@@ -463,7 +463,7 @@
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :view-id="workbench.activeViewId.value ?? undefined"
         :base-id="activeBaseId || undefined"
-        :dispatch-identity="dispatchIdentity"
+        :dispatch-binding="dispatchBinding"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -891,7 +891,8 @@ import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-vers
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordInspector from '../components/MetaRecordInspector.vue'
-import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
+import { createDispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
+import { onMultitableBeforeSend } from '../api/beforeSend'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
@@ -1036,6 +1037,19 @@ const auth = useAuth()
 // useLocale().isZh is a ComputedRef<boolean>; template auto-unwraps it,
 // script reads isZh.value (see T2 i18n dev MD).
 const { isZh } = useLocale()
+// 派发任务 (R-45 step 1): this page's dispatch binding (tasks/recordTaskDispatchIdentity.ts), made before the
+// first request. A dispatch from the record drawer is sent only under the identity it holds, and not at all
+// once any other identity has been seen. Every multitable request of this page checks it right before it is
+// sent (api/beforeSend.ts: told in the same run as apiFetch reads the session headers), so record
+// content read while another user or org was signed in, rows and single records alike, poisons it even when
+// the identity has changed back since. The signal is app-wide (every multitable client tells it), so no
+// client the page reads through is left out.
+const dispatchBinding = createDispatchBinding()
+const stopDispatchSendChecks = onMultitableBeforeSend(() => { dispatchBinding.check() })
+onBeforeUnmount(() => {
+  stopDispatchSendChecks()
+  dispatchBinding.dispose()
+})
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
@@ -1630,10 +1644,6 @@ const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
 const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
-// 派发任务 (R-45 step 1): the signed-in user and org this page was loaded under, read once. The rows
-// the record drawer shows were read under it, so a dispatch from them may be sent only under it; after
-// any change the dialog refuses until the page is reloaded (tasks/recordTaskDispatchIdentity.ts).
-const dispatchIdentity = readDispatchIdentity()
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 // PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
 // `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline

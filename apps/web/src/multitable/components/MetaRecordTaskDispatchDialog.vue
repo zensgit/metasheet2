@@ -21,13 +21,13 @@
   link is captured when submit is clicked, so a late source-line write always names the record the
   task was created from.
 
-  IDENTITY: the dialog is bound to the signed-in user and org the page was loaded under
-  (`boundIdentity`, tasks/recordTaskDispatchIdentity.ts). The identity the request will carry is read
-  again on open, right before the create (with no await between that check and the send) and right
-  before each read/write of the description step. On any mismatch nothing more is sent, the draft is
-  cleared and the dialog shows a plain refusal instead of a form, for good: the record on screen was
-  read under the other identity, so a fresh form prefilled from it would be the same leak. A sign-in
-  or sign-out in this tab, or a storage change from another tab, re-checks at once.
+  IDENTITY: the dialog sends only under the page's binding (`binding`, tasks/recordTaskDispatchIdentity.ts):
+  the signed-in user and org the page was set up under, marked changed for good the first time any
+  other identity is seen (before any multitable request of the page, on a storage change or a session
+  switch, or by this dialog). The dialog checks it again on open, right before the create (with no
+  await between that check and the send) and right before each read/write of the description step.
+  Once the binding is changed nothing more is sent, the draft is cleared and the dialog shows a plain
+  refusal instead of a form until the page is reloaded, as does any dialog opened after it.
 
   WHAT LEAVES THE RECORD: the title the dispatcher sees and confirms (prefilled from the primary
   field's display text), the user ids they confirm (prefilled from a person field they choose), and the
@@ -229,7 +229,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, inject, nextTick, ref, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import type { PersonSummary } from '../types'
 import { MtButton, MtIconButton } from '../ui'
@@ -239,12 +239,7 @@ import { TASKS_EN, TASKS_ZH } from '../../tasks/labels'
 import { createTask, getTask, patchTask, type CompletionMode, type CreateTaskInput } from '../../tasks/tasksApi'
 import { usableViewerTimeZone } from '../../tasks/tasksDraft'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
-import { onAuthSessionSwitch } from '../../composables/authPrincipal'
-import {
-  NO_DISPATCH_IDENTITY,
-  isSameDispatchIdentity,
-  readDispatchIdentity,
-} from '../../tasks/recordTaskDispatchIdentity'
+import { NO_DISPATCH_IDENTITY, type DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
 import {
   beginDispatchRun,
   forgetDispatchRun,
@@ -281,9 +276,9 @@ const props = withDefaults(defineProps<{
   personSummaries?: Record<string, PersonSummary[]>
   /** The record's deep link (ids only), written into the task description after the create. */
   recordLink: string
-  /** The signed-in user and org the page was loaded under (`readDispatchIdentity()`, read once). */
-  boundIdentity: string
-  /** The record's dispatch-state key under that identity (`dispatchRunKey(boundIdentity, sheetId, recordId)`). */
+  /** The page's binding: the signed-in user and org it was set up under, and whether another has been seen. */
+  binding: DispatchBinding
+  /** The record's dispatch-state key under that identity (`dispatchRunKey(binding.identity, sheetId, recordId)`). */
   runKey: string
 }>(), {
   personFields: () => [],
@@ -321,8 +316,11 @@ const created = computed(() => run.value?.created ?? null)
 const sentHere = ref(false)
 const pendingElsewhere = computed(() => submitting.value && !sentHere.value)
 let previouslyFocused: HTMLElement | null = null
-// Set once the identity the requests would carry is not the bound one; never cleared (see the header).
-const identityRefusal = ref<MetaRecordLabelKey | null>(null)
+// The refusal shown once the page's binding is changed; never cleared (see the header).
+const identityRefusal = computed<MetaRecordLabelKey | null>(() => {
+  if (!props.binding.changed.value) return null
+  return props.binding.identity === NO_DISPATCH_IDENTITY ? 'dispatch.identityUnavailable' : 'dispatch.identityChanged'
+})
 
 /** Drops everything the dispatcher entered or the record filled in. */
 function clearDraft(): void {
@@ -339,29 +337,18 @@ function clearDraft(): void {
   sentHere.value = false
 }
 
-/** Whether the identity the next request would carry is still the bound one. When it is not, the
- *  draft is cleared and the dialog refuses from now on. */
+/** Whether a request sent now would carry the page's identity, and no other has been seen. When not,
+ *  the binding is changed for good, and the watcher below clears the draft. */
 function verifyIdentity(): boolean {
-  if (identityRefusal.value) return false
-  if (isSameDispatchIdentity(props.boundIdentity, readDispatchIdentity())) return true
-  clearDraft()
-  identityRefusal.value = props.boundIdentity === NO_DISPATCH_IDENTITY
-    ? 'dispatch.identityUnavailable'
-    : 'dispatch.identityChanged'
-  return false
+  return props.binding.check()
 }
 
-// A transition in this tab (sign-in, sign-out, org switch, through useAuth) and a storage change from
-// another tab (which useAuth does not announce for an ordinary session) re-check at once, so a form
-// that is open flips to the refusal before anyone clicks. The checks before each send stand without
-// these.
-const stopSessionSwitch = onAuthSessionSwitch(() => { verifyIdentity() })
-const onStorage = () => { verifyIdentity() }
-if (typeof window !== 'undefined') window.addEventListener('storage', onStorage)
-onBeforeUnmount(() => {
-  stopSessionSwitch()
-  if (typeof window !== 'undefined') window.removeEventListener('storage', onStorage)
-})
+// The binding changes from many places (the page's requests, a storage change from another tab, a
+// session switch in this tab, this dialog's own checks); the draft goes at once, in the same run, so a
+// form that is open flips to the refusal before anyone clicks.
+watch(() => props.binding.changed.value, (changed) => {
+  if (changed) clearDraft()
+}, { flush: 'sync', immediate: true })
 
 watch(dueDate, (date) => {
   if (date === '') dueTime.value = ''
@@ -520,36 +507,32 @@ const FAILURE_MESSAGES: Record<DispatchFailure, MetaRecordLabelKey> = {
   FAILED: 'dispatch.errorFailed',
 }
 
-/** Whether a request sent now would carry `identity` (no await may separate this from the send). */
-function stillIdentity(identity: string): boolean {
-  return isSameDispatchIdentity(identity, readDispatchIdentity())
-}
-
 /** The second write: one source line into the new task's description. `false` when it did not land,
- *  or was not sent because the identity the requests carry is no longer the one the task was created
- *  under. `recordLink` is the link captured when submit was clicked, not the current prop. */
+ *  or was not sent because the page's binding has changed since the create (each check sits right
+ *  before its send, with no await between). `recordLink` and `binding` are the ones captured when
+ *  submit was clicked, not the current props. */
 async function writeSourceLine(
   taskId: string,
   version: number | undefined,
   recordLink: string,
-  identity: string,
+  binding: DispatchBinding,
 ): Promise<boolean> {
   let expectedVersion = version
   if (expectedVersion === undefined) {
-    if (!stillIdentity(identity)) return false
+    if (!binding.check()) return false
     const read = await getTask(taskId)
     expectedVersion = read.kind === 'ok' ? read.task.version : undefined
   }
   if (expectedVersion === undefined) return false
   const description = buildSourceLine(l('dispatch.sourceLinePrefix'), recordLink)
-  if (!stillIdentity(identity)) return false
+  if (!binding.check()) return false
   const patched = await patchTask(taskId, { expectedVersion, description })
   return patched.kind === 'ok'
 }
 
 /** Both writes. Never throws: a create that fails is a failure message; a create that succeeds is a
  *  created task, with a note when only the second write did not land. */
-async function dispatch(input: CreateTaskInput, recordLink: string, identity: string): Promise<DispatchOutcome> {
+async function dispatch(input: CreateTaskInput, recordLink: string, binding: DispatchBinding): Promise<DispatchOutcome> {
   let taskId: string | null = null
   try {
     // The caller checked the identity in the same synchronous run: `createTask` reaches `apiFetch`,
@@ -561,7 +544,7 @@ async function dispatch(input: CreateTaskInput, recordLink: string, identity: st
     notifyTasksChanged()
     let sourceWritten = false
     try {
-      sourceWritten = await writeSourceLine(result.id, result.version, recordLink, identity)
+      sourceWritten = await writeSourceLine(result.id, result.version, recordLink, binding)
     } catch {
       sourceWritten = false
     }
@@ -595,13 +578,14 @@ async function onSubmit(): Promise<void> {
   // writes settle, and the outcome still belongs to this record and this identity.
   const runKey = props.runKey
   const recordLink = props.recordLink
-  const identity = props.boundIdentity
+  const binding = props.binding
   // The identity the create will carry, read right before it is sent: nothing below awaits before
   // `apiFetch` reads the token and org header.
   if (!verifyIdentity()) return
-  if (!beginDispatchRun(runKey, identity)) return
+  const ticket = beginDispatchRun(runKey, binding.identity)
+  if (ticket === null) return
   sentHere.value = true
-  settleDispatchRun(runKey, await dispatch(built.input, recordLink, identity))
+  settleDispatchRun(runKey, ticket, await dispatch(built.input, recordLink, binding))
   // A change while the writes were out turns this dialog to the refusal, not to the other identity's
   // view of a task it did not create.
   verifyIdentity()

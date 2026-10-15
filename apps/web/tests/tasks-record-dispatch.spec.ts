@@ -24,12 +24,18 @@
  *     names nobody.
  *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
  *     still reports the task as created, with a note.
- *  8. Identity: a dispatch is bound to the signed-in user and org the page was loaded under. A sign-in as someone else in another tab, a sign-out, an org change (stored hint or an
- *     explicit session org) or a sign-in in this tab makes the dialog send nothing more — no create,
- *     no description read or write — clear the draft and refuse until the page is reloaded (a reopen,
- *     or a move to another record and back, does not offer a fresh form from the old load). Dispatch state is kept per identity: another identity sees
- *     neither a pending note nor a created task, and a session change in this tab drops the state of
- *     every other identity.
+ *  8. Identity: a dispatch is sent only under the page's binding, the signed-in user and org the
+ *     page was set up under. The binding is changed for good the first time another identity is
+ *     seen: before any multitable request of the page (the client's before-send hook), on a storage
+ *     change from another tab, on a session switch in this tab, or by the dialog's own checks. A
+ *     sign-in as someone else in another tab, a sign-out, an org change (stored hint or an explicit
+ *     session org) or a sign-in in this tab makes the dialog send nothing more (no create, no
+ *     description read or write), clear the draft and refuse until the page is reloaded. A reopen, a
+ *     move to another record, or the bound identity coming back (A, then B, then A) does not offer a
+ *     fresh form. Without a binding the drawer does not offer 派发任务. No await separates a check
+ *     from its send. Dispatch state is kept per identity: another identity sees neither a pending
+ *     note nor a created task, a session change in this tab drops the state of every other
+ *     identity, and a run is settled only by the create that started it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
@@ -47,9 +53,13 @@ import {
 } from '../src/tasks/recordTaskDispatchRuns'
 import {
   NO_DISPATCH_IDENTITY,
+  createDispatchBinding,
   isSameDispatchIdentity,
   readDispatchIdentity,
+  type DispatchBinding,
 } from '../src/tasks/recordTaskDispatchIdentity'
+import { MultitableApiClient } from '../src/multitable/api/client'
+import { onMultitableBeforeSend } from '../src/multitable/api/beforeSend'
 import { useAuth } from '../src/composables/useAuth'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import { canDispatchTasks, canSeeTasksEntry } from '../src/tasks/tasksAccess'
@@ -197,14 +207,25 @@ interface HarnessOptions {
   /** The router history base (the app served under a sub-path). */
   routerBase?: string
   fieldPermissions?: Record<string, { visible: boolean; readOnly: boolean }>
-  /** The identity the page was loaded under, as the workbench passes it. */
-  dispatchIdentity?: string
+  /** The page's dispatch binding, as the workbench passes it. By default one is made when the drawer
+   *  is mounted (the page being set up); `null` passes none. */
+  binding?: DispatchBinding | null
+}
+
+const bindings: DispatchBinding[] = []
+
+/** A page set up now: its binding, disposed after the test. */
+function pageBinding(): DispatchBinding {
+  const binding = createDispatchBinding()
+  bindings.push(binding)
+  return binding
 }
 
 function mountInspector(options: HarnessOptions = {}) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const state = { record: options.record ?? RECORD }
+  const binding = options.binding === undefined ? pageBinding() : options.binding
   const app = createApp({
     data: () => state,
     render() {
@@ -227,7 +248,7 @@ function mountInspector(options: HarnessOptions = {}) {
           fld_reviewer: [{ id: 'usr_c', display: 'Person C' }],
         },
         ...(options.fieldPermissions ? { fieldPermissions: options.fieldPermissions } : {}),
-        ...(options.dispatchIdentity !== undefined ? { dispatchIdentity: options.dispatchIdentity } : {}),
+        ...(binding ? { dispatchBinding: binding } : {}),
       })
     },
   })
@@ -244,7 +265,7 @@ function mountInspector(options: HarnessOptions = {}) {
   }
   const vm = app.mount(container) as unknown as typeof state
   mountedApps.push(app)
-  return { container, app, vm }
+  return { container, app, vm, binding }
 }
 
 async function openKebab(root: HTMLElement) {
@@ -328,6 +349,7 @@ function unmountAll() {
 
 afterEach(() => {
   unmountAll()
+  while (bindings.length > 0) bindings.pop()!.dispose()
   resetDispatchRunsForTests()
   localStorage.clear()
   useLocale().setLocale('en')
@@ -487,12 +509,23 @@ describe('record drawer 派发任务 entry (gating)', () => {
     expect(binding).toContain(':base-id="activeBaseId || undefined"')
   })
 
-  it('the workbench hands the inspector the identity it read once at set-up (page load), not a live read', async () => {
+  it('the workbench makes one binding before its first request, checks it before every multitable request, and hands it to the drawer', async () => {
     const source = (await import('../src/multitable/views/MultitableWorkbench.vue?raw')).default as string
     const binding = source.slice(source.indexOf('<MetaRecordInspector'), source.indexOf('/>', source.indexOf('<MetaRecordInspector')))
-    expect(binding).toContain(':dispatch-identity="dispatchIdentity"')
-    // A top-level constant of the setup script: read once, never inside a watcher or a computed.
-    expect(source).toMatch(/^const dispatchIdentity = readDispatchIdentity\(\)$/m)
+    expect(binding).toContain(':dispatch-binding="dispatchBinding"')
+    // Top-level statements of the setup script, before the workbench (and so before any request).
+    const made = source.search(/^const dispatchBinding = createDispatchBinding\(\)$/m)
+    const hooked = source.search(/^const stopDispatchSendChecks = onMultitableBeforeSend\(\(\) => \{ dispatchBinding\.check\(\) \}\)$/m)
+    expect(made).toBeGreaterThan(-1)
+    expect(hooked).toBeGreaterThan(made)
+    expect(hooked).toBeLessThan(source.indexOf('useMultitableWorkbench({'))
+  })
+
+  it('without a dispatch binding from the page, the drawer does not offer 派发任务', async () => {
+    const { container } = mountInspector({ binding: null })
+    await flushUi()
+    await openKebab(container)
+    expect(dispatchItem()).toBeNull()
   })
 })
 
@@ -951,7 +984,7 @@ describe('派发任务 dialog: success', () => {
   })
 })
 
-// ---- identity binding (owner §74 review of #6411) -----------------------------------------------
+// ---- identity binding (R-45 step 1; owner review, 2026-10-15) -----------------------------------
 
 const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_me', iat: 2 })
 const TOKEN_B = fakeToken({ sub: 'usr_other' })
@@ -1004,12 +1037,12 @@ describe('派发任务 identity (tasks/recordTaskDispatchIdentity.ts)', () => {
 })
 
 describe('派发任务 dialog: bound to the signed-in identity', () => {
-  it('a sign-in as someone else in another tab: the submit sends nothing, the draft is gone, the dialog refuses', async () => {
+  it('a sign-in as someone else in another tab: the submit sends nothing and the dialog refuses', async () => {
     serveTasks()
     const { container } = mountInspector()
     await flushUi()
     await openDialog(container)
-    // The reviewed path: 不带入 avoids the assignee check that would otherwise stop the create.
+    // No assignee is named, so only the identity check can stop the create.
     setSelect('person-field', '')
     setInput('due-date', '2031-05-06')
     await flushUi()
@@ -1045,7 +1078,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('a sign-out (no token left) refuses with its own message and sends nothing', async () => {
+  it('a sign-out (no token left) refuses with the account-changed message and sends nothing', async () => {
     serveTasks()
     const { container } = mountInspector()
     await flushUi()
@@ -1158,7 +1191,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('after a change elsewhere, moving to another record and back still refuses: the rows are from the old load', async () => {
+  it('after a change elsewhere, moving to another record and back still refuses: the page binding is changed for good', async () => {
     serveTasks()
     const { container, vm } = mountInspector()
     await flushUi()
@@ -1172,12 +1205,12 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
   })
 
-  it('the drawer uses the identity the page was loaded under, not its own later read', async () => {
+  it('the drawer uses the binding the page made, not its own later read', async () => {
     serveTasks()
-    const pageIdentity = readDispatchIdentity()
+    const page = pageBinding()
     signInElsewhere(TOKEN_B)
-    // The drawer is set up after the change, but the page (and its rows) were loaded under A.
-    const { container } = mountInspector({ dispatchIdentity: pageIdentity })
+    // The drawer is set up after the change, but the page was set up under A.
+    const { container } = mountInspector({ binding: page })
     await flushUi()
     await openDialog(container)
     expectRefused()
@@ -1225,19 +1258,43 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     const a = readDispatchIdentity()
     const settledKey = dispatchRunKey(a, 'sht_1', 'rec_1')
     const outKey = dispatchRunKey(a, 'sht_1', 'rec_2')
-    expect(beginDispatchRun(settledKey, a)).toBe(true)
-    settleDispatchRun(settledKey, { created: { id: 'tsk_9', sourceNoteFailed: false } })
-    expect(beginDispatchRun(outKey, a)).toBe(true)
+    const settledTicket = beginDispatchRun(settledKey, a)
+    expect(settledTicket).not.toBeNull()
+    settleDispatchRun(settledKey, settledTicket!, { created: { id: 'tsk_9', sourceNoteFailed: false } })
+    const outTicket = beginDispatchRun(outKey, a)
+    expect(outTicket).not.toBeNull()
     useAuth().setToken(TOKEN_B)
     await flushUi()
     expect(readDispatchRun(settledKey)).toBeUndefined()
     expect(readDispatchRun(outKey)).toBeUndefined()
     // The create that was out settles into nothing.
-    settleDispatchRun(outKey, { created: { id: 'tsk_10', sourceNoteFailed: false } })
+    settleDispatchRun(outKey, outTicket!, { created: { id: 'tsk_10', sourceNoteFailed: false } })
     expect(readDispatchRun(outKey)).toBeUndefined()
   })
 
-  it('a same-user token refresh keeps the dispatch state and the form', async () => {
+  it('a run is settled only by the create that started it: an older answer cannot overwrite a newer run', async () => {
+    const a = readDispatchIdentity()
+    const key = dispatchRunKey(a, 'sht_1', 'rec_1')
+    const first = beginDispatchRun(key, a)
+    expect(first).not.toBeNull()
+    // The session is cleared and the same user signs in again in this tab: the first run is dropped.
+    useAuth().clearToken()
+    await flushUi()
+    useAuth().setToken(TOKEN_A)
+    await flushUi()
+    expect(readDispatchRun(key)).toBeUndefined()
+    const second = beginDispatchRun(key, a)
+    expect(second).not.toBeNull()
+    expect(second).not.toBe(first)
+    // The first create answers: nothing changes; the second run is still out.
+    settleDispatchRun(key, first!, { created: { id: 'tsk_old', sourceNoteFailed: false } })
+    expect(readDispatchRun(key)?.inFlight).toBe(true)
+    expect(readDispatchRun(key)?.created).toBeNull()
+    settleDispatchRun(key, second!, { created: { id: 'tsk_new', sourceNoteFailed: false } })
+    expect(readDispatchRun(key)?.created?.id).toBe('tsk_new')
+  })
+
+  it('a same-user token refresh keeps the binding and the form', async () => {
     serveTasks()
     const { container } = mountInspector()
     await flushUi()
@@ -1249,5 +1306,160 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     await submit()
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
     expect(q('success')).not.toBeNull()
+  })
+})
+
+describe('派发任务 page binding: another identity seen once refuses for good', () => {
+  it('A, then B, then A (storage events), and a move to another record: still refused, nothing sent', async () => {
+    serveTasks()
+    const { container, vm } = mountInspector()
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_A)
+    await flushUi()
+    // A record that may have been read while B was signed in; its dialog is a fresh one.
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    await openDialog(container)
+    expectRefused()
+    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+  })
+
+  it('A, then B, then A with no event at all: a record read while B was signed in is caught by the read itself', async () => {
+    serveTasks()
+    const page = pageBinding()
+    // Wired the way the workbench wires it.
+    const stop = onMultitableBeforeSend(() => { page.check() })
+    const reads: string[] = []
+    const client = new MultitableApiClient({
+      fetchFn: async () => {
+        reads.push(readDispatchIdentity())
+        return jsonResponse(200, { fields: [], rows: [], view: null }) as unknown as Response
+      },
+    })
+    signInElsewhere(TOKEN_B)
+    await client.loadView({ sheetId: 'sht_1', viewId: 'viw_1' }).catch(() => undefined)
+    signInElsewhere(TOKEN_A)
+    stop()
+    expect(reads).toHaveLength(1)
+    expect(page.changed.value).toBe(true)
+    const { container } = mountInspector({ binding: page, record: { ...RECORD, id: 'rec_2' } as unknown as MetaRecord })
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('a refusal outlives a close and the bound identity coming back: the reopen still refuses', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    expectRefused()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_A)
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('no await separates the check from the create: a switch queued for the next microtask finds the create already sent under the bound identity', async () => {
+    const sentUnder: string[] = []
+    serveTasks({
+      create: () => jsonResponse(200, { id: 'tsk_9', version: 1 }),
+    })
+    const serve = mocks.apiFetch.getMockImplementation()!
+    mocks.apiFetch.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      // Read when the transport is called, which is when apiFetch reads the session headers.
+      if (String(url).startsWith('/api/tasks')) sentUnder.push(readDispatchIdentity())
+      return serve(url, init)
+    })
+    const { container, binding } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    // Queued BEFORE the click, so it runs before anything the click handler would put behind an await.
+    queueMicrotask(() => signIn(TOKEN_B))
+    q<HTMLButtonElement>('submit')!.click()
+    await flushUi(10)
+    // Whatever was sent went out under the bound identity; nothing after the switch was sent.
+    expect(sentUnder.length).toBeGreaterThan(0)
+    for (const identity of sentUnder) expect(identity).toBe(binding!.identity)
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+  })
+
+  it('a refused dialog does not consume a result: the task created before the change is shown on a page set up again under that identity', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    signInElsewhere(TOKEN_B)
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    // The refused dialog stays on screen while the result lands.
+    expectRefused()
+    unmountAll()
+    signInElsewhere(TOKEN_A)
+    const again = mountInspector()
+    await flushUi()
+    await openDialog(again.container)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+  })
+})
+
+describe('multitable client: the before-send signal (api/beforeSend.ts)', () => {
+  it('tells its listeners synchronously, before the transport is called, and stops after unsubscribe', async () => {
+    const order: string[] = []
+    const client = new MultitableApiClient({
+      fetchFn: async () => {
+        order.push('send')
+        return jsonResponse(200, {}) as unknown as Response
+      },
+    })
+    const stop = onMultitableBeforeSend(() => { order.push('listener') })
+    const stopThrowing = onMultitableBeforeSend(() => { throw new Error('a listener must never break a request') })
+    await client.aiAvailability().catch(() => undefined)
+    expect(order).toEqual(['listener', 'send'])
+    stop()
+    stopThrowing()
+    await client.aiAvailability().catch(() => undefined)
+    expect(order).toEqual(['listener', 'send', 'send'])
+  })
+
+  it('the public-form path tells its listeners as well', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(200, {}))
+    const client = new MultitableApiClient()
+    const seen = vi.fn()
+    const stop = onMultitableBeforeSend(seen)
+    await client.loadFormContext({ viewId: 'viw_1', publicToken: 'pub_1' }).catch(() => undefined)
+    stop()
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(mocks.apiFetch.mock.calls[0][1]).toMatchObject({ suppressUnauthorizedRedirect: true })
+  })
+
+  it('every transport call in the client is right after the listeners are told', async () => {
+    const source = (await import('../src/multitable/api/client.ts?raw')).default as string
+    const lines = source.split('\n')
+    // The population: every line of the client that calls a transport (the app's apiFetch, the stored
+    // transport, or the global fetch), found by search rather than listed.
+    const transportLines = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => !/^\s*(\/\/|\*|\/\*\*)/.test(line))
+      .filter(({ line }) => /(^|[^.\w])(apiFetch|fetch)\(|\.rawFetch\(/.test(line))
+    expect(transportLines.length).toBeGreaterThanOrEqual(2)
+    for (const { index } of transportLines) expect(lines[index - 1].trim()).toBe('notifyMultitableBeforeSend()')
+    // And the stored transport is called only through the hooked `fetch`.
+    expect(source.match(/this\.fetch\s*=/g)).toHaveLength(1)
   })
 })

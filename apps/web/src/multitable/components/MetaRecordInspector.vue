@@ -227,10 +227,11 @@
           >{{ l('record.submitApproval') }}</MtMenuItem>
           <!-- 派发任务 (R-45 step 1): creates a real task in the task centre from this record. Shown only
                where the top bar's 任务 entry is (same rule, `canDispatchTasks` in tasks/tasksAccess.ts)
-               and the viewer holds tasks:write, and only with the ids the source link needs
-               (sheetId + viewId + record). Otherwise the menu is unchanged. -->
+               and the viewer holds tasks:write, only when the page hands a dispatch binding, and only
+               with the ids the source link needs (sheetId + viewId + record). Otherwise the menu is
+               unchanged. -->
           <MtMenuItem
-            v-if="canDispatchTask && sheetId && viewId && record"
+            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
             class="meta-record-drawer__btn"
             data-testid="record-inspector-dispatch-task"
             :title="l('record.dispatchTaskTitle')"
@@ -512,18 +513,19 @@
          (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
          (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
          lose a result or allow a second create, and the dialog captures the record link at submit.
-         `bound-identity` is the signed-in user and org the page was loaded under; the dialog
-         sends nothing under any other (tasks/recordTaskDispatchIdentity.ts). -->
+         `binding` is the page's dispatch binding (the signed-in user and org the page was set up
+         under, changed for good once another is seen); the dialog sends nothing under any other
+         (tasks/recordTaskDispatchIdentity.ts). -->
     <MetaRecordTaskDispatchDialog
-      v-if="canDispatchTask && sheetId && viewId && record"
+      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
       :key="record.id"
       :visible="showTaskDispatch"
       :default-title="dispatchDefaultTitle"
       :person-fields="dispatchPersonFields"
       :person-summaries="personSummariesByField"
       :record-link="dispatchRecordLink"
-      :bound-identity="dispatchIdentity"
-      :run-key="dispatchRunKey(dispatchIdentity, sheetId, record.id)"
+      :binding="dispatchBinding"
+      :run-key="dispatchRunKey(dispatchBinding.identity, sheetId, record.id)"
       @close="showTaskDispatch = false"
     />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
@@ -595,7 +597,7 @@ import { useFeatureFlags } from '../../stores/featureFlags'
 import { canDispatchTasks } from '../../tasks/tasksAccess'
 import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
 import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
-import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
+import type { DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { AppRouteNames } from '../../router/types'
 import { isNativePersonField } from '../utils/link-fields'
@@ -648,10 +650,10 @@ const props = withDefaults(defineProps<{
    *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
   viewId?: string
   baseId?: string
-  /** 派发任务: the signed-in user and org the page holding this drawer was loaded under
-   *  (`readDispatchIdentity()`, read once by the workbench). Without it the drawer reads it once when
-   *  it is set up. */
-  dispatchIdentity?: string
+  /** 派发任务: the binding of the page holding this drawer (`createDispatchBinding()`, made by the
+   *  workbench, which also checks it before each multitable request). Without it 派发任务 is not
+   *  offered: only the owner of the record data can say which identity it was read under. */
+  dispatchBinding?: DispatchBinding | null
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
@@ -1527,12 +1529,10 @@ const canDispatchTask = computed(() => {
     isPlmWorkbenchFocused: featureFlags.isPlmWorkbenchFocused,
   })
 })
-// The identity (signed-in user + the org the requests carry) the records on screen were read under:
-// the workbench's, read once when the page was loaded, or this drawer's own, read once at set-up. It is
-// NOT re-read when the drawer moves to another record or the dialog opens: the rows came from the same
-// load, so a fresh read would let a later identity send them. See tasks/recordTaskDispatchIdentity.ts.
-const ownDispatchIdentity = readDispatchIdentity()
-const dispatchIdentity = computed(() => props.dispatchIdentity ?? ownDispatchIdentity)
+// The page's dispatch binding (tasks/recordTaskDispatchIdentity.ts): a dispatch is sent only under the
+// identity it holds, and not at all once another identity has been seen on the page. No binding, no
+// 派发任务 (see the prop).
+const dispatchBinding = computed(() => props.dispatchBinding ?? null)
 // The title the dispatcher confirms: the header's own display text of the primary field, or nothing
 // when that value is empty (the header's '—' placeholder is not a title).
 const dispatchDefaultTitle = computed(() => {

@@ -1,15 +1,19 @@
 /**
  * 派发任务 from a multitable record: WHO a dispatch belongs to.
  *
- * The rule. A dispatch is bound to the signed-in user and the organization its requests will carry,
- * read once when the multitable page was loaded (the workbench; a drawer used elsewhere reads it once
- * when it is set up). The rows on screen — and so a record's title, person ids and link — were read
- * under that identity, so they may only be sent under it. It is not re-read on a move to another
- * record or on opening the dialog, since those rows come from the same load. Before the create and
- * before the description write, the identity the request will actually carry is read again; if it is
- * not the bound one, nothing is sent and the dialog refuses until the page is reloaded. The dispatch
- * state of each record is kept per identity as well, so one identity never sees another's pending or
- * created task.
+ * The rule. A page that offers 派发任务 holds one binding (`createDispatchBinding`), made when the page
+ * is set up: the signed-in user and the org its requests carry at that moment. A dispatch is sent only
+ * under that identity. The binding is marked CHANGED, for good, the first time the identity a request
+ * would carry is seen to differ from it, wherever that is seen:
+ *  - right before every multitable request the page sends (the client's before-send hook, wired by the
+ *    workbench), so a record read while another user or org was signed in poisons the binding even if
+ *    the identity has changed back by the time anyone opens the dialog;
+ *  - on a storage change from another tab and on a sign-in, sign-out or org switch in this tab;
+ *  - on opening the dialog, right before the create and right before each read/write of the
+ *    description step.
+ * Once changed, the dialog clears its draft and refuses until the page is reloaded; a dialog opened
+ * later, for this or any other record, refuses as well. Coming back to the bound identity does not
+ * clear it: the record content on screen may have been read in between.
  *
  * Why a value check and not only a notification: `useAuth` announces the transitions THIS tab
  * performs, but a sign-in in another tab only rewrites the shared storage, and an ordinary (not
@@ -22,12 +26,15 @@
  *  - the org header the request will carry (`authHeaders()['x-tenant-id']`), which for an ordinary
  *    session may come from stored hints, the address or the token's claim — none of which the
  *    principal key covers.
- * The raw token is left out, so a token refresh for the same user and org keeps the draft.
+ * For a token that carries a subject claim the raw token is not part of it, so a token refresh for the
+ * same user and org keeps the binding. A token without a subject claim is keyed by its text, so a
+ * refresh of such a token counts as a change.
  *
  * NOTHING HERE IS AN AUTHORIZATION VALUE: it is derived client-side and only compared for equality.
  * The server checks the token and the org on every request.
  */
-import { getAuthPrincipalKey } from '../composables/authPrincipal'
+import { readonly, ref, type Ref } from 'vue'
+import { getAuthPrincipalKey, onAuthSessionSwitch } from '../composables/authPrincipal'
 import { authHeaders } from '../utils/api'
 
 /** No usable identity: no session, or a session-org switch caught half way. Never equal to anything,
@@ -51,4 +58,43 @@ export function readDispatchIdentity(): string {
  *  same as the bound one. */
 export function isSameDispatchIdentity(bound: string, current: string): boolean {
   return bound !== NO_DISPATCH_IDENTITY && current !== NO_DISPATCH_IDENTITY && bound === current
+}
+
+export interface DispatchBinding {
+  /** The identity read when the binding was made. */
+  readonly identity: string
+  /** Set the first time another identity is seen (or at once when there was none); never cleared. */
+  readonly changed: Readonly<Ref<boolean>>
+  /** Reads the identity a request sent now would carry. `true` while it is the bound one and no other
+   *  has been seen; otherwise marks the binding changed and returns `false`. */
+  check(): boolean
+  /** Stops listening for storage changes and session switches. */
+  dispose(): void
+}
+
+/** Makes the binding of one page (see the header). The caller disposes it when the page goes away. */
+export function createDispatchBinding(): DispatchBinding {
+  const identity = readDispatchIdentity()
+  const changed = ref(identity === NO_DISPATCH_IDENTITY)
+  function check(): boolean {
+    if (changed.value) return false
+    if (isSameDispatchIdentity(identity, readDispatchIdentity())) return true
+    changed.value = true
+    return false
+  }
+  const stopSessionSwitch = onAuthSessionSwitch(() => { check() })
+  const onStorage = () => { check() }
+  if (typeof window !== 'undefined') window.addEventListener('storage', onStorage)
+  let disposed = false
+  return {
+    identity,
+    changed: readonly(changed),
+    check,
+    dispose() {
+      if (disposed) return
+      disposed = true
+      stopSessionSwitch()
+      if (typeof window !== 'undefined') window.removeEventListener('storage', onStorage)
+    },
+  }
 }

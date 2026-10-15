@@ -102,6 +102,7 @@ import type {
   MetaRecordApprovalDrift,
 } from '../types'
 import { apiFetch } from '../../utils/api'
+import { notifyMultitableBeforeSend } from './beforeSend'
 import { apiCodeOwnedErrorMessage, apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
 import type { ConditionalRuleDTO } from '../utils/conditional-rule-ops'
 // S3a (comments shared FE kit extraction): the comment normalizer family moved verbatim to
@@ -2217,7 +2218,11 @@ function configRestoreConfirmForPreview(preview: ConfigRestorePreview): ConfigRe
 // removeReaction below already have this exact shape — `implements` only adds a compile-time
 // check, no runtime change).
 export class MultitableApiClient implements CommentsApiClient {
+  /** Every request goes through here: it tells the before-send listeners (api/beforeSend.ts), then
+   *  calls `rawFetch`. */
   private fetch: FetchFn
+  /** The transport itself (`apiFetch`, or a test's stub). Called only by `fetch` and `fetchPublic`. */
+  private readonly rawFetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
   private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
   // Catalog caches: the bases/templates lists are small and change rarely, but
@@ -2243,8 +2248,19 @@ export class MultitableApiClient implements CommentsApiClient {
   private readonly installTemplateInflight = new Map<string, Promise<InstallTemplateResult>>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
-    this.fetch = opts?.fetchFn ?? defaultFetchFn()
+    this.rawFetch = opts?.fetchFn ?? defaultFetchFn()
+    // Arguments are passed on exactly as given (a call with no init stays a call with no init).
+    this.fetch = (...args: Parameters<FetchFn>) => {
+      notifyMultitableBeforeSend()
+      return this.rawFetch(...args)
+    }
     this.isZhOption = opts?.isZh
+  }
+
+  /** The public-form path: `apiFetch` without the sign-in redirect, told to the listeners as well. */
+  private fetchPublic(path: string, init: RequestInit = {}): Promise<Response> {
+    notifyMultitableBeforeSend()
+    return apiFetch(path, { ...init, suppressUnauthorizedRedirect: true })
   }
 
   private resolveIsZh(): boolean {
@@ -3298,8 +3314,8 @@ export class MultitableApiClient implements CommentsApiClient {
   // --- Form context ---
   async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
     const path = `/api/multitable/form-context${qs(params)}`
-    const res = params.publicToken && this.fetch === apiFetch
-      ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
+    const res = params.publicToken && this.rawFetch === apiFetch
+      ? await this.fetchPublic(path)
       : await this.fetch(path)
     const context = await this.parseJson<MetaFormContext>(res)
     // The (public) form never loads /context — it learns the business timezone here.
@@ -3783,8 +3799,8 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     }
-    const res = input.publicToken && this.fetch === apiFetch
-      ? await apiFetch(path, { ...requestInit, suppressUnauthorizedRedirect: true })
+    const res = input.publicToken && this.rawFetch === apiFetch
+      ? await this.fetchPublic(path, requestInit)
       : await this.fetch(path, requestInit)
     return this.parseJson(res)
   }
