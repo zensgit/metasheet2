@@ -879,6 +879,7 @@ export class PlmBomReviewService {
       if (!candidate) throw new Failure(404, 'NOT_FOUND')
       await fenceWriterEntry(query, candidate.sheet_id)
       const b = (await query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1 FOR SHARE', [id])).rows[0] as Binding
+      if (b.status === 'disabled') return { created: 0 }
       const config = (await query('SELECT * FROM meta_plm_bom_review_notification_config WHERE binding_id=$1 FOR SHARE', [id])).rows[0]
       if (!config) return { created: 0 }
       const policy = notificationInput.parse({ expectedVersion: Number(config.version), notifications: config.notifications }).notifications
@@ -943,7 +944,7 @@ export class PlmBomReviewService {
     const b = (await query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1 FOR SHARE',[event.binding_id])).rows[0] as Binding
     const config = (await query(`SELECT c.*,a.after AS audited FROM meta_plm_bom_review_notification_config c
       JOIN meta_config_revisions a ON a.id=c.revision_id WHERE c.binding_id=$1 FOR SHARE OF c,a`,[event.binding_id])).rows[0]
-    if (!b || !config || Number(config.version) < Number(event.configuration_version) || config.updated_by !== event.creator_id
+    if (!b || b.status === 'disabled' || !config || Number(config.version) < Number(event.configuration_version) || config.updated_by !== event.creator_id
       || canonical(config.notifications) !== canonical(config.audited?.notifications)) return null
     const policy = notificationInput.parse({ expectedVersion: Number(config.version),notifications: config.notifications }).notifications
     const kind = String(event.kind)
@@ -989,6 +990,10 @@ export class PlmBomReviewService {
       await fenceWriterEntry(query,candidate.sheet_id)
       const existing = (await query('SELECT * FROM meta_plm_bom_review_notification_intents WHERE event_id=$1 FOR UPDATE',[eventId])).rows[0]
       if (existing) return { state: String(existing.state) }
+      if (await this.bindingDisabled(query,String(candidate.binding_id))) {
+        await query("INSERT INTO meta_plm_bom_review_notification_intents(event_id,recipient_ids,state,cancellation_reason) VALUES($1,'[]'::jsonb,'cancelled','BINDING_DISABLED')",[eventId])
+        return { state: 'cancelled' }
+      }
       const context = await this.notificationContext(query,candidate,now)
       let recipients: string[] = [], reason: string | null = context ? null : 'CONTEXT_INVALID'
       if (context) {
@@ -1020,6 +1025,10 @@ export class PlmBomReviewService {
       await fenceWriterEntry(query,event.sheet_id)
       const intent = (await query('SELECT * FROM meta_plm_bom_review_notification_intents WHERE event_id=$1 FOR UPDATE',[eventId])).rows[0]
       if (!intent || intent.state !== 'prepared') return { state: intent ? String(intent.state) : 'unprepared',inserted: 0 }
+      if (await this.bindingDisabled(query,String(event.binding_id))) {
+        await query("UPDATE meta_plm_bom_review_notification_intents SET state='cancelled',cancellation_reason='BINDING_DISABLED' WHERE event_id=$1",[eventId])
+        return { state: 'cancelled',inserted: 0 }
+      }
       const context = await this.notificationContext(query,event,now)
       let valid = Boolean(context) && Array.isArray(intent.recipient_ids) && intent.recipient_ids.length > 0
         && intent.recipient_ids.every((id: unknown) => typeof id === 'string' && id.trim() === id && id.length > 0)
@@ -1044,6 +1053,9 @@ export class PlmBomReviewService {
       await query("UPDATE meta_plm_bom_review_notification_intents SET state='delivered',delivered_at=now() WHERE event_id=$1",[eventId])
       return { state: 'delivered',inserted: result.inserted }
     })
+  }
+  private async bindingDisabled(query: PlmQuery, id: string): Promise<boolean> {
+    return (await query('SELECT status FROM meta_plm_bom_review_bindings WHERE id=$1 FOR SHARE',[id])).rows[0]?.status === 'disabled'
   }
   async notificationRecipients(actor: string, id: string, search: string) {
     return this.deps.pool.transaction(async ({ query }) => {
@@ -1336,6 +1348,18 @@ export class PlmBomReviewService {
           [id],
         )
       ).rows[0]
+      // Same binding-before-listener lock order as intake and rebind; the cursor is kept as evidence.
+      const listener = (await query("SELECT to_regclass('meta_plm_bom_change_listeners') IS NOT NULL AS ready")).rows[0]?.ready
+        ? (await query(`UPDATE meta_plm_bom_change_listeners SET status='stopped',stop_reason='BINDING_DISABLED',
+            updated_at=clock_timestamp() WHERE binding_id=$1 AND status='active' RETURNING generation,cursor`,[id])).rows[0]
+        : undefined
+      await recordConfigRevision(query, {
+        sheetId: b.sheet_id, entityType: 'sheet_config', entityId: `plm-bom-review:${id}:lifecycle`,
+        action: 'update', before: { status: b.status, version: Number(b.version) },
+        after: { status: 'disabled', version: Number(updated.version),
+          ...(listener ? { stoppedListener: { generation: listener.generation, cursor: Number(listener.cursor) } } : {}) },
+        changedKeys: ['status'], batchId: randomUUID(), actorId: actor,
+      })
       return this.dto(updated, actor, true)
     })
   }
