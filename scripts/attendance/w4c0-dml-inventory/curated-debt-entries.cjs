@@ -712,6 +712,22 @@ const CURATED_DEBT_ENTRIES = [
       'plugins/plugin-attendance/lib/attendance-business-trip.cjs::cancel::attendance_business_trip_arrangements::update',
     ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
   },
+  {
+    id: 'X10',
+    title: 'Approval-change v3.1 leave revision reversal and admin correction of an approved leave.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: true,
+    canonicalizedBy: 'approval-change-v31',
+    residualClassification: 'non_result_shared_hook_ledger',
+    // The admin route's attendance_requests UPDATE stays an arrow inside index.cjs.
+    // A named function there becomes the nearest symbol for later rotation-assignment
+    // writers. This entry claims only the two ledger sites in the revision writer.
+    residualEvidence: 'reversal updates only attendance_leave_balances and attendance_leave_balance_events; it does not write attendance_records',
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-revision-writer.ts::reverseLeaveBalanceForRevisionV1::attendance_leave_balances::update',
+      'packages/core-backend/src/attendance/approval-change-revision-writer.ts::reverseLeaveBalanceForRevisionV1::attendance_leave_balance_events::insert',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
 
 ]
 

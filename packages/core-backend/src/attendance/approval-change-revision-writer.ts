@@ -69,9 +69,8 @@ export async function loadApprovedLeaveDayRecalcPlanV1(
   const companions = await db.query(
     `SELECT c.frame_snapshot
        FROM attendance_timezone_context_companions c
-       JOIN attendance_records r ON r.id = c.record_id AND r.org_id = c.org_id
-      WHERE c.org_id = $1 AND c.user_id = $2 AND c.work_date = $3::date
-        AND r.visibility_state = 'active'`,
+       JOIN attendance_current_records r ON r.id = c.record_id AND r.org_id = c.org_id
+      WHERE c.org_id = $1 AND c.user_id = $2 AND c.work_date = $3::date`,
     [input.orgId, input.userId, input.workDate],
   )
   if (companions.rows.length > 1) throw new Error('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID')
@@ -79,8 +78,8 @@ export async function loadApprovedLeaveDayRecalcPlanV1(
   let activeRecord = companions.rows.length === 1
   if (!activeRecord) {
     const records = await db.query(
-      `SELECT 1 FROM attendance_records
-        WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date AND visibility_state = 'active'
+      `SELECT 1 FROM attendance_current_records
+        WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
         LIMIT 1`,
       [input.orgId, input.userId, input.workDate],
     )
