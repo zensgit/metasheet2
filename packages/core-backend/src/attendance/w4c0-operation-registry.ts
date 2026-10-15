@@ -1058,13 +1058,19 @@ export async function runAttendanceResultOperationTransactionV1<T>(
     | { readonly rolloutSnapshotLock: { readonly orgId: string; readonly mode: 'shared' | 'exclusive' } },
 ): Promise<T> {
   const rolloutSnapshotLock = options && 'rolloutSnapshotLock' in options ? options.rolloutSnapshotLock : undefined
+  // Incomplete cleaning options must fail before any connection use. A lone
+  // `attendanceCleaningAuthority: true` has no sheet ids, so it is not narrowed
+  // by the sheet-id check below.
+  if (options && ('attendanceCleaningAuthority' in options || 'attendanceCleaningSheetIds' in options)) {
+    const sheets = 'attendanceCleaningSheetIds' in options ? options.attendanceCleaningSheetIds : undefined
+    const authority = 'attendanceCleaningAuthority' in options && options.attendanceCleaningAuthority === true
+    if (!authority || !Array.isArray(sheets) || sheets.length < 1 || sheets.length > 2) {
+      fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+    }
+  }
   const cleaningSheetIds = options && 'attendanceCleaningSheetIds' in options
     ? options.attendanceCleaningSheetIds
     : undefined
-  if (cleaningSheetIds !== undefined && (options === undefined || !('attendanceCleaningAuthority' in options)
-    || options.attendanceCleaningAuthority !== true
-    || !Array.isArray(cleaningSheetIds) || cleaningSheetIds.length < 1
-    || cleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
   if (rolloutSnapshotLock !== undefined && (rolloutSnapshotLock.mode !== 'shared' && rolloutSnapshotLock.mode !== 'exclusive')) {
     fail('W4C0_LOCK_MODE_INVALID')
   }
