@@ -34,6 +34,7 @@ import type {
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
+import { isPlmApprovalCardEnabled } from './plm-personal-approval-wire'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
 import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
 import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
@@ -1295,6 +1296,15 @@ export class ApprovalBridgeService {
       }
 
       if (instance.source_system === 'plm') {
+        // With personal bindings enabled, a Yuantus decision must carry the acting person's own
+        // grant; the bridge adapter's account would decide on that person's behalf.
+        if (isPlmApprovalCardEnabled()) {
+          throw new ServiceError(
+            'PLM approvals are decided through a personal Yuantus binding',
+            409,
+            APPROVAL_ERROR_CODES.PLM_PERSONAL_BINDING_REQUIRED,
+          )
+        }
         await this.dispatchPlmAction(id, this.resolvePlmSourceVersion(instance), request)
       }
 

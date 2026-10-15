@@ -1363,6 +1363,27 @@ describe('approval bridge routes', () => {
     expect(Array.from(routeState.state.assignments.values())[0]?.is_active).toBe(false)
   })
 
+  it('refuses adapter-account PLM decisions while personal Yuantus approval bindings are enabled', async () => {
+    vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'true')
+    try {
+      const plmAdapter = createPlmAdapterMock()
+      pinned.setApp(createApp(plmAdapter))
+      for (const body of [{ action: 'approve', comment: 'Ship it' }, { action: 'reject', comment: 'Not yet' }]) {
+        const response = await request(pinned.url())
+          .post('/api/approvals/plm:eco-1/actions')
+          .send(body)
+          .expect(409)
+        expect(response.body.error.code).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+      }
+      expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+      expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
+      expect(routeState.state.instances.get('plm:eco-1')).toMatchObject({ status: 'pending', version: 0 })
+      expect(routeState.state.records).toHaveLength(0)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('fails PLM actions when the source version remains unavailable', async () => {
     routeState.state.instances.set('plm:legacy', {
       ...routeState.state.instances.get('local-1')!,
