@@ -1,3 +1,4 @@
+import { isPlmRecordIngressEnabled } from './plm-record-ingress-wire'
 /**
  * OAPI-1 read-route allowlist (open-API token auth — design-lock
  * docs/development/multitable-openapi-token-auth-designlock-20260619.md).
@@ -102,6 +103,7 @@ export function isOapiWriteAllowlistRequest(
   authHeader: string | undefined,
 ): boolean {
   if (!isApiTokenBearer(authHeader)) return false
+  if (method === 'POST' && path === '/api/multitable/plm-record-ingress') return isPlmRecordIngressEnabled()
   return OAPI_WRITE_ROUTES.some((route) => route.method === method && route.pattern.test(path))
 }
 

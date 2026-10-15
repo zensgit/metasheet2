@@ -40,15 +40,18 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import ts from 'typescript'
 
 import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
 
 const SRC = join(__dirname, '../../src')
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
 
-/** The only two files where `apiTokenAuth` is ever mounted on a route (verified by whole-`src` grep). */
-const ROUTE_FILES = ['routes/univer-meta.ts', 'routes/comments.ts'] as const
+/** Whole-source census includes the explicitly enabled fixed PLM ingress. */
+const ROUTE_FILES = ['routes/univer-meta.ts', 'routes/comments.ts', 'routes/plm-record-ingress.ts'] as const
+beforeEach(() => vi.stubEnv('PLM_RECORD_INGRESS_ENABLED', 'true'))
+afterEach(() => vi.unstubAllEnvs())
 const ROUTE_FILE_SET = new Set<string>(ROUTE_FILES)
 
 interface RouteRegistration {
@@ -59,24 +62,29 @@ interface RouteRegistration {
   guarded: boolean
 }
 
-/**
- * Extract every `router.<verb>('<path>', ...rest)` registration. Both files write each registration as
- * ONE physical source line (`router.verb('path', mw1, mw2, ..., async (req, res) => {`), so a per-line
- * regex is sufficient and mirrors the files' actual style — this is re-verified below by asserting the
- * scan finds a large, non-trivial number of registrations in each file (a style change that broke the
- * regex would silently return an empty/tiny list, which the sanity test below catches).
- */
+/** Parse literal route calls, including multiline middleware lists, without scanning callback bodies for guards. */
 function extractRoutes(file: (typeof ROUTE_FILES)[number]): RouteRegistration[] {
-  const src = read(file)
-  const lineRe = /^\s*router\.(get|post|patch|delete|put)\(\s*'([^']+)'\s*,(.*)$/
+  const source = ts.createSourceFile(file, read(file), ts.ScriptTarget.Latest, true)
   const out: RouteRegistration[] = []
-  for (const rawLine of src.split('\n')) {
-    const m = rawLine.match(lineRe)
-    if (!m) continue
-    const [, method, registeredPath, restOfArgs] = m
-    const guarded = /\bapiTokenAuth\b/.test(restOfArgs) && /\brequireScope\(/.test(restOfArgs)
-    out.push({ file, method: method.toUpperCase(), registeredPath, guarded })
+  const middlewareName = (node: ts.Node): string | undefined => {
+    if (ts.isIdentifier(node)) return node.text
+    if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return undefined
+    if (node.expression.text === 'requireScope') return 'requireScope'
+    if (node.expression.text === 'safe' && node.arguments.length === 1 && ts.isIdentifier(node.arguments[0])) return node.arguments[0].text
+    return undefined
   }
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'router'
+      && ['get', 'post', 'patch', 'delete', 'put'].includes(node.expression.name.text)
+      && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+      const names = node.arguments.slice(1).map(middlewareName)
+      out.push({ file, method: node.expression.name.text.toUpperCase(), registeredPath: node.arguments[0].text,
+        guarded: names.includes('apiTokenAuth') && names.includes('requireScope') })
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
   return out
 }
 
@@ -176,4 +184,13 @@ describe('#3365 OAPI allowlist⟺guard dual-reachability tripwire', () => {
         `or mount apiTokenAuth + requireScope on this route if it was actually meant to be token-reachable.`,
     ).toEqual([])
   })
+})
+
+
+test('PLM fixed route is enumerated with both actual middleware guards and remains default-off', () => {
+  expect(ALL_ROUTES.filter(r => r.file === 'routes/plm-record-ingress.ts')).toEqual([
+    { file: 'routes/plm-record-ingress.ts', method: 'POST', registeredPath: '/plm-record-ingress', guarded: true },
+  ])
+  vi.stubEnv('PLM_RECORD_INGRESS_ENABLED', 'false')
+  expect(isOapiAllowlistRequest('POST', '/api/multitable/plm-record-ingress', MST)).toBe(false)
 })

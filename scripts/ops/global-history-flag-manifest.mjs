@@ -48,6 +48,13 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'PLM_RECORD_INGRESS_ENABLED', type: 'boolean', activationValue: 'true',
+    dependsOn: ['AUTOMATION_DURABLE_DELIVERY_ENABLED', 'MULTITABLE_ENABLE_WRITER_FENCE'], conflictsWith: [], danger: 'high',
+    purpose: 'Default-off bounded Yuantus BOM source record ingress. Exact true only. Requires current mst_ creator/binding authority, writer fence/operation and durable automation schema; source columns remain protected after disable.',
+    source: 'packages/core-backend/src/multitable/plm-record-ingress-wire.ts#isPlmRecordIngressEnabled',
+    rules: [{ kind: 'requires', id: 'plm-ingress-without-durable-writer-fence', description: 'PLM ingress requires the existing durable automation and canonical writer-fence runtimes.' }],
+  },
+  {
     key: 'AUTOMATION_DURABLE_DELIVERY_ENABLED', type: 'boolean', activationValue: 'true', caseInsensitive: true,
     dependsOn: [], conflictsWith: [], danger: 'high',
     purpose: 'Existing default-off transactional automation outbox replaces legacy emit; requires migrated schema and durable consumers. Runtime trims and lowercases the flag.',

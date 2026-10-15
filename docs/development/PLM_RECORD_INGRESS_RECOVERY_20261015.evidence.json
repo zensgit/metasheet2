@@ -1,0 +1,54 @@
+{
+  "base": "2d520922bb",
+  "sourceHashes": {
+    "packages/core-backend/src/index.ts": "4b619a2c681306e60294d19fe538fb9aa63dc1169acc1d19d468c3cdfa60a3c9",
+    "packages/core-backend/src/multitable/automation-service.ts": "70c208221e1b18a2d824b5b40c2cefd617f6110fd094c526488b92c3a59e7522",
+    "packages/core-backend/src/multitable/oapi-read-allowlist.ts": "63f374ec46a847c48f8ae58fe3a9d6ac72508db5364f994ff8e491d7bce7dff3",
+    "packages/core-backend/src/db/migrations/zzzz20261015030000_create_plm_record_ingress.ts": "54142fe581029d3b40fedbe20d2ead67a46a1ab7e5225bfdcd0b870a9ed9ac09",
+    "packages/core-backend/src/multitable/plm-record-ingress-binding.ts": "afb0c244fd4eb1a9f22deff5d095a0259e26cf40a8c9ace009bcc5b38719e2e3",
+    "packages/core-backend/src/multitable/plm-record-ingress-service.ts": "7a68c215c0216c6fdfc423162b0f621404fb0c2b01326566544a12206ed803c1",
+    "packages/core-backend/src/multitable/plm-record-ingress-wire.ts": "41800552c743b26f7f8b0d71c84c6c818f810aae9a606507b8b0f840df83ef3f",
+    "packages/core-backend/src/routes/plm-record-ingress.ts": "22fa6fdbc9353759af7ce6d72f9bf77fcc65ef8e52d665b8af9a51178262574a"
+  },
+  "unit": {
+    "modules": 4,
+    "passed": 106,
+    "failed": 0,
+    "skipped": 0
+  },
+  "structuralGuards": {
+    "modules": 4,
+    "passed": 81,
+    "failed": 0,
+    "skipped": 0
+  },
+  "postgres": {
+    "passed": 25,
+    "failed": 0,
+    "skipped": 0,
+    "cleanup": true
+  },
+  "flagManifest": {
+    "passed": 48,
+    "failed": 0
+  },
+  "crossStack": {
+    "run": "crossstack-06",
+    "passed": 33,
+    "inputCount": 2131,
+    "seconds": 5.414,
+    "cleanup": true
+  },
+  "typecheck": true,
+  "lint": {
+    "errors": 0,
+    "warnings": 1,
+    "warning": "explicit any in PostgreSQL query row adapter"
+  },
+  "ci": "pending publication",
+  "review": {
+    "model": "gpt-6-astra",
+    "effort": "ultra",
+    "finding": "downgrade empty-check race reproduced then fixed via fail-fast table locks"
+  }
+}
