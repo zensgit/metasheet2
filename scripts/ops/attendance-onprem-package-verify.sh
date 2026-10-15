@@ -296,6 +296,8 @@ required=(
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
+  "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/package.json"
   "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"

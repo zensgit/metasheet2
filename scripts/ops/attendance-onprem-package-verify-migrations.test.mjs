@@ -30,11 +30,13 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     omitDistMigration,
     extraSourceMigration,
     omitSupersededAuditMarker,
+    omitRepairCli,
   } = options
 
   const placeholderFiles = [
     'apps/web/package.json',
     'packages/core-backend/package.json',
+    'packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js',
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',
     'scripts/ops/attendance-onprem-start-pm2.ps1',
@@ -60,6 +62,9 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/index.js', 'module.exports = {}\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/db/migrate.js', 'module.exports = {}\n')
+  if (!omitRepairCli) {
+    writeFile(pkgRoot, 'packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js', 'module.exports = {}\n')
+  }
   const providerLines = [
     'const marker = "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL";',
     'const legacy = "032_create_approval_records";',
@@ -200,6 +205,15 @@ test('accepts a package with compiled migration coverage for upgraded databases'
 
     assert.equal(result.status, 0, result.stderr || result.stdout)
     assert.match(result.stderr, /Package verify OK/)
+  })
+})
+
+test('rejects a package missing the compiled legacy timezone repair CLI', () => {
+  withArchive({ omitRepairCli: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /Required package content missing: packages\/core-backend\/dist\/scripts\/attendance-timezone-legacy-repair\.js/)
   })
 })
 

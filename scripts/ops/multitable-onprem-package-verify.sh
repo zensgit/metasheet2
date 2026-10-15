@@ -978,6 +978,8 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/data-adapters/MSSQLAdapter.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
+  "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"

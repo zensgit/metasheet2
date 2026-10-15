@@ -67,3 +67,11 @@ pnpm --filter @metasheet/core-backend exec tsx scripts/attendance-timezone-legac
 代码回滚应使用经确认兼容的先前包，先停止受影响写入并记录当前版本。不能通过删除 immutable companion、重新计算已结算记录或临时改时区实现回滚。若经批准的实际回填有错误，应停写、保留审计证据，按预先验证的备份恢复方案处理；本轮没有对任何实际环境执行这一流程。
 
 组织锁粒度和大规模历史性能 P2 不在本次修复完成声明内。
+
+## 2026-10-15 组合收尾更新
+
+本轮普通合入固定 main `42984091d7`（含 #6051），无 rebase/强推。唯一冲突为 package.json 考勤测试命令，按两边并集保留。
+
+组合数据库矩阵发现测试自身留下缺失默认规则，影响其他文件的全局设置写入。仅在该文件 teardown 恢复最初的默认规则选择，保留考勤历史与业务守卫。另补齐 repair CLI 的 TS 编译入口；两个包 verifier 要求编译 CLI/服务存在，并将缺 CLI 归档负例接入必需 Node 20 lane。provenance 仅实际重算受影响的 package verifier 项。
+
+本轮旧程序升级、关闭态、真实恢复与最终 head 13 项 CI 的收据以交付的最终验证 MD 为准；此前 head 的绿灯不替代新 head。标准 pg_restore 在空 search_path 下暴露历史 SQL 函数依赖问题，恢复会话方案及元数据等价性仍在隔离验证中，未宣称正式恢复可用。无新增迁移、自动回填或开关；真实回填、合并、部署和启用仍另批。

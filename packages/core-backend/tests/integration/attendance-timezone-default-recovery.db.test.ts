@@ -10,6 +10,7 @@ type Actor = Awaited<ReturnType<typeof live.user>>
 const now = '2026-08-12T10:00:00Z'
 const workDate = '2026-08-12'
 let admin: Actor
+let originalDefaultRuleId: string
 const payload = { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [0,1,2,3,4,5,6] }
 const save = (value: Record<string, unknown> = payload, token = admin.token) =>
   live.request('/api/attendance/rules/default', token, { orgId: live.orgId, ...value }, 'PUT')
@@ -36,7 +37,13 @@ async function punch(actor: Actor, eventType: string, instant: string) {
 }
 
 describe('authorized missing organization default recovery (actual HTTP/PostgreSQL)', () => {
-  beforeAll(async () => { punchClock.setOnlinePunchInstantForTests(now); admin = await live.start() },180_000)
+  beforeAll(async () => {
+    punchClock.setOnlinePunchInstantForTests(now)
+    admin = await live.start()
+    const defaults = (await live.pool.query('SELECT id FROM attendance_rules WHERE org_id=$1 AND is_default=true',[live.orgId])).rows
+    expect(defaults).toHaveLength(1)
+    originalDefaultRuleId = defaults[0].id
+  },180_000)
   beforeEach(async () => {
     punchClock.setOnlinePunchInstantForTests(now)
     await live.pool.query('DELETE FROM attendance_shift_assignments WHERE org_id=$1',[live.orgId])
@@ -47,7 +54,16 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
     await live.pool.query(`INSERT INTO attendance_rules(id,org_id,name,timezone,work_start_time,work_end_time,working_days,is_default)
       VALUES($1,$2,'default recovery synthetic','UTC','09:00','18:00','[0,1,2,3,4,5,6]'::jsonb,true)`,[randomUUID(),live.orgId])
   })
-  afterAll(async () => { setBusinessTripInstantForTests(null); await live.stop() },60_000)
+  afterAll(async () => {
+    setBusinessTripInstantForTests(null)
+    try {
+      // Global settings writers enumerate retained fixture orgs. Restore only
+      // our original configuration after the deliberate missing-source cases.
+      if (originalDefaultRuleId) {
+        await live.pool.query('UPDATE attendance_rules SET is_default=(id=$1) WHERE org_id=$2',[originalDefaultRuleId,live.orgId])
+      }
+    } finally { await live.stop() }
+  },60_000)
 
   it('restores an OFF org with future published shift and rotation, without changing schedules or history',async () => {
     const actor = await live.user()
