@@ -1,3 +1,4 @@
+import type { PlmPersonalApprovalBindingService } from '../services/PlmPersonalApprovalBindingService'
 import { randomUUID } from 'crypto'
 import { sql, type Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
@@ -1436,6 +1437,7 @@ export class AutomationService {
     schedulerLeaderOptions: AutomationSchedulerLeaderOptions | null = null,
     schedulerRuntime: AutomationSchedulerRuntimeOptions = {},
     notificationService?: AutomationDeps['notificationService'],
+    private readonly plmPersonalCards?: PlmPersonalApprovalBindingService,
   ) {
     this.eventBus = eventBus
     this.db = db
@@ -4142,6 +4144,21 @@ export class AutomationService {
    * exactly-once claim, record-less payload, and the same recursion-depth guard.
    */
   async handleApprovalTaskCreatedTrigger(event: ApprovalTaskCreatedEventV1): Promise<void> {
+    // The personal PLM lane has no platform template or platform instance. Its persisted
+    // task and recipient are checked by the same sender; platform rule filters stay below.
+    const personal = event as unknown as { source?: string; task?: { plmTaskId?: string } }
+    if (personal.source === 'plm-personal') {
+      const { isPlmApprovalCardEnabled } = await import('../services/plm-personal-approval-wire')
+      if (!isPlmApprovalCardEnabled()) throw new Error('PLM_CARD_DISABLED')
+      if (event.version !== 1 || event.eventType !== 'approval.task_created' || !personal.task?.plmTaskId) throw new Error('PLM_CARD_EVENT_INVALID')
+      if (!this.plmPersonalCards) throw new Error('PLM_CARD_AUTHORITY_UNAVAILABLE')
+      const result = await this.plmPersonalCards.withSendAdmission(personal.task.plmTaskId, event.task.entryEpoch!, event.task.assigneeUserId, () => this.executor.runSingleAction({ type: 'send_dingtalk_approval_card', config: {} }, {
+        executionId: event.eventId, ruleId: '', sheetId: '', recordId: '', recordData: {}, ruleCreatedBy: '',
+        actorId: null, triggerEvent: event,
+      }))
+      if (result.status === 'failed') throw new Error('PLM_CARD_DELIVERY_UNCONFIRMED')
+      return
+    }
     if (event.version !== 1 || event.source !== 'approval-product') return
     if (event.eventType !== APPROVAL_TASK_CREATED_TRIGGER) return
     const templateId = event.approval.templateId

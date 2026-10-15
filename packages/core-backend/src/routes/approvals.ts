@@ -1,3 +1,4 @@
+import type { PlmPersonalApprovalBindingService } from '../services/PlmPersonalApprovalBindingService'
 /**
  * Approvals Router
  *
@@ -416,6 +417,7 @@ interface ApprovalInstance {
 }
 
 interface ApprovalRouterOptions {
+  plmPersonalCards?: PlmPersonalApprovalBindingService
   injector?: Injector
   plmAdapter?: ApprovalBridgePlmAdapter | null
   afterSalesApprovalBridgeService?: AfterSalesApprovalBridgeService
@@ -4080,7 +4082,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
       const token = typeof req.query?.t === 'string' ? req.query.t : ''
       const result = await getApprovalCardDeliverySummary(
-        { query: (sql, params) => pool.query(sql, params) },
+        { query: (sql, params) => pool.query(sql, params), plmPersonalCards: options?.plmPersonalCards },
         { deliveryId: String(req.params.deliveryId ?? ''), token, viewerUserId: userId },
       )
       if (result.status === 'not_found') {
@@ -4111,6 +4113,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         {
           query: (sql, params) => pool.query(sql, params),
           approvals: getProductService(),
+          plmPersonalCards: options?.plmPersonalCards,
         },
         {
           deliveryId: String(req.params.deliveryId ?? ''),

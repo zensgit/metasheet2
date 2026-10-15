@@ -1,0 +1,783 @@
+{
+  "schema_version": 1,
+  "repository": "zensgit/metasheet2",
+  "pr": 6423,
+  "validated_source_sha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+  "base_branch": "codex/plm-record-push-20261015",
+  "draft": true,
+  "workflow_count": 46,
+  "check_count": 56,
+  "all_triggered_workflows_success": true,
+  "main_required_contexts_not_observed": [
+    "contracts (strict)",
+    "contracts (dashboard)",
+    "test (20.x)",
+    "contracts (openapi)",
+    "web-tests",
+    "stock-prep PowerShell 5.1 acceptance"
+  ],
+  "main_merge_readiness_proven": false,
+  "checks": [
+    {
+      "name": "approval-attachment-roundtrip-guard",
+      "workflowName": ".github/workflows/approval-realdb-attachment-roundtrip-guard.yml",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240146/job/116379372069"
+    },
+    {
+      "name": "Approval browser verify (chromium)",
+      "workflowName": "Approval Browser Verify",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239738/job/116379369069"
+    },
+    {
+      "name": "s1-evidence replay gate contract (static census \u2014 no DB, no secrets)",
+      "workflowName": "Approval S1 Evidence Replay Gate",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239993/job/116379370936"
+    },
+    {
+      "name": "approval-realdb-l6a-roundscoping",
+      "workflowName": "Approval dedup return round-scoping real-DB acceptance (Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240102/job/116379371454"
+    },
+    {
+      "name": "approval-realdb-departure-transfer",
+      "workflowName": "Approval departure transfer real-DB acceptance (Lock-4 F4-E gates E-1/E-2/E-3)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239744/job/116379368902"
+    },
+    {
+      "name": "approval-realdb-export-csv",
+      "workflowName": "Approval real-DB acceptance (CSV export read-parity)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239900/job/116379370604"
+    },
+    {
+      "name": "approval-realdb-k1",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379371753"
+    },
+    {
+      "name": "approval-realdb-org-writer-w1w2-s1",
+      "workflowName": "Approval real-DB acceptance (Lock-11 W-1/W-2 org stamping \u2014 G-L11-0/1/2/3/10 + refusal precedence)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239754/job/116379368628"
+    },
+    {
+      "name": "approval-realdb-handler",
+      "workflowName": "Approval real-DB acceptance (Lock-3 handler node)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240331/job/116379372320"
+    },
+    {
+      "name": "approval-realdb-f4b-designated",
+      "workflowName": "Approval real-DB acceptance (Lock-4 F4-B designated fallback, gates B-1/B-2/legacy)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239961/job/116379370705"
+    },
+    {
+      "name": "approval-realdb-lock4-p3a",
+      "workflowName": "Approval real-DB acceptance (Lock-4 P3-A F4-A/F4-C)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240113/job/116379371987"
+    },
+    {
+      "name": "approval-realdb-node-operation-policy",
+      "workflowName": "Approval real-DB acceptance (Lock-5 per-node operation policy)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240116/job/116379371510"
+    },
+    {
+      "name": "approval-realdb-lock9-process-attachments",
+      "workflowName": "Approval real-DB acceptance (Lock-9 process attachments)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240209/job/116379371964"
+    },
+    {
+      "name": "approval-realdb-form-drafts",
+      "workflowName": "Approval real-DB acceptance (P3-3 form drafts)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240406/job/116379372349"
+    },
+    {
+      "name": "approval-realdb-node-entry-epoch",
+      "workflowName": "Approval real-DB acceptance (P7-R1 coverage repair)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239657/job/116379372001"
+    },
+    {
+      "name": "approval-realdb-instance-readability-s1",
+      "workflowName": "Approval real-DB acceptance (S1 instance readability)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239854/job/116379369725"
+    },
+    {
+      "name": "approval-realdb-comments",
+      "workflowName": "Approval real-DB acceptance (S2 comments)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239670/job/116379369804"
+    },
+    {
+      "name": "approval-realdb-history-guard",
+      "workflowName": "Approval real-DB acceptance (history guard alignment)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239973/job/116379371052"
+    },
+    {
+      "name": "approval-realdb-legacy-decision-seat",
+      "workflowName": "Approval real-DB acceptance (legacy decision seat + node attribution)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240141/job/116379371976"
+    },
+    {
+      "name": "approval-realdb-list-scope",
+      "workflowName": "Approval real-DB acceptance (list scope determined server-side)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239821/job/116379369083"
+    },
+    {
+      "name": "approval-realdb-directory-resolve",
+      "workflowName": "Approval real-DB acceptance (member-display-identity resolve endpoint)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240066/job/116379370926"
+    },
+    {
+      "name": "approval-realdb-permission-catalogue",
+      "workflowName": "Approval real-DB acceptance (permission catalogue registration)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240028/job/116379371869"
+    },
+    {
+      "name": "approval-realdb-projection-key-parity",
+      "workflowName": "Approval real-DB acceptance (projection participant key parity)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239997/job/116379371236"
+    },
+    {
+      "name": "approval-realdb-revoke-terminal-guard",
+      "workflowName": "Approval real-DB acceptance (revoke terminal-status guard)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239948/job/116379370594"
+    },
+    {
+      "name": "approval-realdb-todo-center-pending-query",
+      "workflowName": "Approval real-DB acceptance (todo-center shared pending query)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240152/job/116379371249"
+    },
+    {
+      "name": "approval-realdb-can-decide-current-node",
+      "workflowName": "Approval real-DB acceptance (viewer-scoped canDecideCurrentNode)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240101/job/116379371413"
+    },
+    {
+      "name": "approval-realdb-org-writer-plm-mirror-s1",
+      "workflowName": "Approval real-DB acceptance (writers-stamp-org S1 slice 1 \u2014 G-W2 PLM mirror)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239908/job/116379370603"
+    },
+    {
+      "name": "approval-realdb-org-writer-w4-s1",
+      "workflowName": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 W-4 attendance writer)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240829/job/116379372551"
+    },
+    {
+      "name": "approval-realdb-sequential-mode (pg15)",
+      "workflowName": "Approval sequential mode real-DB acceptance (Lock-1 K6)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239876/job/116379371021"
+    },
+    {
+      "name": "approval-template-policy-carrier-realdb",
+      "workflowName": "Approval template policy carrier real-DB acceptance (L6-P1)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239837/job/116379370220"
+    },
+    {
+      "name": "attendance-web-guard",
+      "workflowName": "Attendance Web Guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240148/job/116379371919"
+    },
+    {
+      "name": "guard",
+      "workflowName": "Docker Publish Guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240343/job/116379372025"
+    },
+    {
+      "name": "elearning-web-guard",
+      "workflowName": "Elearning Web Guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239795/job/116379370903"
+    },
+    {
+      "name": "integration-guard",
+      "workflowName": "Integration Guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239861/job/116379370008"
+    },
+    {
+      "name": "migration-prod-image-parity (postgres:15-alpine)",
+      "workflowName": "Migration parity \u2014 production postgres image (advisory)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239868/job/116379370050"
+    },
+    {
+      "name": "observation-kit contract (read-only SQL census + runbook gating)",
+      "workflowName": "Multitable O2 Observation Kit",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239884/job/116379368973"
+    },
+    {
+      "name": "multitable-realdb-context-read-verdict",
+      "workflowName": "Multitable real-DB acceptance (/context read verdict)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239751/job/116379368802"
+    },
+    {
+      "name": "recovery-schema-drift",
+      "workflowName": "Multitable recovery-schema drift (A-vs-B)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240322/job/116379372247"
+    },
+    {
+      "name": "listener-regression",
+      "workflowName": ".github/workflows/plm-bom-listener.yml",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240226/job/116379371624"
+    },
+    {
+      "name": "postgres",
+      "workflowName": "PLM personal approval verification",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240088/job/116379371582"
+    },
+    {
+      "name": "record-ingress-regression",
+      "workflowName": "PLM record ingress",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239967/job/116379371918"
+    },
+    {
+      "name": "pr-validate",
+      "workflowName": "Phase 5 PR Validation (External Metrics Gate)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240032/job/116379371462"
+    },
+    {
+      "name": "ssh host-key pin contract (fail-closed known_hosts)",
+      "workflowName": "SSH Host-Key Pin Contract",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239807/job/116379368518"
+    },
+    {
+      "name": "Stock-prep browser verify (chromium)",
+      "workflowName": "Stock-prep Browser Verify",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240183/job/116379373422"
+    },
+    {
+      "name": "tasks-web-guard",
+      "workflowName": "Tasks Web Guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722240103/job/116379371663"
+    },
+    {
+      "name": "tasks-realdb",
+      "workflowName": "Tasks real DB",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239849/job/116379368661"
+    },
+    {
+      "name": "approval-realdb-sequential-mode (pg16)",
+      "workflowName": "Approval sequential mode real-DB acceptance (Lock-1 K6)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239876/job/116379371195"
+    },
+    {
+      "name": "approval-realdb-k2",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372040"
+    },
+    {
+      "name": "approval-realdb-wp1-any-mode",
+      "workflowName": "Approval real-DB acceptance (P7-R1 coverage repair)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239657/job/116379372168"
+    },
+    {
+      "name": "approval-realdb-k4",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372082"
+    },
+    {
+      "name": "approval-realdb-p7r1-sweep",
+      "workflowName": "Approval real-DB acceptance (P7-R1 coverage repair)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239657/job/116379371257"
+    },
+    {
+      "name": "approval-realdb-k5b",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372360"
+    },
+    {
+      "name": "approval-realdb-k3",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372145"
+    },
+    {
+      "name": "approval-realdb-k6-contact",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372081"
+    },
+    {
+      "name": "approval-realdb-lock2-department-field",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372125"
+    },
+    {
+      "name": "approval-realdb-pack1a-lifecycle",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/38722239916/job/116379372138"
+    }
+  ],
+  "runs": [
+    {
+      "conclusion": "success",
+      "databaseId": 38722240829,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240829",
+      "workflowName": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 W-4 attendance writer)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240032,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240032",
+      "workflowName": "Phase 5 PR Validation (External Metrics Gate)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239807,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239807",
+      "workflowName": "SSH Host-Key Pin Contract"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239884,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239884",
+      "workflowName": "Multitable O2 Observation Kit"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239993,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239993",
+      "workflowName": "Approval S1 Evidence Replay Gate"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239908,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239908",
+      "workflowName": "Approval real-DB acceptance (writers-stamp-org S1 slice 1 \u2014 G-W2 PLM mirror)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240148,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240148",
+      "workflowName": "Attendance Web Guard"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240343,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240343",
+      "workflowName": "Docker Publish Guard"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239738,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239738",
+      "workflowName": "Approval Browser Verify"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239861,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239861",
+      "workflowName": "Integration Guard"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239751,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239751",
+      "workflowName": "Multitable real-DB acceptance (/context read verdict)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239795,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239795",
+      "workflowName": "Elearning Web Guard"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239868,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239868",
+      "workflowName": "Migration parity \u2014 production postgres image (advisory)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239670,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239670",
+      "workflowName": "Approval real-DB acceptance (S2 comments)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240183,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240183",
+      "workflowName": "Stock-prep Browser Verify"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239837,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239837",
+      "workflowName": "Approval template policy carrier real-DB acceptance (L6-P1)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239876,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239876",
+      "workflowName": "Approval sequential mode real-DB acceptance (Lock-1 K6)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239900,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239900",
+      "workflowName": "Approval real-DB acceptance (CSV export read-parity)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239961,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239961",
+      "workflowName": "Approval real-DB acceptance (Lock-4 F4-B designated fallback, gates B-1/B-2/legacy)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239854,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239854",
+      "workflowName": "Approval real-DB acceptance (S1 instance readability)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240028,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240028",
+      "workflowName": "Approval real-DB acceptance (permission catalogue registration)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239754,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239754",
+      "workflowName": "Approval real-DB acceptance (Lock-11 W-1/W-2 org stamping \u2014 G-L11-0/1/2/3/10 + refusal precedence)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240152,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240152",
+      "workflowName": "Approval real-DB acceptance (todo-center shared pending query)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240101,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240101",
+      "workflowName": "Approval real-DB acceptance (viewer-scoped canDecideCurrentNode)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240066,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240066",
+      "workflowName": "Approval real-DB acceptance (member-display-identity resolve endpoint)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239973,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239973",
+      "workflowName": "Approval real-DB acceptance (history guard alignment)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239744,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239744",
+      "workflowName": "Approval departure transfer real-DB acceptance (Lock-4 F4-E gates E-1/E-2/E-3)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240102,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240102",
+      "workflowName": "Approval dedup return round-scoping real-DB acceptance (Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239821,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239821",
+      "workflowName": "Approval real-DB acceptance (list scope determined server-side)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239997,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239997",
+      "workflowName": "Approval real-DB acceptance (projection participant key parity)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240103,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240103",
+      "workflowName": "Tasks Web Guard"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240209,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240209",
+      "workflowName": "Approval real-DB acceptance (Lock-9 process attachments)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239948,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239948",
+      "workflowName": "Approval real-DB acceptance (revoke terminal-status guard)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240116,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240116",
+      "workflowName": "Approval real-DB acceptance (Lock-5 per-node operation policy)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240113,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240113",
+      "workflowName": "Approval real-DB acceptance (Lock-4 P3-A F4-A/F4-C)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240406,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240406",
+      "workflowName": "Approval real-DB acceptance (P3-3 form drafts)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240331,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240331",
+      "workflowName": "Approval real-DB acceptance (Lock-3 handler node)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240146,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240146",
+      "workflowName": ".github/workflows/approval-realdb-attachment-roundtrip-guard.yml"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240322,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240322",
+      "workflowName": "Multitable recovery-schema drift (A-vs-B)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239657,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239657",
+      "workflowName": "Approval real-DB acceptance (P7-R1 coverage repair)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239849,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239849",
+      "workflowName": "Tasks real DB"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239916,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239916",
+      "workflowName": "Approval real-DB acceptance (Lock-1 assignee kinds)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240226,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240226",
+      "workflowName": ".github/workflows/plm-bom-listener.yml"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240141,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240141",
+      "workflowName": "Approval real-DB acceptance (legacy decision seat + node attribution)"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722240088,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722240088",
+      "workflowName": "PLM personal approval verification"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38722239967,
+      "event": "pull_request",
+      "headSha": "d7ee868b0cdd1a0790b00c8296414df47678cd4d",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38722239967",
+      "workflowName": "PLM record ingress"
+    }
+  ],
+  "personal_approval_counts": {
+    "backend_unit": 123,
+    "ui": 54,
+    "postgres": 16,
+    "postgres_failures": 0,
+    "postgres_errors": 0,
+    "postgres_skipped": 0
+  },
+  "scope": "Stacked source commit CI; gh pr checks --required reports no required checks for current base. Main gates and subsequent documentation commit must be checked separately. Counts overlap local evidence and are not summed."
+}

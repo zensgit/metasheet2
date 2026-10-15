@@ -439,6 +439,11 @@ import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
 import { DingTalkInteractiveCardStreamWorker } from './integrations/dingtalk/interactive-card-stream'
+import type { PLMAdapter } from './data-adapters/PLMAdapter'
+import { PlmPersonalApprovalBindingService } from './services/PlmPersonalApprovalBindingService'
+import { PlmPersonalApprovalWorker } from './services/PlmPersonalApprovalWorker'
+import { isPlmApprovalCardEnabled } from './services/plm-personal-approval-wire'
+import { createPlmApprovalBindingsRouter } from './routes/plm-approval-bindings'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -630,6 +635,8 @@ export class MetaSheetServer {
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
   private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
+  private readonly plmPersonalCards: PlmPersonalApprovalBindingService
+  private plmPersonalApprovalWorker?: PlmPersonalApprovalWorker
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
@@ -708,6 +715,10 @@ export class MetaSheetServer {
           await this.handleAfterSalesApprovalDecisionCallback(approval, decision)
         },
       },
+    )
+    this.plmPersonalCards = new PlmPersonalApprovalBindingService(
+      poolManager.get().getInternalPool(),
+      () => this.injector.get(IPLMAdapter) as PLMAdapter,
     )
     
     this.snapshotService = new SnapshotService()
@@ -1953,6 +1964,7 @@ export class MetaSheetServer {
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
+    this.app.use('/api/me/plm-approval-bindings', createPlmApprovalBindingsRouter(this.plmPersonalCards))
 
     // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
     // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would
@@ -1968,6 +1980,7 @@ export class MetaSheetServer {
     this.app.use(approvalsRouter({
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
+      plmPersonalCards: this.plmPersonalCards,
     }))
     // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
     pendingSourceRegistry.register(approvalPendingSource)
@@ -3749,6 +3762,9 @@ export class MetaSheetServer {
     if (this.plmBomNotificationWorker) {
       approvalProducerDrains.push(this.observeShutdownTask(this.plmBomNotificationWorker.stop()))
     }
+    if (this.plmPersonalApprovalWorker) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.plmPersonalApprovalWorker.stop()))
+    }
     if (this.durableDeliveryLoop) {
       approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
     }
@@ -4162,6 +4178,11 @@ export class MetaSheetServer {
     // assert. Now a mid-chain failure rolls the instance back (best-effort shutdown: unsubscribe bus
     // handlers, destroy scheduler timers) and publishes NOTHING: flag-OFF this is the legacy
     // degrade-and-continue, flag-ON the durable boot below fail-closes on automationServiceReady=false.
+    if (isPlmApprovalCardEnabled()) {
+      // Configure the fixed personal provider before durable consumers can send cards.
+      await (this.injector.get(IPLMAdapter) as PLMAdapter).initializePersonalApproval()
+      this.assertStartupNotCancelled()
+    }
     let pendingAutomationService: AutomationService | undefined
     try {
       const pool = poolManager.get()
@@ -4181,6 +4202,7 @@ export class MetaSheetServer {
         schedulerLeaderOptions,
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
         notificationService,
+        this.plmPersonalCards,
       )
       pendingAutomationService.init()
       await pendingAutomationService.loadAndRegisterAllScheduled()
@@ -5147,9 +5169,15 @@ export class MetaSheetServer {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
 
+    if (isPlmApprovalCardEnabled()) {
+      this.assertStartupNotCancelled()
+      this.plmPersonalApprovalWorker = new PlmPersonalApprovalWorker(this.plmPersonalCards)
+      await this.plmPersonalApprovalWorker.start()
+    }
+
     // Initialize optional DingTalk interactive-card Stream worker (B-1 skeleton; default disabled).
     try {
-      this.dingtalkInteractiveCardStreamWorker = new DingTalkInteractiveCardStreamWorker()
+      this.dingtalkInteractiveCardStreamWorker = new DingTalkInteractiveCardStreamWorker({ plmPersonalCards: this.plmPersonalCards })
       await this.dingtalkInteractiveCardStreamWorker.initialize()
     } catch (e) {
       this.logger.error('Failed to initialize DingTalkInteractiveCardStreamWorker', e as Error)

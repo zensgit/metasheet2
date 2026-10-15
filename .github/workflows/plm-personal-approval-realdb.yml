@@ -1,0 +1,149 @@
+name: PLM personal approval verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
+      - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
+      - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
+      - 'packages/core-backend/tests/plm-personal-approval/**'
+      - 'packages/core-backend/tests/plm-bom-review/auth-bootstrap.ts'
+      - 'packages/core-backend/tests/unit/dingtalk-interactive-card-*.test.ts'
+      - 'packages/core-backend/tests/unit/automation-classb-dingtalk-approval-card.test.ts'
+      - 'packages/core-backend/tests/unit/approval-completion-shutdown-lifecycle.test.ts'
+      - 'packages/core-backend/vitest*.config.ts'
+      - 'packages/core-backend/package.json'
+      - 'apps/web/src/**'
+      - 'apps/web/tests/plm-approval-bindings-*.spec.ts'
+      - 'apps/web/tests/sessionCenterView.spec.ts'
+      - 'apps/web/package.json'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'packages/core-backend/tsconfig.json'
+      - 'packages/core-backend/tests/setup.ts'
+      - 'packages/core-backend/tests/utils/test-db.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'scripts/ops/global-history-flag-manifest*'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/tests/setup/localstorage.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/plm-personal-approval-realdb.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
+      - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
+      - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
+      - 'packages/core-backend/tests/plm-personal-approval/**'
+      - 'packages/core-backend/tests/plm-bom-review/auth-bootstrap.ts'
+      - 'packages/core-backend/tests/unit/dingtalk-interactive-card-*.test.ts'
+      - 'packages/core-backend/tests/unit/automation-classb-dingtalk-approval-card.test.ts'
+      - 'packages/core-backend/tests/unit/approval-completion-shutdown-lifecycle.test.ts'
+      - 'packages/core-backend/vitest*.config.ts'
+      - 'packages/core-backend/package.json'
+      - 'apps/web/src/**'
+      - 'apps/web/tests/plm-approval-bindings-*.spec.ts'
+      - 'apps/web/tests/sessionCenterView.spec.ts'
+      - 'apps/web/package.json'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'packages/core-backend/tsconfig.json'
+      - 'packages/core-backend/tests/setup.ts'
+      - 'packages/core-backend/tests/utils/test-db.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'scripts/ops/global-history-flag-manifest*'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/tests/setup/localstorage.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/plm-personal-approval-realdb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: plm_personal_disposable
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d plm_personal_disposable"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NODE_ENV: test
+      EXPECT_DB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Flag dependencies
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs
+      - name: Personal grant contract, transport, routes and worker
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest run
+          tests/unit/plm-personal-approval-contract.test.ts
+          tests/unit/plm-personal-approval-transport.test.ts
+          tests/unit/plm-personal-approval-routes.test.ts
+          tests/unit/plm-personal-approval-worker.test.ts
+          tests/unit/dingtalk-interactive-card-callback.test.ts
+          tests/unit/dingtalk-interactive-card-stream.test.ts
+          tests/unit/dingtalk-interactive-card-stream-lifecycle.test.ts
+          tests/unit/dingtalk-interactive-card-update.test.ts
+          tests/unit/automation-classb-dingtalk-approval-card.test.ts
+          tests/unit/approval-completion-shutdown-lifecycle.test.ts
+          --reporter=verbose
+      - name: Backend source types
+        run: pnpm --filter @metasheet/core-backend exec tsc --noEmit
+      - name: Web application source types
+        run: pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.app.json
+      - name: Personal binding settings UI
+        run: >-
+          pnpm --filter @metasheet/web exec vitest run --config vite.config.ts
+          tests/plm-approval-bindings-service.spec.ts
+          tests/plm-approval-bindings-panel.spec.ts
+          tests/plm-approval-bindings-routes.spec.ts
+          tests/dataSourcesRouteRedirect.spec.ts
+          tests/sessionCenterView.spec.ts
+          --reporter=verbose
+      - name: Run the whole personal approval PostgreSQL suite
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_personal_disposable
+        # Synthetic predecessor catalog, real delivery/outbox/personal migrations.
+        # Provider and DingTalk are fixtures; root cross-service evidence is separate.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.plm-personal-approval.config.ts run
+          tests/integration/plm-personal-approval-realdb.test.ts
+          --reporter=verbose --reporter=junit --outputFile=plm-personal-junit.xml
+      - name: Require executed tests without skips
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('packages/core-backend/plm-personal-junit.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else list(root.findall('testsuite'))
+          counts = {key: sum(int(row.get(key, 0)) for row in suites)
+                    for key in ('tests', 'failures', 'errors', 'skipped')}
+          assert counts['tests'] > 0 and all(counts[key] == 0 for key in ('failures', 'errors', 'skipped')), counts
+          print(counts)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plm-personal-approval-postgres
+          path: packages/core-backend/plm-personal-junit.xml
+          if-no-files-found: error

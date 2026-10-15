@@ -5005,8 +5005,9 @@ export class AutomationExecutor {
     const actionType = 'send_dingtalk_approval_card' as const
     const event = context.triggerEvent as {
       eventType?: unknown
+      source?: unknown
       approval?: { instanceId?: unknown; requestNo?: unknown; templateId?: unknown }
-      task?: { nodeKey?: unknown; entryEpoch?: unknown; assigneeUserId?: unknown; sourceStep?: unknown }
+      task?: { plmTaskId?: unknown; nodeKey?: unknown; entryEpoch?: unknown; assigneeUserId?: unknown; sourceStep?: unknown }
     } | null
     const instanceId = typeof event?.approval?.instanceId === 'string' ? event.approval.instanceId : ''
     const nodeKey = typeof event?.task?.nodeKey === 'string' ? event.task.nodeKey : ''
@@ -5022,14 +5023,29 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
     }
 
-    // Instance metadata for the card summary — ids/title/request_no only, NO form values.
-    const instanceResult = await this.deps.queryFn(
-      `SELECT title, request_no FROM approval_instances WHERE id = $1`,
-      [instanceId],
-    )
-    const instanceRow = (instanceResult.rows[0] ?? null) as { title?: string | null; request_no?: string | null } | null
-    if (!instanceRow) {
-      return { actionType, status: 'failed', error: 'Approval instance not found for the pending-task event' }
+    const plmTaskId = event?.source === 'plm-personal' && typeof event.task?.plmTaskId === 'string' ? event.task.plmTaskId : null
+    let instanceRow: { title?: string | null; request_no?: string | null } | null
+    if (plmTaskId) {
+      const { isPlmApprovalCardEnabled } = await import('../services/plm-personal-approval-wire')
+      if (!isPlmApprovalCardEnabled() || plmTaskId !== instanceId) return { actionType, status: 'failed', error: 'PLM_CARD_DISABLED' }
+      const current = await this.deps.queryFn(`SELECT t.task->>'eco_name' AS title FROM plm_personal_approval_tasks t
+        JOIN plm_personal_approval_bindings b ON b.id=t.binding_id JOIN users u ON u.id=b.owner_id
+        WHERE t.id=$1 AND t.active AND t.seat_status='pending' AND t.source_stage_id::text=$2 AND t.entry_epoch=$3
+          AND b.owner_id=$4 AND b.encrypted_grant IS NOT NULL AND b.expires_at>now() AND u.is_active=true`,
+        [plmTaskId,nodeKey,event.task?.entryEpoch,assigneeUserId])
+      instanceRow = current.rows[0] as typeof instanceRow ?? null
+      if (!instanceRow) return { actionType, status: 'failed', error: 'PLM_CARD_TASK_UNAVAILABLE' }
+      const existing = (await this.deps.queryFn('SELECT id,send_status FROM dingtalk_approval_card_deliveries WHERE plm_task_id=$1 AND entry_epoch=$2',[plmTaskId,event.task?.entryEpoch])).rows[0] as {id:string;send_status:string}|undefined
+      if (existing && existing.send_status !== 'failed') {
+        // A worker died after ledger insertion. Delivery may have occurred: never send again.
+        if (existing.send_status === 'pending') await markDingTalkApprovalCardDeliverySendOutcomeUnknown(this.deps.queryFn,existing.id,'plm_prior_send_unconfirmed')
+        return { actionType, status: 'success', output: { alreadyApplied: true } }
+      }
+    } else {
+      if (event?.source === 'plm-personal') return { actionType, status: 'failed', error: 'PLM_CARD_EVENT_INVALID' }
+      const instanceResult = await this.deps.queryFn('SELECT title, request_no FROM approval_instances WHERE id = $1',[instanceId])
+      instanceRow = (instanceResult.rows[0] ?? null) as typeof instanceRow
+      if (!instanceRow) return { actionType, status: 'failed', error: 'Approval instance not found for the pending-task event' }
     }
     const approvalTitle = typeof instanceRow.title === 'string' && instanceRow.title.trim() ? instanceRow.title.trim() : '审批待办'
     const requestNo = typeof instanceRow.request_no === 'string' ? instanceRow.request_no.trim() : ''
@@ -5136,7 +5152,8 @@ export class AutomationExecutor {
     }
 
     const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
-      instanceId,
+      instanceId: plmTaskId ? null : instanceId,
+      ...(plmTaskId ? { plmTaskId } : {}),
       nodeKey,
       recipientUserId: assigneeUserId,
       recipientDingTalkUserId: dingtalkUserId,
@@ -5234,7 +5251,8 @@ export class AutomationExecutor {
       // state, never plain `failed`, and is NEVER auto-resent — the card may well have reached
       // the recipient. There is no task_id for a lost response, so DingTalk's async-send result
       // query cannot reconcile it automatically; reconciliation is manual/ops via this state.
-      const outcomeUnknown = isDingTalkOutcomeUnknown(error)
+      // A personal card has no Class-B intent: post-send ledger failure must never permit resend.
+      const outcomeUnknown = (plmTaskId !== null && sendReturned) || isDingTalkOutcomeUnknown(error)
       // DT-HARDEN-06: if the ledger row cannot be flipped out of `pending`, the card is
       // fail-closed but invisible — no sweeper, no admin listing. Swallowing that
       // silently (`.catch(() => null)`) hid the only signal an operator would ever get.

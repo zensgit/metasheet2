@@ -1,3 +1,4 @@
+import type { PlmPersonalApprovalBindingService } from '../../services/PlmPersonalApprovalBindingService'
 /**
  * B-1 (DingTalk interactive approval cards): env-gated Stream worker skeleton.
  * B-3 adds the callback dispatch seam: events that carry a card-callback payload are handed to
@@ -218,12 +219,16 @@ export class DingTalkInteractiveCardStreamWorker {
    */
   private shutdownRequested = false
 
+  private readonly plmPersonalCards?: PlmPersonalApprovalBindingService
+
   constructor(options: {
+    plmPersonalCards?: PlmPersonalApprovalBindingService
     logger?: Pick<Logger, 'info' | 'warn'>
     clientFactory?: DingTalkInteractiveCardStreamClientFactory
     /** B-3 dispatch override (tests). Omitted → the lazy production executor. */
     callbackExecutor?: DingTalkInteractiveCardCallbackExecutor
   } = {}) {
+    this.plmPersonalCards = options.plmPersonalCards
     this.logger = options.logger ?? new Logger('DingTalkInteractiveCardStreamWorker')
     this.clientFactory = options.clientFactory ?? defaultDingTalkInteractiveCardStreamClientFactory
     this.callbackExecutor = options.callbackExecutor ?? null
@@ -399,6 +404,7 @@ export class DingTalkInteractiveCardStreamWorker {
         const deps = {
           query: (sql: string, params?: unknown[]) => poolManager.get().query(sql, params),
           approvals: new ApprovalProductService(),
+          plmPersonalCards: this.plmPersonalCards,
         }
         return (payload: unknown) => executeDingTalkApprovalCardCallback(deps, payload)
       })()

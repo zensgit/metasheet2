@@ -107,6 +107,13 @@
         </div>
       </section>
 
+      <button class="session-center__button session-center__button--secondary" type="button" aria-controls="plm-approval-bindings" :aria-expanded="plmBindingsOpen" @click="plmBindingsOpen = !plmBindingsOpen">
+        {{ plmBindingsOpen ? '收起 Yuantus 审批授权' : '管理 Yuantus 审批授权' }}
+      </button>
+      <div v-if="plmBindingsOpen" id="plm-approval-bindings">
+        <PlmApprovalBindingsPanel />
+      </div>
+
       <section v-if="currentSession" class="session-center__current">
         <div class="session-center__current-copy">
           <p class="session-center__current-label">当前设备</p>
@@ -204,6 +211,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import PlmApprovalBindingsPanel from '../components/plm/PlmApprovalBindingsPanel.vue'
 
 type SessionRecord = {
   id: string
@@ -262,6 +270,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuth()
 
+const plmBindingsOpen = ref(false)
 const loading = ref(false)
 const heartbeatLoading = ref(false)
 const busySessionId = ref<string | null>(null)

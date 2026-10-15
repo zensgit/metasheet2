@@ -1,3 +1,4 @@
+import { requirePlmApprovalCard, PlmPersonalApprovalError } from '../services/plm-personal-approval-wire'
 import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
 import { randomUUID } from 'node:crypto'
@@ -1092,17 +1093,24 @@ export class PLMAdapter extends HTTPAdapter {
    * ambiguous/misconfigured source) -- so the relay fails closed. Callers MUST connect() first.
    */
   getEffectiveTenantId(): string | undefined {
+    return this.getEffectiveScopeHeader('x-tenant-id')
+  }
+
+  /** Actual served org, rejecting every ambiguous or malformed header alias. */
+  getEffectiveOrgId(): string | undefined {
+    return this.getEffectiveScopeHeader('x-org-id')
+  }
+
+  private getEffectiveScopeHeader(name: string): string | undefined {
     const headers = this.config.connection.headers as Record<string, unknown> | undefined
     if (!headers) return undefined
-    const distinct = Array.from(
-      new Set(
-        Object.keys(headers)
-          .filter((key) => key.toLowerCase() === 'x-tenant-id')
-          .map((key) => headers[key])
-          .filter((value): value is string => typeof value === 'string' && value.length > 0),
-      ),
-    )
-    return distinct.length === 1 ? distinct[0] : undefined
+    const values = Object.keys(headers)
+      .filter((key) => key.toLowerCase() === name)
+      .map((key) => headers[key])
+    // Axios folds header names: a later empty/nonstring alias can replace a valid
+    // value. Never discard that alias and claim the valid value was actually sent.
+    if (!values.length || values.some((value) => typeof value !== 'string' || !value.trim())) return undefined
+    return new Set(values).size === 1 ? values[0] as string : undefined
   }
 
   async connect(): Promise<void> {
@@ -2438,6 +2446,64 @@ export class PLMAdapter extends HTTPAdapter {
       data: [this.mapYuantusReleaseReadiness(itemId, entry, options)],
       metadata: { totalCount: 1 },
       error: result.error,
+    }
+  }
+
+  /** Resolve the trusted global provider only. Never log in or probe with a service credential. */
+  async initializePersonalApproval(): Promise<void> {
+    requirePlmApprovalCard()
+    const url = (await this.configService.get<string>('plm.url')) || process.env.PLM_BASE_URL || process.env.PLM_URL
+    const tenant = (await this.configService.get<string>('plm.tenantId')) || process.env.PLM_TENANT_ID
+    const org = (await this.configService.get<string>('plm.orgId')) || process.env.PLM_ORG_ID
+    const mode = (await this.configService.get<string>('plm.apiMode')) || process.env.PLM_API_MODE
+    if (!url || await this.configService.get<boolean>('plm.mock') === true || this.resolveApiMode(mode, undefined, tenant, org) !== 'yuantus') throw new PlmPersonalApprovalError(503, 'PLM_PROVIDER_UNAVAILABLE')
+    this.config.connection.url = url
+    this.config.connection.baseURL = url
+    this.applyTenantOrgHeaders(tenant, org)
+    this.apiMode = 'yuantus'
+    this.mockMode = false
+    this.personalApprovalManagementUrl()
+    if (!this.getEffectiveTenantId() || !this.getEffectiveOrgId()) throw new PlmPersonalApprovalError(503, 'PLM_PROVIDER_UNAVAILABLE')
+  }
+
+  private personalApprovalBaseUrl(): URL {
+    const base = new URL(String(this.config.connection.baseURL || this.config.connection.url || ''))
+    const loopbackTest = process.env.NODE_ENV === 'test' && base.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname)
+    if ((base.protocol !== 'https:' && !loopbackTest) || base.username || base.password || base.search || base.hash) throw new Error('PLM_PROVIDER_UNAVAILABLE')
+    return base
+  }
+
+  personalApprovalManagementUrl(): string {
+    return new URL('/personal-approval-grants', this.personalApprovalBaseUrl()).href
+  }
+
+  /** Personal purpose transport: no service-account interceptor, fallback, redirect or retry. */
+  async personalApprovalRequest(
+    operation: 'verify' | 'tasks' | 'task' | 'command' | 'receipt',
+    grant: string, connectionId: string, data?: unknown, id?: string,
+  ): Promise<unknown> {
+    if (connectionId !== requirePlmApprovalCard() || this.mockMode || this.apiMode !== 'yuantus'
+      || !/^yua_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/.test(grant)) throw new PlmPersonalApprovalError(403, 'PLM_PROVIDER_FORBIDDEN')
+    const tenant = this.getEffectiveTenantId(), org = this.getEffectiveOrgId()
+    if (!tenant || !org) throw new PlmPersonalApprovalError(503, 'PLM_PROVIDER_UNAVAILABLE')
+    const base = this.personalApprovalBaseUrl()
+    const paths = { verify: 'verify', tasks: 'tasks', task: `tasks/${encodeURIComponent(id || '')}`, command: 'commands', receipt: `commands/${encodeURIComponent(id || '')}` }
+    if (!Object.hasOwn(paths, operation)) throw new PlmPersonalApprovalError(422, 'PLM_CARD_INVALID_INPUT')
+    const url = new URL(`/api/v1/plm-approval-card/${paths[operation]}`, base)
+    const method = operation === 'verify' || operation === 'command' ? 'POST' : 'GET'
+    if (method === 'GET') url.searchParams.set('connection_id', connectionId)
+    try {
+      const response = await fetch(url, { method, redirect: 'error', signal: AbortSignal.timeout(8000),
+        headers: { Authorization: `Bearer ${grant}`, 'Content-Type': 'application/json', 'x-tenant-id': tenant, 'x-org-id': org },
+        ...(method === 'POST' ? { body: JSON.stringify(operation === 'verify' ? { connection_id: connectionId } : data) } : {}),
+      })
+      if (!response.ok) throw new PlmPersonalApprovalError(response.status, response.status === 401 ? 'PLM_CARD_UNAUTHORIZED' : response.status === 403 ? 'PLM_PROVIDER_FORBIDDEN' : response.status === 404 ? 'PLM_SOURCE_NOT_FOUND' : response.status === 409 ? 'PLM_SOURCE_CONFLICT' : 'PLM_PROVIDER_UNAVAILABLE')
+      const body = await response.text()
+      if (Buffer.byteLength(body) > 2_000_000) throw new Error('response_too_large')
+      return JSON.parse(body)
+    } catch (error) {
+      if (error instanceof PlmPersonalApprovalError) throw error
+      throw new PlmPersonalApprovalError(503, 'PLM_PROVIDER_UNAVAILABLE')
     }
   }
 

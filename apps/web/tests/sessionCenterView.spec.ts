@@ -66,6 +66,15 @@ describe('SessionCenterView', () => {
     container = null
   })
 
+  it('offers a lazy personal Yuantus binding entry without changing session calls', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ success: true, data: null }))
+    app = createApp(SessionCenterView)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('button[aria-controls="plm-approval-bindings"]')).not.toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('loads current-user DingTalk access status in settings', async () => {
     routeState.query = { dingtalk: 'bound' }
     apiFetchMock
