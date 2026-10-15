@@ -40,6 +40,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { formatElearningDate } from './elearningLabels'
 import { ElearningApiError } from '../services/elearning'
 import {
   getMyElearningLearningProfile,
@@ -58,10 +59,7 @@ function text(en: string, zh: string): string {
 }
 
 function formatDate(value: string): string {
-  return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(new Date(value))
+  return formatElearningDate(value, isZh.value)
 }
 
 function errorText(value: unknown): string {

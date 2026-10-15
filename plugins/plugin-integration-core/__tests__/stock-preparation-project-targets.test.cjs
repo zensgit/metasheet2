@@ -143,6 +143,11 @@ function makeProvisioning({ existingObjects = new Map(), withEnsureView = true, 
       return { baseId, created: true }
     },
     async isSheetOwnedByProject() { return true },
+    // G1 field defect (R67): provisioning writes the contract option set onto the new sheet's decision column.
+    async patchObjectFieldProperty({ projectId, objectId, fieldId, propertyPatch }) {
+      calls.push(['patchObjectFieldProperty', objectId, fieldId, propertyPatch])
+      return { id: api.getFieldId(projectId, objectId, fieldId), sheetId: sheetIdOf(projectId, objectId), name: fieldId, type: 'select', property: propertyPatch, order: 0 }
+    },
   }
   if (withEnsureView) {
     api.ensureView = async ({ projectId, sheetId, descriptor }) => {

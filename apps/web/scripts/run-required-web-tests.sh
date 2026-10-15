@@ -1627,6 +1627,7 @@ exec npx vitest run \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceLegacyPermissionPayload \
   attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
   attendancePayrollHelp.spec.ts \
@@ -1652,6 +1653,7 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  builtinCatalogPresentation \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
@@ -1914,12 +1916,14 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionManagementView \
   personal-view-client \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
@@ -2011,6 +2015,7 @@ exec npx vitest run \
   useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
+  userManagementRoleMembership \
   userManagementView \
   uuid-no-bare-randomuuid \
   view-manager-multitable-contract \

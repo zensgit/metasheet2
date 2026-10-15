@@ -166,6 +166,7 @@ attendanceEmployeeQuickActionIcons
 attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
+attendanceLegacyPermissionPayload
 attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
 attendancePayrollHelp.spec.ts
@@ -191,6 +192,7 @@ automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+builtinCatalogPresentation
 cancelRoundEntryApproverList
 cancelRoundEntryAttendancePanel
 cancelRoundEntryCenterRoute
@@ -463,6 +465,7 @@ newTodoPill
 pageShell
 parallelBranchRunsView
 permission-match-parity
+permissionManagementView
 personal-view-client
 platform-app-entry-mismatch-inventory
 platform-app-launcher
@@ -472,6 +475,7 @@ recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
+roleMembers
 routePreviewErrors
 run-required-web-tests-shape
 searchApprovalDirectoryDepartments
@@ -605,6 +609,7 @@ useAttendanceAdminUsers
 useAttendanceRequestTimezone
 useAutoSumTotal
 usePlmExportActions
+userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid
 view-manager-multitable-contract

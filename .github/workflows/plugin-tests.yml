@@ -939,14 +939,14 @@ jobs:
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
       # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (44) = 95. Get each file's own
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) = 97. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=95
+          EXPECTED_OPS_TESTS_COUNT=97
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1776,6 +1776,7 @@ jobs:
             tests/integration/directory-activation-source-lock.db.test.ts \
             tests/integration/login-alias-writers.db.test.ts \
             tests/integration/auth-register-atomicity.db.test.ts \
+            tests/integration/attendance-self-service-revocation-atomicity.db.test.ts \
             tests/integration/directory-deprovision-ledger-schema.db.test.ts \
             tests/integration/directory-deprovision-writer-ledger.db.test.ts \
             tests/integration/directory-deprovision-race-supersede.db.test.ts \
@@ -1951,6 +1952,7 @@ jobs:
           : "${ATTENDANCE_TEST_DATABASE_URL:?ATTENDANCE_TEST_DATABASE_URL is required for attendance integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
+            tests/integration/attendance-import-user-identity.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-live-punch-order.db.test.ts \
             tests/integration/attendance-online-punch-server-time.db.test.ts \

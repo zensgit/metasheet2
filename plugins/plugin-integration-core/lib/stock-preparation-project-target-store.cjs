@@ -80,10 +80,17 @@ const PLANNED_FINISH_ON_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 // viewer as invisible or line-breaking bytes.
 const PROJECT_FIELD_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/
 
-// S3: the closed outcome enum migration 087's CHECK admits on `last_pull_outcome`, and the shape a
+// S3: the closed outcome enum the DB CHECK admits on `last_pull_outcome`, and the shape a
 // `last_pull_code` must have (a closed error code — the same shape the pack-install wrapper admits —
 // never a message, never a value).
-const PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused'])
+//
+// G1 field defect (R67): `failed` — an apply that RAN and wrote fewer rows than it planned (every row,
+// or some, refused by the target: `counts.failed > 0`) is no longer stamped `applied`. Migration 087's
+// CHECK admitted only the first three; the Kysely migration
+// zzzz20261015090000_admit_stock_prep_project_target_failed_pull_outcome re-creates it with `failed`
+// (its down() refuses while a `failed` row exists). Until that migration has run, a `failed` stamp is
+// refused by the database and — like every stamp — logged and swallowed; the pull's answer stands.
+const PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused', 'failed'])
 const PROJECT_TARGET_PULL_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
 // S3 fix round 1 (R10): what a refusal whose code does not have error-code shape is recorded as. The
 // stamp never throws over a shape it was handed — it records this closed word instead (the route logs it).
@@ -565,7 +572,8 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
 
   /**
    * S3 (ADR §1.2 `last_pull_*`): stamp the outcome of ONE pull (dry-run = previewed, apply = applied,
-   * a typed refusal = refused + its code). A bare UPDATE keyed by (tenant, project) — the last pull
+   * a typed refusal = refused + its code; R67: an apply whose target refused rows = failed + the
+   * dominant row error code). A bare UPDATE keyed by (tenant, project) — the last pull
    * wins, no lock needed, no precondition: an archived row may legitimately record the refusal that
    * archiving caused. `missingComponentsCount`, when given, is the run's distinct count (the board's
    * number). Values-free by shape: the outcome is a closed enum, the code must have error-code shape.

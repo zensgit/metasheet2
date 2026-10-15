@@ -398,6 +398,7 @@ import {
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
+import { adminRoleMembersRouter } from './routes/admin-role-members'
 import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
@@ -2128,6 +2129,7 @@ export class MetaSheetServer {
       }),
     }))
     this.app.use(adminUsersRouter())
+    this.app.use(adminRoleMembersRouter())
     // Transfer MVP T1 — mounted BEFORE the broader /api/admin/directory router so the more
     // specific path wins outright; same `ensurePlatformAdmin` RBAC gate.
     this.app.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
