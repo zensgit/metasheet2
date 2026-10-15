@@ -234,3 +234,566 @@ owner_excluded_only_pending() {
   done < <(sed -n 's/^  - \(.*\)$/\1/p' "$file")
   [[ "$listed" == "$count" ]]
 }
+
+# --- staging org-membership inspect / repair (owner ruling 2026-10-12) -----------------------
+#
+# Pure text helpers for action=org-membership-inspect and action=org-membership-repair in
+# attendance-staging-window-runner-remote.sh. No I/O, no docker, no env reads beyond the
+# constants below; every SQL generator prints text only, so the self-test
+# (attendance-window-runner-pipeline.test.mjs) can scan and run them without a database.
+#
+# The population both actions address is the one action=migrate's read-only prechecks count as
+# zero_membership_no_row_count: an ACTIVE user with NO user_orgs row at all. Output is
+# values-free: a user is named only by fp = left(md5(id), 16); no id, username, email or name
+# column ever reaches a SELECT list.
+
+# shellcheck disable=SC2034  # read by the remote script's REPAIR_SPEC refusal message
+ORG_MEMBERSHIP_REPAIR_CONFIRM='I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR'
+# Same literal as the workflow's validation step (the self-test pins the two byte for byte).
+ORG_MEMBERSHIP_REPAIR_SPEC_RE='^(deactivate:[0-9a-f]{16}|add-membership:[0-9a-f]{16}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}):I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR$'
+# An org id the repair spec can name: no ':' (the spec separator), no quote, no whitespace.
+ORG_MEMBERSHIP_ORG_ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+# Known synthetic identity families, as "<class>:<prefix>". The smoke stamps (action_smoke's
+# stamp_prefix values) prefix user ids; the soak family (SOAK_USER_PREFIX) prefixes usernames and
+# emails only (its ids are minted UUIDs). Inspect prints the class name, never the matched value.
+ORG_MEMBERSHIP_SYNTHETIC_CLASSES=(
+  "ae4-smoke:ae4-smoke-"
+  "rd45-smoke:rd45-smoke-"
+  "otbank-v18-smoke:otbank-v18-smoke-"
+  "mp6-smoke:mp6-smoke-"
+  "hmr5-smoke:hmr5-smoke-"
+  "tasks-smoke:tasks-smoke-"
+  "soak-w4w7:synth-w4w7-"
+)
+
+# org_membership_repair_spec_parse <spec>
+#   Prints "<mode> <fp16> <org_id|->" for a well-formed spec; returns 2, printing nothing, for
+#   anything else (missing or wrong confirm phrase, extra or missing fields, upper-case fp, any
+#   character outside the regex, an embedded newline/CR).
+org_membership_repair_spec_parse() {
+  local spec="${1-}" re="$ORG_MEMBERSHIP_REPAIR_SPEC_RE" mode fp rest org
+  [[ "$spec" != *$'\n'* && "$spec" != *$'\r'* ]] || return 2
+  [[ "$spec" =~ $re ]] || return 2
+  IFS=':' read -r mode fp rest <<< "$spec"
+  case "$mode" in
+    deactivate) org='-' ;;
+    add-membership)
+      org="${rest%%:*}"
+      [[ "$org" =~ $ORG_MEMBERSHIP_ORG_ID_RE ]] || return 2
+      ;;
+    *) return 2 ;;
+  esac
+  printf '%s %s %s\n' "$mode" "$fp" "$org"
+}
+
+# org_membership_read_only_wrap
+#   stdin SQL -> stdout SQL wrapped in ONE read-only transaction that is rolled back (never
+#   committed). The caller additionally sets PGOPTIONS default_transaction_read_only=on.
+org_membership_read_only_wrap() {
+  printf '%s\n' '\set VERBOSITY terse' 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;' "SET LOCAL TIME ZONE 'UTC';"
+  cat
+  printf '\n%s\n' 'ROLLBACK;'
+}
+
+# target_precheck_counters_query <org_null_predicate>
+#   The ONE source of action=migrate's read-only precheck counters (action_migrate_read_only_
+#   prechecks) and of the before/after counters of both org-membership actions: a single SELECT
+#   yielding (ord, line) rows, one "<label>=<value>" line per counter. <org_null_predicate> is ''
+#   or exactly 'AND i.org_id IS NULL' (returns 1 for anything else).
+target_precheck_counters_query() {
+  local org_null_predicate="${1-}"
+  case "$org_null_predicate" in
+    ''|'AND i.org_id IS NULL') ;;
+    *) return 1 ;;
+  esac
+  cat <<SQL
+SELECT 1 AS ord, 'approval_action_histogram=' || COALESCE(jsonb_object_agg(action, n ORDER BY action), '{}'::jsonb)::text AS line
+  FROM (SELECT action, count(*) AS n FROM approval_records GROUP BY action) h
+UNION ALL
+SELECT 2, 'invalid_approval_action_count=' || count(*)::text
+  FROM approval_records
+ WHERE action NOT IN ('created','approve','reject','return','revoke','transfer','sign','comment','cc','remind','jump','add_sign','reduce_sign','reassign','handle','policy_denied')
+UNION ALL
+SELECT 3, 'attachment_org_conflict_count=' || count(*)::text FROM (
+  SELECT a.instance_id
+    FROM approval_attachments a
+    JOIN approval_instances i ON i.id = a.instance_id
+   WHERE a.instance_id IS NOT NULL
+     ${org_null_predicate}
+   GROUP BY a.instance_id
+  HAVING count(DISTINCT a.org_id) > 1
+) c
+UNION ALL
+SELECT 4, 'zero_membership_active_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+UNION ALL
+SELECT 5, 'zero_membership_no_row_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+UNION ALL
+SELECT 6, 'zero_membership_only_deactivated_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+UNION ALL
+SELECT 7, 'recovery09_repairable_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+UNION ALL
+SELECT 8, 'distinct_active_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE) o
+UNION ALL
+SELECT 9, 'directory_integration_distinct_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM directory_integrations WHERE org_id IS NOT NULL AND btrim(org_id) <> '') o
+UNION ALL
+SELECT 10, 'directory_integration_non_default_count=' || count(*)::text
+  FROM directory_integrations WHERE org_id <> 'default'
+UNION ALL
+SELECT 11, 'legacy_anchor_active_membership_witness_count=' || count(*)::text
+  FROM user_orgs WHERE org_id = 'default' AND is_active = TRUE
+UNION ALL
+SELECT 12, 'class6_candidate_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id'
+        AND uo.is_active = TRUE
+      GROUP BY uo.user_id
+     HAVING count(*) = 1
+   )
+UNION ALL
+SELECT 13, 'recovery09_unsupported_class6_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+      GROUP BY uo.user_id HAVING count(*) = 1
+   )
+   AND NOT (
+     NOT EXISTS (SELECT 1 FROM users u WHERE u.id = i.requester_snapshot->>'id')
+     OR EXISTS (
+       SELECT 1 FROM users u
+        WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+     )
+   )
+SQL
+}
+
+# target_precheck_counters_sql <org_null_predicate>
+#   The counters as one runnable statement, in counter order (one line per counter under -tA).
+target_precheck_counters_sql() {
+  local query
+  query="$(target_precheck_counters_query "${1-}")" || return 1
+  printf 'SELECT line FROM (\n%s\n) counters ORDER BY ord;\n' "$query"
+}
+
+# org_membership_class6_shaped_predicate <org_null_predicate>
+#   WHERE-clause tail (after "i.requester_snapshot->>'id' = <user>") selecting the approval
+#   instances whose class-6 shape depends ONLY on the requester's memberships: the same
+#   conditions as class6_candidate_count minus its membership clause. For a no-row user this is
+#   exactly that user's share of class6_candidate_count.
+org_membership_class6_shaped_predicate() {
+  local org_null_predicate="${1-}"
+  case "$org_null_predicate" in
+    ''|'AND i.org_id IS NULL') ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%' AND COALESCE(i.source_system, 'platform') = 'platform' AND i.template_id IS NULL ${org_null_predicate} AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)"
+}
+
+# org_membership_probe_sql
+#   Read-only probe: one "<table>.<column>" line per optional column the inspect report reads
+#   and the database actually has. Inspect only references what this probe found (a reference
+#   to a missing table fails at parse time, so to_regclass inside the same statement is not
+#   enough).
+org_membership_probe_sql() {
+  cat <<'SQL'
+SELECT c.table_name || '.' || c.column_name
+  FROM information_schema.columns c
+ WHERE c.table_schema = 'public'
+   AND (c.table_name, c.column_name) IN (
+     ('users', 'username'), ('users', 'email'), ('users', 'created_at'), ('users', 'is_admin'),
+     ('users', 'role'), ('users', 'last_login_at'), ('users', 'updated_at'),
+     ('user_roles', 'user_id'), ('user_roles', 'role_id'),
+     ('approval_instances', 'requester_snapshot'), ('approval_instances', 'org_id'),
+     ('tasks', 'created_by'), ('task_assignees', 'user_id'),
+     ('meta_records', 'created_by'),
+     ('user_external_identities', 'local_user_id'),
+     ('directory_account_links', 'local_user_id'),
+     ('directory_deprovision_events', 'local_user_id'), ('directory_deprovision_events', 'status'),
+     ('directory_deprovision_effects', 'local_user_id'), ('directory_deprovision_effects', 'status')
+   )
+ ORDER BY 1;
+SQL
+}
+
+# org_membership_synthetic_class_expr <present_columns_file>
+#   SQL CASE expression naming the synthetic class of u (or 'none') and, separately, which column
+#   matched. Matches with starts_with (never LIKE: '_' is a LIKE wildcard). Prints
+#   "<class_expr>\t<field_expr>".
+org_membership_synthetic_class_expr() {
+  local present="$1" entry class prefix col
+  local -a cols=(id)
+  grep -qx 'users.username' "$present" && cols+=(username)
+  grep -qx 'users.email' "$present" && cols+=(email)
+  local class_expr="CASE" field_expr="CASE"
+  for entry in "${ORG_MEMBERSHIP_SYNTHETIC_CLASSES[@]}"; do
+    class="${entry%%:*}"
+    prefix="${entry#*:}"
+    [[ "$class" =~ ^[a-z0-9-]+$ && "$prefix" =~ ^[a-z0-9-]+$ ]] || return 1
+    for col in "${cols[@]}"; do
+      class_expr+=" WHEN starts_with(COALESCE(u.${col}, ''), '${prefix}') THEN '${class}'"
+      field_expr+=" WHEN starts_with(COALESCE(u.${col}, ''), '${prefix}') THEN '${col}'"
+    done
+  done
+  class_expr+=" ELSE 'none' END"
+  field_expr+=" ELSE 'none' END"
+  printf '%s\t%s' "$class_expr" "$field_expr"
+}
+
+# org_membership_applied_evidence_expr <present_columns_file> <user_id_expr>
+#   SQL expression counting the 'applied' directory deprovision events + effects of one user (the
+#   evidence the platform's access-graph writers supersede; this runner does not, so it refuses).
+#   Prints 'n/a' (as a SQL literal) when neither table is present. <user_id_expr> is u.id only.
+org_membership_applied_evidence_expr() {
+  local present="$1" user_expr="$2" parts=()
+  [[ "$user_expr" == 'u.id' ]] || return 1
+  if grep -qx 'directory_deprovision_events.local_user_id' "$present" && grep -qx 'directory_deprovision_events.status' "$present"; then
+    parts+=("(SELECT count(*) FROM directory_deprovision_events de WHERE de.local_user_id = u.id AND de.status = 'applied')")
+  fi
+  if grep -qx 'directory_deprovision_effects.local_user_id' "$present" && grep -qx 'directory_deprovision_effects.status' "$present"; then
+    parts+=("(SELECT count(*) FROM directory_deprovision_effects df WHERE df.local_user_id = u.id AND df.status = 'applied')")
+  fi
+  if [[ "${#parts[@]}" -eq 0 ]]; then
+    printf '%s' "'n/a'"
+  else
+    local joined
+    joined="$(printf ' + %s' "${parts[@]}")"
+    printf '(%s)::text' "${joined# + }"
+  fi
+}
+
+# org_membership_inspect_users_sql <present_columns_file> <org_null_predicate>
+#   One values-free line per user matching the population predicate. Every per-user fact is a
+#   count, a yes/no, a class name, a UTC timestamp or the md5 fingerprint; a fact whose table or
+#   column is absent prints n/a.
+org_membership_inspect_users_sql() {
+  local present="$1" org_null_predicate="${2-}" exprs class_expr field_expr shaped
+  exprs="$(org_membership_synthetic_class_expr "$present")" || return 1
+  class_expr="${exprs%%$'\t'*}"
+  field_expr="${exprs#*$'\t'}"
+  shaped="$(org_membership_class6_shaped_predicate "$org_null_predicate")" || return 1
+  has() { grep -qx "$1" "$present"; }
+  local created="'n/a'" is_admin="'n/a'" role_admin="'n/a'" logged_in="'n/a'"
+  local user_roles="'n/a'" admin_roles="'n/a'" approvals="'n/a'" shaped_count="'n/a'"
+  local tasks="'n/a'" assignees="'n/a'" records="'n/a'" identities="'n/a'" links="'n/a'" evidence
+  evidence="$(org_membership_applied_evidence_expr "$present" 'u.id')" || return 1
+  has users.created_at && created="COALESCE(to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), 'null')"
+  has users.is_admin && is_admin="CASE WHEN u.is_admin THEN 'yes' ELSE 'no' END"
+  has users.role && role_admin="CASE WHEN u.role = 'admin' THEN 'yes' ELSE 'no' END"
+  has users.last_login_at && logged_in="CASE WHEN u.last_login_at IS NULL THEN 'no' ELSE 'yes' END"
+  has user_roles.user_id && user_roles="(SELECT count(*) FROM user_roles ur WHERE ur.user_id = u.id)::text"
+  has user_roles.role_id && has user_roles.user_id && admin_roles="(SELECT count(*) FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin')::text"
+  if has approval_instances.requester_snapshot; then
+    approvals="(SELECT count(*) FROM approval_instances i WHERE i.requester_snapshot->>'id' = u.id)::text"
+    shaped_count="(SELECT count(*) FROM approval_instances i WHERE i.requester_snapshot->>'id' = u.id ${shaped})::text"
+  fi
+  has tasks.created_by && tasks="(SELECT count(*) FROM tasks t WHERE t.created_by = u.id)::text"
+  has task_assignees.user_id && assignees="(SELECT count(*) FROM task_assignees ta WHERE ta.user_id = u.id)::text"
+  has meta_records.created_by && records="(SELECT count(*) FROM meta_records mr WHERE mr.created_by = u.id)::text"
+  has user_external_identities.local_user_id && identities="(SELECT count(*) FROM user_external_identities xi WHERE xi.local_user_id = u.id)::text"
+  has directory_account_links.local_user_id && links="(SELECT count(*) FROM directory_account_links dl WHERE dl.local_user_id = u.id)::text"
+  unset -f has
+  cat <<SQL
+SELECT 'user'
+    || ' fp=' || left(md5(u.id), 16)
+    || ' fp_shared_by_users=' || (SELECT count(*) FROM users x WHERE left(md5(x.id), 16) = left(md5(u.id), 16))::text
+    || ' created_at=' || ${created}
+    || ' synthetic_class=' || ${class_expr}
+    || ' synthetic_match=' || ${field_expr}
+    || ' inactive_memberships=' || (SELECT count(*) FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = FALSE)::text
+    || ' user_roles=' || ${user_roles}
+    || ' admin_role_rows=' || ${admin_roles}
+    || ' is_admin_flag=' || ${is_admin}
+    || ' role_column_admin=' || ${role_admin}
+    || ' has_logged_in=' || ${logged_in}
+    || ' approvals_as_requester=' || ${approvals}
+    || ' class6_shaped_requested=' || ${shaped_count}
+    || ' tasks_created=' || ${tasks}
+    || ' task_assignee_rows=' || ${assignees}
+    || ' multitable_records_created=' || ${records}
+    || ' external_identity_rows=' || ${identities}
+    || ' directory_account_links=' || ${links}
+    || ' applied_deprovision_evidence=' || ${evidence}
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+ ORDER BY left(md5(u.id), 16);
+SQL
+}
+
+# org_membership_inspect_orgs_sql
+#   One line per org with ACTIVE members (org ids are not personal values). An org id the repair
+#   spec could not name is withheld and shown by fingerprint with spec_nameable=no.
+org_membership_inspect_orgs_sql() {
+  cat <<SQL
+SELECT 'org '
+    || CASE WHEN o.org_id ~ '${ORG_MEMBERSHIP_ORG_ID_RE}'
+            THEN 'id=' || o.org_id || ' spec_nameable=yes'
+            ELSE 'id_fp=' || left(md5(o.org_id), 16) || ' spec_nameable=no' END
+    || ' active_members=' || o.n::text
+  FROM (SELECT org_id, count(*) AS n FROM user_orgs WHERE is_active = TRUE GROUP BY org_id) o
+ ORDER BY o.n DESC, left(md5(o.org_id), 16);
+SQL
+}
+
+# org_membership_repair_precheck_sql <present_columns_file>
+#   Read-only preconditions, run BEFORE the backup and the write (psql variables :'fp', :'org').
+#   applied_deprovision_evidence is the matching user's count ('n/a' without the ledger tables).
+org_membership_repair_precheck_sql() {
+  local present="$1" evidence
+  evidence="$(org_membership_applied_evidence_expr "$present" 'u.id')" || return 1
+  cat <<'SQL'
+SELECT 'predicate_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id);
+SELECT 'match_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+   AND left(md5(u.id), 16) = :'fp';
+SELECT 'org_active_member_count=' || count(*)::text
+  FROM user_orgs
+ WHERE org_id = :'org' AND is_active = TRUE;
+SQL
+  cat <<SQL
+SELECT 'applied_deprovision_evidence=' || COALESCE(string_agg(${evidence}, ','), '0')
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+   AND left(md5(u.id), 16) = :'fp';
+SQL
+}
+
+# org_membership_repair_write_sql <org_null_predicate>
+#   The ONE write transaction (psql variables :'mode', :'fp', :'org'). Inside a single BEGIN ..
+#   COMMIT it: locks the matching user row(s) FOR UPDATE, then user_orgs against concurrent
+#   writers (the app's order: user row first, then the membership table); snapshots the
+#   counters; re-checks that EXACTLY ONE active no-row user has this fingerprint and that it has
+#   no 'applied' directory deprovision evidence; writes exactly one row (deactivate: UPDATE users,
+#   also advancing access_generation when that column exists; add-membership: INSERT user_orgs,
+#   only into an org that already has active members); requires ROW_COUNT = 1; re-snapshots the
+#   counters and requires the full expected delta vector (anything else raises, which rolls the
+#   whole transaction back). RAISE arguments are counts and labels only (the self-test pins an
+#   allowlist).
+org_membership_repair_write_sql() {
+  local org_null_predicate="${1-}" counters shaped
+  counters="$(target_precheck_counters_query "$org_null_predicate")" || return 1
+  shaped="$(org_membership_class6_shaped_predicate "$org_null_predicate")" || return 1
+  # The shaped predicate is embedded as a dollar-quoted literal; refuse a $ inside it.
+  [[ "$shaped" != *'$'* ]] || return 1
+  cat <<'SQL'
+\set VERBOSITY terse
+-- window-runner:org-membership-repair-write
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+SET LOCAL statement_timeout = '120s';
+SELECT 'orgfix_settings=' || (
+         set_config('window_runner.orgfix_mode', :'mode', true) IS NOT NULL
+     AND set_config('window_runner.orgfix_fp', :'fp', true) IS NOT NULL
+     AND set_config('window_runner.orgfix_org', :'org', true) IS NOT NULL)::text;
+SELECT 'orgfix_user_rows_locked=' || count(*)::text
+  FROM (SELECT 1 FROM users u WHERE left(md5(u.id), 16) = :'fp' FOR UPDATE) locked;
+LOCK TABLE user_orgs IN SHARE ROW EXCLUSIVE MODE;
+SQL
+  printf 'CREATE TEMP TABLE orgfix_before ON COMMIT DROP AS\n%s;\n' "$counters"
+  printf "SELECT 'orgfix_shaped_set=' || (set_config('window_runner.orgfix_shaped', \$orgfix_shaped\$%s\$orgfix_shaped\$, true) IS NOT NULL)::text;\n" "$shaped"
+  cat <<'SQL'
+DO $orgfix_write$
+DECLARE
+  v_mode text := current_setting('window_runner.orgfix_mode');
+  v_fp text := current_setting('window_runner.orgfix_fp');
+  v_org text := current_setting('window_runner.orgfix_org');
+  v_ids text[];
+  v_matches integer;
+  v_rows bigint;
+  v_shaped bigint;
+  v_evidence bigint := 0;
+  v_n bigint;
+  v_set text;
+BEGIN
+  IF v_fp !~ '^[0-9a-f]{16}$' THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT malformed_fp';
+  END IF;
+  IF v_mode NOT IN ('deactivate', 'add-membership') THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT malformed_mode';
+  END IF;
+  SELECT array_agg(u.id) INTO v_ids
+    FROM users u
+   WHERE u.is_active = TRUE
+     AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+     AND left(md5(u.id), 16) = v_fp;
+  v_matches := COALESCE(array_length(v_ids, 1), 0);
+  IF v_matches <> 1 THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT match_count=% (exactly 1 required)', v_matches;
+  END IF;
+  EXECUTE 'SELECT count(*) FROM approval_instances i WHERE i.requester_snapshot->>''id'' = $1 '
+       || current_setting('window_runner.orgfix_shaped')
+     INTO v_shaped USING v_ids[1];
+  PERFORM set_config('window_runner.orgfix_class6_shaped', v_shaped::text, true);
+  IF to_regclass('public.directory_deprovision_events') IS NOT NULL THEN
+    EXECUTE 'SELECT count(*) FROM directory_deprovision_events WHERE local_user_id = $1 AND status = ''applied'''
+       INTO v_n USING v_ids[1];
+    v_evidence := v_evidence + v_n;
+  END IF;
+  IF to_regclass('public.directory_deprovision_effects') IS NOT NULL THEN
+    EXECUTE 'SELECT count(*) FROM directory_deprovision_effects WHERE local_user_id = $1 AND status = ''applied'''
+       INTO v_n USING v_ids[1];
+    v_evidence := v_evidence + v_n;
+  END IF;
+  IF v_evidence <> 0 THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT applied_deprovision_evidence=% (not repairable by this runner)', v_evidence;
+  END IF;
+  IF v_mode = 'deactivate' THEN
+    IF v_org <> '' THEN
+      RAISE EXCEPTION 'ORGFIX_ABORT deactivate_takes_no_org';
+    END IF;
+    -- The SET list is built from fixed fragments only (column presence), never from input.
+    v_set := 'is_active = FALSE';
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'updated_at') THEN
+      v_set := v_set || ', updated_at = now()';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'access_generation') THEN
+      v_set := v_set || ', access_generation = COALESCE(access_generation, 0) + 1';
+    END IF;
+    EXECUTE 'UPDATE users SET ' || v_set || ' WHERE id = $1 AND is_active = TRUE' USING v_ids[1];
+  ELSE
+    IF v_org !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN
+      RAISE EXCEPTION 'ORGFIX_ABORT malformed_org';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM user_orgs WHERE org_id = v_org AND is_active = TRUE) THEN
+      RAISE EXCEPTION 'ORGFIX_ABORT org_has_no_active_members';
+    END IF;
+    INSERT INTO user_orgs (user_id, org_id, is_active) VALUES (v_ids[1], v_org, TRUE);
+  END IF;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows <> 1 THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT write_row_count=% (exactly 1 required)', v_rows;
+  END IF;
+END
+$orgfix_write$;
+SQL
+  printf 'CREATE TEMP TABLE orgfix_after ON COMMIT DROP AS\n%s;\n' "$counters"
+  cat <<'SQL'
+DO $orgfix_check$
+DECLARE
+  v_mode text := current_setting('window_runner.orgfix_mode');
+  v_org text := current_setting('window_runner.orgfix_org');
+  v_shaped bigint := current_setting('window_runner.orgfix_class6_shaped')::bigint;
+  v_expected bigint;
+  v_n_before integer;
+  v_n_after integer;
+  r record;
+BEGIN
+  SELECT count(*) INTO v_n_before FROM orgfix_before;
+  SELECT count(*) INTO v_n_after FROM orgfix_after;
+  IF v_n_before = 0 OR v_n_before <> v_n_after THEN
+    RAISE EXCEPTION 'ORGFIX_ABORT counter_set_mismatch before=% after=%', v_n_before, v_n_after;
+  END IF;
+  FOR r IN
+    SELECT split_part(b.line, '=', 1) AS label,
+           substr(b.line, strpos(b.line, '=') + 1) AS before_value,
+           substr(a.line, strpos(a.line, '=') + 1) AS after_value
+      FROM orgfix_before b
+      LEFT JOIN orgfix_after a ON a.ord = b.ord AND split_part(a.line, '=', 1) = split_part(b.line, '=', 1)
+  LOOP
+    IF r.after_value IS NULL THEN
+      RAISE EXCEPTION 'ORGFIX_ABORT counter_missing_after label=%', r.label;
+    END IF;
+    IF r.label = 'approval_action_histogram' THEN
+      IF r.before_value <> r.after_value THEN
+        RAISE EXCEPTION 'ORGFIX_ABORT counter_changed label=%', r.label;
+      END IF;
+      CONTINUE;
+    END IF;
+    v_expected := CASE r.label
+      WHEN 'zero_membership_active_user_count' THEN -1
+      WHEN 'zero_membership_no_row_count' THEN -1
+      WHEN 'recovery09_repairable_user_count' THEN -1
+      WHEN 'class6_candidate_count' THEN CASE WHEN v_mode = 'add-membership' THEN -v_shaped ELSE 0 END
+      WHEN 'recovery09_unsupported_class6_count' THEN CASE WHEN v_mode = 'deactivate' THEN v_shaped ELSE 0 END
+      WHEN 'legacy_anchor_active_membership_witness_count' THEN CASE WHEN v_mode = 'add-membership' AND v_org = 'default' THEN 1 ELSE 0 END
+      ELSE 0
+    END;
+    IF r.after_value::bigint - r.before_value::bigint <> v_expected THEN
+      RAISE EXCEPTION 'ORGFIX_ABORT counter_delta_mismatch label=% expected=% actual=%',
+        r.label, v_expected, r.after_value::bigint - r.before_value::bigint;
+    END IF;
+  END LOOP;
+END
+$orgfix_check$;
+SELECT 'in_txn_before ' || line FROM orgfix_before ORDER BY ord;
+SELECT 'in_txn_after ' || line FROM orgfix_after ORDER BY ord;
+SELECT 'class6_shaped_requested=' || current_setting('window_runner.orgfix_class6_shaped');
+COMMIT;
+SELECT 'write_committed=yes';
+SQL
+}
+
+# org_membership_migrate_gate_rule <invalid> <conflicts> <active_orgs> <repairable> <class6>
+#   action=migrate's read-only precheck verdict (action_migrate_read_only_prechecks) for these
+#   counters, ASSUMING the Recovery09 migrations are already applied (as on staging): then the
+#   multi-org repair branch, entered when repairable > 0 or class6 > 0 on a DB whose
+#   distinct_active_org_count is not 1, always fails. Prints pass, blocked, or unknown (a
+#   non-numeric input, for example n/a).
+org_membership_migrate_gate_rule() {
+  [[ $# -eq 5 ]] || return 1
+  local v
+  for v in "$@"; do
+    [[ "$v" =~ ^-?[0-9]+$ ]] || { printf 'unknown'; return 0; }
+  done
+  if (( $1 != 0 || $2 != 0 )); then printf 'blocked'; return 0; fi
+  if (( ($4 > 0 || $5 > 0) && $3 != 1 )); then printf 'blocked'; return 0; fi
+  printf 'pass'
+}
+
+# org_membership_migrate_gate_from_counters <counters_file> <repairable_delta> <class6_delta>
+#   The rule above applied to a counter file (target_precheck_counters_sql output) shifted by the
+#   given deltas: (0, 0) for the measured state, (-1, -k) for a projected add-membership, (-1, 0)
+#   for a projected deactivate. A non-numeric delta (k = n/a) prints unknown.
+org_membership_migrate_gate_from_counters() {
+  local file="$1" d_rep="$2" d_c6="$3" label invalid conflicts orgs rep c6
+  for label in invalid_approval_action_count attachment_org_conflict_count distinct_active_org_count recovery09_repairable_user_count class6_candidate_count; do
+    sed -n "s/^${label}=//p" "$file" | tail -n 1 | grep -Eq '^[0-9]+$' || { printf 'unknown'; return 0; }
+  done
+  [[ "$d_rep" =~ ^-?[0-9]+$ && "$d_c6" =~ ^-?[0-9]+$ ]] || { printf 'unknown'; return 0; }
+  invalid="$(sed -n 's/^invalid_approval_action_count=//p' "$file" | tail -n 1)"
+  conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "$file" | tail -n 1)"
+  orgs="$(sed -n 's/^distinct_active_org_count=//p' "$file" | tail -n 1)"
+  rep="$(sed -n 's/^recovery09_repairable_user_count=//p' "$file" | tail -n 1)"
+  c6="$(sed -n 's/^class6_candidate_count=//p' "$file" | tail -n 1)"
+  org_membership_migrate_gate_rule "$invalid" "$conflicts" "$orgs" "$((rep + d_rep))" "$((c6 + d_c6))"
+}
