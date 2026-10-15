@@ -38,7 +38,48 @@ export interface AttendanceImportFieldGroup {
 }
 
 /** Base columns every generated template starts with (identity + user match). */
-export const IMPORT_TEMPLATE_BASE_COLUMNS = ['日期', '工号', '姓名'] as const
+export const IMPORT_TEMPLATE_BASE_COLUMNS = ['UserId', '日期', '工号', '姓名'] as const
+
+/**
+ * Default CSV template. Headers are importer source fields (UserId / 日期 /
+ * 上班1打卡时间 / 下班1打卡时间 and the rest of the DingTalk daily profile),
+ * so a download can be imported without rewriting columns.
+ */
+export const CANONICAL_ATTENDANCE_IMPORT_TEMPLATE_HEADER = [
+  'UserId',
+  '日期',
+  '工号',
+  '姓名',
+  '考勤组',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '异常原因',
+] as const
+
+export const CANONICAL_ATTENDANCE_IMPORT_TEMPLATE_SAMPLE = [
+  'user@example.com',
+  '2026-03-23',
+  'EMP001',
+  '张三',
+  '总部日班',
+  '2026-03-23 09:00',
+  '2026-03-23 18:00',
+  '正常',
+  '',
+] as const
+
+function escapeCanonicalTemplateCell(value: string): string {
+  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`
+  return value
+}
+
+/** Built-in CSV used when the template endpoint cannot be reached. */
+export function buildCanonicalAttendanceImportTemplateCsv(): string {
+  const header = CANONICAL_ATTENDANCE_IMPORT_TEMPLATE_HEADER.map(escapeCanonicalTemplateCell).join(',')
+  const sample = CANONICAL_ATTENDANCE_IMPORT_TEMPLATE_SAMPLE.map(escapeCanonicalTemplateCell).join(',')
+  return `${header}\n${sample}\n`
+}
 
 const GROUP_DEFS: Array<{ key: string; labelEn: string; labelZh: string; targets: string[] }> = [
   {
@@ -271,6 +312,7 @@ export interface AttendanceImportColumnFormatRow {
  * is required; 工号/姓名 are the identity pair (at least one required).
  */
 const IMPORT_TEMPLATE_BASE_COLUMN_SPECS: readonly AttendanceImportColumnFormatRow[] = [
+  { column: 'UserId', requirement: 'identity', formatEn: 'User id, email, username, or mobile', formatZh: '用户 ID、邮箱、用户名或手机号', example: 'user@example.com', meaningEn: 'Direct user identifier', meaningZh: '直接用户标识（ID、邮箱、用户名或手机号）' },
   { column: '日期', requirement: 'required', formatEn: 'YYYY-MM-DD', formatZh: 'YYYY-MM-DD', example: '2026-06-01', meaningEn: 'Attendance date (required)', meaningZh: '考勤日期（必填）' },
   { column: '工号', requirement: 'identity', formatEn: 'Text', formatZh: '文本', example: 'EMP001', meaningEn: 'Employee no. (工号 or 姓名 required)', meaningZh: '员工工号（工号/姓名至少填一个）' },
   { column: '姓名', requirement: 'identity', formatEn: 'Text', formatZh: '文本', example: '张三', meaningEn: 'Name (工号 or 姓名 required)', meaningZh: '姓名（工号/姓名至少填一个）' },

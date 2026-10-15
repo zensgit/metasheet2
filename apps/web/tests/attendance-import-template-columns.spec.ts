@@ -57,7 +57,7 @@ describe('importTemplateColumns', () => {
     expect(keys).not.toContain('leaveMinutes')
     expect(keys).not.toContain('overtimeMinutes')
     const header = buildTemplateHeaderFromSelection(groups, keys)
-    expect(header.filter(column => /[A-Za-z_]/.test(column))).toEqual([])
+    expect(header.filter(column => /[A-Za-z_]/.test(column))).toEqual(['UserId'])
   })
 
   it('skips empty/unknown mapping rows and empty input', () => {
@@ -73,13 +73,13 @@ describe('importTemplateColumns', () => {
     const groups = groupSupportedImportColumns(MAPPING_COLUMNS)
     const header = buildTemplateHeaderFromSelection(groups, new Set(['status', 'firstInAt', 'bogus']))
     expect(header.slice(0, IMPORT_TEMPLATE_BASE_COLUMNS.length)).toEqual([...IMPORT_TEMPLATE_BASE_COLUMNS])
-    expect(header).toEqual(['日期', '工号', '姓名', '上班1打卡时间', '考勤结果'])
+    expect(header).toEqual(['UserId', '日期', '工号', '姓名', '上班1打卡时间', '考勤结果'])
   })
 
   it('default selection reproduces the starter-template shape', () => {
     const groups = groupSupportedImportColumns(MAPPING_COLUMNS)
     const header = buildTemplateHeaderFromSelection(groups, new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
-    expect(header).toEqual(['日期', '工号', '姓名', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因', '考勤组'])
+    expect(header).toEqual(['UserId', '日期', '工号', '姓名', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因', '考勤组'])
   })
 
   it('default selection stays in sync with the backend starter template (fixture-sync)', () => {
@@ -168,7 +168,9 @@ describe('importTemplateColumns', () => {
       expect(byCol['上班1打卡时间'].example).toBe('2026-06-01 09:00')
       expect(byCol['加班小时'].requirement).toBe('optional')
       // base columns come first
-      expect(rows.slice(0, 3).map(r => r.column)).toEqual(['日期', '工号', '姓名'])
+      expect(rows.slice(0, 4).map(r => r.column)).toEqual(['UserId', '日期', '工号', '姓名'])
+      expect(byCol['UserId'].requirement).toBe('identity')
+      expect(byCol['UserId'].example).toBe('user@example.com')
     })
     it('does not duplicate a supported column that shares a base column name', () => {
       const rows = buildImportColumnFormatRows(groups)

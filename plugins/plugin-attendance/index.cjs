@@ -1,4 +1,10 @@
 const crypto = require('crypto')
+const {
+  isCanonicalImportUserId,
+  importUserIdentifierLookupKey,
+  adoptCanonicalImportUserId,
+  loadAttendanceImportUserIdentifierIndex,
+} = require('./lib/attendance-import-user-identity.cjs')
 const {validateAttendanceRelatedAbsoluteInstantsV1,validateAttendanceLeaveTargetRangeV1} = require('./lib/attendance-timezone-request-instants.cjs')
 const { randomUUID } = crypto
 const fs = require('fs')
@@ -721,9 +727,11 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: 'check_in', targetField: 'firstInAt', dataType: 'time' },
+  { sourceField: 'ClockIn', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: 'check_out', targetField: 'lastOutAt', dataType: 'time' },
+  { sourceField: 'ClockOut', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
@@ -776,6 +784,8 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
   { sourceField: 'work_date', targetField: 'workDate', dataType: 'date' },
   { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+  { sourceField: 'date', targetField: 'workDate', dataType: 'date' },
+  { sourceField: 'Date', targetField: 'workDate', dataType: 'date' },
   { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
   { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
   { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
@@ -799,8 +809,8 @@ const IMPORT_MAPPING_PROFILES = [
     userMapSourceFields: ['empNo', '工号', '姓名'],
     requiredFields: DEFAULT_REQUIRED_FIELDS,
     punchRequiredFields: DEFAULT_PUNCH_REQUIRED_FIELDS,
-    templateColumns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
-    templateSampleRow: ['2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
+    templateColumns: ['UserId', '日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+    templateSampleRow: ['user@example.com', '2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
   },
   {
     id: 'dingtalk_api_columns',
@@ -825,10 +835,10 @@ const IMPORT_MAPPING_PROFILES = [
 ]
 
 const IMPORT_REQUIRED_FIELD_ALIASES = {
-  '日期': ['workDate', 'work_date', 'date'],
-  workDate: ['日期', 'work_date', 'date'],
-  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1', 'check_in'],
-  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out'],
+  '日期': ['workDate', 'work_date', 'date', 'Date'],
+  workDate: ['日期', 'work_date', 'date', 'Date'],
+  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1', 'check_in', 'ClockIn'],
+  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out', 'ClockOut'],
   '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
   '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
   '上班3打卡时间': ['3_on_duty_user_check_time', 'clockIn3'],
@@ -7554,6 +7564,8 @@ const IMPORT_HEADER_CONTEXT_KEYS = new Set([
   'shiftname',
   '上班1打卡时间',
   '下班1打卡时间',
+  'clockin',
+  'clockout',
   '考勤结果',
   '考勤组',
   '班次',
@@ -7756,7 +7768,7 @@ function buildImportRowFromCsvRawRow(header, rawRow) {
   })
   if (!hasValue) return null
 
-  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date)
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date ?? fields.Date)
   const userId = fields.UserId ?? fields.userId ?? fields.user_id ?? fields['用户ID']
   return {
     workDate: workDate ?? '',
@@ -8196,6 +8208,40 @@ function collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceField
     values.push({ field: key, value: normalized })
   }
   return values
+}
+
+async function loadImportUserIdentifierIndexForIterator(db, orgId, iterateRows, options) {
+  const pending = []
+  const seen = new Set()
+  if (typeof iterateRows === 'function') {
+    await iterateRows((row) => {
+      const raw = resolveRowUserId({
+        row,
+        fallbackUserId: options?.fallbackUserId,
+        userMap: options?.userMap,
+        userMapKeyField: options?.userMapKeyField,
+        userMapSourceFields: options?.userMapSourceFields,
+      })
+      if (!raw || isCanonicalImportUserId(raw)) return true
+      const key = importUserIdentifierLookupKey(raw)
+      if (!key || seen.has(key)) return true
+      seen.add(key)
+      pending.push(String(raw).trim())
+      return true
+    })
+  }
+  return loadAttendanceImportUserIdentifierIndex(db, orgId, pending)
+}
+
+function resolveImportRowUserReference(row, options) {
+  const rawUserId = resolveRowUserId({
+    row,
+    fallbackUserId: options?.fallbackUserId,
+    userMap: options?.userMap,
+    userMapKeyField: options?.userMapKeyField,
+    userMapSourceFields: options?.userMapSourceFields,
+  })
+  return adoptCanonicalImportUserId(rawUserId, options?.userIdentifierIndex)
 }
 
 function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
@@ -24945,6 +24991,15 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+    isCanonicalImportUserId,
+    adoptCanonicalImportUserId,
+    importUserIdentifierLookupKey,
+    loadAttendanceImportUserIdentifierIndex,
+    applyFieldMappings,
+    buildImportTemplateCsv,
+    getDefaultImportTemplateProfile,
+    IMPORT_MAPPING_COLUMNS,
+    resolveRequiredFieldValue,
     rawImportFieldPresence,
     firstDefinedPresence,
     buildRawImportEvidenceV1,
@@ -26815,18 +26870,19 @@ module.exports = {
       }
     }
 
-    function resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId) {
+    function resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId, userIdentifierIndex) {
       const targets = new Map()
       for (const row of Array.isArray(rows) ? rows : []) {
-        const userId = resolveRowUserId({
-          row,
+        const { userId } = resolveImportRowUserReference(row, {
           fallbackUserId,
+          userIdentifierIndex,
           userMap: payload?.userMap,
           userMapKeyField: payload?.userMapKeyField,
           userMapSourceFields: payload?.userMapSourceFields,
         })
         const workDate = normalizeDateOnly(row?.workDate) ?? row?.workDate
-        if (!userId || !workDate) continue
+        if (!userId) return []
+        if (!workDate) continue
         targets.set(`${userId}:${workDate}`, { userId, workDate })
       }
       return Array.from(targets.values())
@@ -26835,13 +26891,25 @@ module.exports = {
     async function assertAttendanceImportRowsAllowed(req, res, { orgId, rows, payload, fallbackUserId, actorAccess, operation }) {
       const access = actorAccess ?? await resolveAttendanceImportActor(req, res)
       if (!access) return null
-      if (access.fullImport) return access
 
       try {
+        const userIdentifierIndex = await loadAttendanceImportUserIdentifierIndex(
+          db,
+          orgId,
+          (Array.isArray(rows) ? rows : []).map(row => resolveRowUserId({
+            row,
+            fallbackUserId,
+            userMap: payload?.userMap,
+            userMapKeyField: payload?.userMapKeyField,
+            userMapSourceFields: payload?.userMapSourceFields,
+          })),
+        )
+        const resolvedAccess = { ...access, userIdentifierIndex }
+        if (access.fullImport) return resolvedAccess
         const actorContext = await loadAttendanceScopeContextForUser(db, orgId, access.userId)
         const scopes = (await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext))
           .filter(scope => normalizeStringArray(scope.actions).includes('import'))
-        const targets = resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId)
+        const targets = resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId, userIdentifierIndex)
         let allowed = targets.length > 0
         for (const target of targets) {
           const facts = await resolveAttendanceUserSchedulerScopeFacts(db, orgId, target.userId, { workDate: target.workDate })
@@ -26857,7 +26925,7 @@ module.exports = {
           respondAttendanceSchedulerScopeForbidden(res)
           return null
         }
-        return access
+        return resolvedAccess
       } catch (error) {
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
@@ -28023,7 +28091,6 @@ module.exports = {
 	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
 	      let csvWarnings = []
 	      let csvFileId = null
-		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
 		      if (resolvedCsvFileId) {
 		        csvFileId = resolvedCsvFileId
@@ -28033,6 +28100,7 @@ module.exports = {
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
+		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
 		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
@@ -28452,15 +28520,15 @@ module.exports = {
 		    }
 
 		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
-		      if (Array.isArray(payload?.rows)) return payload.rows.length
-		      if (Array.isArray(payload?.entries)) return payload.entries.length
 		      const csvFileId = resolveImportUploadFileId(payload)
 		      if (csvFileId) {
 		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 		        const hint = Number(meta?.rowCount ?? 0)
 		        return Number.isFinite(hint) && hint > 0 ? hint : 0
 		      }
-		      if (typeof payload?.csvText === 'string') return estimateCsvRowCount(payload.csvText)
+		      if (Array.isArray(payload?.rows)) return payload.rows.length
+		      if (typeof payload?.csvText === 'string' && payload.csvText.length > 0) return estimateCsvRowCount(payload.csvText)
+		      if (Array.isArray(payload?.entries)) return payload.entries.length
 		      return 0
 		    }
 
@@ -28593,6 +28661,18 @@ module.exports = {
 	        orgId,
 	        fallbackUserId: payload.userId ?? requesterId,
 	      })
+	      const asyncPreviewUserOptions = {
+	        fallbackUserId: payload.userId ?? requesterId,
+	        userMap: payload.userMap,
+	        userMapKeyField: payload.userMapKeyField,
+	        userMapSourceFields: payload.userMapSourceFields,
+	      }
+	      const asyncPreviewUserIndex = await loadImportUserIdentifierIndexForIterator(
+	        db,
+	        orgId,
+	        (onRow) => rowSource.iterateRows(onRow),
+	        asyncPreviewUserOptions,
+	      )
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
@@ -28606,16 +28686,14 @@ module.exports = {
 	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
-	        const rowUserId = resolveRowUserId({
-	          row,
-	          fallbackUserId: payload.userId ?? requesterId,
-	          userMap: payload.userMap,
-	          userMapKeyField: payload.userMapKeyField,
-	          userMapSourceFields: payload.userMapSourceFields,
-        })
+	        const rowUserRef = resolveImportRowUserReference(row, {
+	          ...asyncPreviewUserOptions,
+	          userIdentifierIndex: asyncPreviewUserIndex,
+	        })
+	        const rowUserId = rowUserRef.userId
         const warnings = []
         if (!rowUserId) {
-          warnings.push(buildUnresolvedRowUserWarning({
+          warnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
             row,
             userMapKeyField: payload.userMapKeyField,
             userMapSourceFields: payload.userMapSourceFields,
@@ -29061,7 +29139,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false }) => {
+			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false, resolvedUserIdentifierIndex }) => {
 		      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 		      const trustedIntegrationId = normalizeUuidString(integrationId)
 		      const commitStartedAtMs = Date.now()
@@ -29114,6 +29192,18 @@ module.exports = {
 	        orgId,
 	        fallbackUserId: payload.userId ?? requesterId,
 	      })
+	      const importUserResolveOptions = {
+	        fallbackUserId: payload.userId ?? requesterId,
+	        userMap: payload.userMap,
+	        userMapKeyField: payload.userMapKeyField,
+	        userMapSourceFields: payload.userMapSourceFields,
+	      }
+	      const userIdentifierIndex = resolvedUserIdentifierIndex ?? await loadImportUserIdentifierIndexForIterator(
+	        db,
+	        orgId,
+	        (onRow) => rowSource.iterateRows(onRow),
+	        importUserResolveOptions,
+	      )
 		      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
 		      const groupNames = new Map()
 		      const groupFirstSourceOrdinals = new Map()
@@ -29122,13 +29212,10 @@ module.exports = {
 		      const rowScan = await rowSource.iterateRows((row, sourceOrdinal) => {
 	        const workDate = row?.workDate
 	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-	        const rowUserId = resolveRowUserId({
-	          row,
-	          fallbackUserId: payload.userId ?? requesterId,
-	          userMap: payload.userMap,
-	          userMapKeyField: payload.userMapKeyField,
-	          userMapSourceFields: payload.userMapSourceFields,
-	        })
+	        const rowUserId = resolveImportRowUserReference(row, {
+	          ...importUserResolveOptions,
+	          userIdentifierIndex,
+	        }).userId
 	        if (rowUserId) scopeUserIds.add(rowUserId)
 		        if (groupSync) {
 		          appendAttendanceGroupName(groupNames, row)
@@ -29608,13 +29695,11 @@ module.exports = {
 	        await rowSource.iterateRows(async (row, sourceOrdinal) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
-	          const rowUserId = resolveRowUserId({
-	            row,
-	            fallbackUserId: payload.userId ?? requesterId,
-	            userMap: payload.userMap,
-	            userMapKeyField: payload.userMapKeyField,
-	            userMapSourceFields: payload.userMapSourceFields,
+	          const rowUserRef = resolveImportRowUserReference(row, {
+	            ...importUserResolveOptions,
+	            userIdentifierIndex,
 	          })
+	          const rowUserId = rowUserRef.userId
 	          const userProfile = resolveRowUserProfile({
 	            row,
 	            fallbackUserId: payload.userId ?? requesterId,
@@ -29624,7 +29709,7 @@ module.exports = {
           })
           const importWarnings = []
           if (!rowUserId) {
-            importWarnings.push(buildUnresolvedRowUserWarning({
+            importWarnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
               row,
               userMapKeyField: payload.userMapKeyField,
               userMapSourceFields: payload.userMapSourceFields,
@@ -43189,16 +43274,21 @@ module.exports = {
           }
           const preview = []
           const seenKeys = new Set()
+          const previewUserOptions = {
+            fallbackUserId: userId,
+            userMap: parsed.data.userMap,
+            userMapKeyField: parsed.data.userMapKeyField,
+            userMapSourceFields: parsed.data.userMapSourceFields,
+          }
+          const previewUserIndex = scopedAccess.userIdentifierIndex
           for (const row of rows) {
             const shouldRender = previewLimit == null || preview.length < previewLimit
             const workDate = row.workDate
-            const rowUserId = resolveRowUserId({
-              row,
-              fallbackUserId: userId,
-              userMap: parsed.data.userMap,
-              userMapKeyField: parsed.data.userMapKeyField,
-              userMapSourceFields: parsed.data.userMapSourceFields,
+            const rowUserRef = resolveImportRowUserReference(row, {
+              ...previewUserOptions,
+              userIdentifierIndex: previewUserIndex,
             })
+            const rowUserId = rowUserRef.userId
             const userProfile = resolveRowUserProfile({
               row,
               fallbackUserId: userId,
@@ -43208,7 +43298,7 @@ module.exports = {
             })
             const importWarnings = []
             if (!rowUserId) {
-              importWarnings.push(buildUnresolvedRowUserWarning({
+              importWarnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
                 row,
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
@@ -43773,6 +43863,7 @@ module.exports = {
 	            batchId,
 	            idempotencyKey,
 	            prepareOnly: true,
+	            resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
 	          })
 	          // Pass the prepared plan through unchanged. Do not re-fingerprint
 	          // attribution/policy leaves here — core freeze authority is separate.
@@ -44431,6 +44522,7 @@ module.exports = {
 	          // The legacy route never exposed or honored idempotency semantics.
 	          idempotencyKey: null,
 	          prepareOnly: true,
+	          resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
 	        })
 	        const commitResult = await syncImportPort.commitSyncImportPlan({
 	          ...preparedPlan,
@@ -44924,6 +45016,7 @@ module.exports = {
                   batchId: newBatchId,
                   idempotencyKey: null,
                   prepareOnly: true,
+                  resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
                   integrationId,
                 })
                 const commitResult = await syncImportPort.commitSyncImportPlan({

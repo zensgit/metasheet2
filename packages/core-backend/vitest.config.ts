@@ -1199,6 +1199,8 @@ export default defineConfig({
       'tests/integration/attendance-csv-export-bom.test.ts',
       'tests/integration/attendance-files-acl.test.ts',
       'tests/integration/attendance-import-template-prefs.test.ts',
+      // Actual identifier SQL, optional alias schema and strict membership filters require PostgreSQL.
+      'tests/integration/attendance-import-user-identity.db.test.ts',
       'tests/integration/attendance-makeup-punch-policy.test.ts',
       // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
       // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the
