@@ -135,6 +135,7 @@
       </el-card>
     </section>
 
+    <p v-if="plmReturnUnavailable" role="alert" data-testid="plm-bom-return-unavailable">BOM 来源不可用，请检查连接和 Part 链接。</p>
     <IntegrationObjectTemplateSection
       :source-systems="sourceSystems"
       :is-source-option-disabled="isSourceOptionDisabled"
@@ -144,6 +145,7 @@
       :selected-plm-bom-multitable-capability-entry="selectedPlmBomMultitableCapabilityEntry"
       :selected-plm-bom-eco-intent-enabled="selectedPlmBomEcoIntentEnabled"
       :selected-source-plm-data-source-id="selectedSourcePlmDataSourceId"
+      :initial-plm-part-id="initialPlmPartId"
       :has-runnable-source-system="hasRunnableSourceSystem"
       :show-staging-setup="showStagingSetup"
       :show-sql-setup="showSqlSetup"
@@ -1324,6 +1326,29 @@ const selectedSourceSystem = computed(() => systems.value.find((system) => syste
 const selectedTargetSystem = computed(() => systems.value.find((system) => system.id === targetSystemId.value) || null)
 const selectedStagingDescriptor = computed(() => stagingDescriptors.value.find((descriptor) => descriptor.id === stagingSheetId.value) || null)
 const selectedSourcePlmDataSourceId = computed(() => bridgeDataSourceIdForSystem(selectedSourceSystem.value))
+// A return link is a location hint only. Never apply its Part to a fallback source.
+const hasPlmReturnTarget = computed(() => route?.query?.plmDataSourceId !== undefined || route?.query?.plmPartId !== undefined)
+const plmReturnTarget = computed(() => {
+  const dataSourceId = route?.query?.plmDataSourceId
+  const partId = route?.query?.plmPartId
+  return typeof dataSourceId === 'string' && dataSourceId.trim() && typeof partId === 'string' && partId.trim()
+    ? { dataSourceId: dataSourceId.trim(), partId: partId.trim() } : null
+})
+const initialPlmPartId = computed(() => plmReturnTarget.value?.dataSourceId === selectedSourcePlmDataSourceId.value ? plmReturnTarget.value.partId : '')
+const plmReturnUnavailable = computed(() => hasPlmReturnTarget.value && (!plmReturnTarget.value || !initialPlmPartId.value))
+
+function applyPlmReturnTarget(): void {
+  if (!hasPlmReturnTarget.value) return
+  const target = plmReturnTarget.value
+  const system = target && systems.value.find((candidate) => (
+    bridgeDataSourceIdForSystem(candidate) === target.dataSourceId && candidate.status === 'active'
+    && canUseSystemForSide(candidate, 'source') && !isSourceOptionDisabled(candidate)
+  ))
+  if (system && isAdvancedSystem(system)) showAdvancedConnectors.value = true
+  sourceSystemId.value = system ? system.id : ''
+  handleSourceSystemChange()
+}
+
 const selectedSourcePlmCapabilities = computed(() => (
   selectedSourceSystem.value ? plmCapabilitiesBySystemId.value[selectedSourceSystem.value.id] || null : null
 ))
@@ -2925,13 +2950,14 @@ async function exportCleansedResult(): Promise<void> {
 
 function normalizeSystemSelections(): void {
   const runnableSources = runnableSourceSystems.value
-  if (sourceSystemId.value && !sourceSystems.value.some((system) => system.id === sourceSystemId.value)) {
+  if (hasPlmReturnTarget.value) applyPlmReturnTarget()
+  if (!hasPlmReturnTarget.value && sourceSystemId.value && !sourceSystems.value.some((system) => system.id === sourceSystemId.value)) {
     sourceSystemId.value = runnableSources[0]?.id || ''
   }
   if (targetSystemId.value && !targetSystems.value.some((system) => system.id === targetSystemId.value)) {
     targetSystemId.value = targetSystems.value[0]?.id || ''
   }
-  if (!sourceSystemId.value) sourceSystemId.value = runnableSources[0]?.id || ''
+  if (!hasPlmReturnTarget.value && !sourceSystemId.value) sourceSystemId.value = runnableSources[0]?.id || ''
   if (!targetSystemId.value) targetSystemId.value = targetSystems.value[0]?.id || ''
 }
 
@@ -4665,6 +4691,11 @@ onMounted(() => {
   // actually names a landing, so an ordinary visit to /integrations/workbench never scrolls, and
   // a deep link scrolls to the same target twice rather than to two different places.
   void refreshBootstrap().finally(() => { void nextTick(applyWorkbenchLanding) })
+})
+
+watch(() => [route?.query?.plmDataSourceId, route?.query?.plmPartId], () => {
+  sourceSystemId.value = ''
+  normalizeSystemSelections()
 })
 
 watch(showAdvancedConnectors, () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, reactive, type App as VueApp, type Component } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 // integration-guard flake fix (#4614 prerequisite): IntegrationWorkbenchView.vue is a ~5100-line SFC
 // with ~20 imported subcomponents. A dynamic `await import(...)` INSIDE a test body pays that whole
@@ -14,6 +14,7 @@ import { createPinia, setActivePinia } from 'pinia'
 // collect/transform phase, which is NOT bounded by `testTimeout` — every test below now runs against
 // an already-resolved module, at effectively 0ms.
 import View from '../src/views/IntegrationWorkbenchView.vue'
+import { routeLocationKey } from 'vue-router'
 
 // IU-2a: minimal ElCard stub — IntegrationWorkbenchView.vue now wraps each section in
 // `<el-card shadow="never">` with the panel-head (title/description/action button) in the
@@ -147,6 +148,57 @@ describe('IntegrationWorkbenchView', () => {
     Object.defineProperty(window, 'confirm', { configurable: true, value: originalConfirm })
     app = null
     container = null
+  })
+
+  async function mountBomReturn(query: Record<string, unknown>, delayed = false) {
+    const route = reactive({ query, hash: '' })
+    const sourceList = deferredResponse()
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([{ kind: 'data-source:sql-readonly', label: 'PLM', roles: ['source'], supports: ['read'], advanced: true }])
+      if (url.startsWith('/api/integration/external-systems?')) return sourceList.promise
+      if (url.includes('/capabilities')) return rawJsonResponse({ data_source_id: url.includes('/chosen/') ? 'chosen' : 'default', available: true, manifest: { schema_version: 'v1', provider: 'yuantus-plm', advisory: true, features: { bom_multitable: { supported: true, api_version: 'v1', entitled: true, scenarios: ['bom_review'] } } } })
+      if (url.includes('/hub/overview')) return jsonResponse(EMPTY_HUB_OVERVIEW)
+      return jsonResponse([])
+    })
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp(View as Component); app.component('ElCard', ElCard)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.provide(routeLocationKey, route as any); app.mount(container)
+    const resolve = () => sourceList.resolve(['default', 'chosen', 'inactive'].map((id) => ({ id: `sys-${id}`, tenantId: 'default', workspaceId: null, name: id, kind: 'data-source:sql-readonly', role: 'source', status: id === 'inactive' ? 'inactive' : 'active', connectionId: id, config: { object: 'eco' } })))
+    if (!delayed) resolve()
+    await flushUi(8)
+    return { route, resolve }
+  }
+
+  it('BOM return link hydrates the exact non-default source and only prefills Part, including async query changes', async () => {
+    const { route, resolve } = await mountBomReturn({ plmDataSourceId: 'default', plmPartId: 'old' }, true)
+    route.query = { plmDataSourceId: 'chosen', plmPartId: 'P2' }
+    resolve(); await flushUi(8)
+    expect((container!.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('sys-chosen')
+    expect((container!.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('P2')
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).includes('/bom-multitable/'))).toBe(false)
+    const picker = container!.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    picker.value = 'sys-default'; picker.dispatchEvent(new Event('change', { bubbles: true })); await flushUi(8)
+    expect((container!.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('')
+    route.query = { plmDataSourceId: 'missing', plmPartId: 'P3' }; await flushUi(8)
+    expect((container!.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('')
+    expect(container!.querySelector('[data-testid="plm-bom-return-unavailable"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="plm-bom-review-panel"]')).toBeNull()
+  })
+
+  it.each([
+    { plmDataSourceId: 'missing', plmPartId: 'P2' },
+    { plmDataSourceId: 'inactive', plmPartId: 'P2' },
+    { plmDataSourceId: ['chosen', 'default'], plmPartId: 'P2' },
+    { plmDataSourceId: 'chosen', plmPartId: ['P2', 'P3'] },
+    { plmDataSourceId: 'chosen' },
+    { plmPartId: 'P2' },
+  ])('BOM return link refuses malformed or unavailable targets without a fallback: %j', async (query) => {
+    await mountBomReturn(query)
+    expect((container!.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('')
+    expect(container!.querySelector('[data-testid="plm-bom-return-unavailable"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="plm-bom-review-panel"]')).toBeNull()
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).includes('/bom-multitable/'))).toBe(false)
   })
 
   // IU-2a quality gate: the rail↔view WIRING is pinned here (the rail component's own spec uses

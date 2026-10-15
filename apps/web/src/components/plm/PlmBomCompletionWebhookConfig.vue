@@ -83,7 +83,7 @@ function save() {
   const webhooks: BomCompletionWebhooks = JSON.parse(JSON.stringify(draft.value))
   return run(async (signal) => {
     const config = await saveBomCompletionWebhooks(props.bindingId,{ expectedVersion: version.value,webhooks },signal)
-    return () => { version.value = config.version; draft.value = config.webhooks!; message.value = '完成规则已保存；外部发送仍在接线。' }
+    return () => { version.value = config.version; draft.value = config.webhooks!; message.value = '完成规则已保存；仅处理后续符合权限和来源授权的事件。' }
   })
 }
 </script>

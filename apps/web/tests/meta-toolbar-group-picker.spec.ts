@@ -49,6 +49,30 @@ describe('MetaToolbar nested group picker', () => {
     expect(opts).toEqual(['', 'status', 'amount', 'city']) // '' = None; notes(longText) excluded
   })
 
+  it('offers native person as a group field and emits its unchanged field ID', async () => {
+    const onSetGroupFields = vi.fn()
+    const root = mountToolbar({ fields: [...FIELDS, { id: 'owner', name: 'Owner', type: 'person' }], groupFieldIds: [], onSetGroupFields })
+    const panel = await openGroupPanel(root)
+    const select = panel.querySelector('.meta-toolbar__group-select') as HTMLSelectElement
+    expect(Array.from(select.options).map(o => o.value)).toContain('owner')
+    select.value = 'owner'
+    select.dispatchEvent(new Event('change'))
+    expect(onSetGroupFields).toHaveBeenCalledWith(['owner'])
+  })
+
+  it('keeps a saved person grouping visible and manageable without duplicate lower levels', async () => {
+    const onSetGroupFields = vi.fn()
+    const root = mountToolbar({ fields: [...FIELDS, { id: 'owner', name: 'Owner', type: 'person' }], groupFieldIds: ['owner', 'status'], onSetGroupFields })
+    expect(root.querySelector('.meta-toolbar__badge')?.textContent?.trim()).toBe('2')
+    const panel = await openGroupPanel(root)
+    const selects = Array.from(panel.querySelectorAll('.meta-toolbar__group-select')) as HTMLSelectElement[]
+    expect(selects.map(select => select.value)).toEqual(['owner', 'status'])
+    expect(Array.from(selects[1].options).map(o => o.value)).not.toContain('owner')
+    selects[0].value = ''
+    selects[0].dispatchEvent(new Event('change'))
+    expect(onSetGroupFields).toHaveBeenCalledWith([])
+  })
+
   it('badge shows the active level count', async () => {
     const root = mountToolbar({ groupFieldIds: ['status', 'city'] })
     const badge = root.querySelector('.meta-toolbar__badge') as HTMLElement

@@ -367,6 +367,73 @@ describe('MetaGridTable grouped row virtualization (GW)', () => {
     expect(subtotal!.textContent).toContain('9000')
   })
 
+  it('matches person and empty-array groups to the exact server subtotal keys', async () => {
+    const owner: MetaField = { id: 'owner', name: 'Owner', type: 'person' }
+    const rows: MetaRecord[] = [
+      { id: 'assigned', version: 1, data: { title: 'Assigned', score: 1, owner: ['u1'] } },
+      { id: 'empty', version: 1, data: { title: 'Empty', score: 2, owner: [] } },
+      { id: 'null', version: 1, data: { title: 'Null', score: 3, owner: null } },
+    ]
+    const root = mountGrid(rows, { groupField: owner, aggregationConfig: { score: 'sum' }, aggregateGroups: [
+      { key: '["u1"]', count: 1, aggregates: { score: { fn: 'sum', value: 9100 } } },
+      { key: null, count: 2, aggregates: { score: { fn: 'sum', value: 9200 } } },
+    ] })
+    await nextTick()
+    const headers = Array.from(root.querySelectorAll('[data-test="group-header"]'))
+    expect(headers.map(el => el.getAttribute('data-group-path'))).toEqual(['["u1"]', '__ungrouped__'])
+    expect(headers.map(el => el.querySelector('.meta-grid__group-count')?.textContent)).toEqual(['(1)', '(2)'])
+    const totals = Array.from(root.querySelectorAll('[data-test="group-subtotal"]'))
+    expect(totals.map(el => el.querySelector('[data-field-id="score"]')?.textContent?.trim() ?? el.textContent?.trim())).toEqual(expect.arrayContaining([expect.stringContaining('9100'), expect.stringContaining('9200')]))
+    expect(renderedRowCount(root)).toBe(3)
+  })
+
+  it('keeps ordered person arrays as whole distinct server buckets without exploding rows', async () => {
+    const owner: MetaField = { id: 'owner', name: 'Owner', type: 'person' }
+    const values = [['u1', 'u2'], ['u2', 'u1'], ['u1,u2']]
+    const root = mountGrid(values.map((value, i) => ({ id: `p${i}`, version: 1, data: { owner: value, score: i, title: `P${i}` } })), {
+      groupField: owner, aggregationConfig: { score: 'sum' }, aggregateGroups: values.map((value, i) => ({
+        key: JSON.stringify(value), count: 1, aggregates: { score: { fn: 'sum', value: 8300 + i } },
+      })),
+    })
+    await nextTick()
+    expect(Array.from(root.querySelectorAll('[data-test="group-header"]')).map(el => el.getAttribute('data-group-path'))).toEqual(values.map(value => JSON.stringify(value)))
+    const totals = Array.from(root.querySelectorAll('[data-test="group-subtotal"]'))
+    expect(totals).toHaveLength(3)
+    totals.forEach((el, i) => expect(el.textContent).toContain(String(8300 + i)))
+    expect(renderedRowCount(root)).toBe(3)
+  })
+
+  it('labels native person groups from visible row summaries and otherwise keeps user IDs', async () => {
+    const owner: MetaField = { id: 'owner', name: 'Owner', type: 'person' }
+    const root = mountGrid([{ id: 'visible', version: 1, data: { owner: ['u1', 'u2'], title: 'Visible', score: 1 } }], {
+      groupField: owner, personSummaries: {
+        visible: { owner: [{ id: 'u1', display: 'Alice' }] },
+        'not-a-visible-row': { owner: [{ id: 'u2', display: 'Outside summary' }] },
+      },
+    })
+    await nextTick()
+    expect(root.querySelector('.meta-grid__group-label')?.textContent).toBe('Alice, u2')
+    expect(root.textContent).not.toContain('Outside summary')
+    expect(root.querySelector('[data-test="group-header"]')?.getAttribute('data-group-path')).toBe('["u1","u2"]')
+  })
+
+  it('matches nested person subtotals under a primitive parent including the empty bucket', async () => {
+    const owner: MetaField = { id: 'owner', name: 'Owner', type: 'person' }
+    const root = mountGrid([
+      { id: 'p1', version: 1, data: { group: 'A', owner: ['u1'], score: 1 } },
+      { id: 'p2', version: 1, data: { group: 'A', owner: [], score: 2 } },
+    ], { groupFields: [GROUP_FIELD, owner], aggregationConfig: { score: 'sum' }, aggregateGroups: [{
+      key: 'A', count: 2, aggregates: { score: { fn: 'sum', value: 9900 } }, children: [
+        { key: '["u1"]', count: 1, aggregates: { score: { fn: 'sum', value: 9801 } } },
+        { key: null, count: 1, aggregates: { score: { fn: 'sum', value: 9802 } } },
+      ],
+    }] })
+    await nextTick()
+    const totals = Array.from(root.querySelectorAll('[data-test="group-subtotal"]'))
+    expect(totals.map(el => el.getAttribute('data-group-path'))).toEqual(['A\u001f["u1"]', 'A\u001f__ungrouped__', 'A'])
+    totals.forEach((el, i) => expect(el.textContent).toContain(String([9801, 9802, 9900][i])))
+  })
+
   it('clamps to a nonblank grouped window after a controlled collapse while scrolled', async () => {
     app?.unmount()
     container?.remove()

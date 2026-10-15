@@ -343,6 +343,7 @@ export interface MetaScopedPermissions {
 
 // --- Context (GET /api/multitable/context) ---
 export interface MetaContext {
+  plmBomSource?: { dataSourceId: string; partId: string }
   base?: MetaBase | null
   sheet?: MetaSheet | null
   sheets: MetaSheet[]

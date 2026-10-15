@@ -1,8 +1,8 @@
 /**
  * EDITABLE whitelist expansion (矩阵 #4/#7): MetaGridTable's inline cell editor used to hard-exclude
  * `person` / `multiSelect` / `dateTime` from the EDITABLE set — dblclick on those columns did nothing
- * (isEditable() returned false, startEdit() no-opped). This PR opens exactly those three (the other 12
- * non-EDITABLE types are out of scope). Each `it` below is discriminating for ONE of:
+ * (isEditable() returned false, startEdit() no-opped). The BOM collaboration follow-up also covers
+ * longText through the existing multiline editor. Each `it` below is discriminating for ONE of:
  *   - EDITABLE gaining the type (dblclick now mounts MetaCellEditor with the matching DOM branch)
  *   - pasteFocusedCell's early-return for person/multiSelect (array-valued fields — raw clipboard text
  *     would 400 server-side; see record-write-service.ts field validation)
@@ -94,6 +94,86 @@ function clickThenDblclick(cell: HTMLElement) {
   cell.click()
   cell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
 }
+
+describe('BOM collaboration longText cells use the native multiline editor', () => {
+  const notes: MetaField = { id: 'notes', name: 'Notes', type: 'longText' }
+  const rows = (): MetaRecord[] => [{ id: 'r0', version: 7, data: { notes: 'Before' } }]
+
+  for (const grouped of [false, true]) {
+    it(`${grouped ? 'grouped' : 'flat'} rows commit multiline text only on explicit confirmation`, async () => {
+      const patch = vi.fn()
+      const root = mountGrid(rows(), patch, {
+        visibleFields: [notes],
+        ...(grouped ? { groupField: notes } : {}),
+      })
+      await flushUi()
+      if (grouped) expect(root.querySelector('[data-test="group-header"]')).not.toBeNull()
+      clickThenDblclick(cellAt(root, 0, 0))
+      await flushUi()
+      const input = root.querySelector<HTMLTextAreaElement>('.meta-cell-editor__textarea')
+      expect(input).not.toBeNull()
+      input!.value = 'First line\nSecond line'
+      input!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await flushUi()
+      expect(patch).not.toHaveBeenCalled()
+      input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+      await flushUi()
+      expect(patch).toHaveBeenCalledTimes(1)
+      expect(patch).toHaveBeenCalledWith('r0', 'notes', 'First line\nSecond line', 7)
+      expect(root.querySelector('.meta-cell-editor__textarea')).toBeNull()
+    })
+  }
+
+  it('pastes a multiline string into the focused longText cell', async () => {
+    vi.mocked(navigator.clipboard.readText).mockResolvedValue('First line\nSecond line')
+    const patch = vi.fn()
+    const root = mountGrid(rows(), patch, { visibleFields: [notes] })
+    await flushUi()
+    cellAt(root, 0, 0).click()
+    await flushUi()
+    gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(patch).toHaveBeenCalledWith('r0', 'notes', 'First line\nSecond line', 7)
+  })
+
+  it('opens the existing rich editor and cancels without writing', async () => {
+    const patch = vi.fn()
+    const root = mountGrid(rows(), patch, { visibleFields: [{ ...notes, property: { rich: true } }] })
+    await flushUi()
+    clickThenDblclick(cellAt(root, 0, 0))
+    await flushUi()
+    const input = root.querySelector<HTMLElement>('[data-test="rich-longtext-editor"]')
+    expect(input).not.toBeNull()
+    expect(root.querySelector('.meta-cell-editor__textarea')).toBeNull()
+    input!.innerHTML = '<p>Unsaved change</p>'
+    input!.dispatchEvent(new Event('input', { bubbles: true }))
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('[data-test="rich-longtext-editor"]')).toBeNull()
+    expect(patch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['source readOnly property', { visibleFields: [{ ...notes, property: { readOnly: true } }] }],
+    ['field permission', { fieldReadOnlyIds: ['notes'] }],
+    ['row permission', { rowActionOverrides: { r0: { canEdit: false, canDelete: false, canComment: true } } }],
+    ['sheet permission', { canEdit: false }],
+    ['locked row', { rows: [{ ...rows()[0], locked: true }] }],
+  ])('does not open or emit a write with %s', async (_label, guard) => {
+    const patch = vi.fn()
+    const root = mountGrid(rows(), patch, { visibleFields: [notes], ...guard })
+    await flushUi()
+    clickThenDblclick(cellAt(root, 0, 0))
+    await flushUi()
+    expect(root.querySelector('.meta-cell-editor__textarea')).toBeNull()
+    gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(patch).not.toHaveBeenCalled()
+  })
+})
 async function flushUi() {
   await nextTick()
   await Promise.resolve()

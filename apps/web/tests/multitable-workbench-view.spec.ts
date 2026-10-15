@@ -1270,6 +1270,7 @@ function createWorkbenchMock() {
       source: 'global-rbac',
       hasSheetAssignments: false,
     }),
+    plmBomSource: ref(null),
     fieldPermissions: ref({}),
     viewPermissions: ref({}),
     activeView: computed(() => views.value.find((view) => view.id === activeViewId.value) ?? null),
@@ -1423,6 +1424,21 @@ describe('MultitableWorkbench view wiring', () => {
     localStorage.removeItem(RECENT_BASES_KEY)
     useLocale().setLocale('en')
     vi.clearAllMocks()
+  })
+
+  it('BOM return link only exposes the fixed internal target from current server context', async () => {
+    mountWorkbench()
+    await flushUi()
+    expect(container!.querySelector('[data-action="open-plm-bom-source"]')).toBeNull()
+    workbenchMock.plmBomSource.value = { dataSourceId: 'ds & 1', partId: 'part/one' }
+    await flushUi()
+    ;(container!.querySelector('[data-action="open-plm-bom-source"]') as HTMLButtonElement).click()
+    expect(pushSpy).toHaveBeenCalledWith({ path: '/integrations/workbench', query: {
+      section: 'cleaning-mapping', plmDataSourceId: 'ds & 1', plmPartId: 'part/one',
+    }, hash: '#int-sec-object-template' })
+    workbenchMock.plmBomSource.value = null
+    await flushUi()
+    expect(container!.querySelector('[data-action="open-plm-bom-source"]')).toBeNull()
   })
 
   function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string }) {

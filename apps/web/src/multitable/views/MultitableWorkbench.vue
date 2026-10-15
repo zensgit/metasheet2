@@ -13,6 +13,7 @@
       </div>
     </div>
     <div class="mt-workbench__actions">
+      <button v-if="workbench.plmBomSource?.value" class="mt-workbench__mgr-btn" data-action="open-plm-bom-source" @click="openPlmBomSource">{{ isZh ? '返回 PLM BOM 来源' : 'Open PLM BOM source' }}</button>
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
         class="mt-workbench__presence-chip"
@@ -1028,6 +1029,13 @@ const emit = defineEmits<{
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
 const router = useRouter()
+function openPlmBomSource() {
+  const source = workbench.plmBomSource?.value
+  if (!source) return
+  void router.push({ path: '/integrations/workbench', query: {
+    section: 'cleaning-mapping', plmDataSourceId: source.dataSourceId, plmPartId: source.partId,
+  }, hash: '#int-sec-object-template' })
+}
 const auth = useAuth()
 // useLocale().isZh is a ComputedRef<boolean>; template auto-unwraps it,
 // script reads isZh.value (see T2 i18n dev MD).

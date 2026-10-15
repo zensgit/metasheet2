@@ -357,7 +357,7 @@ const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'normal', labelKey: 'density.normal' },
   { value: 'expanded', labelKey: 'density.expanded' },
 ]
-const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number', 'date'])
+const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number', 'date', 'person'])
 const MAX_GROUP_LEVELS = 3
 const groupableFields = computed(() => props.fields.filter((f) => GROUPABLE_TYPES.has(f.type)))
 
