@@ -34,7 +34,8 @@
  *   - 'platform-enc': `enc:` + base64(iv 16 | authTag 16 | AES-256-GCM ciphertext), key =
  *     pbkdf2(ENCRYPTION_KEY, ENCRYPTION_SALT, 100000, 32, sha256) — security/encrypted-secrets.ts, and
  *     the byte-identical re-implementation in plugins/plugin-attendance/index.cjs
- *     (encryptIntegrationSecretValue). Anything without the prefix is read as plaintext by every reader.
+ *     (encryptIntegrationSecretValue). Non-prefixed values count as plaintext in this probe; strict
+ *     YiDa readers reject them before decrypting, so this bucket does not imply reader acceptance.
  *   - 'system-config': services/ConfigService.ts SecretManager. SAME key derivation and payload layout,
  *     but a different envelope: the reader (DatabaseConfigSource) decrypts only `enc:`-prefixed values
  *     of `is_encrypted` rows, while SecretManager.encrypt() / rotateKey() write the payload WITHOUT the
@@ -71,7 +72,8 @@ export interface EncryptedStoreCatalogEntry {
   readonly scheme: EncryptedStoreScheme
   /**
    * Which string the `enc:` / `v1:` prefix test sees — the same one this store's runtime reader
-   * tests: 'raw' (the stored string as is, so ` enc:…` is plaintext to the reader and here) or
+   * tests: 'raw' (the stored string as is, so ` enc:…` counts as plaintext here; strict YiDa readers
+   * reject it) or
    * 'trimmed' (the reader trims first, so ` enc:…` is decrypted by the reader and here).
    */
   readonly prefixOn: 'raw' | 'trimmed'
@@ -212,6 +214,48 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     // `value` is text (z20251231 migration) or jsonb (038 migration); it is classified in JS, so no
     // text function is applied to it here.
     sql: `SELECT value FROM system_configs WHERE is_encrypted = true LIMIT $1`,
+  }),
+  // Strict YiDa readers require raw `enc:` before host decrypt; non-prefixed stored values are
+  // reported in the probe's plaintext bucket, never accepted or repaired by those readers.
+  catalogEntry({
+    store: 'integration_yida_credential_materials',
+    field: 'material_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['material_encrypted'],
+    sql: `SELECT material_encrypted AS value FROM integration_yida_credential_materials WHERE material_encrypted <> '' LIMIT $1`,
+  }),
+  catalogEntry({
+    store: 'integration_yida_draft_targets',
+    field: 'target_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['target_encrypted'],
+    sql: `SELECT target_encrypted AS value FROM integration_yida_draft_targets WHERE target_encrypted <> '' LIMIT $1`,
+  }),
+  catalogEntry({
+    store: 'integration_yida_draft_operations',
+    field: 'snapshot_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['snapshot_encrypted'],
+    sql: `SELECT snapshot_encrypted AS value FROM integration_yida_draft_operations WHERE snapshot_encrypted <> '' LIMIT $1`,
+  }),
+  catalogEntry({
+    store: 'integration_yida_approved_target',
+    field: 'evidence_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['evidence_encrypted'],
+    sql: `SELECT evidence_encrypted AS value FROM integration_yida_approved_target WHERE evidence_encrypted <> '' LIMIT $1`,
+  }),
+  catalogEntry({
+    store: 'integration_yida_send_approvals',
+    field: 'snapshot_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['snapshot_encrypted'],
+    sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
 ])
 

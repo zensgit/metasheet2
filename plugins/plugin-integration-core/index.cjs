@@ -104,6 +104,8 @@ let pipelineRunner = null
 let stagingInstaller = null
 let stockPreparationSqlServerRuntime = null
 let stockPreparationRuntimeDatabase = null
+let stopYidaOwnerRuntime = null
+let stopYidaInitializationRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -561,11 +563,73 @@ module.exports = {
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
 
     logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
+    // Only the host receives these actual factories. Never publish them, their
+    // authority/permit, or complete material on buildCommunicationApi().
+    const yidaOwnerRuntime = context.services && context.services.yidaOwnerRuntime
+    if (yidaOwnerRuntime !== undefined) {
+      const security = context.services && context.services.security
+      if (!yidaOwnerRuntime || typeof yidaOwnerRuntime.activate !== 'function'
+        || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+        throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      }
+      const { createYidaOwnerRuntimeBinding } = await import('./lib/yida-owner-runtime-factory.mjs')
+      const binding = createYidaOwnerRuntimeBinding({ db, security: Object.freeze({
+        encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+      }) })
+      const handle = await yidaOwnerRuntime.activate(binding)
+      if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
+      stopYidaOwnerRuntime = handle.stop.bind(handle)
+    }
+    const yidaInitializationRuntime = context.services && context.services.yidaInitializationRuntime
+    if (yidaInitializationRuntime !== undefined) {
+      try {
+        const security = context.services && context.services.security
+        if (!yidaInitializationRuntime || typeof yidaInitializationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaInitializationBinding } = await import('./lib/yida-initialization-producer.mjs')
+        const binding = createYidaInitializationBinding({ security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) })
+        const handle = await yidaInitializationRuntime.activate(binding)
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE')
+        stopYidaInitializationRuntime = handle.stop.bind(handle)
+      } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE') }
+    }
   },
 
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    // Latch the private runtimes before the legacy read drain's first await. A stopped
+    // owner request retains actual pending work, so observe its rejection now
+    // but await the original drain before any plugin DB is closed below.
+    let yidaInitializationDrain, initializationStopFailed = false
+    if (stopYidaInitializationRuntime) {
+      const stop = stopYidaInitializationRuntime
+      stopYidaInitializationRuntime = null
+      try {
+        yidaInitializationDrain = stop()
+        void yidaInitializationDrain.catch(() => {})
+      } catch { initializationStopFailed = true }
+    }
+    let yidaOwnerDrain
+    if (stopYidaOwnerRuntime) {
+      const stop = stopYidaOwnerRuntime
+      stopYidaOwnerRuntime = null
+      try {
+        yidaOwnerDrain = stop()
+        void yidaOwnerDrain.catch(() => {})
+      } catch {
+        throw new Error('YIDA_OWNER_RUNTIME_STOP_UNAVAILABLE')
+      }
+    }
+    if (yidaOwnerDrain) await yidaOwnerDrain
+    if (initializationStopFailed) throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaInitializationDrain) {
+      try { await yidaInitializationDrain } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE') }
+    }
     if (stockPreparationRuntimeDatabase) {
       try {
         await stockPreparationRuntimeDatabase.close()
