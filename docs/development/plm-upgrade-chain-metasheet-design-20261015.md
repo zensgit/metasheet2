@@ -35,7 +35,7 @@ Branch `cursor/plm-upgrade-chain-metasheet-316e`, stacked on the handoff branch 
 
 ### 2. Disabled binding: no notifications, listener stopped (`9daedd2`)
 
-The scan created no event only when no config existed. It never looked at `b.status`, and the prepare/deliver rechecks did not either, while completion delivery already required `active` (`plm-bom-review-service.ts:1117` on the handoff head). Now:
+The scan created no event only when no config existed. It never looked at `b.status`, and the prepare/deliver rechecks did not either, while completion delivery already required `active` (`plm-bom-review-service.ts:1105` on the handoff head). Now:
 
 - `scanNotifications` returns `{ created: 0 }` for a disabled binding (`:882`).
 - `prepareNotification` and `deliverNotification` re-read the status under `FOR SHARE` (`bindingDisabled`, `:1057`). A queued event or intent becomes `cancelled` with reason `BINDING_DISABLED` (`:993-996`, `:1028-1031`); the intent guard permits only that prepared→cancelled transition. `notificationContext` also refuses disabled bindings (`:947`).
