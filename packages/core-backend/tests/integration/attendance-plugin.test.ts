@@ -11,6 +11,7 @@ import http from 'http'
 import * as bcrypt from 'bcryptjs'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+import { assertLegacyGoldenCompletedJobTiming } from '../utils/attendance-legacy-golden-timing'
 import {
   snapshotAttendanceSettingsRow,
   restoreAttendanceSettingsRow,
@@ -20545,6 +20546,7 @@ attendanceIntegrationDescribe(
         intervalMs: 25,
         settle: (job) => Array.isArray(job?.skippedRows),
       })
+      assertLegacyGoldenCompletedJobTiming(asyncCompleted)
 
       const asyncRacePayload = {
         ...asyncPayload,
@@ -20852,6 +20854,10 @@ attendanceIntegrationDescribe(
         sortRace(copy.sync.lockedRace)
         sortRace(copy.async.lockedRace)
         normalizeAsyncReplayLifecycle(copy.async.lockedRace)
+        // Wall-clock completion can be positive even while this fixture freezes Date.
+        // Raw timing is checked above; retain every other completed-job field in the golden.
+        copy.async.completedPublicJob.elapsedMs = '<completed-elapsed-ms>'
+        copy.async.completedPublicJob.throughputRowsPerSec = '<completed-throughput>'
         copy.database.batches.sort((left: any, right: any) =>
           compareText(left.idempotency_key, right.idempotency_key))
         for (const item of copy.database.items) {

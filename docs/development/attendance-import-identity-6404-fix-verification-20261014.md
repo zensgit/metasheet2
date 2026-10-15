@@ -79,3 +79,10 @@
 ## 压力成员收尾（2026-10-15）
 
 深读 calendar settings writer 证实，它枚举所有组织并校验活动成员，只有组织隔离仍会扫描压力历史。9ee 干净源虽然本地 HTTP 全过，后续全局日历用例仍约 20 秒；不把组织隔离声称为全局扫描成本修复。压力用例在成功回滚后，仅将种子登记返回的 500 个自有成员关系设为 inactive，并断言更新数量恰为 500。5001 条记录及不可变 companions 不删除，生产源守卫与超时不变。正常身份与后台任务终态、写入及回滚断言均先完成；之后让这些合成压力成员退场，避免干扰后续无关语义测试。最终验收在此新提交上重跑。
+# 2026-10-15 latest-main combination addendum
+
+Normal merges include #6407/#6408/#6409 and main `d1e77dd41c` (#6398/#6402), with both workflow/config test chains retained. Candidate `97c8fd043b` passed all 13 required checks on the earlier `fa784a2d9f` base; that evidence does not cover #6398.
+
+On the new combination, the Mac mini run passed 397 core and 430 frontend tests (23 web files). Fresh migrations and replay passed. The four-suite PG/HTTP run passed 254 tests and failed one governing-SHA golden: only the completed public job's elapsed time and throughput differed from frozen zero. The rollback suite passed. Wall-clock timing can legitimately be positive while the fixture freezes Date; this is a timing-sensitive test projection, not evidence of a rollback regression.
+
+The test-only repair checks finite/nonnegative integer duration and row count plus the exact two-decimal throughput formula before normalizing only the completed public job's two timing fields. The committed golden bytes/checksum and every other field remain locked. Numeric and formula negatives, guard mutations, the full PG/HTTP combination and final-head CI must pass before final acceptance. No production code or timeout changes are part of this repair. Final exact-head results belong in the final verification MD and PR evidence after execution. Merge, deployment, backfill and enablement remain owner-gated.
