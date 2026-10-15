@@ -1,0 +1,418 @@
+{
+  "source": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+  "checks": {
+    "success": 61,
+    "skipped": 1
+  },
+  "workflows": [
+    {
+      "conclusion": "skipped",
+      "databaseId": 38700362061,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Observability Strict",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362061"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361957,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval S1 Evidence Replay Gate",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361957"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362057,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Phase 5 PR Validation (External Metrics Gate)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362057"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361819,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Docker Publish Guard",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361819"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362085,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval Browser Verify",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362085"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362069,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "SSH Host-Key Pin Contract",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362069"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361899,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (history guard alignment)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361899"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361904,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-9 process attachments)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361904"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361857,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-11 W-1/W-2 org stamping \u2014 G-L11-0/1/2/3/10 + refusal precedence)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361857"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361758,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-11 \u00a710.3 gap-closer \u2014 Migration-B->W1W2 window)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361758"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362010,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Yuantus Pact Consumer",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362010"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361998,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (P3-3 form drafts)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361998"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361872,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (viewer-scoped canDecideCurrentNode)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361872"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361740,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Attendance Gate Contract Matrix",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361740"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362073,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (S1 instance readability)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362073"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361751,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval sequential mode real-DB acceptance (Lock-1 K6)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361751"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361941,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Multitable O2 Observation Kit (real DB)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361941"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361850,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "SQL Server smoke (real-wire)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361850"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361947,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Multitable O2 Observation Kit",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361947"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361859,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (S1 Migration B \u2014 org_id backfill)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361859"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362023,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (revoke terminal-status guard)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362023"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362006,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-4 F4-B designated fallback, gates B-1/B-2/legacy)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362006"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361775,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Multitable real-DB acceptance (/context read verdict)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361775"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361756,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Multitable recovery-schema drift (A-vs-B)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361756"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362036,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (projection participant key parity)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362036"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361949,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "SafetyGuard E2E",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361949"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361845,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Migration parity \u2014 production postgres image (advisory)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361845"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361738,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-4 P3-A F4-A/F4-C)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361738"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361931,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (list scope determined server-side)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361931"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362067,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 slice 1 \u2014 G-W2 PLM mirror)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362067"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361929,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (Lock-5 per-node operation policy)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361929"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362034,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (CSV export read-parity)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362034"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362105,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Migration Replay",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362105"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362335,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (S2 comments)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362335"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361956,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 G-W3 after-sales refund bridge)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361956"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362159,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (permission catalogue registration)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362159"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362122,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Stock-prep Browser Verify",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362122"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362062,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Batch2 Test Stabilization",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362062"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362004,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (P7-R1 coverage repair)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362004"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362284,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Observability E2E",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362284"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362016,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 W-4 attendance writer)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362016"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362030,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (legacy decision seat + node attribution)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362030"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362127,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "PLM BOM listener",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362127"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362015,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Approval real-DB acceptance (todo-center shared pending query)",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362015"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362143,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": ".github/workflows/approval-realdb-attachment-roundtrip-guard.yml",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362143"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361914,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Tasks real DB",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361914"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362208,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Integration Guard",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362208"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362040,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Attendance Web Guard",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362040"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700362037,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Web Tests",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700362037"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361994,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Stock-prep PowerShell 5.1 acceptance",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361994"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 38700361958,
+      "headSha": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+      "name": "Plugin System Tests",
+      "status": "completed",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38700361958"
+    }
+  ],
+  "documentationCommit": "checked separately in PR; do not recursively commit own SHA"
+}

@@ -56,3 +56,11 @@ A source owner changing A→B→A during the asynchronous baseline request could
 The source ABA tests failed before the fix (2 selected failures); account ABA tests failed before its extension (3 selected failures). The final standalone PostgreSQL suite passes 131/0/0. The paired real-HTTP Yuantus / PostgreSQL consumer run passes 132/0/0, including lost acknowledgment after receiver acceptance, recovery in a new Node process with stable delivery identity, and stale-generation cancellation after rebind. The receiver is a loopback idempotent test fixture. Its lease is accelerated for testing; this does not prove elapsed real lease timing. TypeScript passes. The paired driver reports providerExit=0, private credentials/database removed, provider port closed, sourceStable=true.
 
 This version fix covers source authority and local account activity transitions. It does not establish historical versioning for every role/field permission or transient remote Yuantus revocation; existing current-permission checks and the in-flight remote boundary still apply. Yuantus uses fixture SQLite business/identity data with actual HTTP authentication/services; the MetaSheet consumer uses private PostgreSQL 15. The local Yuantus interpreter has SQLAlchemy 2.0.51 rather than the application lock's 2.0.45. No production access or external customer webhook is exercised. Earlier CI greens cover the prior source only; this new source requires fresh exact-head CI.
+
+## Final source CI
+
+Source `d6cd2064d9800589d6a9fd8d79e9363b00b3aad6` now has 61 successful and one skipped checks. All 51 workflow runs returned by the exact-source query are completed successfully; the skipped check is not an executed test. The compact CI record preserves each run name, source SHA, conclusion and URL in `artifacts/plm-listener-review-20261015/ci-final-summary.json`.
+
+- [PLM BOM listener](https://github.com/zensgit/metasheet2/actions/runs/38700362127) — success.
+
+This document records the verified source. Its subsequent documentation commit is checked separately in the PR; another commit is not needed merely to cite its own SHA. Keep Draft and retain the local/fixture, production, enterprise and long-term acceptance boundaries above. Current CI success does not qualify unrelated later UI slices or complete the recovered window.
