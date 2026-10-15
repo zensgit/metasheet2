@@ -148,6 +148,17 @@
 # `tasks-labels.spec.ts` reads the status-aware empty line; `tasks-api-m4.spec.ts` gains the request
 # string with a status.
 #
+# R-45 step 1, 派发任务 from a multitable record (one new file, so twenty-six whole-file args):
+# `tasks-record-dispatch.spec.ts` added — the record drawer's 派发任务 entry and dialog: the entry's
+# gate (the top bar's tasks rule plus tasks:write, outside the focused shells), the prefill from the
+# primary field and person fields, the create body and the one source line written under
+# `expectedVersion`, the in-flight guard across close, reopen and record moves, the error messages,
+# and the identity binding (a dispatch sends nothing under any user or org other than the one the
+# page was set up under, and nothing at all once another has been seen; a sign-in elsewhere, a
+# sign-out or an org change clears the draft and refuses; dispatch state kept per identity). The
+# dialog itself lives under `src/multitable/`; its dispatch modules are under `src/tasks/`, which
+# this guard's paths already cover.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -218,7 +229,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Twenty-five whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Twenty-six whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
@@ -242,6 +253,7 @@ jobs:
             tests/tasks-nav-badge.spec.ts \
             tests/tasks-nav-feature-gate.spec.ts \
             tests/tasks-nav-relogin.spec.ts \
+            tests/tasks-record-dispatch.spec.ts \
             tests/tasks-routes.spec.ts \
             tests/tasks-settings-view.spec.ts \
             tests/tasks-status-filter.spec.ts \
