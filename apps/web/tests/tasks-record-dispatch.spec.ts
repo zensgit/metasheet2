@@ -988,7 +988,7 @@ describe('派发任务 dialog: success', () => {
 
 const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_me', iat: 2 })
 const TOKEN_B = fakeToken({ sub: 'usr_other' })
-const REFUSAL_ZH = '登录账号或组织已变化'
+const REFUSAL_ZH = '本页已停用派发任务'
 
 /** Another tab signs in: the shared storage changes and this tab is told nothing. */
 function signInElsewhere(token: string | null) {
