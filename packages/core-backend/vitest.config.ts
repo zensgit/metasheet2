@@ -1169,6 +1169,8 @@ export default defineConfig({
       'tests/integration/attendance-timezone-policy-write-routes.db.test.ts',
       'tests/integration/attendance-timezone-target-routes.db.test.ts',
       'tests/integration/attendance-timezone-read-context.db.test.ts',
+      'tests/integration/attendance-timezone-default-recovery.db.test.ts',
+      'tests/integration/attendance-timezone-legacy-repair.db.test.ts',
       'tests/integration/attendance-timezone-policy-preview.db.test.ts',
       'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
       'tests/integration/attendance-timezone-runtime.db.test.ts',

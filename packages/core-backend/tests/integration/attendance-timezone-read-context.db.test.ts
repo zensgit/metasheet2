@@ -73,6 +73,28 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
   beforeEach(() => punchClock.setOnlinePunchInstantForTests(instant(0, 0.5)))
   afterAll(async () => { console.info('readonly-existing-infrastructure-statements', { authRoleStatements, existingAuditStatements }); setBusinessTripInstantForTests(null); await live.stop() }, 60000)
 
+  it('missing organization default produces explicit 422 on all three reads with policy OFF; saving the default restores them', async () => {
+    expect((await live.pool.query('SELECT enabled FROM attendance_timezone_policies WHERE org_id=$1', [live.orgId])).rows).toEqual([])
+    await live.pool.query('DELETE FROM attendance_rules WHERE org_id=$1 AND is_default=true', [live.orgId])
+    const routes = ['/api/attendance/rules/me', '/api/attendance/timezone-context/me?workDate=' + day(), calendar(day())]
+    const before = await state()
+    for (const route of routes) {
+      const result = await get(route)
+      expect(result.status).toBe(422)
+      expect(result.body.error.code).toBe('ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED')
+    }
+    expect(await state()).toEqual(before)
+    // Use the administrator's actual write route; no fallback/default inserted by a GET.
+    const saved = await live.request('/api/attendance/rules/default', admin.token, {
+      orgId: live.orgId, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [0,1,2,3,4,5,6],
+    }, 'PUT')
+    expect(saved.status, saved.body.error?.code).toBe(200)
+    for (const route of routes) {
+      const result = await get(route)
+      expect(result.status, result.body.error?.code).toBe(200)
+    }
+    expect(await state()).toEqual(before)
+  })
   it('separates server current instant from the unchanged asOf scheduling date, OFF', async () => {
     const before = await state()
     const response = await get('/api/attendance/rules/me?asOf=' + day(2))

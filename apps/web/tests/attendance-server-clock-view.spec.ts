@@ -129,6 +129,37 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(calendarTodayDates()).toEqual(['2026-04-15'])
     expect(requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')).toHaveLength(1)
   })
+  it('explains calendar failure without exposing the server message and clears it on refresh', async () => {
+    const original = vi.mocked(apiFetch).getMockImplementation()!
+    let failed = true
+    vi.mocked(apiFetch).mockImplementation(async (...args) => {
+      if (String(args[0]).startsWith('/api/attendance/effective-calendar?') && failed) {
+        return response({ ok: false, error: { code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', message: 'PRIVATE_SENTINEL' } }, 422)
+      }
+      return original(...args)
+    })
+    await mount()
+    expect(container.querySelector('[data-calendar-timezone-error]')?.textContent)
+      .toContain('The organization has no default attendance rule.')
+    expect(container.textContent).not.toContain('PRIVATE_SENTINEL')
+    failed = false
+    button('Refresh').click(); await flush()
+    expect(container.querySelector('[data-calendar-timezone-error]')).toBeNull()
+  })
+  it('shows an actionable configuration error instead of promising punch availability, then recovers', async () => {
+    rulesReply = async () => response({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', message: 'PRIVATE_SENTINEL',
+    } }, 422)
+    await mount()
+    expect(container.textContent).toContain('The organization has no default attendance rule.')
+    expect(container.textContent).not.toContain('PRIVATE_SENTINEL')
+    expect(container.textContent).not.toContain('You can still punch')
+    expect(time()).toBe('Server time unavailable')
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click(); await flush()
+    expect(container.textContent).not.toContain('The organization has no default attendance rule.')
+    expect(time()).toBe('10:00:00')
+  })
   it.each([undefined, 'invalid'])('missing/malformed server sample %s stays unavailable, ordinary punch still submits without timezone/time', async sample => {
     rulesReply = async url => response({ ok: true, data: rules(url, { resolvedAt: sample }) })
     await mount()

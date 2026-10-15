@@ -122,22 +122,23 @@ test('timezone configuration tables have explicit buckets without a prefix-wide 
   )
 })
 
-test('ACP canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
+test('reviewed canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
   const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
   const original = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
   assert.equal(original.length, 2)
   const reviewedPaths = [
     relPath,
+    'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts',
     'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
     'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
     'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
   ]
   const raw = reviewedPaths.flatMap(file => scanFileForDmlSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
     .filter(site => TABLE_BUCKETS[site.table] === 'w4_canonical')
-  assert.equal(raw.length, 6)
-  assert.equal(W4_EXACT_CANONICAL_SITES.length, 6)
+  assert.equal(raw.length, 7)
+  assert.equal(W4_EXACT_CANONICAL_SITES.length, 7)
   const positive = classifyCensus(raw)
-  assert.equal(positive.canonicalSites.length, 6)
+  assert.equal(positive.canonicalSites.length, 7)
   assert.deepEqual(positive.exactCanonicalCountDrift, [])
   assert.deepEqual(positive.outsideBoundarySites, [])
   for (const site of raw) {
@@ -177,6 +178,94 @@ test('ACP read decisions require each reviewed symbol and exact count', () => {
     }
     assert.ok(classify([...sites, sites[0]], decisions).countDrift.length > 0)
   }
+})
+
+test('operator archive repair grants one companion append and refuses a neighboring writer', () => {
+  const relPath = 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts'
+  assert.deepEqual(W4_EXACT_CANONICAL_SITES.filter(site => site.relPath === relPath), [{
+    relPath, enclosingSymbol: 'runRepair', table: 'attendance_timezone_context_companions', verb: 'insert', count: 1,
+  }])
+  const raw = [...new Set(W4_EXACT_CANONICAL_SITES.map(site => site.relPath))]
+    .flatMap(file => scanFileForDmlSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
+    .filter(site => TABLE_BUCKETS[site.table] === 'w4_canonical')
+  assert.equal(raw.length, W4_EXACT_CANONICAL_SITES.length)
+  assert.deepEqual(classifyCensus(raw).outsideBoundarySites, [])
+  assert.deepEqual(classifyCensus(raw).exactCanonicalCountDrift, [])
+  const neighbor = scanFileForDmlSites(relPath,
+    'async function neighboringRepairWriter(db) { await db.query("INSERT INTO attendance_timezone_context_companions (record_id) VALUES ($1)") }')
+  assert.equal(neighbor.length, 1)
+  const refused = classifyCensus([...raw, ...neighbor])
+  assert.equal(refused.outsideBoundarySites.length, 1)
+  assert.equal(refused.outsideBoundarySites[0].enclosingSymbol, 'neighboringRepairWriter')
+  assert.deepEqual(refused.exactCanonicalCountDrift, [])
+  const duplicate = scanFileForDmlSites(relPath,
+    'async function runRepair(db) { await db.query("INSERT INTO attendance_timezone_context_companions (record_id) VALUES ($1)") }')
+  assert.equal(duplicate.length, 1)
+  const extraKnownAppend = classifyCensus([...raw, ...duplicate])
+  assert.equal(extraKnownAppend.exactCanonicalCountDrift.length, 1)
+  assert.equal(extraKnownAppend.exactCanonicalCountDrift[0].actual, 2)
+  assert.equal(extraKnownAppend.outsideBoundarySites.length, 2)
+})
+
+test('repair and missing-default reads bind exact reviewed symbols and counts, never neighboring SELECTs', () => {
+  const expected = [
+    { relPath: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', enclosingSymbol: 'runRepair', count: 1, role: 'reviewed_legacy_repair_row_cas' },
+    { relPath: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', enclosingSymbol: 'scan', count: 2, role: 'values_free_upgrade_preflight' },
+    { relPath: 'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', enclosingSymbol: 'readEligibleLegacyRepair', count: 1, role: 'legacy_repair_live_continuation_precondition' },
+    { relPath: 'plugins/plugin-attendance/lib/attendance-timezone-default-recovery.cjs', enclosingSymbol: 'query', count: 1, role: 'missing_default_recovery_open_freeze_precondition' },
+  ]
+  const matches = site => expected.some(entry => entry.relPath === site.relPath && entry.enclosingSymbol === site.enclosingSymbol)
+  const decisions = ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS.filter(matches)
+  assert.deepEqual(decisions, expected)
+  const sites = [...new Set(expected.map(entry => entry.relPath))]
+    .flatMap(file => scanFileForAttendanceRecordReadSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
+    .filter(matches)
+  assert.equal(sites.length, 5)
+  const accepted = classifyAttendanceRecordReadSites(sites, decisions)
+  assert.deepEqual(accepted.unclassified, [])
+  assert.deepEqual(accepted.countDrift, [])
+  assert.deepEqual(accepted.stale, [])
+  for (const decision of decisions) {
+    const subset = sites.filter(site => site.relPath === decision.relPath && site.enclosingSymbol === decision.enclosingSymbol)
+    assert.equal(subset.length, decision.count)
+    assert.equal(classifyAttendanceRecordReadSites(sites, decisions.filter(entry => entry !== decision)).unclassified.length, decision.count)
+    const extraKnownRead = classifyAttendanceRecordReadSites([...sites, subset[0]], decisions)
+    assert.deepEqual(extraKnownRead.countDrift, [{ ...decision, actual: decision.count + 1 }])
+    const neighbor = scanFileForAttendanceRecordReadSites(decision.relPath,
+      'async function neighboringRecoveryRead(db) { return db.query("SELECT id FROM attendance_records") }')
+    assert.equal(neighbor.length, 1)
+    const refused = classifyAttendanceRecordReadSites([...sites, ...neighbor], decisions)
+    assert.equal(refused.unclassified.length, 1)
+    assert.equal(refused.unclassified[0].enclosingSymbol, 'neighboringRecoveryRead')
+    assert.deepEqual(refused.countDrift, [])
+    const neighboringPath = classifyAttendanceRecordReadSites([{ ...subset[0], relPath: decision.relPath + '.neighbor' }])
+    assert.equal(neighboringPath.unclassified.length, 1)
+  }
+})
+
+test('upgrade V2 candidate census is one historical read and rejects neighboring calculation SELECTs', () => {
+  const relPath = 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts'
+  const sites = scanFileForAttendanceCalculationReadSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
+  const decisions = ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS.filter(entry => entry.relPath === relPath)
+  assert.deepEqual(decisions, [{ relPath, enclosingSymbol: 'scan', table: 'attendance_record_calculations', count: 1,
+    posture: 'history', role: 'upgrade_preflight_v2_candidate_review', requiredPredicateFingerprint: null }])
+  assert.equal(sites.length, 1)
+  const accepted = classifyAttendanceCalculationReadSites(sites, decisions)
+  assert.deepEqual(accepted.unclassified, [])
+  assert.deepEqual(accepted.countDrift, [])
+  assert.deepEqual(accepted.stale, [])
+  assert.deepEqual(accepted.predicateDrift, [])
+  assert.equal(accepted.classifiedSites[0].posture, 'history')
+  assert.equal(classifyAttendanceCalculationReadSites(sites, []).unclassified.length, 1)
+  assert.deepEqual(classifyAttendanceCalculationReadSites([...sites, ...sites], decisions).countDrift,
+    [{ ...decisions[0], actual: 2 }])
+  const neighbor = scanFileForAttendanceCalculationReadSites(relPath,
+    'async function neighboringPreflightRead(db) { return db.query("SELECT id FROM attendance_record_calculations") }')
+  assert.equal(neighbor.length, 1)
+  const refused = classifyAttendanceCalculationReadSites([...sites, ...neighbor], decisions)
+  assert.equal(refused.unclassified.length, 1)
+  assert.equal(refused.unclassified[0].enclosingSymbol, 'neighboringPreflightRead')
+  assert.deepEqual(refused.countDrift, [])
 })
 
 test('scheduled existing-parent read is one exact base-table precondition and does not admit neighboring readers', () => {

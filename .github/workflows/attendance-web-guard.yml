@@ -315,6 +315,7 @@ on:
       - 'apps/web/src/views/attendance/AttendanceBusinessTripRequestCard.vue'
       - 'apps/web/src/views/attendance/attendanceWallTime.ts'
       - 'apps/web/src/views/attendance/attendanceTimezoneTarget.ts'
+      - 'apps/web/src/views/attendance/attendanceTimezoneError.ts'
       - 'apps/web/src/views/attendance/attendanceCurrentTimeContext.ts'
       - 'apps/web/src/views/attendance/attendanceDayTimeContext.ts'
       - 'apps/web/src/views/attendance/useAttendanceRequestTimezone.ts'
@@ -490,6 +491,7 @@ jobs:
               apps/web/src/views/attendance/AttendanceTimezonePolicyPanel.vue|\
               apps/web/src/views/attendance/AttendanceBusinessTripRequestCard.vue|\
               apps/web/src/views/attendance/attendanceWallTime.ts|\
+              apps/web/src/views/attendance/attendanceTimezoneError.ts|\
               apps/web/src/views/attendance/attendanceTimezoneTarget.ts|\
               apps/web/src/views/attendance/attendanceCurrentTimeContext.ts|\
               apps/web/src/views/attendance/attendanceDayTimeContext.ts|\

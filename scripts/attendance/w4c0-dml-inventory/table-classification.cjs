@@ -349,8 +349,13 @@ function classifyTable(tableName) {
   return TABLE_BUCKETS[tableName] || null
 }
 
-// ACP grants only these reviewed writes, not a new canonical path prefix.
+// Grant only these reviewed writes, not a new canonical path prefix.
 const W4_EXACT_CANONICAL_SITES = Object.freeze([
+  // Operator-reviewed archive repair appends one immutable companion under
+  // explicit source/plan approval, rollout/runtime locks and original-row CAS.
+  // Neither this file nor neighboring symbols acquire a broader writer grant.
+  Object.freeze({ relPath: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts',
+    enclosingSymbol: 'runRepair', table: 'attendance_timezone_context_companions', verb: 'insert', count: 1 }),
   Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
     enclosingSymbol: 'bindFirst', table: 'attendance_timezone_context_companions', verb: 'insert', count: 1 }),
   Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',

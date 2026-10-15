@@ -3,6 +3,7 @@ import { effectScope, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { useAttendanceRequestTimezone } from '../src/views/attendance/useAttendanceRequestTimezone'
+import { attendanceTimezoneErrorMessage } from '../src/views/attendance/attendanceTimezoneError'
 import type { apiFetch } from '../src/utils/api'
 
 const dto = (workDate = '2026-01-07', timezone = 'Asia/Singapore') => ({
@@ -41,6 +42,29 @@ function fixture(send: typeof apiFetch) {
 }
 
 describe('related document trusted target timezone state', () => {
+  it('retains the known failure code, blocks submission and clears it on recovery or session change', async () => {
+    const send = vi.fn().mockResolvedValueOnce(response({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', message: 'PRIVATE_SENTINEL',
+    } }, 422)).mockImplementation(async () => response(dto()))
+    const f = fixture(send); await settle()
+    expect(f.state.errorCode.value).toBe('ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED')
+    expect(f.state.ready.value).toBe(false)
+    expect(f.state.times()).toBeNull()
+    expect(attendanceTimezoneErrorMessage(f.state.errorCode.value, (_, zh) => zh))
+      .toBe('本组织尚未配置默认考勤规则。请考勤管理员检查默认规则和升级前置条件；仅刷新不能修复缺失配置。')
+    await f.state.refresh()
+    expect(f.state.errorCode.value).toBeNull()
+    expect(f.state.failed.value).toBe(false)
+    expect(f.state.ready.value).toBe(true)
+    f.changeIdentity()
+    expect(f.state.errorCode.value).toBeNull()
+    expect(f.state.times()).toBeNull()
+    f.scope.stop()
+  })
+  it.each([null, {}, 'PRIVATE_SENTINEL', 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED PRIVATE_SENTINEL'])('never renders unknown error values: %j', code => {
+    expect(attendanceTimezoneErrorMessage(code, en => en)).toBeNull()
+  })
+
   it('accepts the complete HTTP envelope and converts both walls to target UTC with its fingerprint', async () => {
     const send = vi.fn(async () => response(dto()))
     const f = fixture(send)
@@ -145,6 +169,12 @@ describe('related document trusted target timezone state', () => {
     f.scope.stop();pending.resolve(response(dto()));await settle()
     expect(f.state.target.value).toBeNull()
     expect(f.state.times()).toBeNull()
+  })
+  it.each([
+    ['ATTENDANCE_TIMEZONE_DEFAULT_MISSING', '已有考勤配置需要升级检查，暂时无法补建默认考勤规则。请管理员检查升级前置条件。'],
+    ['ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED', '该日期已有历史考勤记录，但缺少所需的冻结上下文。请管理员处理历史数据升级；刷新不能解决此问题。'],
+  ])('explains the persistent upgrade blocker %s without suggesting a refresh repair', (code, message) => {
+    expect(attendanceTimezoneErrorMessage(code, (_en, zh) => zh)).toBe(message)
   })
   it('does not guess a target after HTTP or network failure', async () => {
     const f = fixture(vi.fn(async () => response({ ok: false, error: { code: 'private-value' } }, 409)))

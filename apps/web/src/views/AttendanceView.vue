@@ -269,6 +269,7 @@
                 :target="requestTimezone.target.value"
                 :loading="requestTimezone.loading.value"
                 :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
                 :selected="requestTimezone.selected"
                 :resolved="requestTimezone.resolved.value"
                 @refresh="requestTimezone.refresh"
@@ -293,6 +294,7 @@
                 :target="requestTimezone.target.value"
                 :loading="requestTimezone.loading.value"
                 :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
                 :selected="requestTimezone.selected"
                 :resolved="requestTimezone.resolved.value"
                 @refresh="requestTimezone.refresh"
@@ -316,6 +318,7 @@
                 :target="requestTimezone.target.value"
                 :loading="requestTimezone.loading.value"
                 :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
                 :selected="requestTimezone.selected"
                 :resolved="requestTimezone.resolved.value"
                 @refresh="requestTimezone.refresh"
@@ -563,6 +566,7 @@
             </div>
           </div>
           <small class="attendance__field-hint">{{ calendarTimezoneContextHint }}</small>
+          <p v-if="calendarTimezoneError" role="status" data-calendar-timezone-error>{{ calendarTimezoneError }}</p>
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
           </div>
@@ -648,6 +652,7 @@
             :target="requestTimezone.target.value"
             :loading="requestTimezone.loading.value"
             :failed="requestTimezone.failed.value"
+            :error-code="requestTimezone.errorCode.value"
             :selected="requestTimezone.selected"
             :resolved="requestTimezone.resolved.value"
             @refresh="requestTimezone.refresh"
@@ -10451,6 +10456,7 @@ import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTe
 // an ops env gate. Pure modules + one display component; no behaviour change (see the module headers).
 import AttendanceScheduledFeatureStatus from './attendance/AttendanceScheduledFeatureStatus.vue'
 import AttendanceTimezonePolicyPanel from './attendance/AttendanceTimezonePolicyPanel.vue'
+import { attendanceTimezoneErrorMessage } from './attendance/attendanceTimezoneError'
 import AttendanceBusinessTripRequestCard from './attendance/AttendanceBusinessTripRequestCard.vue'
 import AttendanceRequestTimezoneFields from './attendance/AttendanceRequestTimezoneFields.vue'
 import { useAttendanceRequestTimezone } from './attendance/useAttendanceRequestTimezone'
@@ -12827,6 +12833,7 @@ let calendarEffectiveCacheKey: string | null = null
 // counter advanced (rapid month/user switches) so older responses can never
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
+const calendarTimezoneError = ref<string | null>(null)
 const auth = useAuth()
 const attendanceSessionGuard = provideAttendanceSessionGuard(
   String(typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders()['x-tenant-id'] || '' : ''),
@@ -16597,6 +16604,7 @@ async function loadEffectiveCalendarForOverview(
   if (!options?.force && calendarEffectiveCacheKey === cacheKey) return
   calendarEffectiveCacheKey = cacheKey
   const loadVersion = ++calendarEffectiveLoadVersion
+  calendarTimezoneError.value = null
   calendarDayTimeContexts.value = new Map()
   try {
     const result = await fetchEffectiveCalendar({
@@ -16625,9 +16633,9 @@ async function loadEffectiveCalendarForOverview(
       calendarEffectiveChips.value = []
       calendarDayTimeContexts.value = new Map()
       calendarEffectiveCacheKey = null
-    }
-    if (error instanceof EffectiveCalendarFetchError) {
-      console.debug('[AttendanceView] effective-calendar load failed', error.status, error.message)
+      calendarTimezoneError.value = attendanceTimezoneErrorMessage(
+        error instanceof EffectiveCalendarFetchError ? error.code : null, tr,
+      ) ?? tr('Attendance calendar unavailable. Refresh to try again.', '考勤日历不可用，请刷新重试。')
     }
   }
 }
@@ -26331,6 +26339,8 @@ function invalidateServerClock(): void {
   heroClockNow.value = null
   selfRulesSnapshot.value = null
   selfRulesLoading.value = false
+  selfRulesError.value = null
+  calendarTimezoneError.value = null
 }
 
 async function loadSelfAttendanceRules(background = false): Promise<void> {
@@ -26347,6 +26357,7 @@ async function loadSelfAttendanceRules(background = false): Promise<void> {
   selfRulesLoading.value = true
   selfRulesError.value = null
   let asOf = initialDate
+  let timezoneFailure: string | null = null
   try {
     for (let leg = 0; leg < 2; leg += 1) {
       const sample = serverClock.beginSample()
@@ -26359,6 +26370,7 @@ async function loadSelfAttendanceRules(background = false): Promise<void> {
       const data = await response.json().catch(() => null)
       if (!current()) return
       if (!response.ok || !data?.ok) {
+        timezoneFailure = attendanceTimezoneErrorMessage(data?.error?.code, tr)
         serverClock.fail(sample)
         throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
       }
@@ -26385,7 +26397,7 @@ async function loadSelfAttendanceRules(background = false): Promise<void> {
     if (!(error instanceof Error) || error.message !== 'ATTENDANCE_RULES_DATE_UNAVAILABLE') serverClock.invalidate()
     updateHeroClock()
     selfRulesSnapshot.value = null
-    selfRulesError.value = tr('Server time or today’s attendance rules unavailable. You can still punch.', '服务器时间或今日考勤规则不可用，仍可打卡。')
+    selfRulesError.value = timezoneFailure ?? tr('Server time or today’s attendance rules unavailable. Refresh to try again; punch availability must be confirmed by the server.', '服务器时间或今日考勤规则不可用，请刷新重试；能否打卡需由服务器确认。')
   } finally {
     if (current()) selfRulesLoading.value = false
   }

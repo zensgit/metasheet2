@@ -17,6 +17,10 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 }
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
+  // Org-scoped readonly upgrade preflight identifies old V2 candidates through
+  // the parent's calculation pointer. Labels remain REVIEW_REQUIRED evidence,
+  // never validated/current authoritative output or a public calculation list.
+  entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'scan', 'attendance_record_calculations', 1, 'history', 'upgrade_preflight_v2_candidate_review'),
   // Exact current-pointer FrozenV2 continuation evidence; the active parent and organization are required.
   entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 'attendance_record_calculations', 1, 'history', 'original_frozen_v2_continuation_precondition', 'visibility_state=active'),
   // Bind the exact same-transaction calculation to the new companion; never derive mutable policy.

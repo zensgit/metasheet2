@@ -161,6 +161,9 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
 
+      - name: Attendance legacy repair package contracts
+        run: node --test scripts/ops/attendance-onprem-package-verify-migrations.test.mjs
+
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
       - name: W0 exact-anchor L6/L7 CI wiring contract
@@ -810,6 +813,9 @@ jobs:
             tests/unit/attendance-timezone-policy-routes.test.ts \
             tests/unit/attendance-timezone-target-routes.test.ts \
             tests/unit/attendance-timezone-read-context.test.ts \
+            tests/unit/attendance-timezone-default-recovery.test.ts \
+            tests/unit/attendance-timezone-legacy-repair.test.ts \
+            tests/unit/attendance-timezone-legacy-preflight.test.ts \
             tests/unit/attendance-timezone-request-instants.test.ts \
             tests/unit/attendance-business-trip.test.ts \
             tests/unit/attendance-calendar-settings-writer.test.ts \
@@ -2088,6 +2094,8 @@ jobs:
             tests/integration/attendance-timezone-policy-write-routes.db.test.ts \
             tests/integration/attendance-timezone-target-routes.db.test.ts \
             tests/integration/attendance-timezone-read-context.db.test.ts \
+            tests/integration/attendance-timezone-default-recovery.db.test.ts \
+            tests/integration/attendance-timezone-legacy-repair.db.test.ts \
             tests/integration/attendance-timezone-policy-preview.db.test.ts \
             tests/integration/attendance-timezone-runtime-locks.db.test.ts \
             tests/integration/attendance-timezone-runtime.db.test.ts \

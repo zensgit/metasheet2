@@ -34609,8 +34609,15 @@ module.exports = {
       await attendanceW4SegmentCalculationPort.acquireTimezoneRuntimeLocks(trx,{
         orgId:identity.orgId,userId:String(row.user_id),mode:'shared',
       })
-      const target = normalizeMetadata(row.metadata).timezoneContextV1
-      if (target === undefined) return
+      let target = normalizeMetadata(row.metadata).timezoneContextV1
+      if (target === undefined) {
+        // Old pending requests do not carry a timezone token. An explicitly
+        // repaired record supplies authority without rewriting that request.
+        target = await attendanceTimezoneRuntime.readLegacyRepairRequestTarget(trx,{
+          orgId:identity.orgId,userId:String(row.user_id),workDate:row.work_date,
+        })
+        if (!target) return
+      }
       let timezone
       try { timezone = attendanceW4SegmentCalculationPort.validateIanaTimezone(target.timezone) }
       catch (_) { throw new HttpError(409,'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID','ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID') }
@@ -39943,7 +39950,11 @@ module.exports = {
               const frozenAttribution = parseFrozenWorkDateAttribution(rawFrozenAttribution)
               const { adapters: correctionAdapters } = createPluginAttendanceWorkDateResolver(trx,frozenTarget
                 ? {effectiveTimezone:frozenTarget.timezone,strictSources:true} : {})
-              const correctionResolution = await correctionAdapters.correction.resolveCorrectionWorkDate({
+              const frozenFrame = attendanceTimezoneRuntime.requestTargetFactsFor(trx)?.frame
+              const correctionResolution = frozenTarget && frozenFrame?.identity.source === 'legacy_repair'
+                && frozenFrame.orgId === orgId && frozenFrame.userId === String(requestRow.user_id)
+                && frozenFrame.workDate === normalizeDateOnlyValue(requestRow.work_date)
+                ? frozenFrame.resolution : await correctionAdapters.correction.resolveCorrectionWorkDate({
                 orgId,
                 userId: requestRow.user_id,
                 occurredAt: updateFirstInAt || updateLastOutAt || null,
@@ -42451,8 +42462,11 @@ module.exports = {
         const orgId = actorAccess.orgId
         try {
           const rule = await db.transaction(async (trx) => {
-            const verifyTripChange = await prepareAttendanceTimezoneSourceChange(trx,{orgId,userIds:null})
+            await lockAttendanceTimezoneOrg(pluginQueryAdapter(trx),orgId)
             await assertAttendanceTimezoneManage(trx,{orgId,actorId:actorAccess.userId})
+            const verifyTripChange = await prepareAttendanceTimezoneSourceChange(trx,{
+              orgId,userIds:null,mutation:{kind:'default_rule_create',timezone:parsed.data.timezone},
+            })
             await trx.query('UPDATE attendance_rules SET is_default = false WHERE is_default = true AND org_id = $1', [orgId])
 
             const rows = await trx.query(

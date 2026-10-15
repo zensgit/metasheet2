@@ -254,21 +254,45 @@ function createAttendanceTimezoneRuntime({
   }
   const frames = new WeakMap()
   const companion = require('./attendance-timezone-companion-store.cjs').createAttendanceTimezoneCompanionStore({ HttpError,validateFrozenContext,validateFrozenAttribution })
+  async function assertLegacyRepairPosture(trx, frame) {
+    if (frame?.identity?.source !== 'legacy_repair') return
+    // An unresolved historical rule is not an issued segment-calculation context.
+    // Check persisted posture even when the environment currently masks it.
+    const rows = await trx.query('SELECT state,scope FROM attendance_calculation_rollout_state WHERE org_id=$1',[frame.orgId])
+    if (rows.length > 1 || (rows.length === 1
+      && (rows[0].state !== 'legacy' || rows[0].scope !== 'synthetic_staging'))) {
+      fail('ATTENDANCE_TIMEZONE_REPAIR_POSTURE_UNSUPPORTED',409)
+    }
+  }
+  async function readLegacyRepairRequestTarget(trx, input) {
+    const existing = await companion.readForWorkDate(trx,input)
+    if (existing?.frame.identity.source !== 'legacy_repair') return null
+    return readTargetTimezoneContext(trx,input)
+  }
   async function prepareLivePunch(trx, input) {
     const occurredAt = new Date(input.occurredAtResolved ?? input.occurredAt)
     const { orgId, userId, eventType } = input
     await acquireRuntimeLocks(trx, { orgId, userId, mode: input.runtimeLockMode ?? 'shared' })
     try {
+      const repaired = await companion.readEligibleLegacyRepair(trx,{orgId,userId,occurredAt,eventType})
       if (eventType === 'check_out') {
         const existing = await companion.readEligibleOpen(trx,{orgId,userId,occurredAt})
         const legacy = await companion.readLegacyFrozenV2(trx,{orgId,userId,occurredAt})
-        if (existing && legacy) fail('ATTENDANCE_TIMEZONE_OPEN_CONTEXT_AMBIGUOUS',409)
-        const frozen = existing ?? legacy?.frame
+        if ((existing && legacy) || (repaired && legacy)
+          || (repaired && existing && repaired.fingerprint !== existing.fingerprint)) fail('ATTENDANCE_TIMEZONE_OPEN_CONTEXT_AMBIGUOUS',409)
+        const frozen = existing ?? legacy?.frame ?? repaired
         if (frozen) {
+          await assertLegacyRepairPosture(trx,frozen)
           assertClientTimezone(input.clientTimezone,frozen.timezone)
           frames.set(trx,frozen)
           return frozen
         }
+      }
+      if (repaired) {
+        await assertLegacyRepairPosture(trx,repaired)
+        assertClientTimezone(input.clientTimezone,repaired.timezone)
+        frames.set(trx,repaired)
+        return repaired
       }
       const load = loaderFor(trx)
       const contexts = new Map()
@@ -331,6 +355,15 @@ function createAttendanceTimezoneRuntime({
       const workDate = resolution.kind === 'resolved' ? resolution.workDate : natural[0].workDate
       if (built.filter(candidate => candidate.workDate === workDate).length > 1) {
         fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT', 409)
+      }
+      // A closed repair is reusable only after ordinary attribution selected its
+      // date. Its old tail must never steal the next day's new check-in.
+      const prior = await companion.readForWorkDate(trx,{orgId,userId,workDate})
+      if (prior?.frame.identity.source === 'legacy_repair') {
+        await assertLegacyRepairPosture(trx,prior.frame)
+        assertClientTimezone(input.clientTimezone,prior.frame.timezone)
+        frames.set(trx,prior.frame)
+        return prior.frame
       }
       const timezoneContext = await contextAt(workDate)
       const timezone = timezoneContext.timezone
@@ -637,7 +670,10 @@ function createAttendanceTimezoneRuntime({
           rule:frame.context.rule,isWorkingDay:frame.context.isWorkingDay === true,
         }
       }
-      if (existing) return target(existing.frame,existing.recordId,true)
+      if (existing) {
+        await assertLegacyRepairPosture(trx,existing.frame)
+        return target(existing.frame,existing.recordId,true)
+      }
       const legacy = batch ? batch.legacy.get(workDate) : await companion.readLegacyFrozenV2(trx,{orgId,userId,workDate})
       if (legacy) return target(legacy.frame,legacy.recordId,true)
       const prior = batch ? (batch.priorDates.has(workDate) ? [{}] : []) : await trx.query(`SELECT id FROM attendance_records
@@ -848,6 +884,21 @@ function createAttendanceTimezoneRuntime({
     }
     const defaults = await trx.query('SELECT id FROM attendance_rules WHERE org_id=$1 AND is_default=true',[orgId])
     if (defaults.length === 0) {
+      if (mutation?.kind === 'default_rule_create') {
+        return require('./attendance-timezone-default-recovery.cjs').prepareAttendanceTimezoneDefaultRecovery(trx,{
+          orgId,now,timezone:mutation.timezone,HttpError,
+          readFrozenContext:async (db,input) => await companion.readForWorkDate(db,input)
+            ?? await companion.readLegacyFrozenV2(db,input),
+          readPublishedCandidates:loadPublishedCandidates,fingerprint:canonicalContextFingerprint,
+          readCurrentSemantics:async (db,{orgId,userId,workDate,now}) => (await readPublishedTimezoneWindows(db,{
+            orgId,userId,from:now,to:new Date(now.getTime()+1),targetWorkDates:[workDate],
+          })).map(window => ({
+            workDate:window.workDate,shiftId:window.shiftId ?? null,assignmentId:window.assignmentId ?? null,
+            source:window.source,startAt:window.startAt.toISOString(),endAt:window.endAt.toISOString(),
+            timezone:window.timezone,rule:canonicalRuleProfile(window.rule),calculationDefinition:window.calculationDefinition,
+          })),
+        })
+      }
       const existing = await trx.query(`SELECT
         EXISTS(SELECT 1 FROM attendance_shift_assignments WHERE org_id=$1 AND is_active=true) OR
         EXISTS(SELECT 1 FROM attendance_rotation_assignments WHERE org_id=$1 AND is_active=true) OR
@@ -973,7 +1024,7 @@ function createAttendanceTimezoneRuntime({
     return async () => protectedSource(verify)
   }
   const readFrozenTimezoneWindows = require('./attendance-timezone-frozen-windows.cjs').createAttendanceTimezoneFrozenWindowReader({ HttpError })
-  return { acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readRequestTimezoneContext, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
+  return { readLegacyRepairRequestTarget, acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readRequestTimezoneContext, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
 }
 
 function canonicalTimezoneProvenance(context) {

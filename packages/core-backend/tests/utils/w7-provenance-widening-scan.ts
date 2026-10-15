@@ -667,6 +667,11 @@ export function diffProvenanceWideningV1(
  * edits above a site do not churn this list.
  */
 export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Object.freeze([
+  // Reviewed ordinary-record repair and its preflight admit only legacy_untracked.
+  // Both w4 and w4_group remain outside that repair scope; neither is downgraded
+  // or treated as an ordinary legacy candidate. Keep the exact legacy-only tests.
+  { file: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', text: "if (record.visibility_state !== 'active' || record.projection_owner !== 'legacy_untracked'", rule: 'legacy_polarity' },
+  { file: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', text: "} else if (row.current_calculation_id === null && row.projection_owner === 'legacy_untracked' && ordinaryLegacyMeta(row.meta)) {", rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', text: 'if (isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner)) {', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/db/types.ts', text: 'projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'audit\',', rule: 'closed_set_member_list' },

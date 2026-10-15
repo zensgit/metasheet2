@@ -13298,7 +13298,7 @@ attendanceIntegrationDescribe(
       })
 
       // Normalizer (design-lock §2 / the #1776 enum-strict rule) — reject BEFORE any persistence:
-      const ordered = { workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10 }
+      const ordered = { timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10 }
       expect((await putRule({ ...ordered, severeLateThresholdMinutes: 50, absenceLateThresholdMinutes: 20 })).status).toBe(400) // absence < severe
       expect((await putRule({ lateGraceMinutes: 30, severeLateThresholdMinutes: 20, absenceLateThresholdMinutes: 60 })).status).toBe(400) // severe < grace
       expect((await putRule({ ...ordered, severeLateThresholdMinutes: 15.5 })).status).toBe(400) // non-integer (Zod)

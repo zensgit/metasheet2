@@ -17,6 +17,7 @@ export function useAttendanceRequestTimezone(input: {
   const target = ref<AttendanceTimezoneTarget | null>(null)
   const loading = ref(false)
   const failed = ref(false)
+  const errorCode = ref<unknown>(null)
   const selected = reactive({ inAt: '', outAt: '' })
   let generation = 0
   async function refresh(): Promise<void> {
@@ -25,6 +26,7 @@ export function useAttendanceRequestTimezone(input: {
     selected.inAt = ''
     selected.outAt = ''
     failed.value = false
+    errorCode.value = null
     loading.value = false
     const workDate = input.workDate()
     const userId = input.userId()
@@ -36,7 +38,11 @@ export function useAttendanceRequestTimezone(input: {
       if (current !== generation || !input.guard.isCurrent()) return
       const parsed = response.ok && body?.ok === true
         ? parseAttendanceTimezoneTarget(body, { orgId: input.guard.orgId, userId, workDate }) : null
-      if (!parsed) { failed.value = true; return }
+      if (!parsed) {
+        failed.value = true
+        errorCode.value = !response.ok ? body?.error?.code : null
+        return
+      }
       target.value = parsed
     } catch {
       if (current === generation && input.guard.isCurrent()) failed.value = true
@@ -50,6 +56,7 @@ export function useAttendanceRequestTimezone(input: {
     target.value = null
     loading.value = false
     failed.value = false
+    errorCode.value = null
     selected.inAt = ''
     selected.outAt = ''
   }, { flush: 'sync' })
@@ -74,5 +81,5 @@ export function useAttendanceRequestTimezone(input: {
       requestedInAt, requestedOutAt, expectedTimezoneContextFingerprint: target.value.contextFingerprint,
     }
   }
-  return { target, loading, failed, selected, resolved, ready, refresh, times }
+  return { target, loading, failed, errorCode, selected, resolved, ready, refresh, times }
 }
