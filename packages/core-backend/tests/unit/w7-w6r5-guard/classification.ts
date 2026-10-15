@@ -74,6 +74,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/approval-change-leave-reversal.ts',
   'packages/core-backend/src/attendance/approval-change-legacy-repair.ts',
   'packages/core-backend/src/attendance/approval-change-policy.ts',
+  'packages/core-backend/src/attendance/approval-change-revision-swap.ts',
   'packages/core-backend/src/attendance/approval-change-revision-writer.ts',
   'packages/core-backend/src/attendance/approval-change-round-close.ts',
   'packages/core-backend/src/attendance/approval-change-settled-period.ts',

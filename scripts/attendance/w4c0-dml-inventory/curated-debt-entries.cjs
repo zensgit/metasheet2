@@ -740,6 +740,19 @@ const CURATED_DEBT_ENTRIES = [
       'packages/core-backend/src/attendance/approval-change-day-recalc.ts::applyLegacyLeaveDayProjectionV1::attendance_records::update',
     ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
   },
+  {
+    id: 'X12',
+    title: 'Approval-change v3.1 revision swap creates the successor engine and cancels the predecessor engine.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: true,
+    canonicalizedBy: 'approval-change-v31',
+    residualClassification: 'non_result_shared_hook_ledger',
+    residualEvidence: 'revision swap writes approval_instances only; it does not write attendance_records or copy seats',
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-revision-swap.ts::applyRevisionContentSwapV1::approval_instances::insert',
+      'packages/core-backend/src/attendance/approval-change-revision-swap.ts::applyRevisionContentSwapV1::approval_instances::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
 
 ]
 

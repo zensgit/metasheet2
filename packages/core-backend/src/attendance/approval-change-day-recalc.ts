@@ -179,8 +179,7 @@ export async function applyLegacyLeaveDayProjectionV1(
             early_leave_minutes = 0,
             updated_at = now()
       WHERE org_id = $2 AND user_id = $3 AND work_date = $4::date
-        AND visibility_state = 'active'
-        AND projection_owner = 'legacy_untracked'
+        AND visibility_state = 'active' AND projection_owner = 'legacy_untracked'
         AND current_calculation_id IS NULL
         AND NOT (COALESCE(meta, '{}'::jsonb) ? 'manual_result_edit')
       RETURNING id`,

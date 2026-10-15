@@ -24,6 +24,7 @@ import {
   recalcWritesCompanionV1,
 } from '../../src/attendance/approval-change-legacy-repair'
 import { decideLeaveDayRecalcV1, type LeaveDayRecalcFactsV1 } from '../../src/attendance/approval-change-day-recalc'
+import { planRevisionContentSwapV1 } from '../../src/attendance/approval-change-revision-swap'
 import {
   ATTENDANCE_RECOMPUTE_OBLIGATION_SQL_V1,
   ATTENDANCE_SETTLED_WORK_DATE_SQL_V1,
@@ -350,6 +351,37 @@ describe('leave day recalc decides absence only for a finished uncovered workday
   })
 })
 
+describe('revision swap inherits a phase deadline and only tightens it', () => {
+  const inherited = new Date('2049-06-16T00:00:00.000Z')
+  const lifetime = new Date('2049-07-01T00:00:00.000Z')
+
+  it('a later target does not extend the inherited deadline', () => {
+    const plan = planRevisionContentSwapV1({
+      now: new Date('2049-06-10T00:00:00.000Z'),
+      inheritedPhaseDeadlineAt: inherited,
+      newBeforeStartAt: new Date('2049-06-20T00:00:00.000Z'),
+      roundLifetimeEndsAt: lifetime,
+    })
+    expect(plan).toEqual({ action: 'swap', phaseDeadlineAt: inherited, roundLifetimeEndsAt: lifetime })
+  })
+
+  it('an earlier target tightens the deadline, and the deadline itself only closes the old round', () => {
+    const tightened = planRevisionContentSwapV1({
+      now: new Date('2049-06-10T00:00:00.000Z'),
+      inheritedPhaseDeadlineAt: new Date('2049-06-20T00:00:00.000Z'),
+      newBeforeStartAt: inherited,
+      roundLifetimeEndsAt: null,
+    })
+    expect(tightened).toEqual({ action: 'swap', phaseDeadlineAt: inherited, roundLifetimeEndsAt: null })
+    expect(planRevisionContentSwapV1({
+      now: inherited,
+      inheritedPhaseDeadlineAt: inherited,
+      newBeforeStartAt: new Date('2049-06-20T00:00:00.000Z'),
+      roundLifetimeEndsAt: null,
+    })).toEqual({ action: 'close_only', reason: 'phase_deadline_reached' })
+  })
+})
+
 describe('v3.1 acceptance ids that this slice can observe', () => {
   const cases: Array<[string, 'passed' | 'partial' | 'gap', string]> = [
     ['DAY-01', 'passed', 'a finished legacy workday with a frozen frame, no punches, and no other coverage is projected absent in the correction transaction'],
@@ -385,12 +417,12 @@ describe('v3.1 acceptance ids that this slice can observe', () => {
     ['AMD-08', 'gap', 'cross-org visibility is not executed'],
     ['AMD-09', 'gap', 'responsibility evidence across revisions is not executed'],
     ['AMD-10', 'gap', 'future-to-past revision is not executed'],
-    ['AMD-11', 'gap', 'legal content swap of round and engine is not executed'],
-    ['AMD-12', 'gap', 'inherited hard deadline is not executed'],
+    ['AMD-11', 'partial', 'a swap inserts one new engine and one new pending round, supersedes the old round, and replays the same attempt; seats are not copied'],
+    ['AMD-12', 'passed', 'a later target does not extend the inherited deadline, an earlier target tightens it, and submitting at the deadline expires the old round without a successor'],
     ['AMD-13', 'gap', 'revision swap versus close race is not executed'],
     ['COR-01', 'partial', 'admin close sets blocked/admin_closed and does not update the business row'],
     ['COR-02', 'gap', 'expired-lot loss and day-record consistency are not both proven'],
-    ['COR-03', 'gap', 'in-progress trip truncation is not implemented'],
+    ['COR-03', 'partial', 'an ended trip is refused with no arrangement update; an in-progress cancel still truncates at the started shift. Dependency documents are not listed'],
     ['COR-04', 'partial', 'the route requires attendance:admin and refuses the actor own request'],
     ['COR-05', 'gap', 'responsibility lookup after revision is not executed'],
     ['COR-06', 'gap', 'close-then-failed-correct crash injection is not executed'],
@@ -415,7 +447,7 @@ describe('v3.1 acceptance ids that this slice can observe', () => {
   it('names each of the 45 cases once and does not mark a gap as passed', () => {
     expect(cases).toHaveLength(45)
     expect(new Set(cases.map(([id]) => id)).size).toBe(45)
-    expect(cases.filter(([, status]) => status === 'passed').map(([id]) => id)).toEqual(['DAY-01', 'DAY-02'])
+    expect(cases.filter(([, status]) => status === 'passed').map(([id]) => id)).toEqual(['DAY-01', 'DAY-02', 'AMD-12'])
     expect(cases.filter(([, status]) => status === 'partial').map(([id]) => id)).toEqual([
       'DAY-04',
       'DAY-05',
@@ -424,7 +456,9 @@ describe('v3.1 acceptance ids that this slice can observe', () => {
       'EXP-04',
       'AMD-03',
       'AMD-07',
+      'AMD-11',
       'COR-01',
+      'COR-03',
       'COR-04',
     ])
     for (const [, status, observation] of cases) {

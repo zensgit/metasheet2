@@ -160,6 +160,9 @@ function createBusinessTripService({ HttpError, readWindows, readFrozenWindows }
     const row = await detail(trx, request.org_id, request.id)
     if (!row.published_at || row.cancelled_at) fail('ARRANGEMENT_STATE', 409)
     const start = new Date(row.start_at), end = new Date(row.effective_end_at)
+    // AFTER the arrangement has ended there is nothing left to truncate. Do not
+    // stamp cancelled_at over a finished trip.
+    if (now >= end) fail('EVENT_ENDED', 409)
     let cutoff = new Date(Math.max(start.getTime(),Math.min(now.getTime(),end.getTime())))
     if (start <= now && now < end) {
       // Project the post-cancellation base authority without mutating the source
@@ -212,7 +215,35 @@ function createBusinessTripService({ HttpError, readWindows, readFrozenWindows }
       }
     }
   }
-  return { parse, member, detail, map, assertWholeShifts, publish, cancel, prepareSourceChange, fail }
+  function dateKeyInZone(instant, timezone) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timezone,
+      year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(instant).map(part => [part.type, part.value]))
+    return parts.year + '-' + parts.month + '-' + parts.day
+  }
+  // Destination dates that overlap [cutoff, effective end). An ended trip has an
+  // empty span. Hour steps keep a DST day from being skipped.
+  function settlementWorkDates(row, now = new Date()) {
+    const start = new Date(row.start_at)
+    const end = new Date(row.effective_end_at ?? row.end_at)
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) fail('INVALID_INTERVAL')
+    const timezone = row.destination_timezone
+    if (typeof timezone !== 'string' || !timezone) fail('INVALID_ZONE')
+    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0)) } catch (_) { fail('INVALID_ZONE') }
+    if (now >= end) return []
+    const cutoff = Math.max(start.getTime(), Math.min(now.getTime(), end.getTime()))
+    const keys = []
+    let cursor = cutoff
+    let steps = 0
+    while (cursor < end.getTime()) {
+      const key = dateKeyInZone(new Date(cursor), timezone)
+      if (keys[keys.length - 1] !== key) keys.push(key)
+      cursor += 60 * 60 * 1000
+      steps += 1
+      if (steps > 40000) fail('SETTLEMENT_SPAN_TOO_LONG', 409)
+    }
+    return keys
+  }
+  return { parse, member, detail, map, assertWholeShifts, publish, cancel, prepareSourceChange, settlementWorkDates, fail }
 }
 
 async function readApprovedTrips({ query, orgId, userId, occurredAt }) {

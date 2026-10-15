@@ -36326,6 +36326,14 @@ module.exports = {
         if ((approvedLeave || approvedTrip) && operation.cancelRoundAuthorized === true) {
           await rejectSettledWorkDate(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestRow.work_date)
         }
+        if (approvedTrip && operation.cancelRoundAuthorized === true) {
+          const trip = await businessTripService.detail(trx, requestRow.org_id ?? DEFAULT_ORG_ID, route.requestId)
+          const tripNow = getBusinessTripServerInstant()
+          const requestWorkDate = String(requestRow.work_date ?? '').slice(0, 10)
+          for (const workDate of businessTripService.settlementWorkDates(trip, tripNow)) {
+            if (workDate !== requestWorkDate) await rejectSettledWorkDate(trx, requestRow.org_id ?? DEFAULT_ORG_ID, workDate)
+          }
+        }
         if (requestRow.status !== 'pending' && !approvedLeave && !approvedTrip) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
@@ -36428,7 +36436,28 @@ module.exports = {
           await closeScheduleDispatchRequest(trx, requestOrgId, route.requestId)
         }
 
-        if (approvedTrip) await businessTripService.cancel(trx,requestRow,resolvedAt)
+        if (approvedTrip) {
+          try {
+            await businessTripService.cancel(trx, requestRow, resolvedAt)
+          } catch (error) {
+            // A truncation conflict or an already-ended trip must close the
+            // cancel round as blocked. A throw would roll the round back and
+            // leave it pending. The HTTP entry still throws this same error.
+            if (operation.cancelRoundAuthorized === true && (
+              error?.code === 'ATTENDANCE_TRIP_EVENT_ENDED'
+              || error?.code === 'ATTENDANCE_TRIP_PARTIAL_SHIFT'
+              || error?.code === 'ATTENDANCE_TRIP_CANCELLATION_BOUNDARY_CONFLICT'
+            )) {
+              return {
+                kind: 'business_refused',
+                code: error.code,
+                detail: error.code,
+                httpError: error,
+              }
+            }
+            throw error
+          }
+        }
         let reversal = null
         if (approvedLeave) {
           reversal = await reverseLeaveBalanceDeduction(trx, {

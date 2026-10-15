@@ -13,6 +13,7 @@ import {
 } from '../../src/attendance/approval-change-revision-writer'
 import { leaveRevisionReversalSourceIdV1 } from '../../src/attendance/approval-change-leave-reversal'
 import { consumeOneDueRecomputeObligationV1 } from '../../src/attendance/approval-change-day-recalc'
+import { applyRevisionContentSwapV1 } from '../../src/attendance/approval-change-revision-swap'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -32,6 +33,14 @@ describeIfDatabase('approval-change v3.1 revision, recalc, and admin close', () 
     await pool.query('DELETE FROM attendance_timezone_context_companions WHERE org_id = $1', [orgId]).catch(() => undefined)
     await pool.query('DELETE FROM attendance_records WHERE org_id = $1', [orgId]).catch(() => undefined)
     await pool.query('DELETE FROM approval_rounds WHERE requested_by = $1', [userId]).catch(() => undefined)
+    await pool.query(
+      `DELETE FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE org_id = $1)`,
+      [orgId],
+    ).catch(() => undefined)
+    await pool.query(
+      `DELETE FROM approval_assignments WHERE instance_id IN (SELECT id FROM approval_instances WHERE org_id = $1)`,
+      [orgId],
+    ).catch(() => undefined)
     await pool.query('DELETE FROM approval_instances WHERE org_id = $1', [orgId]).catch(() => undefined)
     await pool.end()
   })
@@ -366,5 +375,123 @@ describeIfDatabase('approval-change v3.1 revision, recalc, and admin close', () 
       [otherDocument],
     )
     expect(receipts.rows[0].n).toBe(0)
+  })
+
+  it('a revision swap keeps the earlier deadline and does not copy the old vote', async () => {
+    const document = `acv31-doc-${randomUUID()}`
+    const engineId = `acv31-engine-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id, title)
+       VALUES ($1, 'approved', 'attendance.leave', $1, $2, 'leave'),
+              ($3, 'pending', 'approval.cancel-round', $1, $2, 'cancel')`,
+      [document, orgId, engineId],
+    )
+    await pool.query(
+      `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+       VALUES ($1, $2, 'cancel', $3, $4, 'pending', '{}'::jsonb)`,
+      [`apr_${randomUUID()}`, document, engineId, userId],
+    )
+    await pool.query(
+      `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+       VALUES ($1, 'approve', $2, 'approver', 'approved', 1, '{}'::jsonb)`,
+      [engineId, userId],
+    )
+    const input = {
+      documentId: document,
+      attemptId: 'attempt-tighten',
+      revisionId: 'rev-2',
+      now: new Date('2049-06-10T00:00:00.000Z'),
+      inheritedPhaseDeadlineAt: new Date('2049-06-16T00:00:00.000Z'),
+      newBeforeStartAt: new Date('2049-06-20T00:00:00.000Z'),
+      roundLifetimeEndsAt: new Date('2049-07-01T00:00:00.000Z'),
+    }
+    const client = await pool.connect()
+    let swappedRound = ''
+    let swappedEngine = ''
+    try {
+      await client.query('BEGIN')
+      const tx = {
+        query: async (sql: string, params?: readonly unknown[]) => ({
+          rows: (await client.query(sql, params ? [...params] : [])).rows as Array<Record<string, unknown>>,
+        }),
+      }
+      const swapped = await applyRevisionContentSwapV1(tx, input)
+      expect(swapped.action).toBe('swapped')
+      if (swapped.action !== 'swapped') return
+      expect(swapped.phaseDeadlineAt).toBe('2049-06-16T00:00:00.000Z')
+      expect(swapped.engineInstanceId).not.toBe(engineId)
+      const replay = await applyRevisionContentSwapV1(tx, input)
+      expect(replay).toMatchObject({
+        action: 'swapped',
+        roundId: swapped.roundId,
+        engineInstanceId: swapped.engineInstanceId,
+      })
+      swappedRound = swapped.roundId
+      swappedEngine = swapped.engineInstanceId
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+    const rounds = await pool.query(
+      `SELECT id, outcome, block_reason FROM approval_rounds WHERE document_id = $1 ORDER BY outcome`,
+      [document],
+    )
+    expect(rounds.rows).toEqual([
+      { id: expect.any(String), outcome: 'blocked', block_reason: 'superseded_by_revision' },
+      { id: swappedRound, outcome: 'pending', block_reason: null },
+    ])
+    const engines = await pool.query(
+      'SELECT id, status FROM approval_instances WHERE id = ANY($1::text[]) ORDER BY status',
+      [[engineId, swappedEngine]],
+    )
+    expect(engines.rows).toEqual([
+      { id: engineId, status: 'cancelled' },
+      { id: swappedEngine, status: 'pending' },
+    ])
+    const votes = await pool.query(
+      'SELECT count(*)::int AS n FROM approval_records WHERE instance_id = $1',
+      [swappedEngine],
+    )
+    expect(votes.rows[0].n).toBe(0)
+  })
+
+  it('submitting at the inherited deadline expires the old round and creates no engine', async () => {
+    const document = `acv31-doc-${randomUUID()}`
+    const engineId = `acv31-engine-${randomUUID()}`
+    const deadline = new Date('2049-06-16T00:00:00.000Z')
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'approved', 'attendance.leave', $1, $2),
+              ($3, 'pending', 'approval.cancel-round', $1, $2)`,
+      [document, orgId, engineId],
+    )
+    await pool.query(
+      `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+       VALUES ($1, $2, 'cancel', $3, $4, 'pending', '{}'::jsonb)`,
+      [`apr_${randomUUID()}`, document, engineId, userId],
+    )
+    const closed = await applyRevisionContentSwapV1(db(), {
+      documentId: document,
+      attemptId: 'attempt-deadline',
+      revisionId: 'rev-3',
+      now: deadline,
+      inheritedPhaseDeadlineAt: deadline,
+      newBeforeStartAt: new Date('2049-06-20T00:00:00.000Z'),
+      roundLifetimeEndsAt: null,
+    })
+    expect(closed).toMatchObject({ action: 'closed_only', reason: 'phase_deadline_reached' })
+    const rounds = await pool.query(
+      'SELECT outcome, engine_instance_id FROM approval_rounds WHERE document_id = $1',
+      [document],
+    )
+    expect(rounds.rows).toEqual([{ outcome: 'expired', engine_instance_id: engineId }])
+    const engines = await pool.query(
+      `SELECT count(*)::int AS n FROM approval_instances WHERE business_key = $1 AND status = 'pending'`,
+      [document],
+    )
+    expect(engines.rows[0].n).toBe(1)
   })
 })
