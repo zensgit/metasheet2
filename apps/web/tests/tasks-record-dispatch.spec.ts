@@ -989,6 +989,11 @@ describe('派发任务 dialog: success', () => {
 const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_me', iat: 2 })
 const TOKEN_B = fakeToken({ sub: 'usr_other' })
 const REFUSAL_ZH = '本页已停用派发任务'
+// The refusal is shown in every latch case, so it must be true in all of them: it may not say the
+// account changed (the same user may have signed in again), that a dispatch was stopped (it may already
+// have been created) or that one was created (that would tell whoever is signed in now).
+const REFUSAL_FALSE_CLAIMS_ZH = ['账号或组织已变化', '已停止', '已创建', '打开任务']
+const REFUSAL_FALSE_CLAIMS_EN = ['account or organization has changed', 'stopped', 'created', 'Open task']
 
 /** Another tab signs in: the shared storage changes and this tab is told nothing. */
 function signInElsewhere(token: string | null) {
@@ -1002,7 +1007,9 @@ function signInElsewhereWithEvent(token: string | null) {
 }
 
 function expectRefused() {
-  expect(q('identity-refused')!.textContent).toContain(REFUSAL_ZH)
+  const text = q('identity-refused')!.textContent ?? ''
+  expect(text).toContain(REFUSAL_ZH)
+  for (const claim of REFUSAL_FALSE_CLAIMS_ZH) expect(text).not.toContain(claim)
   // No form, nothing of the record left on screen, nothing to click.
   expect(q('title')).toBeNull()
   expect(q('assignees')).toBeNull()
@@ -1078,7 +1085,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('a sign-out (no token left) refuses with the account-changed message and sends nothing', async () => {
+  it('a sign-out (no token left) refuses with the sign-in-changed message and sends nothing', async () => {
     serveTasks()
     const { container } = mountInspector()
     await flushUi()
@@ -1306,6 +1313,54 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     await submit()
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
     expect(q('success')).not.toBeNull()
+  })
+
+  it('a change after the task was created: the refusal replaces the created panel and does not say the dispatch was stopped', async () => {
+    serveTasks()
+    const { container } = mountInspector({ withRouter: true })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(q('success')).not.toBeNull()
+    expect(q('open-task')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    // expectRefused also checks the text claims no stop, no creation and shows no link.
+    expectRefused()
+    expect(q('success')).toBeNull()
+    expect(dialog()!.textContent).not.toContain('任务已创建')
+  })
+
+  it('a sign-out and sign-in again as the same user: the refusal does not say the account changed', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    signInElsewhereWithEvent(null)
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_A)
+    await flushUi()
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('the English refusal is shown in English and makes none of the false claims', async () => {
+    useLocale().setLocale('en')
+    serveTasks()
+    const { container } = mountInspector({ withRouter: true })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(q('success')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    const text = q('identity-refused')!.textContent ?? ''
+    expect(text).toContain('dispatching is turned off on this page')
+    expect(text).toContain('Reload the page')
+    for (const claim of REFUSAL_FALSE_CLAIMS_EN) expect(text).not.toContain(claim)
+    expect(q('open-task')).toBeNull()
   })
 })
 
