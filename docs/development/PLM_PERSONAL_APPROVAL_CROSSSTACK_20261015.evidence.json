@@ -1,0 +1,258 @@
+{
+  "schema": "yuantus.plm-personal-approval-crossstack-evidence.v1",
+  "scope": "real feature HTTP/auth/service and PostgreSQL; synthetic directory/DingTalk transport, not full server or production acceptance",
+  "status": "passed",
+  "exit_code": 0,
+  "cleanup": true,
+  "elapsed_seconds": 12.842,
+  "checks": [
+    {
+      "name": "fresh-migrated-t19_plm_approval_card",
+      "passed": true
+    },
+    {
+      "name": "fresh-migrated-i10_plm_approval_grants",
+      "passed": true
+    },
+    {
+      "name": "fresh-migrated-plm_approval_card_011",
+      "passed": true
+    },
+    {
+      "name": "ordinary-login-creates-personal-grant",
+      "passed": true
+    },
+    {
+      "name": "ordinary-login-creates-personal-grant",
+      "passed": true
+    },
+    {
+      "name": "grant-list-does-not-repeat-secret",
+      "passed": true
+    },
+    {
+      "name": "purpose-grant-cannot-open-generic-api",
+      "passed": true
+    },
+    {
+      "name": "receiver-http-requires-own-login-and-refuses-source-purpose-bearer",
+      "passed": true
+    },
+    {
+      "name": "two-person-approval-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "first-person-approves-only-own-seat",
+      "passed": true
+    },
+    {
+      "name": "first-person-does-not-complete-two-person-stage",
+      "passed": true
+    },
+    {
+      "name": "same-card-replay-one-source-command",
+      "passed": true
+    },
+    {
+      "name": "two-source-http-transactions-observed-waiting-on-postgres-lock",
+      "passed": true
+    },
+    {
+      "name": "second-real-person-completes-stage",
+      "passed": true
+    },
+    {
+      "name": "concurrent-source-replay-identical-receipt",
+      "passed": true
+    },
+    {
+      "name": "concurrent-source-replay-one-commit",
+      "passed": true
+    },
+    {
+      "name": "card-copy-describes-person-seat-not-whole-eco",
+      "passed": true
+    },
+    {
+      "name": "lost-command-ack-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "lost-ack-source-already-committed",
+      "passed": true
+    },
+    {
+      "name": "lost-ack-intent-remains-pending",
+      "passed": true
+    },
+    {
+      "name": "receiver-process-closed-before-restart",
+      "passed": true
+    },
+    {
+      "name": "receiver-restarted-with-new-process",
+      "passed": true
+    },
+    {
+      "name": "pending-intent-survives-receiver-restart",
+      "passed": true
+    },
+    {
+      "name": "unbind-destroys-stored-secret",
+      "passed": true
+    },
+    {
+      "name": "ordinary-login-creates-personal-grant",
+      "passed": true
+    },
+    {
+      "name": "replacement-grant-receipt-only-no-new-command",
+      "passed": true
+    },
+    {
+      "name": "receipt-only-settles-without-new-command-request",
+      "passed": true
+    },
+    {
+      "name": "personal-cards-never-dispatch-platform-approval",
+      "passed": true
+    },
+    {
+      "name": "receipt-sql-rollback-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "receipt-sql-failure-surfaces-unconfirmed",
+      "passed": true
+    },
+    {
+      "name": "receipt-sql-failure-rolls-back-seat-and-command",
+      "passed": true
+    },
+    {
+      "name": "absent-receipt-requires-fresh-user-admission",
+      "passed": true
+    },
+    {
+      "name": "fresh-click-retries-rolled-back-command",
+      "passed": true
+    },
+    {
+      "name": "retry-commits-one-original-intent",
+      "passed": true
+    },
+    {
+      "name": "round-changed-before-click-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "native-stage-entry-starts-new-round",
+      "passed": true
+    },
+    {
+      "name": "old-round-card-cannot-decide",
+      "passed": true
+    },
+    {
+      "name": "old-round-task-event-cannot-send",
+      "passed": true
+    },
+    {
+      "name": "explicit-reject-comment-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "blank-reject-comment-no-source-effect",
+      "passed": true
+    },
+    {
+      "name": "decision-page-wrapper-reject-succeeds",
+      "passed": true
+    },
+    {
+      "name": "rejection-commits-seat-and-receipt",
+      "passed": true
+    },
+    {
+      "name": "grant-revoked-before-click-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "ordinary-login-revokes-personal-grant",
+      "passed": true
+    },
+    {
+      "name": "revoked-grant-does-not-decide",
+      "passed": true
+    },
+    {
+      "name": "same-person-two-seats-native-two-real-people-seated",
+      "passed": true
+    },
+    {
+      "name": "ordinary-login-creates-personal-grant",
+      "passed": true
+    },
+    {
+      "name": "same-person-seat-does-not-satisfy-two-person-threshold-False",
+      "passed": true
+    },
+    {
+      "name": "same-person-seat-does-not-satisfy-two-person-threshold-True",
+      "passed": true
+    },
+    {
+      "name": "distinct-peer-completes-after-two-same-person-seats",
+      "passed": true
+    },
+    {
+      "name": "tenant-baseline-isolation-on-real-postgres",
+      "passed": true
+    },
+    {
+      "name": "recorded-runtime-inputs-unchanged",
+      "passed": true
+    }
+  ],
+  "observed_source_lock_waiters": 2,
+  "source_concurrency_scope": "two independent Uvicorn event loops/threads sharing one owned PostgreSQL business database, not two Y OS processes",
+  "receiver_restart_scope": "graceful close and new Node PID; no arbitrary crash-timing claim",
+  "recorded_inputs": 2166,
+  "changed_inputs": [],
+  "inputs_sha256": "ec12afd017014f46ba90828cec4ae3102c20d954f270a6774204b0662b09bb32",
+  "runtime": {
+    "python": "3.11.15",
+    "node": "v20.20.2",
+    "postgres": "postgres (PostgreSQL) 15.17 (Homebrew)",
+    "verified_exact_python_dependency_pins": 71
+  },
+  "source_runtime_reference": "5dc3b1c41c0e07c1f9b71d7c760e77171a92152c",
+  "rebased_source_reference": "4848a4cae2820acb785c1e2fc8a3892a87353ea1",
+  "receiver_runtime_reference": "80210bc964cb96afe55e040c131597bfa798ff89",
+  "source_heads": [
+    "t19_plm_approval_card",
+    "i10_plm_approval_grants",
+    "plm_approval_card_011"
+  ],
+  "negative_control": {
+    "case": "cleanup observer reports live source thread after shutdown; no actual resource leak induced",
+    "exit_code": 1,
+    "status": "failed",
+    "cleanup": false,
+    "owned_directory_removed": true,
+    "same_cleanup_logic": true,
+    "recorded_input_difference": "negative preceded only adding two helper files to the input manifest"
+  },
+  "review": {
+    "model": "gpt-6-astra",
+    "effort": "ultra",
+    "mode": "independent read-only; found serialization-only concurrency proof and cleanup false-success, parent repaired and ran final evidence"
+  },
+  "unverified": [
+    "full MetaSheetServer startup and all MetaSheet historical migrations",
+    "durable dispatcher lease/ACK and real enterprise DingTalk/Stream",
+    "browser/password login and production TLS/provisioning",
+    "two Y OS processes and arbitrary crash timing"
+  ]
+}
