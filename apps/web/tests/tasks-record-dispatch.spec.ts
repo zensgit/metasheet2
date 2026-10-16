@@ -25,7 +25,9 @@
  *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
  *     still reports the task as created, with a note.
  *  8. Identity: a dispatch is sent only under the page's binding, the signed-in user and org the
- *     page was set up under. The binding is changed for good the first time another identity is
+ *     page was set up under, where the org is both the one the requests carry and the one the task
+ *     service uses (the token's org claim, read the way the server reads it; a token without one keeps
+ *     the user-plus-header identity). The binding is changed for good the first time another identity is
  *     seen: before any multitable request of the page (the client's before-send hook), on a storage
  *     change from another tab, on a session switch in this tab, or by the dialog's own checks. A
  *     sign-in as someone else in another tab, a sign-out, an org change (stored hint or an explicit
@@ -62,6 +64,7 @@ import { MultitableApiClient } from '../src/multitable/api/client'
 import { onMultitableBeforeSend } from '../src/multitable/api/beforeSend'
 import { useAuth } from '../src/composables/useAuth'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
+import { authHeaders } from '../src/utils/api'
 import { canDispatchTasks, canSeeTasksEntry } from '../src/tasks/tasksAccess'
 import {
   DISPATCH_ASSIGNEE_LIMIT,
@@ -1002,6 +1005,17 @@ const REFUSAL_FALSE_CLAIMS_EN = [
 const REFUSAL_FULL_ZH = '本页打开后，登录状态或所在组织有过变化（例如在其他标签页退出、重新登录或切换了账号，登录已过期，或在本页或其他标签页切换了组织）。为安全起见，本页已停用派发任务，表单内容已清空。请刷新页面后再派发。'
 const REFUSAL_FULL_EN = 'Your sign-in or organization changed after this page was opened (for example, you signed out, signed in again or switched account in another tab, your session expired, or you switched organization here or in another tab). For safety, dispatching is turned off on this page and anything entered in the form was cleared. Reload the page to dispatch again.'
 
+// The same user with an org claim (the org the task service uses). The stored org hint set next to
+// them keeps the org header the same, so only the claim differs between these tokens.
+const TOKEN_A_ORG1 = fakeToken({ sub: 'usr_me', tenantId: 'org_1' })
+const TOKEN_A_ORG1_REFRESHED = fakeToken({ sub: 'usr_me', tenantId: 'org_1', iat: 2, sid: 'ses_2' })
+const TOKEN_A_ORG2 = fakeToken({ sub: 'usr_me', tenantId: 'org_2' })
+const ORG_HINT = 'org_1'
+
+function setOrgHint(org: string) {
+  localStorage.setItem('tenantId', org)
+}
+
 /** Another tab signs in: the shared storage changes and this tab is told nothing. */
 function signInElsewhere(token: string | null) {
   signIn(token)
@@ -1047,6 +1061,83 @@ describe('派发任务 identity (tasks/recordTaskDispatchIdentity.ts)', () => {
     const a = readDispatchIdentity()
     expect(isSameDispatchIdentity(a, a)).toBe(true)
     expect(isSameDispatchIdentity(NO_DISPATCH_IDENTITY, a)).toBe(false)
+  })
+
+  it('also compares the org the task service uses: same user and org header with another org claim is another identity', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A_ORG1)
+    const a = readDispatchIdentity()
+    const header = authHeaders()['x-tenant-id']
+    expect(header).toBe(ORG_HINT)
+    signIn(TOKEN_A_ORG2)
+    expect(authHeaders()['x-tenant-id']).toBe(header)
+    expect(readDispatchIdentity()).not.toBe(a)
+    expect(isSameDispatchIdentity(a, readDispatchIdentity())).toBe(false)
+  })
+
+  it('the same org claim on a refreshed token is the same identity', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A_ORG1)
+    const a = readDispatchIdentity()
+    signIn(TOKEN_A_ORG1_REFRESHED)
+    expect(readDispatchIdentity()).toBe(a)
+  })
+
+  it('a token without an org claim keeps the identity it had: the user plus the org header', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A)
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['sub:usr_me', ORG_HINT]))
+    signIn(TOKEN_A_REFRESHED)
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['sub:usr_me', ORG_HINT]))
+    // A claim that is not a non-empty string is no claim, as on the server.
+    signIn(fakeToken({ sub: 'usr_me', tenantId: 7 }))
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['sub:usr_me', ORG_HINT]))
+    signIn(fakeToken({ sub: 'usr_me', tenantId: '   ' }))
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['sub:usr_me', ORG_HINT]))
+  })
+
+  it('an org claim that appears or disappears is a change', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A)
+    const none = readDispatchIdentity()
+    signIn(TOKEN_A_ORG1)
+    const org1 = readDispatchIdentity()
+    expect(org1).not.toBe(none)
+    signIn(TOKEN_A)
+    expect(readDispatchIdentity()).not.toBe(org1)
+  })
+
+  it('the org claim is read the way the server reads it: trimmed, and only tenantId (workspaceId is not read)', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A_ORG1)
+    const a = readDispatchIdentity()
+    signIn(fakeToken({ sub: 'usr_me', tenantId: ' org_1 ' }))
+    expect(readDispatchIdentity()).toBe(a)
+    signIn(fakeToken({ sub: 'usr_me', tenantId: 'org_1', workspaceId: 'org_9' }))
+    expect(readDispatchIdentity()).toBe(a)
+  })
+
+  it('a token that carries workspaceId and no tenantId has no org claim', () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A)
+    const none = readDispatchIdentity()
+    expect(none).toBe(JSON.stringify(['sub:usr_me', ORG_HINT]))
+    signIn(fakeToken({ sub: 'usr_me', workspaceId: 'org_9' }))
+    expect(readDispatchIdentity()).toBe(none)
+    signIn(TOKEN_A_ORG1)
+    const org1 = readDispatchIdentity()
+    signIn(fakeToken({ sub: 'usr_me', workspaceId: 'org_1' }))
+    expect(readDispatchIdentity()).toBe(none)
+    expect(readDispatchIdentity()).not.toBe(org1)
+  })
+
+  it('the org claim of a token that cannot be read is no claim, and reading it never throws', () => {
+    setOrgHint(ORG_HINT)
+    signIn('not-a-jwt')
+    expect(() => readDispatchIdentity()).not.toThrow()
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['token:not-a-jwt', ORG_HINT]))
+    signIn('h.%%%.s')
+    expect(readDispatchIdentity()).toBe(JSON.stringify(['token:h.%%%.s', ORG_HINT]))
   })
 })
 
@@ -1394,6 +1485,155 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     } finally {
       now.mockRestore()
     }
+  })
+})
+
+describe('派发任务 dialog: bound to the org the task service uses as well', () => {
+  /** A page set up under the user with org claim `token`, the org header held by the stored hint. */
+  async function openUnder(token: string) {
+    setOrgHint(ORG_HINT)
+    signIn(token)
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setSelect('person-field', '')
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    return container
+  }
+
+  it('same user and org header, another org claim read at submit: nothing is sent and the dialog refuses', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    const header = authHeaders()['x-tenant-id']
+    signInElsewhere(TOKEN_A_ORG2)
+    expect(authHeaders()['x-tenant-id']).toBe(header)
+    await submit()
+    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('same user and org header, another org claim from another tab (storage event): the form flips to the refusal before any click', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    expect(q('title')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_A_ORG2)
+    await flushUi()
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('another org claim seen by a multitable read changes the binding for good, even after the claim comes back', async () => {
+    setOrgHint(ORG_HINT)
+    signIn(TOKEN_A_ORG1)
+    serveTasks()
+    const page = pageBinding()
+    const stop = onMultitableBeforeSend(() => { page.check() })
+    const client = new MultitableApiClient({
+      fetchFn: async () => jsonResponse(200, { fields: [], rows: [], view: null }) as unknown as Response,
+    })
+    signInElsewhere(TOKEN_A_ORG2)
+    await client.loadView({ sheetId: 'sht_1', viewId: 'viw_1' }).catch(() => undefined)
+    signInElsewhere(TOKEN_A_ORG1)
+    stop()
+    expect(page.changed.value).toBe(true)
+    const { container } = mountInspector({ binding: page })
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('the same org claim on a refreshed token keeps the binding: the create is sent', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    signInElsewhereWithEvent(TOKEN_A_ORG1_REFRESHED)
+    await flushUi()
+    expect(q('identity-refused')).toBeNull()
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('the same org claim with surrounding spaces, or a token differing only in workspaceId, keeps the binding', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    signInElsewhereWithEvent(fakeToken({ sub: 'usr_me', tenantId: ' org_1 ', workspaceId: 'org_9', iat: 3 }))
+    await flushUi()
+    expect(q('identity-refused')).toBeNull()
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('a page bound with an org claim refuses once the token carries only workspaceId', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    const header = authHeaders()['x-tenant-id']
+    signInElsewhereWithEvent(fakeToken({ sub: 'usr_me', workspaceId: 'org_1', iat: 3 }))
+    await flushUi()
+    expect(authHeaders()['x-tenant-id']).toBe(header)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('a page set up under an explicitly selected session org dispatches', async () => {
+    const exp = Math.floor(Date.now() / 1000) + 3600
+    const session = fakeToken({ sub: 'usr_me', userId: 'usr_me', tenantId: 'org_2', exp })
+    localStorage.setItem('auth_token', session)
+    localStorage.setItem('jwt', session)
+    localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({
+      state: 'ready', token: session, actor: 'usr_me', tenantId: 'org_2', exp, epoch: 'epoch_1',
+    }))
+    expect(readDispatchIdentity()).toBe(JSON.stringify([
+      JSON.stringify(['explicit', 'usr_me', 'org_2', 'epoch_1']), 'org_2', 'org_2',
+    ]))
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setSelect('person-field', '')
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    expect(q('identity-refused')).toBeNull()
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('a token without an org claim behaves as before: a refresh for the same user and org header keeps the binding', async () => {
+    await openUnder(TOKEN_A)
+    signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+    await flushUi()
+    expect(q('identity-refused')).toBeNull()
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('a page bound without an org claim refuses once the token carries one, until the page is set up again', async () => {
+    await openUnder(TOKEN_A)
+    const header = authHeaders()['x-tenant-id']
+    signInElsewhere(TOKEN_A_ORG1)
+    expect(authHeaders()['x-tenant-id']).toBe(header)
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    expectRefused()
+    // A page set up again under the new token dispatches normally.
+    unmountAll()
+    while (bindings.length > 0) bindings.pop()!.dispose()
+    resetDispatchRunsForTests()
+    mocks.apiFetch.mockReset()
+    await openUnder(TOKEN_A_ORG1)
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
+  })
+
+  it('a page bound with an org claim refuses once the token carries none', async () => {
+    await openUnder(TOKEN_A_ORG1)
+    const header = authHeaders()['x-tenant-id']
+    signInElsewhere(TOKEN_A)
+    expect(authHeaders()['x-tenant-id']).toBe(header)
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    expectRefused()
   })
 })
 
