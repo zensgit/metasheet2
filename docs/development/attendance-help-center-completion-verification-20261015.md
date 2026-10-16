@@ -2,6 +2,19 @@
 
 日期：2026-10-15，优化：2026-10-16。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
 
+## 2026-10-16 第五轮
+
+三份排查按「现象 → 原因 → 怎么改」写进现有文章，并新增 `troubleshoot`（排查）。
+
+- 排班保存被拦住：`SHIFT_COMPLIANCE_CAP_EXCEEDED`，强制方式为「保存时阻断」且显式排班分钟超上限。`enforceShiftComplianceCap`：`index.cjs:19667-19690`。
+- 和另一组的人换班失败：没有单独的跨组错误码。列表和接口只接受已发布、生效、常规、单日、无生产者标记的排班。固定排班或轮班行带 `producer_type`，因此不出现。代码 `SHIFT_SWAP_SOURCE_UNSUPPORTED`、`SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY`、`SHIFT_SWAP_SOURCE_TEMPORARY_COVERED`。`normalizeShiftSwapSourceSnapshot`：`index.cjs:33049-33072`；前端过滤 `AttendanceView.vue:24836-24841`。
+- 预览正常、提交没写上：预览不写考勤行。令牌字面量 `1` 时提交要 10 分钟内的新令牌，过期或已用过为 `COMMIT_TOKEN_REQUIRED` / `COMMIT_TOKEN_INVALID`。`index.cjs:5947-5948`、`43513-43526`。
+- `USER_NOT_IN_ORG`：考勤组加人（`index.cjs:47304-47310`）和导入提交写入成员（`index.cjs:30668-30674`）在目标不是本组织有效成员时返回 404。打卡写错组织仍是 `ATTENDANCE_PUNCH_ORG_NOT_PERMITTED`。
+- 排查文章顺序：规则/班次 → 考勤组成员 → 审批/导入批次。搜索词：异常人员、缺勤未生成、报表数字对不上。
+- 搜索别名只落到已有能力：外勤（打卡/设置）、补卡额度（补卡）、排班管理员（排班管理范围，不是单独角色模板）、年假额度（年假）。
+
+本轮没有新的未实现功能要写入缺口清单。跨考勤组换班不是一条禁止码，所以不把「禁止跨组换班」写进帮助。
+
 ## 2026-10-16 第四轮
 
 按钉钉帮助的栏目组织补深度，不抄原文。新增文章 id `glossary`（名词解释）。打卡、补卡、请假、加班、换班各加「失败时怎么办」，代码与「错误码与提示」一致。快速入门开头增加「管理员一天配置完」和「员工一天怎么用」。主要管理文章补齐前提/权限、示例、做完后怎么确认、注意事项里缺的短步骤，并用中文文章名互指。
@@ -102,9 +115,9 @@
 
 相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。
 
-2026-10-16 第四轮之后重跑，均通过：
+2026-10-16 第五轮之后重跑，均通过：
 
-- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（91ms）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（88ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
 
 `apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。

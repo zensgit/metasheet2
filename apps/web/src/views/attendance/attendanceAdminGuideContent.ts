@@ -44,7 +44,7 @@ export const attendanceGuideGroups: GuideGroup[] = [
   { id: 'requests', labelEn: 'Requests and approval', labelZh: '申请与审批', topicIds: ['leave-types', 'overtime-rules', 'approvals'] },
   { id: 'pay', labelEn: 'Payroll and leave', labelZh: '计薪与年假', topicIds: ['payroll', 'annual'] },
   { id: 'data', labelEn: 'Data', labelZh: '数据', topicIds: ['availability', 'fields', 'import', 'reports'] },
-  { id: 'reference', labelEn: 'Reference', labelZh: '说明', topicIds: ['glossary', 'permissions', 'errors', 'faq'] },
+  { id: 'reference', labelEn: 'Reference', labelZh: '说明', topicIds: ['glossary', 'troubleshoot', 'permissions', 'errors', 'faq'] },
 ]
 
 export const attendanceGuideTopics: GuideTopic[] = [
@@ -400,7 +400,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     sectionId: 'attendance-admin-annual-leave-policy',
     intro: [[
       'Balance shows the person’s name next to the remaining minutes. Policy save turns the engine on or off. When it is on, a timezone is required. Chinese shows a place name; the stored value is the IANA id. That timezone sets lot expiry at 1 January 00:00 and the scheduler’s “today”. It does not change shift timezones.',
-      '余额旁显示人员姓名和剩余分钟。策略页打开或关闭引擎。打开时必须有时区。中文显示地名，保存的是 IANA 标识。此时区决定额度在 1 月 1 日 00:00 到期，以及自动发放里的「今天」。它不改班次时区。',
+      '年假额度以分钟显示在人员姓名旁边。策略页打开或关闭引擎。打开时必须有时区。中文显示地名，保存的是 IANA 标识。此时区决定额度在 1 月 1 日 00:00 到期，以及自动发放里的「今天」。它不改班次时区。',
     ]],
     scenarios: [[
       'Turn the engine on when this organization should accrue annual leave here. Use operations only after that, to adjust, backfill expiry, or commit an accrual run.',
@@ -532,6 +532,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Watch-outs', '注意事项'],
         detail: ['Commit is the write. When the token flag is the literal 1, use the token within 10 minutes. 工号 needs a user map. See 错误码与提示 for COMMIT_TOKEN_REQUIRED and COMMIT_TOKEN_INVALID.', '写入发生在「提交」。令牌开关为字面量 1 时，要在 10 分钟内使用令牌。工号需要用户映射。COMMIT_TOKEN_REQUIRED 和 COMMIT_TOKEN_INVALID 见「错误码与提示」。'],
+      },
+      {
+        path: ['Preview looked fine, commit did not write', '预览正常，提交没写上'],
+        detail: ['What you see: preview lists rows, then Commit leaves attendance records unchanged, or returns COMMIT_TOKEN_REQUIRED or COMMIT_TOKEN_INVALID. Why: preview does not write rows. When ATTENDANCE_IMPORT_REQUIRE_TOKEN is the literal 1, commit needs a token issued within 10 minutes. Preview consumes a token. The page issues a fresh one before commit. An expired or already used token fails commit. What to change: preview again and Commit immediately. Then open 导入批次 and confirm this run. Unmatched 工号 rows are skipped until a user map or an email, username, or mobile matches one active member.', '现象：预览有行，「提交」后考勤记录不变，或返回 COMMIT_TOKEN_REQUIRED、COMMIT_TOKEN_INVALID。原因：预览不写入。ATTENDANCE_IMPORT_REQUIRE_TOKEN 为字面量 1 时，提交要一张 10 分钟内签发的令牌。预览会用掉令牌。页面在提交前会再签发一张。过期或已经用过的令牌会让提交失败。怎么改：再预览一次并马上点「提交」。然后打开「导入批次」确认这次运行。对不上的工号行会被跳过，直到有用户映射，或邮箱、用户名、手机号匹配到一名有效成员。'],
       },
     ],
     faqs: [{
@@ -727,7 +731,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       ['Server time', '服务器时间'],
       ['Same-type interval', '同类打卡间隔'],
       ['IP allowlist', 'IP 白名单'],
-      ['Geofence and outdoor approval', '围栏和外勤审批'],
+      ['Geofence and outdoor approval', '围栏和外勤'],
     ],
   },
   {
@@ -743,7 +747,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       '申请类型固定三项：漏打上班卡、漏打下班卡、时间更正。补卡策略在管理员打开强约束之前不生效。关闭时仍可提交并审批。服务器不检查次数、时限、异常类型、原因或附件。',
     ], [
       'When enforcement is on, the cycle is a calendar month, the quota principal is the self-service user, and the window unit is a calendar day. Those three are fixed on the form. Defaults are timezone Asia/Shanghai, 3 requests per cycle, counting pending and approved, and a 30-calendar-day submit window. Quota is 1–99. The window is 0–180 days. A future work date is rejected. A whole-day absence is not a makeup-eligible anomaly. The same person, work date, and request type cannot have another pending or approved row.',
-      '打开强约束后，周期是自然月，额度主体是自助申请人，窗口单位是自然日。这三项在表单上是固定说明。默认时区 Asia/Shanghai，每周期 3 次，计入待审批和已通过，提交时限 30 个自然日。次数范围是 1–99。时限范围是 0–180 天。未来的工作日期会被拒绝。整日旷工不是可补异常。同一人、同一工作日、同一申请类型不能再有一条待审批或已通过的记录。',
+      '打开强约束后才按补卡额度检查。周期是自然月，额度主体是自助申请人，窗口单位是自然日。这三项在表单上是固定说明。默认时区 Asia/Shanghai，每周期 3 次，计入待审批和已通过，提交时限 30 个自然日。次数范围是 1–99。时限范围是 0–180 天。未来的工作日期会被拒绝。整日旷工不是可补异常。同一人、同一工作日、同一申请类型不能再有一条待审批或已通过的记录。',
     ]],
     scenarios: [[
       'An employee missed a punch or needs a time correction, and an administrator sets how many times and how far back that is allowed.',
@@ -914,6 +918,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['When it fails', '失败时怎么办'],
         detail: ['The shift is missing from the list: it is not a published, active, regular, single-day row. Ask an administrator to publish that day under 排班. SHIFT_SWAP_REQUIRES_TWO_USERS: pick a colleague, not yourself. SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED: the colleague clicks 同意换班. SHIFT_SWAP_APPROVAL_FLOW_REQUIRED: enable the named flow under 审批流, or leave the flow unset. See 错误码与提示.', '列表里没有班次：它不是已发布、生效中、常规、单日的排班。请管理员在「排班」里发布这一天。SHIFT_SWAP_REQUIRES_TWO_USERS：选同事，不能选自己。SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED：同事点「同意换班」。SHIFT_SWAP_APPROVAL_FLOW_REQUIRED：在「审批流」启用指定的流程，或不指定流程。详见「错误码与提示」。'],
       },
+      {
+        path: ['Swap across groups', '和另一组的人换班失败'],
+        detail: ['What you see: the colleague’s shift is absent from 对方已发布班次, or submit returns SHIFT_SWAP_SOURCE_UNSUPPORTED or SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY. Why: swap does not check attendance-group membership. It only accepts a published, active, regular, single-day assignment with no producer mark. A fixed-schedule or rotation row carries a producer mark, so it is hidden. A row covered by a temporary replacement returns SHIFT_SWAP_SOURCE_TEMPORARY_COVERED. What to change: on 排班, publish a manual single-day regular assignment for that date, then pick it on 换班.', '现象：同事的班次不在「对方已发布班次」里，或提交返回 SHIFT_SWAP_SOURCE_UNSUPPORTED 或 SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY。原因：换班不检查是不是同一个考勤组。它只接受已发布、生效中、常规、单日、且没有生产者标记的排班。固定排班或轮班生成的行带有生产者标记，所以不会出现。被临时替班盖住时返回 SHIFT_SWAP_SOURCE_TEMPORARY_COVERED。怎么改：在「排班」把这一天发布成手工的单日常规排班，再回「换班」选择。'],
+      },
     ],
     faqs: [{
       q: ['Why is my shift missing from the list?', '为什么列表里没有我的班次？'],
@@ -1035,7 +1043,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Watch-outs', '注意事项'],
-        detail: ['Save draft does not change today’s punch. A temporary replacement counts only after its draft is published. SHIFT_COMPLIANCE_CAP_EXCEEDED rolls the save back. See 错误码与提示.', '保存草稿不改变今天的打卡。临时替班要等草稿发布才生效。SHIFT_COMPLIANCE_CAP_EXCEEDED 会回滚保存。见「错误码与提示」。'],
+        detail: ['Save draft does not change today’s punch. A temporary replacement counts only after its draft is published. SHIFT_COMPLIANCE_CAP_EXCEEDED rolls the save back. See the playbook below and 错误码与提示.', '保存草稿不改变今天的打卡。临时替班要等草稿发布才生效。SHIFT_COMPLIANCE_CAP_EXCEEDED 会回滚保存。见下面的排查，以及「错误码与提示」。'],
+      },
+      {
+        path: ['Schedule save blocked', '排班保存被拦住'],
+        detail: ['What you see: Publish or save stops with SHIFT_COMPLIANCE_CAP_EXCEEDED. Why: Settings enforcement is Block on save, and explicit scheduled minutes for a day, week, or month exceed the filled cap. Days that only use 默认规则 are not counted. What to change: shorten the assignment, or raise or clear the cap on 设置, then publish again. Warn does not block.', '现象：发布或保存停住，代码 SHIFT_COMPLIANCE_CAP_EXCEEDED。原因：「设置」里强制方式是「保存时阻断」，且某日、某周或某月的显式排班分钟超过已填上限。只使用「默认规则」的日期不计入。怎么改：缩短这段排班，或在「设置」提高或清空上限后再发布。「预警」不拦截。'],
       },
     ],
     callout: [
@@ -1057,7 +1069,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     sectionId: 'attendance-admin-scheduler-scopes',
     intro: [[
       'Scheduler scope grants a person, a role, or a role tag a set of actions inside a target. It is separate from attendance-group owner. Owners maintain their group’s member list. Schedulers receive view, edit, import, export, clear, approve, dispatch, or remind on selected targets. Creating or editing a scope itself requires attendance:admin.',
-      '排班管理范围把一组动作授给一名员工、一个角色或一个角色标签，并限定目标。它和考勤组负责人是两件事。负责人维护本组考勤人员。排班范围授予查看、编辑、导入、导出、清空、审批、调度或提醒，并限定在选中的目标上。新建或修改范围本身需要 attendance:admin。',
+      '排班管理范围把一组动作授给一名员工、一个角色或一个角色标签，并限定目标。搜索「排班管理员」时，指的就是被授了这条范围的人，不是用户权限里的单独角色模板。它和考勤组负责人是两件事。负责人维护本组考勤人员。排班范围授予查看、编辑、导入、导出、清空、审批、调度或提醒，并限定在选中的目标上。新建或修改范围本身需要 attendance:admin。',
     ]],
     scenarios: [[
       'A team leader should publish schedules for one schedule group without becoming an attendance administrator.',
@@ -1228,6 +1240,37 @@ export const attendanceGuideTopics: GuideTopic[] = [
     }],
   },
   {
+    id: 'troubleshoot',
+    labelEn: 'Troubleshooting',
+    labelZh: '排查',
+    intro: [[
+      'Three admin questions: an odd person, absence that never appeared, and report numbers that do not match. Walk them in one order: 规则 and 班次, then 考勤组 members, then 审批流 and 导入批次. This article is in admin Attendance help.',
+      '三个管理问题：异常人员、缺勤未生成、报表数字对不上。按同一顺序看：先「规则」和「班次」，再「考勤组」成员，最后「审批流」和「导入批次」。本篇在管理端「考勤帮助」。',
+    ]],
+    scenarios: [[
+      'Use it before changing a cap, a holiday, or an export. The longer playbooks for a blocked schedule save, a failed swap, and a commit that did not write are on 排班, 换班, and 导入.',
+      '先看这里，再去改上限、节假日或导出。排班被拦住、换班失败、提交没写上的逐步说明在「排班」「换班」「导入」。',
+    ]],
+    steps: [
+      {
+        path: ['Odd person', '异常人员'],
+        detail: ['First open 规则 and 班次. Punch uses the rotation shift, otherwise the published assignment, otherwise 默认规则. A wrong clock usually means the published shift, not the group timezone. Next open 考勤组. Only members are attendance people. Owners are not. 团队可用性 is that member list. Last open 审批流 and 导入批次. A pending leave is tentative. An approved leave replaces the day. Import preview does not write the person. Commit does. See 查看记录.', '先打开「规则」和「班次」。打卡用轮班班次，否则用已发布排班，否则用「默认规则」。钟点不对，多半是已发布的班次，不是考勤组时区。再打开「考勤组」。只有成员算考勤人员。负责人不算。「团队可用性」用的就是这份成员。最后打开「审批流」和「导入批次」。待审批请假是暂定。已批请假盖住这一天。导入预览不写入这个人。「提交」才写。见「查看记录」。'],
+      },
+      {
+        path: ['Absence never appeared', '缺勤未生成'],
+        detail: ['First check 规则 and 班次. Auto absence on 设置 only stores Run at and Lookback days. It scans later, not when you click Save settings. A rest holiday is not an absence. Next check 考勤组 membership, so the person is in the roster you are looking at. Last check 审批流 and 导入批次. An approved leave or a committed import can already mark the day adjusted, so absence is not written on top. See 设置.', '先查「规则」和「班次」。「设置」里的自动缺勤只保存执行时间和回溯天数。扫描在执行时间才跑，点「保存设置」不会当场扫。休息的节假日不是缺勤。再查「考勤组」成员，确认你看的就是这份名单。最后查「审批流」和「导入批次」。已批请假或已经提交的导入可能把这一天标成已调整，上面不会再写一条缺勤。见「设置」。'],
+      },
+      {
+        path: ['Report numbers disagree', '报表数字对不上'],
+        detail: ['First check 规则 and 班次. Severe late and absence-level late use 30 and 60 minutes after grace. The three numbers on 报表 count the loaded page. The seven field sentences are definitions, not those three totals. Next check 考勤组 and the user id filter. An empty user filter is the signed-in person. Last check 审批流 and 导入批次. Hidden columns stay in the export. Rows appear after Commit, which you confirm on 导入批次. See 报表 and 统计字段.', '先查「规则」和「班次」。严重迟到和旷工迟到按宽限后的 30 分钟和 60 分钟。「报表」上三个数字只数当前这一页。那七句是字段定义，不是这三个数字的合计。再查「考勤组」和用户 ID。用户筛选留空就是登录人。最后查「审批流」和「导入批次」。藏起的列仍在导出文件里。行要等「提交」之后才有，到「导入批次」确认。见「报表」和「统计字段」。'],
+      },
+    ],
+    faqs: [{
+      q: ['Which article has the code?', '代码在哪一篇？'],
+      a: ['错误码与提示. Schedule compliance is SHIFT_COMPLIANCE_CAP_EXCEEDED on 排班. A swap source the list will not show is SHIFT_SWAP_SOURCE_UNSUPPORTED on 换班. A commit token is COMMIT_TOKEN_REQUIRED or COMMIT_TOKEN_INVALID on 导入. Roster and import member writes use USER_NOT_IN_ORG.', '「错误码与提示」。排班合规是「排班」上的 SHIFT_COMPLIANCE_CAP_EXCEEDED。列表不显示的换班来源是「换班」上的 SHIFT_SWAP_SOURCE_UNSUPPORTED。提交令牌是「导入」上的 COMMIT_TOKEN_REQUIRED 或 COMMIT_TOKEN_INVALID。名册和导入写入成员用 USER_NOT_IN_ORG。'],
+    }],
+  },
+  {
     id: 'glossary',
     labelEn: 'Glossary',
     labelZh: '名词解释',
@@ -1351,6 +1394,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['USER_NOT_IN_ORG', 'USER_NOT_IN_ORG'],
         detail: ['Appears on a roster write or annual-leave adjustment when the target is not an active member. HTTP 404. The sentence is 「该用户不是本组织的有效成员。」. Do: pick an active member of this organization. A punch that names the wrong organization uses ATTENDANCE_PUNCH_ORG_NOT_PERMITTED.', '出现：名单写入或年假调整，目标不是本组织有效成员。HTTP 404。句子是「该用户不是本组织的有效成员。」。处理：改选本组织的有效成员。打卡写错组织用 ATTENDANCE_PUNCH_ORG_NOT_PERMITTED。'],
+      },
+      {
+        path: ['USER_NOT_IN_ORG on add-member or import', '加人或导入时的 USER_NOT_IN_ORG'],
+        detail: ['What you see: adding a person on 考勤组 fails, or import commit fails while writing member rows, with USER_NOT_IN_ORG and 「该用户不是本组织的有效成员。」. Why: the user id is not an active member of this organization. Import runs that same check when the commit writes member assignments. HTTP 404. It is not the punch-organization code. What to change: make the person an active organization member, then add them again on 考勤组. In the file, use that member’s email, username, or mobile, or a user map. See 导入.', '现象：在「考勤组」加人失败，或导入提交在写入成员时失败，代码 USER_NOT_IN_ORG，句子是「该用户不是本组织的有效成员。」。原因：这个用户 ID 不是本组织的有效成员。导入在提交写入成员分配时做同样的检查。HTTP 404。这不是打卡写错组织的那个码。怎么改：先让该用户成为组织的有效成员，再在「考勤组」重试。文件里改用该成员的邮箱、用户名或手机号，或配用户映射。见「导入」。'],
       },
       {
         path: ['ATTENDANCE_PUNCH_ORG_NOT_PERMITTED', 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED'],
