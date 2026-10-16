@@ -2078,18 +2078,12 @@ export function federationRouter(injector?: Injector): Router {
             })
           }
 
-          const result = operation === 'approval_approve'
-            ? await adapter.approveApproval(resolvedApprovalId, resolvedVersion, resolvedComment || undefined)
-            : await adapter.rejectApproval(resolvedApprovalId, resolvedVersion, resolvedComment || '')
-
-          metrics.recordRequest(
-            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
-            Date.now() - startTime
-          )
-
-          return res.json({
-            ok: true,
-            data: result.data[0] ?? { id: resolvedApprovalId },
+          return res.status(409).json({
+            ok: false,
+            error: {
+              code: 'PLM_PERSONAL_BINDING_REQUIRED',
+              message: 'PLM approvals are decided through a personal Yuantus binding',
+            },
           })
         }
 

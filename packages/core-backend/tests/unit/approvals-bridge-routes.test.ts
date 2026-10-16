@@ -446,6 +446,16 @@ const routeState = vi.hoisted(() => {
       return { rows: [], rowCount: 1 }
     }
 
+    if (normalized.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+      Array.from(state.assignments.values())
+        .filter((row) => row.instance_id === String(params[0]) && row.is_active)
+        .forEach((row) => {
+          row.is_active = false
+          row.updated_at = now()
+        })
+      return { rows: [], rowCount: 1 }
+    }
+
     if (normalized.startsWith('UPDATE approval_assignments')) {
       const instanceId = String(params[0])
       const key = `${instanceId}:source_queue:plm:source-owned:0`
@@ -487,16 +497,6 @@ const routeState = vi.hoisted(() => {
         row.updated_at = now()
       }
       return { rows: [], rowCount: row ? 1 : 0 }
-    }
-
-    if (normalized.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
-      Array.from(state.assignments.values())
-        .filter((row) => row.instance_id === String(params[0]) && row.is_active)
-        .forEach((row) => {
-          row.is_active = false
-          row.updated_at = now()
-        })
-      return { rows: [], rowCount: 1 }
     }
 
     if (normalized.startsWith('UPDATE approval_instances SET status = \'approved\'')) {
@@ -673,6 +673,22 @@ const routeState = vi.hoisted(() => {
     // production answer; the reader's own behaviour is gated by its real-DB suite, not this fake.
     if (normalized.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
       return { rows: [], rowCount: 0 }
+    }
+
+    // `/actions` asks this before choosing the bridge. A row with no published definition stays
+    // on the legacy bridge path. The positive platform approve/reject test depends on that.
+    if (
+      normalized.startsWith('SELECT EXISTS(')
+      && normalized.includes("COALESCE(source_system, 'platform') = 'platform'")
+      && normalized.includes('published_definition_id IS NOT NULL')
+    ) {
+      const row = state.instances.get(String(params[0]))
+      const exists = Boolean(
+        row
+        && (row.source_system || 'platform') === 'platform'
+        && row.published_definition_id != null,
+      )
+      return { rows: [{ exists }], rowCount: 1 }
     }
 
     throw new Error(`Unhandled SQL in approvals bridge test: ${normalized}`)
@@ -1335,56 +1351,39 @@ describe('approval bridge routes', () => {
     expect(response.body.error.code).toBe('REJECT_COMMENT_REQUIRED')
   })
 
-  it('dispatches PLM approve actions and writes local audit state', async () => {
-    const plmAdapter = createPlmAdapterMock()
-    const app = createApp(plmAdapter)
-
-    pinned.setApp(app)
-    const response = await request(pinned.url())
-      .post('/api/approvals/plm:eco-1/actions')
-      .send({ action: 'approve', comment: 'Ship it' })
-      .expect(200)
-
-    expect(plmAdapter.approveApproval).toHaveBeenCalledWith('eco-1', 7, 'Ship it')
-    expect(response.body).toMatchObject({
-      id: 'plm:eco-1',
-      status: 'approved',
-    })
-
-    const mirrored = routeState.state.instances.get('plm:eco-1')
-    expect(mirrored?.status).toBe('approved')
-    expect(routeState.state.records).toHaveLength(1)
-    expect(routeState.state.records[0]).toMatchObject({
-      instance_id: 'plm:eco-1',
-      action: 'approve',
-      to_status: 'approved',
-    })
-    expect(mirrored?.version).toBe(1)
-    expect(Array.from(routeState.state.assignments.values())[0]?.is_active).toBe(false)
-  })
-
-  it('refuses adapter-account PLM decisions while personal Yuantus approval bindings are enabled', async () => {
-    vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'true')
+  it('refuses shared-account PLM approve and reject at every approval-card flag value', async () => {
+    const flagValues: Array<string | undefined> = [undefined, 'off', 'false', 'TRUE', '1', 'true']
+    const previous = process.env.PLM_APPROVAL_CARD_ENABLED
     try {
-      const plmAdapter = createPlmAdapterMock()
-      pinned.setApp(createApp(plmAdapter))
-      for (const body of [{ action: 'approve', comment: 'Ship it' }, { action: 'reject', comment: 'Not yet' }]) {
-        const response = await request(pinned.url())
-          .post('/api/approvals/plm:eco-1/actions')
-          .send(body)
-          .expect(409)
-        expect(response.body.error.code).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+      for (const flag of flagValues) {
+        routeState.reset()
+        if (flag === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+        else process.env.PLM_APPROVAL_CARD_ENABLED = flag
+
+        const plmAdapter = createPlmAdapterMock()
+        pinned.setApp(createApp(plmAdapter))
+        for (const body of [{ action: 'approve', comment: 'Ship it' }, { action: 'reject', comment: 'Not yet' }]) {
+          const response = await request(pinned.url())
+            .post('/api/approvals/plm:eco-1/actions')
+            .send(body)
+            .expect(409)
+          expect(response.body.error.code).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+          expect(response.body.error.message).toBe('PLM approvals are decided through a personal Yuantus binding')
+        }
+        expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+        expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
+        expect(routeState.plmApprovals[0]).toMatchObject({ status: 'pending', version: 7 })
+        expect(routeState.state.instances.get('plm:eco-1')).toMatchObject({ status: 'pending', version: 0 })
+        expect(routeState.state.records).toHaveLength(0)
+        expect(routeState.state.assignments.get('plm:eco-1:source_queue:plm:source-owned:0')?.is_active).toBe(true)
       }
-      expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
-      expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
-      expect(routeState.state.instances.get('plm:eco-1')).toMatchObject({ status: 'pending', version: 0 })
-      expect(routeState.state.records).toHaveLength(0)
     } finally {
-      vi.unstubAllEnvs()
+      if (previous === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+      else process.env.PLM_APPROVAL_CARD_ENABLED = previous
     }
   })
 
-  it('fails PLM actions when the source version remains unavailable', async () => {
+  it('refuses a PLM action before source-version dispatch when refresh fails', async () => {
     routeState.state.instances.set('plm:legacy', {
       ...routeState.state.instances.get('local-1')!,
       id: 'plm:legacy',
@@ -1406,27 +1405,50 @@ describe('approval bridge routes', () => {
     const response = await request(pinned.url())
       .post('/api/approvals/plm:legacy/actions')
       .send({ action: 'approve', comment: 'Ship it' })
-      .expect(502)
+      .expect(409)
 
     expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+    expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
     expect(response.body).toMatchObject({
       error: {
-        code: 'SOURCE_ACTION_FAILED',
-        message: 'PLM source version is unavailable',
+        code: 'PLM_PERSONAL_BINDING_REQUIRED',
+        message: 'PLM approvals are decided through a personal Yuantus binding',
       },
     })
+    expect(routeState.state.instances.get('plm:legacy')).toMatchObject({ status: 'pending', version: 0 })
+    expect(routeState.state.records).toHaveLength(0)
   })
 
   it('keeps merged PLM history sorting deterministic when upstream timestamps are invalid', async () => {
     routeState.plmHistory[0].approved_at = 'not-a-date'
     routeState.plmHistory[0].created_at = 'still-not-a-date'
+    const occurredAt = new Date('2026-04-04T08:00:00.000Z')
+    routeState.state.records.push({
+      id: 1,
+      instance_id: 'plm:eco-1',
+      action: 'approve',
+      actor_id: 'test-user',
+      actor_name: 'Test User',
+      comment: 'Ship it',
+      reason: null,
+      from_status: 'pending',
+      to_status: 'approved',
+      from_version: 0,
+      to_version: 1,
+      metadata: { sourceSystem: 'plm' },
+      occurred_at: occurredAt,
+      created_at: occurredAt,
+    })
+    routeState.state.recordId = 2
 
-    const app = createApp(createPlmAdapterMock())
-    pinned.setApp(app)
+    const plmAdapter = createPlmAdapterMock()
+    pinned.setApp(createApp(plmAdapter))
     await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'approve', comment: 'Ship it' })
-      .expect(200)
+      .expect(409)
+    expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+    expect(routeState.state.records).toHaveLength(1)
 
     const response = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history')
@@ -1441,13 +1463,33 @@ describe('approval bridge routes', () => {
   })
 
   it('merges local audit records into PLM history responses', async () => {
-    const app = createApp(createPlmAdapterMock())
+    const occurredAt = new Date('2026-04-04T08:00:00.000Z')
+    routeState.state.records.push({
+      id: 1,
+      instance_id: 'plm:eco-1',
+      action: 'approve',
+      actor_id: 'test-user',
+      actor_name: 'Test User',
+      comment: 'Ship it',
+      reason: null,
+      from_status: 'pending',
+      to_status: 'approved',
+      from_version: 0,
+      to_version: 1,
+      metadata: { sourceSystem: 'plm' },
+      occurred_at: occurredAt,
+      created_at: occurredAt,
+    })
+    routeState.state.recordId = 2
 
-    pinned.setApp(app)
+    const plmAdapter = createPlmAdapterMock()
+    pinned.setApp(createApp(plmAdapter))
     await request(pinned.url())
       .post('/api/approvals/plm:eco-1/actions')
       .send({ action: 'approve', comment: 'Ship it' })
-      .expect(200)
+      .expect(409)
+    expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+    expect(routeState.state.records).toHaveLength(1)
 
     const history = await request(pinned.url())
       .get('/api/approvals/plm:eco-1/history')
@@ -1462,6 +1504,84 @@ describe('approval bridge routes', () => {
         sourceSystem: 'plm',
       },
     })
+  })
+
+  it('keeps platform approve and reject on the local decision path', async () => {
+    const previous = process.env.PLM_APPROVAL_CARD_ENABLED
+    const timestamp = new Date('2026-04-04T08:00:00.000Z')
+    routeState.state.instances.set('local-reject', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-reject',
+      title: 'Local reject',
+    })
+    routeState.state.assignments.set('local-1:user:test-user:0', {
+      id: 'assign-local-approve',
+      instance_id: 'local-1',
+      assignment_type: 'user',
+      assignee_id: 'test-user',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: timestamp,
+      updated_at: timestamp,
+    })
+    routeState.state.assignments.set('local-reject:user:test-user:0', {
+      id: 'assign-local-reject',
+      instance_id: 'local-reject',
+      assignment_type: 'user',
+      assignee_id: 'test-user',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: timestamp,
+      updated_at: timestamp,
+    })
+
+    try {
+      for (const flag of [undefined, 'true'] as const) {
+        if (flag === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+        else process.env.PLM_APPROVAL_CARD_ENABLED = flag
+        const plmAdapter = createPlmAdapterMock()
+        pinned.setApp(createApp(plmAdapter))
+
+        const missingComment = await request(pinned.url())
+          .post('/api/approvals/local-reject/actions')
+          .send({ action: 'reject' })
+          .expect(400)
+        expect(missingComment.body.error.code).toBe('REJECT_COMMENT_REQUIRED')
+        expect(routeState.state.instances.get('local-reject')?.status).toBe('pending')
+
+        const approved = await request(pinned.url())
+          .post('/api/approvals/local-1/actions')
+          .send({ action: 'approve', comment: 'Ship it' })
+          .expect(200)
+        expect(approved.body).toMatchObject({ id: 'local-1', status: 'approved' })
+        expect(routeState.state.instances.get('local-1')).toMatchObject({ status: 'approved', version: 1 })
+        expect(routeState.state.assignments.get('local-1:user:test-user:0')?.is_active).toBe(false)
+
+        const rejected = await request(pinned.url())
+          .post('/api/approvals/local-reject/actions')
+          .send({ action: 'reject', comment: 'Not yet' })
+          .expect(200)
+        expect(rejected.body).toMatchObject({ id: 'local-reject', status: 'rejected' })
+        expect(routeState.state.instances.get('local-reject')).toMatchObject({ status: 'rejected', version: 1 })
+        expect(routeState.state.assignments.get('local-reject:user:test-user:0')?.is_active).toBe(false)
+        expect(routeState.state.records.map((row) => row.action).sort()).toEqual(['approve', 'reject'])
+        expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+        expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
+
+        routeState.state.instances.get('local-1')!.status = 'pending'
+        routeState.state.instances.get('local-1')!.version = 0
+        routeState.state.instances.get('local-reject')!.status = 'pending'
+        routeState.state.instances.get('local-reject')!.version = 0
+        routeState.state.assignments.get('local-1:user:test-user:0')!.is_active = true
+        routeState.state.assignments.get('local-reject:user:test-user:0')!.is_active = true
+        routeState.state.records = []
+      }
+    } finally {
+      if (previous === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+      else process.env.PLM_APPROVAL_CARD_ENABLED = previous
+    }
   })
 
   it('returns structured errors when PLM history fetch fails', async () => {

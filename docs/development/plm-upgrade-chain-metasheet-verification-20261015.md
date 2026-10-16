@@ -146,3 +146,15 @@ From the repository root: `node --test scripts/ops/global-history-flag-manifest.
 - The workbench write-back is now audited in MetaSheet and may still be executed by the shared integration account. The audit records the MetaSheet actor, not the Yuantus subject.
 - Whole-BOM completion can be configured and does not fire. The dropped-line rule is unanswered.
 - The local runtime is Node 22, not CI's Node 20. Exact-head CI is the authority for CI claims.
+
+## Independent approval-boundary verification — 2026-10-17
+
+Input source: `70af11cadb2393f1fe6e477ea539a6924184d347`. Grok 4.7 (xhigh) implemented the scoped guard and tests; Codex independently read the diff and executed the tests with Node **20.20.2** and existing locked dependencies. This runtime statement applies to this increment, not the older Node 22 evidence above.
+
+- With the new tests and the original two source files restored temporarily, both entry tests failed: expected 409, actual 200. Sources were restored to the candidate in a `finally` block. Two failures, 42 unrelated tests skipped by the focused name filter.
+- The four complete candidate suites passed independently: approval bridge **31**, federation **13**, personal approval routes **9**, personal transport **9**; **62/62** in **1.62s**. Flag matrices cover unset/off/false/TRUE/1/true for approve and reject; assert no adapter decision, no local decision record/status/assignment mutation. Platform approve/reject, existing history, federation substitutes and personal-card positives remain covered.
+- `git diff --check` passed. No production call, real notification, deployment or merge occurred. No new environment flag or migration.
+
+Reproduce from `packages/core-backend` under Node 20: `node node_modules/vitest/vitest.mjs run tests/unit/approvals-bridge-routes.test.ts tests/unit/federation.contract.test.ts tests/unit/plm-personal-approval-routes.test.ts tests/unit/plm-personal-approval-transport.test.ts`. The package manager wrapper rejected symlinked task-state dependencies (`ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH`); the existing locked Vitest binary was invoked directly, without dependency changes.
+
+Exact pushed-head CI is tracked separately in the PR description. The purpose-specific personal BOM-line/ECO chain, split identity/RBAC/PLM topology and cross-process revocation remain pending; these guard tests are not their acceptance evidence.

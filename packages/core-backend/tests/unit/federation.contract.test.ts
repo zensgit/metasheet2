@@ -439,13 +439,15 @@ describe('Federation contract routes', () => {
         version: 2,
         comment: 'looks good',
       })
-      .expect(200)
+      .expect(409)
 
-    expect(plmAdapter.approveApproval).toHaveBeenCalledWith('eco-1', 2, 'looks good')
-    expect(approveResponse.body.data).toEqual({
-      id: 'eco-1',
-      version: 2,
-      comment: 'looks good',
+    expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+    expect(approveResponse.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PLM_PERSONAL_BINDING_REQUIRED',
+        message: 'PLM approvals are decided through a personal Yuantus binding',
+      },
     })
 
     const missingCommentResponse = await request(pinned.url())
@@ -473,14 +475,57 @@ describe('Federation contract routes', () => {
         version: 4,
         comment: 'missing test evidence',
       })
-      .expect(200)
+      .expect(409)
 
-    expect(plmAdapter.rejectApproval).toHaveBeenCalledWith('eco-1', 4, 'missing test evidence')
-    expect(rejectResponse.body.data).toEqual({
-      id: 'eco-1',
-      version: 4,
-      comment: 'missing test evidence',
+    expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
+    expect(rejectResponse.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PLM_PERSONAL_BINDING_REQUIRED',
+        message: 'PLM approvals are decided through a personal Yuantus binding',
+      },
     })
+  })
+
+  it('refuses federation PLM approve and reject at every approval-card flag value', async () => {
+    const flagValues: Array<string | undefined> = [undefined, 'off', 'false', 'TRUE', '1', 'true']
+    const previous = process.env.PLM_APPROVAL_CARD_ENABLED
+    try {
+      for (const flag of flagValues) {
+        if (flag === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+        else process.env.PLM_APPROVAL_CARD_ENABLED = flag
+        const plmAdapter = createPlmAdapterMock()
+        pinned.setApp(createFederationApp({ plmAdapter }))
+
+        const approveResponse = await request(pinned.url())
+          .post('/api/federation/plm/mutate')
+          .send({
+            operation: 'approval_approve',
+            approvalId: 'eco-1',
+            version: 2,
+            comment: 'looks good',
+          })
+          .expect(409)
+        const rejectResponse = await request(pinned.url())
+          .post('/api/federation/plm/mutate')
+          .send({
+            operation: 'approval_reject',
+            approvalId: 'eco-1',
+            version: 4,
+            comment: 'missing test evidence',
+          })
+          .expect(409)
+
+        expect(approveResponse.body.error.code).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+        expect(rejectResponse.body.error.code).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+        expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+        expect(plmAdapter.rejectApproval).not.toHaveBeenCalled()
+        expect(plmAdapter.addBomSubstitute).not.toHaveBeenCalled()
+      }
+    } finally {
+      if (previous === undefined) delete process.env.PLM_APPROVAL_CARD_ENABLED
+      else process.env.PLM_APPROVAL_CARD_ENABLED = previous
+    }
   })
 
   it('supports PLM detail contracts for product detail and BOM detail', async () => {

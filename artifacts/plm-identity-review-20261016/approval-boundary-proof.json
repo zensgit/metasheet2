@@ -1,0 +1,37 @@
+{
+  "schema": "plm-approval-boundary-proof.v1",
+  "input_head": "70af11cadb2393f1fe6e477ea539a6924184d347",
+  "implementation_model": "Grok 4.7 (xhigh)",
+  "independent_verifier": "Codex",
+  "node": "20.20.2",
+  "baseline": {
+    "failed": 2,
+    "skipped_by_filter": 42,
+    "observed": "expected 409, actual 200 on both generic decision entries"
+  },
+  "candidate": {
+    "files": 4,
+    "passed": 62,
+    "failed": 0,
+    "seconds": 1.62,
+    "suite_pass_counts": [
+      31,
+      13,
+      9,
+      9
+    ]
+  },
+  "flags": [
+    null,
+    "off",
+    "false",
+    "TRUE",
+    "1",
+    "true"
+  ],
+  "limits": [
+    "guard-only increment; personal BOM-line/ECO positive chain pending",
+    "no production acceptance or merge",
+    "pushed-head CI pending"
+  ]
+}

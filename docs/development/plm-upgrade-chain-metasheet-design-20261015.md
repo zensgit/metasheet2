@@ -53,7 +53,7 @@ The remaining latent reds need security dispositions that only their owners shou
 
 ### 4. One decision channel per Yuantus approval (`0ac8b5f`)
 
-`ApprovalBridgeService` decides `plm:` mirror instances by calling `PLMAdapter.approveApproval/rejectApproval` with the bridge adapter's own account (`ApprovalBridgeService.ts:1740-1745` on this branch, `:1730-1735` on the handoff head). With `PLM_APPROVAL_CARD_ENABLED=true` the same ECO tasks are decided by the acting person's Yuantus grant. The bridge path would then impersonate that person through an integration account, contrary to the manifest's own "No service-account approval fallback", and give one Yuantus approval a second decision channel. The bridge now refuses with `409 PLM_PERSONAL_BINDING_REQUIRED` before any source call or local state change (`:1298-1309`). Behavior with the flag off is unchanged. The read-only mirror sync is not changed.
+`ApprovalBridgeService` decides `plm:` mirror instances by calling `PLMAdapter.approveApproval/rejectApproval` with the bridge adapter's own account (`ApprovalBridgeService.ts:1740-1745` on this branch, `:1730-1735` on the handoff head). With `PLM_APPROVAL_CARD_ENABLED=true` the same ECO tasks are decided by the acting person's Yuantus grant. The bridge path would then impersonate that person through an integration account, contrary to the manifest's own "No service-account approval fallback", and give one Yuantus approval a second decision channel. The bridge now refuses with `409 PLM_PERSONAL_BINDING_REQUIRED` before any source call or local state change (`:1298-1309`). The 2026-10-17 security continuation makes this refusal unconditional: unset, `off`, `false`, `TRUE`, `1` and `true` all refuse. Federation `approval_approve` and `approval_reject` now return the same 409 after their existing id/version/reject-comment validation. Neither entry dispatches a shared-account decision or writes local decision state. Native platform approvals, personal card commands and read-only mirror sync retain their existing paths.
 
 ### 5. Flag registration (`f46c317`)
 
@@ -138,3 +138,9 @@ Recorded from the eight uploads against this checkout. Historical counts in thos
 4. **Generic pre-review wiring** (gap 2): needs a named template, trigger and form mapping. Automatic PLM apply waits on the reuse review's step 5 contract.
 5. **Real environment** (owner-approved): paired Yuantus read-only window, real DingTalk, embed CSP/TLS, package install/upgrade/restore, full migration chain and server lifecycle.
 6. **Not a MetaSheet implementation from these docs**: DP1, Stage A, RG source binding, baseline member batch, continuous SSO, Discussion visibility values.
+
+## Personal identity boundary continuation — 2026-10-17
+
+This increment closes the two generic shared-account approval entries, including when the personal-card feature is disabled. It removes only private dispatch/version helpers and their now-unused flag import. History still reads existing decisions; a refusal creates no decision history. Platform approve/reject remain functional. No new flag, schema or credential is introduced.
+
+The distinct personal BOM-line and ECO-intent grant chain remains unfinished. Workbench writes still use the configured integration identity on this source; the MetaSheet attempt audit is not proof of a Yuantus personal subject. The next increment must implement and verify the actual positive chain, independently scoped credentials, current permissions, immutable retry identity and revocation/concurrency behavior. This guard increment does not complete PR #6425 or the master goal.
