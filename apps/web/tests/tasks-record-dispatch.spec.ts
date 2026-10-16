@@ -991,7 +991,19 @@ describe('派发任务 dialog: success', () => {
 
 const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_me', iat: 2 })
 const TOKEN_B = fakeToken({ sub: 'usr_other' })
-const REFUSAL_ZH = '登录账号或组织已变化'
+const REFUSAL_ZH = '本页已停用派发任务'
+// The refusal is shown in every latch case, so it must be true in all of them: it may not say the
+// account changed (the same user may have signed in again), that a dispatch was stopped (it may already
+// have been created) or that one was created (that would tell whoever is signed in now).
+// These lists ban the short fragments such claims are usually made of; they cannot rule out every
+// possible false sentence, which is why one cell per language also pins the whole text.
+const REFUSAL_FALSE_CLAIMS_ZH = ['账号已', '账号或组织已', '本次派发', '派发已', '已停止', '已中止', '已取消', '已创建']
+const REFUSAL_FALSE_CLAIMS_EN = [
+  'account changed', 'account has changed', 'account or organization has', 'this dispatch', 'dispatch was',
+  'stopped', 'aborted', 'cancel', 'created',
+]
+const REFUSAL_FULL_ZH = '本页打开后，登录状态或所在组织有过变化（例如在其他标签页退出、重新登录或切换了账号，登录已过期，或在本页或其他标签页切换了组织）。为安全起见，本页已停用派发任务，表单内容已清空。请刷新页面后再派发。'
+const REFUSAL_FULL_EN = 'Your sign-in or organization changed after this page was opened (for example, you signed out, signed in again or switched account in another tab, your session expired, or you switched organization here or in another tab). For safety, dispatching is turned off on this page and anything entered in the form was cleared. Reload the page to dispatch again.'
 
 // The same user with an org claim (the org the task service uses). The stored org hint set next to
 // them keeps the org header the same, so only the claim differs between these tokens.
@@ -1016,7 +1028,9 @@ function signInElsewhereWithEvent(token: string | null) {
 }
 
 function expectRefused() {
-  expect(q('identity-refused')!.textContent).toContain(REFUSAL_ZH)
+  const text = q('identity-refused')!.textContent ?? ''
+  expect(text).toContain(REFUSAL_ZH)
+  for (const claim of REFUSAL_FALSE_CLAIMS_ZH) expect(text).not.toContain(claim)
   // No form, nothing of the record left on screen, nothing to click.
   expect(q('title')).toBeNull()
   expect(q('assignees')).toBeNull()
@@ -1169,7 +1183,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('a sign-out (no token left) refuses with the account-changed message and sends nothing', async () => {
+  it('a sign-out (no token left) refuses with the sign-in-changed message and sends nothing', async () => {
     serveTasks()
     const { container } = mountInspector()
     await flushUi()
@@ -1261,6 +1275,7 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     await flushUi(10)
     expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
     expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expectRefused()
   })
 
   it('a change between the version read and the description write: the write is not sent', async () => {
@@ -1397,6 +1412,79 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     await submit()
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
     expect(q('success')).not.toBeNull()
+  })
+
+  it('a change after the task was created: the refusal replaces the created panel and does not say the dispatch was stopped', async () => {
+    serveTasks()
+    const { container } = mountInspector({ withRouter: true })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(q('success')).not.toBeNull()
+    expect(q('open-task')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    // expectRefused also checks the text claims no stop and no creation, and that there is no link.
+    expectRefused()
+    expect(q('identity-refused')!.textContent!.trim()).toBe(REFUSAL_FULL_ZH)
+    expect(q('success')).toBeNull()
+    expect(dialog()!.textContent).not.toContain('任务已创建')
+  })
+
+  it('a sign-out and sign-in again as the same user: the refusal does not say the account changed', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    signInElsewhereWithEvent(null)
+    await flushUi()
+    signInElsewhereWithEvent(TOKEN_A)
+    await flushUi()
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('the English refusal is shown in English and makes none of the false claims', async () => {
+    useLocale().setLocale('en')
+    serveTasks()
+    const { container } = mountInspector({ withRouter: true })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(q('success')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    const text = q('identity-refused')!.textContent ?? ''
+    expect(text).toContain('dispatching is turned off on this page')
+    expect(text).toContain('form was cleared')
+    expect(text).toContain('Reload the page')
+    for (const claim of REFUSAL_FALSE_CLAIMS_EN) expect(text).not.toContain(claim)
+    expect(text.trim()).toBe(REFUSAL_FULL_EN)
+    expect(q('open-task')).toBeNull()
+  })
+
+  it('an explicitly selected session org that expires while the page is open refuses, and sends nothing', async () => {
+    const exp = Math.floor(Date.now() / 1000) + 60
+    const explicit = fakeToken({ sub: 'usr_me', userId: 'usr_me', tenantId: 'org_2', exp })
+    localStorage.setItem('auth_token', explicit)
+    localStorage.setItem('jwt', explicit)
+    localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({
+      state: 'ready', token: explicit, actor: 'usr_me', tenantId: 'org_2', exp, epoch: 'epoch_1',
+    }))
+    serveTasks()
+    const { container, binding } = mountInspector()
+    await flushUi()
+    expect(binding!.identity).not.toBe(NO_DISPATCH_IDENTITY)
+    const now = vi.spyOn(Date, 'now').mockReturnValue((exp + 60) * 1000)
+    try {
+      await openDialog(container)
+      expectRefused()
+      expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    } finally {
+      now.mockRestore()
+    }
   })
 })
 
