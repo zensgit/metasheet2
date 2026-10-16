@@ -2,9 +2,10 @@
  * 派发任务 from a multitable record: WHO a dispatch belongs to.
  *
  * The rule. A page that offers 派发任务 holds one binding (`createDispatchBinding`), made when the page
- * is set up: the signed-in user and the org its requests carry at that moment. A dispatch is sent only
- * under that identity. The binding is marked CHANGED, for good, the first time the identity a request
- * would carry is seen to differ from it, wherever that is seen:
+ * is set up: the signed-in user, the org its requests carry and the org the task service uses (the
+ * token's org claim) at that moment. A dispatch is sent only under that identity. The binding is marked
+ * CHANGED, for good, the first time the identity a request would carry is seen to differ from it,
+ * wherever that is seen:
  *  - right before every multitable request the page sends (the client's before-send hook, wired by the
  *    workbench), so a record read while another user or org was signed in poisons the binding even if
  *    the identity has changed back by the time anyone opens the dialog;
@@ -25,21 +26,39 @@
  *    session org the actor, org and switch epoch;
  *  - the org header the request will carry (`authHeaders()['x-tenant-id']`), which for an ordinary
  *    session may come from stored hints, the address or the token's claim — none of which the
- *    principal key covers.
+ *    principal key covers;
+ *  - the org the task service uses: the stored token's `tenantId` claim, read the way the server reads
+ *    it (only `tenantId`, a string, trimmed, non-empty; `workspaceId` is not read). It is part of the
+ *    identity only when the token carries one, so for a token without it the identity is exactly the
+ *    first two components, and a claim that appears, disappears or changes is a change like any other.
  * For a token that carries a subject claim the raw token is not part of it, so a token refresh for the
- * same user and org keeps the binding. A token without a subject claim is keyed by its text, so a
- * refresh of such a token counts as a change.
+ * same user, org header and org claim keeps the binding. A token without a subject claim is keyed by
+ * its text, so a refresh of such a token counts as a change.
  *
  * NOTHING HERE IS AN AUTHORIZATION VALUE: it is derived client-side and only compared for equality.
  * The server checks the token and the org on every request.
  */
 import { readonly, ref, type Ref } from 'vue'
-import { getAuthPrincipalKey, onAuthSessionSwitch } from '../composables/authPrincipal'
+import {
+  getAuthPrincipalKey,
+  onAuthSessionSwitch,
+  parseJwtPayload,
+  readStoredToken,
+} from '../composables/authPrincipal'
 import { authHeaders } from '../utils/api'
 
 /** No usable identity: no session, or a session-org switch caught half way. Never equal to anything,
  *  itself included (see `isSameDispatchIdentity`). */
 export const NO_DISPATCH_IDENTITY = 'none'
+
+/** The stored token's org claim as the task service reads it, or `''` when it carries none. Never
+ *  throws: an unreadable token has no claim. */
+function readTokenOrgClaim(): string {
+  const token = readStoredToken()
+  if (!token) return ''
+  const raw = parseJwtPayload(token)?.tenantId
+  return typeof raw === 'string' ? raw.trim() : ''
+}
 
 /** The identity the next request would carry, or `NO_DISPATCH_IDENTITY`. */
 export function readDispatchIdentity(): string {
@@ -47,7 +66,8 @@ export function readDispatchIdentity(): string {
     const principal = getAuthPrincipalKey()
     if (principal === null) return NO_DISPATCH_IDENTITY
     const org = authHeaders()['x-tenant-id'] ?? ''
-    return JSON.stringify([principal, org])
+    const claim = readTokenOrgClaim()
+    return JSON.stringify(claim ? [principal, org, claim] : [principal, org])
   } catch {
     // A partial explicit switch throws in both readers: not a session.
     return NO_DISPATCH_IDENTITY
