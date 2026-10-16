@@ -151,11 +151,20 @@ function fixture(transform = text => text) {
     } },
     readFileSync(target) { assert(files.has(target), 'synthetic missing file'); return Buffer.from(files.get(target)) },
   }
+  const pinned = { id: 'upstream-1719529', executablePath: '/synthetic-browser', sha256: '1'.repeat(64),
+    version: '158.0.8107.0', localOnly: true }
   const context = { module: { exports: {} }, Buffer, __dirname: repoRoot + '/scripts/ops/lib',
     process: { execPath: selectedNode, versions: { node: '20.20.2' }, getuid: () => 1000 },
     require(name) { return name === 'node:fs' ? fakeFs : name === 'node:path' ? path.posix
-      : name === './stock-preparation-browser-network-isolation.cjs' ? guard : require(name) },
+      : name === './stock-preparation-browser-network-isolation.cjs' ? guard
+        : name === './stock-preparation-yida-browser-candidate.cjs' ? { pinnedBrowserForRoot(root, id) {
+          assert.equal(root, repoRoot)
+          if (id === undefined) return undefined
+          assert.equal(id, pinned.id)
+          return context.__parseCandidate(JSON.stringify(pinned))
+        } } : require(name) },
   }
+  runInNewContext('globalThis.__parseCandidate = text => JSON.parse(text)', context)
   runInNewContext(transform(source), context, { filename: sourcePath, timeout: 1000 })
   const api = context.module.exports
   const owner = { owner: 'PLM_FULL_APP_NAMESPACE', nonce, repoRoot, pid: 800, uid: 1000,
@@ -171,9 +180,30 @@ function fixture(transform = text => text) {
     files.set(directory + '/worker-preload.cjs', preload)
     return { ...config, preloadSha256: hash(preload) }
   }
-  return { api, owner, files, repoRoot, directory, writeOwner,
+  return { api, owner, files, repoRoot, directory, writeOwner, pinned,
     setInstalled(value) { installed = value }, get nativeCalls() { return calls } }
 }
+
+test('installed candidate is absent only in a valid default scope, never an uninstalled scope', () => {
+  const f = fixture()
+  assert.throws(() => f.api.installedBrowserCandidate(), /CAPABILITY_REQUIRED/)
+  f.api.installOwnedNamespacePreload(f.writeOwner())
+  assert.equal(f.api.installedBrowserCandidate(), undefined)
+})
+
+test('PLM owner binds the full candidate metadata and revalidates before browser selection', () => {
+  const f = fixture()
+  f.owner.browserCandidate = { ...f.pinned }
+  f.api.installOwnedNamespacePreload(f.writeOwner())
+  assert.equal(JSON.stringify(f.api.installedBrowserCandidate()), JSON.stringify(f.pinned))
+  f.files.set(f.directory + '/owner.json', Buffer.from('tampered synthetic owner'))
+  assert.throws(() => f.api.installedBrowserCandidate(), /OWNER_HASH_MISMATCH/)
+  for (const field of ['id', 'executablePath', 'sha256', 'version', 'localOnly']) {
+    const bad = fixture()
+    bad.owner.browserCandidate = { ...bad.pinned, [field]: field === 'localOnly' ? false : 'wrong' }
+    assert.throws(() => bad.api.scopeFromOwner(bad.writeOwner()))
+  }
+})
 
 test('formal runAcceptance refuses an uninstalled scope before scratch/build/PG', async () => {
   await assert.rejects(() => runAcceptance({ pgBin: '/synthetic-postgresql/bin', automationScenario: 'manual' }),

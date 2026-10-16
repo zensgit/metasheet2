@@ -214,7 +214,12 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     const native = createRequire(import.meta.url)(path.join(root, 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs')) as
       { assertBrowserNetworkIsolation(): unknown }
     native.assertBrowserNetworkIsolation()
-    browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath() })
+    const authority = createRequire(import.meta.url)(path.join(root, 'scripts/ops/lib/stock-preparation-plm-namespace-scope.cjs')) as {
+      installedBrowserCandidate(): { executablePath: string; version: string } | undefined
+    }
+    const candidate = authority.installedBrowserCandidate()
+    browser = await chromium.launch({ headless: true, executablePath: candidate?.executablePath ?? chromium.executablePath() })
+    if (candidate) assert.equal(browser.version(), candidate.version, 'APP_BROWSER_YIDA_INIT_PINNED_BROWSER_VERSION_REQUIRED')
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', serviceWorkers: 'block' })
     const window = createInitializationRequestWindow(uiOrigin, () => token, input.commandId)
     const boardPath = '/api/integration/stock-preparation/projects/' + input.projectNo + '/board'

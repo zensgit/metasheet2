@@ -15,6 +15,7 @@ import { assertOwnedScratch, assertPlainOwnedTree, SCRATCH_OWNER } from './lib/s
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const lib = path.join(root, 'scripts/ops/lib')
 const native = createRequire(import.meta.url)(path.join(lib, 'stock-preparation-browser-network-isolation.cjs'))
+const browserCandidate = createRequire(import.meta.url)(path.join(lib, 'stock-preparation-yida-browser-candidate.cjs'))
 const clone = value => JSON.parse(JSON.stringify(value))
 function validSnapshot() {
   return {
@@ -48,7 +49,10 @@ test('ambient DB, PG, preload, credentials and production flags cannot enter chi
 
 test('public entry accepts only one PG binary directory and no arbitrary command or test selector', () => {
   assert.deepEqual(parsePublicArguments(['--pg-bin', root]), { pgBin: root })
+  assert.deepEqual(parsePublicArguments(['--pg-bin', root, '--browser-candidate', 'upstream-1719529']),
+    { pgBin: root, browserCandidate: 'upstream-1719529' })
   for (const args of [[], ['--pg-bin', 'relative'], ['--command', root], ['--pg-bin', root, '--retry', '1'],
+    ['--pg-bin', root, '--browser-candidate', 'latest'], ['--pg-bin', root, '--browser-executable', root],
     ['--pg-bin', root, '--testNamePattern', 'sentinel'], ['--worker', root], ['--pg-bin', root + '\0']]) {
     assert.throws(() => parsePublicArguments(args), /YIDA_BROWSER_CI_ARGUMENTS_INVALID/u)
   }
@@ -69,6 +73,44 @@ test('startup diagnostic accepts only private reason tags and fixed stage labels
     assert.deepEqual(startupFailureDiagnostic(error, 'ENVIRONMENT_FILES'),
       { stage: 'ENVIRONMENT_FILES', reason: 'INTERNAL' })
   }
+})
+
+test('local browser selection defaults unchanged and rejects ambient overrides or incomplete owner context', () => {
+  assert.equal(browserCandidate.pinnedBrowserForRoot(root), undefined)
+  assert.equal(browserCandidate.browserFromOwner(root, {
+    CHROME_EXECUTABLE: '/synthetic/foreign', BROWSER_CANDIDATE: 'upstream-1719529',
+  }), undefined)
+  assert.throws(() => browserCandidate.pinnedBrowserForRoot(root, 'latest'))
+  assert.throws(() => browserCandidate.browserFromOwner(root, { YIDA_BROWSER_CI_OWNER: '/synthetic/foreign' }))
+  assert.throws(() => browserCandidate.browserFromOwner(root, { YIDA_BROWSER_CI_OWNER_SHA256: '0'.repeat(64) }))
+})
+
+test('local candidate refuses foreign owner path and mismatched candidate bytes before browser launch', async () => {
+  assert.throws(() => browserCandidate.browserFromOwner(root, {
+    YIDA_BROWSER_CI_OWNER: path.join(root, 'owner.json'), YIDA_BROWSER_CI_OWNER_SHA256: '0'.repeat(64),
+  }))
+  const sandbox = path.join(root, 'tmp', 'browser-candidate-contract-' + randomUUID())
+  const source = path.join(sandbox, 'source')
+  const binary = path.join(sandbox, 'browser-fix-probe/upstream-1719529/chrome-linux/chrome')
+  await fs.mkdir(path.dirname(binary), { recursive: true })
+  await fs.mkdir(source)
+  await fs.writeFile(binary, 'not-the-pinned-browser', { mode: 0o700 })
+  try { assert.throws(() => browserCandidate.pinnedBrowserForRoot(source, browserCandidate.ID)) }
+  finally { await fs.rm(sandbox, { recursive: true, force: true }) }
+})
+
+test('browser owner bytes must match their original digest even when legacy selection has no candidate', async () => {
+  const sandbox = path.join(root, 'tmp', 'yida-browser-ci-' + randomUUID())
+  await fs.mkdir(sandbox, { mode: 0o700 })
+  const ownerPath = path.join(sandbox, 'owner.json')
+  const raw = JSON.stringify({ protocol: 'YIDA_BROWSER_CI_NATIVE_V1', root })
+  await fs.writeFile(ownerPath, raw, { mode: 0o600 })
+  const env = { YIDA_BROWSER_CI_OWNER: ownerPath, YIDA_BROWSER_CI_OWNER_SHA256: createHash('sha256').update(raw).digest('hex') }
+  try {
+    assert.equal(browserCandidate.browserFromOwner(root, env), undefined)
+    await fs.appendFile(ownerPath, ' ')
+    assert.throws(() => browserCandidate.browserFromOwner(root, env))
+  } finally { await fs.rm(sandbox, { recursive: true, force: true }) }
 })
 
 test('startup diagnostic never reads hostile error properties, getters or proxy traps', () => {

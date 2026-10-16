@@ -30,8 +30,9 @@ const contractsId = 'stock-preparation-plm-full-app-contracts'
 const browserId = 'stock-preparation-yida-owner-browser-install'
 const dependencyInstallId = 'workspace-dependency-install'
 const node20 = "matrix.node-version == '20.x'"
-const acceptanceCommand = 'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin'
-const intervalAcceptanceCommand = acceptanceCommand + ' --automation-scenario=interval'
+const acceptanceBaseCommand = 'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin'
+const acceptanceCommand = acceptanceBaseCommand + ' --browser-candidate=upstream-1719529'
+const intervalAcceptanceCommand = acceptanceBaseCommand + ' --automation-scenario=interval --browser-candidate=upstream-1719529'
 const acceptanceCommands = acceptanceCommand + '\n' + intervalAcceptanceCommand
 const contractsCommand = 'node --test scripts/ops/stock-preparation-plm-full-app-contract.test.mjs scripts/ops/stock-preparation-plm-owned-pg.test.mjs scripts/ops/run-stock-preparation-yida-synthetic-trial.test.mjs'
 const dependencyInstallCommand = 'set -o pipefail\npnpm install --frozen-lockfile 2>&1 | tee install.log'
@@ -1151,6 +1152,13 @@ test('dependency and whole-file wiring guard removals make the actual rejection 
 
 test('runner accepts explicit absolute PostgreSQL binaries and only the closed optional automation scenario', () => {
   assert.deepEqual(parseArguments([`--pg-bin=${pgBin}`]), { pgBin, automationScenario: 'manual' })
+  assert.deepEqual(parseArguments([`--pg-bin=${pgBin}`, '--automation-scenario=interval', '--browser-candidate=upstream-1719529']),
+    { pgBin, automationScenario: 'interval', browserCandidate: 'upstream-1719529' })
+  for (const browser of ['', 'latest', 'UPSTREAM-1719529', '/arbitrary/browser']) {
+    assert.throws(() => parseArguments([`--pg-bin=${pgBin}`, `--browser-candidate=${browser}`]), /BROWSER_CANDIDATE_INVALID/)
+  }
+  assert.throws(() => parseArguments([`--pg-bin=${pgBin}`, '--browser-candidate=upstream-1719529',
+    '--browser-candidate=upstream-1719529']), /EXPLICIT_PG_BIN_REQUIRED/)
   for (const automationScenario of ['manual', 'interval']) {
     for (const args of [[`--pg-bin=${pgBin}`, `--automation-scenario=${automationScenario}`],
       [`--automation-scenario=${automationScenario}`, `--pg-bin=${pgBin}`]]) {
@@ -1221,6 +1229,54 @@ const productionStopRecords = () => [
     httpListenerClosed: true, collaborationClosed: true, collaborationDisconnects: 2,
     referencedTimers: 0, maintenanceTimers: 0 },
 ]
+
+async function executeActualStopFailurePath({ exitCode, rejectStop = false, source }) {
+  source ??= read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
+  const start = source.indexOf("  try {\n    assert(host, 'APP_CONFIGURED_HOST_REQUIRED')")
+  const end = source.indexOf('  if (process.exitCode) {', start)
+  assert(start >= 0 && end > start, 'actual stop/proof code anchors required')
+  const records = []
+  const processState = { exitCode }
+  let calls = 0
+  const stopPromise = rejectStop ? Promise.reject(new Error('synthetic stop failure')) : Promise.resolve()
+  // Exercise the original finally blocks, not a reimplementation of their guards.
+  await runInNewContext('(async () => { let collaborationStopStarted = false;\n'
+    + source.slice(start, end) + '\n})()', {
+    assert, Error, process: processState, collaborationCompletion: undefined,
+    host: { stop() { calls += 1; return stopPromise } },
+    stage: (stage, data = {}) => records.push({ stage, ...data }),
+  })
+  return { records, exitCode: processState.exitCode, calls }
+}
+
+test('actual stop still runs after browser failure and proof preserves that earlier failure', async () => {
+  const actual = await executeActualStopFailurePath({ exitCode: 1 })
+  assert.equal(actual.calls, 2)
+  assert.equal(actual.exitCode, 1)
+  assert.deepEqual(actual.records, [
+    { stage: 'actual-stop-resolved' },
+    { stage: 'production-stop-failed', diagnostic: 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF' },
+  ])
+  assert.throws(() => validateProductionStopEvidence(actual.records))
+  const source = read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
+  const guard = "    assert.equal(process.exitCode ?? 0, 0, 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF')\n"
+  assert.equal(source.split(guard).length - 1, 1)
+  const mutation = await executeActualStopFailurePath({ exitCode: 1, source: source.replace(guard, '') })
+  assert.notDeepEqual(mutation.records, actual.records, 'removing the earlier-failure guard must change real-path evidence')
+})
+
+test('actual stop rejection is distinct and missing collaboration remains fail closed on a clean path', async () => {
+  const rejected = await executeActualStopFailurePath({ exitCode: 0, rejectStop: true })
+  assert.equal(rejected.calls, 2)
+  assert.equal(rejected.exitCode, 1)
+  assert.equal(rejected.records[0].stage, 'actual-stop-failed')
+  assert.equal(rejected.records[1].diagnostic, 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF')
+  const missing = await executeActualStopFailurePath({ exitCode: 0 })
+  assert.equal(missing.exitCode, 1)
+  assert.equal(missing.records[0].stage, 'actual-stop-resolved')
+  assert.equal(missing.records[1].diagnostic, 'APP_CONFIGURED_COLLAB_CHILD_REQUIRED')
+  for (const result of [rejected, missing]) assert.throws(() => validateProductionStopEvidence(result.records))
+})
 
 test('production stop evidence accepts one resolved stop followed by exact verified state without mutating input', () => {
   const records = productionStopRecords()
@@ -3366,4 +3422,165 @@ test('actual in-memory transport mutations invalidate the transparency and close
     await assert.rejects(async () => verify(source.replaceAll(needle, replacement)), error => error?.code === 'ERR_ASSERTION', name)
     console.log('TRANSPORT_MUTATION ' + name + ' KILLED')
   }
+})
+
+function fixtureFunction(name, transform = code => code) {
+  const ts = createRequire(path.join(repoRoot, 'packages/core-backend/package.json'))('typescript')
+  const source = read('packages/core-backend/tests/utils/stock-preparation-automation-full-app-fixture.ts')
+  const parsed = ts.createSourceFile('fixture.ts', source, ts.ScriptTarget.ES2022, true)
+  const found = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  assert.equal(found.length, 1)
+  const compiled = ts.transpileModule(found[0].getText(parsed), { compilerOptions: {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+  } }).outputText.replace('export function ' + name, 'function ' + name)
+  // Execute only the selected own-source function in the same realm as the
+  // actual EventEmitter/Promise controls. Cross-VM array prototypes would test
+  // the fixture rather than the real wrapper's strict equality invariants.
+  return new Function('assert', 'AsyncLocalStorage', 'performance', 'mirrorObservationSql',
+    transform(compiled) + '\nreturn ' + name)(assert, AsyncLocalStorage, { now: () => 1 }, 'unused-in-this-pass-through-case')
+}
+const clockSql = 'SELECT extract(epoch FROM clock_timestamp()) * 1000 AS now_ms'
+
+async function assertClockReceiptScenarios(factory) {
+  let time = 0
+  const observer = factory(() => time)
+  observer.start()
+  async function receipt(database, received, started) {
+    time = received
+    const original = Promise.resolve({ rows: [{ now_ms: String(database) }] })
+    observer.observe(clockSql, undefined, original, started)
+    await original
+    await Promise.resolve()
+  }
+  await receipt(1000, 0, 0)
+  await receipt(1100, 100, 100)
+  await receipt(1200, 1100, 100) // A slow reply alone must NOT become a jump.
+  assert.equal(observer.snapshot().clockBackwardBeyondWait, 0)
+  await receipt(2200, 2100, 2100)
+  await receipt(4200, 2200, 2200)
+  await receipt(2300, 2300, 2300)
+  const value = observer.snapshot()
+  assert.equal(value.clockReceipts, 6)
+  assert.equal(value.clockMaxReceiptWaitMs, 1000)
+  assert.equal(value.clockForwardBeyondWait, 1)
+  assert.equal(value.clockBackwardBeyondWait, 1)
+  assert.equal(value.clockMaxForwardExcessMs, 1650)
+  assert.equal(value.clockMaxBackwardExcessMs, 1750)
+  assert.deepEqual(Object.values(value).every(item => Number.isSafeInteger(item) && item >= 0), true)
+  assert.equal(JSON.stringify(value).includes('4200'), false)
+}
+
+test('actual clock receipt collector distinguishes latency from forward/backward DB deltas', async () => {
+  await assertClockReceiptScenarios(fixtureFunction('createAutomationClockReceiptObservation'))
+})
+
+test('clock receipt observer ignores other queries and never replaces a rejected native promise or reads its error', async () => {
+  const observer = fixtureFunction('createAutomationClockReceiptObservation')(() => 10)
+  let reads = 0
+  const poisoned = new Proxy({}, { get() { reads++; throw new Error('synthetic-private') } })
+  observer.observe(clockSql, poisoned, poisoned, 0)
+  observer.start()
+  observer.observe('SELECT synthetic_other_query', poisoned, poisoned, 0)
+  assert.equal(reads, 0)
+  const originalError = new Proxy({}, { get() { reads++; throw new Error('synthetic-private') } })
+  const original = Promise.reject(originalError)
+  observer.observe(clockSql, poisoned, original, 0)
+  let caught
+  await original.then(() => assert.fail('native rejection was replaced'), error => { caught = error })
+  assert.equal(caught, originalError)
+  await Promise.resolve()
+  assert.equal(observer.snapshot().clockRejected, 1)
+  assert.equal(reads, 0)
+  const invalid = Promise.resolve({ rows: [{ now_ms: { valueOf() { reads++; return 1 } } }] })
+  observer.observe(clockSql, poisoned, invalid, 0)
+  await invalid
+  await Promise.resolve()
+  assert.equal(observer.snapshot().clockInvalid, 1)
+  assert.equal(reads, 0)
+})
+
+async function assertOwnedQueryForwarding(factory) {
+  const server = new EventEmitter(), pool = new EventEmitter()
+  const listener = () => {}
+  server.on('request', listener)
+  const values = ['synthetic-owned-reference']
+  const originalPromise = Promise.resolve({ rows: [] })
+  const client = { query(...args) {
+    assert.equal(this, client)
+    assert.deepEqual(args, [clockSql, values])
+    assert.equal(args[1], values)
+    return originalPromise
+  } }
+  const originalQuery = client.query
+  const observed = []
+  const observer = factory(server, pool, 'synthetic-connection', (sql, params, result, started) => {
+    // Assertions here would be swallowed by the real observer isolation.
+    observed.push({ sql, params, result, started })
+  })
+  try {
+    pool.emit('acquire', client)
+    assert.equal(client.query(clockSql, values), originalPromise)
+    assert.equal(observed.length, 1)
+    assert.equal(observed[0].sql, clockSql)
+    assert.equal(observed[0].params, values)
+    assert.equal(observed[0].result, originalPromise)
+    assert.equal(observed[0].started, 1)
+    await originalPromise
+  } finally { observer.dispose() }
+  assert.equal(client.query, originalQuery)
+  assert.deepEqual(server.rawListeners('request'), [listener])
+  assert.equal(pool.listenerCount('acquire'), 0)
+}
+
+test('actual owned-host query wrapper forwards receiver, arguments and the original promise to caller and observer', async () => {
+  await assertOwnedQueryForwarding(fixtureFunction('observeOwnedDetailRequests'))
+})
+
+test('observer argument mutations cannot hide behind the real callback exception isolation', async () => {
+  for (const [name, replacement] of [
+    ['sql', "observeQuery?.('synthetic-wrong-sql', values, result, started)"],
+    ['params', 'observeQuery?.(sql, [...values], result, started)'],
+    ['result', 'observeQuery?.(sql, values, result.then(value => value), started)'],
+    ['started', 'observeQuery?.(sql, values, result, 0)'],
+  ]) {
+    const mutant = fixtureFunction('observeOwnedDetailRequests', code => {
+      const needle = 'observeQuery?.(sql, values, result, started)'
+      assert.equal(code.split(needle).length, 2)
+      return code.replace(needle, replacement)
+    })
+    await assert.rejects(() => assertOwnedQueryForwarding(mutant), assert.AssertionError, name)
+    console.log('OBSERVER_ARGUMENT_MUTATION ' + name + ' KILLED')
+  }
+})
+
+test('actual owned-host query wrapper isolates a throwing observer and restores native methods', async () => {
+  const factory = fixtureFunction('observeOwnedDetailRequests')
+  const server = new EventEmitter(), pool = new EventEmitter()
+  const listener = () => {}
+  server.on('request', listener)
+  const result = Promise.resolve({ rows: [] })
+  const client = { query() { assert.equal(this, client); return result } }
+  const original = client.query
+  let calls = 0
+  const observer = factory(server, pool, 'synthetic-connection', () => {
+    calls++
+    throw new Error('synthetic-observer-failure')
+  })
+  try {
+    pool.emit('acquire', client)
+    assert.equal(client.query(clockSql), result)
+    assert.equal(calls, 1)
+    await result
+  } finally { observer.dispose() }
+  assert.equal(client.query, original)
+  assert.deepEqual(server.rawListeners('request'), [listener])
+  assert.equal(pool.listenerCount('acquire'), 0)
+})
+
+test('removing the clock latency uncertainty bound makes the actual collector scenario red', async () => {
+  const mutant = fixtureFunction('createAutomationClockReceiptObservation', code => {
+    assert.equal(code.split('prior.wait + wait + 250').length, 2)
+    return code.replace('prior.wait + wait + 250', '250')
+  })
+  await assert.rejects(() => assertClockReceiptScenarios(mutant), assert.AssertionError)
 })

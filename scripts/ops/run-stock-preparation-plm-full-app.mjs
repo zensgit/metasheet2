@@ -353,16 +353,20 @@ export function createFullAppStageRunner({ repoRoot, scratchDir, emit = console.
 }
 export function parseArguments(args) {
   if (args.length === 1 && args[0] === '--help') return { help: true }
-  assert(args.length >= 1 && args.length <= 2 && args.every(arg => typeof arg === 'string')
+  assert(args.length >= 1 && args.length <= 3 && args.every(arg => typeof arg === 'string')
     && args.filter(arg => arg.startsWith('--pg-bin=')).length === 1
-    && args.every(arg => arg.startsWith('--pg-bin=') || arg.startsWith('--automation-scenario=')),
+    && args.filter(arg => arg.startsWith('--automation-scenario=')).length <= 1
+    && args.filter(arg => arg.startsWith('--browser-candidate=')).length <= 1
+    && args.every(arg => arg.startsWith('--pg-bin=') || arg.startsWith('--automation-scenario=') || arg.startsWith('--browser-candidate=')),
     'PLM_FULL_APP_EXPLICIT_PG_BIN_REQUIRED')
   const pgBin = args.find(arg => arg.startsWith('--pg-bin=')).slice('--pg-bin='.length)
   assert(pgBin.length > 0, 'PLM_FULL_APP_EXPLICIT_PG_BIN_REQUIRED')
   assert(path.isAbsolute(pgBin), 'PLM_FULL_APP_ABSOLUTE_PG_BIN_REQUIRED')
   const automationScenario = args.find(arg => arg.startsWith('--automation-scenario='))?.slice('--automation-scenario='.length) ?? 'manual'
   assert(['manual', 'interval'].includes(automationScenario), 'PLM_FULL_APP_AUTOMATION_SCENARIO_INVALID')
-  return { pgBin, automationScenario }
+  const browserCandidate = args.find(arg => arg.startsWith('--browser-candidate='))?.slice('--browser-candidate='.length)
+  assert(browserCandidate === undefined || browserCandidate === 'upstream-1719529', 'PLM_FULL_APP_BROWSER_CANDIDATE_INVALID')
+  return { pgBin, automationScenario, ...(browserCandidate ? { browserCandidate } : {}) }
 }
 export function cleanEnvironment(source) {
   const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'COMSPEC', 'PATHEXT', 'HOME'])
@@ -829,6 +833,7 @@ function validateIntervalAutomationEvidence(records) {
 export async function runAcceptance(options, namespaceScope) {
   const namespaceAuthority = createRequire(import.meta.url)('./lib/stock-preparation-plm-namespace-scope.cjs')
   const nativeIsolation = namespaceAuthority.assertOwnedNamespaceScope(namespaceScope)
+  assert.equal(options.browserCandidate, namespaceScope.owner.browserCandidate?.id, 'PLM_FULL_APP_BROWSER_CANDIDATE_SCOPE_MISMATCH')
   const automationScenario = options.automationScenario ?? 'manual'
   assert(['manual', 'interval'].includes(automationScenario), 'PLM_FULL_APP_AUTOMATION_SCENARIO_INVALID')
   const repoRoot = await fs.realpath(repository)

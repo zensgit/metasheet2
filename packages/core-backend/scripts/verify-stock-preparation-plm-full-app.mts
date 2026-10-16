@@ -802,6 +802,10 @@ try {
     stage('actual-stop-resolved')
   } catch { stage('actual-stop-failed'); process.exitCode = 1 }
   try {
+    // Preserve the earlier acceptance failure instead of misreporting a socket
+    // child that the failed browser path never reached. This remains a failed
+    // stop proof; actual host.stop() above is always attempted independently.
+    assert.equal(process.exitCode ?? 0, 0, 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF')
     assert(collaborationCompletion, 'APP_CONFIGURED_COLLAB_CHILD_REQUIRED')
     const socketResult = await collaborationCompletion
     collaborationDisconnects = socketResult.disconnects
@@ -814,7 +818,6 @@ try {
         ? [{ origin, referenced: timer.hasRef(), repeating: Boolean(timer._repeat) }] : []
     })
     stage('post-stop-observed-timers', { timers: remaining })
-    assert.equal(process.exitCode ?? 0, 0, 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF')
     assert.equal(mainPool?.getInternalPool().ended, true, 'APP_CONFIGURED_MAIN_POOL_NOT_ENDED')
     assert.equal(hostListener?.listening, false, 'APP_CONFIGURED_HTTP_NOT_CLOSED')
     assert.equal(collaboration?.getIO(), null, 'APP_CONFIGURED_COLLAB_NOT_CLOSED')

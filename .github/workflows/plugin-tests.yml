@@ -1306,6 +1306,34 @@ jobs:
         if: matrix.node-version == '20.x'
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Install hash-pinned Chromium candidate for PLM and YiDa acceptance
+        id: stock-preparation-pinned-browser-install
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep Playwright's default install above for other consumers. Only the
+          # three explicit acceptance commands below select this candidate.
+          candidate_parent="$(realpath "$GITHUB_WORKSPACE/..")/browser-fix-probe"
+          candidate_target="$candidate_parent/upstream-1719529"
+          test ! -e "$candidate_target"
+          test ! -L "$candidate_parent"
+          mkdir -p "$candidate_parent"
+          candidate_stage="$(mktemp -d "$candidate_parent/.chromium-1719529-XXXXXX")"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --connect-timeout 20 --max-time 300 \
+            https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip \
+            --output "$candidate_stage/chrome-linux.zip"
+          printf '%s  %s\n' '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d' \
+            "$candidate_stage/chrome-linux.zip" | sha256sum --check --status
+          unzip -q "$candidate_stage/chrome-linux.zip" -d "$candidate_stage/extracted"
+          printf '%s  %s\n' '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925' \
+            "$candidate_stage/extracted/chrome-linux/chrome" | sha256sum --check --status
+          # Exclusive publication directory: a pre-existing target is never reused.
+          mkdir "$candidate_target"
+          mv -T "$candidate_stage/extracted/chrome-linux" "$candidate_target/chrome-linux"
+          node -e "const p=require('./scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs'); p.pinnedBrowserForRoot(process.cwd(),p.ID)"
+
       # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
       # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
@@ -1368,12 +1396,12 @@ jobs:
         if: matrix.node-version == '20.x'
         timeout-minutes: 20
         run: |
-          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin
-          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --browser-candidate=upstream-1719529
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529
 
       # These files each import the real native AuthService/JWT and scoped pool.
       # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
-      # Chromium comes from the required owner-browser install step above; only YiDa responses
+      # Chromium comes from the hash-pinned candidate install step above; only YiDa responses
       # are synthetic, never a customer request or an API response stub.
       - name: Run owner YiDa JWT HTTP and browser real-DB proof
         id: stock-preparation-yida-owner-real-db
@@ -1408,7 +1436,7 @@ jobs:
             "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
             scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs
           /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin"
+            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529
 
       - name: Run PLM validation source-revision unit contracts
         run: |

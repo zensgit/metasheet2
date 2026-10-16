@@ -21,6 +21,59 @@ export interface AutomationReadinessDiagnostic {
   nativeCalls: number; nativeCompleted: number; nativeRejected: number; nativePending: number
   hostPoolTotal: number; hostPoolIdle: number; hostPoolWaiting: number
   sourcePoolTotal: number; sourcePoolIdle: number; sourcePoolWaiting: number
+  clockReceipts?: number; clockRejected?: number; clockInvalid?: number; clockMaxReceiptWaitMs?: number
+  clockForwardBeyondWait?: number; clockBackwardBeyondWait?: number; clockMaxForwardExcessMs?: number
+  clockMaxBackwardExcessMs?: number
+}
+
+/** Test-only receipt observer. No query, argument, promise or result is replaced.
+ * A DB/monotonic delta is classified only beyond BOTH query wait bounds, so
+ * differing reply latency alone cannot be reported as a database clock jump.
+ * Counters cover the owned host pool, not uniquely an executor/checkpoint. */
+export function createAutomationClockReceiptObservation(now: () => number) {
+  let active = false
+  let prior: { database: number; monotonic: number; wait: number } | undefined
+  const stats = { clockReceipts: 0, clockRejected: 0, clockInvalid: 0, clockMaxReceiptWaitMs: 0,
+    clockForwardBeyondWait: 0, clockBackwardBeyondWait: 0, clockMaxForwardExcessMs: 0, clockMaxBackwardExcessMs: 0 }
+  const bounded = (value: number) => Math.min(2147483647, Math.max(0, Math.ceil(value)))
+  return {
+    start() { active = true },
+    observe(sql: unknown, _values: unknown, result: unknown, started: number) {
+      try {
+        if (!active || typeof sql !== 'string' || ![
+          'SELECT extract(epoch FROM clock_timestamp()) * 1000 AS now_ms',
+          'SELECT extract(epoch FROM pg_catalog.clock_timestamp()) * 1000 AS now_ms',
+        ].includes(sql.replace(/\s+/g, ' ').trim())) return
+        if (!result || typeof result !== 'object' || !('then' in result) || typeof result.then !== 'function') return
+        void Promise.resolve(result).then(value => {
+          try {
+            const monotonic = now(), wait = monotonic - started
+            // This cast observes only the native PG receipt; it grants no authority.
+            const receipt = value as { rows?: ReadonlyArray<{ now_ms?: unknown }> } | null | undefined
+            const raw: unknown = receipt?.rows?.[0]?.now_ms
+            const database = typeof raw === 'number' || typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN
+            if (!Number.isFinite(database) || !Number.isFinite(wait) || wait < 0) { stats.clockInvalid++; return }
+            stats.clockReceipts++
+            stats.clockMaxReceiptWaitMs = Math.max(stats.clockMaxReceiptWaitMs, bounded(wait))
+            if (prior) {
+              const drift = database - prior.database - (monotonic - prior.monotonic)
+              const uncertainty = prior.wait + wait + 250
+              if (drift > uncertainty) {
+                stats.clockForwardBeyondWait++
+                stats.clockMaxForwardExcessMs = Math.max(stats.clockMaxForwardExcessMs, bounded(drift - uncertainty))
+              }
+              if (drift < -uncertainty) {
+                stats.clockBackwardBeyondWait++
+                stats.clockMaxBackwardExcessMs = Math.max(stats.clockMaxBackwardExcessMs, bounded(-drift - uncertainty))
+              }
+            }
+            prior = { database, monotonic, wait }
+          } catch { stats.clockInvalid++ }
+        }, () => { stats.clockRejected++ }).catch(() => {})
+      } catch { stats.clockInvalid++ }
+    },
+    snapshot() { return { ...stats } },
+  }
 }
 export interface AutomationExecutorAbortObservation {
   origin: 'timeout' | 'live-check' | 'executor-other'
@@ -106,7 +159,7 @@ type DetailObservation = { poll: number; path: string; incoming: number; finishe
 /** Observe the unchanged real HTTP callback and owned host PG query promises.
  * Worker metadata queries have no request-scoped context and cannot justify a GET refusal. */
 export function observeOwnedDetailRequests(server: HttpServer, pool: Pool, connectionId: string,
-  observeQuery?: (sql: unknown, values: unknown, result: unknown) => void) {
+  observeQuery?: (sql: unknown, values: unknown, result: unknown, started: number) => void) {
   const contexts = new AsyncLocalStorage<DetailObservation>()
   const listeners = server.rawListeners('request')
   assert.equal(listeners.length, 1, 'APP_AUTOMATION_HTTP_SINGLE_LISTENER_REQUIRED')
@@ -127,8 +180,9 @@ export function observeOwnedDetailRequests(server: HttpServer, pool: Pool, conne
         && sql.replace(/\s+/g, ' ').trim() === mirrorObservationSql
         && Array.isArray(values) && values.length === 1 && values[0] === connectionId
       if (mirror) context.mirrorQueries += 1
+      const started = observeQuery ? performance.now() : 0
       const result: unknown = Reflect.apply(target, receiver, args)
-      observeQuery?.(sql, values, result)
+      try { observeQuery?.(sql, values, result, started) } catch { /* Diagnostics must not replace a native query result. */ }
       if (context && result && typeof result === 'object' && 'then' in result && typeof result.then === 'function') {
         void Promise.resolve(result).then(() => {}, error => {
           if (mirror && error && typeof error === 'object'
@@ -254,7 +308,9 @@ export async function createAutomationFullAppFixture(input: {
       [f.target.sheetId])).rows[0].count, 0, 'APP_AUTOMATION_ARCHIVE_MUST_BE_EMPTY')
   }
   await emptyProjectContext()
-  const detailObserver = observeOwnedDetailRequests(input.hostServer, input.hostPool, f.connectionId)
+  const clockObservation = createAutomationClockReceiptObservation(() => performance.now())
+  const detailObserver = observeOwnedDetailRequests(input.hostServer, input.hostPool, f.connectionId,
+    (sql, values, result, started) => clockObservation.observe(sql, values, result, started))
   const evidence: Record<string, boolean | number> = {
     realRuleHttpCreated: true, ruleEditorDomVerified: false, manualOnly: true,
     independentOneShotPermit: true, sourceQueryObserverPassThrough: true, emptyProjectNoTargetOrArchive: true,
@@ -292,6 +348,14 @@ export async function createAutomationFullAppFixture(input: {
         hostPoolTotal: input.hostPool.totalCount, hostPoolIdle: input.hostPool.idleCount,
         hostPoolWaiting: input.hostPool.waitingCount, sourcePoolTotal: observedPool!.totalCount,
         sourcePoolIdle: observedPool!.idleCount, sourcePoolWaiting: observedPool!.waitingCount,
+        clockReceipts: clockObservation.snapshot().clockReceipts,
+        clockRejected: clockObservation.snapshot().clockRejected,
+        clockInvalid: clockObservation.snapshot().clockInvalid,
+        clockMaxReceiptWaitMs: clockObservation.snapshot().clockMaxReceiptWaitMs,
+        clockForwardBeyondWait: clockObservation.snapshot().clockForwardBeyondWait,
+        clockBackwardBeyondWait: clockObservation.snapshot().clockBackwardBeyondWait,
+        clockMaxForwardExcessMs: clockObservation.snapshot().clockMaxForwardExcessMs,
+        clockMaxBackwardExcessMs: clockObservation.snapshot().clockMaxBackwardExcessMs,
       })
       diagnostic('start')
       // Sampling adds no SQL, locks or waits to the worker. The bounded 30s
@@ -440,6 +504,7 @@ export async function createAutomationFullAppFixture(input: {
         assert.equal((await query('SELECT count(*)::int AS count FROM integration_b2a_operation_claim WHERE registration_id=$1',
           [f.b2aRegistrationIds[2]])).rows[0].count, 0)
         evidence.grantZeroSourceIo = true
+        clockObservation.start()
       } else {
         assert(typeof command.requestId === 'string' && /^[a-f0-9-]{36}$/.test(command.requestId), 'APP_AUTOMATION_REQUEST_REQUIRED')
         if (requestId) assert.equal(command.requestId, requestId)

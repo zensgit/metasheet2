@@ -51,7 +51,8 @@ paths = ['scripts/ops/run-stock-preparation-plm-full-app.mjs',
          'scripts/ops/lib/stock-preparation-plm-namespace-scope.cjs',
          'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs',
          'scripts/ops/lib/stock-preparation-plm-namespace.mjs',
-         'scripts/ops/lib/stock-preparation-plm-namespace-bootstrap.py']
+         'scripts/ops/lib/stock-preparation-plm-namespace-bootstrap.py',
+         'scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs']
 require([row['path'] for row in owner['sources']] == paths)
 for row in owner['sources']:
     target = os.path.join(root, row['path'])

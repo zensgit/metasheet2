@@ -404,7 +404,12 @@ export async function createYidaOwnerBrowserFixture(input: {
     const nativeIsolation = webRequire(path.join(root, 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs')) as
       { assertBrowserNetworkIsolation(): unknown }
     nativeIsolation.assertBrowserNetworkIsolation()
-    browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath() })
+    const { browserFromOwner } = webRequire(path.join(root, 'scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs')) as {
+      browserFromOwner(root: string, env: NodeJS.ProcessEnv): { executablePath: string; version: string } | undefined
+    }
+    const browserCandidate = browserFromOwner(root, process.env)
+    browser = await chromium.launch({ headless: true, executablePath: browserCandidate?.executablePath ?? chromium.executablePath() })
+    if (browserCandidate) check(browser.version() === browserCandidate.version, 'PINNED_BROWSER_VERSION_REQUIRED')
     context = await browser.newContext({ viewport: { width: 1200, height: 900 }, locale: 'zh-CN', serviceWorkers: 'block' })
     await context.addInitScript(({ authToken, ownedOrigin }) => {
       if (location.origin === ownedOrigin) localStorage.setItem('auth_token', authToken)

@@ -97,6 +97,8 @@ export async function launchFullAppNamespace(options, cleanEnvironment) {
   const owner = { owner: 'PLM_FULL_APP_NAMESPACE', nonce, repoRoot: repository, pid: process.pid,
     uid: process.getuid(), parentNamespace: fs.readlinkSync('/proc/self/ns/net'), node, nodeSha256: hash(executable),
     pgBin: options.pgBin, automationScenario: options.automationScenario,
+    ...(options.browserCandidate ? { browserCandidate: require('./stock-preparation-yida-browser-candidate.cjs')
+      .pinnedBrowserForRoot(repository, options.browserCandidate) } : {}),
     sources: scopes.SOURCE_PATHS.map(relative => ({ path: relative, sha256: hash(fs.readFileSync(path.join(repository, relative))) })) }
   const ownerBytes = Buffer.from(JSON.stringify(owner) + '\n'), ownerSha256 = hash(ownerBytes)
   fs.writeFileSync(path.join(directory, 'owner.json'), ownerBytes, { flag: 'wx', mode: 0o600 })
@@ -129,7 +131,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === file) {
     await runOwnedNamespaceChild(scope.owner.node, ['--require', scope.preloadPath,
       path.join(repository, 'scripts/ops/run-stock-preparation-plm-full-app.mjs'),
       `--plm-full-app-namespace=${scope.nonce}:${scope.ownerSha256}:${scope.preloadSha256}`,
-      `--pg-bin=${scope.owner.pgBin}`, `--automation-scenario=${scope.owner.automationScenario}`],
+      `--pg-bin=${scope.owner.pgBin}`, `--automation-scenario=${scope.owner.automationScenario}`,
+      ...(scope.owner.browserCandidate ? [`--browser-candidate=${scope.owner.browserCandidate.id}`] : [])],
     cleanEnvironment(process.env), 1050000, 'PLM_FULL_APP_RESULT ')
     console.log('PLM_FULL_APP_NAMESPACE_RESULT ' + JSON.stringify({ passed: true, workerReceiptObserved: true,
       normalChildExit: true, pidInitCapabilitiesZero: true, ordinaryWorker: true }))

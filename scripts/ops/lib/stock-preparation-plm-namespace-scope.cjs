@@ -12,12 +12,14 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const sha = /^[a-f0-9]{64}$/
 const registered = new WeakSet()
+let installedScope
 const SOURCE_PATHS = Object.freeze([
   'scripts/ops/run-stock-preparation-plm-full-app.mjs',
   'scripts/ops/lib/stock-preparation-plm-namespace-scope.cjs',
   'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs',
   'scripts/ops/lib/stock-preparation-plm-namespace.mjs',
   'scripts/ops/lib/stock-preparation-plm-namespace-bootstrap.py',
+  'scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs',
 ])
 function plain(target, directory = false) {
   assert(path.isAbsolute(target) && fs.realpathSync(target) === target, 'PLM_FULL_APP_NAMESPACE_PATH_REDIRECTED')
@@ -44,7 +46,14 @@ function scopeFromOwner({ repoRoot, nonce, ownerSha256, preloadSha256 }) {
   assert.equal(hash(bytes), ownerSha256, 'PLM_FULL_APP_NAMESPACE_OWNER_HASH_MISMATCH')
   const owner = JSON.parse(bytes)
   assert.deepEqual(Object.keys(owner).sort(), ['automationScenario', 'node', 'nodeSha256', 'nonce', 'owner',
-    'parentNamespace', 'pgBin', 'pid', 'repoRoot', 'sources', 'uid'])
+    'parentNamespace', 'pgBin', 'pid', 'repoRoot', 'sources', 'uid',
+    ...(Object.hasOwn(owner, 'browserCandidate') ? ['browserCandidate'] : [])].sort())
+  if (Object.hasOwn(owner, 'browserCandidate')) {
+    const candidate = require('./stock-preparation-yida-browser-candidate.cjs')
+      .pinnedBrowserForRoot(repoRoot, owner.browserCandidate?.id)
+    assert(candidate, 'PLM_FULL_APP_NAMESPACE_BROWSER_CANDIDATE_REQUIRED')
+    assert.deepEqual(owner.browserCandidate, candidate, 'PLM_FULL_APP_NAMESPACE_BROWSER_CANDIDATE_MISMATCH')
+  }
   assert(owner.owner === 'PLM_FULL_APP_NAMESPACE' && owner.repoRoot === repoRoot && owner.nonce === nonce,
     'PLM_FULL_APP_NAMESPACE_OWNER_MISMATCH')
   assert(Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isSafeInteger(owner.uid) && owner.uid > 0,
@@ -97,6 +106,13 @@ function installOwnedNamespacePreload(config) {
   assert.equal(process.getuid?.(), scope.owner.uid, 'PLM_FULL_APP_NAMESPACE_UID_MISMATCH')
   native.installBrowserNetworkIsolation(scope.parentNamespace)
   assertOwnedNamespaceScope(scope)
+  installedScope = scope
+}
+function installedBrowserCandidate() {
+  assert(installedScope, 'PLM_FULL_APP_NAMESPACE_CAPABILITY_REQUIRED')
+  const scope = scopeFromOwner(installedScope)
+  assertOwnedNamespaceScope(scope)
+  return scope.owner.browserCandidate
 }
 function namespaceChildArguments(scope) {
   assertOwnedNamespaceScope(scope)
@@ -107,4 +123,4 @@ function namespaceArgument(scope) {
   return `--plm-full-app-namespace=${scope.nonce}:${scope.ownerSha256}:${scope.preloadSha256}`
 }
 module.exports = Object.freeze({ SOURCE_PATHS, preloadBytes, scopeFromOwner, decodeScope, assertOwnedNamespaceScope,
-  installOwnedNamespacePreload, namespaceChildArguments, namespaceArgument })
+  installOwnedNamespacePreload, namespaceChildArguments, namespaceArgument, installedBrowserCandidate })
