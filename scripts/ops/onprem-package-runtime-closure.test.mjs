@@ -65,3 +65,10 @@ for (const [kind, requiredFiles] of Object.entries(closures)) {
     })
   }
 }
+
+test('runtime closure regression executes in the required Node 20 job', () => {
+  const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const requiredJob = workflow.split('\n  test:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
+  assert.match(requiredJob, /node-version: \[20\.x\]/)
+  assert.match(requiredJob, /run: node --test scripts\/ops\/attendance-onprem-package-verify-migrations\.test\.mjs scripts\/ops\/onprem-package-runtime-closure\.test\.mjs/)
+})
