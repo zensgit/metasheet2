@@ -187,6 +187,7 @@ import {
 import {
   AttendanceW4IdentityError,
   acquireAttendanceCalculationRolloutLock,
+  AttendanceRolloutConnectionUncertainError,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceLegacyIdempotencyAdvisoryKey,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
@@ -198,6 +199,20 @@ import {
   W4_ADVISORY_HELPER_WAIT_MS,
   W4_TRANSACTION_LOCK_TIMEOUT_MS,
 } from './attendance/w4c0-operation-contract'
+import { runAttendanceResultOperationTransactionV1 } from './attendance/w4c0-operation-registry'
+import {
+  applyLeaveRevisionCorrectionV1,
+  closeApprovalRoundAsAdminV1,
+  type ApprovalChangeQueryV1,
+} from './attendance/approval-change-revision-writer'
+
+function pluginRowsToApprovalChangeDb(
+  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+): ApprovalChangeQueryV1 {
+  return {
+    query: async (sql, params) => ({ rows: await trx.query(sql, params ? [...params] : undefined) }),
+  }
+}
 // W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
 // connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
 // other `attendanceW4SegmentCalculation` port method below.
@@ -834,6 +849,37 @@ export class MetaSheetServer {
             }
             return callback(trx)
           })
+        },
+        transactionWithRolloutLock: async <T>(
+          orgId: string,
+          mode: 'shared' | 'exclusive',
+          callback: (trx: import('./types/plugin').DatabaseTransaction) => Promise<T>,
+        ): Promise<T> => {
+          const client = await poolManager.get().getInternalPool().connect()
+          let uncertain = false
+          try {
+            return await runAttendanceResultOperationTransactionV1(
+              client,
+              async (raw) => {
+                const trx: import('./types/plugin').DatabaseTransaction = {
+                  query: async (sql: string, params?: unknown[]) => {
+                    const result = await raw.query(sql, params)
+                    return result.rows as import('./types/plugin').DatabaseQueryResult
+                  },
+                  __rawClient: client,
+                  commit: async () => undefined,
+                  rollback: async () => undefined,
+                }
+                return callback(trx)
+              },
+              { rolloutSnapshotLock: { orgId, mode } },
+            )
+          } catch (error) {
+            if (error instanceof AttendanceRolloutConnectionUncertainError) uncertain = true
+            throw error
+          } finally {
+            client.release(uncertain ? new AttendanceRolloutConnectionUncertainError() : undefined)
+          }
         },
         model: (_name: string): import('./types/plugin').DatabaseModel => ({
           find: async () => [],
@@ -2976,6 +3022,14 @@ export class MetaSheetServer {
                 // decision. The plugin's canonical live adapter consumes this
                 // instead of the removed second mutable post-upsert pass — the
                 // plugin never copies the branch logic, one source, no drift.
+                applyLeaveRevisionCorrectionV1: (
+                  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+                  input: Parameters<typeof applyLeaveRevisionCorrectionV1>[1],
+                ) => applyLeaveRevisionCorrectionV1(pluginRowsToApprovalChangeDb(trx), input),
+                closeApprovalRoundAsAdminV1: (
+                  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+                  engineInstanceId: string,
+                ) => closeApprovalRoundAsAdminV1(pluginRowsToApprovalChangeDb(trx), engineInstanceId),
                 applyMergePolicyPure: (input: unknown) =>
                   applyAttendanceInOutMergePolicyPureV1(
                     input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],
@@ -3001,7 +3055,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as

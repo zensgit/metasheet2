@@ -68,6 +68,16 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // Approval-change readers and writers. They do not build a frozen context.
+  // Classified calculation_path so both W6 aggregate bans still apply. No carve-out.
+  'packages/core-backend/src/attendance/approval-change-day-recalc.ts',
+  'packages/core-backend/src/attendance/approval-change-leave-reversal.ts',
+  'packages/core-backend/src/attendance/approval-change-legacy-repair.ts',
+  'packages/core-backend/src/attendance/approval-change-policy.ts',
+  'packages/core-backend/src/attendance/approval-change-revision-swap.ts',
+  'packages/core-backend/src/attendance/approval-change-revision-writer.ts',
+  'packages/core-backend/src/attendance/approval-change-round-close.ts',
+  'packages/core-backend/src/attendance/approval-change-settled-period.ts',
   // Trip, request and timezone modules supply or protect the frozen calculation context.
   // Apply both aggregate bans to every new module; no exclusion is introduced.
   'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',
@@ -203,6 +213,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // calculation path also depends on, so both ban legs apply to it even though it never
   // WRITES a calculation itself (only an out-of-band audit row).
   'plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs',
+  // Settled-period and recompute-obligation predicates. Both W6 aggregate bans
+  // apply; this is not an exclusion.
+  'plugins/plugin-attendance/lib/attendance-period-gate.cjs',
   'plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs',
   // Records/calendar pre-read identity boundary, not a calculation engine.
   // Keep the stricter partition: both W6 aggregate bans apply, with no carve-out.

@@ -92,6 +92,10 @@ const TABLE_BUCKETS = Object.freeze({
   // result truth), cannot mint evidence, and must never be read by the W4 calculation path;
   // same posture as attendance_notification_deliveries above.
   attendance_org_resolution_shadow: 'operational',
+  // Approval-change bookkeeping. An open obligation blocks payroll close; a revision
+  // row is the reversal idempotency identity. Neither table is a daily result.
+  attendance_recompute_obligations: 'operational',
+  attendance_document_revisions: 'operational',
 
   // --- reference: org configuration/reference data, not calculation truth ------------------
   attendance_groups: 'reference',

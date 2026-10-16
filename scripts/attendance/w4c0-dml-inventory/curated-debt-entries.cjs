@@ -712,6 +712,47 @@ const CURATED_DEBT_ENTRIES = [
       'plugins/plugin-attendance/lib/attendance-business-trip.cjs::cancel::attendance_business_trip_arrangements::update',
     ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
   },
+  {
+    id: 'X10',
+    title: 'Approval-change v3.1 leave revision reversal and admin correction of an approved leave.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: true,
+    canonicalizedBy: 'approval-change-v31',
+    residualClassification: 'non_result_shared_hook_ledger',
+    // The admin route's attendance_requests UPDATE stays an arrow inside index.cjs.
+    // A named function there becomes the nearest symbol for later rotation-assignment
+    // writers. This entry claims only the two ledger sites in the revision writer.
+    residualEvidence: 'reversal updates only attendance_leave_balances and attendance_leave_balance_events; it does not write attendance_records',
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-revision-writer.ts::reverseLeaveBalanceForRevisionV1::attendance_leave_balances::update',
+      'packages/core-backend/src/attendance/approval-change-revision-writer.ts::reverseLeaveBalanceForRevisionV1::attendance_leave_balance_events::insert',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
+  {
+    id: 'X11',
+    title: 'Approval-change v3.1 legacy day projection after a removed leave.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: false,
+    canonicalizedBy: 'approval-change-v31',
+    // One UPDATE. It refuses W4-owned, manual-edit, and retired parents in the
+    // WHERE clause. It does not insert a companion or a calculation row.
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-day-recalc.ts::applyLegacyLeaveDayProjectionV1::attendance_records::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
+  {
+    id: 'X12',
+    title: 'Approval-change v3.1 revision swap creates the successor engine and cancels the predecessor engine.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: true,
+    canonicalizedBy: 'approval-change-v31',
+    residualClassification: 'non_result_shared_hook_ledger',
+    residualEvidence: 'revision swap writes approval_instances only; it does not write attendance_records or copy seats',
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-revision-swap.ts::applyRevisionContentSwapV1::approval_instances::insert',
+      'packages/core-backend/src/attendance/approval-change-revision-swap.ts::applyRevisionContentSwapV1::approval_instances::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
 
 ]
 

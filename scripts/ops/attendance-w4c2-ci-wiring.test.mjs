@@ -2178,6 +2178,7 @@ test('suite-API detector: any member form counts, prose and test titles do not',
 // ---------------------------------------------------------------------------------------------
 const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-approval-action-authorization.db.test.ts',
+  'tests/integration/attendance-approval-change-v31.db.test.ts',
   'tests/integration/attendance-approval-dept-head-s7-3.db.test.ts',
   'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
   'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',

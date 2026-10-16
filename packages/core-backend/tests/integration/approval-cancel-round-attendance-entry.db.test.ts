@@ -3533,14 +3533,12 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         expect(approvalSide.status, approvalSide.text).toBe(200)
         expect(approvalSide.json.cancellationOutcome).toEqual(outcome)
 
-        // Twin 1: the existing direct cancel by its employee.
+        // Twin 1: direct cancel of an approved leave is refused. The round path above is the cancel.
         const direct = await http('POST', `/api/attendance/requests/${leaves[1].requestId}/cancel`, tokens[1], {})
-        expect(direct.status, direct.text).toBe(200)
-        expect(direct.json.data.reversal).toEqual(outcome.reversal)
+        expect(direct.status, direct.text).toBe(409)
+        expect(direct.json.error.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
 
-        // The ledgers end in the same place, column by column.
-        const [roundLedger, directLedger] = [await ledgerOf(0), await ledgerOf(1)]
-        expect(roundLedger).toEqual(directLedger)
+        const roundLedger = await ledgerOf(0)
         expect(roundLedger.lots).toEqual([
           expect.objectContaining({ amount_minutes: 60, remaining_minutes: 0 }),
           expect.objectContaining({ amount_minutes: 480, remaining_minutes: 480, status: 'active' }),
@@ -3550,11 +3548,13 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           expect.objectContaining({ lot: 1, event_type: 'deduct', delta_minutes: -60, ownRequest: true }),
           expect.objectContaining({ lot: 1, event_type: 'reverse', delta_minutes: 60, ownRequest: true }),
         ])
+        const untouched = await ledgerOf(1)
+        expect(untouched.events.filter((row) => row.event_type === 'reverse')).toEqual([])
         const statuses = await pool().query<{ status: string }>(
           'SELECT status FROM attendance_requests WHERE id = ANY($1::uuid[]) ORDER BY status',
           [[leaves[0].requestId, leaves[1].requestId]],
         )
-        expect(statuses.rows).toEqual([{ status: 'cancelled' }, { status: 'cancelled' }])
+        expect(statuses.rows).toEqual([{ status: 'approved' }, { status: 'cancelled' }])
         expect((await roundsFor(leaves[0].documentId)).map((row) => row.outcome)).toEqual(['applied'])
       })
 
@@ -3653,15 +3653,16 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           } finally {
             directEvents.stop()
           }
-          expect(direct.status, direct.text).toBe(200)
-          expect(directEvents.seen).toEqual(['attendance.request.cancelled'])
+          expect(direct.status, direct.text).toBe(409)
+          expect(direct.json.error.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
+          expect(directEvents.seen).toEqual([])
           const afterDirect = await pool().query<{ request_status: string; document_status: string }>(
             `SELECT r.status AS request_status, i.status AS document_status
                FROM attendance_requests r JOIN approval_instances i ON i.id = r.approval_instance_id
               WHERE r.id = $1`,
             [requestId],
           )
-          expect(afterDirect.rows[0]).toEqual({ request_status: 'cancelled', document_status: 'cancelled' })
+          expect(afterDirect.rows[0]).toEqual({ request_status: 'approved', document_status: 'approved' })
           expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
 
           return {
@@ -3806,75 +3807,36 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['blocked'])
         }
 
-        it('attendance-side approve by the seat holder (real token): 200 with the minimal body saying blocked; the round is closed by the system as business_blocked, its seat released, the leave and its balance untouched, zero completion events', async () => {
+        it('attendance-side direct cancel is refused; the pending round and the approved leave stay', async () => {
           const fixture = await pendingRoundOverDirectlyCancelledLeave('att')
-          const before = await leaveBusinessState(fixture)
-          const events = captureRoundEvents(fixture.roundInstanceId)
-          let decided: Raw
-          try {
-            decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
-          } finally {
-            events.stop()
-          }
-          expect(decided.status, decided.text).toBe(200)
-          expect(decided.json).toEqual({
-            ok: true,
-            data: {
-              requestId: fixture.requestId,
-              roundId: fixture.roundId,
-              outcome: 'blocked',
-              status: 'cancellation_blocked',
-            },
-          })
-          expect(events.seen).toEqual([])
-          expect(await leaveBusinessState(fixture)).toEqual(before)
-          await expectClosedAsSystemBlocked(fixture)
-          expect(await leaveBusinessState(fixture)).toEqual(before)
+          const row = await pool().query<{ status: string }>('SELECT status FROM attendance_requests WHERE id = $1', [fixture.requestId])
+          expect(row.rows[0].status).toBe('approved')
+          expect((await roundsFor(fixture.documentId)).map((round) => round.outcome)).toEqual(['pending'])
         })
 
-        it('approval-side approve by the same seat holder: 200 with the closed DTO (rejected + the bounded close reason), the same system close, and the leave and its balance untouched', async () => {
+        it('approval-side direct cancel is the same refusal; the round is not closed as blocked', async () => {
           const fixture = await pendingRoundOverDirectlyCancelledLeave('apr')
-          const before = await leaveBusinessState(fixture)
-          const events = captureRoundEvents(fixture.roundInstanceId)
-          let decided: Raw
-          try {
-            decided = await http('POST', `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverFixtureToken, {
-              action: 'approve',
-            })
-          } finally {
-            events.stop()
-          }
-          expect(decided.status, decided.text).toBe(200)
-          expect(decided.json.status).toBe('rejected')
-          expect(decided.json.cancelRoundCloseReason).toBe(CLOSE_REASON)
-          expect(events.seen).toEqual([])
-          expect(await leaveBusinessState(fixture)).toEqual(before)
-          await expectClosedAsSystemBlocked(fixture)
+          const engine = await pool().query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [fixture.roundInstanceId])
+          expect(engine.rows[0].status).toBe('pending')
         })
 
-        it('precedence: when the window has ALSO closed, the close is still blocked with this code, not expired — the reason that holds regardless of the clock', async () => {
+        it('a closed window does not turn the refused direct cancel into an expired round', async () => {
           const fixture = await pendingRoundOverDirectlyCancelledLeave('win')
-          // §2-G2 anchor moved past the leave suite's 90-day ceiling — the anchor, not the clock
-          // (same fixture move as the V5 case above).
           const aged = await pool().query(
             `UPDATE approval_records SET created_at = now() - make_interval(days => 200)
               WHERE instance_id = $1 AND to_status = 'approved'`,
             [fixture.documentId],
           )
           expect(aged.rowCount).toBe(1)
-          const before = await leaveBusinessState(fixture)
-          const decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
-          expect(decided.status, decided.text).toBe(200)
-          expect(decided.json.data).toMatchObject({ outcome: 'blocked', status: 'cancellation_blocked' })
-          expect(await leaveBusinessState(fixture)).toEqual(before)
-          await expectClosedAsSystemBlocked(fixture)
+          const again = await http('POST', `/api/attendance/requests/${fixture.requestId}/cancel`, fixture.employeeToken, {})
+          expect(again.status, again.text).toBe(409)
+          expect(again.json.error.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
+          expect((await roundsFor(fixture.documentId)).map((round) => round.outcome)).toEqual(['pending'])
         })
 
-        it('ordering: an original with no §2-G2 anchor (the REDEEM suite\'s legacy/bridge fixture shape) that is then cancelled directly still closes as blocked with this code — never the retryable 409 CANCEL_ROUND_WINDOW_ANCHOR_MISSING, which no retry could clear', async () => {
+        it('a missing anchor still refuses direct cancel and does not close the round', async () => {
           const fixture = await pendingRoundOverDirectlyCancelledLeave('anc', {
             beforeLaunch: async (documentId) => {
-              // The REDEEM suite's anchor erase, verbatim: the approved transition on the document's
-              // own audit trail is rewritten while its status stays `approved`, so the round launches.
               const erased = await pool().query(
                 `UPDATE approval_records SET to_status = 'pending'
                   WHERE instance_id = $1 AND to_status = 'approved'`,
@@ -3883,17 +3845,9 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
               expect(erased.rowCount).toBe(1)
             },
           })
-          const anchors = await pool().query<{ count: string }>(
-            `SELECT COUNT(*)::text AS count FROM approval_records WHERE instance_id = $1 AND to_status = 'approved'`,
-            [fixture.documentId],
-          )
-          expect(anchors.rows[0].count).toBe('0')
-          const before = await leaveBusinessState(fixture)
-          const decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
-          expect(decided.status, decided.text).toBe(200)
-          expect(decided.json.data).toMatchObject({ outcome: 'blocked', status: 'cancellation_blocked' })
-          expect(await leaveBusinessState(fixture)).toEqual(before)
-          await expectClosedAsSystemBlocked(fixture)
+          expect((await roundsFor(fixture.documentId)).map((round) => round.outcome)).toEqual(['pending'])
+          const row = await pool().query<{ status: string }>('SELECT status FROM attendance_requests WHERE id = $1', [fixture.requestId])
+          expect(row.rows[0].status).toBe('approved')
         })
       })
     })

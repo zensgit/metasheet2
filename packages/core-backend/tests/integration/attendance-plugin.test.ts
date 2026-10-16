@@ -24,6 +24,12 @@ type AttendancePluginTestModule = {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG: string
     runAttendanceAutoShiftAutoWriteOnce(db: unknown, options?: Record<string, unknown>): Promise<any>
   }
+  __attendanceLeaveCancellationForTests?: {
+    reverseLeaveBalanceDeduction(
+      trx: { query(sql: string, params?: unknown[]): Promise<Array<Record<string, unknown>>> },
+      input: { orgId: string; userId: string; requestId: string },
+    ): Promise<{ reversed: number; lots: number; unrecoverableExpired: number; alreadyReversed: boolean }>
+  }
   // Resets the plugin's module-level settings cache (60s TTL). Exposed by the plugin for test isolation.
   resetAttendanceSettingsCacheForTests?: () => void
 }
@@ -20099,33 +20105,55 @@ attendanceIntegrationDescribe(
       expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 120, status: 'active' })
       expect(await events(lot, req)).toEqual([{ event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' }])
 
-      // (2) cancel the APPROVED leave → reverse (restored; reverse event mirrors comp_time_leave)
+      // Direct HTTP cancel of an approved leave is refused. The reverse algorithm
+      // remains the one authorized redemption calls; exercise it on this connection.
       const cancelRes = await cancel(token, req)
-      expect(cancelRes.status).toBe(200)
-      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(cancelRes.status).toBe(409)
+      expect((cancelRes.body as { error?: { code?: string } }).error?.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
+      expect((await cancel(token, req)).status).toBe(409)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 120, status: 'active' })
+      const reverseLeave = getAttendancePluginForTest().__attendanceLeaveCancellationForTests?.reverseLeaveBalanceDeduction
+      expect(reverseLeave).toEqual(expect.any(Function))
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const trx = { query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows }
+        const first = await reverseLeave!(trx, { orgId: 'default', userId, requestId: req })
+        expect(first).toMatchObject({ reversed: 120, alreadyReversed: false })
+        const second = await reverseLeave!(trx, { orgId: 'default', userId, requestId: req })
+        expect(second.alreadyReversed).toBe(true)
+        expect(second.reversed).toBe(0)
+        await client.query('COMMIT')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
       expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240, status: 'active' })
       expect(await events(lot, req)).toEqual([
         { event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' },
         { event_type: 'reverse', delta_minutes: 120, source_type: 'comp_time_leave' },
       ])
 
-      // (3) §3b idempotency: a 2nd cancel is rejected (already cancelled); balance + events unchanged
-      expect((await cancel(token, req)).status).toBe(400)
-      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240 })
-      expect(await events(lot, req)).toHaveLength(2)
-
-      // (4) §3a expired lot: deduct, then expire the lot → cancel does NOT restore it; reverse=0, unrecoverable surfaced
+      // §3a expired lot: deduct, then expire the lot → reverse does NOT restore it.
       const lotE = await insertLot(userExp, 120, 'exp')
       const reqE = await createLeave(tokenExp, userExp, 120)
       expect((await approve(tokenExp, reqE)).status).toBe(200)
       expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
       await pool.query(`UPDATE attendance_leave_balances SET expires_at = '2000-01-01', status = 'expired' WHERE id = $1`, [lotE])
       const cancelE = await cancel(tokenExp, reqE)
-      expect(cancelE.status).toBe(200)
-      const reversalE = (cancelE.body as { data?: { reversal?: { reversed?: number; unrecoverableExpired?: number } } } | undefined)?.data?.reversal
-      expect(reversalE?.reversed).toBe(0)
-      expect(reversalE?.unrecoverableExpired).toBe(120)
-      // not resurrected (still expired, remaining 0) + no reverse event written for the expired portion
+      expect(cancelE.status).toBe(409)
+      const clientE = await pool.connect()
+      try {
+        await clientE.query('BEGIN')
+        const trx = { query: async (sql: string, params?: unknown[]) => (await clientE.query(sql, params)).rows }
+        const reversalE = await reverseLeave!(trx, { orgId: 'default', userId: userExp, requestId: reqE })
+        expect(reversalE.reversed).toBe(0)
+        expect(reversalE.unrecoverableExpired).toBe(120)
+        await clientE.query('COMMIT')
+      } finally {
+        await clientE.query('ROLLBACK').catch(() => undefined)
+        clientE.release()
+      }
       expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'expired' })
       expect((await events(lotE, reqE)).filter(e => e.event_type === 'reverse')).toHaveLength(0)
     } finally {
@@ -20200,10 +20228,23 @@ attendanceIntegrationDescribe(
         [userId, otherLot, req],
       )
 
-      // cancel → reverse for (default, userId, req): ONLY the legit 120 (own lot) reverses; the corrupt 200 is ignored.
+      // Direct HTTP cancel is refused. The reverse helper still ignores the corrupt lot.
       const cancelRes = await requestJson(`${baseUrl}/api/attendance/requests/${req}/cancel`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'withdraw' }) })
-      expect(cancelRes.status, cancelRes.raw).toBe(200)
-      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(cancelRes.status, cancelRes.raw).toBe(409)
+      expect((cancelRes.body as { error?: { code?: string } }).error?.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
+      const reverseLeave = getAttendancePluginForTest().__attendanceLeaveCancellationForTests?.reverseLeaveBalanceDeduction
+      expect(reverseLeave).toEqual(expect.any(Function))
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const trx = { query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows }
+        const reversal = await reverseLeave!(trx, { orgId: 'default', userId, requestId: req })
+        expect(reversal.reversed).toBe(120)
+        await client.query('COMMIT')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
       expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 240, status: 'active' }) // own lot restored
       expect(await lotRow(otherLot)).toMatchObject({ remaining_minutes: 100, status: 'active' }) // stranger's lot UNTOUCHED
       const otherReverse = (await pool.query(`SELECT 1 FROM attendance_leave_balance_events WHERE balance_id = $1 AND event_type = 'reverse'`, [otherLot])).rows

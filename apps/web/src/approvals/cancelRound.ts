@@ -360,6 +360,11 @@ export const CANCEL_ROUND_ERROR_COPY: Readonly<Record<string, CancelRoundErrorCo
   APPROVAL_REVOKE_DISABLED: { cls: 'withdraw', zh: '该撤销申请不允许撤回', en: 'This cancellation cannot be withdrawn' },
   // Entry-level plugin codes that can reach the dialogs.
   CANCEL_ROUND_REQUIRED: { cls: 'other', zh: '已通过的出差需通过撤销申请取消', en: 'An approved business trip must be cancelled through a cancellation request' },
+  CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED: {
+    cls: 'other',
+    zh: '已通过的申请需通过撤销申请取消',
+    en: 'An approved request must be cancelled through a cancellation request',
+  },
   NOT_FOUND: { cls: 'other', zh: '找不到这条申请或撤销申请,请刷新后重试', en: 'This request or cancellation was not found — please refresh and try again' },
   FORBIDDEN: { cls: 'other', zh: '没有权限执行此操作', en: 'You do not have permission to do this' },
 })

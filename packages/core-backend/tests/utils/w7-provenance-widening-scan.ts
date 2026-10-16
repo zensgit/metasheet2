@@ -670,6 +670,10 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   // Reviewed ordinary-record repair and its preflight admit only legacy_untracked.
   // Both w4 and w4_group remain outside that repair scope; neither is downgraded
   // or treated as an ordinary legacy candidate. Keep the exact legacy-only tests.
+  // Leave-day projection refuses a w4-owned parent and rewrites only a legacy parent.
+  // The w4 test names one member. The SQL gate names only legacy_untracked.
+  { file: 'packages/core-backend/src/attendance/approval-change-day-recalc.ts', text: "if (facts.hasRecord && facts.projectionOwner === 'w4') return { action: 'refuse', reason: 'w4_owned' }", rule: 'single_member_selector' },
+  { file: 'packages/core-backend/src/attendance/approval-change-day-recalc.ts', text: "AND visibility_state = 'active' AND projection_owner = 'legacy_untracked'", rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', text: "if (record.visibility_state !== 'active' || record.projection_owner !== 'legacy_untracked'", rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', text: "} else if (row.current_calculation_id === null && row.projection_owner === 'legacy_untracked' && ordinaryLegacyMeta(row.meta)) {", rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', text: 'if (isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner)) {', rule: 'widened_predicate' },

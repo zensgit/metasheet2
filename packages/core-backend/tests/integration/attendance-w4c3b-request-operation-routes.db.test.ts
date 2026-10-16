@@ -545,8 +545,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     })
     expect(response.status, response.raw).toBe(409)
     expect(response.body?.error).toMatchObject({
-      code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
-      details: [{ field: 'calculation', message: 'record_missing' }],
+      code: 'CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED',
     })
     expect(await counts(fixture.orgId)).toEqual(before)
     const persisted = await pool.query(
@@ -1539,8 +1538,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
         },
         body: { operationId: randomUUID() },
       })
-      expect(response.status, `${specialized.kind}: ${response.raw}`).toBe(400)
-      expect(response.body?.error?.code).toBe('INVALID_STATUS')
+      expect(response.status, `${specialized.kind}: ${response.raw}`).toBe(409)
+      expect(response.body?.error?.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
       expect(await counts(fixture.orgId)).toEqual(before)
       const persisted = await pool.query(
         'SELECT status, resolved_by, resolved_at FROM attendance_requests WHERE id = $1::uuid AND org_id = $2',
