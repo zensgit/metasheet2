@@ -307,7 +307,9 @@ describeDatabase('Automation read delivery: real PG sink and dispatcher, synthet
     }
   })
   it('real dispatcher timeout aborts the exact runtime signal; retry delivery drains unknown without rerunning', async () => {
-    const item = await seed(), started = barrier(), stopped = barrier()
+    const item = await seed(), started = barrier(), stopped = barrier(), settled = barrier()
+    const tailEntered = barrier(), releaseTail = barrier()
+    let reconciliations = 0, handlerSettled = false
     let runtimeSignal: AbortSignal | undefined
     const execute = vi.fn(async (requestId: string, signal: AbortSignal) => {
       runtimeSignal = signal
@@ -318,7 +320,26 @@ describeDatabase('Automation read delivery: real PG sink and dispatcher, synthet
       await terminal(requestId, 'outcome_unknown')
       return { requestId, status: 'outcome_unknown' as const }
     })
-    const dispatch = tick(execute, { adapterTimeoutMs: 1000 })
+    const delivery = adapter(execute, work => transaction(async trx => {
+      const trailing = ++reconciliations === 2
+      const result = await work(trx)
+      if (trailing) {
+        // Hold the real trailing transaction, including its consumer FOR SHARE
+        // lock, so removing the drain wait fails deterministically in CI.
+        tailEntered.resolve()
+        await releaseTail.promise
+      }
+      return result
+    }))
+    const registry = new ConsumerAdapterRegistry()
+    registry.register({
+      key: delivery.key,
+      async handle(event, context) {
+        try { return await delivery.handle(event, context) }
+        finally { handlerSettled = true; settled.resolve() }
+      },
+    })
+    const dispatch = runDispatchTick(pool, registry, { batchSize: 1, adapterTimeoutMs: 1000 })
     try {
       await started.promise
       const outcome = await dispatch
@@ -328,13 +349,23 @@ describeDatabase('Automation read delivery: real PG sink and dispatcher, synthet
       expect(outcome).toMatchObject({ rescheduled: 1 })
       // Wait for the cooperative safe sink; the outer timeout may win its COMMIT.
       await vi.waitFor(async () => expect((await snapshot(item.requestId)).status).toBe('outcome_unknown'))
+      // The timeout settles the dispatcher, not its cooperative adapter. Its
+      // trailing reconciliation can still hold FOR SHARE on the consumer row;
+      // an immediate retry then legitimately claims nothing via SKIP LOCKED.
+      // Drain that exact invocation before requiring one retry tick to ACK.
+      await tailEntered.promise
+      setImmediate(releaseTail.resolve)
+      await settled.promise
+      expect(handlerSettled).toBe(true)
       await requeue(item.outboxId)
       expect(await tick(execute)).toMatchObject({ completed: 1 })
       expect(await snapshot(item.requestId)).toMatchObject({ status: 'outcome_unknown', used_executions: 1, result: null, delivery_status: 'done' })
       expect(execute).toHaveBeenCalledTimes(1)
     } finally {
       stopped.resolve()
+      releaseTail.resolve()
       await dispatch
+      await settled.promise
       await vi.waitFor(async () => expect((await snapshot(item.requestId)).status).toBe('outcome_unknown'))
     }
   })

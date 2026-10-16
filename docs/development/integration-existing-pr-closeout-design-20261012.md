@@ -1,5 +1,19 @@
 # 既有 #6337 收口设计
 
+## 2026-10-16 Automation 前置失败：只修测试收尾同步（本地）
+
+本轮 owner 明确授权在现有 #6337 内本地复现、捕获脱敏计数、最小修复、合成验证及更新 MD。不新增切片，不提交/推送、重跑 CI、合并、部署、客户读取或真实发送。
+
+冻结远端 head 为 `bef3f94b69938c37266ec306e1e551cbde3a5bb0`。真实失败断言是 `automation-read-delivery-realdb.test.ts` 原332行，取消超时后的重新投递期望 completed=1、实际0。只读日志没有保存完整 dispatch 计数，不能证明此次 CI 的唯一实际时序。
+
+生产路径存在可实证的测试竞争：`automation-read-delivery.ts:87` 的 trailing reconciliation 对 consumer 行取 FOR SHARE；dispatcher `automation-durable-dispatcher.ts:189` 的领取使用 FOR UPDATE SKIP LOCKED。超时结束的是外层 dispatch，不保证原 adapter 已完成 reconciliation。旧 adapter 在手工 requeue 之后持有该共享锁时，下一 tick 可以合法 claimed=0/completed=0。只有 durable source 状态成为 outcome_unknown，并不能证明旧 invocation 已释放锁。
+
+最小改动限于这个测试文件：真实 adapter 原样接收 event/context，finally 记录其完整 handle 已 settled；测试先确认原 timeout/AbortSignal/unknown，再等待同一个 handle settle，才手工 requeue 并要求下一 tick ACK。生产 dispatcher、adapter、数据库租约、timeout=1000、原单次执行/fence/unknown断言全部不变。
+
+为使回归不靠运气，在该用例的真实 transaction 包装器中，以两个本地 barrier 暂停第二次 reconciliation 的提交；所有实际 SQL、锁和事务仍走原路径。测试等到 tail 已进入，安排下一事件循环释放，再等待 settled 并断言 handlerSettled，最后重新投递。删除 drain wait 将在原用例内确定性失败，而不是只能靠外置探针重现。finally 同时释放 tail 与 cooperative execution，并等待 settled，避免失败时留下挂起事务。未新增端点、env flag、迁移或生产能力。
+
+边界：这是已复现的测试同步缺陷及修复，不冒称已证明 CI 当时唯一根因、Chromium ABORTED 已修复或宜搭正式71项通过。固定浏览器正式安装已通过，但目标 PLM/宜搭步骤在失败 run 中 skipped，发布门继续保留。仅回滚本地测试补丁即可回到原行为；不回滚运行时或任何数据。
+
 ## 2026-10-16 本轮推送授权与发布范围
 
 用户已明确授权将固定浏览器CI接线补丁及本MD推入现有草稿#6337，并运行既有合成CI。仅此推送/CI授权覆盖下方历史“未获推送授权”的状态；不允许新增切片、合并、部署、读取客户数据或真实宜搭发送。发布内容为基线fcb20上的16文件受验补丁及两份现有MD，保持草稿及原base不变。正式CI结果以新head实跑为准，既有本地三门、266合同及历史失败不被改写。

@@ -1,5 +1,47 @@
 # 既有 #6337 收口验证
 
+## 2026-10-16 已授权本地 Automation 复现与测试同步修复
+
+本节覆盖同日之前“等待本地诊断授权”的状态，不改变远端结果。仅改 `packages/core-backend/tests/integration/automation-read-delivery-realdb.test.ts` 与现有设计/验证MD；未提交、推送、重跑CI、合并、部署、客户读取或真实发送。诊断工具保存在本任务tmp中，不接入产品或新增CI切片。
+
+### 真实路径复现与最小修复
+
+- 校验Linux隔离源的测试、delivery adapter、dispatcher/loop、原Vitest配置、owned-PG与network-guard逐SHA等于发布候选对应文件。仅启动本次新建PG，无继承数据库地址或.env，父进程/worker使用原network guard；worker内另有真实守卫哨兵及afterAll检查。没有改系统时间或时间同步服务。
+- 初次工具启动被原守卫拒绝（Vite默认监听/localhost探测），尚未进入产品断言；均保留失败回执且owned PG已移除。临时工具只关闭组件验收不需要的HMR/WebSocket并选字面量host，显式fork预载同一守卫；不增加网络白名单、不更改仓库Vitest配置。后续实际SQL仅到新PG，forbiddenConnections/forbiddenEnvReads均0。
+- 原生产handler的第二次 `FOR SHARE OF o,c` 查询被本地探针在真实事务中暂停；手工requeue后让该锁实际取得，再调用真实第二tick。第一tick为 claimed=1/rescheduled=1；第二为 claimed=0/completed=0，rescheduled/poisoned/lostLease/heartbeatErrors均0，oldTailLockHeld=true。原332行completed断言失败。回执SHA `40e97bd762eb8e47406450ec42a745794beb39f54a10b2a4e29abc0a67a604c8`；PG已移除。只改变时序，不伪造SQL结果、adapter结果或dispatch返回值。
+- 第一版修补等待真实adapter handle结束后才requeue；固定尾部时序连续3次目标用例通过（回执SHA `ca46f9df13fdfffc3fd89953d3cd40bde0c6ab54b63043263489e5130a950b16`）。删除等待的变异再次得到 claimed=0/completed=0，原断言变红，回执SHA `6ce253b0c479e0e298d639b4f13c0a1c6062942104b7031480397de37fc32894`。
+- 最终补丁将该收尾阶段固定进原测试：真实第二次reconcile transaction执行完工作后持锁等待barrier；测试等待tailEntered，安排setImmediate释放，再await同一handler的settled并断言完成，之后才重新投递。finally释放两道barrier并等待handler，原timeout=1000、signal精确传播、未知结果、fence与仅执行一次等断言不变。生产代码零改动。
+
+### 最终字节验证与负向证明
+
+最终测试文件SHA `b1346d14003d6711af0c60b4bd2c11ed4de9a61b4a23b282eec75ab11e59895b`。真实整文件执行34项原测试+1项native guard哨兵，35/35通过、skip/fail均0，owned PG移除；回执SHA `643f2182ad2ca7cf048add527c1b973f41ef7e0a0ad8dcb764da351be8d56fd9`。这是本地单文件回归，不是CI前置33套全跑或宜搭71项正式证明。
+
+变异结束恢复相同最终SHA后，再次整文件35/35实际执行通过，skip/fail均0，PG移除，回执SHA `cb9a4ab27e14515603d2d6bcb77f51ac1596b78e7e2093120800d17641cc9a02`。收尾逐条核验本轮11份运行回执ownedPostgresRemoved均true，并检查其nonce对应owned scratch下没有pg-*子目录。诊断目录与失败证据保留，未删除既有工作区或其它进程的资产。脱敏回执已逐SHA复制到Windows本任务tmp的automation-delivery-local-20261016目录；未复制私有原日志或生成凭据。git diff --check通过，最终仅上述测试及两份既有MD有改动，主检出用户artifacts/reviews未触碰。
+
+直接从最终补丁删掉requeue前的await settled（保留finally等待），关闭外置race探针，原用例自身即失败：实际执行1个目标用例+1个哨兵，目标失败/哨兵通过，33项其余用例按名称过滤未执行。回执SHA `119f245dc358c4e5e8030ccf6eb02cf74511606dd3b3116ba50c67aa2f65444e`；随后恢复最终文件并核验上述SHA。该负例由原用例的确定性尾部barrier触发，不依赖外置探针或修改返回值。
+
+统计口径修正：本机Vitest 1.6的JSON reporter会把名称过滤的用例仍记为passed，不能采用其numPassedTests宣称整文件通过。后续改用ctx.state的task.mode/result.state直接核对：定向run为2实际执行+33 skip，整文件run为35实际执行+0 skip。本节上述“连续3次目标用例”不等同3次35/35；历史原JSON和工具失败回执保留，不改写为全链通过。
+
+采用原strict/noEmit编译选项，仅补入本次测试root作基线/候选类型对照：基线54条、候选54条，file/code/message指纹集合一致，无新增诊断；回执SHA `b6dd77b3a218de1f86b28db72f2a0c08ac32e4231f749ca1e9e1d24df75ecf14`。不宣称严格类型全绿或整个backend类型通过，不扩大修复54条历史诊断。
+
+证据限制：已证明可导致相同CI断言失败的真实收尾竞争，并使原用例可确定性发现等待丢失。CI旧日志缺少完整tick计数，故不宣称锁竞争为那一次失败的唯一已观测根因。本地通过不会把远端PLM/宜搭skipped变成通过；固定Chromium发布门、旧失败和WSL时钟风险继续保留。
+
+## 2026-10-16 新 head 正式 CI 终结：前置失败，目标验收跳过
+
+只读核验 run `38858364709` attempt 1，head 严格等于 `bef3f94b69938c37266ec306e1e551cbde3a5bb0`。该既有 workflow 经本轮授权一次 dispatch 执行：PR 的 stacked base 不匹配原 workflow 的 main/develop 自动触发过滤；没有修改过滤规则或重复重跑。Integration Guard run `38858293253` 同 head completed/success。
+
+Plugin System Tests 最终 completed/failure：step98 固定 Chromium 安装 completed/success；step100 锁协议 real-DB proof completed/failure；step101 PLM manual/interval 与 step102 owner 宜搭均 skipped。不能据此判断新浏览器正式 ABORTED 是否解决，也没有本轮实际 host.stop、清理或宜搭71项正式通过证据。
+
+公开 job 日志仅在内存筛选固定标签，不输出原响应、URL、query、业务ID或堆栈，不读取私有产物。全部公开日志规范为换行连接后的 SHA-256 为 `da6c4e294f1d1a796b28c7db702cba185e3c0264d95310d4e82b76e299f02a2a`（60600行）。精确限制 step100 后12253行中有一个 AssertionError、ABORTED计数0、Test timed out计数0；失败摘要命中 `automation-read-delivery-realdb.test.ts` 与 `db.test.ts`。这仅定位失败套件，不证明具体根因；整 job 的其他 timeout/ABORTED 字样可能来自预期负例，不能当作本步骤故障归因。
+
+后续完整复核并纠正提取器误判：第一条 FAIL 长287字符，只含一个测试文件及真实 dispatcher timeout 用例；第二条长2251字符，是含33个测试文件的失败命令回显（Command、vitest均命中），不是第二个失败用例。初版 `db.test.ts` 后缀匹配、随后把命令里的 `stock-preparation-read-plan-host-realdb.test.ts` 当第二失败套件，两次判断都不成立，撤回。当前只证明 Automation 的一个真实失败用例，不能报告宿主套件失败。
+
+Automation 失败用例对应源码309行（真实 dispatcher timeout 后 drain unknown 不重执行），失败引用指向332:35，即重新投递后的 completed 断言（期望1、实际0）。尚缺这一 tick 的完整 claimed/rescheduled/lostLease/heartbeatErrors 等计数，因此不能断言没有 claim、断言安全 sink 失败或归因某个竞争。源码中的 requeue 把该 outbox consumer 显式置 pending 并清空 lease，而 claim 接受 pending；因此“未清重试时间”也不是当前源码支持的解释。不能仅凭步骤标题归因锁协议死锁或超时。不修改重试/租约或安全约束来求绿。
+
+只读调用链补充：dispatch loop 的 completed 为0还可能伴随 claimed为0、rescheduled、poisoned、lostLease或heartbeatErrors，必须记录整个闭合计数集合才能分类。adapter内部 reconcile 使用DB clock_timestamp 校验 delivery lease，而 dispatcher claim/complete 使用其 now seam（默认进程时钟）；这只是待检验的双时钟路径，不是CI时钟偏移证据。允许本地复现后应只记录相对时差、闭合阶段与计数，保留原断言和租约，不输出实际时间、请求ID、SQL参数或凭据；同时检查旧 handler 是否仍在收尾，不能仅靠调大等待预算掩盖竞争。
+
+保持历史失败与本机时钟风险，发布阻断不解除，不启动以正式全绿为前提的 Chrome 试用。不自动重跑、不再推送、不合并、不部署、不读客户数据、不真实发送。本条为本地续记，未提交或推送。
+
 ## 2026-10-16 已授权推入原草稿并运行既有合成CI
 
 本轮用户明确批准推送固定浏览器接线补丁与MD到现有#6337；不新增PR或切片、不改base/草稿状态、不合并/部署/客户读取/真实发送。远端推送前实读仍为fcb20，使用隔离发布副本，排除.env文件，16份代码字节逐SHA等于受验补丁回执；主检出和旧分支工作区不清理、不重置。
