@@ -44,7 +44,7 @@ export const attendanceGuideGroups: GuideGroup[] = [
   { id: 'requests', labelEn: 'Requests and approval', labelZh: '申请与审批', topicIds: ['leave-types', 'overtime-rules', 'approvals'] },
   { id: 'pay', labelEn: 'Payroll and leave', labelZh: '计薪与年假', topicIds: ['payroll', 'annual'] },
   { id: 'data', labelEn: 'Data', labelZh: '数据', topicIds: ['availability', 'fields', 'import', 'reports'] },
-  { id: 'reference', labelEn: 'Reference', labelZh: '说明', topicIds: ['permissions', 'errors', 'faq'] },
+  { id: 'reference', labelEn: 'Reference', labelZh: '说明', topicIds: ['glossary', 'permissions', 'errors', 'faq'] },
 ]
 
 export const attendanceGuideTopics: GuideTopic[] = [
@@ -135,6 +135,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['After saving → what to check', '做完后怎么确认'],
         detail: ['Today’s punch rows stay as they were. Auto absence runs later, at Run at, across Lookback days. The report digest is not sent from this save.', '今天已有的打卡行保持原样。自动缺勤要到「执行时间」才跑，并按「回溯天数」回看。这次保存不会发出统计通知。'],
       },
+      {
+        path: ['Who can open Settings', '前提条件/权限'],
+        detail: ['Saving this page needs attendance:admin. Employees never see these fields. They only read the four common icons. See 权限说明.', '保存本页需要 attendance:admin。员工看不到这些字段。他们只读取四个常用图标。见「权限说明」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['A saved geofence makes overview punches, which send no location, count as outside the fence. Turn on 外勤打卡需审批 or clear the fence. See 打卡.', '保存了地理围栏之后，总览打卡不传定位，会按围栏外计算。打开「外勤打卡需审批」，或清空围栏。见「打卡」。'],
+      },
     ],
     callout: [
       'Saving settings does not send the report digest. The digest section stores timezone, channel, and send times; a message goes out only when that scheduled job actually runs.',
@@ -170,6 +178,18 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['After sync → what to check', '做完后怎么确认'],
         detail: ['The holiday list gains or updates date rows. Yesterday’s punch times and shift clocks stay as they were.', '节假日列表里出现或更新日期行。昨天的打卡时间和班次钟点保持原样。'],
+      },
+      {
+        path: ['Who can edit dates', '前提条件/权限'],
+        detail: ['Writing holiday rows and Sync now need attendance:admin. Reading the list needs attendance:read. See 节假日 and 设置 for first-day hours.', '写节假日行和「立即同步」需要 attendance:admin。读列表需要 attendance:read。首日工时见「设置」。'],
+      },
+      {
+        path: ['Example: days 4 and 5 become workdays', '示例：第 4、5 天改成工作日'],
+        detail: ['A partial-rest rule with start 4 and end 5 changes only those inclusive indexes of the matched holiday into workdays. Empty indexes cover the whole holiday. 「春节-1」 is day 1.', '少休规则起始 4、结束 5，只把匹配节日的第 4 天和第 5 天改成工作日，含首尾。序号留空则覆盖整段。「春节-1」是第 1 天。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Overwrite replaces existing dates for the chosen years. Sync does not move punch times. Calendar overrides for who works that day live on this Holidays page, not on 设置.', '打开覆盖会改写所选年份里已有的日期。同步不改打卡时间。决定谁在这天上班的日历覆盖在本页「节假日」，不在「设置」。'],
       },
     ],
     callout: [
@@ -213,6 +233,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         detail: ['Start day 26, end day 25, end-month offset this month. Because the end day is earlier, the window is treated as next month. Anchor 2026-03-10 is before day 26, so the window is 2026-02-26 through 2026-03-25. Anchor 2026-03-26 is on the start day, so the window is 2026-03-26 through 2026-04-25. Saving the template still writes no cycle until Generate cycles.', '起始日 26、结束日 25、结束月偏移当月。结束日更早，窗口按次月算。锚点 2026-03-10 早于 26 日，窗口是 2026-02-26 至 2026-03-25。锚点 2026-03-26 落在起始日，窗口是 2026-03-26 至 2026-04-25。保存模板仍然不写周期，要点「生成周期」。'],
       },
       {
+        path: ['After generate → what to check', '做完后怎么确认'],
+        detail: ['The new rows appear under Payroll cycles. A cycle with the same start and end in this organization is skipped, not overwritten. Auto-generate on the template does not create them.', '新行出现在「计薪周期」。本组织已有相同起止日的周期会被跳过，不会覆盖。模板上的「自动生成」不会写出这些行。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['The saved timezone is an IANA id. The Chinese label shows a place name. A selection of summary fields is stored as summaryFieldCodes. Leaving every box empty keeps the backend default columns.', '保存的时区是 IANA 标识。中文显示地名。勾选了汇总字段才写入 summaryFieldCodes。一个都不选则用后端默认列。'],
+      },
+      {
         path: ['Who can do this', '前提条件/权限'],
         detail: ['Payroll templates and cycles need attendance:admin. Generate cycles needs a template, or the one marked Default, plus an anchor date. Count is 1–36.', '计薪模板和计薪周期需要 attendance:admin。生成周期要有模板，或标了「默认」的那一份，并且填写锚点日期。数量是 1–36。'],
       },
@@ -254,6 +282,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         detail: ['Check-in 09:12 and check-out 17:40. Late starts at 09:10, so late minutes are 2. Early starts at 17:50, so early-leave minutes are 10. Status is late and early. Raw span is 508 minutes. Rounding floors to a multiple of 5, so work minutes are 505. Check-in at 09:10 is not late. Built-in severe late is 30 minutes after grace, absence-level late is 60. A 09:40 check-in is 30 late minutes: severe, not absence-level. A 10:10 check-in is 60: both.', '上班 09:12、下班 17:40。迟到从 09:10 起算，迟到 2 分钟。早退从 17:50 起算，早退 10 分钟。状态是迟到且早退。原始跨度 508 分钟。取整按 5 向下取整，工时 505 分钟。09:10 打上班不算迟到。严重迟到内置阈值是宽限后的 30 分钟，旷工迟到是 60。09:40 上班是迟到 30 分钟：计严重，不计旷工。10:10 上班是 60 分钟：两档都计。'],
       },
       {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['Save rule. A person with no published shift then punches against this window. See 打卡. If a shift is assigned, that shift’s grace wins. See 班次.', '点「保存规则」。没有已发布班次的人，之后按这个窗口打卡。见「打卡」。若已排了班次，用班次上的宽限。见「班次」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Changing a group timezone does not move shift clocks. Severe-late and absence-level thresholds are not fields on this form. They stay at the built-in 30 and 60 minutes.', '改考勤组时区不会挪班次钟点。严重迟到和旷工迟到不是这张表上的字段。它们保持内置的 30 分钟和 60 分钟。'],
+      },
+      {
         path: ['Rule sets → the group’s rule policy', '规则集 → 考勤组的规则策略'],
         detail: ['A rule set can be attached to a group. The rule template library stores versions of those templates.', '规则集可以挂到考勤组上。规则模板库保存这些模板的版本。'],
       },
@@ -284,6 +320,22 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['People → type a name or email', '考勤人员 → 输入姓名或邮箱'],
         detail: ['Matches appear as you type. Paste user IDs stays closed until you already have ids. Members and owners are still stored as user ids. Maintaining owners stays admin-only; an owner or sub-owner of the group can add or remove members.', '输入时自动匹配。「粘贴用户 ID」默认收起，已有 ID 时再打开。成员和负责人保存的仍是用户 ID。维护负责人仅限管理员；本组 owner 或 sub_owner 可以增删成员。'],
+      },
+      {
+        path: ['Who can create a group', '前提条件/权限'],
+        detail: ['Creating a group and editing owners need attendance:admin. After the first save, that group’s owner or sub-owner can add or remove members. See 排班管理范围 for who may publish the schedule.', '新建考勤组和改负责人需要 attendance:admin。第一次保存之后，本组 owner 或 sub_owner 可以增删成员。谁能发布排班见「排班管理范围」。'],
+      },
+      {
+        path: ['Example: a fixed-shift group', '示例：一个固定班制组'],
+        detail: ['Name it, choose 固定班制, save once. Then add members by name or email. The type control is locked. Owners added later are not attendance people. Next, open 排班 and apply the fixed schedule.', '填写名称，选择固定班制，保存一次。再按姓名或邮箱加成员。类型控件已锁定。之后加上的负责人不计入考勤人员。接着打开「排班」应用固定排班。'],
+      },
+      {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['The group appears in the list under its name. You can add people only after that first save. A code, if set, is under Technical info.', '组名出现在列表里。第一次保存之后才能加人。编码若有，在「技术信息」里。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Free time on this page keeps people and policy together. It does not by itself create a punch window. People with no shift still use 默认规则. See 名词解释.', '本页的自由工时是把人和策略放在一组。它本身不产生打卡窗口。没有班次的人仍用「默认规则」。见「名词解释」。'],
       },
     ],
     faqs: [{
@@ -316,6 +368,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Example: 10 people, 30 days', '示例：10 人、30 天'],
         detail: ['10 members times 30 days is 300, under 6000, so Load is accepted. 20 members times 366 days is 7320 and is refused. One member on an approved personal-leave day counts as approved leave, not as available. The same day with only a pending leave counts as pending and stays in Available (formal).', '10 名成员乘 30 天是 300，低于 6000，查询会被接受。20 名成员乘 366 天是 7320，会被拒绝。某人当天已批事假，这一格是已批请假，不计入可用。同一天只有待审批请假时，这一格是待审批，仍计入可用（正式）。'],
+      },
+      {
+        path: ['After load → what to check', '做完后怎么确认'],
+        detail: ['The matrix lists names, not group ids. Available (formal) equals scheduled plus pending. Reload after a schedule publish if the grid still shows unscheduled.', '矩阵按姓名列出，不显示组 id。可用（正式）等于排班加待审批。若格子仍是未排班，发布排班后再查询一次。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['This page does not edit 排班. A failed load, including 403 and 404, clears the previous table. 403 is checked before 404.', '本页不改「排班」。加载失败，包括 403 和 404，会清掉上一张表。403 先于 404 被检查。'],
       },
     ],
     callout: [
@@ -363,6 +423,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Example: 5 days, then a 2026 hire', '示例：5 天，以及 2026 年入职'],
         detail: ['Built-in tiers: 1–10 completed years grant 5 days, 10–20 grant 10, 20 and above grant 15. Standard day 480. A person hired 2018-01-01, cumulative start the same day, as of 2026-12-31, has 8 completed years and is granted 5 days, 2400 minutes. Carry-over off expires that 2026 lot at 2027-01-01 00:00 in the policy timezone. A person whose cumulative start is 2020-01-01 and whose hire date is 2026-05-27 is eligible by cumulative service: 6 completed years, tier 5 days. The 2026 grant is prorated: 219 remaining days in 2026 times 5 days, divided by 365, floored, is 3 days, 1440 minutes. Company-tenure mode uses the hire date for the 12-month gate, so that May 2026 hire is skipped for 2026.', '内置阶梯：满 1 年到不满 10 年是 5 天，满 10 年到不满 20 年是 10 天，满 20 年及以上是 15 天。标准日 480 分钟。入职日和累计工龄起算日都是 2018-01-01、截止 2026-12-31 的人，已满 8 年，发放 5 天，2400 分钟。不结转时，这份 2026 年额度在策略时区的 2027-01-01 00:00 到期。累计工龄起算日 2020-01-01、入职日 2026-05-27 的人，按累计工龄已满 12 个月，已满 6 年，阶梯是 5 天。2026 年按当年剩余 219 天乘 5 天再除以 365 向下取整，得 3 天，1440 分钟。本单位工龄口径用入职日做满 12 个月的门槛，因此 2026 年 5 月入职的人在 2026 年会被跳过。'],
       },
+      {
+        path: ['After commit → what to check', '做完后怎么确认'],
+        detail: ['A dry-run lists each person and writes no balance. Commit creates the lots. The employee overview My annual leave then shows the new minutes. A positive manual adjustment has no expiry. See 查看记录.', '预演列出每个人，不写余额。提交才生成额度。员工总览「我的年假」随后显示新的分钟。正数手工调整没有到期时间。见「查看记录」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['The engine starts off. Operations stay blocked until Enabled and a timezone are saved. USER_NOT_IN_ORG means the target is not an active member. One annual request cannot exceed one standard day. See 请假 and 错误码与提示.', '引擎默认关闭。启用并保存时区之前，操作页的提交会被拦住。USER_NOT_IN_ORG 表示对象不是有效成员。一次年假申请不能超过一个标准日。见「请假」和「错误码与提示」。'],
+      },
     ],
     faqs: [{
       q: ['A 2026 lot with carry-over off expires when?', '2026 年的额度、不结转，什么时候到期？'],
@@ -403,6 +471,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Example formulas', '示例'],
         detail: ['A record formula starts with = and reads one row, for example ={late_duration}. A summary formula wraps a field, for example =SUM({work_duration}), or uses a summary alias such as ={total_minutes}. Preview checks the expression and does not save. Save is what writes a custom formula. A system formula has no edit button.', '单记录公式以 = 开头，读一行，例如 ={late_duration}。周期汇总把字段包起来，例如 =SUM({work_duration})，或用汇总别名，例如 ={total_minutes}。预览只检查，不保存。保存才写入自定义公式。系统公式没有编辑按钮。'],
+      },
+      {
+        path: ['After sync → what to check', '做完后怎么确认'],
+        detail: ['Reload fields shows the new row. Reports does not gain period data from this button. Open 报表 and Reload report to see attendance numbers.', '「重载字段」能看到新行。这个按钮不会把周期考勤数据推进去。看数字要打开「报表」并点「重载报表」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['A formula cannot reference another formula. NOW, TODAY, lookups, and cross-table cells are blocked. Hiding a column on 报表 does not remove it from export.', '公式不能引用另一个公式。NOW、TODAY、查找函数和跨表单元格被禁用。在「报表」藏起一列，不会让它从导出文件里消失。'],
       },
     ],
     faqs: [{
@@ -449,6 +525,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['After commit → what to check', '做完后怎么确认'],
         detail: ['Mapped preview alone leaves attendance rows unchanged. After Commit, open Import batches and confirm this run. Then reload Reports for that date.', '只做映射预览时，考勤行不变。「提交」之后打开「导入批次」，确认这次运行。再到「报表」重载对应日期。'],
       },
+      {
+        path: ['Who can import', '前提条件/权限'],
+        detail: ['attendance:import or attendance:admin. A group owner is not enough. A scheduler import scope applies only on the sync path that checks scopes. See 权限说明 and 排班管理范围.', '需要 attendance:import 或 attendance:admin。考勤组负责人不够。排班范围里的导入只在会检查该范围的同步路径上生效。见「权限说明」和「排班管理范围」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Commit is the write. When the token flag is the literal 1, use the token within 10 minutes. 工号 needs a user map. See 错误码与提示 for COMMIT_TOKEN_REQUIRED and COMMIT_TOKEN_INVALID.', '写入发生在「提交」。令牌开关为字面量 1 时，要在 10 分钟内使用令牌。工号需要用户映射。COMMIT_TOKEN_REQUIRED 和 COMMIT_TOKEN_INVALID 见「错误码与提示」。'],
+      },
     ],
     faqs: [{
       q: ['I mapped the file but the records did not change. Why?', '我映射了文件，记录为什么没变？'],
@@ -486,6 +570,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['After export → what to check', '做完后怎么确认'],
         detail: ['Change the date range, then Reload report, then Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '改完日期后先点「重载报表」，再点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
       },
+      {
+        path: ['Who can open Reports', '前提条件/权限'],
+        detail: ['attendance:read opens your own rows. Another person’s user id needs attendance:approve, attendance:admin, or a scheduler scope that includes export. See 权限说明.', 'attendance:read 打开自己的行。要填别人的用户 ID，需要 attendance:approve、attendance:admin，或包含导出的排班范围。见「权限说明」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['The three numbers are this page only. The seven sentences under the collapsed guide are field definitions, not those three totals. Column choices stay in this browser. See 统计字段 for codes.', '三个数字只统计本页。收起的说明里那七句是字段定义，不是这三个数字的合计。显示字段记在这台浏览器里。编码见「统计字段」。'],
+      },
     ],
     callout: [
       'CSV header mode chooses field names or field codes for the file. It lives under Technical details, not on the main toolbar.',
@@ -521,6 +613,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
       '管理员第一次启用考勤，或员工询问打卡和申请入口时，从这里看顺序。',
     ]],
     steps: [
+      {
+        path: ['Admin, one sitting', '管理员一天配置完'],
+        detail: ['Open Attendance help, then follow 1 through 8 below. Each title is the article id. Stop at Reports and Reload report. Makeup policy and annual leave can wait until people are punching. See 名词解释 if a label is unfamiliar.', '打开「考勤帮助」，按下面 1 到 8 做。标题里的英文是文章 id。做到「报表」并点「重载报表」即可。补卡策略和年假可以等大家能打卡后再配。名词不熟先看「名词解释」。'],
+      },
+      {
+        path: ['Employee, one day', '员工一天怎么用'],
+        detail: ['The overview has no help button. Read 打卡, 补卡, 请假, 加班, 换班, and 查看记录 here. The day is: Check In, work, Check Out. Missed punch uses Common → Makeup punch. Results for today stay on the overview. A date range is Reports.', '总览没有帮助按钮。本手册里的「打卡」「补卡」「请假」「加班」「换班」「查看记录」就是员工操作。一天的顺序是上班打卡、工作、下班打卡。漏打用「常用 → 补卡」。当天结果留在总览。一段时间看「报表」。'],
+      },
       {
         path: ['1. settings', '1. 设置（settings）'],
         detail: ['Need attendance:admin. Save Auto absence, Punch and geofence, and Employee common icons if you use them. Save settings stores values. It does not scan punches.', '需要 attendance:admin。按需保存自动缺勤、打卡与围栏、员工常用图标。保存设置只写入数值，不会去扫打卡。'],
@@ -603,6 +703,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Outdoor note, when the page asks', '页面要求时填写外勤备注'],
         detail: ['If the policy requires a note, the overview shows Outdoor punch note and Retry punch with note. The retry sends that note and still does not send a location. Require a photo applies to clients that submit a location or an outdoor marker.', '策略要求备注时，总览出现「外勤打卡备注」和「补充备注后重试打卡」。重试会带上这段备注，仍然不带定位。「外勤打卡需上传照片证据」对提交定位或外勤标记的客户端生效。'],
       },
+      {
+        path: ['When it fails', '失败时怎么办'],
+        detail: ['PUNCH_TOO_SOON: wait out Min punch interval on 设置. LOCATION_RESTRICTED: ask an administrator to clear the geofence or turn on 外勤打卡需审批. OUTDOOR_NOTE_REQUIRED: fill 外勤打卡备注 and click 补充备注后重试打卡. ATTENDANCE_PUNCH_ORDER_CONFLICT: Check In before Check Out. IP_RESTRICTED: use an allowed address or edit IP allowlist. PUNCH_UNSCHEDULED_BLOCKED: publish a schedule, or set unscheduled punching back to allow. PUNCH_CLIENT_TIMESTAMP_FORBIDDEN: the page cannot type a time; use 补卡 for a past day. Full rows are in 错误码与提示.', 'PUNCH_TOO_SOON：等到「设置」里的最小打卡间隔过去。LOCATION_RESTRICTED：请管理员清空地理围栏，或打开「外勤打卡需审批」。OUTDOOR_NOTE_REQUIRED：填写「外勤打卡备注」，再点「补充备注后重试打卡」。ATTENDANCE_PUNCH_ORDER_CONFLICT：先上班打卡，再下班打卡。IP_RESTRICTED：换允许的地址，或改 IP 白名单。PUNCH_UNSCHEDULED_BLOCKED：先发布排班，或把未排班改回允许。PUNCH_CLIENT_TIMESTAMP_FORBIDDEN：页面不能手填时间；改过去某一天用「补卡」。完整对照见「错误码与提示」。'],
+      },
     ],
     callout: [
       'Unscheduled punching is allowed unless the organization sets that policy to block. In block mode, a day with no schedule returns PUNCH_UNSCHEDULED_BLOCKED.',
@@ -666,6 +770,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Watch-outs', '注意事项'],
         detail: ['Two makeup requests for different work dates in the same cycle can both pass if they are submitted at the same time. The saved count can then sit one above the cap. The same person, same work date, and same type still cannot have two pending or approved rows.', '同一周期里两个不同工作日期的补卡若同时提交，有可能都通过。保存后的次数就可能比上限多 1。同一人、同一工作日、同一类型仍然不能有两条待处理或已通过。'],
       },
+      {
+        path: ['When it fails', '失败时怎么办'],
+        detail: ['MAKEUP_PUNCH_QUOTA_EXCEEDED: wait for the next cycle, or raise Requests per cycle. MAKEUP_PUNCH_WINDOW_EXPIRED: pick a work date inside Submit window. MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED: choose today or earlier. MAKEUP_PUNCH_TYPE_NOT_ALLOWED: change type or date, or edit Allowed anomaly types. MAKEUP_PUNCH_REASON_REQUIRED and MAKEUP_PUNCH_ATTACHMENT_REQUIRED: fill the field and submit again. MAKEUP_PUNCH_CROSS_USER_FORBIDDEN: the employee submits their own request. Sentences are in 错误码与提示.', 'MAKEUP_PUNCH_QUOTA_EXCEEDED：等到下个周期，或提高「每周期补卡次数」。MAKEUP_PUNCH_WINDOW_EXPIRED：改选「提交时限」内的工作日期。MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED：改选今天或更早。MAKEUP_PUNCH_TYPE_NOT_ALLOWED：改类型或日期，或调整「可补异常类型」。MAKEUP_PUNCH_REASON_REQUIRED 和 MAKEUP_PUNCH_ATTACHMENT_REQUIRED：补上原因或附件链接再提交。MAKEUP_PUNCH_CROSS_USER_FORBIDDEN：由员工本人提交。原句见「错误码与提示」。'],
+      },
     ],
     callout: [
       'Editing a makeup request for another person is rejected with MAKEUP_PUNCH_CROSS_USER_FORBIDDEN. The employee submits their own request.',
@@ -717,6 +825,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Example: 09:00–18:00 and 480 minutes per day', '示例：09:00–18:00，每日 480 分钟'],
         detail: ['Full day fills 09:00 to 18:00 and 480 minutes. Morning and Afternoon split at 13:30. Each half is 240 minutes. A second leave on the same work date is DUPLICATE_REQUEST while the first is pending or approved, even when one is morning and one is afternoon. A rejected row does not block a new submit. The employee needs attendance:write and an enabled leave type.', '全天填 09:00 至 18:00，480 分钟。上午和下午在 13:30 切开。各 240 分钟。同一工作日的第二条请假，只要第一条还是待处理或已通过，就会是 DUPLICATE_REQUEST，即使一条是上午、一条是下午。已驳回不拦住再次提交。员工需要 attendance:write，以及一条启用的请假类型。'],
       },
+      {
+        path: ['When it fails', '失败时怎么办'],
+        detail: ['Empty leave-type list: an administrator creates an enabled type under 请假类型. DUPLICATE_REQUEST: cancel the pending row, or wait until it is rejected, then submit again. ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED: split so each request stays within one standard day. ANNUAL_LEAVE_BALANCE_INSUFFICIENT: shorten the request or grant balance under 年假. APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED: fix the manager on the 审批流 step. See 错误码与提示.', '假期类型为空：管理员在「请假类型」里建一条启用的类型。DUPLICATE_REQUEST：取消待处理的那条，或等它被驳回后再交。ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED：拆开，每条不超过一个标准日。ANNUAL_LEAVE_BALANCE_INSUFFICIENT：缩短申请，或在「年假」里先发放额度。APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED：到「审批流」补上能解析的上级。详见「错误码与提示」。'],
+      },
     ],
     faqs: [{
       q: ['I cleared Requires approval. Why is the request still pending?', '我取消了「需要审批」，为什么还是待处理？'],
@@ -752,6 +864,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Example: minimum 30, rounding 15, daily cap 600', '示例：最小 30、取整 15、每日上限 600'],
         detail: ['20 minutes is raised to 30, then stays 30. 40 minutes rounds up to 45. 610 rounds up to 615, then the daily cap cuts it to 600. The employee needs attendance:write and one enabled overtime rule. Requires approval on the rule does not skip the pending status.', '20 分钟先抬到 30，结果仍是 30。40 分钟向上取整到 45。610 先向上取整到 615，再被每日上限截成 600。员工需要 attendance:write，以及一条启用的加班规则。规则上的「需要审批」不会跳过待处理。'],
+      },
+      {
+        path: ['When it fails', '失败时怎么办'],
+        detail: ['No rule in the list: an administrator saves an enabled rule under 加班规则. OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED: keep one local midnight at most, starting on the work date. OVERTIME_INVALID_TIME_WINDOW: set the end after the start. OVERTIME_BANK_CAP_EXCEEDED: shorten the request, or raise the comp-time cap on 设置. DUPLICATE_REQUEST: one pending or approved overtime already exists that work date. See 错误码与提示.', '列表没有规则：管理员在「加班规则」保存一条启用的规则。OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED：最多跨一个当地午夜，并且从该工作日开始。OVERTIME_INVALID_TIME_WINDOW：结束要晚于开始。OVERTIME_BANK_CAP_EXCEEDED：缩短加班，或在「设置」里提高调休上限。DUPLICATE_REQUEST：该工作日已有待处理或已通过的加班。详见「错误码与提示」。'],
       },
       {
         path: ['Reports show three overtime durations', '报表里有三类加班时长'],
@@ -793,6 +909,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['After the other person agrees → approval', '对方同意之后 → 审批'],
         detail: ['Final approval deactivates both original assignments and writes a replacement assignment for each person with the shifts exchanged. A specified approval flow that is missing or inactive returns SHIFT_SWAP_APPROVAL_FLOW_REQUIRED. Finalizing before counterparty consent returns SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED.', '最终审批会停用双方原来的排班，并为每人写入一条对调后的替换排班。指定的审批流不存在或未启用时返回 SHIFT_SWAP_APPROVAL_FLOW_REQUIRED。对方尚未同意就终结会返回 SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED。'],
+      },
+      {
+        path: ['When it fails', '失败时怎么办'],
+        detail: ['The shift is missing from the list: it is not a published, active, regular, single-day row. Ask an administrator to publish that day under 排班. SHIFT_SWAP_REQUIRES_TWO_USERS: pick a colleague, not yourself. SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED: the colleague clicks 同意换班. SHIFT_SWAP_APPROVAL_FLOW_REQUIRED: enable the named flow under 审批流, or leave the flow unset. See 错误码与提示.', '列表里没有班次：它不是已发布、生效中、常规、单日的排班。请管理员在「排班」里发布这一天。SHIFT_SWAP_REQUIRES_TWO_USERS：选同事，不能选自己。SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED：同事点「同意换班」。SHIFT_SWAP_APPROVAL_FLOW_REQUIRED：在「审批流」启用指定的流程，或不指定流程。详见「错误码与提示」。'],
       },
     ],
     faqs: [{
@@ -859,6 +979,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         detail: ['End is earlier than start, so the shift is overnight. The work date is the start date. The end clock is 06:00 on the next calendar day. With 10 minutes of late grace and 10 minutes of early grace, check-in at 22:05 and check-out at 05:55 are inside both graces. Check-in at 22:20 is 10 late minutes. Saving needs attendance:admin. Assigning it still needs a published schedule.', '下班时间早于上班时间，所以这是跨夜班。工作日是开始那天。下班钟点是次日 06:00。迟到宽限和早退宽限各 10 分钟时，22:05 上班、次日 05:55 下班都在宽限内。22:20 上班是迟到 10 分钟。保存需要 attendance:admin。要让人按这个班打卡，仍需已发布的排班。'],
       },
       {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['The shift appears in the list. It is not on anyone’s day until 排班 publishes it. A banner 「仅供预览」 means save is allowed and assign is not.', '班次出现在列表里。在「排班」发布之前，它还不属于任何人的某一天。横幅「仅供预览」表示可以保存，不能拿去分配。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Grace on the shift overrides 默认规则 when this shift is the one used for the punch. Severe late and absence-level late stay at 30 and 60 minutes. See 规则.', '这个班次被用于打卡时，班次上的宽限代替「默认规则」。严重迟到和旷工迟到仍是 30 分钟和 60 分钟。见「规则」。'],
+      },
+      {
         path: ['Attach the shift by scheduling, not by the shift row alone', '班次行本身不会自动套到人'],
         detail: ['Fixed shift applies the shift from the group fixed-schedule action. Scheduled shift uses a shift assignment or a rotation whose rule lists shift ids. A person with neither still punches against the default rule.', '固定班制从考勤组的固定排班动作把班次套到人。排班制使用排班分配，或使用列出班次序列的轮班规则。两者都没有的人，打卡仍按默认规则。'],
       },
@@ -896,6 +1024,18 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Settings → Shift compliance and Multi-shift day', '设置 → 排班合规，以及一天多班次'],
         detail: ['Block on save with a filled daily, weekly, or monthly cap rolls the save back when explicit scheduled minutes exceed it. The cap counts days covered by a shift or rotation assignment. Days that only fall back to the default rule are not counted. Warn does not block. Multi-shift day is off until saved. The maximum slots field accepts 1–3. Attendance results still summarize the day’s punches.', '「保存时阻断」并且填写了每日、每周或每月上限时，显式排班分钟超出上限会回滚这次保存。上限统计的是班次或轮班覆盖到的日期。只回落到默认规则的日期不计入。「预警」不拦截。一天多班次在保存打开之前是关闭的。每日最多槽位可填 1–3。出勤结果仍按当日打卡汇总。'],
+      },
+      {
+        path: ['Who can publish', '前提条件/权限'],
+        detail: ['attendance:admin can publish. Anyone else needs scheduler scope action 调度 on the person’s schedule group. See 排班管理范围. Creating a shift still needs attendance:admin. See 班次.', 'attendance:admin 可以发布。其他人需要对员工所在排班组具备「调度」。见「排班管理范围」。新建班次仍要 attendance:admin。见「班次」。'],
+      },
+      {
+        path: ['After publish → what to check', '做完后怎么确认'],
+        detail: ['The row’s status is published. Advanced scheduling, which is read-only, then lists that published row. The employee’s next punch uses this shift instead of 默认规则. See 打卡.', '这一行的状态是已发布。只读的「高级排班」随后能看到它。该员工下一次打卡用这个班次，不再只用「默认规则」。见「打卡」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Save draft does not change today’s punch. A temporary replacement counts only after its draft is published. SHIFT_COMPLIANCE_CAP_EXCEEDED rolls the save back. See 错误码与提示.', '保存草稿不改变今天的打卡。临时替班要等草稿发布才生效。SHIFT_COMPLIANCE_CAP_EXCEEDED 会回滚保存。见「错误码与提示」。'],
       },
     ],
     callout: [
@@ -940,6 +1080,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Example: one leader publishes one schedule group', '示例：一名组长发布一个排班组'],
         detail: ['Subject type Employee, one schedule group as the target, action Dispatch. That person can publish shift assignments for people resolved through that schedule group. They still cannot create a shift definition. A group owner without this scope can add members and preview a fixed schedule, and publish returns SCHEDULER_SCOPE_FORBIDDEN.', '主体类型选员工，目标选一个排班组，动作勾选调度。这个人可以为解析到该排班组的员工发布排班分配。他们仍然不能新建班次定义。没有这条范围的考勤组负责人可以增删成员、预览固定排班；发布会返回 SCHEDULER_SCOPE_FORBIDDEN。'],
       },
+      {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['That employee opens 排班 and can publish inside the target. Outside the target, the same action returns SCHEDULER_SCOPE_FORBIDDEN. See 错误码与提示.', '该员工打开「排班」，可以在目标内发布。目标之外的同一操作返回 SCHEDULER_SCOPE_FORBIDDEN。见「错误码与提示」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['A scope is not 考勤组 owner. Import batches, rollback, and template upload still need attendance:import or attendance:admin. See 导入 and 权限说明.', '范围不是考勤组负责人。导入批次、回滚和模板上传仍要 attendance:import 或 attendance:admin。见「导入」和「权限说明」。'],
+      },
     ],
     callout: [
       'Async import jobs, batches, rollback, templates, and uploads stay on attendance:import or attendance:admin. Scheduler import scope covers the sync import path that checks the scope.',
@@ -974,6 +1122,22 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Admin → Leave types → Create or update', '管理 → 请假类型 → 创建或更新'],
         detail: ['Save an active type. The list columns are code, name, approval (not in effect), attachment, minutes, enabled, and edit or delete. The paid flag exists on the stored row and is not a field on this form.', '保存一个启用的类型。列表列是编码、名称、审批(暂不生效)、附件、分钟、启用，以及编辑或删除。是否带薪存在于保存的记录上，这张表单没有该字段。'],
       },
+      {
+        path: ['Who can create a type', '前提条件/权限'],
+        detail: ['attendance:admin. Employees only see enabled types on 请假. Code annual is what 年假 deducts. Code comp_time is what 加班 bank balance spends.', '需要 attendance:admin。员工在「请假」里只看到启用的类型。编码 annual 供「年假」扣减。编码 comp_time 供「加班」转入的调休消耗。'],
+      },
+      {
+        path: ['Example: personal leave, 480 minutes', '示例：事假，480 分钟'],
+        detail: ['Name 事假, leave minutes per day 480, enabled, attachment off. Save. The employee’s Full day button then fills 480 minutes. Requires approval stays marked 暂不生效. The request is still pending. See 审批流.', '名称填事假，每日分钟数 480，启用，附件不勾。保存。员工点「全天」后时长是 480 分钟。「需要审批」仍标「暂不生效」。申请仍是待处理。见「审批流」。'],
+      },
+      {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['The type appears in the employee leave-type list. A disabled type disappears from that list and stays on this admin list.', '该类型出现在员工的假期类型列表里。停用后从员工列表消失，仍留在这张管理列表上。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Unticking Requires approval does not auto-approve. The page says 暂不生效. Attachment is checked on the employee form. The server stores the URL.', '取消「需要审批」不会自动通过。页面写着「暂不生效」。附件由员工表单检查。服务器保存链接。'],
+      },
     ],
     faqs: [{
       q: ['Employees say the leave type list is empty.', '员工说假期类型是空的。'],
@@ -997,6 +1161,18 @@ export const attendanceGuideTopics: GuideTopic[] = [
       {
         path: ['Admin → Overtime rules → save', '管理 → 加班规则 → 保存'],
         detail: ['Name the rule, set minimum, rounding, and daily maximum, and leave it enabled. Employees cannot submit overtime until at least one active rule exists.', '填写名称、最小分钟、取整和每日上限，并保持启用。至少有一条启用规则之后，员工才能提交加班。'],
+      },
+      {
+        path: ['Who can save a rule', '前提条件/权限'],
+        detail: ['attendance:admin. Employees pick one enabled rule on 加班. The numeric example 20→30, 40→45, 610→600 is on that article.', '需要 attendance:admin。员工在「加班」里选择一条启用的规则。20 变 30、40 变 45、610 变 600 的算例在那一篇。'],
+      },
+      {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['The rule appears in the employee overtime-rule list. A disabled rule disappears from that list.', '规则出现在员工的加班规则列表里。停用后从该列表消失。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Requires approval is stored and marked 暂不生效. Rounding here rounds up. Work-minute rounding on 规则 floors. They are different fields. This page has no switch for the three overtime buckets. See 报表.', '「需要审批」只保存，并标「暂不生效」。这里的取整是向上。 「规则」里的工时取整是向下。不是同一个字段。本页没有三类加班的开关。见「报表」。'],
       },
     ],
     faqs: [{
@@ -1034,6 +1210,14 @@ export const attendanceGuideTopics: GuideTopic[] = [
         path: ['Example: leave goes to the direct manager', '示例：请假交给直属上级'],
         detail: ['Create an enabled flow, request type leave, one step named 直属主管, source Direct manager. A requester whose snapshot has a different person as manager routes there. If that manager is missing or is the requester, submit stops with APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED. A static step with no person named goes to the admin role and the attendance:approve queue. The page warning 「未配置任何步骤——该类型申请可能自动通过。」 does not approve the request by itself. The row stays pending.', '新建一条启用的流程，申请类型选请假，一步名称写直属主管，来源选直属上级。快照里的上级是另一个人时，申请交给那个人。上级缺失或就是申请人本人时，提交停在 APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED。静态步骤没有点名时，进入管理员角色和 attendance:approve 队列。页面警告「未配置任何步骤——该类型申请可能自动通过。」本身不会把申请批掉。该行仍是待处理。'],
       },
+      {
+        path: ['After save → what to check', '做完后怎么确认'],
+        detail: ['Submit a leave from 请假. My requests shows 待处理. The named manager, not the requester, sees Approve. See 查看记录.', '从「请假」提交一条。 「我的申请」显示待处理。批准出现在指定上级那里，不在申请人自己的列表。见「查看记录」。'],
+      },
+      {
+        path: ['Watch-outs', '注意事项'],
+        detail: ['Leave types and overtime rules marked 暂不生效 still submit as pending. An empty dynamic step fails closed. It does not fall through to the administrator queue. See 错误码与提示.', '标了「暂不生效」的请假类型和加班规则，提交后仍是待处理。动态步骤解析失败会停住，不会落到管理员队列。见「错误码与提示」。'],
+      },
     ],
     faqs: [{
       q: ['The warning says the request may auto-pass. Does an empty flow approve itself?', '警告说可能自动通过。空流程会自己批准吗？'],
@@ -1041,6 +1225,77 @@ export const attendanceGuideTopics: GuideTopic[] = [
     }, {
       q: ['Who sees Approve on the employee overview?', '员工总览上谁能看到批准？'],
       a: ['A pending row can be approved when it belongs to someone other than the signed-in user and the viewer has the approval access for that row. My requests lists the viewer’s own rows.', '待处理的行在所属用户不是当前登录人、且查看人具备该行的审批权限时可以批准。「我的申请」列出的是查看人自己的行。'],
+    }],
+  },
+  {
+    id: 'glossary',
+    labelEn: 'Glossary',
+    labelZh: '名词解释',
+    intro: [[
+      'These are the labels on the attendance screens. Each entry is one to three sentences and matches the current product. Open the named article for steps. This manual is admin Attendance help.',
+      '这些是考勤页面上的名称。每条一到三句，按当前产品来写。步骤到同名文章里看。本手册在管理端「考勤帮助」。',
+    ]],
+    scenarios: [[
+      'Use it when a button name and an article name do not yet line up.',
+      '按钮名和文章名对不上时，先看这里。',
+    ]],
+    steps: [
+      {
+        path: ['Attendance group', '考勤组'],
+        detail: ['A named roster plus a type: 固定班制, 排班制, or 自由工时. The type locks after the first save. Members are the people who are scheduled. Owners and sub-owners are a separate list and are not attendance people. See 考勤组.', '一组有名称和类型：固定班制、排班制或自由工时。类型在第一次保存后锁定。成员是被排班的人。负责人和子负责人是另一份名单，不计入考勤人员。见「考勤组」。'],
+      },
+      {
+        path: ['Shift', '班次'],
+        detail: ['The clock window: timezone, start, end, late grace, early grace, and rounding. A single segment can be assigned. A row marked 仅供预览 can be saved and cannot be assigned yet. See 班次.', '上下班窗口：时区、开始、结束、迟到宽限、早退宽限和取整。单段可以拿去排班。标了「仅供预览」的可以保存，还不能分配。见「班次」。'],
+      },
+      {
+        path: ['Schedule', '排班'],
+        detail: ['A person, a shift, a date range, and a slot. Draft does not apply. Publish does. Fixed-shift groups also have preview then apply. See 排班.', '一个人、一个班次、一段日期和一个槽位。草稿不生效。发布才生效。固定班制还有先预览再应用。见「排班」。'],
+      },
+      {
+        path: ['Default rule', '默认规则'],
+        detail: ['The work window used when someone has no rotation shift and no published assignment. Punch order is rotation shift, then assignment shift, then this rule. See 规则.', '没有轮班班次、也没有已发布排班时使用的上下班窗口。打卡顺序是轮班班次、排班班次、然后这份规则。见「规则」。'],
+      },
+      {
+        path: ['Geofence and outdoor punch', '围栏 / 外勤'],
+        detail: ['Geofence is latitude, longitude, and radius on 设置. The overview punch sends no location, so a saved fence treats it as outside. 外勤打卡需审批 lets that punch wait as a pending request. See 设置 and 打卡.', '围栏是「设置」里的纬度、经度和半径。总览打卡不传定位，所以保存了围栏就按围栏外处理。「外勤打卡需审批」让这次打卡先变成待处理申请。见「设置」和「打卡」。'],
+      },
+      {
+        path: ['Makeup punch', '补卡'],
+        detail: ['Three fixed types: 漏打上班卡, 漏打下班卡, 时间更正. Enforcement is off until 启用补卡强约束. The cycle is a calendar month in the policy timezone. See 补卡.', '三种固定类型：漏打上班卡、漏打下班卡、时间更正。打开「启用补卡强约束」之前不做次数检查。周期是规则时区里的自然月。见「补卡」。'],
+      },
+      {
+        path: ['Leave type', '请假类型'],
+        detail: ['The choice on 请假. Minutes per day default to 480. Code annual feeds 年假. Code comp_time spends comp time. Requires approval is marked 暂不生效 and still submits as pending. See 请假类型.', '「请假」里的选项。每日分钟数默认 480。编码 annual 给「年假」扣。编码 comp_time 消耗调休。「需要审批」标「暂不生效」，提交后仍是待处理。见「请假类型」。'],
+      },
+      {
+        path: ['Overtime rule', '加班规则'],
+        detail: ['Minimum minutes, rounding up, and a daily cap applied when an overtime request is saved. The request stays pending. See 加班规则 and 加班.', '保存加班申请时使用的最小分钟、向上取整和每日上限。申请仍是待处理。见「加班规则」和「加班」。'],
+      },
+      {
+        path: ['Approval flow', '审批流'],
+        detail: ['An enabled flow for one request type, with ordered steps. A new request is stored as pending. A dynamic step that cannot be resolved is blocked. See 审批流.', '某一种申请类型下的启用流程，带有序步骤。新申请保存为待处理。动态步骤解析不到人会被阻断。见「审批流」。'],
+      },
+      {
+        path: ['Payroll cycle', '计薪周期'],
+        detail: ['A dated window generated from a template and an anchor. Saving the template, including Auto-generate, does not write cycles. Generate cycles does. See 计薪.', '由模板和锚点生成的一段起止日期。保存模板，包括「自动生成」，不写周期。「生成周期」才写。见「计薪」。'],
+      },
+      {
+        path: ['Annual-leave balance', '年假额度'],
+        detail: ['Minutes in lots. The engine is off until 年假策略 is enabled with a timezone. Employees see My annual leave for themselves. Administrators adjust on 年假. See 年假.', '以分钟记的额度批次。在「年假策略」启用并保存时区之前，引擎是关的。员工在「我的年假」看自己的。管理员在「年假」里调整。见「年假」。'],
+      },
+      {
+        path: ['Scheduler scope', '排班管理范围'],
+        detail: ['A subject, one or more targets, and actions such as 调度 or 查看. It is not the same as 考勤组 owner. Missing scope returns SCHEDULER_SCOPE_FORBIDDEN. See 排班管理范围.', '一个主体、至少一个目标，以及调度或查看等动作。它不是考勤组负责人。没有匹配范围时返回 SCHEDULER_SCOPE_FORBIDDEN。见「排班管理范围」。'],
+      },
+      {
+        path: ['Report fields', '统计字段'],
+        detail: ['The column catalog. Reload reads it. Sync catalog adds missing field rows and does not push period rows. Custom formulas start with =. See 统计字段.', '列目录。「重载字段」只读。「同步字段目录」补齐缺失字段行，不推送周期数据。自定义公式以 = 开头。见「统计字段」。'],
+      },
+    ],
+    faqs: [{
+      q: ['Where are the steps?', '步骤在哪一篇？'],
+      a: ['Each entry names the article. The admin one-day order is 快速入门. Employee actions are 打卡, 补卡, 请假, 加班, 换班, and 查看记录.', '每条都写了文章名。管理员一天的顺序在「快速入门」。员工操作在「打卡」「补卡」「请假」「加班」「换班」「查看记录」。'],
     }],
   },
   {

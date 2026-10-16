@@ -2,6 +2,24 @@
 
 日期：2026-10-15，优化：2026-10-16。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
 
+## 2026-10-16 第四轮
+
+按钉钉帮助的栏目组织补深度，不抄原文。新增文章 id `glossary`（名词解释）。打卡、补卡、请假、加班、换班各加「失败时怎么办」，代码与「错误码与提示」一致。快速入门开头增加「管理员一天配置完」和「员工一天怎么用」。主要管理文章补齐前提/权限、示例、做完后怎么确认、注意事项里缺的短步骤，并用中文文章名互指。
+
+### 栏目对照
+
+| 钉钉帮助常见栏目 | 本手册文章 |
+| --- | --- |
+| 管理员快速配置 | 快速入门、设置、名词解释 |
+| 考勤组与班次 | 考勤组、班次、排班、规则、排班管理范围 |
+| 打卡方式与规则 | 打卡、设置（IP 白名单、地理围栏、外勤）、补卡 |
+| 假勤申请 | 请假、加班、换班、请假类型、加班规则、出差写在请假文内 |
+| 审批与统计 | 审批流、报表、统计字段、计薪、年假、团队可用性 |
+| 常见问题 | 常见问题、错误码与提示 |
+| 名词解释 | 名词解释 |
+
+钉钉有而本产品不能按步骤操作的能力仍只在下方缺口清单，不单开文章。本轮没有新的产品缺口。节假日加班来源不加分钟已在第 21 条。
+
 ## 2026-10-16 第三轮
 
 按当前计算代码补了可核对的例子，并给偏短的文章补了前提和示例。
@@ -84,9 +102,9 @@
 
 相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。
 
-2026-10-16 第三轮之后重跑，均通过：
+2026-10-16 第四轮之后重跑，均通过：
 
-- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（93ms）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（91ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
 
 `apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。
