@@ -2,6 +2,23 @@
 
 日期：2026-10-15，优化：2026-10-16。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
 
+## 2026-10-16 第三轮
+
+按当前计算代码补了可核对的例子，并给偏短的文章补了前提和示例。
+
+- 快速入门改成 8 步，文章 id 写在步骤标题里：settings、rules、shifts、groups、assignments、leave-types、approvals、import、reports。
+- 规则：09:12/17:40、宽限 10、取整 5 → 迟到 2、早退 10、工时 505。取整是向下。严重/旷工按宽限后的迟到分钟，内置 30/60。`computeMetrics`、`roundMinutes`：`index.cjs:11918-11922`、`12457-12473`。
+- 班次：22:00–06:00 的下班落在次日。`resolveOvernightFlag`：`index.cjs:7106-7108`。
+- 补卡：起始日 1 时 2026-03 整月共用 3 次；起始日 26 的周期跨月。窗口按规则时区的工作日。`computeMakeupCycleWindow`：`index.cjs:14854-14873`。同时提交不同日期可能比上限多 1，已写进注意事项。
+- 请假：09:00–18:00、480 分钟，中点 13:30，上下午各 240。同一工作日第二条请假即重复，不论上午下午。`halfDayLeaveHelper.ts:105-107`；重复查询 `index.cjs:10543-10556`。
+- 加班规则：20→30，40→45，610→600。向上取整后再截每日上限。`applyOvertimeRule`：`index.cjs:11931-11944`。
+- 节假日工时：首日默认 8 小时写成 480。加班来源只产生警告，不加进这 480。`applyHolidayPolicy`：`index.cjs:12848-12878`。
+- 计薪：26 日至次月 25 日，锚点 2026-03-10 与 2026-03-26 两个窗口。`resolvePayrollWindow`：`index.cjs:8503-8524`。
+- 导入：默认表头与跳过原因（日期、工号映射、邮箱/用户名/手机号、两人匹配）。`index.cjs:799-813`；`attendance-import-user-identity.cjs:75-98`。
+- 年假：满 8 年发 2400 分钟；累计工龄满年、2026-05-27 入职折成 3 天 1440 分钟；本单位工龄同年入职不满 12 个月跳过。`computeAnnualLeaveAccrualForUser`：`index.cjs:19995-20038`。
+- 团队可用性、统计字段、排班范围、审批流补了权限和一条例子。
+- 常见问题增加员工情景：忘打卡、围栏外、班次不对、驳回后再交、换班、结果在哪看。
+
 ## 2026-10-16 优化
 
 - 「设置」把打卡间隔、IP 白名单、地理围栏、员工常用图标、节假日工时、外勤打卡审批拆成各自步骤。文案使用页面上的字段名和按钮名。
@@ -67,9 +84,9 @@
 
 相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。
 
-2026-10-16 优化后在本分支重跑，均通过：
+2026-10-16 第三轮之后重跑，均通过：
 
-- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（95ms）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（93ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
 
 `apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。
@@ -98,3 +115,4 @@
 18. 公式字段互相引用，以及 NOW、TODAY、查找函数、跨表单元格和脚本。统计字段帮助已写明禁用。
 19. 补卡周期除自然月以外的周期、按部门共享额度、按工作日计提交窗口。这三项在补卡策略上是固定说明。
 20. 哺乳假等特殊假种的单独时长规则。没有对应规则页，只是普通请假类型。
+21. 节假日「计入加班」把加班分钟叠加进当日工时。`applyHolidayPolicy` 把首日工时设成基准分钟，加班来源只追加警告（「节假日首日加班单叠加工时」或「节假日首日存在加班单但未提供加班工时」），不把加班分钟加进 `workMinutes`（`index.cjs:12852-12878`）。
