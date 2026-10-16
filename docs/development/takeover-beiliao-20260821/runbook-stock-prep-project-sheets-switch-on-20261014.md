@@ -404,6 +404,19 @@ SELECT count(*) AS old_sheet_registered FROM integration_stock_prep_project_targ
 - **清单保持只有 A，直到 B 登记**；之后按 D13 改回多项目。脚本绝不建表。
 - 定时任务的令牌必须是绑定租户的服务账号（`stock-preparation-scheduled-pull.mjs:32`）。登记行按租户查，建表的拉取人员与这个服务账号必须在同一租户；A 建表后的第一次 06:00 试拉若仍是 `skipped_project_sheet_absent`，就是租户或项目号不一致，停下报开发机（本手册没有在演示机上核对过这一点）。
 
+### 4.1 大 BOM 项目的超时：`MS_TIMEOUT_MS` 建议值（R67 前的临时口径）
+
+试拉脚本对每个项目发一次 dry-run，单次 HTTP 超时由 `MS_TIMEOUT_MS` 决定（默认 `120000`，`scripts/ops/stock-preparation-scheduled-pull.mjs` 的 `readConfig`），整轮预算由 `MS_TOTAL_TIMEOUT_MS` 决定（默认 `1800000`，超过后不再开始下一个项目）。
+
+- **为什么会超时**：dry-run 对客户 PLM **逐次串行**读（演示机实测：项目 A 每次 1,414 次读、项目 B 460 次），每次往返随客户 PLM 负载在约 15–130 ms 之间变化。同一个已有 652 行的项目，PLM 快时 18 s、慢时超过 120 s；与目标表已有行数无关（`g1-switch-on-record-20261016.md` §4）。
+- **怎么取值**：单次超时 ≥ 读次数 × 130 ms 再留一倍余量。读次数看该项目任一次 dry-run 响应的 `evidence.expansion.readCount`，或试拉日志里 `durationMs` 的历史最大值。
+  - 读次数 ≤ 500：保持默认 `120000`。
+  - 读次数 500–2,000（演示机项目 A 属此档）：`600000`（10 分钟）。演示机 2026-10-16 起即用此值。
+  - 读次数 > 2,000：`900000`，并同时检查 `MS_TOTAL_TIMEOUT_MS` ≥ 各项目单次超时之和；大于此规模的项目应走大 BOM 后台车道。
+- **怎么改**：只在试拉任务的 env 文件里增加或修改 `MS_TIMEOUT_MS=<毫秒>` 这一行（先备份；不要回显同文件里的令牌），然后手动触发一次任务，核对日志里每个项目 `dryRunHttpStatus 200` 且 summary `failed 0`。
+- **界面不受此值影响**：界面 dry-run 经 nginx，60 s 即 504。PLM 慢的时段里，大 BOM 项目在界面上重新拉取仍可能 504，待 R67 的「PLM 读批量 / 并发」与「界面 dry-run 走后台任务」两项上机后解决。
+
+
 ## 5. 回退
 
 1. 改 `app.env`。两种做法任选其一：
