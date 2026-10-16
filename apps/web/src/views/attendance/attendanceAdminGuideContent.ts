@@ -56,8 +56,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
       'The management home lists task cards. A card that names a section opens that one section. The left rail does the same: one section is open at a time, and the bar above it is that section’s name.',
       '管理首页是任务卡片。点到某个区块名称，就只打开那一个区块。左侧目录同样一次只打开一个区块，上方标题就是该区块的名称。',
     ], [
-      'This help is the in-product manual for administrators and for the employee overview. The left list groups quick start, employee punch and requests, setup, shifts and schedules, approval, annual leave, reports, permissions, and status codes. Search matches both Chinese and English.',
-      '本帮助是管理端和员工总览的产品内手册。左侧按快速入门、员工打卡与申请、配置、班次与排班、审批、年假、报表、权限和状态码分组。搜索同时匹配中文和英文。',
+      'Open this manual from Attendance help on the admin bar. The employee overview has no second help entry. Articles here cover admin setup and what employees do on the overview. Search matches Chinese and English.',
+      '本手册从管理端顶栏的「考勤帮助」打开。员工总览没有第二本帮助。这里同时写管理员配置，以及员工在总览上的操作。搜索同时匹配中文和英文。',
     ]],
     scenarios: [[
       'Use the home when you know the job (today’s exceptions, a group, a payroll window) and you do not yet know which form holds it.',
@@ -104,16 +104,32 @@ export const attendanceGuideTopics: GuideTopic[] = [
         detail: ['The cycle is a calendar month; v1 does not offer another cycle. In the timezone field, type a city, an IANA id, or an offset such as +8, then pick a suggestion. The chosen zone stays in that same field. The saved value is an IANA id. An unknown zone is refused before save.', '周期只有自然月，v1 没有第二种。在时区框里输入城市、IANA 标识，或 +8 这类偏移，再点选一条建议。选中的时区就显示在这一个框里。保存的是 IANA 标识。无法识别的时区会在保存前被拦住。'],
       },
       {
-        path: ['Settings → Punch and geofence', '设置 → 打卡与围栏'],
-        detail: ['Minimum punch interval is in minutes. An empty IP allowlist allows every address; otherwise list one address per line or separate them with commas. A geofence needs latitude, longitude, and radius in meters. Leave the fence empty to turn it off. Save settings stores these values.', '最小打卡间隔以分钟计。IP 白名单留空表示不限制；否则每行一个或用逗号分隔。地理围栏要同时填写纬度、经度和半径（米）。围栏留空表示关闭。保存设置会写入这些值。'],
+        path: ['Settings → Punch and geofence → Min punch interval', '设置 → 打卡与围栏 → 最小打卡间隔（分钟）'],
+        detail: ['Enter minutes, then Save settings. The same punch type inside this gap is rejected. Check-in then check-out is not limited by it.', '填写分钟后点「保存设置」。同一类打卡落在这个间隔内会被拒绝。先上班再下班不受它限制。'],
+      },
+      {
+        path: ['Settings → Punch and geofence → IP allowlist', '设置 → 打卡与围栏 → IP 白名单'],
+        detail: ['Leave it empty to allow every address. Otherwise enter one address per line, or separate addresses with commas. Save settings.', '留空表示不限制地址。否则每行一个，或用逗号分隔。然后点「保存设置」。'],
+      },
+      {
+        path: ['Settings → Punch and geofence → Geo fence', '设置 → 打卡与围栏 → 地理围栏'],
+        detail: ['Fill Geo fence lat, Geo fence lng, and Geo fence radius (m) together. Leave them empty to turn the fence off. Save settings.', '地理围栏纬度、地理围栏经度、地理围栏半径（米）要一起填。三项都留空则关闭围栏。然后点「保存设置」。'],
       },
       {
         path: ['Settings → Employee common icons', '设置 → 员工常用图标'],
-        detail: ['The four tiles are Makeup punch, Leave, Overtime, and Shift swap. Pick one filled icon for each. Allowed icons are clock-plus, calendar, moon, swap, plus, user, briefcase, and pin. Defaults are clock-plus, calendar, moon, and swap. An invalid stored key falls back to that default. The employee overview shows the saved icons and leaves them unchanged.', '四个磁贴是补卡、请假、加班、换班。每一项选一个面性图标。可选值是 clock-plus、calendar、moon、swap、plus、user、briefcase、pin。默认依次是 clock-plus、calendar、moon、swap。存进去的无效值会回到默认。员工总览显示已保存的图标，员工不能在那里修改。'],
+        detail: ['Four rows: 补卡, 请假, 加班, 换班. Pick one icon on each row. Choices are clock-plus, calendar, moon, swap, plus, user, briefcase, and pin. Defaults are clock-plus, calendar, moon, and swap. Save settings. The overview shows those icons. Employees cannot change them there.', '四行：补卡、请假、加班、换班。每行点一个图标。可选 clock-plus、calendar、moon、swap、plus、user、briefcase、pin。默认是 clock-plus、calendar、moon、swap。点「保存设置」。总览显示这些图标。员工不能在总览上改。'],
       },
       {
-        path: ['Settings → Holiday hours, then Outdoor punch approval', '设置 → 节假日工时，以及外勤打卡审批'],
-        detail: ['Holiday hours sets a first-day base and whether holiday time counts as overtime, with source Approval, Clock, or Both. Named holiday overrides use contains, equals, or a regular expression, and can be limited to groups, roles, or people. Calendar overrides themselves open from the Holidays page. Outdoor punch approval is off by default. Turn on Require approval for outdoor punches when a punch outside the fence should wait for approval. Require a note and Require a photo are extra. Photo evidence applies to punch clients that send a location or an outdoor marker.', '节假日工时可设首日基准工时，以及节假日是否计入加班；加班来源是审批、打卡或两者。按节假日名称的覆盖支持包含、等于或正则，并可限定考勤组、角色或人员。日历覆盖规则本身从节假日页面进入。外勤打卡审批默认关闭。围栏外打卡要等审批时，打开「外勤打卡需审批」。备注和照片是附加要求。照片证据对携带定位或外勤标记的打卡端生效。'],
+        path: ['Settings → Holiday hours', '设置 → 节假日工时'],
+        detail: ['Holiday first-day base hours turns on the first-day hours field. Overtime adds on holiday uses Overtime source: Approval, Clock, or Both. Named rows under Holiday overrides use Contains, Equals, or Regex. Calendar overrides open from Holidays. Save settings.', '勾选「节假日首日基准工时」后填写「首日基准工时」。「节假日计入加班」配合「加班来源」：审批、打卡或两者。「节假日覆盖规则」按名称匹配，方式是包含、等于或正则。日历覆盖规则从「节假日」进入。点「保存设置」。'],
+      },
+      {
+        path: ['Settings → Outdoor punch approval', '设置 → 外勤打卡审批'],
+        detail: ['Default off. Turn on Require approval for outdoor punches when a punch outside the fence should wait. Require a note and Require a photo are separate checkboxes. Photo evidence applies when the punch client sends a location or an outdoor marker. Save outdoor approval.', '默认关闭。围栏外打卡要等审批时，勾选「外勤打卡需审批」。「外勤打卡需填写备注」和「外勤打卡需上传照片证据」是另外两个勾选。照片对提交了定位或外勤标记的打卡端生效。点「保存外勤审批」。'],
+      },
+      {
+        path: ['After saving → what to check', '做完后怎么确认'],
+        detail: ['Today’s punch rows stay as they were. Auto absence runs later, at Run at, across Lookback days. The report digest is not sent from this save.', '今天已有的打卡行保持原样。自动缺勤要到「执行时间」才跑，并按「回溯天数」回看。这次保存不会发出统计通知。'],
       },
     ],
     callout: [
@@ -121,12 +137,6 @@ export const attendanceGuideTopics: GuideTopic[] = [
       '保存设置不会发出统计通知。统计通知订阅单独保存时区、渠道和发送时间；只有定时任务真正跑起来才会发。',
     ],
     faqs: [{
-      q: ['I saved auto-absence. Why are today’s punches unchanged?', '我保存了自动缺勤，为什么今天的打卡没有变化？'],
-      a: ['The form only stores the schedule. The scan runs later, at the configured time, looking back the configured number of days.', '这张表只保存计划。扫描在配置的时间才跑，并按回溯天数回看。'],
-    }, {
-      q: ['Can an employee change the common icons?', '员工能改常用图标吗？'],
-      a: ['Icons are saved on Settings. The employee overview reads those four icons and shows the tiles.', '图标在设置页保存。员工总览读取这四个图标并显示磁贴。'],
-    }, {
       q: ['What does Shift compliance do?', '排班合规做什么？'],
       a: ['With enforcement set to Block on save and a daily, weekly, or monthly cap filled in, saving a schedule that would exceed that cap is rolled back. Empty caps are not enforced. Warn is stored and does not block the save.', '强制方式选「保存时阻断」，并且填写了每日、每周或每月上限时，超出计划工时的排班保存会被回滚。上限留空不启用。「预警」会保存，但不会拦住保存。'],
     }],
@@ -151,7 +161,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Holiday sync → Sync now', '节假日同步 → 立即同步'],
-        detail: ['Choose years and whether to overwrite. Sync writes holiday rows. It does not change a shift’s timezone or retime punches.', '选择年份，以及是否覆盖。同步写入的是节假日记录。它不改班次时区，也不重算打卡时间。'],
+        detail: ['Choose years and whether to overwrite. Then Sync now.', '选择年份，以及是否覆盖。然后点「立即同步」。'],
+      },
+      {
+        path: ['After sync → what to check', '做完后怎么确认'],
+        detail: ['The holiday list gains or updates date rows. Yesterday’s punch times and shift clocks stay as they were.', '节假日列表里出现或更新日期行。昨天的打卡时间和班次钟点保持原样。'],
       },
     ],
     callout: [
@@ -159,8 +173,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
       '少休规则用的是含首尾的序号。起始填 4、结束填 5，只把匹配节日的第 4 天和第 5 天改成工作日。序号留空则覆盖整段节日。',
     ],
     faqs: [{
-      q: ['Will sync move yesterday’s punch times?', '同步会改昨天的打卡时间吗？'],
-      a: ['No. Sync writes holiday rows only.', '不会。同步只写节假日记录。'],
+      q: ['Which page edits one date?', '改单独某一天去哪一页？'],
+      a: ['Holidays, on that date row. Holiday sync fills a year from the published index.', '在「节假日」的日期行上改。「节假日同步」按已发布索引铺一年。'],
     }],
     figureTitle: ['Two pages', '两个页面'],
     figureRows: [
@@ -373,11 +387,19 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Import → map the file → Commit', '导入 → 映射文件 → 提交'],
-        detail: ['Rows are written only at commit. If the token flag is the literal 1, issue the token and commit within 10 minutes. A .xlsx workbook under 10MB is converted in the browser to CSV from the first non-empty sheet, then follows the same preview and commit path. Password-protected, empty, or unreadable workbooks stop there. A legacy .xls file is refused; save it as CSV and select that file. The server upload accepts CSV text.', '只有提交才写入。令牌开关为字面量 1 时，签发后要在 10 分钟内提交。10MB 以内的 .xlsx 会在浏览器里把第一个非空工作表转成 CSV，然后仍走同一条预览和提交。有密码、空工作簿或无法读取的文件会停在这里。旧版 .xls 会被拒绝，请另存为 CSV 再选择。服务端上传接受的是 CSV 文本。'],
+        detail: ['Rows are written only at Commit. If the token flag is the literal 1, issue the token and commit within 10 minutes.', '只有「提交」才写入。令牌开关为字面量 1 时，签发后要在 10 分钟内提交。'],
+      },
+      {
+        path: ['Import → file type', '导入 → 文件类型'],
+        detail: ['A .xlsx file under 10MB is converted in the browser. The first non-empty sheet becomes CSV, then uses the same preview and Commit. A locked, empty, or unreadable workbook stops. Save a legacy .xls file as CSV, then select that .csv. The server accepts CSV text.', '10MB 以内的 .xlsx 在浏览器里转换。第一个非空工作表变成 CSV，再走同一条预览和「提交」。有密码、空表或读不开的工作簿会停住。旧版 .xls 请另存为 CSV，再选择该 .csv。服务端接受 CSV 文本。'],
       },
       {
         path: ['Import batches', '导入批次'],
         detail: ['Import batches is the history of those runs, not a second import form.', '导入批次是这些运行的历史，不是第二张导入表。'],
+      },
+      {
+        path: ['After commit → what to check', '做完后怎么确认'],
+        detail: ['Mapped preview alone leaves attendance rows unchanged. After Commit, open Import batches and confirm this run. Then reload Reports for that date.', '只做映射预览时，考勤行不变。「提交」之后打开「导入批次」，确认这次运行。再到「报表」重载对应日期。'],
       },
     ],
     faqs: [{
@@ -410,7 +432,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Reports → Columns', '报表 → 显示字段'],
-        detail: ['The choice is remembered in this browser. Date and name stay visible. Show all reveals the full catalog. Export CSV and Export Excel still download the server dataset for the active range and filters. Hiding a column does not drop it from the file. Trend, minute totals, and request mixes stay under Breakdown / more stats, which starts collapsed.', '选择记在这台浏览器里。日期和姓名始终显示。「全部显示」打开完整目录。导出 CSV 和导出 Excel 仍下载当前区间和筛选条件下的服务端数据集。藏起一列不会让它从文件里消失。趋势、分钟合计和申请分布在「分布 / 更多统计」里，默认收起。'],
+        detail: ['The choice is remembered in this browser. Date and name stay visible. Show all reveals the full catalog. Restore default resets only this browser. Trend, minute totals, and request mixes stay under Breakdown / more stats, which starts collapsed.', '选择记在这台浏览器里。日期和姓名始终显示。「全部显示」打开完整目录。「恢复默认」只重置这台浏览器。趋势、分钟合计和申请分布在「分布 / 更多统计」里，默认收起。'],
+      },
+      {
+        path: ['After export → what to check', '做完后怎么确认'],
+        detail: ['Change the date range, then Reload report, then Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '改完日期后先点「重载报表」，再点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
       },
     ],
     callout: [
@@ -439,8 +465,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelZh: '快速入门',
     sectionId: 'attendance-admin-setup',
     intro: [[
-      'A new organization is ready for daily attendance after four saves: a shift, a default rule, an attendance group with members, and a published schedule for those people. Employees then punch and file requests from the overview. Setup readiness is a checklist of that path. Applying a starter template only fills the forms in memory; each form still needs its own save.',
-      '一个新组织要开始日常考勤，先完成四次保存：班次、默认规则、带成员的考勤组，以及这些人已发布的排班。员工再从总览打卡和提交申请。启用准备是这条路径的清单。应用起步模板只在内存里预填表单，每张表仍要各自保存。',
+      'A new organization is ready for daily attendance after four saves: a shift, a default rule, an attendance group with members, and a published schedule for those people. Employees then punch and file requests from the overview. This manual opens from Attendance help on the admin bar. Setup readiness is a checklist. Applying a starter template only fills forms in memory. Each form still needs its own save.',
+      '一个新组织要开始日常考勤，先完成四次保存：班次、默认规则、带成员的考勤组，以及这些人已发布的排班。员工再从总览打卡和提交申请。本手册从管理端「考勤帮助」打开。启用准备是清单。应用起步模板只在内存里预填。每张表仍要各自保存。',
     ]],
     scenarios: [[
       'Use it when an administrator is turning attendance on, or when an employee asks where to punch and where to file a request.',
@@ -470,10 +496,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     ],
     faqs: [{
       q: ['Where does an employee punch?', '员工在哪里打卡？'],
-      a: ['On the attendance overview, with Check In and Check Out. The clock time is the server time. The page does not offer a punch time to type.', '在考勤总览，用上班打卡和下班打卡。时钟时间由服务器决定。页面上不能手填打卡时间。'],
-    }, {
-      q: ['Does saving Settings scan today’s punches?', '保存设置会扫描今天的打卡吗？'],
-      a: ['Saving stores the values. Auto absence runs later, at the configured time, across the lookback days.', '保存只写入配置。自动缺勤在配置的时间才跑，并按回溯天数回看。'],
+      a: ['On the attendance overview, buttons Check In and Check Out. The clock is the server time. See Punch for refusals.', '在考勤总览，按钮是「上班打卡」和「下班打卡」。时钟是服务器时间。被拒绝时的说明见「打卡」。'],
     }],
     figureTitle: ['First week', '第一次启用'],
     figureRows: [
@@ -488,6 +511,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Punch',
     labelZh: '打卡',
     intro: [[
+      'Read this in admin Attendance help. Employees punch on the overview. That screen has no help manual of its own.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览打卡。总览没有自己的帮助手册。',
+    ], [
       'The overview shows a live clock, today’s in and out, and two buttons: Check In and Check Out. A successful punch says 「上班打卡已记录。」 or 「下班打卡已记录。」. The request sends the event type and, when known, the rule timezone and organization. It does not send a client timestamp, a map location, or a photo.',
       '总览显示实时时钟、今日上班和下班，以及两个按钮：上班打卡、下班打卡。成功后提示「上班打卡已记录。」或「下班打卡已记录。」。请求提交打卡类型，并在已知时带上规则时区与组织。它不提交客户端时间、地图定位或照片。',
     ], [
@@ -540,8 +566,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelZh: '补卡',
     sectionId: 'attendance-admin-makeup-punch-policy',
     intro: [[
-      'Employees open Makeup punch from Common. The request types are fixed: missed check-in, missed check-out, and time correction. Makeup punch policy is off until an administrator enables enforcement. While it is off, a request can still be submitted and approved; the server does not check quota, window, anomaly type, reason, or attachment.',
-      '员工从常用进入补卡。申请类型是固定的三项：漏打上班卡、漏打下班卡、时间更正。补卡策略在管理员打开强约束之前不生效。关闭时仍可提交并审批；服务器不检查次数、时限、异常类型、原因或附件。',
+      'Read this in admin Attendance help. Employees use Common → Makeup punch on the overview.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览使用「常用 → 补卡」。',
+    ], [
+      'Request types are fixed: missed check-in, missed check-out, and time correction. Makeup punch policy is off until an administrator enables enforcement. While it is off, a request can still be submitted and approved. The server does not check quota, window, anomaly type, reason, or attachment.',
+      '申请类型固定三项：漏打上班卡、漏打下班卡、时间更正。补卡策略在管理员打开强约束之前不生效。关闭时仍可提交并审批。服务器不检查次数、时限、异常类型、原因或附件。',
     ], [
       'When enforcement is on, the cycle is a calendar month, the quota principal is the self-service user, and the window unit is a calendar day. Those three are fixed on the form. Defaults are timezone Asia/Shanghai, 3 requests per cycle, counting pending and approved, and a 30-calendar-day submit window. Quota is 1–99. The window is 0–180 days. A future work date is rejected. A whole-day absence is not a makeup-eligible anomaly. The same person, work date, and request type cannot have another pending or approved row.',
       '打开强约束后，周期是自然月，额度主体是自助申请人，窗口单位是自然日。这三项在表单上是固定说明。默认时区 Asia/Shanghai，每周期 3 次，计入待审批和已通过，提交时限 30 个自然日。次数范围是 1–99。时限范围是 0–180 天。未来的工作日期会被拒绝。整日旷工不是可补异常。同一人、同一工作日、同一申请类型不能再有一条待审批或已通过的记录。',
@@ -580,6 +609,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Leave',
     labelZh: '请假',
     intro: [[
+      'Read this in admin Attendance help. Employees open Leave from Common on the overview.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览的「常用」里打开请假。',
+    ], [
       'Leave request asks for a leave type, a start, an end, a duration, and an optional reason. Presets are Full day, Morning, and Afternoon. Morning and Afternoon split the person’s work window at its midpoint and do not subtract a lunch break. A cross-midnight shift hides those presets. Choosing a preset fills the times once; later edits recalculate the duration in 0.5-hour steps.',
       '请假申请要选假期类型、开始、结束、时长，原因可选。时段预设是全天、上午、下午。上午和下午按本人上下班窗口的中点切开，不扣除午休。跨午夜班次不显示这组预设。点预设只填充一次；之后再改时间，时长按 0.5 小时重算。',
     ], [
@@ -617,8 +649,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Overtime',
     labelZh: '加班',
     intro: [[
-      'Overtime request asks for an overtime rule, a start, an end, a duration, and an optional reason. A rule is required. The server raises the minutes to the rule minimum, rounds up by the rounding minutes, and cuts the result at the daily maximum. Requires approval on the rule is stored only; the request is still pending.',
-      '加班申请要选加班规则、开始、结束、时长，原因可选。必须选择规则。服务器会把分钟抬到规则的最小值，按取整分钟向上取整，并在每日上限处截断。规则上的「需要审批」只被保存；申请仍是待处理。',
+      'Read this in admin Attendance help. Employees open Overtime from Common on the overview.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览的「常用」里打开加班。',
+    ], [
+      'Overtime request asks for an overtime rule, a start, an end, a duration, and an optional reason. A rule is required. The server raises the minutes to the rule minimum, rounds up by the rounding minutes, and cuts the result at the daily maximum. Requires approval on the rule is stored only. The request is still pending.',
+      '加班申请要选加班规则、开始、结束、时长，原因可选。必须选择规则。服务器会把分钟抬到规则的最小值，按取整分钟向上取整，并在每日上限处截断。规则上的「需要审批」只被保存。申请仍是待处理。',
     ], [
       'A window that crosses one local midnight is accepted when the local start date is the request work date. The minutes are split onto those two local dates. A window that crosses more than one midnight, or whose local start date is not the work date, is rejected with OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED. An invalid window is OVERTIME_INVALID_TIME_WINDOW.',
       '恰好跨过一个当地午夜、并且当地开始日就是这条申请的工作日时，可以提交。分钟会拆到这两个当地日期上。跨过不止一个午夜，或当地开始日不是该工作日，会被拒绝，代码 OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED。时间窗无效的代码是 OVERTIME_INVALID_TIME_WINDOW。',
@@ -654,6 +689,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Shift swap',
     labelZh: '换班',
     intro: [[
+      'Read this in admin Attendance help. Employees open Shift swap from Common on the overview.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览的「常用」里打开换班。',
+    ], [
       'Shift swap request asks for My published shift, the other person’s published shift, and an optional reason. The first version accepts a published, active, regular, single-day assignment with no producer mark. The other row must belong to a different person. The page says 「首版换班仅支持已发布的单日常规排班。」',
       '换班申请选择「我的已发布班次」、对方的已发布班次，原因可选。首版接受已发布、生效中、常规、单日、且没有生产者标记的排班。对方必须是另一个人。页面写明「首版换班仅支持已发布的单日常规排班。」',
     ]],
@@ -684,6 +722,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Records and requests',
     labelZh: '查看记录',
     intro: [[
+      'Read this in admin Attendance help. Employees read today, requests, and balances on the overview.',
+      '在管理端「考勤帮助」里阅读本篇。员工在总览查看今日、申请和余额。',
+    ], [
       'My requests on the overview is the signed-in person’s own attendance requests: counts for pending, approved, and rejected, plus a few recent rows. It is not the organization queue of requests waiting for the viewer. Anomalies are the days that need a follow-up, with a way to start a makeup request. Records are the calculated daily results.',
       '总览上的「我的申请」是当前登录人自己的考勤申请：待处理、已通过、已驳回的计数，以及最近几条。它不是全组织待该查看人审批的队列。异常是需要跟进的日期，可以从这里发起补卡。记录是已经算出的每日结果。',
     ]],
@@ -938,37 +979,200 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Status codes',
     labelZh: '错误码与提示',
     intro: [[
-      'A failed action shows a sentence and, when the server sent one, a code under that sentence. Match the code below to the page that can change it. Refreshing does not repair a missing default rule or a historical context that still needs an upgrade check.',
-      '失败时会显示一句话；服务器若返回了代码，这句话下面会有代码。按下面的代码回到可以修改它的页面。仅刷新不能补上缺失的默认规则，也不能完成仍需升级检查的历史上下文。',
+      'Each row is code, then when it appears, then what to do. The status line shows 代码 when the server sent one. This article is in admin Attendance help.',
+      '每一行是代码、出现时机、然后怎么处理。服务器返回代码时，状态条显示「代码」。本篇在管理端「考勤帮助」里。',
     ]],
     scenarios: [[
-      'Use this list when the status line names a code and the sentence is easy to misread.',
-      '状态行写出了代码，而那句话容易读偏时，查这张表。',
+      'Open it when a save, punch, or request stops and names a code.',
+      '保存、打卡或申请停住，并写出代码时，打开本篇。',
     ]],
     steps: [
       {
-        path: ['Punch codes', '打卡'],
-        detail: ['PUNCH_CLIENT_TIMESTAMP_FORBIDDEN: the client sent a punch time. PUNCH_TOO_SOON: the same event type is inside the minimum interval. IP_RESTRICTED: the address is outside the allowlist. LOCATION_RESTRICTED: outside the fence while outdoor approval is off. ATTENDANCE_PUNCH_ORG_NOT_PERMITTED: the named organization is not an active membership of the caller. PUNCH_UNSCHEDULED_BLOCKED: unscheduled punching is set to block. ATTENDANCE_PUNCH_ORDER_CONFLICT: check-out is before check-in on that work date. OUTDOOR_NOTE_REQUIRED: fill the outdoor note and retry.', 'PUNCH_CLIENT_TIMESTAMP_FORBIDDEN：客户端自带了打卡时间。PUNCH_TOO_SOON：同类打卡落在最小间隔内。IP_RESTRICTED：地址不在白名单内。LOCATION_RESTRICTED：围栏外且外勤审批关闭。ATTENDANCE_PUNCH_ORG_NOT_PERMITTED：请求写明的组织不是调用人的有效成员组织。PUNCH_UNSCHEDULED_BLOCKED：未排班打卡被设为拦截。ATTENDANCE_PUNCH_ORDER_CONFLICT：该工作日先下班后上班。OUTDOOR_NOTE_REQUIRED：填写外勤备注后重试。'],
+        path: ['USER_NOT_IN_ORG', 'USER_NOT_IN_ORG'],
+        detail: ['Appears on a roster write or annual-leave adjustment when the target is not an active member. HTTP 404. The sentence is 「该用户不是本组织的有效成员。」. Do: pick an active member of this organization. A punch that names the wrong organization uses ATTENDANCE_PUNCH_ORG_NOT_PERMITTED.', '出现：名单写入或年假调整，目标不是本组织有效成员。HTTP 404。句子是「该用户不是本组织的有效成员。」。处理：改选本组织的有效成员。打卡写错组织用 ATTENDANCE_PUNCH_ORG_NOT_PERMITTED。'],
       },
       {
-        path: ['Makeup, leave, overtime, and swap', '补卡、请假、加班、换班'],
-        detail: ['MAKEUP_PUNCH_QUOTA_EXCEEDED, MAKEUP_PUNCH_WINDOW_EXPIRED, MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED, MAKEUP_PUNCH_TYPE_NOT_ALLOWED, MAKEUP_PUNCH_REASON_REQUIRED, and MAKEUP_PUNCH_ATTACHMENT_REQUIRED come from an enabled makeup policy. DUPLICATE_REQUEST is the same person, work date, and request type already pending or approved. ANNUAL_LEAVE_BALANCE_INSUFFICIENT and ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED are annual-leave approval results. OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED and OVERTIME_BANK_CAP_EXCEEDED are overtime results. SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED means the other person has not agreed. APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED means a manager step could not be resolved.', 'MAKEUP_PUNCH_QUOTA_EXCEEDED、MAKEUP_PUNCH_WINDOW_EXPIRED、MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED、MAKEUP_PUNCH_TYPE_NOT_ALLOWED、MAKEUP_PUNCH_REASON_REQUIRED、MAKEUP_PUNCH_ATTACHMENT_REQUIRED 来自已启用的补卡策略。DUPLICATE_REQUEST 表示同一人、同一工作日、同一申请类型已有待处理或已通过。ANNUAL_LEAVE_BALANCE_INSUFFICIENT 和 ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED 是年假审批结果。OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED 和 OVERTIME_BANK_CAP_EXCEEDED 是加班结果。SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED 表示对方尚未同意。APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED 表示上级类步骤解析失败。'],
+        path: ['ATTENDANCE_PUNCH_ORG_NOT_PERMITTED', 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED'],
+        detail: ['Appears on punch when the named organization is not one of the caller’s active memberships. HTTP 403. Do: punch without a foreign organization id, or sign in to an organization you belong to.', '出现：打卡请求写明的组织不是调用人的有效成员组织。HTTP 403。处理：不要带上别人的组织；或登录到自己所属的组织再打卡。'],
       },
       {
-        path: ['Administration and import', '管理和导入'],
-        detail: ['USER_NOT_IN_ORG means the target user is not an active member of this organization. It is used on roster and annual-leave writes. It is not the punch organization error. ANNUAL_LEAVE_NOT_ENABLED, ANNUAL_LEAVE_TIMEZONE_REQUIRED, and ANNUAL_LEAVE_TIMEZONE_INVALID block annual-leave operations until the policy is enabled with a valid timezone. SCHEDULER_SCOPE_FORBIDDEN means a non-administrator has no matching scope. ATTENDANCE_GROUP_TYPE_LOCKED means the group type cannot change after creation. SHIFT_COMPLIANCE_CAP_EXCEEDED rolls back a schedule save. COMMIT_TOKEN_REQUIRED and COMMIT_TOKEN_INVALID apply when import commit requires a token. VALIDATION_ERROR means the submitted fields were rejected. DB_NOT_READY means the attendance tables are not ready in this environment.', 'USER_NOT_IN_ORG 表示目标用户不是本组织的有效成员。它用于名单和年假写入。它不是打卡选错组织的那个错误。ANNUAL_LEAVE_NOT_ENABLED、ANNUAL_LEAVE_TIMEZONE_REQUIRED、ANNUAL_LEAVE_TIMEZONE_INVALID 会拦住年假操作，直到策略启用且时区有效。SCHEDULER_SCOPE_FORBIDDEN 表示非管理员没有匹配的范围。ATTENDANCE_GROUP_TYPE_LOCKED 表示考勤组类型创建后不能改。SHIFT_COMPLIANCE_CAP_EXCEEDED 会回滚一次排班保存。COMMIT_TOKEN_REQUIRED 和 COMMIT_TOKEN_INVALID 出现在导入提交需要令牌时。VALIDATION_ERROR 表示提交的字段被拒绝。DB_NOT_READY 表示本环境的考勤表尚未就绪。'],
+        path: ['PUNCH_CLIENT_TIMESTAMP_FORBIDDEN', 'PUNCH_CLIENT_TIMESTAMP_FORBIDDEN'],
+        detail: ['Appears when the punch body includes a client time. HTTP 400. Do: send only the event type. The server records the time. Use Makeup punch to correct a past day.', '出现：打卡请求自带了发生时间。HTTP 400。处理：只提交打卡类型。时间由服务器记录。要改过去某一天，走补卡。'],
       },
       {
-        path: ['Timezone sentences', '时区提示'],
-        detail: ['ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED: the organization has no default attendance rule. Ask an administrator to check the default rule and the upgrade prerequisites. ATTENDANCE_TIMEZONE_DEFAULT_MISSING: existing attendance data needs an upgrade check before a missing default rule can be created. ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED: a historical record lacks the required frozen context. ATTENDANCE_TIMEZONE_INVALID_ZONE: an attendance timezone is invalid. ATTENDANCE_TIMEZONE_MULTIPLE_DEFAULTS: more than one default rule conflicts. ATTENDANCE_TIMEZONE_MEMBER_REQUIRED: an active organization membership is required; sign in again after an administrator checks it.', 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED：本组织尚未配置默认考勤规则。请管理员检查默认规则和升级前置条件。ATTENDANCE_TIMEZONE_DEFAULT_MISSING：已有考勤配置需要升级检查，暂时无法补建默认规则。ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED：历史记录缺少所需的冻结上下文。ATTENDANCE_TIMEZONE_INVALID_ZONE：考勤时区配置无效。ATTENDANCE_TIMEZONE_MULTIPLE_DEFAULTS：存在冲突的默认考勤规则。ATTENDANCE_TIMEZONE_MEMBER_REQUIRED：需要有效的组织成员关系；管理员检查后重新登录。'],
+        path: ['PUNCH_TOO_SOON', 'PUNCH_TOO_SOON'],
+        detail: ['Appears when the same event type repeats inside Min punch interval. HTTP 429. Do: wait. Check-in then check-out is not limited by that interval. Change the minutes under Settings → Punch and geofence.', '出现：同一类打卡落在「最小打卡间隔（分钟）」内。HTTP 429。处理：等过间隔再打。先上班再下班不受这个间隔限制。间隔在「设置 → 打卡与围栏」里改。'],
+      },
+      {
+        path: ['IP_RESTRICTED', 'IP_RESTRICTED'],
+        detail: ['Appears when IP allowlist is non-empty and the client address is absent from it. HTTP 403. Do: punch from an allowed address, or an administrator edits IP allowlist and clicks Save settings.', '出现：IP 白名单非空，且当前地址不在名单里。HTTP 403。处理：从允许的地址打卡，或由管理员修改「IP 白名单」后点「保存设置」。'],
+      },
+      {
+        path: ['LOCATION_RESTRICTED', 'LOCATION_RESTRICTED'],
+        detail: ['Appears when a geofence is set, outdoor approval is off, and the punch has no in-fence location. The overview punch does not send a location, so it is treated as outside. HTTP 403. The sentence says the location is outside the allowed range. Do: clear the fence, or turn on Require approval for outdoor punches.', '出现：已设地理围栏、外勤审批关闭，且这次打卡没有围栏内定位。总览打卡不传定位，因此按围栏外处理。HTTP 403。句子会说当前位置在允许范围外。处理：清空围栏，或勾选「外勤打卡需审批」。'],
+      },
+      {
+        path: ['OUTDOOR_NOTE_REQUIRED', 'OUTDOOR_NOTE_REQUIRED'],
+        detail: ['Appears when outdoor approval requires a note and the punch has none. HTTP 422. Do: fill Outdoor punch note and click Retry punch with note.', '出现：外勤审批要求备注，而这次打卡没有备注。HTTP 422。处理：填写「外勤打卡备注」，再点「补充备注后重试打卡」。'],
+      },
+      {
+        path: ['PUNCH_UNSCHEDULED_BLOCKED', 'PUNCH_UNSCHEDULED_BLOCKED'],
+        detail: ['Appears when unscheduled punching is set to block and that work date has no schedule. HTTP 422. Do: publish a schedule for that day, or an administrator sets the policy back to allow.', '出现：未排班策略为拦截，且该工作日没有排班。HTTP 422。处理：为这一天发布排班，或由管理员把策略改回允许。'],
+      },
+      {
+        path: ['ATTENDANCE_PUNCH_ORDER_CONFLICT', 'ATTENDANCE_PUNCH_ORDER_CONFLICT'],
+        detail: ['Appears when check-out is recorded before check-in on the same work date. HTTP 409. Do: Check In first, then Check Out.', '出现：同一工作日先记下了下班、还没有上班。HTTP 409。处理：先点「上班打卡」，再点「下班打卡」。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_QUOTA_EXCEEDED', 'MAKEUP_PUNCH_QUOTA_EXCEEDED'],
+        detail: ['Appears when makeup enforcement is on and this cycle has no remaining count. HTTP 422. The sentence is 「本周期的补卡次数已用完。」. Do: wait for the next calendar month, cancel a pending request that counts, or raise Requests per cycle.', '出现：补卡强约束已开，且本周期次数用完。HTTP 422。句子是「本周期的补卡次数已用完。」。处理：等到下个自然月，或取消一条计入额度的待处理申请，或提高「每周期补卡次数」。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_WINDOW_EXPIRED', 'MAKEUP_PUNCH_WINDOW_EXPIRED'],
+        detail: ['Appears when the work date is outside the calendar-day submit window. HTTP 422. The sentence is 「该工作日期不在允许的补卡时间窗口内。」. Do: pick a date inside Submit window, or an administrator changes that field.', '出现：工作日期超出「提交时限（自然日）」。HTTP 422。句子是「该工作日期不在允许的补卡时间窗口内。」。处理：改选时限内的日期，或由管理员改这个字段。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED', 'MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED'],
+        detail: ['Appears when the makeup work date is in the future. HTTP 422. The sentence is 「未来的工作日期无法提交补卡。」. Do: choose today or an earlier work date.', '出现：补卡的工作日期在未来。HTTP 422。句子是「未来的工作日期无法提交补卡。」。处理：改选今天或更早的工作日期。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_TYPE_NOT_ALLOWED', 'MAKEUP_PUNCH_TYPE_NOT_ALLOWED'],
+        detail: ['Appears when the date and request type do not match Allowed anomaly types. HTTP 422. The sentence is 「所选日期/类型不符合当前补卡策略。」. A whole-day absence is not makeup-eligible. Do: change the type or date, or an administrator edits the anomaly checkboxes.', '出现：该日期和申请类型对不上「可补异常类型」。HTTP 422。句子是「所选日期/类型不符合当前补卡策略。」。整日旷工不能补。处理：改类型或日期，或由管理员改异常勾选。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_REASON_REQUIRED', 'MAKEUP_PUNCH_REASON_REQUIRED'],
+        detail: ['Appears when Require reason is on and the reason is empty. HTTP 422. The sentence is 「补卡策略要求填写原因。」. Do: fill the reason and submit again.', '出现：已勾选「要求填写原因」，原因为空。HTTP 422。句子是「补卡策略要求填写原因。」。处理：填写原因后再提交。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_ATTACHMENT_REQUIRED', 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED'],
+        detail: ['Appears when Require attachment URL is on and the URL is empty. HTTP 422. The sentence is 「补卡策略要求上传附件。」. Do: fill the attachment URL and submit again.', '出现：已勾选「要求附件链接」，链接为空。HTTP 422。句子是「补卡策略要求上传附件。」。处理：填写附件链接后再提交。'],
+      },
+      {
+        path: ['MAKEUP_PUNCH_CROSS_USER_FORBIDDEN', 'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN'],
+        detail: ['Appears when someone edits a makeup request for another person. HTTP 422. The sentence is 「v1 不支持为他人编辑补卡申请。」. Do: the employee submits their own request.', '出现：替他人编辑补卡申请。HTTP 422。句子是「v1 不支持为他人编辑补卡申请。」。处理：由该员工自己提交。'],
+      },
+      {
+        path: ['DUPLICATE_REQUEST', 'DUPLICATE_REQUEST'],
+        detail: ['Appears when the same person, work date, and request type already has a pending or approved row. HTTP 409. Do: cancel the pending row, or wait until it is rejected. This check does not compare clock times.', '出现：同一人、同一工作日、同一申请类型已有待处理或已通过。HTTP 409。处理：取消那条待处理，或等它被驳回。这项检查不比较钟点是否重叠。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_NOT_ENABLED', 'ANNUAL_LEAVE_NOT_ENABLED'],
+        detail: ['Appears on annual-leave adjust, backfill, or accrual while the engine is off. HTTP 422. The sentence says to enable it under Annual leave policy. Do: open Annual leave policy, turn on Enabled, set a timezone, and save.', '出现：年假引擎关闭时做调整、回填或发放。HTTP 422。句子会要求先在「年假策略」启用。处理：打开「年假策略」，勾选启用，填写时区，再保存。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_TIMEZONE_REQUIRED', 'ANNUAL_LEAVE_TIMEZONE_REQUIRED'],
+        detail: ['Appears when the enabled annual-leave policy has no timezone. HTTP 422. The sentence is 「策略缺少时区。」. Do: pick a timezone on Annual leave policy and save.', '出现：年假策略已启用但没有时区。HTTP 422。句子是「策略缺少时区。」。处理：在「年假策略」选择时区并保存。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_TIMEZONE_INVALID', 'ANNUAL_LEAVE_TIMEZONE_INVALID'],
+        detail: ['Appears when the policy timezone is not a valid IANA id. HTTP 422. The sentence is 「策略时区不是有效的 IANA 时区。」. Do: pick a suggestion from the timezone field and save again.', '出现：策略时区不是合法的 IANA 标识。HTTP 422。句子是「策略时区不是有效的 IANA 时区。」。处理：从时区框的建议里重选一条再保存。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_BALANCE_INSUFFICIENT', 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT'],
+        detail: ['Appears when a negative adjustment or an approved annual-leave request exceeds active lots. HTTP 422. The sentence says the balance is short. Do: reduce the amount, or grant more balance before approving.', '出现：负数调整或批准年假时，超过可用额度。HTTP 422。句子会说余额不足。处理：减小数值，或先发放额度再批准。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED', 'ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED'],
+        detail: ['Appears when approving annual leave whose minutes exceed one standard day. HTTP 422. Do: split the request so each one stays within one standard day (default 480 minutes).', '出现：批准年假时，分钟数超过一个标准日。HTTP 422。处理：拆成多条申请，每条不超过一个标准日（默认 480 分钟）。'],
+      },
+      {
+        path: ['ANNUAL_LEAVE_ADJUST_DELTA_INVALID', 'ANNUAL_LEAVE_ADJUST_DELTA_INVALID'],
+        detail: ['Appears when the adjustment amount is zero. HTTP 400. The sentence is 「调整数值必须非零。」. Do: enter a positive or negative amount.', '出现：调整数值为 0。HTTP 400。句子是「调整数值必须非零。」。处理：填写正数或负数。'],
+      },
+      {
+        path: ['OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED', 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED'],
+        detail: ['Appears when an overtime window crosses more than one local midnight, or the local start date is not the request work date. Do: keep the window on one local date, or on exactly one midnight that starts on the work date.', '出现：加班时间跨过不止一个当地午夜，或当地开始日不是这条申请的工作日。处理：把时间窗放在同一个当地日，或只跨一个午夜且从该工作日开始。'],
+      },
+      {
+        path: ['OVERTIME_INVALID_TIME_WINDOW', 'OVERTIME_INVALID_TIME_WINDOW'],
+        detail: ['Appears when the overtime start and end do not form a valid window. Do: set the end after the start, then submit again.', '出现：加班的开始和结束构不成有效时间窗。处理：让结束晚于开始，再提交。'],
+      },
+      {
+        path: ['OVERTIME_BANK_CAP_EXCEEDED', 'OVERTIME_BANK_CAP_EXCEEDED'],
+        detail: ['Appears when an approved overtime would push the comp-time bank over its cycle cap. Do: raise the cap, set the cap to 0 for no limit, or shorten the overtime. Statutory-holiday overtime does not enter this pool.', '出现：批准加班后，调休池会超过本周期上限。处理：提高上限，或把上限设为 0 表示不限，或缩短加班。法定节假日加班不进入这个池。'],
+      },
+      {
+        path: ['SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED', 'SHIFT_SWAP_COUNTERPARTY_CONSENT_REQUIRED'],
+        detail: ['Appears when shift swap is finalized before the other person agrees. Do: the other person clicks Agree. Approval continues after that.', '出现：对方尚未同意就终结换班。处理：由对方点「同意换班」。同意之后才继续审批。'],
+      },
+      {
+        path: ['SHIFT_SWAP_APPROVAL_FLOW_REQUIRED', 'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED'],
+        detail: ['Appears when the request names a shift-swap approval flow that is missing or inactive. HTTP 422. Do: leave the flow unset so the active shift-swap flow is used, or enable that flow under Approval flows.', '出现：换班指定的审批流不存在或未启用。HTTP 422。处理：不指定流程，改用当前启用的换班审批流；或在「审批流」里启用它。'],
+      },
+      {
+        path: ['APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED', 'APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED'],
+        detail: ['Appears when Direct manager, Department head, or a manager level cannot be resolved, or resolves to the requester. HTTP 422. The request is blocked. Do: fix the directory link, or change that step to a named approver. It does not fall back to the administrator queue.', '出现：直属上级、部门主管或指定层级上级解析不到，或解析到申请人本人。HTTP 422。申请被阻断。处理：补目录关系，或把该步改成指定审批人。不会改派到管理员队列。'],
+      },
+      {
+        path: ['SCHEDULER_SCOPE_FORBIDDEN', 'SCHEDULER_SCOPE_FORBIDDEN'],
+        detail: ['Appears when a non-administrator acts without a matching scheduler scope. HTTP 403. Do: an administrator adds a scope with the needed action and target, or uses an attendance:admin account.', '出现：非管理员操作，且没有匹配的排班管理范围。HTTP 403。处理：由管理员补一条包含所需动作和目标的范围，或改用 attendance:admin 账号。'],
+      },
+      {
+        path: ['ATTENDANCE_GROUP_TYPE_LOCKED', 'ATTENDANCE_GROUP_TYPE_LOCKED'],
+        detail: ['Appears when a save tries to change Fixed shift, Scheduled shift, or Free time after the group exists. HTTP 409. Do: keep the original type. Create another group if a different type is required.', '出现：考勤组已存在后，保存试图修改固定班制、排班制或自由工时。HTTP 409。处理：保持原类型。需要另一种类型时另建一组。'],
+      },
+      {
+        path: ['SHIFT_COMPLIANCE_CAP_EXCEEDED', 'SHIFT_COMPLIANCE_CAP_EXCEEDED'],
+        detail: ['Appears when Block on save is set and explicit scheduled minutes exceed a daily, weekly, or monthly cap. HTTP 422. The save rolls back. Do: shorten the schedule, or raise or clear the cap. Warn does not block.', '出现：「保存时阻断」已选，且显式排班分钟超过每日、每周或每月上限。HTTP 422。这次保存会回滚。处理：缩短排班，或提高、清空上限。「预警」不拦截。'],
+      },
+      {
+        path: ['COMMIT_TOKEN_REQUIRED', 'COMMIT_TOKEN_REQUIRED'],
+        detail: ['Appears on import commit when ATTENDANCE_IMPORT_REQUIRE_TOKEN is the literal 1 and no token was sent. HTTP 400. Do: issue a token and Commit within 10 minutes.', '出现：ATTENDANCE_IMPORT_REQUIRE_TOKEN 为字面量 1，提交时没有令牌。HTTP 400。处理：签发令牌，并在 10 分钟内点「提交」。'],
+      },
+      {
+        path: ['COMMIT_TOKEN_INVALID', 'COMMIT_TOKEN_INVALID'],
+        detail: ['Appears when the import token is expired, already used, or belongs to another user or organization. HTTP 403. Do: issue a new token and Commit again within 10 minutes.', '出现：导入令牌过期、已用过，或属于其他用户或组织。HTTP 403。处理：重新签发，并在 10 分钟内再点「提交」。'],
+      },
+      {
+        path: ['VALIDATION_ERROR', 'VALIDATION_ERROR'],
+        detail: ['Appears when a field fails the request check. HTTP 400. The sentence is 「请求校验失败。」 on annual-leave operations. Do: correct the named field and submit again.', '出现：某个字段没通过校验。HTTP 400。年假操作上的句子是「请求校验失败。」。处理：按提示改正该字段后再提交。'],
+      },
+      {
+        path: ['UNAUTHORIZED', 'UNAUTHORIZED'],
+        detail: ['Appears when the request has no signed-in user id. HTTP 401. Do: sign in again.', '出现：请求里没有登录用户。HTTP 401。处理：重新登录。'],
+      },
+      {
+        path: ['FORBIDDEN', 'FORBIDDEN'],
+        detail: ['Appears when the token’s permission or organization does not allow the action. HTTP 403. Do: see Permissions for the key that action needs. Group owner is not import access.', '出现：令牌上的权限或组织不允许该操作。HTTP 403。处理：到「权限说明」查看该操作需要的权限。考勤组负责人不能代替导入权限。'],
+      },
+      {
+        path: ['DB_NOT_READY', 'DB_NOT_READY'],
+        detail: ['Appears when attendance tables are missing in this environment. The sentence is 「本环境的考勤表尚未就绪。」. Do: an administrator finishes migration before retrying. Refreshing the page does not create the tables.', '出现：本环境缺少考勤表。句子是「本环境的考勤表尚未就绪。」。处理：由管理员完成迁移后再试。刷新页面不会建表。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED'],
+        detail: ['Appears when the organization has no default attendance rule. The sentence asks an administrator to check the default rule and upgrade prerequisites. Do: open Default rule and save a timezone, work start, and work end. Refresh alone does not create the rule.', '出现：本组织没有默认考勤规则。句子会请管理员检查默认规则和升级前置条件。处理：打开「默认规则」，保存时区、上班时间和下班时间。只刷新不会建出规则。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_DEFAULT_MISSING', 'ATTENDANCE_TIMEZONE_DEFAULT_MISSING'],
+        detail: ['Appears when a missing default rule cannot be created because existing attendance data still needs an upgrade check. Do: an administrator reviews the upgrade prerequisites. Do not expect Save rule to skip that check.', '出现：已有考勤数据还要升级检查，因此暂时不能补建默认规则。处理：由管理员核对升级前置条件。不要指望「保存规则」跳过这项检查。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED', 'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'],
+        detail: ['Appears when a historical attendance row lacks the required frozen context. Do: an administrator reviews the historical upgrade. Refresh does not fill that context.', '出现：某条历史考勤记录缺少所需的冻结上下文。处理：由管理员处理历史数据升级。刷新不会补上这段上下文。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_INVALID_ZONE', 'ATTENDANCE_TIMEZONE_INVALID_ZONE'],
+        detail: ['Appears when an attendance timezone is not valid. Do: an administrator re-picks a timezone suggestion on the rule, shift, or policy, then saves. Then refresh.', '出现：某个考勤时区无效。处理：由管理员在规则、班次或策略的时区框重选一条建议并保存，然后再刷新。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_MULTIPLE_DEFAULTS', 'ATTENDANCE_TIMEZONE_MULTIPLE_DEFAULTS'],
+        detail: ['Appears when more than one default attendance rule conflicts. Do: an administrator resolves the duplicate defaults, then refresh.', '出现：存在互相冲突的多条默认考勤规则。处理：由管理员处理重复的默认规则，然后再刷新。'],
+      },
+      {
+        path: ['ATTENDANCE_TIMEZONE_MEMBER_REQUIRED', 'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'],
+        detail: ['Appears when an active organization membership is required. Do: an administrator checks the membership. The person signs in again.', '出现：操作需要有效的组织成员关系。处理：由管理员检查组织归属。当事人重新登录。'],
       },
     ],
+    figureTitle: ['How to read a row', '一行怎么读'],
+    figureRows: [
+      ['Code', '代码'],
+      ['When it appears', '出现时机'],
+      ['What to do', '处理'],
+    ],
     faqs: [{
-      q: ['USER_NOT_IN_ORG appeared on an annual-leave adjustment.', '年假调整出现了 USER_NOT_IN_ORG。'],
-      a: ['The sentence is 「该用户不是本组织的有效成员。」. Choose a person who is an active member of this organization. A punch that names the wrong organization uses ATTENDANCE_PUNCH_ORG_NOT_PERMITTED instead.', '这句话是「该用户不是本组织的有效成员。」。改选本组织的有效成员。打卡写错组织使用的是 ATTENDANCE_PUNCH_ORG_NOT_PERMITTED。'],
-    }, {
-      q: ['FORBIDDEN and UNAUTHORIZED.', 'FORBIDDEN 和 UNAUTHORIZED。'],
-      a: ['UNAUTHORIZED means the signed-in user id is missing. FORBIDDEN means the permission or the organization on the token does not allow that action. See Permissions for which key each action uses.', 'UNAUTHORIZED 表示缺少登录用户。FORBIDDEN 表示令牌上的权限或组织不允许该操作。每个操作用哪类权限见「权限说明」。'],
+      q: ['The code is not in this list.', '这里没有这个代码。'],
+      a: ['Use the sentence on the status line. These rows are the codes the attendance screens return for punch, requests, annual leave, schedule saves, import commit, and timezone checks.', '先看状态条上的那句话。这里列出的是打卡、申请、年假、排班保存、导入提交和时区检查会返回的代码。'],
     }],
   },
   {
@@ -976,39 +1180,42 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Common questions',
     labelZh: '常见问题',
     intro: [[
-      'These answers repeat the shortest form of questions that span more than one page. Each article on the left has its own questions as well. Search finds both.',
-      '这里是跨页面问题的短答。左侧每篇文章还有自己的常见问题。搜索两边都能找到。',
+      'This page points at the article that already answers the question. Open Attendance help on the admin bar. The employee overview has no separate help.',
+      '本页只指向已经写过答案的文章。从管理端顶栏打开「考勤帮助」。员工总览没有另一本帮助。',
     ]],
     scenarios: [[
-      'Start here when the task is known and the page is not.',
-      '知道要办的事，还不确定落在哪一页时，先看这里。',
+      'Use it to find the article, then read the steps there.',
+      '先在这里找到文章，再去那一篇看步骤。',
     ]],
     steps: [
       {
-        path: ['Common icons', '常用图标'],
-        detail: ['Settings → Employee common icons saves the four tiles. The employee overview reads them. The tiles stay Makeup punch, Leave, Overtime, and Shift swap.', '设置 → 员工常用图标保存四个磁贴。员工总览读取它们。磁贴名称仍是补卡、请假、加班、换班。'],
-      },
-      {
-        path: ['Group type', '考勤组类型'],
-        detail: ['Choose Fixed shift, Scheduled shift, or Free time before the first save. After creation the type stays as saved. Free time on this page is the people and policy grouping.', '第一次保存前选择固定班制、排班制或自由工时。创建之后类型保持当时的选择。本页的自由工时是人员和策略分组。'],
+        path: ['Where this manual opens', '本手册从哪里打开'],
+        detail: ['Admin bar → Attendance help. Employee punch, leave, overtime, makeup, and shift swap are articles in that same manual. They describe the overview. They are not a second app.', '管理端顶栏 →「考勤帮助」。打卡、请假、加班、补卡、换班都是这一本里的文章。它们描述总览上的操作，不是另一个应用。'],
       },
       {
         path: ['My requests', '我的申请'],
-        detail: ['My requests lists the signed-in person. Anomalies open the overview anomaly list. Approving someone else uses the approval queue.', '「我的申请」列出当前登录人。异常打开总览里的异常列表。批准他人使用审批队列。'],
+        detail: ['See Overview. That article states whose requests the card lists.', '见「总览」。那一篇写明这张卡片列出的是谁的申请。'],
+      },
+      {
+        path: ['After Save settings', '保存设置之后'],
+        detail: ['See Settings → After saving → what to check. Auto absence waits for Run at.', '见「设置」里的「做完后怎么确认」。自动缺勤要等到执行时间。'],
+      },
+      {
+        path: ['Holiday sync', '节假日同步'],
+        detail: ['See Holidays → After sync → what to check. Sync writes holiday rows.', '见「节假日」里的「做完后怎么确认」。同步写入的是节假日记录。'],
+      },
+      {
+        path: ['Import and reports', '导入和报表'],
+        detail: ['See Import → After commit → what to check, and Reports → After export → what to check.', '见「导入」里的「做完后怎么确认」，以及「报表」里的「做完后怎么确认」。'],
+      },
+      {
+        path: ['A status code', '某个代码'],
+        detail: ['See Status codes. Each row is the code, when it appears, and what to do.', '见「错误码与提示」。每一行是代码、出现时机和处理。'],
       },
     ],
     faqs: [{
       q: ['Saving the makeup policy did not fill in old missing punches.', '保存补卡策略后，以前的缺卡没有被补上。'],
-      a: ['The policy limits later self-service requests. It does not scan old days. Employees submit a makeup request for a date the policy allows.', '策略约束的是之后的自助申请。它不回扫旧日期。员工对策略允许的日期提交补卡申请。'],
-    }, {
-      q: ['Holiday sync changed punch times.', '节假日同步改了打卡时间吗？'],
-      a: ['Sync writes holiday rows. It does not retime punches or shift clocks.', '同步写入节假日记录。它不改打卡时间，也不改班次钟点。'],
-    }, {
-      q: ['Auto-generate on a payroll template created no cycles.', '计薪模板打开了自动生成，却没有周期。'],
-      a: ['The flag is stored on the template. Generate cycles writes the rows. A cycle with the same start and end in this organization is skipped.', '该开关只随模板保存。生成周期才写出周期行。本组织已有相同起止日的周期会被跳过。'],
-    }, {
-      q: ['A hidden report column is still in the file.', '报表里藏起的列仍在文件中。'],
-      a: ['Column choices stay in this browser. Export downloads the server dataset for the date range and filters, up to 5000 rows.', '显示字段记在这台浏览器里。导出下载的是该日期区间和筛选条件下的服务端数据，最多 5000 行。'],
+      a: ['The policy limits later requests. It does not scan old days. The employee submits Makeup punch for a date the policy allows.', '策略约束之后的申请。它不回扫旧日期。员工对策略允许的日期提交补卡。'],
     }],
   },
 ]
