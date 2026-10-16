@@ -554,7 +554,7 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('部门 ID 2')
     expect(container?.textContent).toContain('当前可见 1 个部门')
     const visibleDepartmentPreview = container!.querySelector('.directory-admin__visible-department-preview') as HTMLTextAreaElement | null
-    expect(visibleDepartmentPreview?.value).toBe('2')
+    expect(visibleDepartmentPreview?.value).toBe('项目组 · 信息化团队 / 项目组')
 
     const copyVisibleDepartmentIdsButton = Array.from(container!.querySelectorAll('button'))
       .find((button) => button.textContent?.includes('复制当前可见部门 ID'))
