@@ -758,6 +758,39 @@ describe('EN locale — TasksView list page renders no CJK', () => {
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
+  it('a create while "Completed" is on — the notice that the new task is not shown, with both actions in a listing view and the link-only form in 关注中', async () => {
+    // The status switch remembers its choice in this browser's storage: start and end clean so no
+    // other cell in this file starts under "Completed".
+    const KEY = 'metasheet.tasks.statusFilter'
+    try {
+      window.localStorage.removeItem(KEY)
+      h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+      const el = await mountViewAt('/tasks')
+      await click(el, 'tasks-status-switch-done')
+      typeInto(el, 'tasks-create-title', 'New one')
+      await submitForm(el, 'tasks-create-form')
+      expect(must(el, 'tasks-create-hidden-text').textContent?.trim()).toBe(
+        'Task created. It is not completed yet, so the current "Completed" filter does not show it.',
+      )
+      expect(must(el, 'tasks-create-hidden-show-open').textContent?.trim()).toBe('Show tasks not completed')
+      expect(must(el, 'tasks-create-hidden-open-task').textContent?.trim()).toBe('Open the new task')
+      expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+
+      // In a view that leaves the new task out under any status: the other copy, no switch action.
+      await click(el, 'tasks-view-switch-following')
+      typeInto(el, 'tasks-create-title', 'Another one')
+      await submitForm(el, 'tasks-create-form')
+      expect(must(el, 'tasks-create-hidden-text').textContent?.trim()).toBe(
+        'Task created. The current view and filter do not show it.',
+      )
+      expect(el.querySelector('[data-testid="tasks-create-hidden-show-open"]')).toBeNull()
+      expect(must(el, 'tasks-create-hidden-open-task').textContent?.trim()).toBe('Open the new task')
+      expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    } finally {
+      window.localStorage.removeItem(KEY)
+    }
+  })
+
   it('an "all" mode row: complete and reopen on the task page', async () => {
     h_.listTasks.mockResolvedValue({
       kind: 'ok',

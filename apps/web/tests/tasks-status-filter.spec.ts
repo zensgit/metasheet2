@@ -495,6 +495,8 @@ describe('G2-core status switch — late action result after switching status (l
     expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
     expect(h.listTasks).toHaveBeenCalledTimes(2)
     expect(el.textContent).toContain('Done Item')
+    // The create belongs to the page it started on: no hidden-by-filter notice on the page now showing.
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
   })
 })
 
@@ -623,10 +625,10 @@ describe('G2-core status switch — with the all-mode row link and the create du
     expect(rowActions(el)).toEqual({ 'All Open': 'detail:在任务详情中完成' })
   })
 
-  // Pinned as it is today: a create while 已完成 is on is sent with its due date, the form is
-  // cleared, and the reload stays under 已完成, so the new (open) task is not in the list until the
-  // switch moves to 未完成 or 全部.
-  it('g2core|fe|6390|a create with a due date while 已完成 is on: sent with the due keys, form cleared, reload stays under 已完成', async () => {
+  // A create while 已完成 is on is sent with its due date, the form is cleared, and the reload
+  // stays under 已完成 (the remembered choice is not switched for the viewer), so the new (open)
+  // task is not in the list: an inline notice says so, and its action moves the switch to 未完成.
+  it('g2core|fe|6390|a create with a due date while 已完成 is on: sent with the due keys, form cleared, reload stays under 已完成, the notice leads to it', async () => {
     h.createTask.mockImplementation(async (body: { title: string; completionMode: 'all' | 'any' }) => {
       rows = [...rows, taskItem({ id: 'n1', title: body.title, status: 'open', completion_mode: body.completionMode })]
       return { kind: 'ok', id: 'n1' }
@@ -656,9 +658,233 @@ describe('G2-core status switch — with the all-mode row link and the create du
     expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('')
     expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).value).toBe('')
     expect(rowActions(el)).toEqual(EXPECTED.done)
+    expect(shown(el, 'tasks-create-hidden-notice')).not.toBeNull()
+    expect(window.localStorage.getItem(KEY)).toBe('done')
 
-    statusButton(el, 'open').click()
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
     await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
+    expect(pressed(el)).toEqual(['open'])
+    expect(window.localStorage.getItem(KEY)).toBe('open')
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
     expect(rowActions(el)).toEqual({ ...EXPECTED.open, 'Fresh Task': 'detail:在任务详情中完成' })
+  })
+})
+
+// A create while 已完成 is on makes a task the reloaded list leaves out (a new task is never
+// completed). The page says so inline, without a dialog and without switching the remembered
+// filter, and always offers the new task's page. In a view that lists the creator's new task
+// (分配给我 / 我创建的 / 任一角色) it also offers the 未完成 switch; in 关注中 / 我委派的, which leave the
+// new task out under any status, it offers only the task's page and does not put the hiding down
+// to the filter alone. Under 未完成 and 全部 nothing is said. The notice goes with the next create
+// (whatever its outcome) and with a status or view switch.
+describe('G2-core status switch — a new task the filter leaves out', () => {
+  type Row = ReturnType<typeof taskItem>
+  let rows: Row[] = []
+  let nextId = 0
+  // Tasks the create form made: the creator is their only assignee and nobody follows them, so the
+  // server leaves them out of 关注中 and 我委派的 under any status. The fake list read does the same.
+  let created = new Set<string>()
+
+  beforeEach(() => {
+    rows = [taskItem({ id: 'd1', title: 'Old Done', status: 'done', completion_mode: 'any' })]
+    nextId = 0
+    created = new Set()
+    h.listTasks.mockImplementation(async (view: string, _page: unknown, status?: 'open' | 'done' | 'all') => {
+      const items = rows.filter((row) =>
+        (status === undefined || status === 'all' || row.status === status)
+        && !((view === 'following' || view === 'delegated') && created.has(row.id)))
+      return { kind: 'ok', items, total: items.length }
+    })
+    h.createTask.mockImplementation(async (body: { title: string; completionMode: 'all' | 'any' }) => {
+      nextId += 1
+      const id = `n${nextId}`
+      created.add(id)
+      rows = [...rows, taskItem({ id, title: body.title, status: 'open', completion_mode: body.completionMode })]
+      return { kind: 'ok', id }
+    })
+  })
+
+  async function create(el: HTMLElement, title: string): Promise<void> {
+    const input = shown(el, 'tasks-create-title') as HTMLInputElement
+    input.value = title
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+  }
+
+  function titles(el: HTMLElement): string[] {
+    return Array.from(el.querySelectorAll('[data-testid="tasks-list-item-link"]')).map((link) => link.textContent?.trim() ?? '')
+  }
+
+  function notice(el: HTMLElement): HTMLElement | null {
+    return shown(el, 'tasks-create-hidden-notice')
+  }
+
+  it('g2core|fe|hidden|under 已完成 a create shows the inline notice with its two ways to the task, and the list stays under 已完成', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    expect(notice(el)).toBeNull()
+    // The live region is on the page before anything is said in it (empty, no text), so the
+    // notice is a change inside an existing polite region rather than a region that appears.
+    const live = shown(el, 'tasks-create-hidden-live')
+    expect(live?.getAttribute('role')).toBe('status')
+    expect(live?.textContent?.trim()).toBe('')
+    await create(el, 'Fresh Task')
+
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+    expect(pressed(el)).toEqual(['done'])
+    expect(titles(el)).toEqual(['Old Done'])
+    const box = notice(el)
+    expect(box).not.toBeNull()
+    // The same region element now carries the notice.
+    expect(shown(el, 'tasks-create-hidden-live')).toBe(live)
+    expect(box?.closest('[role="status"]')).toBe(live)
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(
+      '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+    )
+    expect(shown(el, 'tasks-create-hidden-show-open')?.textContent?.trim()).toBe('查看未完成任务')
+    const link = shown(el, 'tasks-create-hidden-open-task')
+    expect(link?.textContent?.trim()).toBe('打开新任务')
+    expect(link?.getAttribute('to')).toBe('/tasks/n1')
+    // Not a list row: the row walkers above do not see the notice's link.
+    expect(el.querySelectorAll('[data-testid="tasks-list-item-link"]').length).toBe(1)
+  })
+
+  it('g2core|fe|hidden|the notice action switches to 未完成 (remembered), shows the new task and clears the notice', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
+    expect(pressed(el)).toEqual(['open'])
+    expect(window.localStorage.getItem(KEY)).toBe('open')
+    expect(titles(el)).toEqual(['Fresh Task'])
+    expect(notice(el)).toBeNull()
+    // The pressed button went away with the notice: focus is on the 未完成 switch, not the page body.
+    expect(document.activeElement).toBe(statusButton(el, 'open'))
+  })
+
+  it('g2core|fe|hidden|the new task id in the link is encoded as a path segment', async () => {
+    h.createTask.mockResolvedValueOnce({ kind: 'ok', id: 'a/b c' })
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Odd Id')
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/a%2Fb%20c')
+  })
+
+  it.each(['created', 'any_role'] as const)('g2core|fe|hidden|in the %s view under 已完成 the notice offers the 未完成 switch, which shows the new task', async (view) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+    await flush()
+    await create(el, 'Fresh Task')
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'done')
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(
+      '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+    )
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'open')
+    expect(titles(el)).toContain('Fresh Task')
+    expect(notice(el)).toBeNull()
+  })
+
+  it.each(['following', 'delegated'] as const)('g2core|fe|hidden|in the %s view under 已完成 the notice offers only the new task\'s page, not the 未完成 switch', async (view) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+    await flush()
+    await create(el, 'Fresh Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'done')
+    expect(titles(el)).toEqual(['Old Done'])
+    expect(notice(el)?.closest('[role="status"]')?.getAttribute('data-testid')).toBe('tasks-create-hidden-live')
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+    expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+    const link = shown(el, 'tasks-create-hidden-open-task')
+    expect(link?.textContent?.trim()).toBe('打开新任务')
+    expect(link?.getAttribute('to')).toBe('/tasks/n1')
+    expect(pressed(el)).toEqual(['done'])
+    expect(window.localStorage.getItem(KEY)).toBe('done')
+  })
+
+  it.each(['open', 'all'] as const)('g2core|fe|hidden|under %s a create shows the new task in the list and no notice', async (status) => {
+    window.localStorage.setItem(KEY, status)
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, status)
+    expect(titles(el)).toContain('Fresh Task')
+    expect(notice(el)).toBeNull()
+  })
+
+  it.each(['open', 'all'] as const)('g2core|fe|hidden|switching from 已完成 to %s clears the notice', async (status) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+    statusButton(el, status).click()
+    await flush()
+    expect(notice(el)).toBeNull()
+    expect(titles(el)).toContain('Fresh Task')
+  })
+
+  it('g2core|fe|hidden|switching the view clears the notice (the status stays 已完成)', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'done')
+    expect(notice(el)).toBeNull()
+  })
+
+  it('g2core|fe|hidden|the next create clears the notice: a failed one shows only its error', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    h.createTask.mockResolvedValueOnce({ kind: 'error', status: 500 })
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(2)
+    expect(notice(el)).toBeNull()
+    expect(shown(el, 'tasks-create-error')?.textContent?.trim()).toBe('创建任务失败，请稍后重试')
+  })
+
+  it('g2core|fe|hidden|the next create clears the notice: one stopped by the due-date pre-check shows only that message', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const due = shown(el, 'tasks-create-due-date') as HTMLInputElement
+    due.value = '2031-03-04'
+    due.dispatchEvent(new Event('input'))
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+    expect(notice(el)).toBeNull()
+  })
+
+  it('g2core|fe|hidden|a second create under 已完成 points the notice at the newest task', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'First Task')
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n2')
+    expect(el.querySelectorAll('[data-testid="tasks-create-hidden-notice"]').length).toBe(1)
   })
 })
