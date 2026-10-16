@@ -870,6 +870,54 @@ onBeforeUnmount(() => {
   margin-left: auto;
 }
 
+/* Up to 960px: long words in block text break instead of widening the board (`break-word` leaves
+   min-content sizes alone, so labels in the rows keep their words). The group header row wraps, so
+   its labels keep their width and only a part wider than the whole line, such as a long group name
+   in the delete prompt, breaks. The move controls wrap, and the move-to select (which sizes itself
+   to the longest group name) and the create input are capped at the row. */
+@media (max-width: 960px) {
+  .tasks-group-board {
+    overflow-wrap: break-word;
+  }
+
+  .tasks-group__header {
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-group__name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-group-board__moves {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
+  .tasks-group-board__moves select,
+  .tasks-group-board__create input {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* Narrow screens: the move controls (the fallback for dragging rows) take a line of their own
+   under the row content, left-aligned, with the select filling what is left of that line. */
+@media (max-width: 720px) {
+  .tasks-group {
+    padding: 8px;
+  }
+
+  .tasks-group-board__moves {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .tasks-group-board__moves select {
+    flex: 1 1 8em;
+  }
+}
+
 .tasks-group-board__error {
   flex-basis: 100%;
   margin: 0;

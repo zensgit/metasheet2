@@ -346,4 +346,17 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--el-color-danger, #c45656);
 }
+
+/* Up to 960px: the create input can narrow with the sidebar, and the list rows wrap, so their
+   labels keep their width and only a list name wider than the line breaks. */
+@media (max-width: 960px) {
+  .tasks-lists__create input {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .tasks-lists__item {
+    overflow-wrap: anywhere;
+  }
+}
 </style>
