@@ -12,6 +12,10 @@ vi.mock('ioredis', async () => {
     status = 'ready'
     _store = new Map<string, { value: string; expiresAt?: number }>()
     _shouldFail = false
+    disconnect = vi.fn(() => {
+      this.status = 'end'
+      this.emit('end')
+    })
 
     constructor() {
       super()
@@ -125,6 +129,8 @@ vi.mock('../../src/metrics/metrics', () => ({
 import {
   initIdempotency,
   destroyIdempotency,
+  stopIdempotencyCleanup,
+  shutdownIdempotency,
   getActiveStore
 } from '../../src/guards/idempotency'
 
@@ -147,6 +153,7 @@ describe('RedisIdempotencyStore', () => {
   })
 
   afterEach(async () => {
+    shutdownIdempotency()
     await destroyIdempotency()
     delete process.env.IDEMPOTENCY_STORE
     delete process.env.REDIS_URL
@@ -171,6 +178,89 @@ describe('RedisIdempotencyStore', () => {
     expect(result).toBeDefined()
     expect(result!.response.statusCode).toBe(200)
     expect(result!.response.body).toEqual({ ok: true })
+  })
+
+  it('stops maintenance without clearing Redis replay entries', async () => {
+    vi.useFakeTimers()
+    try {
+      process.env.IDEMPOTENCY_STORE = 'redis'
+      process.env.REDIS_URL = 'redis://localhost:6379'
+      initIdempotency({ ttlSeconds: 60 })
+      const store = getActiveStore()
+      const entry = {
+        response: { statusCode: 201, body: { id: 'created-once' } },
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+      await store.set('shutdown:replay', entry, 60)
+      expect(vi.getTimerCount()).toBe(1)
+
+      stopIdempotencyCleanup()
+      stopIdempotencyCleanup()
+
+      expect(vi.getTimerCount()).toBe(0)
+      expect((await store.get('shutdown:replay'))?.response).toEqual(entry.response)
+      expect(getActiveStore()).toBe(store)
+    } finally {
+      stopIdempotencyCleanup()
+      vi.useRealTimers()
+    }
+  })
+
+  it('disconnects its owned client on shutdown without deleting replay data', async () => {
+    process.env.IDEMPOTENCY_STORE = 'redis'
+    process.env.REDIS_URL = 'redis://localhost:6379'
+    initIdempotency()
+    const store = getActiveStore()
+    const entry = {
+      response: { statusCode: 201, body: { id: 'owned-once' } },
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000)
+    }
+    await store.set('owned:replay', entry, 60)
+    const redis = getLastMockRedis()
+
+    shutdownIdempotency()
+    shutdownIdempotency()
+
+    expect(redis.disconnect).toHaveBeenCalledTimes(1)
+    expect((redis._store as Map<string, unknown>).has('idem:owned:replay')).toBe(true)
+    expect((await store.get('owned:replay'))?.response).toEqual(entry.response)
+  })
+
+  it('leaves a caller-owned Redis connection open', async () => {
+    const { default: Redis } = await import('ioredis')
+    const client = new Redis()
+    process.env.IDEMPOTENCY_STORE = 'redis'
+    initIdempotency({}, client)
+
+    shutdownIdempotency()
+
+    expect(getLastMockRedis().disconnect).not.toHaveBeenCalled()
+  })
+
+  it('releases the old owned connection when initialized again', () => {
+    vi.useFakeTimers()
+    try {
+      process.env.IDEMPOTENCY_STORE = 'redis'
+      process.env.REDIS_URL = 'redis://localhost:6379'
+      initIdempotency()
+      const previous = getLastMockRedis()
+
+      initIdempotency()
+      const current = getLastMockRedis()
+
+      expect(current).not.toBe(previous)
+      expect(previous.disconnect).toHaveBeenCalledTimes(1)
+      expect(current.disconnect).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(1)
+      shutdownIdempotency()
+      expect(current.disconnect).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      shutdownIdempotency()
+      vi.useRealTimers()
+    }
   })
 
   it('should fall back to memory when Redis is down', async () => {

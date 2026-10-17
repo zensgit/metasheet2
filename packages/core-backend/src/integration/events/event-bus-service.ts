@@ -37,3 +37,11 @@ export function getEventBusSync(): EventBusService {
   }
   return eventBusServiceInstance
 }
+
+/** Drain the initialized singleton without creating a bus during shutdown. */
+export async function shutdownEventBusService(): Promise<void> {
+  const instance = eventBusServiceInstance
+  if (!instance) return
+  await instance.shutdown()
+  if (eventBusServiceInstance === instance) eventBusServiceInstance = null
+}

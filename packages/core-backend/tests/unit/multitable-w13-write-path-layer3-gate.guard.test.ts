@@ -1119,6 +1119,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    */
   test('chokepoint: the set of files writing meta_records directly (raw INSERT/UPDATE/MERGE SQL or a kysely builder) is frozen (a new write spine outside the three surfaces trips red)', () => {
     const RAW_META_RECORDS_SQL_WRITERS: Record<string, string> = {
+      'multitable/plm-bom-review-service.ts': 'OUT OF SCOPE of the three native surfaces: owner-authorized source snapshot sync; sheet/row/field permission checks, common record-lock rule and revisions run in its fenced transaction. Writes only immutable string source fields.',
       // ── IN SCOPE of this lock: these ARE the three write surfaces ────────────────────────────────
       'multitable/record-write-service.ts': 'IN SCOPE — the RecordWriteService surface itself (patchRecords).',
       'multitable/record-service.ts': 'IN SCOPE — the RecordService surface itself (patch/create/restore/delete).',

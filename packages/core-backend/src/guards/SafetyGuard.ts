@@ -731,3 +731,9 @@ export function initSafetyGuard(
   safetyGuardInstance = new SafetyGuard(config);
   return safetyGuardInstance;
 }
+
+/** Dispose the current guard without constructing a replacement on shutdown. */
+export function shutdownSafetyGuard(): void {
+  safetyGuardInstance?.destroy();
+  safetyGuardInstance = null;
+}

@@ -1,0 +1,164 @@
+{
+  "repository": "metasheet2",
+  "base": "ad2246fecd7af5227f8f4a68ee5c8ba8512e212c",
+  "sourceHashes": {
+    ".github/workflows/plm-bom-listener.yml": "f7fbc4f7c18ef1cc8baf6df0105f8129a05464f1855370c6c06ec4f0626aee97",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "c7644bbb4fe2e54edc30fae29ea553d33946109cea3c08b082ffb707bddb6290",
+    "packages/core-backend/src/db/migrations/zzzz20261002010000_create_plm_bom_reviews.ts": "4160934442d1b2c20db80addb38f758013f0dedbd9c717defeb94c42ee6083e8",
+    "packages/core-backend/src/db/migrations/zzzz20261002020000_add_plm_bom_owner_view_initialized.ts": "2ccf9cb2942ae8534d0ed401dd15c7c749a5500c5889eb8863022ac32c95502d",
+    "packages/core-backend/src/db/migrations/zzzz20261014010000_add_plm_bom_review_states.ts": "2be98620c0efa67fdfeed058650227002f839ad8e89293216866a7b79cd331a4",
+    "packages/core-backend/src/db/migrations/zzzz20261014020000_add_plm_bom_completion_events.ts": "d8c4d1c9a2b4904141d872da784110bc2565949d5f2bea6cd1de8ad02261458e",
+    "packages/core-backend/src/db/migrations/zzzz20261014030000_add_plm_bom_status_views_initialized.ts": "d67c5121e575ce21c05cc35253bcdbbe06467b12625f76f0ad92da46aab70b9e",
+    "packages/core-backend/src/db/migrations/zzzz20261014040000_add_plm_bom_row_completion_events.ts": "236691403e50c82e4d897f08a78a6c0bdee19fc2355946c3b78841cb8180a670",
+    "packages/core-backend/src/db/migrations/zzzz20261014050000_add_plm_bom_completion_intents.ts": "8a8bd6b5d989ae14783569a78ecaba4e6f77dc562aa0c52e43edfccce84cf437",
+    "packages/core-backend/src/db/migrations/zzzz20261014060000_add_plm_bom_completion_attempts.ts": "f266ca0eedffc33756890f4e5560cc9dbb39bce62da52c50cc8e4680cbec38f1",
+    "packages/core-backend/src/db/migrations/zzzz20261014070000_add_plm_change_inbox.ts": "8433a1ca8d388b4fa4bf417d4bf37267eea33c64952fe621df99fd6171daf5e8",
+    "packages/core-backend/src/db/migrations/zzzz20261014080000_dispatch_plm_change_events.ts": "ecf0c07a21ddb4e6547820b14e946625dd88496de2c1c67e5b158c169a14368a",
+    "packages/core-backend/src/db/migrations/zzzz20261015010000_add_plm_change_listeners.ts": "5efc8960ca0c0a1e603fc4955af6ed52a4e81e40fee5eb93496accd448c54d15",
+    "packages/core-backend/src/guards/SafetyGuard.ts": "3a24dc02b5b11cfa27cbb86c71f79d69ca87cf26b1bde489537a9427c7d668da",
+    "packages/core-backend/src/guards/idempotency.ts": "4dc9d9e2e5dea30ba1196b2452313137f63f45ba11da4cc211fbe8ca34628b61",
+    "packages/core-backend/src/index.ts": "30906671cc264580f2954fa8c503a1d8333f7a7ca1d08e2640907ced40a1e437",
+    "packages/core-backend/src/integration/events/event-bus-service.ts": "4b6fb40bf6382089120895232add68b59e4f48eca3ff2f037374858d8ec72d23",
+    "packages/core-backend/src/multitable/plm-bom-notification-worker.ts": "7c70c7a8007a97ad35fbaad18dbb8ac692abd7a9671fc71f29506b4bc679ce28",
+    "packages/core-backend/src/multitable/plm-bom-review-db.ts": "58860279a0ef2b1af5a57c7c3fe562bffc311793bdb20cb16a82626253c2b663",
+    "packages/core-backend/src/multitable/plm-bom-review-service.ts": "117a1c85a0e5d00b6a0afc94a8964ec48391d69102d84a98bcfe03fce906033b",
+    "packages/core-backend/src/multitable/plm-bom-review-wire.ts": "c0f505c66180f73ab87e4f64f6a1da5f563f6bc8c76d1a1c796f947b838ea7e7",
+    "packages/core-backend/src/multitable/plm-bom-source-navigation.ts": "c26731ca8708b8519a6d3533d995744eb87ba9f84171a174a7f4e73232bf248f",
+    "packages/core-backend/src/multitable/plm-change-ingress-wire.ts": "e6c2ab604beebec1529fcccad3cf155dde1d1e45274a0b027bef949d1a1654b1",
+    "packages/core-backend/src/multitable/plm-wire.ts": "93298f3cb96838ebb807c70e2c5144c519d6cf101e781f5d3b7cd79e299c3de3",
+    "packages/core-backend/src/multitable/record-subscription-service.ts": "56769d80fe97778e28497d289d84f8c984fe6000c8b44b3dfd8442c35ea00e6f",
+    "packages/core-backend/src/routes/plm-bom-reviews.ts": "2be096e37b14dfcbb37d2ca2118b4b486aee65037291084e043919ceed1b4a6f",
+    "packages/core-backend/src/routes/univer-meta.ts": "4513cc8a7b23d17fee952856a0f76192f8357503b5affd641ead5d8e96cb266d",
+    "packages/core-backend/tests/integration/plm-bom-review-realdb.test.ts": "c0f640c20308656525fc8075dc05bfd15eb92bc8c62a1082734ee3b45d571baf",
+    "packages/core-backend/tests/plm-bom-review/auth-bootstrap.ts": "009bdea71bc178e5bce89e023eeefd39b3988f324fa0b372a4da4edd7466a554",
+    "packages/core-backend/tests/plm-bom-review/auth-http.ts": "0c7337cde29a56b59c4613ff1c5a98320f911c4312e1fe24da31b964b3580761",
+    "packages/core-backend/tests/plm-bom-review/base-bootstrap.ts": "50624ae5f8347a6031f67d77e26c85d5667eb3635743a31dfa44ad08ac8cdf64",
+    "packages/core-backend/tests/plm-bom-review/bootstrap.ts": "972b99db0d6c2487b817b5bbab7022b4f95d6b5a2ca767b14bc5fd93dd0f4ef7",
+    "packages/core-backend/tests/plm-bom-review/change-crossprocess.ts": "38d1eb316699926bc58ad5c49f53f39277f7b63355c511d36e7654b9042ada43",
+    "packages/core-backend/tests/plm-bom-review/fixture.ts": "8d167fa0201d01422c1bf898dfb6007b8f392e3b76f95634435b7798f8c52b46",
+    "packages/core-backend/tests/plm-bom-review/native-bootstrap.ts": "4fca69f504edf897c5289d52a626ed17b615c0d496872fba396083a39a360d95",
+    "packages/core-backend/tests/plm-bom-review/native-http.ts": "232fd00c11869b1298c699f11e3b9fc59558da2ce08ce8d96c79b351ea6356ad",
+    "packages/core-backend/tests/unit/approval-completion-shutdown-lifecycle.test.ts": "8a0ee299e264b0ff27fe43db37489ad3de6a409395b937367ba5ed18055623ae",
+    "packages/core-backend/tests/unit/idempotency-redis.test.ts": "32fb71967bcf32c47735306da90a4e5c71d8c0549ac2054ed183f3b1fcc100ad",
+    "packages/core-backend/tests/unit/plm-bom-notification-worker.test.ts": "e95ec2cc2b1482e60fbdf06bc0a7321f51bc2d518fe30681fb2d19a965619f39",
+    "packages/core-backend/tests/unit/plm-bom-review-routes.test.ts": "0c506e93670468dbda391e7d8750378a1636c5b05475f2dd3e97f42f72dc7063",
+    "packages/core-backend/tests/unit/plm-bom-review-service.test.ts": "edaa3cb28dc2ee7a739443db767a5221ad1f1c2eb0d540c501ba5c769ee7e9de",
+    "packages/core-backend/tests/unit/plm-bom-review-wire.test.ts": "f790599dbbe83eeb985270e0949f57f1970d8a15bd7e7e2f3a8620dae7c0fbc7",
+    "packages/core-backend/tests/unit/plm-change-ingress-wire.test.ts": "d2e9c61d1edad2110ee929f0fa0ef8af382aba93d013524dea68f677f0ed3327",
+    "packages/core-backend/tests/unit/plm-change-page.test.ts": "3d4803b1966849b50eabb6f45227e1c698921b5e1a3c15369307cfc2174a3577",
+    "packages/core-backend/tests/unit/plm-change-source-verification.test.ts": "b0f02b0257ee8e46b9b463636fb381635495c3ad6f2d9567e6ea48587070ce35",
+    "packages/core-backend/tests/unit/record-subscription-service.test.ts": "dfe2d9e28689758a5ad353c3cbcf5a58f34c61762dd57f963aba9a60650fbf3a",
+    "packages/core-backend/vitest.plm-bom-review.config.ts": "0887aab2381c74e9677dd1bfea822632469705ccbc677d1001c8b786c42ee004",
+    "scripts/ops/global-history-flag-manifest.mjs": "9fffa78afd24a271f492d67d8afac9cf1e432f927ec9d27f5799dec66272716c",
+    "scripts/ops/global-history-flag-manifest.test.mjs": "b930c8366967d3b4a2a2a212c4119bd53176cd6e886619126f33f4094f7dc51b",
+    "scripts/plm-listener/app.mts": "330f7f8c0608af6f2b0b388cdd889443aa6cb6dc812d00aa6d5739259ca06b42",
+    "scripts/plm-listener/run-app.py": "63e734f541e2b30542f142fa9d84d11be526cf3e20f8c86dc4992243fcd5f28b",
+    "scripts/plm-listener/run-pg.py": "d2b5190ba5e02755cd2efd149cb4688bd1e5f57c256ee818cef5144b562d546a"
+  },
+  "ci": "pending; exact-head results tracked in PR",
+  "crossProcess": {
+    "exit": 0,
+    "durationSeconds": 12.43804049998289,
+    "commands": [
+      [
+        "/opt/homebrew/bin/initdb",
+        "-D",
+        "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/w20-bom-pg-60k8ybyk/data",
+        "-A",
+        "trust",
+        "--no-locale",
+        "-U",
+        "w20"
+      ],
+      [
+        "/opt/homebrew/bin/pg_ctl",
+        "-D",
+        "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/w20-bom-pg-60k8ybyk/data",
+        "-l",
+        "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/metasheet2/artifacts/plm-listener-review-20261015/clean-cross-02/postgres.log",
+        "-o",
+        "-h 127.0.0.1 -p 59648 -k /var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/w20-bom-pg-60k8ybyk/socket",
+        "-w",
+        "start"
+      ],
+      [
+        "/opt/homebrew/bin/createdb",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "59648",
+        "-U",
+        "w20",
+        "w20"
+      ],
+      [
+        "/Users/chouhua/.nvm/versions/node/v20.20.2/bin/node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "vitest.plm-bom-review.config.ts",
+        "--reporter=verbose",
+        "--reporter=junit",
+        "--outputFile.junit=/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/metasheet2/artifacts/plm-listener-review-20261015/clean-cross-02/junit.xml"
+      ]
+    ],
+    "port": 59648,
+    "privateCluster": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/w20-bom-pg-60k8ybyk",
+    "sourceStable": true
+  },
+  "realDbCrossProcessPassed": 125,
+  "focusedGroupsPassed": [
+    55,
+    31,
+    25
+  ],
+  "flagManifestPassed": 47,
+  "typecheck": true,
+  "fullApplication": {
+    "fullEntry": "MetaSheetServer",
+    "mocked": false,
+    "success": true,
+    "redisReplayBefore": true,
+    "workerRunning": true,
+    "endpointStatus": 200,
+    "postStopStoreRead": true,
+    "redisReplayAfter": true,
+    "workerStopped": true,
+    "listenerClosed": true,
+    "activeResources": [
+      "PipeWrap",
+      "PipeWrap"
+    ],
+    "referencedTimers": [],
+    "activeSockets": []
+  },
+  "authorityFix": {
+    "sourceHashes": {
+      "packages/core-backend/src/multitable/plm-bom-review-service.ts": "ab0ced921448a059cbb1f0f19af071610c5f11eada6990c56e02a1aec6162879",
+      "packages/core-backend/src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version.ts": "616fc843caed885c4351b897939efa952d64f68a4b756eed8a275b3e41f9b777",
+      "packages/core-backend/tests/plm-bom-review/change-crossprocess.ts": "184b8d59da175f20ab6685c3599ca3cb4f6ea2a92580412d52b6f6a31943dd5c",
+      "packages/core-backend/tests/plm-bom-review/completion-recover.ts": "2b9c5e1337b3cb34078357aa73031a4abae1a26c3e2f2395da26eb5b566c8504",
+      "packages/core-backend/tests/integration/plm-bom-review-realdb.test.ts": "623a173301230b23e3df6bdbf826767ad7eb8347e7e7774575ddb7c53c9e446f",
+      "packages/core-backend/tests/plm-bom-review/bootstrap.ts": "5c4e676f6e19273e6eaa2e2728f9d83d215430fca7cedac8b76c17722831b46c"
+    },
+    "standalone": {
+      "passed": 131,
+      "failed": 0,
+      "skipped": 0
+    },
+    "crossProcess": {
+      "passed": 132,
+      "failed": 0,
+      "skipped": 0
+    },
+    "cleanup": {
+      "providerExit": 0,
+      "privateCredentialsRemoved": true,
+      "privateConsumerDatabaseRemoved": true,
+      "providerPortClosed": true,
+      "sourceStable": true
+    },
+    "ci": "pending for new source; prior source results are historical",
+    "nativeAutoCAD": false
+  }
+}

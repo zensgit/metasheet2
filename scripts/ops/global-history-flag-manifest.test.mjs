@@ -391,7 +391,8 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
+  const plmBom = grepFlagTokens('PLM_BOM_REVIEW_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED')
+  return [...new Set([...plmBom, ...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
@@ -767,7 +768,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['plm-bom-review-without-durable-writer-fence', 'archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })
@@ -861,4 +862,11 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
   assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
   assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
+})
+
+
+test('PLM BOM review requires durable writer fences and exact enablement', () => {
+  assert.ok(violationIds({ PLM_BOM_REVIEW_ENABLED: 'true' }).includes('plm-bom-review-without-durable-writer-fence'))
+  assert.ok(!violationIds({ PLM_BOM_REVIEW_ENABLED: 'TRUE' }).includes('plm-bom-review-without-durable-writer-fence'))
+  assert.ok(!violationIds({ PLM_BOM_REVIEW_ENABLED: 'true', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' }).includes('plm-bom-review-without-durable-writer-fence'))
 })

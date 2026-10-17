@@ -12,6 +12,16 @@ import {
 } from '../../src/multitable/record-subscription-service'
 
 describe('record-subscription-service', () => {
+  it('source-stamped deliveries report actual inserted receipts and carry an idempotency key', async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: 'receipt' }] }).mockResolvedValueOnce({ rows: [] })
+    const input = { sheetId: 'sheet',recordId: 'record',userIds: ['reader'],eventType: 'notification.sent' as const,sourceEventId: 'bom-review:event' }
+    expect(await insertRecordSubscriptionNotifications(query,input)).toEqual({ inserted: 1 })
+    expect(await insertRecordSubscriptionNotifications(query,input)).toEqual({ inserted: 0 })
+    expect(query.mock.calls[0][0]).toContain('ON CONFLICT(source_event_id,user_id)')
+    expect(JSON.parse(query.mock.calls[0][1][0])[0].source_event_id).toBe('bom-review:event')
+    await expect(insertRecordSubscriptionNotifications(query,{ ...input,sourceEventId: ' ' })).rejects.toThrow('sourceEventId must not be blank')
+    expect(query).toHaveBeenCalledTimes(2)
+  })
   it('upserts record subscriptions', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [{
