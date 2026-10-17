@@ -1357,3 +1357,58 @@ describe('personal BOM frozen retry', () => {
     expect(stored).toContain('person-1')
   })
 })
+
+describe('initialPartId', () => {
+  it('reads once on mount when a nonblank part is supplied and does not mutate', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    mountPanel('plm-ds', { initialPartId: '  P1  ' })
+    await flushUi()
+
+    expect(getContextMock).toHaveBeenCalledTimes(1)
+    expect(getContextMock).toHaveBeenCalledWith('plm-ds', 'P1', expect.any(AbortSignal))
+    expect(updateLineMock).not.toHaveBeenCalled()
+    expect(ecoIntentMock).not.toHaveBeenCalled()
+    expect(listBindingsMock).not.toHaveBeenCalled()
+    expect((container.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('P1')
+    expect(stateOf()).toBe('table')
+  })
+
+  it('keeps manual mode when initialPartId is blank', async () => {
+    mountPanel('plm-ds', { initialPartId: '   ' })
+    await flushUi()
+
+    expect(getContextMock).not.toHaveBeenCalled()
+    expect(updateLineMock).not.toHaveBeenCalled()
+    expect(ecoIntentMock).not.toHaveBeenCalled()
+    expect(listBindingsMock).not.toHaveBeenCalled()
+    expect(stateOf()).toBe('idle')
+    expect((container.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('')
+  })
+
+  it('does not autostart when initialPartId changes after mount', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    const initialPartId = ref('')
+    const Harness = defineComponent({
+      name: 'InitialPartHarness',
+      setup() {
+        return () => h(PlmBomReviewPanel, {
+          dataSourceId: 'plm-ds',
+          initialPartId: initialPartId.value || undefined,
+        })
+      },
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(Harness)
+    app.mount(container)
+    await flushUi()
+
+    initialPartId.value = 'P9'
+    await flushUi()
+
+    expect(getContextMock).not.toHaveBeenCalled()
+    expect(updateLineMock).not.toHaveBeenCalled()
+    expect(ecoIntentMock).not.toHaveBeenCalled()
+    expect(stateOf()).toBe('idle')
+  })
+})

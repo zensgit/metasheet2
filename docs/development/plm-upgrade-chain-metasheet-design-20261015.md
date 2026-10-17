@@ -291,3 +291,12 @@ Pending display compares the complete server identity, and exact pinned/current-
 
 
 Personal HTTP/browser implementation source172def50 has49 successful checks across46 actual workflow runs, including394 backend units,138 web units and real PostgreSQL16 approval16/BOM22 with no skips. Verification MD and compact `plm-personal-bom-http-ci-20261017.json` retain exact source/merge/run attribution. This validates the personal boundary increment; the native domain-audit dependency and managed upgrade/unified entry remain separately tracked engineering work.
+
+
+## C1 customer BOM entry — 2026-10-17
+
+The authenticated `/plm/bom-review?dataSourceId=…&partId=…` route hosts the existing personal `PlmBomReviewPanel`. Its route uses the ordinary session and `plm` feature gate, without `integration:write`, admin access or a source administration directory. Existing server-side source ownership, Meta membership and personal native mutation authorization remain authoritative. Query parameters are navigation hints: missing, blank, repeated or padded source values make no source request; an invalid Part makes no automatic BOM read. A valid Part starts only the existing GET. The panel remounts when its validated source/Part changes.
+
+A valid source keeps binding cleanup accessible when the capability manifest is unavailable. ECO visibility requires the same supported/entitled `eco_revision_intent` manifest predicate as the workbench. Source tickets and current-session checks discard late manifest results, including A→B→A and account switches. The optional panel `initialPartId` is mount-only; existing manual hosts retain their behavior.
+
+This slice supplies a customer page, not managed Yuantus→Meta login. Current owned-source reads still use the source's configured native read principal. C2 must independently establish browser-bound explicit identity linkage and a separately purposed, revocable native BOM-read session, with fresh native object authorization and no configured-credential fallback on any managed-source query path. Login proof, read authority, approval grants and write grants remain separate. No full managed upgrade, generic pre-review or installation/restore acceptance is claimed here.
