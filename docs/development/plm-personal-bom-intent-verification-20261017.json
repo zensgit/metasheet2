@@ -1,0 +1,64 @@
+{
+  "recorded_utc": "2026-10-17T07:30:33.691864+00:00",
+  "source_parent": "a410cfe929f22790fd328f0f26d6ec42f98b4cf1",
+  "source_commit": "containing commit; no recursive self-SHA document commit",
+  "implementation_model": "Grok4.7(xhigh)",
+  "review": "Astra ultra readonly design and counterexample review; Codex independent diff and actual test execution",
+  "unit": {
+    "files": 3,
+    "passed": 81,
+    "seconds": 2.52
+  },
+  "postgres": {
+    "counts": {
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "exit_code": 0,
+    "seconds": 3.22,
+    "postgres_major": 15,
+    "source_stable": true,
+    "source_sha256": {
+      "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "fef9cacab64f643644c232f06d9e3f27e1eee98a9f6ec9641d276ca20f94f7ea",
+      "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "f1c027088b17092faa20469653874e1a5b34a617618f7428b0d69813e9501041",
+      "packages/core-backend/src/data-adapters/PLMAdapter.ts": "50d0ff766e6d5b2afc5c0b3b3e9cfb27ceeaa46afa22e92a8cf1a3c9d8fb4ce0",
+      "packages/core-backend/src/db/migrations/zzzz20261017010000_create_plm_personal_bom_write_bindings.ts": "7a4490b217b1db608f2ea6a59703c3008fac4e6a2ad01f7f5258031622a37f45",
+      "packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts": "c45c37378caf83d8420c7ed236b68075fc47a9208e306a31ee9550912ae8db82",
+      "packages/core-backend/vitest.plm-personal-bom-write-lock.config.ts": "362b28529a7559b2ad01b0a1fec9058d270b155f72bf36ed9c3977a15b08e1fe",
+      "packages/core-backend/src/db/migrations/zzzz20261017020000_create_plm_personal_bom_write_intents.ts": "aaee62fa9d69309e2a5010cd0ff440d16f5583084e4c50b0251138e8c0cd3fce",
+      "packages/core-backend/tests/unit/plm-personal-bom-write-intent.test.ts": "254deb0a243abf8a95005cf9afcc153f741f0547c5e67c9ad88d70ae4359c770",
+      "packages/core-backend/tests/unit/plm-personal-bom-write-binding.test.ts": "1a1743ee89696c86e01bb10cd429793268c5d65e85c119b20cd2cac2ef5545e3",
+      "packages/core-backend/tests/unit/plm-personal-bom-write-transport.test.ts": "095a095194d92b5c367b3408ec5dadc4bdc53345915b88723a4103e42bcfe261",
+      "packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts": "31d2055bf6e85854c49b31f3697e7356e0d8c2fc830bafe8cff005f753da951f"
+    },
+    "cluster_stopped": true,
+    "cleanup": true
+  },
+  "backend_types_exit": 0,
+  "actionlint_exit": 0,
+  "junit_guard": {
+    "actual_22_tests": "accepted",
+    "missing_intent": "rejected",
+    "zero_intent": "rejected",
+    "skipped": "rejected"
+  },
+  "proved": [
+    "phase1 durable commit before wire",
+    "phase2 user/member/source/unbind lock cutoffs with pg_blocking_pids",
+    "same-person rotation retains provider operation key",
+    "actual server COMMIT then client acknowledgement loss in both phases",
+    "ECO absent body and committed-outcome restart replay",
+    "empty/populated/active-writer downgrade controls",
+    "wrong line and contradictory known confirmation become unknown503"
+  ],
+  "limits": [
+    "controlled provider fetch fixture, not paired native runtime",
+    "routes/UI and trusted request carrier not integrated",
+    "arbitrary business text is not a SQL bearer filter",
+    "native configured tenant ECO domain-audit repair pending",
+    "new source remote CI pending",
+    "whole master goal incomplete"
+  ]
+}

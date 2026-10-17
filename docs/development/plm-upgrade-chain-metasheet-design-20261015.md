@@ -237,3 +237,35 @@ when the feature is disabled; it gains no business write authority. The two
 systems' subjects and tenant/org values remain distinct. Actual route construction
 of the trusted actor, durable intents, personal dispatch and binding UI remain
 pending. This service contract does not make a header/body tenant trustworthy.
+
+
+### Durable personal BOM operation admission
+
+The new additive intent table is keyed by owner, source, operation kind and
+client-key SHA256. Mutable binding ID/generation, native person and origin do
+not define logical uniqueness. The first transaction locks active user,
+exact active Meta organization membership, persisted source and binding, then
+locks/inserts the intent. It freezes the independently scoped Meta/native
+identities, workspace/policy, origin, connection, person, part/line, canonical
+allowed body, If-Match including absence, and provider key. It commits before
+any native mutation request.
+
+The second transaction reacquires those authority locks in the same order and
+locks the intent. Changed frozen context is409 with zero new dispatch; it is
+never silently replaced. A current grant for the same native person may rotate
+without changing the stored operation key. The locks remain held through native
+request and local outcome commit. Every replay calls native authorization;
+confirmed local evidence never bypasses current native permission checks.
+Receipt validation requires the frozen line ID and agreement with any prior
+canonical confirmation. Conflicting acknowledgements and transport ambiguity
+remain unknown, preserve earlier confirmation and return unavailable. A lost
+COMMIT acknowledgement may still leave durable evidence; retries use that row.
+The existing memory-only freeze helper is not durable dispatch.
+
+Intent-table downgrade takes an exclusive NOWAIT lock and refuses any stored
+row. Credentials are encrypted only on bindings; intents retain no credential
+fields or raw client operation keys. Ordinary business text is not filtered by
+broad secret substrings. The standalone native provider retains authority over
+PLM business state and permission. Route/UI integration and live paired-service
+verification are subsequent slices; this design does not authorize production
+enablement or represent the whole upgrade package as completed.

@@ -6,7 +6,10 @@ if (process.env.EXPECT_PLM_PERSONAL_BOM_WRITE_DB !== '1' || !process.env.PLM_PER
 /** Whole-file lock/restart gate. Missing or skipped PostgreSQL execution is a failure. */
 export default defineConfig({
   test: {
-    include: ['tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'],
+    include: [
+      'tests/integration/plm-personal-bom-write-lock-pg.realdb.ts',
+      'tests/integration/plm-personal-bom-intent-pg.realdb.ts',
+    ],
     environment: 'node',
     pool: 'forks',
     fileParallelism: false,

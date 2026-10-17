@@ -7,6 +7,7 @@ on:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
+      - 'packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts'
       - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
       - 'packages/core-backend/tests/unit/plm-personal-bom-write-*.test.ts'
       - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
@@ -38,6 +39,7 @@ on:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
       - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
+      - 'packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts'
       - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
       - 'packages/core-backend/tests/unit/plm-personal-bom-write-*.test.ts'
       - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
@@ -106,6 +108,7 @@ jobs:
           tests/unit/plm-personal-approval-worker.test.ts
           tests/unit/plm-personal-bom-write-binding.test.ts
           tests/unit/plm-personal-bom-write-transport.test.ts
+          tests/unit/plm-personal-bom-write-intent.test.ts
           tests/unit/dingtalk-interactive-card-callback.test.ts
           tests/unit/dingtalk-interactive-card-stream.test.ts
           tests/unit/dingtalk-interactive-card-stream-lifecycle.test.ts
@@ -136,7 +139,7 @@ jobs:
           --config vitest.plm-personal-approval.config.ts run
           tests/integration/plm-personal-approval-realdb.test.ts
           --reporter=verbose --reporter=junit --outputFile=plm-personal-junit.xml
-      - name: Personal BOM binding PostgreSQL and restart boundaries
+      - name: Personal BOM binding and intent PostgreSQL boundaries
         env:
           EXPECT_PLM_PERSONAL_BOM_WRITE_DB: '1'
           PLM_PERSONAL_BOM_WRITE_TEST_PG_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_personal_disposable
@@ -153,6 +156,13 @@ jobs:
           counts = {key: sum(int(row.get(key, 0)) for row in suites)
                     for key in ('tests', 'failures', 'errors', 'skipped')}
           assert counts['tests'] > 0 and all(counts[key] == 0 for key in ('failures', 'errors', 'skipped')), counts
+          expected = (
+              'tests/integration/plm-personal-bom-write-lock-pg.realdb.ts',
+              'tests/integration/plm-personal-bom-intent-pg.realdb.ts',
+          )
+          for filename in expected:
+              matching = [row for row in suites if row.get('name', '').replace('\\', '/') == filename]
+              assert len(matching) == 1 and int(matching[0].get('tests', 0)) > 0, filename
           print(counts)
           PY
       - name: Require executed tests without skips

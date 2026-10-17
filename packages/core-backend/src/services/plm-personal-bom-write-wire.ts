@@ -265,6 +265,15 @@ export function normalizeMetaTenant(value: unknown): string | null {
 
 const LINE_KEYS = ['quantity', 'uom', 'find_num', 'refdes'] as const
 
+/**
+ * JSON body cell. Native stores the scalar as given: empty is a value, and there is
+ * no header length and no ASCII whitelist. NUL is not a text scalar. A lone surrogate is not Unicode.
+ */
+function jsonCellText(value: string): boolean {
+  if (value.includes('\u0000')) return false
+  return codePointLength(value) >= 0
+}
+
 export function linePatchBody(input: unknown): Record<string, string | number | null> {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
@@ -278,9 +287,9 @@ export function linePatchBody(input: unknown): Record<string, string | number | 
         throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
       if (typeof value === 'number' && !Number.isFinite(value))
         throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
-      if (typeof value === 'string' && (value.length > 64 || !/^[\x20-\x7e]*$/.test(value)))
+      if (typeof value === 'string' && !jsonCellText(value))
         throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
-    } else if (value !== null && (typeof value !== 'string' || !headerText(value))) {
+    } else if (value !== null && (typeof value !== 'string' || !jsonCellText(value))) {
       throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
     }
     body[key] = value as string | number | null
@@ -505,6 +514,11 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
+/** SHA-256 of the caller key. The raw key is not a storage or log field. */
+export function clientKeySha256(clientKey: string): string {
+  return sha256(clientKey)
+}
+
 /** Python `json.dumps(..., separators=(",", ":"), ensure_ascii=True)` for string-or-null tuples. */
 function pythonJson(values: readonly (string | null)[]): string {
   return `[${values.map((value) => (value === null ? 'null' : `"${escapePythonString(value)}"`)).join(',')}]`
@@ -652,7 +666,7 @@ export function freezeNativeOperation(input: {
     subjectId: input.subjectId,
     partId: input.partId,
     bomLineId: input.bomLineId,
-    clientKeySha256: sha256(input.clientKey),
+    clientKeySha256: clientKeySha256(input.clientKey),
     payloadFingerprint: sha256(canonicalPayload(input.payload)),
     providerIdempotencyKey: providerKey,
   }
@@ -703,6 +717,89 @@ export const personalBomWriteFreezeInput = z
     patch: z.unknown().optional(),
   })
   .strict()
+
+export const personalBomWriteDispatchInput = z
+  .object({
+    operationKind: z.enum(['line', 'eco-intent']),
+    partId: pathId,
+    bomLineId: pathId.optional(),
+    clientKey: z.string().min(1).max(128).refine((value) => /^[\x20-\x7e]+$/.test(value)),
+    patch: z.unknown().optional(),
+    ifMatch: z.string().refine((value) => headerText(value)).optional(),
+  })
+  .strict()
+
+export interface PersonalBomWriteDispatchRequest {
+  operationKind: 'line' | 'eco-intent'
+  partId: string
+  bomLineId: string | null
+  clientKeySha256: string
+  ifMatch: string | null
+  requestBody: string
+  payloadFingerprint: string
+  /** Used only to hash the provider key on first insert. Not stored. */
+  clientKey: string
+}
+
+/** Canonical effective body. Absence is the JSON token null, not an empty object. */
+export function readPersonalBomWriteDispatch(input: unknown): PersonalBomWriteDispatchRequest {
+  const parsed = personalBomWriteDispatchInput.safeParse(input)
+  if (!parsed.success) throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
+  const request = parsed.data
+  if (request.operationKind === 'line') {
+    if (!request.bomLineId) throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
+    const requestBody = canonicalPayload(linePatchBody(request.patch))
+    return {
+      operationKind: 'line',
+      partId: request.partId,
+      bomLineId: request.bomLineId,
+      clientKeySha256: clientKeySha256(request.clientKey),
+      ifMatch: request.ifMatch ?? null,
+      requestBody,
+      payloadFingerprint: sha256(requestBody),
+      clientKey: request.clientKey,
+    }
+  }
+  if (request.bomLineId !== undefined || request.patch !== undefined || request.ifMatch !== undefined)
+    throw new PlmPersonalBomWriteError(422, 'PLM_BOM_WRITE_INVALID')
+  const requestBody = canonicalPayload(null)
+  return {
+    operationKind: 'eco-intent',
+    partId: request.partId,
+    bomLineId: null,
+    clientKeySha256: clientKeySha256(request.clientKey),
+    ifMatch: null,
+    requestBody,
+    payloadFingerprint: sha256(requestBody),
+    clientKey: request.clientKey,
+  }
+}
+
+export function acceptedPersonalBomWriteResult(
+  operation: 'line' | 'eco-intent',
+  value: unknown,
+): { ok: true; bom_line_id: string } | {
+  eco_id: string
+  state: string
+  attached: boolean
+  source_version_id: string | null
+  target_version_id: string | null
+} {
+  if (operation === 'line') {
+    const parsed = lineSuccess.safeParse(value)
+    if (!parsed.success) throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+    return parsed.data as { ok: true; bom_line_id: string }
+  }
+  const parsed = ecoSuccess.safeParse(value)
+  if (!parsed.success) throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+  return parsed.data as {
+    eco_id: string
+    state: string
+    attached: boolean
+    source_version_id: string | null
+    target_version_id: string | null
+  }
+}
 
 export interface PersonalBomWriteTransport {
   personalBomWriteManagementUrl(sourceConfig: unknown): string

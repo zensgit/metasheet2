@@ -6,12 +6,16 @@ import {
   isEncryptedSecretValue,
 } from '../security/encrypted-secrets'
 import {
+  acceptedPersonalBomWriteResult,
   bindingAuthorizesFrozen,
+  canonicalPayload,
   freezeDispatchAttempt,
   freezeNativeOperation,
   grantPublicId,
   normalizeMetaTenant,
   personalBomWriteManagementUrl,
+  providerIdempotencyKey,
+  readPersonalBomWriteDispatch,
   requirePlmPersonalBomWrite,
   personalBomWriteBindingInput,
   personalBomWriteFreezeInput,
@@ -20,6 +24,7 @@ import {
   linePatchBody,
   type PersonalBomWriteActor,
   type PersonalBomWriteAuthority,
+  type PersonalBomWriteDispatchRequest,
   PlmPersonalBomWriteError as Failure,
   type BindingAuthorizationView,
   type FrozenDispatchAttempt,
@@ -91,6 +96,53 @@ export interface PersonalBomWriteBindingMetadata extends BindingAuthorizationVie
 const BINDING_COLUMNS = `id, owner_id, data_source_id, connection_id, subject_id, meta_tenant_id,
   yuantus_tenant_id, yuantus_org_id, target_origin, workspace_id, scope_kind, grant_id, expires_at,
   encrypted_grant, generation, purpose, remote_revoke_state, previous_grant_revoke_state`
+
+const INTENT_COLUMNS = `id, owner_id, data_source_id, operation_kind, client_key_sha256,
+  actor_meta_tenant_id, source_meta_tenant_id, workspace_id, scope_kind, target_origin, connection_id,
+  yuantus_tenant_id, yuantus_org_id, subject_id, purpose, part_id, bom_line_id, if_match, request_body,
+  payload_fingerprint, provider_idempotency_key, binding_id, outcome, saw_unknown, confirmed_response`
+
+interface IntentRow {
+  id: string
+  owner_id: string
+  data_source_id: string
+  operation_kind: 'line' | 'eco-intent'
+  client_key_sha256: string
+  actor_meta_tenant_id: string | null
+  source_meta_tenant_id: string | null
+  workspace_id: string | null
+  scope_kind: string
+  target_origin: string
+  connection_id: string
+  yuantus_tenant_id: string
+  yuantus_org_id: string
+  subject_id: string
+  purpose: string
+  part_id: string
+  bom_line_id: string | null
+  if_match: string | null
+  request_body: string
+  payload_fingerprint: string
+  provider_idempotency_key: string
+  binding_id: string
+  outcome: string
+  saw_unknown: boolean
+  confirmed_response: string | null
+}
+
+export interface PersonalBomWriteDispatchReceipt {
+  intentId: string
+  operationKind: 'line' | 'eco-intent'
+  dataSourceId: string
+  partId: string
+  bomLineId: string | null
+  providerIdempotencyKey: string
+  clientKeySha256: string
+  actorMetaTenantId: string | null
+  sourceMetaTenantId: string | null
+  outcome: 'accepted'
+  native: ReturnType<typeof acceptedPersonalBomWriteResult>
+}
 
 export class PlmPersonalBomWriteBindingService {
   constructor(
@@ -759,5 +811,327 @@ export class PlmPersonalBomWriteBindingService {
       if (error.status === 408 || error.status === 429) return 'unknown'
       return 'rejected'
     }
+  }
+
+  /**
+   * Commit the immutable intent, then send it once.
+   * A thrown phase-1 COMMIT is uncertain and does not call the provider.
+   * The provider key is hashed only on first insert. A later denial does not erase a confirmed response.
+   */
+  async dispatchOperation(
+    actor: PersonalBomWriteActor,
+    dataSourceId: string,
+    input: unknown,
+  ): Promise<PersonalBomWriteDispatchReceipt> {
+    requirePlmPersonalBomWrite()
+    if (
+      typeof dataSourceId !== 'string' ||
+      dataSourceId.length < 1 ||
+      dataSourceId.length > 256 ||
+      !/^[\x20-\x7e]+$/.test(dataSourceId)
+    )
+      throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+    const request = readPersonalBomWriteDispatch(input)
+    const caller = this.readActor(actor)
+    const intentId = await this.tx((client) => this.freezeIntent(client, caller, dataSourceId, request))
+    const sent = await this.tx((client) => this.sendIntent(client, caller, dataSourceId, request, intentId))
+    if (!('receipt' in sent)) throw sent.failure
+    return sent.receipt
+  }
+
+  private async freezeIntent(
+    client: PoolClient,
+    caller: { userId: string; metaTenantId: string | null },
+    dataSourceId: string,
+    request: PersonalBomWriteDispatchRequest,
+  ): Promise<string> {
+    const { source, binding } = await this.lockDispatch(client, caller, dataSourceId)
+    const intent = await this.lockIntent(client, caller.userId, dataSourceId, request)
+    if (intent) {
+      if (!this.sameFrozenRequest(intent, request)) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+      return intent.id
+    }
+    this.usableGrant(binding)
+    this.assertLiveBinding(source, binding)
+    const sourceTenant = normalizeMetaTenant(source.tenant_id)
+    const providerKey = providerIdempotencyKey({
+      operationKind: request.operationKind,
+      ownerId: binding.owner_id,
+      dataSourceId: binding.data_source_id,
+      metaTenantId: binding.meta_tenant_id,
+      targetOrigin: binding.target_origin,
+      connectionId: binding.connection_id,
+      yuantusTenantId: binding.yuantus_tenant_id,
+      yuantusOrgId: binding.yuantus_org_id,
+      subjectId: binding.subject_id,
+      clientKey: request.clientKey,
+    })
+    const created = (
+      await client.query<IntentRow>(
+        `INSERT INTO plm_personal_bom_write_intents(
+           id, owner_id, data_source_id, operation_kind, client_key_sha256,
+           actor_meta_tenant_id, source_meta_tenant_id, workspace_id, scope_kind, target_origin,
+           connection_id, yuantus_tenant_id, yuantus_org_id, subject_id, purpose,
+           part_id, bom_line_id, if_match, request_body, payload_fingerprint, provider_idempotency_key,
+           binding_id
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'bom_write',$15,$16,$17,$18,$19,$20,$21)
+         ON CONFLICT (owner_id, data_source_id, operation_kind, client_key_sha256) DO NOTHING
+         RETURNING ${INTENT_COLUMNS}`,
+        [
+          randomUUID(),
+          caller.userId,
+          dataSourceId,
+          request.operationKind,
+          request.clientKeySha256,
+          caller.metaTenantId,
+          sourceTenant,
+          source.workspace_id ?? null,
+          source.scope_kind,
+          binding.target_origin,
+          binding.connection_id,
+          binding.yuantus_tenant_id,
+          binding.yuantus_org_id,
+          binding.subject_id,
+          request.partId,
+          request.bomLineId,
+          request.ifMatch,
+          request.requestBody,
+          request.payloadFingerprint,
+          providerKey,
+          binding.id,
+        ],
+      )
+    ).rows[0]
+    if (created) return created.id
+    const raced = await this.lockIntent(client, caller.userId, dataSourceId, request)
+    if (!raced || !this.sameFrozenRequest(raced, request)) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+    return raced.id
+  }
+
+  private async sendIntent(
+    client: PoolClient,
+    caller: { userId: string; metaTenantId: string | null },
+    dataSourceId: string,
+    request: PersonalBomWriteDispatchRequest,
+    intentId: string,
+  ): Promise<{ failure: Failure } | { failure: null; receipt: PersonalBomWriteDispatchReceipt }> {
+    const { source, binding } = await this.lockDispatch(client, caller, dataSourceId)
+    const intent = await this.lockIntent(client, caller.userId, dataSourceId, request)
+    if (!intent || intent.id !== intentId) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+    if (!this.sameFrozenRequest(intent, request)) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+    this.assertLiveIntent(source, binding, intent, caller.metaTenantId)
+    const grant = this.usableGrant(binding)
+    const authority: PersonalBomWriteAuthority = {
+      origin: intent.target_origin,
+      tenantId: intent.yuantus_tenant_id,
+      orgId: intent.yuantus_org_id,
+    }
+    const data = intent.operation_kind === 'line' ? JSON.parse(intent.request_body) as unknown : undefined
+    let native: unknown
+    try {
+      native = await this.provider().personalBomWriteRequest(
+        intent.operation_kind,
+        grant,
+        intent.connection_id,
+        authority,
+        data,
+        {
+          partId: intent.part_id,
+          ...(intent.bom_line_id ? { bomLineId: intent.bom_line_id } : {}),
+          idempotencyKey: intent.provider_idempotency_key,
+          ...(intent.if_match ? { ifMatch: intent.if_match } : {}),
+        },
+      )
+    } catch (error) {
+      const failure = error instanceof Failure ? error : new Failure(503, 'PLM_BOM_WRITE_UNAVAILABLE')
+      await this.recordIntentOutcome(client, intent, this.wireOutcome(failure), null)
+      return { failure }
+    }
+    let parsed: ReturnType<typeof acceptedPersonalBomWriteResult>
+    try {
+      parsed = acceptedPersonalBomWriteResult(intent.operation_kind, native)
+    } catch (error) {
+      const failure = error instanceof Failure ? error : new Failure(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+      await this.recordIntentOutcome(client, intent, 'unknown', null)
+      return { failure }
+    }
+    const canonical = canonicalPayload(parsed)
+    if (!this.acknowledgementAgrees(intent, parsed, canonical)) {
+      const failure = new Failure(503, 'PLM_BOM_WRITE_UNAVAILABLE', undefined, true)
+      await this.recordIntentOutcome(client, intent, 'unknown', null)
+      return { failure }
+    }
+    await this.recordIntentOutcome(client, intent, 'accepted', canonical)
+    return { failure: null, receipt: this.receipt(intent, parsed) }
+  }
+
+  /** A shape-valid body is not acceptance unless it names the frozen line and repeats a stored confirmation. */
+  private acknowledgementAgrees(
+    intent: IntentRow,
+    parsed: ReturnType<typeof acceptedPersonalBomWriteResult>,
+    canonical: string,
+  ): boolean {
+    if (intent.operation_kind === 'line') {
+      const line = parsed as { bom_line_id?: string }
+      if (line.bom_line_id !== intent.bom_line_id) return false
+    }
+    return intent.confirmed_response == null || intent.confirmed_response === canonical
+  }
+
+  private receipt(intent: IntentRow, native: ReturnType<typeof acceptedPersonalBomWriteResult>): PersonalBomWriteDispatchReceipt {
+    return {
+      intentId: intent.id,
+      operationKind: intent.operation_kind,
+      dataSourceId: intent.data_source_id,
+      partId: intent.part_id,
+      bomLineId: intent.bom_line_id,
+      providerIdempotencyKey: intent.provider_idempotency_key,
+      clientKeySha256: intent.client_key_sha256,
+      actorMetaTenantId: intent.actor_meta_tenant_id,
+      sourceMetaTenantId: intent.source_meta_tenant_id,
+      outcome: 'accepted',
+      native,
+    }
+  }
+
+  /** users SHARE, membership SHARE, source UPDATE, binding UPDATE. The intent lock follows. */
+  private async lockDispatch(
+    client: PoolClient,
+    caller: { userId: string; metaTenantId: string | null },
+    dataSourceId: string,
+  ): Promise<{ source: SourceRow; binding: Binding }> {
+    await this.activeOwner(client, caller.userId)
+    if (caller.metaTenantId !== null) await this.requireMembership(client, caller.userId, caller.metaTenantId)
+    const source = await this.lockSource(client, dataSourceId, caller.userId)
+    this.assertPersistedTenant(source, caller.metaTenantId)
+    const binding = (
+      await client.query<Binding>(
+        `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings
+         WHERE owner_id=$1 AND data_source_id=$2 FOR UPDATE`,
+        [caller.userId, dataSourceId],
+      )
+    ).rows[0]
+    if (!binding) throw new Failure(404, 'PLM_BOM_WRITE_NOT_FOUND')
+    return { source, binding }
+  }
+
+  private async lockIntent(
+    client: PoolClient,
+    ownerId: string,
+    dataSourceId: string,
+    request: PersonalBomWriteDispatchRequest,
+  ): Promise<IntentRow | undefined> {
+    const found = await client.query<IntentRow>(
+      `SELECT ${INTENT_COLUMNS} FROM plm_personal_bom_write_intents
+       WHERE owner_id=$1 AND data_source_id=$2 AND operation_kind=$3 AND client_key_sha256=$4
+       FOR UPDATE`,
+      [ownerId, dataSourceId, request.operationKind, request.clientKeySha256],
+    )
+    return found.rows[0]
+  }
+
+  private sameFrozenRequest(intent: IntentRow, request: PersonalBomWriteDispatchRequest): boolean {
+    return (
+      intent.operation_kind === request.operationKind &&
+      intent.part_id === request.partId &&
+      (intent.bom_line_id ?? null) === request.bomLineId &&
+      (intent.if_match ?? null) === request.ifMatch &&
+      intent.request_body === request.requestBody &&
+      intent.payload_fingerprint === request.payloadFingerprint &&
+      intent.client_key_sha256 === request.clientKeySha256
+    )
+  }
+
+  private assertLiveBinding(source: SourceRow, binding: Binding): void {
+    this.sameSnapshot(source, binding)
+    this.assertCurrentTarget(source, binding)
+  }
+
+  /** Same person and native scope. A replacement grant is allowed; its id is not compared. */
+  private assertLiveIntent(
+    source: SourceRow,
+    binding: Binding,
+    intent: IntentRow,
+    actorTenant: string | null,
+  ): void {
+    this.assertLiveBinding(source, binding)
+    const resolved = resolvePersistedPlmSource(this.configOf(source))
+    const sourceTenant = normalizeMetaTenant(source.tenant_id)
+    const workspaceId = source.workspace_id ?? null
+    if (
+      actorTenant !== intent.actor_meta_tenant_id ||
+      sourceTenant !== intent.source_meta_tenant_id ||
+      workspaceId !== (intent.workspace_id ?? null) ||
+      source.scope_kind !== intent.scope_kind ||
+      source.owner_id !== intent.owner_id ||
+      source.id !== intent.data_source_id ||
+      resolved.origin.origin !== intent.target_origin ||
+      resolved.tenantId !== intent.yuantus_tenant_id ||
+      resolved.orgId !== intent.yuantus_org_id ||
+      binding.owner_id !== intent.owner_id ||
+      binding.data_source_id !== intent.data_source_id ||
+      binding.subject_id !== intent.subject_id ||
+      binding.connection_id !== intent.connection_id ||
+      binding.yuantus_tenant_id !== intent.yuantus_tenant_id ||
+      binding.yuantus_org_id !== intent.yuantus_org_id ||
+      binding.target_origin !== intent.target_origin ||
+      binding.meta_tenant_id !== intent.source_meta_tenant_id ||
+      (binding.workspace_id ?? null) !== (intent.workspace_id ?? null) ||
+      binding.scope_kind !== intent.scope_kind ||
+      binding.purpose !== 'bom_write' ||
+      intent.purpose !== 'bom_write'
+    )
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+  }
+
+  private usableGrant(row: Binding): string {
+    if (row.purpose !== 'bom_write' || !row.encrypted_grant || row.remote_revoke_state)
+      throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+    const secret = this.secret(row)
+    if (!secret || new Date(row.expires_at).getTime() <= Date.now())
+      throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+    return secret
+  }
+
+  /** Received 408, 429, and 5xx stay unknown. A later 403 does not clear saw_unknown or a confirmed body. */
+  private wireOutcome(error: Failure): 'unknown' | 'denied' {
+    if (!error.received || error.status === 408 || error.status === 429 || error.status >= 500) return 'unknown'
+    return 'denied'
+  }
+
+  private async recordIntentOutcome(
+    client: PoolClient,
+    intent: IntentRow,
+    outcome: 'accepted' | 'unknown' | 'denied',
+    confirmed: string | null,
+  ): Promise<void> {
+    const saved = await client.query(
+      `UPDATE plm_personal_bom_write_intents
+       SET outcome=$2,
+           saw_unknown = saw_unknown OR $3,
+           confirmed_response = CASE
+             WHEN confirmed_response IS NULL AND $4::text IS NOT NULL THEN $4
+             ELSE confirmed_response
+           END,
+           updated_at=now()
+       WHERE id=$1 AND owner_id=$5 AND provider_idempotency_key=$6
+         AND client_key_sha256=$7 AND request_body=$8 AND part_id=$9
+         AND bom_line_id IS NOT DISTINCT FROM $10
+         AND if_match IS NOT DISTINCT FROM $11`,
+      [
+        intent.id,
+        outcome,
+        outcome === 'unknown',
+        outcome === 'accepted' ? confirmed : null,
+        intent.owner_id,
+        intent.provider_idempotency_key,
+        intent.client_key_sha256,
+        intent.request_body,
+        intent.part_id,
+        intent.bom_line_id,
+        intent.if_match,
+      ],
+    )
+    if (!saved.rowCount) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
   }
 }

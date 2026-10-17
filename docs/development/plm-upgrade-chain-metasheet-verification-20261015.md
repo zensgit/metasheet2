@@ -278,3 +278,59 @@ positives remain functional. No new flags, migrations or production defaults
 changed. The service is verified; actual route/JWT carrier integration and the
 full personal line/ECO dispatch/restart chain remain pending. New remote CI must
 verify the actor commit; foundation037's49 green checks do not cover these edits.
+
+Actor source `a410cfe929f22790fd328f0f26d6ec42f98b4cf1` completed **49 successful checks across 46 workflows**
+on 2026-10-17 at06:25UTC. [Personal verification run](https://github.com/zensgit/metasheet2/actions/runs/39009409287)
+checked out automatic merge `0fa8fe01f4d212e3013e880eb6ed0f7c4faa3f64` into base `a5977db1`.
+That run passed backend173/12files, web54/5files, personal approval real-DB16,
+and personal BOM real-PG7/0skip; backend and web typechecks succeeded.
+The compact exact-SHA record is `plm-personal-bom-actor-ci-20261017.json`.
+The next intent implementation is uncommitted and cannot inherit this green.
+
+### Durable personal BOM dispatch intent (2026-10-17)
+
+Grok 4.7 (xhigh) implemented the bounded slice. Astra ultra independently read
+the two-phase design and found a concrete acknowledgement-validation defect:
+a shape-valid reply could name another line or contradict an earlier stored
+confirmation. The repaired path compares the frozen line and canonical prior
+confirmation before accepting. A mismatch returns503, records unknown and
+preserves any earlier confirmation; it does not claim the native write failed.
+Codex independently reviewed the repair and executed:
+
+- Three complete unit files: **81 passed in2.52s**.
+- Both complete real PostgreSQL15 files: **22 passed,0 skipped in2.93s**,
+  wrapper3.22s. All11 source fingerprints stayed stable. Owned cluster shutdown
+  and removal succeeded. The provider is an actual adapter with a controlled
+  fetch fixture; this is not a paired live native-service acceptance test.
+- Backend `tsc --noEmit`, workflow `actionlint` and diff checks passed.
+- The actual workflow JUnit checker accepted the22-test report and rejected
+  missing-intent-suite, zero-intent-tests and skipped-test counterexamples.
+
+Real PostgreSQL tests observe `pg_blocking_pids` while phase2 holds the provider
+request: source transfer, user deactivation, membership revocation and actual
+service unbind wait; after release, the accepted write completes first and the
+next dispatch is denied without another write. Same-person rotation waits, then
+replays the stored key with the replacement grant. Phase1 and phase2 wrappers
+execute the real server COMMIT before throwing an acknowledgement-loss error:
+phase1 leaves a durable intent with zero immediate writes; phase2 leaves the
+accepted confirmation. New service instances retain the intent/key and call
+native authorization again. ECO dispatch has no body/If-Match and retains its
+key/confirmation after a committed-but-unacknowledged outcome.
+
+The real additive migration drops an empty intent table, refuses populated
+unconfirmed evidence, and refuses an active writer with PostgreSQL55P03 NOWAIT,
+without losing rows. Earlier rollback-before-COMMIT testing is retained and is
+reported separately from actual COMMIT acknowledgement loss. Ordinary empty,
+long and `assembly_yuw_component` JSON text remains valid; header limits do not
+apply to BOM text. Only allowed body fields are copied, raw client keys become
+SHA256, and binding credentials remain encrypted. There is no SQL bearer-pattern
+constraint or general secret detector; the unit fake's credential assertion is
+not such a database guarantee.
+
+Compact source fingerprints and evidence limits:
+`plm-personal-bom-intent-verification-20261017.json`. Source parent is
+`a410cfe929f22790fd328f0f26d6ec42f98b4cf1`; the pending source commit must obtain
+its own CI. The actor source's49 green checks do not validate it. Actual
+workbench routes/JWT carrier, management UI, durable browser retry keys and the
+paired live line/ECO/revocation chain remain required next work. No shared-account
+mutation route has been claimed repaired by this service-only increment.
