@@ -728,6 +728,14 @@ describeRealDb('SA06AQ recovery record after-image', () => {
       // The worker renews its JOB lease after commit, so latest job xmin is not
       // evidence of source atomicity. Chunk/record/revision/seal/derived/outbox/
       // image tuples below all belong to the actual single apply transaction.
+      // Earlier real-DB files can leave allocated empty tables with zero-row
+      // statistics. Plan this 5000-row fixture with its actual cardinality,
+      // not a one-row nested-loop estimate. This changes planner statistics
+      // only: retain the original SQL, 8s budget and all atomicity assertions.
+      await q(`ANALYZE public.meta_records, public.meta_record_revisions,
+        public.meta_recovery_archive_derived_effects, public.meta_automation_record_after_images,
+        public.meta_automation_outbox, public.meta_recovery_archive_job_chunks,
+        public.meta_record_history_operations`)
       const atomic = (await q(`SELECT count(*)::int AS total,
         bool_and(r.xmin::text=$3 AND v.xmin::text=$3 AND d.xmin::text=$3 AND o.xmin::text=$3
           AND i.xmin::text=$3 AND c.xmin::text=$3 AND h.xmin::text=$3 AND i.capture_xid::text=$4) AS same_xid,

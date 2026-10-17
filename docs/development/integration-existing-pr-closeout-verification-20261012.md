@@ -1,6 +1,66 @@
 # 既有 #6337 收口验证
 
+## 2026-10-17 本轮三文件推送与既有合成CI授权
+
+Owner已明确批准将本轮测试统计准备及两份既有MD推入原草稿#6337，并运行既有合成CI。推送前只读核验远端仍OPEN/draft，head=ad9056f888e44da9e1f01359c2c9c84e63fbe844，原base/head分支未变；本地仅这三文件有改动。授权不包含新增切片、合并、部署、客户读取或真实发送。
+
+执行前精确暂存并比对staged blob与受验工作副本原字节，原测试候选SHA仍3afafbbc...6a349；正常fast-forward推送，不force或转正式。正式CI证据必须绑定新commit/run，不能借本地40/40、旧head宜搭71项与停止清理证明补齐。仅正确同head整轮成功且SQL/Chromium/宜搭71项/实际停止清理证据闭合后，才执行本次授权的Chrome本地合成初始化和两行推送预览；不点击发送、不交换真实token，Chrome未连接时不启动短TTL环境。
+
+## 2026-10-17 新授权后的失败清单纠偏（覆盖下方“三个失败”历史表述）
+
+### 本地最小修复与合成证据
+
+本地代码仅测试8行新增：原子聚合前固定ANALYZE七张夹具表；候选SHA `3afafbbc9444f52fe7b5877830f48ce1716716e904b391b4d664e35703a6a349`，Windows与Linux受验源相同。原8秒预算、SQL哈希b60d8c...15ed、5001/5000+1、256/4744及same_xid/exact_binding断言均未改；生产代码、schema、权限、浏览器与发送配置未改。
+
+负例：原源e2b509整文件先12/12，再在同一PG14上对清理后的已分配表页做空表ANALYZE并在该owned合成库关闭表autovacuum，目标实际1失败/1隔离哨兵通过/10过滤，原SQL8000.88ms被真实57014取消。诊断保持数据与SQL不变，仅刷新统计后同语句21.20ms得到total5000/same_xid=true/exact_binding=true，再重抛原错误，负例未被修后绿灯覆盖。前计划主要Nested Loop估1行，后Hash Join估4999；诊断计划回执SHA `28e8a90fb232c43448a090cad4e75ea17e2dbc06a55cfb36e1e9b9120fe64178`，整轮回执 `9cacf14c63bc552bc1e41ccfd9505414e47b627fabc6c3700a98f4b49ca3a2a5`，owned PG移除、源未改、隔离违规0。此为同类统计机制复现，不是伪造57014或pg_sleep，亦不冒称CI原始计划已被采集。
+
+候选：新owned PG同462项完整迁移后，整文件12/12、0过滤；清理后重复相同残留统计实验，目标2/2、10过滤、取消帧0，原语句22.19ms，计划Hash Join估4999。计划回执SHA `7e753093b8154099691191be59de3a615b1c5ce2488282452011cf857b6b8cf2`，整轮 `4742938f8ee081029e1e67dbc390e3159e033f310f6e5f2a446b4481c1e6e458`；隔离违规0、源未改、owned PG移除。严格noEmit单根诊断116→116指纹集合不变，回执 `5e5809beb15e3fe71f5dbdc6e32e0b0ede7b0eb9fb9f5b7726326babc15785d9`；不是整包类型全绿。
+
+额外AI/button回归首轮未通过，保留回执 `4ca1b1c7c4c3e2d74b861a1d54de227c9ef42dcf1d5ad9cd282c86683087a966`。业务请求均在Supertest同步读取临时listener的address().port时失败，错误哈希 `e973c1b7f7dfed39335e30c8d30c088a4773e02d631a7bb0e8163ee2cfa55f6e`精确等于null listener port错误；未执行到路由，不算业务回归通过。仅本地tmp工具将Supertest的隐式listen(0)固定到本进程loopback，并对原guard已允许的唯一literal地址做同步无需DNS回调；未扩大出网集合、未改正式测试。原失败与清理成功回执保留。
+
+工具修订后的新owned PG完成同462项迁移，原三整文件依次实际12/12、19/19、9/9，总40/40（37原测试+3隔离哨兵）、0过滤、0失败、隔离违规均0；SQL取消帧0、受验源未改、owned PG已移除。整轮回执SHA `c04e60d53eee70f1989a0a735264f73d3ee004f7adfdd73fbc581dc5a325926f`；三文件日志SHA依次 `adb765cf52fa552ab9314a740d2a158a422b75020d25ce13c69cbbbc59bbe4a8` / `9051c10d5eb0670ffbca87f7be1059a5071a17ac13625ac944364994bc233344` / `fd42906002458c727fefce90b8444c677e9ce2032bf0ed986ef40101ba6902e9`。本地脱敏回执与计划副本存于tmp/pr6337-proxy-drain-local-20261014/post-ci-local-20261017，复制后逐SHA核对；不复制私有日志、报告、凭据或.env。负例/候选/工具失败/最终回归四轮对应scratch均实查pg-*目录0。
+
+最终范围：未提交改动仅原测试与两份既有MD；主检出用户artifacts/reviews未动。git diff --check通过，原聚合SQL哈希、8000预算、5000原子绑定与256/4744断言均核实未变。未推送、未重跑CI、未合并/部署/真实读写；远端仍ad9056旧CI失败，不以本地通过改写正式CI状态或启动原条件要求“整轮正式CI成功”的Chrome试用。宜搭71项正式通过证据仍属于ad9056，不冒称候选另跑71项。
+
+Owner授权在现有#6337本地复现、最小修复及合成验收，不推送/重跑CI/合并/部署/真实读写。重新核准日志发现此前PowerShell `-match` 默认大小写不敏感，将成功测试标题里的fail-closed误当成大写FAIL，后续预期负例日志又被错误归到失败窗口。此前把AI bulk preview缺表负例、button audit负例列为另外两项阻断的结论撤回；相应窗口哈希仅证明曾读取该窗口，不证明其为正式失败。
+
+改用 `-cmatch` 严格大写FAIL、排除最终ERR_PNPM命令回显后，正式失败头仅1个：multitable-recovery-record-after-image-realdb.test.ts。公开汇总为Test Files 1 failed / 265 passed，Tests 1 failed / 3101 passed / 2 skipped；AI及button均无正式失败头。它们不得因本次误判被修迁移、放宽守卫或改业务实现。后续仅修已证实的ATOMIC_BINDING超时，并对另外两份做合成回归以补证据。旧SQL聚合哈希与真实57014诊断、PLM/宜搭71项及停止清理闭合证据不受此纠偏影响。
+
 ## 2026-10-17 本轮三文件诊断补丁推送及既有CI获准
+
+### 本轮正式终态：失败，目标浏览器/宜搭证据已闭合，后置SQL仍阻断
+
+run39002841136 attempt1 / job117309194154 / head ad9056严格匹配当前草稿head，整轮completed/failure；step98/100/101/102 success，step110 failure。公开日志64824行，LF拼接SHA `a2c361052cf2baa3e92e5ec53f07fdccf55430cd0cb611eba1ada5b5968a6de5`。只读公开日志先剥离job/step列，未读任何私有artifact或凭据。
+
+PLM manual/interval两条闭合RESULT均passed、failurePresent=false、cleanup=stopped-and-owned-database-removed、sourceFiles=6588，回执SHA分别 `72cbb8ac6dc9f30de1da154f8327a8c77cd61f3948f57b2b512ca91ef0a927ff` / `3acda09600b9bde48ed2503825fc8ccd89f8546c70c67ce429c045719c28eed4`；actual-stop-resolved=2、actual-stop-failed=0、production-stop-failed=0。336条闭合transport帧内ABORTED/ABORT/signalAborted均0，SDK和PLAYWRIGHT POST202 BODY_DONE complete各1，PROXY DOWNSTREAM_FINISH/UPSTREAM_COMPLETE/UPSTREAM_END complete各1。宜搭闭合RESULT passed=true、tests=71、business=66、sentinels=5。清理证据是受审runner在公开成功帧前执行其强制校验的间接证据，不是读取私有清理产物；不将新绿冒称所有历史风险根因已修。
+
+本轮SQL诊断真实捕获1条：stage=ATOMIC_BINDING、queryOrdinal=5534、sqlState=57014、statementSha256=`b60d8c0d3016a0fcb4d6495647be382a5f913f874789058bcea90afa73cd15ed`，同一步payload存在canceling statement due to statement timeout、无Test timed out。诊断将本轮失败定位到原5001-plan用例的原子绑定验证聚合查询，而不是本地注入负例的FIXTURE_RECORDS；原8秒预算与完整性断言保留，尚未修复该查询或证明更深执行计划根因。失败标签提取还命中multitable-ai-bulk-preview.test.ts与multitable-button-send-notification.test.ts，具体异常归因尚待闭合核实，不宣称只有一个失败。
+
+只读终态补核：逐个提取FAIL标签后的错误窗口（不输出原错误），AI bulk preview错误行确认缺少ai_bulk缓存关系，非statement timeout；button send-notification错误窗口也未命中statement/hook/test timeout，具体分类仍未证明。三者不能归并成同一超时。失败窗口SHA分别 `03d26e00926bf9f232f635d38ff670ec1031b2b8ae634ea71ad0c8def469ced0` / `d96c1f8e71a8db2ed068e06ae13496f86f77a180b7444f59c0db5a4333aa576b` / `d47ca15b7e43f00979b049827b93c6858c8ba1ffb7f3a5dc402af45b4cf5dc35`。对本地源逐条提取q模板、归一空白后哈希，唯一含bool_and(r.xmin的完整SQL与CI `b60d8c...15ed`逐字节归一哈希相同，已将ATOMIC_BINDING准确绑定到L731聚合查询；初版跨模板regex提取哈希不符已弃用，不作为证据。
+
+缓存前置静态核实：建表迁移zzzz20260621140000_create_multitable_ai_bulk_preview_cache.ts存在且不在当前plugin-tests的MIGRATION_EXCLUDE中；该测试L396会临时rename缓存表、L409 finally恢复。由此不能仅凭缺表报错断言漏迁移，需合成复现区分共享DB上的临时DDL/清理时序与初始schema缺失；当前没有修改迁移或测试。按钮失败原因仍未证实，不以没有命中固定异常分类推定为偶发。
+
+补核范围：git diff --quiet确认AI bulk preview及button send-notification两个测试从549935039到ad9056未改。仅说明三文件诊断补丁未改这两份测试，不证明它们的失败与本PR无关；运行顺序、共享schema与导入路径的影响仍需复现。按钮守卫来源未能以当前闭合错误投影证明，保留unknown，不自行忽略。
+
+整轮失败，因此按先前条件授权未启动Chrome试用；不自动重跑、修改代码、再次推送、合并或部署。下一步需核实三个失败标签的真实异常，并单独批准必要的本地最小修复；原历史SQL取消、lease到期与WSL回拨证据继续保留。
+
+执行后本地续记（未再次推送）：精确暂存一个测试与两份MD，三个staged blob均等于受验工作副本原始字节，测试SHA仍e2b509；commit `ad9056f888e44da9e1f01359c2c9c84e63fbe844` 已正常fast-forward推入原草稿，OPEN/draft及原base/head分支不变。推送后同head未出现Plugin System Tests自动run（原stacked base不匹配该workflow自动过滤），故按本轮授权只dispatch一次既有plugin-tests.yml，run `39002841136` attempt1、test(20.x) job `117309194154`，元数据head严格匹配ad9056。当前in_progress，目标step98/100/101/102/110尚pending；不将queued、pending或旧head的通过算作本轮验收。
+
+同head自动Integration Guard run `39002824831` attempt1经独立只读复核仍in_progress、暂无失败步骤；不借它替代主run正式目标证据。公开日志投影器已准备：先剥离job/step列，再解析闭合SQL_CANCELLED和PLM/宜搭帧；Playwright完成按BODY_DONE而非REQUEST_FINISHED的默认status0判断。尚未读取未完成job日志或任何私有artifact，不自动重跑、再次推送、合并或部署。
+
+后续只读状态变化：Integration Guard run39002824831已completed/success，head仍严格匹配ad9056。主run39002841136仍in_progress，test(20.x)推进至step9，98/100/101/102/110仍pending。Guard绿不替代SQL取消诊断、正式浏览器/宜搭71项或实际停止清理证明；保持原发布门。
+
+目标步骤推进：同head/run的step98固定浏览器安装已completed/success，step100前置real-DB proof开始执行；step101 PLM、step102宜搭和step110后置诊断仍pending。前期检查没有阻断到这里，但未据安装成功宣称ABORTED、host.stop或宜搭71项已通过。
+
+前置等待期间的观测器勘误：PowerShell ConvertFrom-Json将startedAt自动转为UTC DateTime，再用DateTimeOffset.Parse隐式字符串转换会丢时区，曾得到29809秒错误耗时；该值撤回，不作为CI超时证据。改用DateTimeOffset直接转换与GitHub响应Date服务端时钟交叉核验，真实经过1040秒、run仍in_progress，主机UTC与服务端差约4秒。没有修改系统时间、重启或重跑；本步骤未配置独立timeout-minutes，当前没有正式超时/失败结论。
+
+关键状态变化：同head/run的step100前置real-DB proof现completed/success，step101 PLM manual/interval已in_progress；step102宜搭与step110后置SQL诊断仍pending。前置本轮正式通过，不表示旧lease时序风险或原后置SQL超时根因已修，也不据此认定ABORTED/停止清理/71项通过。
+
+最新目标状态：同head ad9056/run39002841136 attempt1的step101 PLM manual/interval现completed/success，step102 owner宜搭JWT HTTP/browser proof已in_progress；step110后置SQL诊断仍pending。这里只确认步骤元数据变化；公开闭合帧、ABORTED计数、actual-stop/清理与宜搭71项需待日志可用逐项核验，尚不解除发布门，也未启动Chrome试用。
+
+宜搭步骤状态变化：同head/run的step102已completed/success，step103源修订单元合同开始；step110仍pending。宜搭正式步骤元数据已绿，但71=66+5闭合结果、传输取消及停止清理帧尚待公开job日志核验；整轮仍in_progress，未将此状态单独当作Chrome试用放行或后置SQL问题已解决。
+
+后置测试已启动：同head/run的step110 multitable real-DB现in_progress，包含本轮SQL取消诊断所在测试；step98/100/101/102均completed/success，暂无失败job。未将执行中当作通过，原CI SQL超时具体语句仍不能凭本轮尚未闭合的状态推定。
 
 Owner明确批准将本轮一个测试与两份现有MD推入原草稿#6337并运行既有合成CI；只覆盖此次推送/执行，不允许新增切片、合并、部署、客户读取或真实发送。推送前只读核验远端仍OPEN/draft，head=549935039，base/head分支未变；测试源仍为已验证e2b509，最终12/12、真实PG取消负例、dot透传及独立只读复核证据见下节。没有将诊断补丁冒称为原CI SQL超时根因修复。
 
