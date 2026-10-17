@@ -147,6 +147,8 @@ function git(cwd, ...args) {
 function openClassifierSession(script) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'stock-prep-browser-classifier-'))
   git(fixtureRoot, 'init', '--quiet')
+  git(fixtureRoot, 'config', 'gc.auto', '0')
+  git(fixtureRoot, 'config', 'maintenance.auto', 'false')
   git(fixtureRoot, 'config', 'user.name', 'Stock Prep Browser Contract')
   git(fixtureRoot, 'config', 'user.email', 'stock-prep-browser-contract@example.invalid')
   writeFileSync(join(fixtureRoot, 'README.md'), 'base\n')
@@ -186,9 +188,8 @@ function openClassifierSession(script) {
       return relevant === 'true'
     },
     close() {
-      // The last `git commit` may leave a detached child (auto maintenance) still writing under
-      // `.git/objects`; a plain recursive rm then races it and fails with ENOTEMPTY (seen twice on
-      // CI, 2026-10-13). Retry the removal instead of failing the suite on fixture cleanup.
+      // Preventive fixture config (gc.auto=0, maintenance.auto=false) avoids detached
+      // autowriters under .git/objects. Removal still fails visibly if the tree remains.
       rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 })
     },
   }
@@ -270,6 +271,39 @@ const allVerificationSpecs = walkFiles(verificationRoot)
   .map(webRelative)
   .sort()
 const stockPrepSpecs = allVerificationSpecs.filter((path) => basename(path).startsWith('stock-prep-'))
+
+test('classifier fixture commits do not launch inherited automatic maintenance', () => {
+  const root = mkdtempSync(join(tmpdir(), 'stock-prep-maintenance-control-'))
+  const config = join(root, 'global.gitconfig')
+  const trace = join(root, 'git-trace.jsonl')
+  const names = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_TRACE2_EVENT']
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]))
+  let session
+  try {
+    writeFileSync(config, '[gc]\n auto = 1\n autoDetach = false\n[maintenance]\n auto = true\n')
+    process.env.GIT_CONFIG_GLOBAL = config
+    process.env.GIT_CONFIG_NOSYSTEM = '1'
+    process.env.GIT_TRACE2_EVENT = trace
+    session = openClassifierSession('printf "relevant=true\\n" >> "$GITHUB_OUTPUT"')
+    assert.equal(session.relevant('pull_request', 'docs/maintenance-probe.md'), true)
+    session.close()
+    session = undefined
+    const children = readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse)
+      .filter((event) => event.event === 'child_start' && Array.isArray(event.argv)
+        && basename(event.argv[0]) === 'git' && ['maintenance', 'gc'].includes(event.argv[1]))
+    assert.deepEqual(children, [], 'throwaway commits must not leave automatic Git writers')
+  } finally {
+    try {
+      session?.close()
+    } finally {
+      for (const name of names) {
+        if (previous[name] === undefined) delete process.env[name]
+        else process.env[name] = previous[name]
+      }
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
 
 test('stock-prep workflow creates a stable PR and merge-queue context with a real classifier', () => {
   const source = readFileSync(workflowPath, 'utf8')
