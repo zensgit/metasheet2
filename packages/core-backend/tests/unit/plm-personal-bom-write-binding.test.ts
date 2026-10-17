@@ -83,6 +83,9 @@ function verified(over: Record<string, unknown> = {}) {
 
 function memory() {
   const users = new Map<string, { id: string; is_active: boolean }>([[OWNER, { id: OWNER, is_active: true }]])
+  const memberships: Array<{ user_id: string; org_id: string; is_active: boolean }> = [
+    { user_id: OWNER, org_id: 'meta-a', is_active: true },
+  ]
   const sources = new Map<string, ReturnType<typeof source>>([[SOURCE, source()]])
   const bindings: Row[] = []
   const retired: Array<{
@@ -114,6 +117,12 @@ function memory() {
       if (text.includes('FROM users')) {
         const user = users.get(String(params[0]))
         return user?.is_active ? { rows: [user], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      if (text.includes('FROM user_orgs')) {
+        const row = memberships.find(
+          (item) => item.user_id === params[0] && item.org_id === params[1] && item.is_active,
+        )
+        return { rows: row ? [{ user_id: row.user_id }] : [], rowCount: row ? 1 : 0 }
       }
       if (text.includes('pg_advisory_xact_lock')) return { rows: [], rowCount: 1 }
       if (text.includes('FROM data_sources')) {
@@ -296,6 +305,7 @@ function memory() {
   }
   return {
     users,
+    memberships,
     sources,
     bindings,
     retired,
@@ -319,6 +329,10 @@ function service(mem = memory()) {
   return { mem, svc: new PlmPersonalBomWriteBindingService(mem.pool as never, () => mem.transport as never) }
 }
 
+function actor(metaTenantId: string | null = 'meta-a') {
+  return { userId: OWNER, metaTenantId }
+}
+
 function interruptRevoke(mem: ReturnType<typeof memory>): void {
   mem.setRevoke(() => {
     throw new Error('synthetic interruption before revoke')
@@ -331,11 +345,12 @@ async function bindId(
   id: string,
 ) {
   mem.setVerify(verified({ grant_id: id.repeat(32) }))
-  return svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw(id) })
+  return svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw(id) })
 }
 
 /** The reuse probe sits after the source and binding locks and before any upsert. */
 function reuseCheckedBeforeWrite(queries: string[]): void {
+  const memberAt = queries.findIndex((sql) => sql.includes('FROM user_orgs') && sql.includes('FOR SHARE'))
   const sourceAt = queries.findIndex((sql) => sql.includes('FROM data_sources') && sql.includes('FOR UPDATE'))
   const bindingAt = queries.findIndex(
     (sql) => sql.includes('plm_personal_bom_write_bindings') && sql.includes('data_source_id=$2') && sql.includes('FOR UPDATE'),
@@ -344,7 +359,8 @@ function reuseCheckedBeforeWrite(queries: string[]): void {
     (sql) => sql.includes('plm_personal_bom_write_retired_grants') && sql.includes('binding_id=$1'),
   )
   const insertAt = queries.findIndex((sql) => sql.includes('INSERT INTO plm_personal_bom_write_bindings'))
-  expect(sourceAt).toBeGreaterThanOrEqual(0)
+  expect(memberAt).toBeGreaterThanOrEqual(0)
+  expect(sourceAt).toBeGreaterThan(memberAt)
   expect(bindingAt).toBeGreaterThan(sourceAt)
   expect(reuseAt).toBeGreaterThan(bindingAt)
   expect(insertAt).toBe(-1)
@@ -365,6 +381,13 @@ function sourceBeforeBinding(queries: string[]): boolean {
   return peek < source && source < binding
 }
 
+function admissionBeforeSource(queries: string[]): boolean {
+  const user = queries.findIndex((sql) => sql.includes('FROM users') && sql.includes('FOR SHARE'))
+  const member = queries.findIndex((sql) => sql.includes('FROM user_orgs') && sql.includes('FOR SHARE'))
+  const source = queries.findIndex((sql) => sql.includes('FROM data_sources') && sql.includes('FOR UPDATE'))
+  return user >= 0 && user < member && member < source
+}
+
 beforeEach(() => {
   process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
   delete process.env.PLM_APPROVAL_CARD_ENABLED
@@ -374,7 +397,7 @@ describe('personal BOM write binding', () => {
   it('stores a verified yuw binding encrypted and keeps Meta and Yuantus identities apart', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     const row = mem.bindings[0]
     expect(saved.subjectId).toBe('42')
     expect(saved.ownerId).toBe(OWNER)
@@ -400,34 +423,170 @@ describe('personal BOM write binding', () => {
     )
     expect(serviceSource).not.toContain('40P01')
     const { mem, svc } = service()
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    expect(admissionBeforeSource(mem.queries)).toBe(true)
     expect(lockPoint(mem.queries, 'FROM data_sources')).toBeLessThan(
       lockPoint(mem.queries, 'data_source_id=$2 FOR UPDATE'),
     )
     mem.queries.length = 0
-    await svc.requireUsable(OWNER, saved.id)
+    await svc.requireUsable(actor(), saved.id)
+    expect(admissionBeforeSource(mem.queries)).toBe(true)
     expect(sourceBeforeBinding(mem.queries)).toBe(true)
     mem.queries.length = 0
-    await svc.freezeForOperation(OWNER, saved.id, {
+    await svc.freezeForOperation(actor(), saved.id, {
       operationKind: 'line',
       partId: 'part-1',
       bomLineId: 'line-1',
       clientKey: 'browser-key-1',
       patch: { quantity: 1 },
     })
+    expect(admissionBeforeSource(mem.queries)).toBe(true)
     expect(sourceBeforeBinding(mem.queries)).toBe(true)
     mem.queries.length = 0
     await svc.unbind(OWNER, saved.id)
+    expect(mem.queries.some((sql) => sql.includes('FROM user_orgs'))).toBe(false)
     expect(sourceBeforeBinding(mem.queries)).toBe(true)
   })
 
-  it('preserves a null Meta tenant instead of copying the Yuantus tenant', async () => {
+  it('preserves a null legacy_private Meta tenant and does not copy the Yuantus tenant', async () => {
     const { mem, svc } = service()
     mem.sources.set(SOURCE, source({ tenant_id: null, scope_kind: 'legacy_private', workspace_id: null }))
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const saved = await svc.bind(actor(null), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
     expect(saved.metaTenantId).toBeNull()
     expect(saved.yuantusTenantId).toBe('yt-b')
     expect(saved.scopeKind).toBe('legacy_private')
+    expect(mem.queries.some((sql) => sql.includes('FROM user_orgs'))).toBe(false)
+    expect(mem.calls[0]).toMatchObject({ op: 'verify', tenantId: 'yt-b' })
+
+    mem.calls.length = 0
+    mem.memberships.push({ user_id: OWNER, org_id: 'yt-b', is_active: true })
+    await expect(
+      svc.bind(actor('yt-b'), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('b') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    mem.sources.set(SOURCE, source({ tenant_id: null, scope_kind: 'private', workspace_id: null }))
+    await expect(
+      svc.bind(actor(null), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('b') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(mem.calls).toHaveLength(0)
+    expect(mem.bindings).toHaveLength(1)
+    expect(mem.bindings[0].meta_tenant_id).toBeNull()
+    expect(mem.bindings[0].yuantus_tenant_id).toBe('yt-b')
+  })
+
+  it.each([
+    ['missing', { userId: OWNER }],
+    ['undefined', { userId: OWNER, metaTenantId: undefined }],
+    ['numeric', { userId: OWNER, metaTenantId: 12 }],
+    ['blank', { userId: OWNER, metaTenantId: '' }],
+    ['whitespace', { userId: OWNER, metaTenantId: ' \t' }],
+  ])('rejects %s metaTenantId instead of admitting legacy_private', async (_name, bad) => {
+    const { mem, svc } = service()
+    mem.sources.set(SOURCE, source({ tenant_id: null, scope_kind: 'legacy_private', workspace_id: null }))
+    const caller = bad as never
+    const line = {
+      operationKind: 'line' as const,
+      partId: 'part-1',
+      bomLineId: 'line-1',
+      clientKey: 'browser-key-1',
+      patch: { quantity: 1 },
+    }
+    await expect(svc.bind(caller, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
+      status: 403,
+      code: 'PLM_BOM_WRITE_FORBIDDEN',
+    })
+    await expect(svc.list(caller)).rejects.toMatchObject({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.managementUrl(caller, SOURCE)).rejects.toMatchObject({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.requireUsable(caller, 'missing')).rejects.toMatchObject({ status: 403, code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.freezeForOperation(caller, 'missing', line)).rejects.toMatchObject({
+      status: 403,
+      code: 'PLM_BOM_WRITE_FORBIDDEN',
+    })
+    expect(mem.calls).toHaveLength(0)
+    expect(mem.bindings).toHaveLength(0)
+    expect(mem.queries.some((sql) => sql.includes('FROM data_sources') || sql.includes('FROM user_orgs'))).toBe(false)
+  })
+
+  it('keeps the native Yuantus tenant distinct from the Meta actor tenant', async () => {
+    const { mem, svc } = service()
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    expect(saved.metaTenantId).toBe('meta-a')
+    expect(saved.yuantusTenantId).toBe('yt-b')
+    expect(saved.metaTenantId).not.toBe(saved.yuantusTenantId)
+    expect(mem.calls[0]).toMatchObject({ op: 'verify', tenantId: 'yt-b' })
+    mem.calls.length = 0
+    mem.memberships.push({ user_id: OWNER, org_id: 'yt-b', is_active: true })
+    await expect(
+      svc.bind(actor('yt-b'), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('b') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(mem.calls).toHaveLength(0)
+    expect(mem.bindings[0].meta_tenant_id).toBe('meta-a')
+    expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(yuw('a'))
+  })
+
+  it('refuses a different Meta tenant and a missing or revoked membership before verify', async () => {
+    const wrong = service()
+    wrong.mem.memberships.push({ user_id: OWNER, org_id: 'meta-b', is_active: true })
+    await expect(
+      wrong.svc.bind(actor('meta-b'), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(wrong.mem.calls).toHaveLength(0)
+    expect(wrong.mem.bindings).toHaveLength(0)
+    wrong.mem.users.set('other', { id: 'other', is_active: true })
+    wrong.mem.memberships.push({ user_id: 'other', org_id: 'meta-a', is_active: true })
+    await expect(
+      wrong.svc.bind({ userId: 'other', metaTenantId: 'meta-a' }, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(wrong.mem.calls).toHaveLength(0)
+
+    const missing = service()
+    missing.mem.memberships.length = 0
+    await expect(
+      missing.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(missing.svc.requireUsable(actor(), 'missing')).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(missing.mem.calls).toHaveLength(0)
+
+    const { mem, svc } = service()
+    const grant = yuw('a')
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    mem.memberships[0].is_active = false
+    mem.calls.length = 0
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.managementUrl(actor(), SOURCE)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.list(actor())).resolves.toEqual([])
+    expect(mem.calls).toHaveLength(0)
+    expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
+    delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
+    const cleared = await svc.unbind(OWNER, saved.id)
+    expect(cleared.bound).toBe(false)
+    expect(cleared.remoteRevokeState).toBe('revoked')
+    expect(mem.calls).toEqual([expect.objectContaining({ op: 'revoke', grant })])
+  })
+
+  it('denies use when the persisted source tenant or scope changes', async () => {
+    const { mem, svc } = service()
+    const grant = yuw('a')
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    mem.sources.set(SOURCE, source({ tenant_id: 'meta-b' }))
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(
+      svc.freezeForOperation(actor(), saved.id, {
+        operationKind: 'line',
+        partId: 'part-1',
+        bomLineId: 'line-1',
+        clientKey: 'browser-key-1',
+        patch: { quantity: 1 },
+      }),
+    ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.managementUrl(actor(), SOURCE)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.list(actor())).resolves.toEqual([])
+    expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
+
+    mem.sources.set(SOURCE, source({ scope_kind: 'workspace' }))
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.list(actor())).resolves.toEqual([])
+    await expect(svc.unbind(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
   })
 
   it.each([
@@ -443,7 +602,7 @@ describe('personal BOM write binding', () => {
     const { mem, svc } = service()
     if ('verify' in change) mem.setVerify(change.verify as Record<string, unknown>)
     const grant = 'grant' in change ? change.grant : yuw('a')
-    await expect(svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })).rejects.toMatchObject({ code })
+    await expect(svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })).rejects.toMatchObject({ code })
     expect(mem.bindings).toHaveLength(0)
     if (String(grant).startsWith('yua_')) expect(mem.calls).toHaveLength(0)
   })
@@ -452,7 +611,7 @@ describe('personal BOM write binding', () => {
     const { mem, svc } = service()
     mem.transport.getEffectiveTenantId = () => 'meta-a'
     mem.transport.getEffectiveOrgId = () => 'other-org'
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
     expect(saved.targetOrigin).toBe('https://synthetic.invalid')
     expect(mem.calls).toEqual([
       expect.objectContaining({ op: 'verify', origin: 'https://synthetic.invalid', tenantId: 'yt-b' }),
@@ -462,7 +621,7 @@ describe('personal BOM write binding', () => {
   it('refuses inactive users, other owners, and inactive or ambiguous sources', async () => {
     const inactive = service()
     inactive.mem.users.set(OWNER, { id: OWNER, is_active: false })
-    await expect(inactive.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
+    await expect(inactive.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
       status: 401,
     })
     expect(inactive.mem.calls).toHaveLength(0)
@@ -470,13 +629,13 @@ describe('personal BOM write binding', () => {
     const transferred = service()
     transferred.mem.sources.set(SOURCE, source({ owner_id: 'other-owner' }))
     await expect(
-      transferred.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+      transferred.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
     ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
     expect(transferred.mem.calls).toHaveLength(0)
 
     const disabled = service()
     disabled.mem.sources.set(SOURCE, source({ is_active: false }))
-    await expect(disabled.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
+    await expect(disabled.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
       code: 'PLM_BOM_WRITE_FORBIDDEN',
     })
 
@@ -485,26 +644,26 @@ describe('personal BOM write binding', () => {
     config.connection.headers['X-Tenant-Id'] = 'meta-a'
     ambiguous.mem.sources.set(SOURCE, source({ config }))
     await expect(
-      ambiguous.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
+      ambiguous.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') }),
     ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
     expect(ambiguous.mem.calls).toHaveLength(0)
   })
 
   it('blocks a transferred source and an inactive user from using the stored binding', async () => {
     const { mem, svc } = service()
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
     mem.sources.set(SOURCE, source({ owner_id: 'other-owner' }))
-    await expect(svc.requireUsable(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
     expect(mem.bindings[0].encrypted_grant).toContain('enc:')
     mem.sources.set(SOURCE, source())
     mem.users.set(OWNER, { id: OWNER, is_active: false })
-    await expect(svc.requireUsable(OWNER, saved.id)).rejects.toMatchObject({ status: 401 })
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ status: 401 })
   })
 
   it('invalidates locally before revoke and records an unknown network outcome', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     mem.setRevoke(() => {
       throw new Error('socket hang up')
     })
@@ -518,12 +677,12 @@ describe('personal BOM write binding', () => {
 
   it('records native 204 as revoked and a definite 401 as rejected', async () => {
     const ok = service()
-    const saved = await ok.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const saved = await ok.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
     const revoked = await ok.svc.unbind(OWNER, saved.id)
     expect(revoked.remoteRevokeState).toBe('revoked')
 
     const denied = service()
-    const row = await denied.svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const row = await denied.svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
     denied.mem.setRevoke(() => {
       throw new PlmPersonalBomWriteError(401, 'PLM_BOM_WRITE_UNAUTHORIZED', undefined, true)
     })
@@ -534,7 +693,7 @@ describe('personal BOM write binding', () => {
   it('keeps the old row when a generation compare fails', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     mem.failCas()
     await expect(svc.unbind(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_CONFLICT' })
     expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
@@ -543,7 +702,7 @@ describe('personal BOM write binding', () => {
     mem.failCas()
     mem.setVerify(verified({ grant_id: 'd'.repeat(32), auth_user_id: '900' }))
     await expect(
-      svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('d') }),
+      svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('d') }),
     ).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_CONFLICT' })
     expect(mem.bindings[0].subject_id).toBe('42')
     expect(mem.calls.filter((call) => call.op === 'revoke')).toHaveLength(0)
@@ -551,8 +710,8 @@ describe('personal BOM write binding', () => {
 
   it('replaces the native person for future operations and does not call an unknown old revoke success', async () => {
     const { mem, svc } = service()
-    const first = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
-    const frozen = await svc.freezeForOperation(OWNER, first.id, {
+    const first = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const frozen = await svc.freezeForOperation(actor(), first.id, {
       operationKind: 'line',
       partId: 'part-1',
       bomLineId: 'line-1',
@@ -572,7 +731,7 @@ describe('personal BOM write binding', () => {
     mem.setRevoke(() => {
       throw new Error('timeout')
     })
-    const replaced = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('e', 'f') })
+    const replaced = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('e', 'f') })
     expect(replaced.subjectId).toBe('900')
     expect(replaced.bound).toBe(true)
     expect(replaced.remoteRevokeState).toBeNull()
@@ -586,20 +745,20 @@ describe('personal BOM write binding', () => {
   it('lists owned metadata and revokes the exact secret while the flag is off', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     mem.bindings[0].expires_at = new Date('2020-01-01T00:00:00.000Z')
     mem.sources.set(SOURCE, source({ is_active: false }))
     delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
-    const listed = await svc.list(OWNER)
+    const listed = await svc.list(actor())
     expect(listed.map((row) => row.id)).toEqual([saved.id])
     expect(listed[0].bound).toBe(true)
     expect(JSON.stringify(listed)).not.toContain(grant)
-    await expect(svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })).rejects.toMatchObject({
+    await expect(svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })).rejects.toMatchObject({
       code: 'PLM_BOM_WRITE_DISABLED',
     })
-    await expect(svc.requireUsable(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_DISABLED' })
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_DISABLED' })
     await expect(
-      svc.freezeForOperation(OWNER, saved.id, {
+      svc.freezeForOperation(actor(), saved.id, {
         operationKind: 'line',
         partId: 'part-1',
         bomLineId: 'line-1',
@@ -617,10 +776,10 @@ describe('personal BOM write binding', () => {
   it('keeps source owner and the current Meta tenant in force while the flag is off', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
     mem.sources.set(SOURCE, source({ owner_id: 'other-owner' }))
-    await expect(svc.list(OWNER)).resolves.toEqual([])
+    await expect(svc.list(actor())).resolves.toEqual([])
     await expect(svc.unbind(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
     expect(mem.calls.filter((call) => call.op === 'revoke')).toHaveLength(0)
     expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
@@ -633,12 +792,12 @@ describe('personal BOM write binding', () => {
     delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
     process.env.PLM_APPROVAL_CARD_ENABLED = 'true'
     const { mem, svc } = service()
-    await expect(svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
+    await expect(svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })).rejects.toMatchObject({
       code: 'PLM_BOM_WRITE_DISABLED',
     })
     expect(mem.calls).toHaveLength(0)
     process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'TRUE'
-    await expect(svc.managementUrl(OWNER, SOURCE)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_DISABLED' })
+    await expect(svc.managementUrl(actor(), SOURCE)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_DISABLED' })
   })
 
   it('freezes the native line and eco materials without the grant id', () => {
@@ -752,7 +911,7 @@ describe('personal BOM write binding', () => {
 
     const { mem, svc } = service()
     mem.setVerify(verified({ connection_id: '连接-甲' }))
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: '连接-甲', grant: yuw('a') })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: '连接-甲', grant: yuw('a') })
     expect(saved.connectionId).toBe('连接-甲')
     expect(saved.yuantusTenantId).toBe('yt-b')
     expect(mem.bindings[0].connection_id).toBe('连接-甲')
@@ -879,17 +1038,17 @@ describe('personal BOM write binding', () => {
     mem.sources.set(SOURCE, at('https://bound.example/plm'))
     const svc = new PlmPersonalBomWriteBindingService(mem.pool as never, () => stale as never)
     const grant = yuw('a')
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     expect(saved.targetOrigin).toBe('https://bound.example')
     expect(hosts).toEqual(['bound.example'])
 
     mem.sources.set(SOURCE, at('https://moved.example/plm'))
-    await expect(svc.managementUrl(OWNER, SOURCE)).resolves.toBe(
+    await expect(svc.managementUrl(actor(), SOURCE)).resolves.toBe(
       'https://moved.example/personal-approval-grants#bom-write',
     )
-    await expect(svc.requireUsable(OWNER, saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
+    await expect(svc.requireUsable(actor(), saved.id)).rejects.toMatchObject({ code: 'PLM_BOM_WRITE_FORBIDDEN' })
     await expect(
-      svc.freezeForOperation(OWNER, saved.id, {
+      svc.freezeForOperation(actor(), saved.id, {
         operationKind: 'line',
         partId: 'part-1',
         bomLineId: 'line-1',
@@ -900,7 +1059,7 @@ describe('personal BOM write binding', () => {
     expect(hosts).toEqual(['bound.example'])
     expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(grant)
 
-    const rebound = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('e') })
+    const rebound = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('e') })
     expect(rebound.targetOrigin).toBe('https://moved.example')
     expect(hosts).toEqual(['bound.example', 'moved.example', 'bound.example'])
     expect(fetch.mock.calls[1][1].headers.Authorization).toBe(`Bearer ${yuw('e')}`)
@@ -949,6 +1108,7 @@ describe('personal BOM write binding', () => {
       release() {},
       async query(sql: string, params: unknown[] = []) {
         if (sql.includes('FROM users')) return { rows: [{ id: OWNER }], rowCount: 1 }
+        if (sql.includes('FROM user_orgs')) return { rows: [{ user_id: OWNER }], rowCount: 1 }
         if (sql.includes('FROM data_sources')) return { rows: [sourceRow], rowCount: 1 }
         if (sql.includes('INSERT INTO plm_personal_bom_write_bindings')) {
           stored = {
@@ -994,7 +1154,7 @@ describe('personal BOM write binding', () => {
         config(staleOrigin) as never,
       )
       const svc = new PlmPersonalBomWriteBindingService({ connect: async () => client } as never, () => cached as never)
-      const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: connection, grant })
+      const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: connection, grant })
       expect(saved.targetOrigin).toBe(expectedOrigin)
       expect(stored?.target_origin).toBe(expectedOrigin)
       expect(targets).toEqual([expectedOrigin])
@@ -1025,7 +1185,7 @@ describe('personal BOM write binding', () => {
     }
     const grant = yuw('a')
     const svc = new PlmPersonalBomWriteBindingService(pool as never, () => mem.transport as never)
-    const saved = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
+    const saved = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant })
     killSettle = true
     await expect(svc.unbind(OWNER, saved.id)).rejects.toThrow('process lost')
     expect(mem.bindings[0].encrypted_grant).toBeNull()
@@ -1064,7 +1224,7 @@ describe('personal BOM write binding', () => {
     const { svc } = service(mem)
     const oldGrant = yuw('a')
     const nextGrant = yuw('e', 'f')
-    await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: oldGrant })
+    await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: oldGrant })
     const moved = source()
     ;(moved.config as { connection: { url: string } }).connection.url = 'https://moved.example'
     mem.sources.set(SOURCE, moved)
@@ -1077,7 +1237,7 @@ describe('personal BOM write binding', () => {
       expect(decryptStoredSecretValue(mem.bindings[0].encrypted_grant!)).toBe(nextGrant)
       throw new Error('timeout')
     })
-    const replaced = await svc.bind(OWNER, { dataSourceId: SOURCE, connectionId: 'conn-1', grant: nextGrant })
+    const replaced = await svc.bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: nextGrant })
     expect(replaced.bound).toBe(true)
     expect(replaced.targetOrigin).toBe('https://moved.example')
     expect(replaced.subjectId).toBe('900')
@@ -1313,7 +1473,7 @@ describe('personal BOM write binding', () => {
     expect(mem.retired[0].state).toBe('revoked')
     expect(mem.retired[0].encrypted_grant).toBeNull()
     expect(JSON.stringify(mem.retired)).not.toContain(yuw('a'))
-    const listed = await restarted.list(OWNER)
+    const listed = await restarted.list(actor())
     expect(listed).toEqual([expect.objectContaining({ bound: false, remoteRevokeState: 'revoked', grantId: 'a'.repeat(32) })])
   })
 

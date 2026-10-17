@@ -247,3 +247,34 @@ the existing workbench line/ECO routes: trusted MetaSheet request tenant and
 membership admission, durable frozen intents (including preconditions), actual
 personal dispatch, binding/settings UI and paired native positive/retry/permission
 proof remain required next work. Remote CI of this candidate is pending.
+
+Foundation commit `037f161216ee7843a30c0e71a56ff00a566515a3` was checked live
+on 2026-10-17 at05:53UTC: **49 checks successful**, PR #6425 remains Draft.
+This applies to the foundation commit only. The following trusted actor/membership
+admission edits are uncommitted and require independent local and exact-head CI
+verification. The read-only Astra ultra dispatch design review performed no
+executions and is not test evidence for a personal write chain.
+
+
+### Independently verified actor admission increment
+
+Grok 4.7 (xhigh) implemented the bounded service/type/test slice and then fixed
+the independently identified missing/blank-context collapse. Codex reviewed the
+diff and independently ran both complete unit files: **50 passed in2.59s**;
+backend `tsc --noEmit` exited0. The complete owned PostgreSQL15 file ran
+**7 passed,0 skipped in1.34s**, wrapper1.61s, stable source fingerprints and
+confirmed shutdown/cleanup. This includes a real `pg_blocking_pids` barrier:
+membership deactivation waits while native verification is held, then completes;
+the next use is denied403 without another provider call, preserving ciphertext.
+Both source/binding lock orders and all existing retired-grant restart controls
+also pass. PostgreSQL uses a controlled native-wire fixture, not a paired live
+Yuantus service. Exact fingerprints and limits are in
+`plm-personal-bom-actor-verification-20261017.json`.
+
+Unit negatives cover wrong Meta tenant, revoked/missing membership, source-scope
+changes and five malformed context forms on every admitted entry, with no native
+verification call. Explicit null-private and different Meta/native tenant
+positives remain functional. No new flags, migrations or production defaults
+changed. The service is verified; actual route/JWT carrier integration and the
+full personal line/ECO dispatch/restart chain remain pending. New remote CI must
+verify the actor commit; foundation037's49 green checks do not cover these edits.

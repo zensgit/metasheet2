@@ -14,6 +14,10 @@
  * grant still binds, and a credential already pending or unknown for this
  * binding is refused before it becomes the live secret. A retired DELETE that
  * receives 429 keeps its ciphertext and is revoked on a later 204 restart.
+ *
+ * Membership admission holds user_orgs FOR SHARE through verify. A concurrent
+ * is_active=false must wait in pg_blocking_pids, and the next requireUsable
+ * denies while the new ciphertext stays.
  */
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -45,6 +49,7 @@ if (process.env.PLM_BOM_LOCK_PG_REQUIRED === 'true' && !rawUrl)
   throw new Error('Explicit disposable personal BOM PostgreSQL URL required')
 
 const owner = 'meta-owner'
+const actor = { userId: owner, metaTenantId: 'meta-a' }
 const sourceId = 'source-1'
 const connection = 'conn-1'
 const token = (id: string) => `yuw_${id.repeat(32)}_${'c'.repeat(43)}`
@@ -221,11 +226,169 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     const done = await retired(fx.pool)
     expect(done[0].state).toBe('revoked')
     expect(done[0].encrypted_grant).toBeNull()
-    const listed = await fx.restart().list(owner)
+    const listed = await fx.restart().list(actor)
     expect(listed).toEqual([
       expect.objectContaining({ bound: false, remoteRevokeState: 'revoked', grantId: 'a'.repeat(32) }),
     ])
   }, 20000)
+
+  it('holds membership through verify so revocation waits, then use is denied', async () => {
+    await membershipRevokeDuringVerify()
+  }, 20000)
+
+  async function membershipRevokeDuringVerify(): Promise<void> {
+    if (!rawUrl) throw new Error('owned socket required')
+    process.env.NODE_ENV = 'test'
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
+    process.env.ENCRYPTION_KEY ||= 'synthetic-pg-lock-order-key'
+    process.env.ENCRYPTION_SALT ||= 'synthetic-pg-lock-order-salt'
+    const schema = `plm_bom_lock_${randomUUID().replaceAll('-', '')}`
+    const admin = new Pool({ connectionString: rawUrl, max: 1 })
+    let pool: Pool | undefined
+    let db: Kysely<unknown> | undefined
+    let revoker: PoolClient | undefined
+    let revokerReleased = false
+    let updateSettled = false
+    let releaseVerify = () => {}
+    const releaseRevoker = () => {
+      if (!revoker || revokerReleased) return
+      revokerReleased = true
+      revoker.release()
+    }
+    leftovers.push(async () => {
+      releaseVerify()
+      const deadline = Date.now() + 3000
+      while (!updateSettled && revoker && !revokerReleased && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      releaseRevoker()
+      if (db) await db.destroy()
+      else if (pool) await pool.end()
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await admin.end()
+    })
+    await admin.query(`CREATE SCHEMA "${schema}"`)
+    pool = new Pool({ connectionString: searchPathUrl(rawUrl, schema), max: 6 })
+    const ready = pool
+    db = new Kysely({ dialect: new PostgresDialect({ pool: ready }) })
+    await ready.query(
+      `CREATE TABLE users(id text PRIMARY KEY, is_active boolean NOT NULL);
+       CREATE TABLE user_orgs(
+         user_id text NOT NULL,
+         org_id text NOT NULL,
+         is_active boolean NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now(),
+         PRIMARY KEY (user_id, org_id)
+       );
+       CREATE TABLE data_sources(
+         id text PRIMARY KEY, owner_id text, workspace_id text, tenant_id text,
+         scope_kind text, type text, config jsonb, is_active boolean, deleted_at timestamptz
+       )`,
+    )
+    await up(db)
+    const config = {
+      id: sourceId,
+      name: 'Source',
+      type: 'plm',
+      connection: { url: 'https://native.invalid', headers: { 'x-tenant-id': 'yt-b', 'x-org-id': 'org-1' } },
+      options: { apiMode: 'yuantus', tenantId: 'yt-b', orgId: 'org-1' },
+    }
+    await ready.query('INSERT INTO users VALUES($1,true)', [owner])
+    await ready.query(
+      'INSERT INTO user_orgs(user_id, org_id, is_active) VALUES($1,$2,true)',
+      [owner, 'meta-a'],
+    )
+    await ready.query(
+      "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
+      [sourceId, owner, JSON.stringify(config)],
+    )
+    let enteredVerify = () => {}
+    const verifyStarted = new Promise<void>((resolve) => {
+      enteredVerify = resolve
+    })
+    const verifyHeld = new Promise<void>((resolve) => {
+      releaseVerify = resolve
+    })
+    const methods: string[] = []
+    vi.stubGlobal('fetch', async (url: string, init: { method?: string; headers: Record<string, string> }) => {
+      const method = init.method ?? 'GET'
+      methods.push(method)
+      expect(new URL(String(url)).origin).toBe('https://native.invalid')
+      if (method !== 'POST') throw new Error(`membership race saw ${method}`)
+      enteredVerify()
+      await verifyHeld
+      const grantId = init.headers.Authorization.slice('Bearer yuw_'.length, 'Bearer yuw_'.length + 32)
+      return new Response(JSON.stringify({
+        schema: 'yuantus.plm-bom-write-binding.v1',
+        grant_id: grantId,
+        connection_id: connection,
+        tenant_id: 'yt-b',
+        org_id: 'org-1',
+        auth_user_id: '42',
+        expires_at: '2027-01-01T00:00:00.000000Z',
+        purpose: 'bom_write',
+      }), { status: 200 })
+    })
+    const adapter = new PLMAdapter(
+      { get: async () => undefined } as never,
+      { info() {}, warn() {}, error() {}, debug() {} } as never,
+      { ...config, connection: { ...config.connection, url: 'https://stale-native.invalid' } } as never,
+    )
+    const holder = { pid: 0 }
+    const servicePool: Pick<Pool, 'connect'> = {
+      async connect() {
+        const client = await ready.connect()
+        return {
+          release: () => client.release(),
+          async query(sql: string, params?: unknown[]) {
+            const out = await client.query(sql, params)
+            if (sql.includes('FROM user_orgs') && sql.includes('FOR SHARE')) holder.pid = client.processID
+            return out
+          },
+        } as PoolClient
+      },
+    }
+    const service = new PlmPersonalBomWriteBindingService(servicePool, () => adapter)
+    const grant = token('d')
+    const bindWork = service.bind(actor, { dataSourceId: sourceId, connectionId: connection, grant })
+    await Promise.race([
+      verifyStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('verify barrier not reached')), 5000)),
+    ])
+    expect(holder.pid).toBeGreaterThan(0)
+    revoker = await ready.connect()
+    let updateFinished = false
+    const update = revoker.query(
+      'UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id=$2',
+      [owner, 'meta-a'],
+    ).finally(() => {
+      updateSettled = true
+      updateFinished = true
+    })
+    expect(await blocked(ready, () => revoker!.processID, holder.pid)).toBe(true)
+    expect(updateFinished).toBe(false)
+    releaseVerify()
+    const saved = await bindWork
+    await update
+    releaseRevoker()
+    expect(saved.bound).toBe(true)
+    expect(saved.metaTenantId).toBe('meta-a')
+    expect(saved.yuantusTenantId).toBe('yt-b')
+    expect(methods).toEqual(['POST'])
+    await expect(service.requireUsable(actor, saved.id)).rejects.toMatchObject({
+      status: 403,
+      code: 'PLM_BOM_WRITE_FORBIDDEN',
+    })
+    expect(methods).toEqual(['POST'])
+    const row = await live(ready)
+    expect(row.grant_id).toBe('d'.repeat(32))
+    expect(row.remote_revoke_state).toBeNull()
+    expect(decryptStoredSecretValue(row.encrypted_grant!)).toBe(grant)
+    const membership = await ready.query<{ is_active: boolean }>(
+      'SELECT is_active FROM user_orgs WHERE user_id=$1 AND org_id=$2',
+      [owner, 'meta-a'],
+    )
+    expect(membership.rows[0].is_active).toBe(false)
+  }
 
   async function race(order: 'use-then-bind' | 'bind-then-use'): Promise<void> {
     if (!rawUrl) throw new Error('owned socket required')
@@ -250,6 +413,13 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     db = new Kysely({ dialect: new PostgresDialect({ pool }) })
     await pool.query(
       `CREATE TABLE users(id text PRIMARY KEY, is_active boolean NOT NULL);
+       CREATE TABLE user_orgs(
+         user_id text NOT NULL,
+         org_id text NOT NULL,
+         is_active boolean NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now(),
+         PRIMARY KEY (user_id, org_id)
+       );
        CREATE TABLE data_sources(
          id text PRIMARY KEY, owner_id text, workspace_id text, tenant_id text,
          scope_kind text, type text, config jsonb, is_active boolean, deleted_at timestamptz
@@ -264,6 +434,10 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
       options: { apiMode: 'yuantus', tenantId: 'yt-b', orgId: 'org-1' },
     }
     await pool.query('INSERT INTO users VALUES($1,true)', [owner])
+    await pool.query(
+      'INSERT INTO user_orgs(user_id, org_id, is_active) VALUES($1,$2,true)',
+      [owner, 'meta-a'],
+    )
     await pool.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
       [sourceId, owner, JSON.stringify(config)],
@@ -293,7 +467,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     )
     const provider = () => adapter
     const setup = new PlmPersonalBomWriteBindingService(pool, provider)
-    const first = await setup.bind(owner, { dataSourceId: sourceId, connectionId: connection, grant: token('a') })
+    const first = await setup.bind(actor, { dataSourceId: sourceId, connectionId: connection, grant: token('a') })
     expect(first.id).toBeTruthy()
 
     let releaseHeld = () => {}
@@ -325,12 +499,12 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
       (error: { code?: string }) => ({ ok: false as const, code: error.code ?? null, id: null }),
     )
     if (order === 'use-then-bind') {
-      const use = settle(useService.requireUsable(owner, first.id))
+      const use = settle(useService.requireUsable(actor, first.id))
       await Promise.race([
         held,
         new Promise((_, reject) => setTimeout(() => reject(new Error('use barrier not reached')), 5000)),
       ])
-      const bind = settle(bindService.bind(owner, {
+      const bind = settle(bindService.bind(actor, {
         dataSourceId: sourceId,
         connectionId: connection,
         grant: token('b'),
@@ -341,7 +515,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
       expect(used).toMatchObject({ ok: true, code: null })
       expect(bound).toMatchObject({ ok: true, code: null })
     } else {
-      const bind = settle(bindService.bind(owner, {
+      const bind = settle(bindService.bind(actor, {
         dataSourceId: sourceId,
         connectionId: connection,
         grant: token('b'),
@@ -350,7 +524,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
         held,
         new Promise((_, reject) => setTimeout(() => reject(new Error('bind barrier not reached')), 5000)),
       ])
-      const use = settle(useService.requireUsable(owner, first.id))
+      const use = settle(useService.requireUsable(actor, first.id))
       expect(await blocked(pool, () => usePid.pid, bindPid.pid)).toBe(true)
       releaseGate()
       const [bound, used] = await Promise.all([bind, use])
@@ -389,6 +563,13 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     db = new Kysely({ dialect: new PostgresDialect({ pool }) })
     await pool.query(
       `CREATE TABLE users(id text PRIMARY KEY, is_active boolean NOT NULL);
+       CREATE TABLE user_orgs(
+         user_id text NOT NULL,
+         org_id text NOT NULL,
+         is_active boolean NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now(),
+         PRIMARY KEY (user_id, org_id)
+       );
        CREATE TABLE data_sources(
          id text PRIMARY KEY, owner_id text, workspace_id text, tenant_id text,
          scope_kind text, type text, config jsonb, is_active boolean, deleted_at timestamptz
@@ -403,6 +584,10 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
       options: { apiMode: 'yuantus', tenantId: 'yt-b', orgId: 'org-1' },
     }
     await pool.query('INSERT INTO users VALUES($1,true)', [owner])
+    await pool.query(
+      'INSERT INTO user_orgs(user_id, org_id, is_active) VALUES($1,$2,true)',
+      [owner, 'meta-a'],
+    )
     await pool.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
       [sourceId, owner, JSON.stringify(config)],
@@ -450,7 +635,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
   }
 
   function bind(service: PlmPersonalBomWriteBindingService, id: string) {
-    return service.bind(owner, { dataSourceId: sourceId, connectionId: connection, grant: token(id) })
+    return service.bind(actor, { dataSourceId: sourceId, connectionId: connection, grant: token(id) })
   }
 
   async function live(pool: Pool) {

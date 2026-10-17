@@ -107,6 +107,16 @@ export const personalBomWriteBindingInput = z
   })
   .strict()
 
+/**
+ * Trusted Meta caller. `metaTenantId` is explicit null or a nonempty string.
+ * A future route may set null only for a known legacy_private policy when authenticated context is absent.
+ * It copies JWT `req.authenticatedTenantId` and does not infer a tenant from `req.user`, a header, the body, or the Yuantus tenant.
+ */
+export interface PersonalBomWriteActor {
+  userId: string
+  metaTenantId: string | null
+}
+
 export type PersonalBomWriteOperation = 'verify' | 'revoke' | 'line' | 'eco-intent'
 export interface PersonalBomWriteTarget {
   partId: string

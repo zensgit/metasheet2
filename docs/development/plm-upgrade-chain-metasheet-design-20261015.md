@@ -158,7 +158,7 @@ The binding records the current persistent source owner, MetaSheet tenant,
 workspace/scope and canonical native target origin, plus the separately verified
 Yuantus tenant, organization and subject. Source configuration is re-read under
 locks; a cached adapter URL is not authority to receive a personal bearer. Lock
-order is owner, source, binding, including rebind and use. A first mapping read
+order is active owner, exact active Meta membership (when non-null), source, then binding, including rebind and use. A first mapping read
 must be rechecked after locking; it must not follow a changed mapping into an
 inverted second lock. Transfer or scope/target changes invalidate further use.
 
@@ -188,3 +188,52 @@ must survive a process restart until revocation can be reconciled. Replacement
 must not revoke the replacement credential or lose older pending revocations.
 The encrypted retirement/restart foundation is implemented and independently
 verified below. Consumer admission and automatic reconciliation wiring remain pending.
+
+### Reviewed durable dispatch boundary (implementation pending)
+
+Read-only Astra ultra review pinned MetaSheet `037f1612` and native `e75a9f4`.
+A two-phase transaction is required: phase one commits one immutable logical
+intent before any provider mutation; phase two reacquires current authority and
+sends the stored request. Both phases lock `users FOR SHARE`, exact active
+`user_orgs FOR SHARE`, source, binding, then intent. Source/binding/intent use
+`FOR UPDATE`. `FOR KEY SHARE` would permit an ordinary membership deactivation.
+A unique `(owner, source, operation kind, client key hash)` prevents a changed
+binding/person/origin from creating another namespace for the same operation.
+
+The stored intent must include both identity domains, source workspace/scope,
+canonical native origin/connection/person, target part/line, effective body,
+normalized `If-Match` including absence, fingerprint and stable provider key.
+On an existing logical identity, compare those frozen fields; never refreeze or
+regenerate the key. A current replacement grant for the same person may retry.
+Persisting only a hash cannot reconstruct the request after restart.
+
+An uncertain first commit forbids immediate dispatch. After the first confirmed
+commit, a crash, timeout, malformed provider success or lost local outcome commit
+leaves that same intent recoverable. Known local success also replays through
+native current authorization with the frozen key, rather than bypassing a later
+native revocation. At the reviewed native source this includes current grant,
+membership/global RBAC, entitlement and Part BOM type permission; it does not
+prove per-item Part/line/ECO ACL enforcement. A later refusal does not negate a
+previous unknown attempt that may already have committed. A timed-out HTTP
+request is not distributed cancellation: an admitted provider operation may
+finish after local locks release. Neither distributed atomicity nor cancellation
+is claimed. Existing routes still require implementation and fault/race tests
+against this contract; these paragraphs are not completion evidence.
+
+
+### Trusted actor admission implemented (2026-10-17)
+
+The binding service now requires `{userId, metaTenantId}` for bind, management
+URL, scoped metadata list, use and freeze. `metaTenantId` must be an explicit null
+or a nonempty valid string. Missing, undefined, numeric or blank context cannot
+become legacy admission. Null matches only a persisted null `legacy_private`
+source, without borrowing the native tenant. Non-null context must equal the
+persisted source tenant and have a current active `user_orgs` row locked
+`FOR SHARE` after the active user and before the source/binding locks. The
+membership lock remains held through native verification and local commit.
+
+Self-revoke/unbind cleanup retains owner-only admission and remains available
+when the feature is disabled; it gains no business write authority. The two
+systems' subjects and tenant/org values remain distinct. Actual route construction
+of the trusted actor, durable intents, personal dispatch and binding UI remain
+pending. This service contract does not make a header/body tenant trustworthy.

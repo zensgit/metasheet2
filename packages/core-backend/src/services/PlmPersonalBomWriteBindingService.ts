@@ -18,6 +18,7 @@ import {
   personalBomWriteGrantSchema,
   resolvePersistedPlmSource,
   linePatchBody,
+  type PersonalBomWriteActor,
   type PersonalBomWriteAuthority,
   PlmPersonalBomWriteError as Failure,
   type BindingAuthorizationView,
@@ -119,6 +120,50 @@ export class PlmPersonalBomWriteBindingService {
   private async activeOwner(client: PoolClient, owner: string): Promise<void> {
     const found = await client.query('SELECT id FROM users WHERE id=$1 AND is_active=true FOR SHARE', [owner])
     if (!found.rowCount) throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+  }
+
+  /**
+   * Explicit null stays null. A missing, blank, or non-string tenant is not legacy_private admission.
+   * normalizeMetaTenant collapses those caller values to null, so they are rejected here.
+   */
+  private readActor(actor: PersonalBomWriteActor): { userId: string; metaTenantId: string | null } {
+    if (!actor || typeof actor.userId !== 'string' || actor.userId.length < 1)
+      throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+    if (actor.metaTenantId === null)
+      return { userId: actor.userId, metaTenantId: null }
+    const metaTenantId = normalizeMetaTenant(actor.metaTenantId)
+    if (metaTenantId === null) throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    return { userId: actor.userId, metaTenantId }
+  }
+
+  /**
+   * Active membership for a non-null Meta tenant.
+   * FOR SHARE is held by the caller through the provider call and commit.
+   */
+  private async shareMembership(client: PoolClient, userId: string, metaTenantId: string): Promise<boolean> {
+    const found = await client.query(
+      `SELECT user_id FROM user_orgs
+       WHERE user_id=$1 AND org_id=$2 AND is_active=true
+       FOR SHARE`,
+      [userId, metaTenantId],
+    )
+    return !!found.rowCount
+  }
+
+  private async requireMembership(client: PoolClient, userId: string, metaTenantId: string): Promise<void> {
+    if (!(await this.shareMembership(client, userId, metaTenantId)))
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+  }
+
+  /** Null is admitted only for an explicit legacy_private source, and stays null. */
+  private persistedTenantMatches(source: SourceRow, metaTenantId: string | null): boolean {
+    const persisted = normalizeMetaTenant(source.tenant_id)
+    if (persisted !== metaTenantId) return false
+    return persisted !== null || source.scope_kind === 'legacy_private'
+  }
+
+  private assertPersistedTenant(source: SourceRow, metaTenantId: string | null): void {
+    if (!this.persistedTenantMatches(source, metaTenantId)) throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
   }
 
   private async lockSource(client: PoolClient, dataSourceId: string, owner: string): Promise<SourceRow> {
@@ -224,16 +269,19 @@ export class PlmPersonalBomWriteBindingService {
     return this.secretValue(row.encrypted_grant)
   }
 
-  async managementUrl(owner: string, dataSourceId: string): Promise<string> {
+  async managementUrl(actor: PersonalBomWriteActor, dataSourceId: string): Promise<string> {
     requirePlmPersonalBomWrite()
+    const { userId, metaTenantId } = this.readActor(actor)
     return this.tx(async (client) => {
-      await this.activeOwner(client, owner)
-      const source = await this.lockSource(client, dataSourceId, owner)
+      await this.activeOwner(client, userId)
+      if (metaTenantId !== null) await this.requireMembership(client, userId, metaTenantId)
+      const source = await this.lockSource(client, dataSourceId, userId)
+      this.assertPersistedTenant(source, metaTenantId)
       return personalBomWriteManagementUrl(resolvePersistedPlmSource(this.configOf(source)).origin)
     })
   }
 
-  async bind(owner: string, input: unknown): Promise<PersonalBomWriteBindingMetadata> {
+  async bind(actor: PersonalBomWriteActor, input: unknown): Promise<PersonalBomWriteBindingMetadata> {
     requirePlmPersonalBomWrite()
     const parsed = personalBomWriteBindingInput.safeParse(input)
     if (!parsed.success) {
@@ -242,13 +290,16 @@ export class PlmPersonalBomWriteBindingService {
         throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
       throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
     }
+    const { userId, metaTenantId: actorTenantId } = this.readActor(actor)
     const body = parsed.data
     const bound = await this.tx(async (client) => {
-      await this.activeOwner(client, owner)
+      await this.activeOwner(client, userId)
+      if (actorTenantId !== null) await this.requireMembership(client, userId, actorTenantId)
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `plm-personal-bom-write:${owner}:${body.dataSourceId}`,
+        `plm-personal-bom-write:${userId}:${body.dataSourceId}`,
       ])
-      const source = await this.lockSource(client, body.dataSourceId, owner)
+      const source = await this.lockSource(client, body.dataSourceId, userId)
+      this.assertPersistedTenant(source, actorTenantId)
       const resolved = resolvePersistedPlmSource(this.configOf(source))
       const authority: PersonalBomWriteAuthority = {
         origin: resolved.origin.origin,
@@ -276,11 +327,11 @@ export class PlmPersonalBomWriteBindingService {
         await client.query<Binding>(
           `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings
            WHERE owner_id=$1 AND data_source_id=$2 FOR UPDATE`,
-          [owner, body.dataSourceId],
+          [userId, body.dataSourceId],
         )
       ).rows[0]
       if (previous) {
-        await this.rejectRetiredReuse(client, previous.id, owner, {
+        await this.rejectRetiredReuse(client, previous.id, userId, {
           grantId: grant.grant_id,
           connectionId: grant.connection_id,
           tenantId: grant.tenant_id,
@@ -322,7 +373,7 @@ export class PlmPersonalBomWriteBindingService {
            RETURNING ${BINDING_COLUMNS}`,
           [
             randomUUID(),
-            owner,
+            userId,
             body.dataSourceId,
             grant.connection_id,
             grant.auth_user_id,
@@ -355,25 +406,28 @@ export class PlmPersonalBomWriteBindingService {
           : null
       return { saved, retiredId }
     })
-    if (bound.retiredId) await this.attemptRetired(owner, bound.retiredId)
-    const current = await this.readOwn(owner, bound.saved.id)
+    if (bound.retiredId) await this.attemptRetired(userId, bound.retiredId)
+    const current = await this.readOwn(userId, bound.saved.id)
     return this.metadata(current ?? bound.saved)
   }
 
-  /** Owned metadata. The enable flag is not consulted. */
-  async list(owner: string): Promise<PersonalBomWriteBindingMetadata[]> {
+  /** Owned metadata for the trusted actor. The enable flag is not consulted. */
+  async list(actor: PersonalBomWriteActor): Promise<PersonalBomWriteBindingMetadata[]> {
+    const { userId, metaTenantId } = this.readActor(actor)
     return this.tx(async (client) => {
-      await this.activeOwner(client, owner)
+      await this.activeOwner(client, userId)
+      if (metaTenantId !== null && !(await this.shareMembership(client, userId, metaTenantId))) return []
       const rows = (
         await client.query<Binding>(
           `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings WHERE owner_id=$1 ORDER BY id`,
-          [owner],
+          [userId],
         )
       ).rows
       const visible: PersonalBomWriteBindingMetadata[] = []
       for (const row of rows) {
-        const source = await this.ownedSource(client, row.data_source_id, owner)
+        const source = await this.ownedSource(client, row.data_source_id, userId)
         if (!source || !this.snapshotMatches(source, row)) continue
+        if (!this.persistedTenantMatches(source, metaTenantId)) continue
         visible.push(this.metadata(row))
       }
       return visible
@@ -442,13 +496,13 @@ export class PlmPersonalBomWriteBindingService {
     for (const id of ids) await this.attemptRetired(owner, id)
   }
 
-  async requireUsable(owner: string, bindingId: string): Promise<PersonalBomWriteBindingMetadata> {
+  async requireUsable(actor: PersonalBomWriteActor, bindingId: string): Promise<PersonalBomWriteBindingMetadata> {
     requirePlmPersonalBomWrite()
-    return this.tx(async (client) => this.metadata(await this.usable(client, owner, bindingId)))
+    return this.tx(async (client) => this.metadata(await this.usable(client, actor, bindingId)))
   }
 
   async freezeForOperation(
-    owner: string,
+    actor: PersonalBomWriteActor,
     bindingId: string,
     input: unknown,
   ): Promise<{
@@ -467,7 +521,7 @@ export class PlmPersonalBomWriteBindingService {
       throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
     const payload = request.operationKind === 'line' ? linePatchBody(request.patch) : { partId: request.partId }
     return this.tx(async (client) => {
-      const row = await this.usable(client, owner, bindingId)
+      const row = await this.usable(client, actor, bindingId)
       const operation = freezeNativeOperation({
         operationKind: request.operationKind,
         ownerId: row.owner_id,
@@ -493,12 +547,15 @@ export class PlmPersonalBomWriteBindingService {
     })
   }
 
-  private async usable(client: PoolClient, owner: string, bindingId: string): Promise<Binding> {
-    await this.activeOwner(client, owner)
-    const dataSourceId = await this.mapOwn(client, owner, bindingId)
-    const source = await this.lockSource(client, dataSourceId, owner)
-    const row = await this.lockOwn(client, owner, bindingId)
-    this.assertMappedSource(row, owner, dataSourceId, source.id)
+  private async usable(client: PoolClient, actor: PersonalBomWriteActor, bindingId: string): Promise<Binding> {
+    const { userId, metaTenantId } = this.readActor(actor)
+    await this.activeOwner(client, userId)
+    if (metaTenantId !== null) await this.requireMembership(client, userId, metaTenantId)
+    const dataSourceId = await this.mapOwn(client, userId, bindingId)
+    const source = await this.lockSource(client, dataSourceId, userId)
+    this.assertPersistedTenant(source, metaTenantId)
+    const row = await this.lockOwn(client, userId, bindingId)
+    this.assertMappedSource(row, userId, dataSourceId, source.id)
     this.sameSnapshot(source, row)
     if (row.purpose !== 'bom_write' || !row.encrypted_grant || row.remote_revoke_state)
       throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
