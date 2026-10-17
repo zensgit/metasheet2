@@ -105,6 +105,123 @@
     "Actual appRoutes record/VueRouter/view and signed ordinary Meta JWT, not full main.ts bootstrap; route policy tests do not clone the login guard.",
     "Existing owned-source read uses configured native read principal. No native-person SSO/read-revocation or managed companion install/backup/restore claim.",
     "Native domain candidate dd1 is unpublished; fresh remote 26-step migration/CI still pending.",
-    "Local runtime tested the recorded working source blobs on parent00de; new source commit CI is pending, not inferred from parent49green."
-  ]
+    "Local runtime tested the recorded source blobs on parent00de; exact source687 CI now has16successful checks with actual156web cases. Documentation closeout commit checks remain independently pending."
+  ],
+  "source_ci": {
+    "source_sha": "687e23031083efb32891fc5e144dccf849646de9",
+    "merge_sha": "4821129e29b35c02f5c82efe89af370975af6f80",
+    "base_sha": "00de3a19342d8eea6603fa18859de8a472439722",
+    "observed_utc": "2026-10-17T13:11:02.543110+00:00",
+    "checks_success": 16,
+    "workflow_runs": 16,
+    "personal_run": 39034213448,
+    "personal_job": 117400667895,
+    "backend": {
+      "files": 22,
+      "passed": 394,
+      "seconds": 17.16
+    },
+    "web": {
+      "files": 12,
+      "passed": 156,
+      "seconds": 7.82
+    },
+    "approval_pg16": {
+      "passed": 16,
+      "skipped": 0,
+      "seconds": 12.01
+    },
+    "bom_pg16": {
+      "files": 2,
+      "passed": 22,
+      "skipped": 0,
+      "seconds": 5.18
+    },
+    "backend_and_web_types": "SUCCESS",
+    "executed_junit_guards": "SUCCESS",
+    "stock_browser": "conditional green job117400667887 did not run stock business suite for this source; do not repeat parent00de29 count as current execution",
+    "checks": [
+      {
+        "name": "Approval browser verify (chromium)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213369/job/117400667449"
+      },
+      {
+        "name": "s1-evidence replay gate contract (static census — no DB, no secrets)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213530/job/117400668124"
+      },
+      {
+        "name": "approval-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213386/job/117400667689"
+      },
+      {
+        "name": "attendance-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213327/job/117400667430"
+      },
+      {
+        "name": "guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213567/job/117400668196"
+      },
+      {
+        "name": "elearning-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213400/job/117400667813"
+      },
+      {
+        "name": "integration-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213350/job/117400667450"
+      },
+      {
+        "name": "observation-kit contract (read-only SQL census + runbook gating)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213401/job/117400667747"
+      },
+      {
+        "name": "recovery-schema-drift",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213431/job/117400667840"
+      },
+      {
+        "name": "visual-consumer",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213531/job/117400667925"
+      },
+      {
+        "name": "postgres",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213448/job/117400667895"
+      },
+      {
+        "name": "pr-validate",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213360/job/117400667690"
+      },
+      {
+        "name": "ssh host-key pin contract (fail-closed known_hosts)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213357/job/117400667518"
+      },
+      {
+        "name": "Stock-prep browser verify (chromium)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213447/job/117400667887"
+      },
+      {
+        "name": "tasks-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213393/job/117400667657"
+      },
+      {
+        "name": "tasks-realdb",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213379/job/117400667824"
+      }
+    ],
+    "doc_policy": "One3pathdocumentationcloseout follows; its exactCIwillbe reported inPRbody/state,noadditionalselfSHAloop"
+  }
 }
