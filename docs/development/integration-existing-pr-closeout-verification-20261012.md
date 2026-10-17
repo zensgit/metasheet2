@@ -1,5 +1,77 @@
 # 既有 #6337 收口验证
 
+## 2026-10-17 本轮三文件诊断补丁推送及既有CI获准
+
+Owner明确批准将本轮一个测试与两份现有MD推入原草稿#6337并运行既有合成CI；只覆盖此次推送/执行，不允许新增切片、合并、部署、客户读取或真实发送。推送前只读核验远端仍OPEN/draft，head=549935039，base/head分支未变；测试源仍为已验证e2b509，最终12/12、真实PG取消负例、dot透传及独立只读复核证据见下节。没有将诊断补丁冒称为原CI SQL超时根因修复。
+
+本轮将精确暂存上述三文件，校验staged字节与工作副本一致，正常fast-forward推送；不force、改base或转正式。正式CI结果必须绑定新的实际commit/run，后续另作本地续记；原run38904209572失败、原CI具体SQL未知、旧ABORTED/lease到期及WSL回拨风险保留，不借旧head宜搭71项通过替代新head验收。
+
+## 2026-10-16 后置失败本地复现授权与日志归因勘误
+
+Owner 已授权仅在现有 #6337 内本地复现、最小修复与合成验证；不新增切片、不推送、不重跑 CI、不合并、部署、客户读取或真实发送，完整性守卫不得削弱。
+
+必须撤回下节将 HISTORY_INCOMPLETE 当真实异常的归因：`gh run view --log` 每行含 job、step、payload 三列；step110 的长标题本身包含 HISTORY_INCOMPLETE/system_kind。旧提取器虽然按步骤过滤，却没先移除标题，因而误把标题词当故障枚举。现在先按 tab 切三列、只检查 payload，真实 FAIL 块不含 HISTORY_INCOMPLETE 或 system_kind，含 canceling statement、statement timeout 与 SQLSTATE 57014。它是 PostgreSQL statement timeout，不是已经证明的历史不完整；Test timed out 不命中也绝不等于没有数据库超时。此前宽块的文件名列表还包含失败命令回显，不能当额外失败套件。
+
+首轮本地使用既有 Linux 隔离源与新建 owned PG，目标测试、三份真实 archive fixture、history precheck、迁移 provider、network guard/owned PG helper 逐 SHA 等于当前549935039对应副本；真实 source migration CLI 执行与现有 CI 相同 exclusion，462项成功。目标5001-plan用例+原生隔离哨兵实际2通过、0失败、10 skip，不冒称整文件通过。forbiddenConnections/forbiddenEnvReads均0；输入源码未改，owned PG已移除。回执 SHA `0cf9df3bd9542f5cfe696c2f2971bac2ccca8265a7eebd51bf4112990c272ab3`；migration公开脱敏日志哈希 `437c779f10a62dbc83f59d8757d1dba4e4e457cb2714e05594087b949a091703`，测试日志哈希 `ccf75b1cd058add5a11bfd6e47ff34ea84cf54706b7e42190be0cbc30c2a62a2`。首次定向通过不证明CI时序故障已修；正在原整文件真实路径上采集 SQL 语句哈希、闭合类别、耗时与SQLSTATE，不输出参数/业务值，不修改SQL结果、返回Promise、预算或完整性判定。
+
+第二轮新PG、同462项迁移后，真实整文件11项原测试+1哨兵实际12/12通过、0 skip；隔离计数均0、源码未改、owned PG移除，回执 SHA `980e55d8280c92fd228729272d1e77f8d5e8beec593b0eaf026793637fef8ae9`，测试日志 SHA `22037e673ac7aace50d07a6a8a52c03a65c71c48f4b0042938090d98689e7732`。第一版耗时观察仅覆盖 Client.query 返回Promise路径，事务外 Pool.query 内部callback路径没被记录，不能用其最大398ms宣称全部SQL耗时无风险。已将观察补到Pool.query实际Promise，仍返回原Promise且不替换结果；完整性守卫与原8秒statement_timeout均未修改。CI原始异常仍未本地重现，不宣称已修。
+
+补齐Pool/Client后，原目标再跑实际2通过、10 skip，最大单语句为FIXTURE_RECORDS约2209ms；回执SHA `8ee243f852dfeaca5208b3734fccbf6331ee639b25f29fd2891700e008141a02`，临时PG移除。此结果不能把原CI定性为同一条seed超时。
+
+### 最终本地诊断补丁与真实负例
+
+最终测试文件SHA `e2b509e08ce69886e63c10da0f247f2b4b9b248a4deb04e8e8a4b63e23deb3e6`。只在原q入口捕获57014时输出SA06AQ_SQL_CANCELLED固定帧（阶段、调用计数、SQLSTATE、SQL文本SHA），随后原样throw error。没有更改生产代码、SQL内容、statement_timeout=8000、完整性守卫、恢复事务、5001/5000+1分块、256/4744预算、原断言或任何重试逻辑。
+
+外置负例仅将本次owned PG中目标fixture首次INSERT的实际转发换成SELECT pg_sleep(9)，由原8秒SQL限制产生真实57014；不是伪造reject/error，不是原CI故障重现。首次负例确实失败、PG已移除，但终端/JSON报告未包含console帧，因此外置证明门正确拒绝，回执SHA `640e61e40fffe3fc9c7aa14d97a7baf92d64e4040c455952301771404f78e548`保留。不能把这一轮宣称诊断接线通过。补查Vitest ctx.state实际task.logs后才能取得帧；未修改仓库runner、降低断言或屏蔽原失败。
+
+最终同一新PG/462项真实迁移内先负例后整文件：负例目标失败1、哨兵通过1、其余skip10，真实取消耗时8001ms，任务日志恰一帧stage=FIXTURE_RECORDS/queryOrdinal=34/sqlState=57014/statementSha256=`9cc05846eca7d12432c6de3a9cb0ff0c168031c58cc7013daafa98426564c07c`，与原语句观测SHA一致，且原错误没有被吞掉；负例日志SHA `6216d2bd996fa31d99d98a69f052cf07dcd06d9ce9f0b9d7472f05b91c7d8e6d`。移除外置注入后，最终字节原整文件11项+哨兵实际12/12、0 skip、诊断帧0；最慢fixture INSERT约2245ms，原atomic binding联表约38ms。正例日志SHA `21d08a943626d5f8cb3f7cb6bc1f80c3a39a61c5eb48f453b46aa2dfc9f4c88b`。两段隔离计数均0，最终源码未变、owned PG移除，综合回执SHA `e26275ef4fc3ea92eedf7f7175103e0b7eb135d962cbfcf37a39926f0f2f80a3`。
+
+原strict/noEmit选项下单独加入此测试root作基线/最终候选对照：116条对116条，file/code/message指纹集合相同，无新增类型诊断；不是全包类型绿灯。最终源SHA仍e2b509，类型回执SHA `9ce933dbbfad212ed6613a48c2b974a616c24e55505130fa2a9c596c3301b6e7`，禁网/禁.env计数均0。
+
+结论：已修正错误日志归因并验证最小诊断接线；尚未在本地重现原CI具体SQL超时，也未证明其根因已修。现有正式CI仍failed，不能解除整run阻断或自动启动条件式Chrome试用。下一次获授权的同head/候选CI若再次失败，应以原dot reporter中的SA06AQ_SQL_CANCELLED定位真实阶段与语句SHA；若成功也不反向证明历史超时根因。当前仅本地一个测试与两份原MD改变，未推送或重跑CI。全部临时工具在任务tmp内，不注册新CI切片或产品flag，不碰系统时间服务。
+
+收尾已将本轮5份脱敏运行回执及最终类型回执逐SHA复制到Windows任务tmp/history-incomplete-local-20261016，未复制私有日志、报告或生成凭据。5份运行回执ownedPostgresRemoved均true；主检出仍只有用户原有artifacts/reviews未跟踪目录，本轮隔离检出仅上述3文件改动，HEAD未变。
+
+报告器补核：现有workflow step110显式--reporter=dot，覆盖config中的verbose；上文早期“原verbose reporter”措辞已订正。用当前Vitest1.6.1与真实dot reporter执行一个tmp内无DB诊断帧透传探针，1/1通过，终端stderr确实出现完整闭合SA06AQ_SQL_CANCELLED帧，禁网/禁.env计数均0；不需要修改workflow或添加泳道。该探针只证明报告器透传，不冒充真实PG、业务测试或正式CI证明；真实q入口的PG57014负例由上节独立证明。测试源最终SHA及3文件改动范围不变。
+
+后续独立只读窄范围复核：review_sql_cancel_diagnostic核对冻结HEAD、最终源SHA、该diff、两份MD顶部章节、5份脱敏回执及tmp运行器，未发现该范围的新阻断或误述；确认q随后抛出同一error，8秒限制/5001与5000分块/256与4744断言未变，原CI根因未证明的限制未被省略。复核者未运行测试、联网、读私有日志或编辑文件；不将它表述成全PR/全仓审计。同时主代理只读实查这5个nonce对应scratch根，pg-*子目录残留0，没有读取其中私有文件。原历史误判段已就地明确撤回，避免只读局部片段时仍误用。源SHA仍e2b509，未推送或重跑CI。
+
+## 2026-10-16 正式目标验收通过；整条 CI 后置失败，仍不启动试用
+
+run `38904209572` attempt 1 已 completed/failure；head 为 `549935039ee6aa93cfffb1a9b1c0c7eb57400b85`，读取时仍等于草稿 #6337 当前 head。同 head Integration Guard run `38904179112` completed/success。step98 固定浏览器、step100 前置 real-DB、step101 PLM manual/interval、step102 owner 宜搭均 completed/success；整体失败在后置 step110 multitable real-DB，不是目标步骤 skipped 或前置再次失败。
+
+公开 job 日志仅在内存按步骤与闭合诊断字段投影，未读私有 artifact、凭据或客户数据。64801 行公开日志按 LF 连接的 SHA-256 为 `cc165d64233f7a5ed76230ec4ee66e54a3b06d138c6a3c9692fec94af62e8388`。
+
+- PLM 两条正式结果均 result=passed、failure=null、cleanup=stopped-and-owned-database-removed；回执 SHA 分别为 `6724561e71ec8e439a98718cdd1086ed520f977e3dab1a1722574100124288ba` 与 `8edf2f9e000fdb3a029f37902144bddd00887f99a1b3779c8bdfb21696a93fa0`，sourceFiles 各6588。独立 actual-stop-resolved=2、actual-stop-failed=0、production-stop-failed=0；入口成功还强制核验停止证明、池/监听/协作关闭及 owned PG 移除。
+- 348 条闭合 transport 帧中 ABORTED=0、ABORT=0、signalAborted=0。automationRequests POST 的 SDK 与 PLAYWRIGHT 各有一条 BODY_DONE/status202/complete=true/failure=NONE；PROXY 有 UPSTREAM_COMPLETE、UPSTREAM_END、DOWNSTREAM_FINISH 各一条 status202/complete=true/failure=NONE。PLAYWRIGHT 的 REQUEST_FINISHED 按源码默认 status0/complete=false，不能用它要求 status202/complete=true 后得到0条便误判未完成。
+- 宜搭正式 `YIDA_BROWSER_CI_RESULT` 恰一条：passed=true、tests=71、business=66、sentinels=5。该公开成功帧的原入口先校验同 source/owner SHA 的私有回执、71项计数和 stopped-owned-pg-removed；这里只审计入口契约与公开帧，未直接读取私有回执。不借本地71/71或其他泳道代替。
+
+step110 的真实 FAIL 摘要只有一个测试文件 `packages/core-backend/tests/integration/multitable-recovery-record-after-image-realdb.test.ts`，命中648行的 SA06AR 5001-plan/256-image-budget 用例；本轮三文件提交未改该文件。尚未从闭合脱敏证据确定根因，不把整个步骤中预期负例的 SQL/timeout/deadlock 标签计数当成此用例故障，也不宣称是偶发或可忽略。整体 CI 阻断仍在，不能仅凭目标步骤通过宣称 PR 可发布。
+
+【历史误判，已撤回；见顶部日志归因勘误】此前只读缩窄到真实 FAIL 摘要后100行时，未剥离step标题，误把其中HISTORY_INCOMPLETE当作异常，并误指向历史完整性/fixture链。Error标签及Test timed out未命中不能支持这一归因；真正payload为PostgreSQL statement timeout/57014，原CI具体SQL尚未知。保留此错误记录供审计，不作为当前实施方向。648行仍只是当时测试定义，不是已验证抛错行；后续本地诊断已由owner另行授权，边界及结果见顶部。
+
+保留全部旧 run 的 lease 到期、ABORTED、停止证明失败、宜搭失败/skipped 与 WSL 回拨风险；这次正确 head 的成功是新增正式合成证据，不是历史根因全部修复。未自动重跑、扩展修复、再次推送、合并、部署或真实发送。Chrome 自动试用的“整 run 成功”前提未满足，因此没有启动会过期的临时环境。本段仅本地续记，未推送。
+
+## 2026-10-16 三文件补丁已获授权推送，正式合成 CI 已启动
+
+Owner 明确批准本轮三文件补丁推入原草稿并运行既有合成CI。推送前核验远端仍为bef3f94、OPEN/draft、base/head分支未变；精确暂存仅一个测试与两份MD，staged blob逐项等于受验工作副本，测试SHA仍为下节b1346d。commit `549935039ee6aa93cfffb1a9b1c0c7eb57400b85`，fast-forward推入现有#6337，未force push、改base或转正式。
+
+同head查证plugin-tests.yml没有自动run（原PR base过滤不匹配stacked base），因此按本轮授权一次dispatch既有workflow。Plugin System Tests run `38904209572` attempt1，head严格为549935039；首次元数据状态queued，后续须按这个run核对前置、PLM manual/interval、owner宜搭71项与独立实际停止/清理，未完成或skipped不计通过。同head自动Integration Guard run `38904179112` 首次为in_progress。没有重跑旧失败job或新增泳道。
+
+旧run38858364709 failure及目标skipped保留；本地两轮35/35、变异红和PG移除不替代新head正式证据。当前不解除Chromium发布阻断，不启动以正式通过为前提的试用。不合并、部署、客户读取或真实发送。本段为推送后的本地续记，未再次推送，不能把它误认成已发布commit里的内容。
+
+后续只读核验：同head Integration Guard run38904179112已completed/success；Plugin System Tests run38904209572仍in_progress，step76执行中，step98/100/101/102待执行。Guard绿不替代目标正式浏览器/宜搭和实际停止清理证据，不解除发布门。
+
+后续推进：同run step98固定浏览器安装completed/success，step100前置real-DB proof已in_progress；PLM step101、宜搭step102仍pending。没有把前置开始执行当作修复验收成功，也不回填此前失败或skipped。
+
+关键状态变化：同head/run的step100现completed/success，step101 PLM manual/interval已in_progress，step102宜搭仍pending。此前失败的前置步骤本轮正式通过；单项数量/细节仍待可用正式日志核对，不以步骤绿冒称宜搭71项或实际host.stop/清理已经通过。没有重跑本轮run。
+
+再次推进：step101 PLM manual/interval现completed/success，step102 owner宜搭正式HTTP/browser proof已in_progress。尚待正式日志中两场景的闭合transport帧、独立actual-stop与清理及宜搭71项计数；元数据步骤成功不替代逐项证据审计，发布门仍保留。
+
+目标步骤现均为completed/success：step98、100、101、102。主job仍在step108后置检查；首次只读请求该job公开日志尚不可用，不能据此重启或判失败，也不读取私有artifact替代。宜搭71项实际帧及PLM停止/transport闭合审计暂待job日志可用，发布门仍未解除。
+
+新失败：后置step110 multitable real-DB integration已completed/failure，step122上传结果中；step98/100/101/102仍success。不能把后置失败说成Automation前置复发或PLM/宜搭步骤失败。当前正式整run尚未终结，失败用例及目标日志待公开job日志可用后核验；不自动重跑、不据目标绿灯启动以整run成功为前提的Chrome试用，也不越界修复其它业务模块。
+
 ## 2026-10-16 已授权本地 Automation 复现与测试同步修复
 
 本节覆盖同日之前“等待本地诊断授权”的状态，不改变远端结果。仅改 `packages/core-backend/tests/integration/automation-read-delivery-realdb.test.ts` 与现有设计/验证MD；未提交、推送、重跑CI、合并、部署、客户读取或真实发送。诊断工具保存在本任务tmp中，不接入产品或新增CI切片。

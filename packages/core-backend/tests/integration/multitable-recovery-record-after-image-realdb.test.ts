@@ -6,7 +6,7 @@
  * SA06AR also runs one real async worker tick; no background loop or delivery
  * consumer is started. This file never installs/repairs the public schema.
  */
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -54,7 +54,24 @@ function database(): Pool {
   if (!pool) throw new Error('SA06AQ_DATABASE_NOT_READY')
   return pool
 }
-const q = (statement: string, params: unknown[] = []) => database().query<Record<string, unknown>>(statement, params)
+let queryOrdinal = 0
+const q = async (statement: string, params: unknown[] = []) => {
+  const ordinal = ++queryOrdinal
+  try {
+    return await database().query<Record<string, unknown>>(statement, params)
+  } catch (error) {
+    if (errorCode(error) === '57014') {
+      const normalized = statement.replace(/\s+/gu, ' ').trim()
+      const stage = normalized.startsWith('INSERT INTO meta_records') ? 'FIXTURE_RECORDS'
+        : normalized.includes('bool_and(r.xmin') ? 'ATOMIC_BINDING' : 'OTHER'
+      // No SQL, parameters, fixture identities, response or original error text.
+      // 57014 also covers explicit cancellation; do not infer its cause here.
+      console.error('SA06AQ_SQL_CANCELLED ' + JSON.stringify({ stage, queryOrdinal: ordinal,
+        sqlState: '57014', statementSha256: createHash('sha256').update(normalized).digest('hex') }))
+    }
+    throw error
+  }
+}
 const transaction: RecoveryArchiveRestoreJobTransaction = async work => {
   const client = await database().connect()
   let began = false
