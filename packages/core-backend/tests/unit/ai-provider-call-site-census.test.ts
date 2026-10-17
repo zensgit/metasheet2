@@ -19,6 +19,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import * as ts from 'typescript'
 
 import { describe, expect, it } from 'vitest'
 
@@ -29,6 +30,29 @@ const KNOWN_CALL_SITES = [
   'services/ai-bulk-shared.ts', // runShortcutCore — shipped shortcut / bulk-fill / async worker
   'services/governed-ai-service.ts', // the boundary itself
 ].sort()
+
+// A ledger terminal transition is not an AI provider. Pin the ONE reviewed call,
+// not its whole file; an additional provider call in this file must still be found.
+const LEDGER_SITE = 'integration/automation-read-executor.ts'
+const LEDGER_CALL = 'ledger.complete({ ...reference, result: result as ReadPreview, signal: controller.signal })'
+function completionCalls(file: string, text: string): string[] {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
+  const calls: string[] = []
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'complete') calls.push(node.getText(source).replace(/\s+/g, ' '))
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return calls
+}
+function classifyCompletionCalls(file: string, text: string) {
+  const calls = completionCalls(file, text)
+  return {
+    ledger: calls.filter(call => file === LEDGER_SITE && call === LEDGER_CALL),
+    providers: calls.filter(call => file !== LEDGER_SITE || call !== LEDGER_CALL),
+  }
+}
 
 function walkTsFiles(dir: string, acc: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -57,14 +81,32 @@ describe('AI provider call-site census (pins the governed-AI scope claim)', () =
 
   it('every `.complete(` provider call site is a KNOWN, routing-gated one', () => {
     const found: string[] = []
+    let ledgerCalls = 0
     for (const file of files) {
       const text = readFileSync(file, 'utf8')
-      // Strip block comments so a doc mention of `.complete()` is not a call site.
-      const code = text.replace(/\/\*[\s\S]*?\*\//g, '')
-      // A real call: `<something>.complete({` — the provider client's only signature.
-      if (/\.complete\(\s*\{/.test(code)) found.push(relative(file))
+      const classified = classifyCompletionCalls(relative(file), text)
+      ledgerCalls += classified.ledger.length
+      if (classified.providers.length) found.push(relative(file))
     }
+    expect(ledgerCalls, 'remove stale ledger classification, never retain a file exemption').toBe(1)
     expect(found.sort()).toEqual(KNOWN_CALL_SITES)
+  })
+
+  it('the classified ledger receiver is the host ledger return type, not an AI provider alias', () => {
+    const source = readFileSync(join(SRC_ROOT, LEDGER_SITE), 'utf8')
+    expect(source).toContain("import type { createAutomationReadLedger, ReadCheckpoint } from './automation-read-ledger'")
+    expect(source).toContain('ledger: ReturnType<typeof createAutomationReadLedger>')
+    expect(source).toContain('const { ledger, authority, transaction, sourceExecution, preview, onExecutionDiagnostic } = options')
+  })
+
+  it('a new provider call in the ledger file is not hidden by the ledger classification', () => {
+    const source = readFileSync(join(SRC_ROOT, LEDGER_SITE), 'utf8')
+    expect(classifyCompletionCalls(LEDGER_SITE, source).providers).toEqual([])
+    for (const call of ['provider.complete({ prompt })', 'provider.complete(input)', 'provider.complete?.(input)']) {
+      expect(classifyCompletionCalls(LEDGER_SITE, `${source}\n${call}`).providers).toEqual([call])
+    }
+    expect(classifyCompletionCalls('services/new-provider.ts', LEDGER_CALL).providers).toEqual([LEDGER_CALL])
+    expect(classifyCompletionCalls(LEDGER_SITE, `${source}\n${LEDGER_CALL}`).ledger).toHaveLength(2)
   })
 
   it('BOTH known call sites import the routing choke `authorizeAiRoute`', () => {

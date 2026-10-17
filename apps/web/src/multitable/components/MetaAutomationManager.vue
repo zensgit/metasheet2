@@ -867,6 +867,8 @@
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useRouter } from 'vue-router'
+import { automationReadOwnerHint, containsAutomationReadAction } from '../automationReadAuthoring'
+import { summarizeAutomationAction } from '../automationActionSummary'
 import type {
   AutomationExecution,
   AutomationRule,
@@ -1809,6 +1811,10 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>) {
 }
 
 async function onTestRule(ruleId: string) {
+  if (containsAutomationReadAction(rules.value.find((rule) => rule.id === ruleId))) {
+    setRuleTestRunState(ruleId, { status: 'failed', message: automationReadOwnerHint(isZh.value) })
+    return
+  }
   if (!props.client) return
   setRuleTestRunState(ruleId, {
     status: 'running',
@@ -2059,6 +2065,10 @@ function openCreateForm() {
 // see the template). Kept in sync with DraftState (and with F9's canonical action types) so the quick
 // form stays coherent if it is ever wired back to a card.
 function openEditForm(rule: AutomationRule) {
+  if (containsAutomationReadAction(rule)) {
+    openRuleEditor(rule)
+    return
+  }
   editingRuleId.value = rule.id
   const legacyFolded: AutomationActionType = rule.actionType === 'notify'
     ? 'send_notification'
@@ -2294,6 +2304,8 @@ function describeAction(rule: AutomationRule): string {
 
 function describeActionType(actionType: AutomationActionType, actionConfig: Record<string, unknown>): string {
   switch (actionType) {
+    case 'integration_read_preview':
+      return summarizeAutomationAction({ type: actionType, integrationReadPreview: { allowManual: actionConfig.allowManual } }, isZh.value)
     case 'notify':
     case 'send_notification':
       return automationCardActionSummary(actionType, '', isZh.value)

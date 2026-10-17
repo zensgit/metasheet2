@@ -2707,6 +2707,27 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded')
   })
 
+  it('blocks controlled read previews in both the ordinary Test button and manager handler', async () => {
+    const type = 'integration_read_preview'
+    const config = { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: true }
+    const { client, fetchFn } = mockClient([fakeRule({
+      actionType: type, actionConfig: config, actions: [{ type, config }],
+    })])
+    const { container, app } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    try {
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect((container.querySelector('[data-action="test"]') as HTMLButtonElement).disabled).toBe(true)
+      const state = app._instance?.subTree.component?.setupState as Record<string, unknown>
+      fetchFn.mockClear()
+      await (state.onTestRule as (ruleId: string) => Promise<void>)('rule_1')
+      await flushPromises()
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('owner')
+    } finally { app.unmount(); container.remove() }
+  })
+
   it('shows a successful automation test run status and refreshes stats', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client, fetchFn } = mockClient([

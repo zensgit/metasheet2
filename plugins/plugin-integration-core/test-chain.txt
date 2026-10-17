@@ -290,6 +290,11 @@ node __tests__/stock-preparation-read-plan-validation-ledger.test.cjs
 node __tests__/stock-preparation-read-plan-validation-read.test.cjs
 node __tests__/stock-preparation-read-plan-validation-runtime.test.cjs
 
+node __tests__/stock-preparation-automation-host-wiring.test.cjs
+node __tests__/stock-preparation-automation-preview.test.cjs
+node __tests__/stock-preparation-automation-profile.test.cjs
+node __tests__/stock-preparation-automation-target-contract.test.cjs
+
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

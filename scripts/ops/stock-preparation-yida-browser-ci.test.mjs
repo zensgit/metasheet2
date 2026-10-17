@@ -15,6 +15,7 @@ import { assertOwnedScratch, assertPlainOwnedTree, SCRATCH_OWNER } from './lib/s
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const lib = path.join(root, 'scripts/ops/lib')
 const native = createRequire(import.meta.url)(path.join(lib, 'stock-preparation-browser-network-isolation.cjs'))
+const browserCandidate = createRequire(import.meta.url)(path.join(lib, 'stock-preparation-yida-browser-candidate.cjs'))
 const clone = value => JSON.parse(JSON.stringify(value))
 function validSnapshot() {
   return {
@@ -28,7 +29,7 @@ function validSnapshot() {
   }
 }
 function validReceipt() {
-  return { files: [...TEST_FILES].sort(), counts: { files: 5, tests: 70, passed: 70, failed: 0, skipped: 0,
+  return { files: [...TEST_FILES].sort(), counts: { files: 5, tests: 71, passed: 71, failed: 0, skipped: 0,
     sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 },
   policy: { pool: 'forks', config: CONFIG, retry: 0, repeat: 0, watch: false,
     filtered: false, setupFiles: 0, globalSetup: 0 } }
@@ -48,7 +49,10 @@ test('ambient DB, PG, preload, credentials and production flags cannot enter chi
 
 test('public entry accepts only one PG binary directory and no arbitrary command or test selector', () => {
   assert.deepEqual(parsePublicArguments(['--pg-bin', root]), { pgBin: root })
+  assert.deepEqual(parsePublicArguments(['--pg-bin', root, '--browser-candidate', 'upstream-1719529']),
+    { pgBin: root, browserCandidate: 'upstream-1719529' })
   for (const args of [[], ['--pg-bin', 'relative'], ['--command', root], ['--pg-bin', root, '--retry', '1'],
+    ['--pg-bin', root, '--browser-candidate', 'latest'], ['--pg-bin', root, '--browser-executable', root],
     ['--pg-bin', root, '--testNamePattern', 'sentinel'], ['--worker', root], ['--pg-bin', root + '\0']]) {
     assert.throws(() => parsePublicArguments(args), /YIDA_BROWSER_CI_ARGUMENTS_INVALID/u)
   }
@@ -69,6 +73,44 @@ test('startup diagnostic accepts only private reason tags and fixed stage labels
     assert.deepEqual(startupFailureDiagnostic(error, 'ENVIRONMENT_FILES'),
       { stage: 'ENVIRONMENT_FILES', reason: 'INTERNAL' })
   }
+})
+
+test('local browser selection defaults unchanged and rejects ambient overrides or incomplete owner context', () => {
+  assert.equal(browserCandidate.pinnedBrowserForRoot(root), undefined)
+  assert.equal(browserCandidate.browserFromOwner(root, {
+    CHROME_EXECUTABLE: '/synthetic/foreign', BROWSER_CANDIDATE: 'upstream-1719529',
+  }), undefined)
+  assert.throws(() => browserCandidate.pinnedBrowserForRoot(root, 'latest'))
+  assert.throws(() => browserCandidate.browserFromOwner(root, { YIDA_BROWSER_CI_OWNER: '/synthetic/foreign' }))
+  assert.throws(() => browserCandidate.browserFromOwner(root, { YIDA_BROWSER_CI_OWNER_SHA256: '0'.repeat(64) }))
+})
+
+test('local candidate refuses foreign owner path and mismatched candidate bytes before browser launch', async () => {
+  assert.throws(() => browserCandidate.browserFromOwner(root, {
+    YIDA_BROWSER_CI_OWNER: path.join(root, 'owner.json'), YIDA_BROWSER_CI_OWNER_SHA256: '0'.repeat(64),
+  }))
+  const sandbox = path.join(root, 'tmp', 'browser-candidate-contract-' + randomUUID())
+  const source = path.join(sandbox, 'source')
+  const binary = path.join(sandbox, 'browser-fix-probe/upstream-1719529/chrome-linux/chrome')
+  await fs.mkdir(path.dirname(binary), { recursive: true })
+  await fs.mkdir(source)
+  await fs.writeFile(binary, 'not-the-pinned-browser', { mode: 0o700 })
+  try { assert.throws(() => browserCandidate.pinnedBrowserForRoot(source, browserCandidate.ID)) }
+  finally { await fs.rm(sandbox, { recursive: true, force: true }) }
+})
+
+test('browser owner bytes must match their original digest even when legacy selection has no candidate', async () => {
+  const sandbox = path.join(root, 'tmp', 'yida-browser-ci-' + randomUUID())
+  await fs.mkdir(sandbox, { mode: 0o700 })
+  const ownerPath = path.join(sandbox, 'owner.json')
+  const raw = JSON.stringify({ protocol: 'YIDA_BROWSER_CI_NATIVE_V1', root })
+  await fs.writeFile(ownerPath, raw, { mode: 0o600 })
+  const env = { YIDA_BROWSER_CI_OWNER: ownerPath, YIDA_BROWSER_CI_OWNER_SHA256: createHash('sha256').update(raw).digest('hex') }
+  try {
+    assert.equal(browserCandidate.browserFromOwner(root, env), undefined)
+    await fs.appendFile(ownerPath, ' ')
+    assert.throws(() => browserCandidate.browserFromOwner(root, env))
+  } finally { await fs.rm(sandbox, { recursive: true, force: true }) }
 })
 
 test('startup diagnostic never reads hostile error properties, getters or proxy traps', () => {
@@ -167,7 +209,7 @@ test('implicit Vite env files are refused by filename without reading their valu
   }
 })
 
-test('whole-five-file receipt preserves 65 business tests plus five sentinels', () => {
+test('whole-five-file receipt preserves 66 business tests plus five sentinels', () => {
   assert.equal(validateTaskReceipt(validReceipt()), true)
   for (const key of ['files', 'tests', 'passed', 'sentinels']) {
     const receipt = validReceipt(); receipt.counts[key]--
@@ -407,7 +449,7 @@ test('production capture and outer caller classify only exact unshare denial and
       owner.hashes[probe] = fileHash(probe)
       // Even an otherwise successful receipt cannot override the child exit.
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }), { mode: 0o600 })
       const file = path.join(sandbox, 'namespace.stderr.log')
       if (variant === 'hash') await fs.appendFile(file, 'synthetic-secret')
       if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
@@ -705,10 +747,10 @@ test('diagnostic log hash, file mode, byte budget and source failures are fixed 
     // Original success criteria still govern even if the diagnostic view is
     // unavailable. No new protocol serves as a capability or success fallback.
     await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }), { mode: 0o600 })
     const lines = []
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), true)
-    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":71,"business":66,"sentinels":5}'])
     owner.hashes[path.join(lib, 'stock-preparation-plm-owned-pg.mjs')] = '0'.repeat(64)
     lines.length = 0
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false)
@@ -738,9 +780,9 @@ test('production outer caller rejects each single failure against an otherwise s
       await fs.writeFile(probe, '// synthetic original source', { mode: 0o600 })
       owner.hashes[probe] = fileHash(probe)
       const receipt = { ownerSha, sourceSha: sha(JSON.stringify(owner.hashes)),
-        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }
+        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }
       if (fault === 'cleanup') receipt.cleanup = 'stop-failed-data-retained'
-      if (fault === 'tests') receipt.tests = 69
+      if (fault === 'tests') receipt.tests = 70
       if (fault === 'passed') receipt.passed = false
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify(receipt), { mode: 0o600 })
       // Mutate only a private synthetic source byte, keeping owner hashes and
@@ -749,7 +791,7 @@ test('production outer caller rejects each single failure against an otherwise s
       const lines = [], passed = reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line))
       assert.equal(passed, fault === 'none', fault)
       if (fault === 'none') assert.deepEqual(lines,
-        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":71,"business":66,"sentinels":5}'])
       else {
         assert.equal(process.exitCode, 1, fault)
         assert.equal(lines.length, 2, fault)

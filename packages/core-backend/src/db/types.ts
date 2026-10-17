@@ -1478,6 +1478,7 @@ export interface MultitableAutomationExecutionsTable {
   triggered_at: CreatedAt
   status: string
   steps: JsonObjectArrayColumn
+  integration_read: JsonObjectColumn
   error: string | null
   duration: number | null
   // A1 run-governance snapshot columns (nullable for rows predating the migration).

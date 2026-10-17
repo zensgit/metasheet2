@@ -29,6 +29,8 @@ const preload = path.join(lib, 'stock-preparation-yida-browser-ci-preload.cjs')
 const backend = path.join(root, 'packages/core-backend')
 const requireBackend = createRequire(path.join(backend, 'package.json'))
 const native = createRequire(import.meta.url)(nativePath)
+const candidatePath = path.join(lib, 'stock-preparation-yida-browser-candidate.cjs')
+const { ID: candidateId, pinnedBrowserForRoot } = createRequire(import.meta.url)(candidatePath)
 // Only errors created here carry a public reason. Never inspect thrown values:
 // even message/code getters or a forged Error can contain customer values.
 const failureReasons = new WeakMap()
@@ -167,10 +169,11 @@ export function cleanEnvironment(input = {}) {
 }
 
 export function parsePublicArguments(args) {
-  if (args.length !== 2 || args[0] !== '--pg-bin' || !path.isAbsolute(args[1]) || args[1].includes('\0')) {
+  if (![2, 4].includes(args.length) || args[0] !== '--pg-bin' || !path.isAbsolute(args[1]) || args[1].includes('\0')
+    || args.length === 4 && (args[2] !== '--browser-candidate' || args[3] !== candidateId)) {
     throw fail('ARGUMENTS_INVALID')
   }
-  return { pgBin: path.resolve(args[1]) }
+  return { pgBin: path.resolve(args[1]), ...(args.length === 4 ? { browserCandidate: candidateId } : {}) }
 }
 
 export function assertNoEnvironmentFiles(directories) {
@@ -202,8 +205,9 @@ export function fileHash(file) {
   finally { fs.closeSync(descriptor) }
   return result.digest('hex')
 }
-function sourcePaths(node, cli) {
-  return [runner, nativePath, pgPath, helper, preload, node, cli, path.join(backend, CONFIG),
+function sourcePaths(node, cli, browserCandidate) {
+  return [runner, nativePath, pgPath, helper, preload, candidatePath, node, cli, path.join(backend, CONFIG),
+    ...(browserCandidate ? [browserCandidate.executablePath] : []),
     ...TEST_FILES.map(file => path.join(backend, file)),
     ...['stock-preparation-yida-owner-browser-fixture.ts', 'stock-preparation-yida-owner-http-fixture.ts',
       'yida-native-module-import.cjs'].map(file => path.join(backend, 'tests/utils', file))]
@@ -228,7 +232,9 @@ function readOwner(ownerPath, sha) {
   assert.equal(owner.node, process.execPath); assert.equal(owner.uid, process.getuid()); assert.equal(owner.gid, process.getgid())
   assert.equal(owner.cli, requireBackend.resolve('vitest/vitest.mjs'))
   assert.equal(owner.collector, path.join(path.dirname(ownerPath), 'collector.mjs'))
-  assert.deepEqual(Object.keys(owner.hashes).sort(), [...sourcePaths(owner.node, owner.cli), owner.collector].sort())
+  const browserCandidate = pinnedBrowserForRoot(root, owner.browserCandidate?.id)
+  assert.deepEqual(owner.browserCandidate, browserCandidate)
+  assert.deepEqual(Object.keys(owner.hashes).sort(), [...sourcePaths(owner.node, owner.cli, browserCandidate), owner.collector].sort())
   assert.equal(owner.hashes[owner.collector], hash(COLLECTOR))
   verifyHashes(owner)
   assert.notEqual(fs.readlinkSync('/proc/self/ns/net'), owner.parentNetworkNamespace)
@@ -271,7 +277,7 @@ export default class Collector {
 
 export function validateTaskReceipt(receipt) {
   assert.deepEqual(receipt.files, [...TEST_FILES].sort())
-  assert.deepEqual(receipt.counts, { files: 5, tests: 70, passed: 70, failed: 0, skipped: 0,
+  assert.deepEqual(receipt.counts, { files: 5, tests: 71, passed: 71, failed: 0, skipped: 0,
     sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
   assert.deepEqual(receipt.policy, { pool: 'forks', config: CONFIG, retry: 0, repeat: 0,
     watch: false, filtered: false, setupFiles: 0, globalSetup: 0 })
@@ -394,7 +400,7 @@ async function worker(owner, ownerPath, ownerSha) {
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
-    assert.equal(report.success, true); assert.equal(report.numTotalTests, 70); assert.equal(report.numPassedTests, 70)
+    assert.equal(report.success, true); assert.equal(report.numTotalTests, 71); assert.equal(report.numPassedTests, 71)
     for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(report[key], 0)
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
@@ -411,7 +417,7 @@ async function worker(owner, ownerPath, ownerSha) {
     // available; only the original owned-PG module removes its own PG subtree.
     const receiptRaw = JSON.stringify({ protocol: owner.protocol,
       ownerSha, sourceSha: hash(JSON.stringify(owner.hashes)), passed, cleanup,
-      tests: passed ? 70 : 0, sentinels: passed ? 5 : 0, business: passed ? 65 : 0,
+      tests: passed ? 71 : 0, sentinels: passed ? 5 : 0, business: passed ? 66 : 0,
       isolatedNetwork: isolation.isolatedNetwork, unixIpcIsolated: false,
       sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage, result })
     privateWrite(path.join(evidence, 'receipt.json'), receiptRaw)
@@ -468,20 +474,20 @@ export function reportOuterResult(owner, ownerSha, terminal, evidence, write = c
     const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
     assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
     assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
-    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 70)
+    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 71)
     passed = terminal.passed
   } catch { /* Original refusal remains; diagnostics carry only fixed fields. */ }
   if (!passed) write('YIDA_BROWSER_CI_CHILD_FAILED ' + JSON.stringify(
     childFailureDiagnostic(terminal, evidence, ownerSha, hash(JSON.stringify(owner.hashes)), postHashesVerified)))
-  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 70 : 0,
-    business: passed ? 65 : 0, sentinels: passed ? 5 : 0 }))
+  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 71 : 0,
+    business: passed ? 66 : 0, sentinels: passed ? 5 : 0 }))
   if (!passed) process.exitCode = 1
   return passed
 }
 
 async function outer(args, setStage) {
   setStage('ARGUMENTS')
-  const { pgBin } = parsePublicArguments(args)
+  const { pgBin, browserCandidate: selector } = parsePublicArguments(args)
   setStage('RUNTIME')
   assertRuntime()
   setStage('ENVIRONMENT_FILES')
@@ -504,10 +510,12 @@ async function outer(args, setStage) {
   const collector = path.join(evidence, 'collector.mjs')
   privateWrite(collector, COLLECTOR)
   setStage('SOURCE_INTEGRITY')
+  const browserCandidate = pinnedBrowserForRoot(root, selector)
   const owner = { protocol: 'YIDA_BROWSER_CI_NATIVE_V1', root, runner, helper, preload, native: nativePath,
     node, cli, collector, pgBin, uid: process.getuid(), gid: process.getgid(),
+    ...(browserCandidate ? { browserCandidate } : {}),
     parentNetworkNamespace: fs.readlinkSync('/proc/self/ns/net'),
-    hashes: Object.fromEntries([...sourcePaths(node, cli), collector].map(file => [file, fileHash(file)])) }
+    hashes: Object.fromEntries([...sourcePaths(node, cli, browserCandidate), collector].map(file => [file, fileHash(file)])) }
   verifyHashes(owner)
   setStage('OWNER')
   const ownerPath = path.join(evidence, 'owner.json'), raw = JSON.stringify(owner), ownerSha = hash(raw)

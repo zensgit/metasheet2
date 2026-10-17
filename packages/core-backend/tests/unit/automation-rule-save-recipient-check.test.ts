@@ -42,7 +42,7 @@ interface Harness {
  * The roster stub models the REAL resolver's two reads and its KEYING: a roster asked for another
  * sheet comes back empty, so a gate that read the wrong sheet cannot stay green by accident.
  */
-function makeHarness(options: { members?: string[]; rosterError?: Error; withQueryFn?: boolean } = {}): Harness {
+function makeHarness(options: { members?: string[]; rosterError?: Error; withQueryFn?: boolean; missingInsertReceipt?: boolean } = {}): Harness {
   const members = options.members ?? ['u1', 'u2']
   const calls: QueryCall[] = []
   const insertRows: Record<string, unknown>[] = []
@@ -90,7 +90,13 @@ function makeHarness(options: { members?: string[]; rosterError?: Error; withQue
   chain.values = vi.fn((row: unknown) => { insertRows.push(row as Record<string, unknown>); return chain })
   chain.set = vi.fn((row: unknown) => { setCalls.push(row as Record<string, unknown>); return chain })
   chain.execute = vi.fn(async () => {
-    if (lastVerb.startsWith('insert')) return []
+    if (lastVerb.startsWith('insert')) {
+      expect(lastVerb).toBe('insert:automation_rules')
+      expect(chain.returningAll).toHaveBeenCalled()
+      if (options.missingInsertReceipt) return []
+      // Model INSERT ... RETURNING, including database-generated schedule identity.
+      return [{ ...insertRows.at(-1), created_at: '2026-09-01T00:00:00.000Z', updated_at: '2026-09-01T00:00:00.000Z' }]
+    }
     return executeResults.shift() ?? []
   })
   chain.executeTakeFirst = vi.fn(async () => selectResults.shift())
@@ -251,6 +257,7 @@ describe('F9c — createRule recipient roster gate', () => {
     const rule = await h.service.createRule(SHEET_ID, notifyCreateInput({ message: 'ping', userIds: ['u1', 'u2'] }))
 
     expect(rule.action_type).toBe('send_notification')
+    expect(rule.created_at).toBe('2026-09-01T00:00:00.000Z')
     const rows = h.insertedRows()
     expect(rows).toHaveLength(1)
     // Write SHAPE is untouched by this slice: same column set, same serialization.
@@ -267,6 +274,14 @@ describe('F9c — createRule recipient roster gate', () => {
   it('normalizes with the executor function: padding and duplicates are accepted, not rejected (M3)', async () => {
     await h.service.createRule(SHEET_ID, notifyCreateInput({ message: 'ping', userIds: [' u1 ', 'u1', 'u2'] }))
 
+    expect(h.insertedRows()).toHaveLength(1)
+  })
+
+  it('does not fabricate a saved rule when INSERT returns no receipt', async () => {
+    h = makeHarness({ missingInsertReceipt: true })
+    await expect(h.service.createRule(SHEET_ID, notifyCreateInput({ message: 'ping', userIds: ['u1'] })))
+      .rejects.toThrow('AUTOMATION_RULE_INSERT_NOT_RETURNED')
+    expect(h.rosterCalls()).toHaveLength(1)
     expect(h.insertedRows()).toHaveLength(1)
   })
 

@@ -55,6 +55,37 @@ function first(result) {
   return rows[0] || null
 }
 function rows(result) { return Array.isArray(result) ? result : (result && Array.isArray(result.rows) ? result.rows : []) }
+function automationRevision(value) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)) {
+    fail(409, 'READ_PLAN_AUTOMATION_AUTHORITY_INVALID')
+  }
+  return value
+}
+// Private DB JSON projection only. Do not invoke getters/serializers or retain
+// driver-owned objects; timestamps arrive as exact UTC microsecond strings.
+function frozenAutomationJson(value, ancestors = new Set(), depth = 0) {
+  const invalid = () => fail(409, 'READ_PLAN_AUTOMATION_AUTHORITY_INVALID')
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (!value || typeof value !== 'object' || ancestors.has(value) || depth > 64) return invalid()
+  ancestors.add(value)
+  try {
+    if (Array.isArray(value)) {
+      if (Reflect.ownKeys(value).length !== value.length + 1) return invalid()
+      return Object.freeze(Array.from({ length: value.length }, (_, index) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return invalid()
+        return frozenAutomationJson(descriptor.value, ancestors, depth + 1)
+      }))
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return invalid()
+    return Object.freeze(Object.fromEntries(Reflect.ownKeys(value).map(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (typeof key !== 'string' || !descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return invalid()
+      return [key, frozenAutomationJson(descriptor.value, ancestors, depth + 1)]
+    })))
+  } finally { ancestors.delete(value) }
+}
 function whereScope(scope) { return { tenant_id: scope.tenantId, workspace_id: scope.workspaceId } }
 function whereFamily(scope, config) {
   return { ...whereScope(scope), action_id: config.actionId, system_id: config.systemId }
@@ -420,6 +451,103 @@ function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUU
     // facade calls must bind this revision to the actually used adapter too.
     return { activation, version, sourceValidation }
   }
+  // Private host prerequisite: the caller owns this raw PostgreSQL transaction
+  // and retains every lock until its own COMMIT/ROLLBACK. This is NOT a public
+  // plugin capability, an authorization grant, or permission to execute a read.
+  // The host must separately verify current subject/admin/rule/target authority.
+  async function lockActiveForAutomation(queryable, input = {}) {
+    const scope = scopeOf(input)
+    const actor = actorOf(input.actor)
+    const action = text(input.actionId)
+    const system = text(input.systemId)
+    if (scope.workspaceId !== null) fail(409, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE')
+    // Do not SET isolation here: the caller may already have acquired subject
+    // locks. Probe the actual handle, not a forgeable isTransaction property.
+    // As with the host guard, this catches accidental pool/autocommit misuse;
+    // an actively dishonest query implementation is outside the trust boundary.
+    try {
+      if (!queryable || typeof queryable.query !== 'function') throw new Error('unavailable')
+      const probe = async () => {
+        const row = first(await queryable.query(
+          "SELECT pg_current_xact_id()::text AS xid, current_setting('transaction_isolation') AS isolation_level", []))
+        if (!row || typeof row.xid !== 'string' || !/^[0-9]+$/.test(row.xid)
+          || row.isolation_level !== 'read committed') throw new Error('unavailable')
+        return row.xid
+      }
+      if (await probe() !== await probe()) throw new Error('unavailable')
+    } catch (_error) { fail(500, 'READ_PLAN_TRANSACTION_UNAVAILABLE') }
+    const scoped = createDb({ database: { query: (...args) => queryable.query(...args) } })
+    const readAuthorityRow = async (table, where, locked) => {
+      // All identifiers below are private constants, never caller input. Feed
+      // the ACTUAL rows to the existing checkers, preserving UTC microseconds
+      // before the pg Date parser can lose information. No public DTO changes.
+      const receipt = table === VALIDATION_TABLE
+      const pointer = table === ACTIVATION_TABLE
+      const clocks = receipt ? ['begun_at', 'expires_at', 'finished_at', 'confirmed_at'] : ['created_at', 'updated_at']
+      const times = clocks.map(column => `'${column}', pg_catalog.to_char(r.${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`).join(', ')
+      const params = [where.tenant_id, where.workspace_id, pointer ? where.action_id : where.id]
+      if (receipt) params.push(where.version_id)
+      const raw = first(await queryable.query(`SELECT (pg_catalog.to_jsonb(r) || pg_catalog.jsonb_build_object(
+        'automation_authority_revision', r.automation_authority_revision, ${times}
+        )) AS raw_authority FROM "${table}" r
+        WHERE r.tenant_id = $1 AND r.workspace_id IS NOT DISTINCT FROM $2::text
+          AND r.${pointer ? 'action_id' : 'id'} = $3${receipt ? ' AND r.version_id = $4' : ''}${locked ? ' FOR UPDATE' : ''}`, params))
+      if (!raw) return null
+      const descriptor = Object.getOwnPropertyDescriptor(raw, 'raw_authority')
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail(409, 'READ_PLAN_AUTOMATION_AUTHORITY_INVALID')
+      return frozenAutomationJson(descriptor.value)
+    }
+    const trx = { ...scoped,
+      async selectOne(table, where) {
+        return table === ACTIVATION_TABLE ? readAuthorityRow(table, where, false) : scoped.selectOne(table, where)
+      },
+      async selectOneForUpdate(table, where) {
+        return [VERSION_TABLE, VALIDATION_TABLE, ACTIVATION_TABLE].includes(table)
+          ? readAuthorityRow(table, where, true) : scoped.selectOneForUpdate(table, where)
+      },
+    }
+    return validation.boundary(async () => {
+      const pointerWhere = { ...whereScope(scope), action_id: action }
+      // Unlocked ordering hint only: the pointer is locked LAST, after the
+      // source, version, and frozen receipt. Never lock the data_sources row.
+      const hintRow = await trx.selectOne(ACTIVATION_TABLE, pointerWhere)
+      if (!hintRow) fail(404, 'READ_PLAN_ACTIVATION_NOT_FOUND')
+      const hint = checkedActivation(hintRow)
+      if (typeof hint.id !== 'string' || !hint.id || hint.tenantId !== scope.tenantId
+        || hint.workspaceId !== scope.workspaceId || hint.actionId !== action) {
+        fail(409, 'READ_PLAN_ACTIVATION_INVALID')
+      }
+      if (hint.status !== 'active') fail(409, 'READ_PLAN_ACTIVATION_DISABLED')
+      if (hint.systemId !== system) fail(409, 'READ_PLAN_ACTIVATION_SOURCE_MISMATCH')
+      if (!hint.validationId) fail(409, 'READ_PLAN_VALIDATION_REQUIRED')
+      const source = await validation.lockSource(trx, scope, system, actor)
+      const row = await trx.selectOneForUpdate(VERSION_TABLE,
+        { ...whereScope(scope), id: hint.versionId })
+      if (!row) fail(409, 'READ_PLAN_ACTIVATION_INVALID')
+      const version = checkedRow(row)
+      activationMatchesVersion(hint, version)
+      if (version.status !== 'approved') fail(409, 'READ_PLAN_NOT_APPROVED')
+      const receipt = await validation.requireConfirmed(trx, scope, version, source, actor,
+        { validationId: hint.validationId, requireLatest: false, requireUnexpired: false })
+      const currentRow = await trx.selectOneForUpdate(ACTIVATION_TABLE, pointerWhere)
+      if (!currentRow) fail(409, 'READ_PLAN_GENERATION_CONFLICT')
+      const activation = checkedActivation(currentRow)
+      if (['id', 'tenantId', 'workspaceId', 'actionId', 'generation', 'status',
+        'versionId', 'validationId', 'systemId', 'contentKey'].some(key => activation[key] !== hint[key])) {
+        fail(409, 'READ_PLAN_GENERATION_CONFLICT')
+      }
+      activationMatchesVersion(activation, version)
+      return { activation, version, sourceValidation: Object.freeze({
+        connectionId: source.connectionId, connectionRevision: source.connectionRevision,
+        bindingRevision: source.bindingRevision,
+      }), sourceAuthority: Object.freeze({
+        versionRevision: automationRevision(row.automation_authority_revision),
+        receiptRevision: automationRevision(receipt.automation_authority_revision),
+        activationRevision: automationRevision(currentRow.automation_authority_revision),
+        receipt,
+      }) }
+    })
+  }
   async function listAudit({ tenantId, workspaceId, id, limit = 100, offset = 0 } = {}) {
     const scope = scopeOf({ tenantId, workspaceId })
     const versionId = text(id)
@@ -433,7 +561,7 @@ function createStockPreparationReadPlanStore({ db, idGenerator = crypto.randomUU
   }
   return { saveVersion, list, get, approve: (input) => transition('approve', input),
     retire: (input) => transition('retire', input), getForRuntime, listAudit,
-    getActivation, activate, deactivate, getActiveForRuntime,
+    getActivation, activate, deactivate, getActiveForRuntime, lockActiveForAutomation,
     beginValidation: validation.beginValidation, finishValidation: validation.finishValidation,
     confirmValidation: validation.confirmValidation, failValidation: validation.failValidation,
     getValidation: validation.getValidation }

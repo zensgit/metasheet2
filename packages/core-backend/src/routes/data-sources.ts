@@ -356,6 +356,11 @@ export function getDataSourceManager(): DataSourceManager {
   return getManager()
 }
 
+/** Terminal application shutdown: do not allocate a manager or erase registrations. */
+export async function disconnectDataSourcesForShutdown(): Promise<void> {
+  await dataSourceManager?.disconnectAll()
+}
+
 /**
  * Bind the shared DataSourceManager singleton to the database and load
  * persisted sources (A0). Call once at startup; route handlers then see a

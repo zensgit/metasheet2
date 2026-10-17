@@ -1,6 +1,6 @@
 import { withAutomationEventId } from './automation-event-dedup'
 import { emitRecordEventIfLegacy, enqueueRecordEventIfDurable } from './automation-producer-emit'
-import type { ExactAnchorAppliedMutation } from './exact-anchor-recovery-execute'
+import { getExactAnchorRevertAfterImageEvidence, type ExactAnchorAppliedMutation } from './exact-anchor-recovery-execute'
 import type { QueryFn } from './permission-service'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import type { RecoveryArchiveWorkerApplyCallbacks, RecoveryArchiveWorkerIdentity } from './recovery-archive-async-restore'
@@ -17,7 +17,8 @@ export async function enqueueRecoveryMutationEvent(
   actorId: string,
   mutation: ExactAnchorAppliedMutation,
 ): Promise<RecoveryMutationEvent> {
-  const transaction: TransactionalQueryable = {
+  const evidence = getExactAnchorRevertAfterImageEvidence(query, sheetId, mutation)
+  const transaction: TransactionalQueryable = evidence?.transaction ?? {
     isTransaction: true,
     query: async (sql, params) => {
       const result = await query(sql, params)
@@ -33,7 +34,7 @@ export async function enqueueRecoveryMutationEvent(
       actorId,
     }),
   }
-  await enqueueRecordEventIfDurable(transaction, event.type, event.payload)
+  await enqueueRecordEventIfDurable(transaction, event.type, event.payload, process.env, evidence?.afterImage)
   return event
 }
 

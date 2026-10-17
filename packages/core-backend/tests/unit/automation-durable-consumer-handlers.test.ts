@@ -6,14 +6,22 @@
  * payload reconstruction with spy services — no DB, no flag (the builder is a pure delegation over injected
  * services; `bootDurableDelivery` is the only flag gate and is proven in the real-DB activation suite).
  */
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { buildDurableConsumerHandlers, type DurableDeliveryServices } from '../../src/multitable/automation-durable-consumer-handlers'
-import { buildConsumerAdapterRegistry } from '../../src/multitable/automation-durable-activation'
+import { bootDurableDelivery, buildConsumerAdapterRegistry, DURABLE_CONSUMER_KEYS } from '../../src/multitable/automation-durable-activation'
 import { assertManifestCompleteness, manifestConsumerKeys } from '../../src/multitable/automation-routing-manifest'
 import type { ClaimedConsumer } from '../../src/multitable/automation-durable-dispatcher'
+import type { AdapterOutcome, ConsumerAdapter, DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
 
 type Call = { method: string; args: unknown[] }
+
+// This suite exercises the legacy handlers. A read routed here must remain pending,
+// never gain an accidental ACK from a no-op substitute for the private service.
+const unavailableReadAdapter: ConsumerAdapter = {
+  key: 'integration-read-preview',
+  handle: async () => ({ outcome: 'retryable_failure', reason: 'adapter_error' }),
+}
 
 function spyServices(): { services: DurableDeliveryServices; calls: Call[] } {
   const calls: Call[] = []
@@ -26,7 +34,9 @@ function spyServices(): { services: DurableDeliveryServices; calls: Call[] } {
       handleApprovalCompletionTrigger: rec('handleApprovalCompletionTrigger'),
       handleApprovalTaskCreatedTrigger: rec('handleApprovalTaskCreatedTrigger'),
       handleEvent: rec('handleEvent'),
+      handleDurableRecordEvent: rec('handleDurableRecordEvent'),
     },
+    automationReadRecord: { produce: rec('readRecordProduce') },
     projectionService: { reconcile: rec('reconcile') as unknown as (id: string) => Promise<unknown> },
     webhookService: { deliverEvent: rec('deliverEvent') as unknown as (e: never, p: unknown) => Promise<unknown> },
     recordApprovalService: { handleApprovalCompletion: rec('handleApprovalCompletion') as unknown as (e: never) => Promise<void> },
@@ -99,15 +109,18 @@ describe('buildDurableConsumerHandlers — durable consumer_key → real product
     expect(calls).toEqual([{ method: 'handleApprovalTaskCreatedTrigger', args: [taskPayload] }])
   })
 
-  test('automation-record-trigger delegates to handleEvent(eventType, payload) overlaying the durable _eventId + _automationDepth', async () => {
+  test.each(['multitable.record.created', 'multitable.record.updated'])('%s delegates private admission and ordinary durable leg with authoritative identity and signal', async eventType => {
     const { services, calls } = spyServices()
     const handlers = buildDurableConsumerHandlers(services)
+    const context = { signal: new AbortController().signal }
     await handlers['automation-record-trigger'](
-      claimed({ consumerKey: 'automation-record-trigger', eventType: 'multitable.record.created', eventId: 'evt_durable_id', automationDepth: 2, payload: { sheetId: 's1', recordId: 'r1', _eventId: 'STALE', _automationDepth: 99 } }),
+      claimed({ consumerKey: 'automation-record-trigger', eventType, eventId: 'evt_durable_id', automationDepth: 2, payload: { sheetId: 's1', recordId: 'r1', _eventId: 'STALE', _automationDepth: 99 } }),
+      context,
     )
     // the DURABLE row's identity + depth win — a re-delivery dedups on the stable original id, not a stale copy
     expect(calls).toEqual([
-      { method: 'handleEvent', args: ['multitable.record.created', { sheetId: 's1', recordId: 'r1', _eventId: 'evt_durable_id', _automationDepth: 2 }] },
+      { method: 'readRecordProduce', args: [{ outboxId: 'obx_1', eventId: 'evt_durable_id', fence: '1', attempts: 1 }, context.signal] },
+      { method: 'handleDurableRecordEvent', args: [eventType, { sheetId: 's1', recordId: 'r1', _eventId: 'evt_durable_id', _automationDepth: 2 }] },
     ])
   })
 
@@ -189,9 +202,118 @@ describe('buildDurableConsumerHandlers — durable consumer_key → real product
 
   test('the REAL handler set is manifest-complete (registry keys === every routed consumer_key, bidirectional)', () => {
     const { services } = spyServices()
-    const registry = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services))
+    const registry = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services), unavailableReadAdapter)
     // bidirectional: no routed key without an adapter, no adapter without a route (throws otherwise)
     expect(() => assertManifestCompleteness(registry)).not.toThrow()
     expect(registry.keys().sort()).toEqual(manifestConsumerKeys().sort())
+  })
+})
+
+describe('SA06P — separate context-aware read consumer registration', () => {
+  test('legacy handler set stays eight and read registration preserves the exact adapter, signal and outcome', async () => {
+    const { services, calls } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    expect(Object.keys(handlers).sort()).toEqual([...DURABLE_CONSUMER_KEYS].sort())
+    expect(DURABLE_CONSUMER_KEYS).toHaveLength(8)
+    const event = claimed({ consumerKey: 'integration-read-preview', eventType: 'integration.read-preview.requested', manifestVersion: 4 })
+    const context = { signal: new AbortController().signal }
+    for (const outcome of [
+      { outcome: 'success' },
+      { outcome: 'retryable_failure', reason: 'adapter_timeout' },
+      { outcome: 'permanent_failure', reason: 'permanent_rejection' },
+    ] satisfies AdapterOutcome[]) {
+      const handle = vi.fn(async () => outcome)
+      const adapter: ConsumerAdapter = { key: 'integration-read-preview', handle }
+      const registry = buildConsumerAdapterRegistry(handlers, adapter)
+      expect(registry.get(adapter.key)).toBe(adapter)
+      expect(await registry.get(adapter.key)!.handle(event, context)).toBe(outcome)
+      expect(handle).toHaveBeenCalledTimes(1)
+      expect(handle).toHaveBeenCalledWith(event, context)
+    }
+    expect(calls).toEqual([])
+  })
+
+  test('missing or wrongly keyed read adapter fails closed instead of creating a successful no-op', () => {
+    const { services } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    for (const adapter of [undefined, { ...unavailableReadAdapter, key: 'approval-bridge' }, { key: 'integration-read-preview' }]) {
+      expect(() => buildConsumerAdapterRegistry(handlers, adapter as ConsumerAdapter)).toThrow('integration-read-preview adapter required')
+    }
+  })
+
+  test('flag-OFF boot remains zero-query without a read adapter; flag-ON requires it before the loop', () => {
+    const { services } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    const observer: DispatchLoopObserver = {
+      onUnknownConsumerKeys() {}, onTickError() {}, onHeartbeatError() {}, onClaimTimePoison() {},
+    }
+    expect(bootDurableDelivery({ query }, handlers, observer, { env: {} })).toBeNull()
+    expect(() => bootDurableDelivery({ query }, handlers, observer, {
+      env: { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' },
+    })).toThrow('integration-read-preview adapter required')
+    expect(query).not.toHaveBeenCalled()
+  })
+})
+
+describe('SA06V — record producer wiring is explicit and independent of ordinary rules', () => {
+  const event = () => claimed({ consumerKey: 'automation-record-trigger', eventType: 'multitable.record.created',
+    payload: { sheetId: 's1', recordId: 'r1' } })
+  test('registry preserves the real dispatch signal for the record producer', async () => {
+    const { services, calls } = spyServices(), context = { signal: new AbortController().signal }
+    const adapter = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services), unavailableReadAdapter).get('automation-record-trigger')!
+    expect(await adapter.handle(event(), context)).toEqual({ outcome: 'success' })
+    expect(calls.map(call => call.method)).toEqual(['readRecordProduce', 'handleDurableRecordEvent'])
+    expect(calls[0].args[1]).toBe(context.signal)
+  })
+  for (const failedLeg of ['read', 'ordinary', 'both'] as const) {
+    test(`${failedLeg} failure retries transport AFTER both independent legs were attempted`, async () => {
+      const { services } = spyServices()
+      const read = vi.fn(async () => { if (failedLeg !== 'ordinary') throw new Error('synthetic-private-read') })
+      const ordinary = vi.fn(async () => { if (failedLeg !== 'read') throw new Error('synthetic-private-ordinary') })
+      services.automationReadRecord.produce = read
+      services.automationService.handleDurableRecordEvent = ordinary
+      const adapter = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services), unavailableReadAdapter).get('automation-record-trigger')!
+      expect(await adapter.handle(event(), { signal: new AbortController().signal }))
+        .toEqual({ outcome: 'retryable_failure', reason: 'adapter_error' })
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(ordinary).toHaveBeenCalledTimes(1)
+    })
+  }
+  for (const missing of ['signal', 'aborted'] as const) {
+    test(`${missing} signal prevents read admission and cannot falsely ACK`, async () => {
+      const { services, calls } = spyServices(), controller = new AbortController()
+      controller.abort()
+      const adapter = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services), unavailableReadAdapter).get('automation-record-trigger')!
+      expect(await adapter.handle(event(), missing === 'signal' ? undefined : { signal: controller.signal }))
+        .toEqual({ outcome: 'retryable_failure', reason: 'adapter_error' })
+      expect(calls).toEqual([])
+    })
+  }
+  test('other record families retain the ordinary path and never touch automatic read admission', async () => {
+    const { services, calls } = spyServices(), handlers = buildDurableConsumerHandlers(services)
+    await handlers['automation-record-trigger']({ ...event(), eventType: 'multitable.record.deleted' })
+    expect(calls.map(call => call.method)).toEqual(['handleEvent'])
+  })
+  test.each(['multitable.record.created', 'multitable.record.updated'])('a %s read admission that settles after cancellation cannot start ordinary SQL', async eventType => {
+    const { services } = spyServices(), controller = new AbortController()
+    let finish!: () => void
+    services.automationReadRecord.produce = vi.fn(() => new Promise(resolve => { finish = resolve }))
+    const ordinary = vi.fn(async () => {})
+    services.automationService.handleDurableRecordEvent = ordinary
+    const adapter = buildConsumerAdapterRegistry(buildDurableConsumerHandlers(services), unavailableReadAdapter).get('automation-record-trigger')!
+    const running = adapter.handle({ ...event(), eventType }, { signal: controller.signal })
+    expect(typeof finish).toBe('function')
+    controller.abort(); finish()
+    expect(await running).toEqual({ outcome: 'retryable_failure', reason: 'adapter_error' })
+    expect(ordinary).not.toHaveBeenCalled()
+  })
+  test('missing producer or ordinary durable entry fails construction, not a successful no-op', () => {
+    const { services } = spyServices()
+    expect(() => buildDurableConsumerHandlers({ ...services, automationReadRecord: undefined } as unknown as DurableDeliveryServices))
+      .toThrow('AUTOMATION_READ_RECORD_PRODUCER_REQUIRED')
+    expect(() => buildDurableConsumerHandlers({ ...services, automationService: {
+      ...services.automationService, handleDurableRecordEvent: undefined,
+    } } as unknown as DurableDeliveryServices)).toThrow('AUTOMATION_READ_RECORD_PRODUCER_REQUIRED')
   })
 })

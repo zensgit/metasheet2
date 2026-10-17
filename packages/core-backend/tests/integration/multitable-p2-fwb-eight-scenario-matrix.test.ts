@@ -484,9 +484,11 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
 
       // 2) the REAL consumer adapters, wired exactly as boot wires them (index.ts durable-delivery block):
       //    buildDurableConsumerHandlers over the live AutomationService + projection + webhook services,
-      //    wrapped in the ratified outcome mapping by buildConsumerAdapterRegistry. No hand-rolled fakes.
+      //    wrapped in the ratified outcome mapping by buildConsumerAdapterRegistry. Unrelated legs are stubbed below.
       const handlers = buildDurableConsumerHandlers({
         automationService: svc,
+        // This suite proves only ordinary delivery; the explicit no-op read leg is not read-path evidence.
+        automationReadRecord: { produce: async () => undefined },
         projectionService: getApprovalRecordProjectionService(),
         webhookService: new WebhookService(kyselyDb),
         // manifest v2 consumer. This scenario enqueues a synthetic completion for an instance that has no
@@ -496,7 +498,9 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
         // hermetic and the mirror's own flag/ledger behaviour is proven by its own suites.
         todoMirrorService: { handleApprovalTaskCreated: async () => undefined, handleApprovalCompletion: async () => undefined },
       })
-      const fullRegistry = buildConsumerAdapterRegistry(handlers) // the boot-identical six-adapter worker
+      const fullRegistry = buildConsumerAdapterRegistry(handlers, {
+        key: 'integration-read-preview', handle: async () => ({ outcome: 'retryable_failure', reason: 'adapter_error' }),
+      }) // full v4 registration; this scenario delivers only approval/record families
       // Tick 1 runs a worker scoped to the approval-completion keys (the dispatcher's own worker-key
       // contract — a worker claims only the keys it registers; SAME real adapter objects). This keeps the
       // chained row's consumers untouched between ticks so the "durable row first, dispatch second" order
@@ -552,7 +556,7 @@ describeIfDatabase('八场景全链验收矩阵 (P2 × ledger × FWB, real DB)',
       ])
 
       // 6) a SECOND tick with the FULL boot registry dispatches the chained row to the REAL record-trigger
-      //    consumer (automationService.handleEvent) and the webhook bridge.
+      //    consumer (automationService.handleDurableRecordEvent) and the webhook bridge.
       await runDispatchTick(db(), fullRegistry, { batchSize: 500 })
       expect(await consumerStates(chainedRow.id)).toEqual([
         ['automation-record-trigger', 'done'],

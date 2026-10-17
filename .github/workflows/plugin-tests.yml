@@ -689,6 +689,7 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies (with log)
+        id: workspace-dependency-install
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
@@ -1305,11 +1306,44 @@ jobs:
         if: matrix.node-version == '20.x'
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Install hash-pinned Chromium candidate for PLM and YiDa acceptance
+        id: stock-preparation-pinned-browser-install
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep Playwright's default install above for other consumers. Only the
+          # three explicit acceptance commands below select this candidate.
+          candidate_parent="$(realpath "$GITHUB_WORKSPACE/..")/browser-fix-probe"
+          candidate_target="$candidate_parent/upstream-1719529"
+          test ! -e "$candidate_target"
+          test ! -L "$candidate_parent"
+          mkdir -p "$candidate_parent"
+          candidate_stage="$(mktemp -d "$candidate_parent/.chromium-1719529-XXXXXX")"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --connect-timeout 20 --max-time 300 \
+            https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip \
+            --output "$candidate_stage/chrome-linux.zip"
+          printf '%s  %s\n' '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d' \
+            "$candidate_stage/chrome-linux.zip" | sha256sum --check --status
+          unzip -q "$candidate_stage/chrome-linux.zip" -d "$candidate_stage/extracted"
+          printf '%s  %s\n' '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925' \
+            "$candidate_stage/extracted/chrome-linux/chrome" | sha256sum --check --status
+          # Exclusive publication directory: a pre-existing target is never reused.
+          mkdir "$candidate_target"
+          mv -T "$candidate_stage/extracted/chrome-linux" "$candidate_target/chrome-linux"
+          node -e "const p=require('./scripts/ops/lib/stock-preparation-yida-browser-candidate.cjs'); p.pinnedBrowserForRoot(process.cwd(),p.ID)"
+
       # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
       # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
       # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
       # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      - name: PLM full-app acceptance isolation and CI contracts
+        id: stock-preparation-plm-full-app-contracts
+        if: matrix.node-version == '20.x'
+        run: node --test scripts/ops/stock-preparation-plm-full-app-contract.test.mjs scripts/ops/stock-preparation-plm-owned-pg.test.mjs scripts/ops/run-stock-preparation-yida-synthetic-trial.test.mjs
+
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
         if: matrix.node-version == '20.x'
@@ -1321,6 +1355,28 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
             tests/integration/stock-preparation-read-plan-host-realdb.test.ts \
+            tests/integration/automation-read-authoring-realdb.test.ts \
+            tests/integration/automation-read-authority-realdb.test.ts \
+            tests/integration/automation-read-date-schedule-realdb.test.ts \
+            tests/integration/automation-read-delivery-realdb.test.ts \
+            tests/integration/automation-read-execution-audit-realdb.test.ts \
+            tests/integration/automation-read-installed-material-realdb.test.ts \
+            tests/integration/automation-read-ledger-realdb.test.ts \
+            tests/integration/automation-read-linked-retry-realdb.test.ts \
+            tests/integration/automation-read-material-epochs-realdb.test.ts \
+            tests/integration/automation-read-owner-realdb.test.ts \
+            tests/integration/automation-read-profiles-realdb.test.ts \
+            tests/integration/automation-read-record-activation-realdb.test.ts \
+            tests/integration/automation-read-recovery-realdb.test.ts \
+            tests/integration/automation-read-rule-authority-realdb.test.ts \
+            tests/integration/automation-read-runtime-realdb.test.ts \
+            tests/integration/automation-read-schedule-activation-realdb.test.ts \
+            tests/integration/automation-read-source-authority-realdb.test.ts \
+            tests/integration/automation-read-source-pointer-realdb.test.ts \
+            tests/integration/automation-read-target-authority-realdb.test.ts \
+            tests/integration/automation-read-target-records-realdb.test.ts \
+            tests/integration/automation-record-after-image-realdb.test.ts \
+            tests/integration/automation-record-after-image-retention-realdb.test.ts \
             tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts \
             tests/integration/stock-preparation-yida-create-fence-realdb.test.ts \
             tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts \
@@ -1332,9 +1388,20 @@ jobs:
             tests/integration/automation-live-authority-realdb.test.ts \
             --reporter=verbose
 
+      # Keep the real-DB proof ahead of full-app browser acceptance so a browser
+      # regression cannot hide its result. Both steps remain required/fail-fast.
+      # Each scenario owns fresh synthetic migrations and production app lifecycle.
+      - name: Run synthetic PLM full-app manual and interval acceptance
+        id: stock-preparation-plm-full-app
+        if: matrix.node-version == '20.x'
+        timeout-minutes: 20
+        run: |
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --browser-candidate=upstream-1719529
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529
+
       # These files each import the real native AuthService/JWT and scoped pool.
       # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
-      # Chromium comes from the required owner-browser install step above; only YiDa responses
+      # Chromium comes from the hash-pinned candidate install step above; only YiDa responses
       # are synthetic, never a customer request or an API response stub.
       - name: Run owner YiDa JWT HTTP and browser real-DB proof
         id: stock-preparation-yida-owner-real-db
@@ -1369,12 +1436,57 @@ jobs:
             "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
             scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs
           /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin"
+            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529
 
       - name: Run PLM validation source-revision unit contracts
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/data-source-validation-revision.test.ts \
+            --reporter=dot
+
+      - name: Run Automation read unit contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/integration/automation-live-authority.test.ts \
+            tests/unit/integration/automation-read-authoring-migration.test.ts \
+            tests/unit/integration/automation-read-authoring.test.ts \
+            tests/unit/integration/automation-read-authority-record.test.ts \
+            tests/unit/integration/automation-read-authority.test.ts \
+            tests/unit/integration/automation-read-contracts.test.ts \
+            tests/unit/integration/automation-read-date-linked-retry-migration.test.ts \
+            tests/unit/integration/automation-read-date-schedule.test.ts \
+            tests/unit/integration/automation-read-delivery.test.ts \
+            tests/unit/integration/automation-read-discovery.test.ts \
+            tests/unit/integration/automation-read-execution-audit.test.ts \
+            tests/unit/integration/automation-read-executor.test.ts \
+            tests/unit/integration/automation-read-installed-material.test.ts \
+            tests/unit/integration/automation-read-interval-schedule-migration.test.ts \
+            tests/unit/integration/automation-read-linked-retry-migration.test.ts \
+            tests/unit/integration/automation-read-management.test.ts \
+            tests/unit/integration/automation-read-material-epochs.test.ts \
+            tests/unit/integration/automation-read-operation-policy.test.ts \
+            tests/unit/integration/automation-read-owner-wiring.test.ts \
+            tests/unit/integration/automation-read-profiles.test.ts \
+            tests/unit/integration/automation-read-record-activation.test.ts \
+            tests/unit/integration/automation-read-record-conditions-migration.test.ts \
+            tests/unit/integration/automation-read-record-conditions.test.ts \
+            tests/unit/integration/automation-read-routes.test.ts \
+            tests/unit/integration/automation-read-rule-authority.test.ts \
+            tests/unit/integration/automation-read-runtime.test.ts \
+            tests/unit/integration/automation-read-schedule-activation.test.ts \
+            tests/unit/integration/automation-read-source-pointer.test.ts \
+            tests/unit/integration/automation-read-target-authority.test.ts \
+            tests/unit/integration/automation-read-target-context.test.ts \
+            tests/unit/integration/automation-read-target-records.test.ts \
+            tests/unit/integration/data-source-read-execution.test.ts \
+            tests/unit/automation-producer-emit-approval.test.ts \
+            tests/unit/automation-producer-emit.test.ts \
+            tests/unit/automation-read-schedule-producer.test.ts \
+            tests/unit/automation-record-after-image-retention.test.ts \
+            tests/unit/automation-record-after-image.test.ts \
+            tests/unit/automation-record-schema.test.ts \
+            tests/unit/automation-scheduler-occurrence.test.ts \
+            tests/unit/recovery-record-after-image-ci-wiring.test.ts \
             --reporter=dot
 
       - name: Run required after-sales install integration
@@ -1566,6 +1678,7 @@ jobs:
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-recovery-record-after-image-realdb.test.ts \
             tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
             tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
             tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \

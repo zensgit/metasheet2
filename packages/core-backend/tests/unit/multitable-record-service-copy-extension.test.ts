@@ -70,7 +70,26 @@ function createMockPool(): ConnectionPool & { statements: Array<{ sql: string; p
   const statements: Array<{ sql: string; params: unknown[] }> = []
   const queryMock = vi.fn(async (sql: string, params: unknown[] = []): Promise<QueryResponse> => {
     statements.push({ sql: sql.replace(/\s+/g, ' ').trim(), params })
+    if (sql === "SELECT current_setting('transaction_isolation') AS isolation") return { rows: [{ isolation: 'read committed' }] }
+    if (sql.includes('INSERT INTO meta_automation_record_after_images')) {
+      expect(params[3]).toBe('sheet_new')
+      expect(params[5]).toBe(1)
+      return { rows: [{ outbox_id: params[0] }], rowCount: 1 }
+    }
     if (sql.includes('pg_current_xact_id')) return { rows: [{ xid: '4242' }] }
+    if (sql.includes('AS consistent') && sql.includes('pg_catalog.pg_class')) {
+      expect(params).toEqual([['meta_sheets', 'meta_fields', 'plugin_multitable_object_registry', 'automation_read_material_epochs']])
+      return { rows: [{ consistent: true }] }
+    }
+    if (sql === 'SELECT id, deleted_at FROM meta_sheets WHERE id = $1') {
+      expect(params).toEqual(['sheet_new'])
+      return { rows: [{ id: 'sheet_new', deleted_at: null }] }
+    }
+    // No read-plan material epoch has been created for this ordinary REST/copy fixture.
+    if (sql.includes('SELECT revision FROM automation_read_material_epochs')) {
+      expect(params).toEqual([JSON.stringify({ id: 'sheet_new' })])
+      return { rows: [] }
+    }
     if (sql.includes('INSERT INTO meta_automation_outbox_consumer')) return { rows: [], rowCount: 1 }
     if (sql.includes('INSERT INTO meta_automation_outbox')) return { rows: [], rowCount: 1 }
     if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) return { rows: [{ id: 'sheet_new' }] }
@@ -237,6 +256,7 @@ describe('RecordService.createRecord — copy-sheet extension (ADR §7.3)', () =
       copy: copyCtx(0),
     })
     expect(pool.statements.some((s) => s.sql.includes('meta_automation_outbox'))).toBe(false)
+    expect(pool.statements.some((s) => s.sql.includes('meta_automation_record_after_images'))).toBe(false)
     expect(pool.statements.some((s) => s.sql.includes('pg_current_xact_id'))).toBe(false)
     expect(eventBus.emit).not.toHaveBeenCalled()
 
@@ -248,6 +268,7 @@ describe('RecordService.createRecord — copy-sheet extension (ADR §7.3)', () =
       capabilities: restCapabilities,
     })
     expect(pool.statements.some((s) => s.sql.includes('INSERT INTO meta_automation_outbox'))).toBe(true)
+    expect(pool.statements.filter((s) => s.sql.includes('INSERT INTO meta_automation_record_after_images'))).toHaveLength(1)
   })
 
   it('C5: shape-only — out-of-set select, multiSelect without option set, person without roster, no property.validation', async () => {

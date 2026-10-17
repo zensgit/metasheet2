@@ -14,16 +14,23 @@ import {
 import {
   getZonedParts,
   isValidIanaTimeZone,
-  zonedMinuteKey,
   type ZonedParts,
   isZonedFallbackRepeat,
 } from './automation-timezone'
 import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
+import { scheduleIntervalMs } from './automation-triggers'
+import { containsAutomationReadAction } from '../integration/automation-read-authoring-policy'
 
 const logger = new Logger('AutomationScheduler')
+// Node clamps larger timeout delays to 1ms, which would spin long-horizon cron rules.
+const MAX_TIMEOUT_DELAY_MS = 2 ** 31 - 1
 
-export type ScheduleCallback = (rule: AutomationRule) => void | Promise<void>
+export type ScheduleOccurrence = Readonly<{ triggerType: 'schedule.cron'; scheduledAtMs: number }>
+  | Readonly<{ triggerType: 'schedule.interval'; scheduledAtMs: number; intervalMs: number; anchorMs: number }>
+  /** Wake identity only, never evidence that any particular record is due. */
+  | Readonly<{ triggerType: 'schedule.date_field'; scheduledAtMs: number }>
+export type ScheduleCallback = (rule: AutomationRule, occurrence?: ScheduleOccurrence) => void | Promise<void>
 
 /**
  * Minimal Prometheus gauge shape used via dependency injection so the
@@ -340,6 +347,7 @@ export class AutomationScheduler {
   private isLeader: boolean = false
   private destroyed = false
   private readonly inFlight = new Set<Promise<void>>()
+  private readonly readIntervalRunning = new Set<string>()
   private destroyPromise: Promise<void> | null = null
   private readonly leaderStateGauge: AutomationSchedulerLeaderGauge | null
   /**
@@ -487,10 +495,10 @@ export class AutomationScheduler {
     return this.isLeader
   }
 
-  private runScheduledRule(rule: AutomationRule): void {
-    if (this.destroyed) return
+  private runScheduledRule(rule: AutomationRule, occurrence?: ScheduleOccurrence): Promise<void> {
+    if (this.destroyed) return Promise.resolve()
     try {
-      const task = Promise.resolve(this.callback(rule)).catch((err) => {
+      const task = Promise.resolve(occurrence ? this.callback(rule, occurrence) : this.callback(rule)).catch((err) => {
         logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
       })
       this.inFlight.add(task)
@@ -498,9 +506,47 @@ export class AutomationScheduler {
         () => this.inFlight.delete(task),
         () => this.inFlight.delete(task),
       )
+      return task
     } catch (err) {
       logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
+      return Promise.resolve()
     }
+  }
+
+  private registerReadInterval(rule: AutomationRule, intervalMs: number, anchorMs: number): void {
+    if (this.destroyed || !this.isLeader) return
+    const now = Date.now()
+    const n = Math.max(1, Math.floor((now - anchorMs) / intervalMs) + 1)
+    const nextMs = anchorMs + n * intervalMs
+    if (!Number.isSafeInteger(nextMs) || nextMs <= now || nextMs <= anchorMs) return
+    const occurrence: ScheduleOccurrence = Object.freeze({ triggerType: 'schedule.interval',
+      scheduledAtMs: nextMs, intervalMs, anchorMs })
+    const arm = (): void => {
+      if (this.destroyed || !this.isLeader) return
+      const timer = setTimeout(() => {
+        if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+        if (Date.now() < nextMs) { arm(); return }
+        if (this.readIntervalRunning.has(rule.id)) {
+          this.timers.delete(rule.id)
+          this.registerReadInterval(rule, intervalMs, anchorMs)
+          return
+        }
+        this.readIntervalRunning.add(rule.id)
+        const finished = this.runScheduledRule(rule, occurrence).finally(() => {
+          this.readIntervalRunning.delete(rule.id)
+          // Replacements, leader loss and destroy cannot be overwritten by a
+          // late completion. Re-arm from NOW on the same immutable phase.
+          if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+          this.timers.delete(rule.id)
+          this.registerReadInterval(rule, intervalMs, anchorMs)
+        })
+        this.inFlight.add(finished)
+        void finished.then(() => this.inFlight.delete(finished), () => this.inFlight.delete(finished))
+      }, Math.min(MAX_TIMEOUT_DELAY_MS, Math.max(1, nextMs - Date.now())))
+      if (typeof timer.unref === 'function') timer.unref()
+      this.timers.set(rule.id, timer)
+    }
+    arm()
   }
 
   /**
@@ -517,25 +563,37 @@ export class AutomationScheduler {
   }
 
   private registerCron(rule: AutomationRule, expression: string, timeZone?: string): void {
-    if (this.destroyed) return
+    if (this.destroyed || !this.isLeader) return
     const nextMs = nextCronOccurrenceMs(expression, Date.now(), timeZone)
     if (!nextMs) {
       logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
       return
     }
-    const delayMs = Math.max(1_000, nextMs - Date.now())
-    const timer = setTimeout(() => {
-      if (!this.timers.has(rule.id)) return
-      this.runScheduledRule(rule)
-      this.timers.delete(rule.id)
-      // Re-arm from NOW (no catch-up — Q3 at-most-once). On a DST fall-back day the next-occurrence scan
-      // suppresses the repeated wall-clock minute, so the timer advances past the overlap (fire-once).
-      if (this.isLeader && !this.destroyed) this.registerCron(rule, expression, timeZone)
-    }, delayMs)
-    if (typeof timer.unref === 'function') {
-      timer.unref()
+    // This is the planned UTC instant, not callback wall time. It is a candidate
+    // occurrence only; private producers must still authorize and deduplicate it.
+    const occurrence: ScheduleOccurrence = Object.freeze({ triggerType: 'schedule.cron', scheduledAtMs: nextMs })
+    const arm = (): void => {
+      if (this.destroyed || !this.isLeader) return
+      const delayMs = Math.min(MAX_TIMEOUT_DELAY_MS, Math.max(1_000, nextMs - Date.now()))
+      const timer = setTimeout(() => {
+        if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+        // A bounded chunk or a clock rollback is not an occurrence. Retain the
+        // ORIGINAL planned instant across chunks; do not rescan from the earlier
+        // clock and accidentally admit a different cron minute.
+        if (Date.now() < nextMs) { arm(); return }
+        this.runScheduledRule(rule, occurrence)
+        // The callback may synchronously unregister/replace this rule or shut down.
+        // An old timer must never consume or re-arm over its replacement.
+        if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+        this.timers.delete(rule.id)
+        // Re-arm from NOW (no catch-up — Q3 at-most-once). On a DST fall-back day the next-occurrence scan
+        // suppresses the repeated wall-clock minute, so the timer advances past the overlap (fire-once).
+        this.registerCron(rule, expression, timeZone)
+      }, delayMs)
+      if (typeof timer.unref === 'function') timer.unref()
+      this.timers.set(rule.id, timer)
     }
-    this.timers.set(rule.id, timer)
+    arm()
     logger.info(
       `Registered cron schedule for rule ${rule.id} (next: ${new Date(nextMs).toISOString()}${timeZone ? `, tz=${timeZone}` : ''})`,
     )
@@ -568,6 +626,16 @@ export class AutomationScheduler {
         return
       }
       const config = trigger.config as Partial<ScheduleDateFieldConfig>
+      if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
+        const wakeAt = Date.now()
+        // Arm first: a synchronous callback may replace/unregister this rule.
+        // Never install the old handle over its replacement after the callback.
+        this.armDateFieldTimer(rule, config, wakeAt)
+        if (dateReminderTimeOfDayPassed(config.timeOfDay, wakeAt, config.timezone)) {
+          this.runScheduledRule(rule, Object.freeze({ triggerType: 'schedule.date_field', scheduledAtMs: wakeAt }))
+        }
+        return
+      }
       if (dateReminderTimeOfDayPassed(config.timeOfDay, Date.now(), config.timezone)) {
         this.runScheduledRule(rule)
       }
@@ -579,9 +647,16 @@ export class AutomationScheduler {
     let cronExpression: string | null = null
     let cronTimezone: string | undefined
     if (trigger.type === 'schedule.interval') {
-      intervalMs = typeof trigger.config.intervalMs === 'number' ? trigger.config.intervalMs : null
-      if (!intervalMs || intervalMs < 1000) {
-        logger.warn(`Rule ${rule.id}: interval too small (${intervalMs}ms), minimum 1000ms`)
+      const read = containsAutomationReadAction(undefined, undefined, rule.actions)
+      intervalMs = scheduleIntervalMs(trigger.config, read)
+      if (intervalMs === null) {
+        logger.warn(`Rule ${rule.id}: invalid interval configuration`)
+        return
+      }
+      if (read) {
+        const anchorMs = Math.floor(new Date(rule.createdAt).getTime())
+        if (!Number.isSafeInteger(anchorMs) || anchorMs <= 0) return
+        this.registerReadInterval(rule, intervalMs, anchorMs)
         return
       }
     } else if (trigger.type === 'schedule.cron') {
@@ -628,19 +703,30 @@ export class AutomationScheduler {
    * so the `=== timer` guard stops the re-arm). No boot-time anchoring. Leader-only (caller guards). The handle
    * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
    */
-  private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
-    if (this.destroyed) return
-    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, Date.now(), config.timezone)
-    const timer = setTimeout(() => {
-      this.runScheduledRule(rule)
-      if (!this.destroyed && this.timers.get(rule.id) === timer) {
-        this.armDateFieldTimer(rule, config)
+  private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>, now = Date.now()): void {
+    if (this.destroyed || !this.isLeader) return
+    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, now, config.timezone)
+    const occurrence = containsAutomationReadAction(undefined, undefined, rule.actions)
+      ? Object.freeze({ triggerType: 'schedule.date_field' as const, scheduledAtMs: now + delay }) : undefined
+    const arm = (): void => {
+      if (this.destroyed || !this.isLeader) return
+      const timer = setTimeout(() => {
+        if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+        // An early tick or wall-clock rollback retains this planned day. A
+        // fresh daily calculation here could skip it or choose an earlier day.
+        if (occurrence && Date.now() < occurrence.scheduledAtMs) { arm(); return }
+        if (occurrence) this.runScheduledRule(rule, occurrence)
+        else this.runScheduledRule(rule)
+        if (!this.destroyed && this.isLeader && this.timers.get(rule.id) === timer) {
+          this.armDateFieldTimer(rule, config)
+        }
+      }, occurrence ? Math.min(MAX_TIMEOUT_DELAY_MS, Math.max(1, occurrence.scheduledAtMs - Date.now())) : delay)
+      if (typeof timer.unref === 'function') {
+        timer.unref()
       }
-    }, delay)
-    if (typeof timer.unref === 'function') {
-      timer.unref()
+      this.timers.set(rule.id, timer)
     }
-    this.timers.set(rule.id, timer)
+    arm()
     const tzLabel = config.timezone && config.timezone !== 'UTC' ? config.timezone : 'UTC'
     logger.info(`Registered date-reminder schedule for rule ${rule.id} (next scan in ${delay}ms, timeOfDay=${config.timeOfDay ?? '09:00'} ${tzLabel})`)
   }

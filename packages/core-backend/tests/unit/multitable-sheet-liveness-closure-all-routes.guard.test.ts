@@ -1071,6 +1071,31 @@ const COMMENT_ID_ROUTES = [
 ]
 
 const COVERED: Record<string, CoveredFile> = {
+  'routes/integration-automation-read.ts': {
+    minHandlers: 13,
+    minInScope: 1,
+    exempt: {
+      'GET /options': {
+        reason: 'OWNER-BOUND OPTION DISCOVERY, not sheet content: sheetId filters eligible rule/target '
+          + 'selectors. The host validates the live actor, filters deleted sheets/bases in its candidate '
+          + 'query, and locks each candidate through execution authority before returning its bounded '
+          + 'name. Missing/deleted candidates produce no options; this is not the sheet CRUD 404 surface. '
+          + 'Only this named endpoint is classified; new sheet-addressing handlers remain unaccounted.',
+        stillTrue: (h) => {
+          const discovery = readSource('integration/automation-read-discovery.ts')
+          const wiring = readSource('index.ts')
+          return /\bport\.options\(owner, optionsInput\(req\)\)/.test(everything(h))
+            && /\boptionsPage\(result\)/.test(everything(h))
+            && touchesNoSheetTable(h)
+            && discovery.includes('JOIN meta_sheets s ON s.id=r.sheet_id AND s.deleted_at IS NULL')
+            && discovery.includes('JOIN meta_bases base ON base.id=s.base_id AND base.deleted_at IS NULL')
+            && discovery.includes('await assertAutomationIntegrationActor(trx, owner)')
+            && discovery.includes('await deps.authority.lockExecution(trx, owner, selector)')
+            && wiring.includes('options: (actor, input) => this.automationReadRuntime.options(actor, input)')
+        },
+      },
+    },
+  },
   'routes/api-tokens.ts': {
     minHandlers: 15,
     minInScope: 7,

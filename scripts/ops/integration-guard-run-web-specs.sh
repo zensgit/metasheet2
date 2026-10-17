@@ -155,6 +155,9 @@ set -euo pipefail
 # required-web-lane-registration-shape.test.ts both check for directly.
 #
 pnpm --filter @metasheet/web exec vitest run \
+  automation-read-authoring \
+  AutomationExecutionsView \
+  automationRead \
   bomSnapshotDiff \
   bridgeAgentConfigCheck \
   composition-vocab-mirror \
@@ -194,11 +197,15 @@ pnpm --filter @metasheet/web exec vitest run \
   JsonAssist \
   k3-endpoint-vocab-mirror \
   MetaIntegrationFieldRuleAuthoring \
+  multitable-automation-manager \
+  multitable-automation-read-editor \
+  multitable-automation-rule-editor \
   multitable-resolver-vocab-mirror \
   optionSetsStructured \
   readSourceCompositions.service \
   readSourceModePresets \
   readSourceTemplateCatalog \
+  StockPreparationAutomationReadPanel \
   StockPreparationDashboardView \
   StockPreparationDiffSummaryExport \
   StockPreparationExceptionQueueView \

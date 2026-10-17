@@ -34,6 +34,7 @@ const {
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
   B2A_PURPOSE_STOCK_PREPARATION_PLAN_VALIDATION,
+  B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW,
   B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
   B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
@@ -657,6 +658,7 @@ async function unknownEntryPointsDefaultRefuse() {
     B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
     B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
     B2A_PURPOSE_STOCK_PREPARATION_PLAN_VALIDATION,
+    B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW,
     B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
     B2A_PURPOSE_PIPELINE_RUNNER_READ,
     B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
@@ -668,6 +670,12 @@ async function unknownEntryPointsDefaultRefuse() {
   }
   // …and a registration cannot name one either, so the vocabulary has exactly one authority.
   assertConfigThrow([registration({ purpose: 'some.new.read.path' })], 'an unrecognized purpose is refused at load')
+  assert.equal(B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW, 'stock-preparation.automation-preview')
+  const automation = build([registration({ purpose: B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW })])
+  assert.equal((await check(automation, { purpose: B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW })).purpose,
+    B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW)
+  await assertRefusal(automation, { purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION },
+    B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'Automation permission cannot authorize interactive preview')
 }
 
 // ── R-03: the operation claim ────────────────────────────────────────────────
@@ -1209,10 +1217,17 @@ async function R05_theCauseClassRostersAreClosedAndRestated() {
     'read_page_limit_exceeded', 'max_rows_exceeded', 'read_count_exceeded', 'SOURCE_RUN_RESULT_TOO_LARGE',
   ])
   assert.deepEqual([...B2A_INCOMPLETE_BATCH_CAUSE_CLASSES], ['read_cursor_broken'])
-  // Every expander bound the stock-preparation path can produce is on exactly one roster. A bound
-  // that fell off every roster would surface as an unclassified failure, which is the defect this
-  // machinery exists to remove.
+  // Known bounds retain their specific classification. SA01E deliberately uses the
+  // existing result-side generic C6 refusal, without expanding the runtime cause rosters.
   for (const type of INCOMPLETE_READ_ERROR_TYPES) {
+    if (type === 'read_completeness_unprovable') {
+      assert.equal(classifyB2aSourceReadCause(type), null)
+      const refusal = captured(() => assertB2aFullBatchComplete({ registrationId: 'synthetic' }, [{ type }]))
+      assert.equal(refusal.code, C6_FULL_BATCH_INCOMPLETE)
+      assert.equal(refusal.details.reason, 'source_read_incomplete')
+      assert.equal(refusal.details.fullBatch, false)
+      continue
+    }
     assert.ok(classifyB2aSourceReadCause(type), `${type} is on no roster`)
   }
 }

@@ -5,6 +5,63 @@ import { join } from 'node:path'
 import { resolvePluginRuntimeConfig } from '../../src/plugin-runtime-config'
 
 describe('plugin runtime config resolution', () => {
+  describe('stock preparation Automation deployment profiles', () => {
+    const key = 'INTEGRATION_CORE_STOCK_PREPARATION_AUTOMATION_PROFILES_PATH'
+    let directory: string
+    beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'automation-profiles-')) })
+    afterEach(() => { rmSync(directory, { recursive: true, force: true }) })
+    function file(contents: string): string {
+      const target = join(directory, 'profiles.json')
+      writeFileSync(target, contents, 'utf8')
+      return target
+    }
+    const profiles = [{ tenantId: 'synthetic-tenant', workspaceId: null,
+      projectId: 'synthetic-project', actionId: 'plm.stock-preparation.pull-bom.v1' }]
+
+    it('omits absent and blank configuration without inferring any tenant', () => {
+      for (const value of [undefined, '', '   ']) {
+        expect(resolvePluginRuntimeConfig('plugin-integration-core', { [key]: value }))
+          .not.toHaveProperty('stockPreparationAutomationProfiles')
+      }
+    })
+
+    it('projects only the explicit profiles array and preserves other deployment config', () => {
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {
+        [key]: file(JSON.stringify({ profiles })), INTEGRATION_CORE_TABLE_ACTIONS_JSON: '[]',
+      })
+      expect(config).toEqual({ stockPreparationAutomationProfiles: profiles, tableActions: [] })
+    })
+
+    it.each(['null', '[]', '{}', '{"profiles":null}', '{"profiles":{}}',
+      '{"profiles":[],"tenantId":"synthetic-private-value"}', '{"profiles":[],"enabled":true}'])
+    ('rejects a malformed or widened envelope: %s', contents => {
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [key]: file(contents) }))
+        .toThrow(`${key} must point at a JSON object containing only a profiles array`)
+    })
+
+    it('keeps descriptor validation with the actual plugin preparer', () => {
+      expect(resolvePluginRuntimeConfig('plugin-integration-core', {
+        [key]: file('{"profiles":[{"invalid":"synthetic-private-value"}]}'),
+      })).toEqual({ stockPreparationAutomationProfiles: [{ invalid: 'synthetic-private-value' }] })
+    })
+
+    it('rejects unreadable files and invalid JSON without disclosing path or contents', () => {
+      const absent = join(directory, 'synthetic-private-path.json')
+      for (const [path, message] of [[absent, `${key} points at a file that could not be read`],
+        [file('{synthetic-private-value'), `${key} must point at a file containing valid JSON`]]) {
+        expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [key]: path })).toThrow(message)
+        try { resolvePluginRuntimeConfig('plugin-integration-core', { [key]: path }) } catch (error) {
+          expect((error as Error).message).not.toContain('synthetic-private')
+          expect((error as Error).message).not.toContain(directory)
+        }
+      }
+    })
+
+    it('does not read the configured file for another plugin', () => {
+      expect(resolvePluginRuntimeConfig('plugin-after-sales', { [key]: join(directory, 'absent.json') })).toEqual({})
+    })
+  })
+
   it('keeps non-integration plugins unconfigured', () => {
     const config = resolvePluginRuntimeConfig('plugin-view-kanban', {
       INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON: '[{"actionId":"plm.stock-preparation.pull-bom.v1"}]',

@@ -534,13 +534,21 @@ export async function clearIdempotencyStore(): Promise<void> {
 }
 
 /**
- * Destroy the service
+ * Stop the synchronous janitor without resetting either store or its configuration.
+ * An executing tick finishes synchronously; there is no asynchronous work to drain.
  */
-export async function destroyIdempotency(): Promise<void> {
+export function stopIdempotencyMaintenance(): void {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
   }
+}
+
+/**
+ * Destroy the service
+ */
+export async function destroyIdempotency(): Promise<void> {
+  stopIdempotencyMaintenance();
   await activeStore.clear();
   rateLimitStore.clear();
   activeStore = memoryStore;

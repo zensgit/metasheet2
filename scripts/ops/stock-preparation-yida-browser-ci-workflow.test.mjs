@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { writeFile as writeFixtureFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -19,9 +19,9 @@ const contracts = ['scripts/ops/stock-preparation-yida-browser-ci.test.mjs',
 const probePrefix = 'YIDA_CALLER_SYNTHETIC_PROBE '
 const linuxShell = { skip: process.platform !== 'linux' ? 'GitHub Linux bash caller; source contract still runs on Windows' : false }
 
-function extractStep(source) {
+function extractStep(source, selectedId = stepId) {
   const lines = source.split('\n')
-  const matches = lines.flatMap((line, index) => line === `        id: ${stepId}` ? [index] : [])
+  const matches = lines.flatMap((line, index) => line === `        id: ${selectedId}` ? [index] : [])
   assert.equal(matches.length, 1, 'caller step must occur exactly once')
   const idIndex = matches[0]
   let start = idIndex
@@ -43,6 +43,95 @@ function extractStep(source) {
 }
 
 const step = extractStep(workflow)
+
+const candidateStep = extractStep(workflow, 'stock-preparation-pinned-browser-install')
+const candidateArchiveSha = '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d'
+const candidateBinarySha = '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925'
+
+test('fixed candidate installer precedes all three exact acceptance selectors without weakening default install', () => {
+  assert.match(candidateStep.header, /if: matrix.node-version == '20.x'/u)
+  assert.match(candidateStep.run, /set -euo pipefail/u)
+  assert(candidateStep.run.includes('https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip'))
+  assert(candidateStep.run.includes(candidateArchiveSha))
+  assert.match(candidateArchiveSha, /^[a-f0-9]{64}$/u)
+  assert(candidateStep.run.includes(candidateBinarySha))
+  assert(!candidateStep.run.includes('--location'))
+  assert(workflow.includes('pnpm exec playwright install --with-deps chromium'))
+  assert(workflow.indexOf('id: stock-preparation-pinned-browser-install') < workflow.indexOf('id: stock-preparation-plm-full-app\n'))
+  const plm = extractStep(workflow, 'stock-preparation-plm-full-app')
+  assert.deepEqual(plm.run.trim().split('\n'), [
+    'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --browser-candidate=upstream-1719529',
+    'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529',
+  ])
+  assert(step.run.includes(`${runner} --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529`))
+  assert.equal((workflow.match(/--browser-candidate(?:=| )upstream-1719529/gu) ?? []).length, 3)
+  assert(!candidateStep.header.includes('continue-on-error'))
+})
+
+function installerProbe({ corruptArchive = false, corruptBinary = false, downloadFails = false, existing = false,
+  mutate = source => source } = {}) {
+  const scratch = path.join(root, 'tmp', 'candidate-installer-contract-' + randomUUID())
+  mkdirSync(scratch, { recursive: true })
+  const workspace = path.join(scratch, 'workspace'), tools = path.join(scratch, 'tools'), payload = path.join(scratch, 'payload')
+  mkdirSync(workspace); mkdirSync(tools); mkdirSync(path.join(payload, 'chrome-linux'), { recursive: true })
+  const binary = path.join(payload, 'chrome-linux/chrome')
+  writeFileSync(binary, 'synthetic-official-binary-contract\n', { mode: 0o700 })
+  const binarySha = createHash('sha256').update(readFileSync(binary)).digest('hex')
+  const archive = path.join(scratch, 'fixture.zip')
+  function pack() {
+    const result = spawnSync('/usr/bin/zip', ['-q', archive, 'chrome-linux/chrome',
+      ...(corruptArchive ? ['extra.txt'] : [])], { cwd: payload })
+    assert.equal(result.status, 0)
+  }
+  // Archive negative adds an unrelated entry: the binary guard cannot mask a
+  // removed archive guard. Binary negative updates the accepted archive digest.
+  const accepted = path.join(scratch, 'accepted.zip')
+  const base = spawnSync('/usr/bin/zip', ['-q', accepted, 'chrome-linux/chrome'], { cwd: payload })
+  assert.equal(base.status, 0)
+  if (corruptArchive) writeFileSync(path.join(payload, 'extra.txt'), 'synthetic-extra\n')
+  if (corruptBinary) writeFileSync(binary, 'synthetic-tampered-binary\n', { mode: 0o700 })
+  pack()
+  const archiveSha = createHash('sha256').update(readFileSync(corruptArchive ? accepted : archive)).digest('hex')
+  const marker = path.join(scratch, 'node-called')
+  writeFileSync(path.join(tools, 'curl'), '#!/bin/bash\nset -eu\n'
+    + (downloadFails ? 'exit 22\n' : 'while test "$#" -gt 0; do if test "$1" = --output; then cp "$SYNTHETIC_ZIP" "$2"; exit 0; fi; shift; done\nexit 2\n'), { mode: 0o700 })
+  writeFileSync(path.join(tools, 'node'), '#!/bin/bash\nprintf done > "$SYNTHETIC_NODE_MARKER"\n', { mode: 0o700 })
+  const target = path.join(scratch, 'browser-fix-probe/upstream-1719529')
+  if (existing) { mkdirSync(target, { recursive: true }); writeFileSync(path.join(target, 'keep'), 'untouched') }
+  const script = mutate(candidateStep.run.replace(candidateArchiveSha, archiveSha).replace(candidateBinarySha, binarySha))
+  const result = spawnSync('/bin/bash', ['-c', script], { cwd: workspace,
+    env: { PATH: tools + ':/usr/bin:/bin', GITHUB_WORKSPACE: workspace, SYNTHETIC_ZIP: archive, SYNTHETIC_NODE_MARKER: marker },
+    encoding: 'utf8', timeout: 10000 })
+  assert.equal(result.error, undefined)
+  assert.equal(result.signal, null)
+  return { status: result.status, published: existsSync(path.join(target, 'chrome-linux/chrome')),
+    nodeCalled: existsSync(marker), originalKept: existing && readFileSync(path.join(target, 'keep'), 'utf8') === 'untouched' }
+}
+
+test('actual install bash checks archive before extraction and binary before exclusive publication', linuxShell, () => {
+  const positive = installerProbe()
+  assert.equal(positive.status, 0)
+  assert.equal(positive.published, true)
+  assert.equal(positive.nodeCalled, true)
+  for (const options of [{ corruptArchive: true }, { corruptBinary: true }, { downloadFails: true }, { existing: true }]) {
+    const negative = installerProbe(options)
+    assert.notEqual(negative.status, 0)
+    assert.equal(negative.published, false)
+    assert.equal(negative.nodeCalled, false)
+    if (options.existing) assert.equal(negative.originalKept, true)
+  }
+})
+
+test('archive and binary digest removal each defeats its isolated negative oracle', linuxShell, () => {
+  const archive = installerProbe({ corruptArchive: true, mutate: source => source.replace(
+    /printf '%s  %s\\n' '[a-f0-9]{64}' \\\n  "\$candidate_stage\/chrome-linux.zip" \| sha256sum --check --status/u, ':') })
+  assert.equal(archive.status, 0, 'archive guard mutant must reach otherwise successful install')
+  assert.equal(archive.published, true)
+  const binary = installerProbe({ corruptBinary: true, mutate: source => source.replace(
+    /printf '%s  %s\\n' '[a-f0-9]{64}' \\\n  "\$candidate_stage\/extracted\/chrome-linux\/chrome" \| sha256sum --check --status/u, ':') })
+  assert.equal(binary.status, 0, 'binary guard mutant must reach otherwise successful install')
+  assert.equal(binary.published, true)
+})
 
 function extractTestJob(source) {
   const lines = source.split('\n')
@@ -224,7 +313,7 @@ function withProbe(callback, pgConfigMode = 'wrong-directory') {
         assert.deepEqual(receipt.env, expectedEnvironment, 'CALLER_ENVIRONMENT: callback must start with only allowlisted variables')
       }
       assert.deepEqual(result.receipts.map(receipt => receipt.argv), [
-        ['--test', ...contracts], [runner, '--pg-bin', pgBin],
+        ['--test', ...contracts], [runner, '--pg-bin', pgBin, '--browser-candidate', 'upstream-1719529'],
       ], 'CALLER_ARGUMENTS: run both whole contract files then only the fixed launcher and PG directory')
     }
     callback({ execute, assertClean, pgBin, ambient })
@@ -280,6 +369,8 @@ for (const [name, mutate] of [
   ['sentinel-only filter', run => run.replace(`${runner} --pg-bin`, `${runner} --testNamePattern sentinel --pg-bin`)],
   ['extra whole-file selector', run => run.replace(`${runner} --pg-bin`, `${runner} tests/synthetic-only.test.ts --pg-bin`)],
   ['missing PG argument', run => run.replace(' --pg-bin "$yida_pg_bin"', '')],
+  ['missing browser selector', run => run.replace(' --browser-candidate upstream-1719529', '')],
+  ['different browser selector', run => run.replace(' --browser-candidate upstream-1719529', ' --browser-candidate upstream-other')],
   ['missing whole contract file', run => run.replace(' \\\n  ' + contracts[1], '')],
 ]) {
   test(`actual callback arguments reject ${name}`, linuxShell, () => {

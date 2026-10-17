@@ -38,6 +38,8 @@ interface MemoryEntry {
   expiresAt: number
 }
 
+const activeMemoryMaintenance = new Set<MemoryRateLimitStore>()
+
 export class MemoryRateLimitStore implements RateLimitStore {
   private store = new Map<string, MemoryEntry>()
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
@@ -55,6 +57,7 @@ export class MemoryRateLimitStore implements RateLimitStore {
       if (this.cleanupTimer && typeof this.cleanupTimer === 'object' && 'unref' in this.cleanupTimer) {
         this.cleanupTimer.unref()
       }
+      activeMemoryMaintenance.add(this)
     }
   }
 
@@ -77,13 +80,24 @@ export class MemoryRateLimitStore implements RateLimitStore {
     return this.store
   }
 
-  destroy(): void {
+  /** Stop periodic cleanup while preserving counters and their expiration times. */
+  stopMaintenance(): void {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer)
       this.cleanupTimer = null
     }
+    activeMemoryMaintenance.delete(this)
+  }
+
+  destroy(): void {
+    this.stopMaintenance()
     this.store.clear()
   }
+}
+
+/** Stop only already-created stores that own active maintenance timers. */
+export function stopRateLimiterMaintenance(): void {
+  for (const store of activeMemoryMaintenance) store.stopMaintenance()
 }
 
 // ---------------------------------------------------------------------------

@@ -1634,12 +1634,14 @@ exec npx vitest run \
   automation-condition-values \
   automation-log-redact \
   automation-log-support-packet \
+  automation-read-authoring \
   automation-recipes \
   automation-rerun-execution \
   automation-rule-concurrent-merge \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  automationRead \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
@@ -1724,6 +1726,7 @@ exec npx vitest run \
   multitable-attachment-list \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
+  multitable-automation-read-editor \
   multitable-automation-rule-editor \
   multitable-automation-trigger-time \
   multitable-b4-field-always-readonly \
@@ -1920,6 +1923,7 @@ exec npx vitest run \
   SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
+  StockPreparationAutomationReadPanel \
   StockPreparationCodeHelp \
   stockPreparationConfirmationQueue \
   StockPreparationDashboardView \

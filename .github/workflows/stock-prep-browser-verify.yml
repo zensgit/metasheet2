@@ -92,6 +92,7 @@ jobs:
                 apps/web/src/components/integration/stockPreparation/*|\
                 apps/web/src/services/integration/stockPreparation/*|\
                 apps/web/src/services/integration/workbench.ts|\
+                apps/web/src/services/integration/automationRead.ts|\
                 apps/web/src/services/integration/yidaInitialization.ts|\
                 apps/web/src/services/integration/yidaOwner.ts|\
                 apps/web/src/components/layout/PageShell.vue|\

@@ -827,6 +827,19 @@ describe('项目备料页 — the operator project board', () => {
     return root
   }
 
+  it('mounts the controlled Automation panel for the opened project without starting source reads', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    try {
+      const root = await mountBoard()
+      const panel = root.querySelector('[data-testid="automation-read-panel"]')
+      expect(panel).not.toBeNull()
+      expect(panel?.textContent).toContain('只读预览')
+      expect(panel?.querySelector('[data-testid="automation-read-load"]')).not.toBeNull()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(h.apiFetch.mock.calls.every(([url]) => !String(url).includes('/automation-read'))).toBe(true)
+    } finally { fetchSpy.mockRestore() }
+  })
+
   // ---- B-01 the tab, and whose landing it is -------------------------------------------------
 
   it('B-01: the tab is present for the operator tier and absent for everyone below it', async () => {

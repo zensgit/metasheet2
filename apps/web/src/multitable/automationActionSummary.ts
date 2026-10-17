@@ -97,6 +97,7 @@ export interface ActionSummaryFwbWriteback {
 }
 
 export interface ActionSummarySnapshot {
+  integrationReadPreview?: { allowManual: unknown }
   type: AutomationActionType
   updateRecord?: ActionSummaryUpdateRecord
   createRecord?: ActionSummaryCreateRecord
@@ -148,6 +149,10 @@ export function summarizeAutomationAction(snapshot: ActionSummarySnapshot, isZh:
   const label = automationActionTypeLabel(snapshot.type, isZh)
 
   switch (snapshot.type) {
+    case 'integration_read_preview':
+      return `${label}${sep(isZh)}${pick(isZh, '备料差异预览', 'preparation diff preview')} · ${snapshot.integrationReadPreview?.allowManual === true
+        ? pick(isZh, '手动执行已选择（仍需负责人授权）', 'manual selected (owner authorization still required)')
+        : pick(isZh, '手动执行未选择', 'manual not selected')}`
     case 'update_record': {
       const pairs = snapshot.updateRecord?.fieldUpdates ?? []
       if (pairs.length === 0) return `${label}${notConfigured(isZh)}`

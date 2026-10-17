@@ -6,7 +6,43 @@
         '从 PLM 读项目和 BOM、从 ERP·K3 读物料,拿不准的地方交给人确认,再生成备料明细。全程不改动这两个系统里的数据。',
         'Reads projects and BOMs from PLM and materials from ERP/K3, brings anything uncertain to a person, then builds the prep lines. It changes nothing inside either of those systems.',
       )"
-    />
+    >
+      <template v-if="canChooseExecutionScope" #actions>
+        <fieldset class="stock-prep__scope" data-testid="stock-prep-execution-scope">
+          <legend>{{ bi('执行范围', 'Execution scope') }}</legend>
+          <span data-testid="stock-prep-execution-scope-current">
+            {{ scopeNavigationRequired ? bi('等待重新打开', 'Awaiting reload') : executionScopeMode === 'tenant' ? bi('当前租户', 'Current tenant') : bi('当前工作区', 'Current workspace') }}
+          </span>
+          <button
+            type="button"
+            data-testid="stock-prep-execution-scope-workspace"
+            :aria-pressed="executionScopeMode === 'workspace'"
+            :disabled="scopeNavigationRequired || executionScopeMode === 'workspace'"
+            @click="askExecutionScope('workspace')"
+          >{{ bi('当前工作区', 'Current workspace') }}</button>
+          <button
+            type="button"
+            data-testid="stock-prep-execution-scope-tenant"
+            :aria-pressed="executionScopeMode === 'tenant'"
+            :disabled="scopeNavigationRequired || executionScopeMode === 'tenant'"
+            @click="askExecutionScope('tenant')"
+          >{{ bi('当前租户', 'Current tenant') }}</button>
+        </fieldset>
+      </template>
+      <template v-if="pendingExecutionScope && !scopeNavigationRequired" #meta>
+        <div class="stock-prep__scope-confirm" data-testid="stock-prep-execution-scope-confirm">
+          <p>{{ bi('切换后将重新打开「数据来源与体检」，清除本页未保存草稿、预览和项目选择。现有来源绑定不变；切换不会读取来源或同步数据。', 'Switching reopens Data source and health check and clears this page’s unsaved draft, preview and project selection. Existing source bindings remain unchanged; switching does not read the source or sync data.') }}</p>
+          <a
+            :href="executionScopeHref(pendingExecutionScope)"
+            data-testid="stock-prep-execution-scope-switch"
+            @click="confirmExecutionScope"
+          >{{ bi('确认切换并重新打开', 'Confirm and reopen') }}</a>
+          <button type="button" data-testid="stock-prep-execution-scope-cancel" @click="pendingExecutionScope = null">
+            {{ bi('取消', 'Cancel') }}
+          </button>
+        </div>
+      </template>
+    </PageHeader>
 
     <!-- THE FENCE SENTENCE. It keeps every promise the old one made; what changed is that it makes
          them to the customer admin who has to trust them rather than to the reviewer who wrote them.
@@ -51,8 +87,14 @@
       NOBODY BELOW THAT TIER EVER WAITS. `landingPending` is false for an operator and for a queue
       watcher — their landing needs no read at all — so this line is not on the floor's path.
     -->
+    <p v-if="scopeNavigationRequired" class="stock-prep__scope-confirm" data-testid="stock-prep-execution-scope-reload" role="status">
+      {{ bi('页面执行范围正在切换。重新打开页面后才能继续；之前的结果已收起。', 'The page execution scope is changing. Reopen the page to continue; previous results are hidden.') }}
+      <a :href="executionScopeReloadHref" data-testid="stock-prep-execution-scope-reload-link">
+        {{ bi('按所选范围重新打开', 'Reopen the selected scope') }}
+      </a>
+    </p>
     <p
-      v-if="landingPending"
+      v-else-if="landingPending"
       class="stock-prep__landing-pending"
       data-testid="stock-prep-landing-pending"
       role="status"
@@ -297,6 +339,7 @@ import {
   canOpenStockPrepProjectBoard,
   canOpenStockPrepProjectQuery,
   canUseLegacyMvpTabs,
+  holdsPlatformAdmin,
   landsOnStockPrepProjectBoard,
   stockPrepLandingKey,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
@@ -314,7 +357,59 @@ import {
 
 const { locale } = useLocale()
 const auth = useAuth()
-const scope = getDefaultIntegrationScope()
+const route = useRoute()
+const router = useRouter()
+type ExecutionScopeMode = 'workspace' | 'tenant'
+
+// This is a page-local, fixed two-state choice. It never chooses a tenant or an
+// arbitrary workspace, changes auth/storage, or supplies authority to the server.
+function executionScopeModeFromQuery(value: unknown): ExecutionScopeMode {
+  return value === 'tenant' && holdsPlatformAdmin(auth.getAccessSnapshot()) ? 'tenant' : 'workspace'
+}
+
+const executionScopeMode = executionScopeModeFromQuery(route.query?.executionScope)
+const defaultScope = getDefaultIntegrationScope()
+const scope = executionScopeMode === 'tenant' ? { ...defaultScope, workspaceId: null } : defaultScope
+const canChooseExecutionScope = computed(() => holdsPlatformAdmin(auth.getAccessSnapshot()))
+const pendingExecutionScope = ref<ExecutionScopeMode | null>(null)
+const scopeNavigationRequired = ref(false)
+const scopeNavigationTarget = ref<ExecutionScopeMode>(executionScopeMode)
+
+function executionScopeHref(mode: ExecutionScopeMode): string {
+  // A normal anchor loads a new document. Drop ALL former tab/project/filter/hash
+  // context and return to installation; no router navigation reuses old components.
+  return mode === 'tenant' ? '/stock-prep?tab=install&executionScope=tenant' : '/stock-prep?tab=install'
+}
+
+const executionScopeReloadHref = computed(() => executionScopeHref(scopeNavigationTarget.value))
+
+function askExecutionScope(mode: ExecutionScopeMode): void {
+  if (scopeNavigationRequired.value || !holdsPlatformAdmin(auth.getAccessSnapshot()) || mode === executionScopeMode) return
+  pendingExecutionScope.value = mode
+}
+
+function confirmExecutionScope(event: MouseEvent): void {
+  const target = pendingExecutionScope.value
+  if (!target || scopeNavigationRequired.value || !holdsPlatformAdmin(auth.getAccessSnapshot())) {
+    event.preventDefault()
+    pendingExecutionScope.value = null
+    return
+  }
+  // Leave the anchor's document navigation intact, while immediately retiring the
+  // old panel. The scope object is never changed in an existing document.
+  scopeNavigationTarget.value = target
+  scopeNavigationRequired.value = true
+  pendingExecutionScope.value = null
+}
+
+watch(() => route.query?.executionScope, (value) => {
+  const next = executionScopeModeFromQuery(value)
+  pendingExecutionScope.value = null
+  scopeNavigationTarget.value = next
+  // Router links / history can reuse this component. Hold it instead of showing
+  // a new URL above stale results; once held, only a new document restores it.
+  if (next !== executionScopeMode) scopeNavigationRequired.value = true
+}, { flush: 'sync' })
 
 // Same synchronous locale pattern as the rest of the integration surface (IntegrationHelpView /
 // errorCodeLabels): read `locale.value` directly in the template.
@@ -897,9 +992,6 @@ const effectiveKey = computed<StockPreparationViewKey | null>(() => activeView.v
 // projectId: view 1 emits it (row action), view 2 receives it as a prop, and the `?projectId=`
 // route query seeds/mirrors it so a reload or shared link keeps the same project scope. The
 // projectId is an internal MetaSheet handle — kept in state/URL, never rendered (values-free).
-const route = useRoute()
-const router = useRouter()
-
 /**
  * 项目查询's OWN four URL state bits (P2-1) — the shell's half of that contract.
  *
@@ -1034,6 +1126,7 @@ const confirmationQueueEl = ref<InstanceType<typeof StockPreparationConfirmation
 
 /** A rail click. The rail decides nothing — it names a key and this is what acts on it. */
 function handleRailSelect(key: string): void {
+  if (scopeNavigationRequired.value) return
   activeKey.value = key as StockPreparationViewKey
   // 今天要处理 MEANS 「没有项目打开」, so picking it clears the state bit that says otherwise.
   // Without this the URL keeps `?projectNo=` while the panel shows the task list, and the next
@@ -1108,6 +1201,7 @@ function handleDashboardProjectSelect(projectId: string): void {
 // had selected (§2.3's `?projectNo=` state bit) — routed through the same `handleProjectNoSelect` the
 // board's own row-open path uses, so the query mirroring stays the one implementation.
 function handleNavigateStage(viewKey: string, projectNo?: string): void {
+  if (scopeNavigationRequired.value) return
   activeKey.value = viewKey as StockPreparationViewKey
   if (typeof projectNo === 'string' && projectNo.trim().length > 0) {
     // One replace, made by `handleProjectNoSelect` — whose query already comes from `shellQueryBase()`,
@@ -1235,6 +1329,7 @@ function adminActionCodeOf(error: unknown): string | null {
 }
 
 async function handleAdminAction(action: 'ensure' | 'reconcile', projectNo: string): Promise<void> {
+  if (scopeNavigationRequired.value) return
   if (adminActionBusy.value) return
   const trimmed = typeof projectNo === 'string' ? projectNo.trim() : ''
   // reconcile is scoped to ONE project server-side. Saying so here beats sending a request that can
@@ -1320,6 +1415,33 @@ function effectLabel(view: StockPreparationViewTab): string {
 </script>
 
 <style scoped>
+.stock-prep__scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  font-size: 13px;
+}
+
+.stock-prep__scope-confirm {
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.stock-prep__scope-confirm p {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.stock-prep__scope-confirm a {
+  margin-right: var(--ms-space-3);
+}
+
 .stock-prep__boundary {
   margin: 0 0 var(--ms-space-4);
   padding: var(--ms-space-3);

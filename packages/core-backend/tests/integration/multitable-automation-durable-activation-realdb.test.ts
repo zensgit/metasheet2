@@ -44,13 +44,12 @@ import {
   type DurableConsumerHandlers,
 } from '../../src/multitable/automation-durable-activation'
 import { claimDueConsumers, completeConsumer, type ClaimedConsumer } from '../../src/multitable/automation-durable-dispatcher'
-import { runDispatchTick, ConsumerAdapterRegistry, type AdapterOutcome, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
+import { runDispatchTick, ConsumerAdapterRegistry, type AdapterOutcome, type ConsumerAdapter, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
 import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
 import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
 import { buildDurableConsumerHandlers, type DurableDeliveryServices } from '../../src/multitable/automation-durable-consumer-handlers'
 import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
 import { APPROVAL_COMPLETION_CONSUMERS_V3, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
-import type { PoolClient } from 'pg'
 
 /**
  * A REAL idempotent outbound endpoint model: it records ONE effect per distinct idempotency key and
@@ -81,6 +80,12 @@ const db = () => poolManager.get()
 const RUN = randomUUID()
 const FLAG_ON = { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 const FLAG_OFF = {} as NodeJS.ProcessEnv
+// These legacy activation scenarios do not execute private reads. An unexpected
+// read delivery is explicitly retryable, never silently ACKed by a fixture.
+const unavailableReadAdapter: ConsumerAdapter = {
+  key: 'integration-read-preview',
+  handle: async () => ({ outcome: 'retryable_failure', reason: 'adapter_error' }),
+}
 const enqueued: string[] = []
 /** Required telemetry sink (boot now demands one, per the loop's observability doctrine). */
 const noopObserver: DispatchLoopObserver = {
@@ -204,14 +209,16 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   })
 
   test('boot fails loudly on a missing handler (before any claim)', () => {
-    const handlers = recordingHandlers([]) as Record<string, unknown>
+    const handlers = recordingHandlers([]) as unknown as Record<string, unknown>
     delete handlers['approval-projection']
-    expect(() => bootDurableDelivery(db(), handlers as unknown as DurableConsumerHandlers, noopObserver, { env: FLAG_ON })).toThrow(/missing handler.*approval-projection/)
+    expect(() => bootDurableDelivery(db(), handlers as unknown as DurableConsumerHandlers, noopObserver, {
+      env: FLAG_ON, integrationReadAdapter: unavailableReadAdapter,
+    })).toThrow(/missing handler.*approval-projection/)
   })
 
   test('registry from handlers passes the bidirectional manifest completeness assertion', () => {
-    const registry = buildConsumerAdapterRegistry(recordingHandlers([]))
-    expect(registry.keys().sort()).toEqual([...DURABLE_CONSUMER_KEYS].sort())
+    const registry = buildConsumerAdapterRegistry(recordingHandlers([]), unavailableReadAdapter)
+    expect(registry.keys().sort()).toEqual([...DURABLE_CONSUMER_KEYS, 'integration-read-preview'].sort())
   })
 
   test('flag ON: produce (in txn) via the REAL seam enqueues the exact manifest fan-out (approval → 5 consumers, pending)', async () => {
@@ -236,16 +243,42 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
   test('boot lifecycle (flag ON): bootDurableDelivery returns a LIVE handle and stop() resolves cleanly — no rows touched', async () => {
     // The index.ts wiring calls exactly this. A large interval means the first tick never fires before stop(),
-    // so booting the REAL eight-key registry is safe on the shared CI DB (it claims nothing). This proves the
+    // so booting the REAL nine-key registry is safe on the shared CI DB (it claims nothing). This proves the
     // start/stop lifecycle + shutdown hook path; per-row DELIVERY through the loop is proven by V2/V3 (tick)
     // and the handler MAPPING by the unit suite. A `count(*)` before/after guards against a stray claim.
     const before = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE status <> \'pending\'')
-    const handle = bootDurableDelivery(db(), recordingHandlers([]), noopObserver, { env: FLAG_ON, intervalMs: 3_600_000 })
+    const handle = bootDurableDelivery(db(), recordingHandlers([]), noopObserver, {
+      env: FLAG_ON, intervalMs: 3_600_000, integrationReadAdapter: unavailableReadAdapter,
+    })
     expect(handle).not.toBeNull()
     await handle!.stop() // resolves promptly (no in-flight adapter) — the shutdown path
     await handle!.stop() // idempotent second stop must not throw
     const after = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE status <> \'pending\'')
     expect(Number(after.rows[0].c)).toBe(Number(before.rows[0].c)) // no tick fired → no claim → no foreign-row mutation
+  })
+
+  test('v4 read request enqueue has exactly one consumer and retains only the request reference', async () => {
+    const client = await db().getInternalPool().connect()
+    const requestId = randomUUID()
+    let outboxId = ''
+    try {
+      await client.query('BEGIN')
+      const enqueuedEvent = await produceAutomationEvent({ isTransaction: true, query: (s, p) => client.query(s, p) }, {
+        eventType: 'integration.read-preview.requested', eventId: `integration-read:${requestId}`, payload: { requestId },
+      }, FLAG_ON)
+      outboxId = enqueuedEvent!.outboxId
+      enqueued.push(outboxId)
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    expect(await consumerStatuses(outboxId)).toEqual({ 'integration-read-preview': 'pending' })
+    const row = (await db().query('SELECT manifest_version, payload FROM meta_automation_outbox WHERE id=$1', [outboxId])).rows[0]
+    expect(row).toEqual({ manifest_version: 4, payload: { requestId } })
+    // No dispatcher tick: real-key rows from this or other suites cannot be consumed.
   })
 
   test('flag ON: a PermanentDeliveryFailure handler poisons its row to dead_letter (run-unique key — no shared-row pollution)', async () => {
@@ -357,12 +390,12 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     expect(await completeConsumer(db(), res.outboxId, keyZ, z!.fence)).toBe(false)
   })
 
-  test('S7-composed: producer seam → real dispatch CLAIM → the REAL record-trigger handler delegates to handleEvent → row done', async () => {
+  test('S7-composed: producer seam → real dispatch CLAIM → the REAL record-trigger handler delegates to handleDurableRecordEvent → row done', async () => {
     // Composes the S5 wiring end-to-end on a run-unique key (no foreign-row claim): the outbox row is claimed
     // by the ACTUAL dispatch tick, the claimed row flows into the REAL `automation-record-trigger` handler from
-    // buildDurableConsumerHandlers (not a synthetic recorder), and that handler delegates to the SAME
-    // AutomationService.handleEvent the legacy bus subscriber calls — proving the ClaimedConsumer shape → real
-    // handler → real method path holds under a live claim. Idempotency of the real handler is the sink's own
+    // buildDurableConsumerHandlers (not a synthetic recorder), and that handler delegates to
+    // AutomationService.handleDurableRecordEvent — proving the ClaimedConsumer shape and live context → real
+    // handler → durable service method boundary holds under a live claim. Idempotency of the real handler is the sink's own
     // event_fires lease (S6/#4426), exercised by the automation-service suites; here the handler is a spy so the
     // composition stays hermetic and shared-DB-safe.
     const calls: Array<{ eventType: string; payload: unknown }> = []
@@ -371,8 +404,11 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
         handleApprovalCompletionEvent: async () => {},
         handleApprovalCompletionTrigger: async () => {},
         handleApprovalTaskCreatedTrigger: async () => {},
-        handleEvent: async (eventType: string, payload: unknown) => { calls.push({ eventType, payload }) },
+        handleEvent: async () => {},
+        handleDurableRecordEvent: async (eventType: string, payload: unknown) => { calls.push({ eventType, payload }) },
       },
+      // This suite proves only ordinary delivery; the explicit no-op read leg is not read-path evidence.
+      automationReadRecord: { produce: async () => undefined },
       projectionService: { reconcile: async () => undefined },
       webhookService: { deliverEvent: async () => [] },
       recordApprovalService: { handleApprovalCompletion: async () => undefined },
@@ -385,15 +421,15 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     const registry = new ConsumerAdapterRegistry()
     registry.register({
       key: keyC,
-      async handle(event): Promise<AdapterOutcome> {
-        await realHandlers['automation-record-trigger'](event)
+      async handle(event, context): Promise<AdapterOutcome> {
+        await realHandlers['automation-record-trigger'](event, context)
         return { outcome: 'success' }
       },
     })
     await runDispatchTick(db(), registry)
 
     expect(await consumerStatuses(res.outboxId)).toEqual({ [keyC]: 'done' })
-    // the REAL handler forwarded to handleEvent with the durable identity overlaid (fence-free stable eventId)
+    // The REAL handler forwarded to handleDurableRecordEvent with durable identity overlaid (fence-free stable eventId).
     expect(calls).toHaveLength(1)
     expect(calls[0].eventType).toBe('multitable.record.created')
     expect((calls[0].payload as { _eventId?: string })._eventId).toBe(`evt_${RUN}_composed`)

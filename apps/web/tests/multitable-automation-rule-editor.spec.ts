@@ -647,6 +647,65 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-field="direction"]')).toBeTruthy()
   })
 
+  function intervalRule(triggerConfig: Record<string, unknown>): AutomationRule {
+    return fakeRule({ triggerType: 'schedule.interval', triggerConfig,
+      actionConfig: { fields: { fld_2: 'unchanged' } },
+      actions: [{ type: 'update_record', config: { fields: { fld_2: 'unchanged' } } }] })
+  }
+  it.each([[1000, '1'], [1001, '1.001'], [1500, '1.5'], [2147483647, '2147483.647']] as const)('loads and saves interval milliseconds %s with exact seconds text %s', async (intervalMs, text) => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule: intervalRule({ intervalMs }), onSave: saved })
+    await flushPromises()
+    expect((container.querySelector('[data-field="intervalSeconds"]') as HTMLInputElement).value).toBe(text)
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].triggerConfig).toEqual({ intervalMs })
+    expect(saved.mock.calls[0][0].trigger).toEqual({ type: 'schedule.interval', config: { intervalMs } })
+  })
+  it.each(['0.999', '1.0001', '2147483.648', 'Infinity', '1e3', '-1', ' 1', '', '1.'])('does not save invalid seconds text %j', async text => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule: intervalRule({ intervalMs: 1000 }), onSave: saved })
+    await flushPromises()
+    const input = container.querySelector('[data-field="intervalSeconds"]') as HTMLInputElement
+    input.value = text; input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(container.textContent).toContain('2147483.647')
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+  it('legacy minute-only configuration is disclosed and converts only on explicit save', async () => {
+    const saved = vi.fn(), rule = intervalRule({ intervalMinutes: 5 })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+    expect(container.querySelector('[data-field="legacyIntervalNotice"]')).toBeTruthy()
+    expect((container.querySelector('[data-field="intervalSeconds"]') as HTMLInputElement).value).toBe('300')
+    expect(rule.triggerConfig).toEqual({ intervalMinutes: 5 })
+    expect(saved).not.toHaveBeenCalled()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].triggerConfig).toEqual({ intervalMs: 300000 })
+    expect(rule.triggerConfig).toEqual({ intervalMinutes: 5 })
+  })
+  it('dual units do not choose a priority and require explicit replacement with entered seconds', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields,
+      rule: intervalRule({ intervalMs: 60000, intervalMinutes: 2 }), onSave: saved })
+    await flushPromises()
+    const input = container.querySelector('[data-field="intervalSeconds"]') as HTMLInputElement
+    expect(input.value).toBe('')
+    input.value = '2.501'; input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(container.querySelector('[data-action="replaceIntervalConfig"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].triggerConfig).toEqual({ intervalMs: 2501 })
+  })
+
   it('exposes form.submitted as a config-less trigger and saves it (light up the BACKEND-ONLY trigger)', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })

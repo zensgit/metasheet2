@@ -37,6 +37,7 @@
 import type { ClaimedConsumer } from './automation-durable-dispatcher'
 import type { DurableConsumerHandlers } from './automation-durable-activation'
 import type { AutomationEventPayload } from './automation-service'
+import type { ReadRecordDelivery } from '../integration/automation-read-contracts'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
 import type { WebhookEventType } from './webhooks'
@@ -53,7 +54,9 @@ export interface DurableDeliveryServices {
     handleApprovalCompletionTrigger(event: ApprovalCompletionEventV1): Promise<void>
     handleApprovalTaskCreatedTrigger(event: ApprovalTaskCreatedEventV1): Promise<void>
     handleEvent(eventType: string, payload: AutomationEventPayload): Promise<void>
+    handleDurableRecordEvent(eventType: string, payload: AutomationEventPayload): Promise<void>
   }
+  automationReadRecord: { produce(delivery: ReadRecordDelivery, signal: AbortSignal): Promise<void> }
   projectionService: {
     reconcile(instanceId: string): Promise<unknown>
   }
@@ -93,6 +96,10 @@ function recordTriggerPayload(event: ClaimedConsumer): AutomationEventPayload {
  */
 export function buildDurableConsumerHandlers(services: DurableDeliveryServices): DurableConsumerHandlers {
   const { automationService, projectionService, webhookService, recordApprovalService, todoMirrorService } = services
+  if (typeof services.automationReadRecord?.produce !== 'function'
+    || typeof automationService.handleDurableRecordEvent !== 'function') {
+    throw new Error('AUTOMATION_READ_RECORD_PRODUCER_REQUIRED')
+  }
   return {
     'approval-bridge': async (event: ClaimedConsumer) => {
       await automationService.handleApprovalCompletionEvent(event.payload as ApprovalCompletionEventV1)
@@ -113,8 +120,29 @@ export function buildDurableConsumerHandlers(services: DurableDeliveryServices):
     'approval-task-trigger': async (event: ClaimedConsumer) => {
       await automationService.handleApprovalTaskCreatedTrigger(event.payload as ApprovalTaskCreatedEventV1)
     },
-    'automation-record-trigger': async (event: ClaimedConsumer) => {
-      await automationService.handleEvent(event.eventType, recordTriggerPayload(event))
+    'automation-record-trigger': async (event: ClaimedConsumer, context?: { signal: AbortSignal }) => {
+      if (event.eventType !== 'multitable.record.created' && event.eventType !== 'multitable.record.updated') {
+        await automationService.handleEvent(event.eventType, recordTriggerPayload(event))
+        return
+      }
+      // Do not strand independent ordinary rules when the read admission is
+      // temporarily unavailable. Both legs have their own durable dedup; the
+      // source consumer ACKs only after both have settled without failure.
+      let failed = false
+      try {
+        if (!(context?.signal instanceof AbortSignal) || context.signal.aborted) throw new Error('DELIVERY_CANCELLED')
+        await services.automationReadRecord.produce({ outboxId: event.outboxId, eventId: event.eventId,
+          fence: event.fence, attempts: event.attempts }, context.signal)
+      } catch { failed = true }
+      // A timed-out read admission may settle after dispatcher.stop() has
+      // already stopped waiting for this adapter. Never start ordinary SQL
+      // from that abandoned callback; a future live delivery can retry it.
+      if (!(context?.signal instanceof AbortSignal) || context.signal.aborted) {
+        throw new Error('AUTOMATION_RECORD_DELIVERY_UNAVAILABLE')
+      }
+      try { await automationService.handleDurableRecordEvent(event.eventType, recordTriggerPayload(event)) }
+      catch { failed = true }
+      if (failed) throw new Error('AUTOMATION_RECORD_DELIVERY_UNAVAILABLE')
     },
     'webhook-event-bridge': async (event: ClaimedConsumer) => {
       const webhookEvent: WebhookEventType | undefined = WEBHOOK_BRIDGE_EVENT_MAP[event.eventType]

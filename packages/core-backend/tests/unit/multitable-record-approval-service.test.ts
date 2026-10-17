@@ -58,7 +58,8 @@ import {
   createRecordApprovalCompletionSink,
   terminalOutcomeOf,
 } from '../../src/multitable/record-approval-submission-service'
-import { DURABLE_CONSUMER_KEYS } from '../../src/multitable/automation-durable-activation'
+import { buildConsumerAdapterRegistry, DURABLE_CONSUMER_KEYS, type DurableConsumerHandlers } from '../../src/multitable/automation-durable-activation'
+import { AUTOMATION_READ_CONSUMER } from '../../src/integration/automation-read-contracts'
 import {
   CURRENT_ROUTING_MANIFEST,
   expandConsumerKeysForEvent,
@@ -914,14 +915,21 @@ describe('completion wiring: durable consumer + eventBus fallback share ONE idem
     for (const eventType of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       expect(expandConsumerKeysForEvent(eventType)).toContain('multitable-record-approval')
     }
-    // v3 since the dingtalk-todo-mirror consumer landed; this consumer's OWN route is version-independent
+    // v4 adds the private Automation read consumer; this consumer's OWN route is version-independent
     // (it must survive every future manifest bump), so the assertion above is a `toContain`, not an
     // exact set - the exact per-version sets are pinned in automation-routing-manifest.test.ts.
-    expect(CURRENT_ROUTING_MANIFEST.version).toBe(3)
+    expect(CURRENT_ROUTING_MANIFEST.version).toBe(4)
     expect(manifestConsumerKeys()).toContain('multitable-record-approval')
     // the other direction: a routed key with no registered adapter would park rows forever
     expect([...DURABLE_CONSUMER_KEYS]).toContain('multitable-record-approval')
-    expect([...DURABLE_CONSUMER_KEYS].sort()).toEqual(manifestConsumerKeys().sort())
+    // v4 registers the private read adapter separately from legacy handler keys.
+    // Exercise the real builder so removing that registration still fails here.
+    const handlers = Object.fromEntries(DURABLE_CONSUMER_KEYS.map(key => [key, async () => undefined])) as DurableConsumerHandlers
+    const readAdapter = { key: AUTOMATION_READ_CONSUMER, handle: vi.fn() }
+    const registry = buildConsumerAdapterRegistry(handlers, readAdapter)
+    expect(registry.keys().sort()).toEqual(manifestConsumerKeys().sort())
+    expect(registry.get(AUTOMATION_READ_CONSUMER)).toBe(readAdapter)
+    expect(readAdapter.handle).not.toHaveBeenCalled()
   })
 })
 

@@ -648,6 +648,7 @@ async function invoke(routes, method, routePath, req = {}) {
     body: req.body || {},
     query: req.query || {},
     params: req.params || {},
+    headers: req.headers || {},
     authenticatedTenantId,
   }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a JSON body`)
@@ -7246,7 +7247,7 @@ async function testReadSmokeRoute() {
   const { routes } = mountRoutes(services)
 
   // success: read once, values-free evidence, backend credential context, no write, system untouched
-  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
     body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
@@ -7277,7 +7278,7 @@ async function testReadSmokeRoute() {
   }
 
   // C2: the forward { presetId, intent } shape is accepted and drives the SAME single read as { presetId, key }
-  const okIntent = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const okIntent = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-002' } },
   })
@@ -7288,7 +7289,7 @@ async function testReadSmokeRoute() {
   assert.ok(!JSON.stringify(okIntent.body.data).includes('M-002'), 'intent-shape response is values-free')
 
   // C3: LIST-only preset accepts the explicit intent shape and drives a bounded preset-owned list read.
-  const okList = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const okList = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list' } },
   })
@@ -7351,7 +7352,7 @@ async function testReadSmokeRoute() {
     assert.ok(!okListStr.includes(leak), `LIST read-smoke response must not leak ${leak}`)
   }
 
-  const okListKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const okListKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', key: 'M-004' } },
   })
@@ -7367,7 +7368,7 @@ async function testReadSmokeRoute() {
   // C4 BOM read (#1709): the route preserves values-free BOM evidence (header/line counts + Page1/Page2
   // container types) end-to-end and drops leak-bait; the parent bill key is plumbed to the adapter as
   // options.bomKey (bound value), never echoed in the evidence.
-  const okBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const okBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
     body: { presetId: 'k3wise.material-bom.v1', intent: { object: 'material-bom', mode: 'bom', key: 'BILL-001' } },
   })
@@ -7400,31 +7401,31 @@ async function testReadSmokeRoute() {
 
   // C2/C3: unauthorized LIST/BOM/raw fields fail closed before any system load.
   const systemLoadCountBeforeInvalid = findCalls(calls, 'getExternalSystemForAdapter').length
-  const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'bom', mode: 'single_record_detail', key: 'M-003' } },
   })
   assert.equal(intentBom.statusCode, 400, 'intent.object=bom is fail-closed (not allowlisted)')
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, systemLoadCountBeforeInvalid, 'invalid intent fails before system load')
   // C2: raw config in intent (readPath) cannot ride in
-  const intentRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const intentRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-004', readPath: '/evil' } },
   })
   assert.equal(intentRaw.statusCode, 400, 'raw config in intent is fail-closed')
-  const listRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const listRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', limit: 500 } },
   })
   assert.equal(listRaw.statusCode, 400, 'LIST request-supplied pagination is fail-closed')
-  const listBlankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const listBlankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', key: '   ' } },
   })
   assert.equal(listBlankKey.statusCode, 400, 'blank LIST key is fail-closed')
   // C4: BOM key is REQUIRED (unlike LIST). A no-key BOM intent fails closed at the contract layer with a 400,
   // before any system load or adapter creation — values-free, no BOM call.
-  const bomNoKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const bomNoKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-bom.v1', intent: { object: 'material-bom', mode: 'bom' } },
   })
@@ -7433,25 +7434,25 @@ async function testReadSmokeRoute() {
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, systemLoadCountBeforeInvalid, 'no-key BOM fails before system load')
 
   // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
-  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assert.equal(denied.statusCode, 403, 'read user cannot trigger read-smoke (requires integration write)')
 
   // wrong preset → 400 fail-closed
-  const badPreset = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const badPreset = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'evil.custom.v1', key: 'M-001' },
   })
   assert.equal(badPreset.statusCode, 400, 'unknown preset is fail-closed')
 
   // missing/blank key → 400 fail-closed
-  const blankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const blankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: '   ' },
   })
   assert.equal(blankKey.statusCode, 400, 'blank key is fail-closed')
 
   // extra body keys → 400 (no custom-preset / object smuggling)
-  const extra = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const extra = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001', object: 'bom' },
   })
   assert.equal(extra.statusCode, 400, 'extra body keys are fail-closed')
@@ -7461,7 +7462,7 @@ async function testReadSmokeRoute() {
     externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'http' } } },
   })
   const { routes: wkRoutes } = mountRoutes(wrong.services)
-  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assert.equal(wk.statusCode, 409, 'wrong adapter kind is fail-closed')
@@ -7508,7 +7509,7 @@ async function testReadSmokeRoute() {
     } } },
   })
   const { routes: fRoutes } = mountRoutes(failSvc.services)
-  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assertOkResponse(fail, 200)
@@ -7604,7 +7605,7 @@ async function testReadSourceProbeRoute() {
   }
 
   // success: one read, values-free S2-a evidence, backend credential context, no write, system untouched
-  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
     body: { config: probeConfig, boundedSmoke: true, inputs: { key: 'M-001' } },
   })
@@ -7635,26 +7636,26 @@ async function testReadSourceProbeRoute() {
   }
 
   // read access is not enough: live credentialed outbound probe requires integration write
-  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
   })
   assert.equal(denied.statusCode, 403, 'read user cannot trigger the probe (requires integration write)')
 
   // contract-invalid → 400 with a coarse values-free reason (raw path/method/credential cannot ride in)
-  const rawPath = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const rawPath = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { config: { ...probeConfig, readPath: 'https://evil.example.com/x' }, inputs: { key: 'M-001' } },
   })
   assert.equal(rawPath.statusCode, 400, 'absolute readPath is fail-closed')
   assert.ok(!JSON.stringify(rawPath.body).includes('evil.example.com'), 'contract error is values-free')
-  const missingKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const missingKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig },
   })
   assert.equal(missingKey.statusCode, 400, 'missing required key input is fail-closed')
 
   // URL :id must name the config's systemId → 409, and the system is never loaded
   const before = findCalls(calls, 'getExternalSystemForAdapter').length
-  const mismatch = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const mismatch = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_other' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
   })
   assert.equal(mismatch.statusCode, 409, 'systemId mismatch is fail-closed')
@@ -7665,7 +7666,7 @@ async function testReadSourceProbeRoute() {
     externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'http' } } },
   })
   const { routes: wkRoutes } = mountRoutes(wrongKind.services)
-  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
   })
   assert.equal(wk.statusCode, 409, 'wrong system kind is fail-closed')
@@ -7683,7 +7684,7 @@ async function testReadSourceProbeRoute() {
     } } },
   })
   const { routes: fRoutes } = mountRoutes(failSvc.services)
-  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
   })
   assertOkResponse(fail, 200)
@@ -7763,7 +7764,7 @@ async function testReadSourceConfigRoutes() {
   }
 
   // save → 201 new draft v1
-  const created = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const created = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
   })
   assertOkResponse(created, 201)
@@ -7774,7 +7775,7 @@ async function testReadSourceConfigRoutes() {
   const configId = created.body.data.id
 
   // identical save → 200 reused, still one stored version
-  const reused = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const reused = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
   })
   assertOkResponse(reused, 200)
@@ -7783,7 +7784,7 @@ async function testReadSourceConfigRoutes() {
   assert.equal(dbTables.integration_read_source_configs.length, 1)
 
   // changed save → 201 v2
-  const second = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const second = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config: { ...config, readMethod: 'GET' } },
   })
   assertOkResponse(second, 201)
@@ -7802,7 +7803,7 @@ async function testReadSourceConfigRoutes() {
   }
 
   // invalid config → 400 values-free (S1 tuples ride through, endpoint never echoed)
-  const invalid = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const invalid = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' },
     body: { config: { ...config, readPath: 'https://evil.example.com/x' } },
   })
@@ -7813,7 +7814,7 @@ async function testReadSourceConfigRoutes() {
 
   // unexpected-field key names are coarsened at the route boundary: a URL/secret-shaped KEY
   // must not ride into the 400 payload (review item 5).
-  const urlKey = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const urlKey = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' },
     body: { config: { ...config, 'https://exfil.example.com/steal?token=abc': true } },
   })
@@ -7828,45 +7829,45 @@ async function testReadSourceConfigRoutes() {
   )
 
   // list + get (read tier)
-  const listed = await invoke(routes, 'GET', '/api/integration/read-source-configs', {
+  const listed = await invoke(routes, 'GET', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, query: { workspaceId: 'workspace_1', systemId: 'sys_1' },
   })
   assertOkResponse(listed, 200)
   assert.equal(listed.body.data.length, 2)
-  const fetched = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', {
+  const fetched = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assertOkResponse(fetched, 200)
   assert.equal(fetched.body.data.id, configId)
-  const missing = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', {
+  const missing = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_missing' }, query: { workspaceId: 'workspace_1' },
   })
   assert.equal(missing.statusCode, 404)
   assert.equal(missing.body.error.code, 'READ_SOURCE_CONFIG_NOT_FOUND')
 
   // status lifecycle fail-closed: retire a draft → 409; approve → 200; approve again → 409
-  const earlyRetire = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', {
+  const earlyRetire = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assert.equal(earlyRetire.statusCode, 409)
   assert.equal(earlyRetire.body.error.code, 'READ_SOURCE_CONFIG_STATUS_CONFLICT')
-  const approved = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', {
+  const approved = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assertOkResponse(approved, 200)
   assert.equal(approved.body.data.status, 'approved')
-  const reApprove = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', {
+  const reApprove = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assert.equal(reApprove.statusCode, 409)
-  const retired = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', {
+  const retired = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assertOkResponse(retired, 200)
   assert.equal(retired.body.data.status, 'retired')
 
   // audit (read tier): actions recorded, detail coarse-only, no config content anywhere
-  const audit = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', {
+  const audit = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assertOkResponse(audit, 200)
@@ -7881,13 +7882,13 @@ async function testReadSourceConfigRoutes() {
 
   // retired content cannot be silently revived through save → 409, and no audit row appears
   // (review item 3).
-  const retiredSave = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+  const retiredSave = await invoke(routes, 'POST', '/api/integration/read-source-configs', { authenticatedTenantId: 'tenant_1',
     user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
   })
   assert.equal(retiredSave.statusCode, 409)
   assert.equal(retiredSave.body.error.code, 'READ_SOURCE_CONFIG_STATUS_CONFLICT')
   assert.equal(retiredSave.body.error.details.reason, 'content_retired')
-  const auditAfter = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', {
+  const auditAfter = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
   })
   assert.equal(auditAfter.body.data.length, audit.body.data.length, 'retired-content conflict appends no audit row')
@@ -7970,7 +7971,7 @@ async function testReadSourceConfiguredReadRoute() {
 
   // success: read tier is ALLOWED (the designed runtime tier), data plane carries ONLY mapped targets,
   // evidence stays values-free.
-  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, query: { workspaceId: 'workspace_1' },
     body: { inputs: { key: 'M-001' } },
   })
@@ -7993,7 +7994,7 @@ async function testReadSourceConfiguredReadRoute() {
   // plane, so this route must be able to run that same plane — otherwise the config an operator verifies
   // here and the config the feeder executes are two different things, and a fieldMap that resolves
   // perfectly here can resolve NOWHERE there and be written as null on every ingested row.
-  const recordPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const recordPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, query: { workspaceId: 'workspace_1' },
     body: { inputs: { key: 'M-001' }, rowSource: 'adapter_records' },
   })
@@ -8013,34 +8014,34 @@ async function testReadSourceConfiguredReadRoute() {
   // Closed enum, same as the runtime's — and rejected BEFORE the system (and therefore its credentials) is
   // resolved: a request we already know is invalid must not cause a credential lookup.
   const loadsBeforeBadPlane = systemLoads.length
-  const badPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const badPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowSource: 'raw' },
   })
   assert.equal(badPlane.statusCode, 400)
   assert.equal(badPlane.body.error.details.reason, 'execution_row_source_invalid')
   assert.equal(systemLoads.length, loadsBeforeBadPlane, 'an invalid row source never resolves a system credential')
-  const unexpectedField = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const unexpectedField = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowCap: 5000 },
   })
   assert.equal(unexpectedField.statusCode, 400)
   assert.equal(unexpectedField.body.error.details.reason, 'unexpected_field')
 
   // approved-only: draft/retired → 409 coarse
-  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_draft' }, body: { inputs: { key: 'M-001' } },
   })
   assert.equal(draft.statusCode, 409, 'non-approved config is fail-closed')
   assert.equal(draft.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
 
   // strict body allowlist: a config (or any extra key) can never ride in from the runtime request
-  const smuggle = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const smuggle = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, config: { readPath: 'https://evil.example.com' } },
   })
   assert.equal(smuggle.statusCode, 400, 'extra body keys are fail-closed')
   assert.ok(!JSON.stringify(smuggle.body).includes('evil.example.com'), 'error is values-free')
 
   // unauthenticated rejected
-  const anon = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const anon = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' } },
   })
   assert.equal(anon.statusCode, 401, 'unauthenticated caller rejected')
@@ -8064,7 +8065,7 @@ async function testReadSourceConfiguredReadRoute() {
     },
   }).services
   const { routes: wkRoutes } = mountRoutes(wrongKind)
-  const wk = await invoke(wkRoutes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' } },
   })
   assert.equal(wk.statusCode, 409, 'kind drift is fail-closed')
@@ -8133,7 +8134,7 @@ async function testReadSourceResolverReadRoute() {
   const { routes } = mountRoutes(services)
 
   // exactly_one resolves; read-tier; keyed outbound read once; standalone data; no write; values-free.
-  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_resolver' }, body: { inputs: { key: 'M-001' } },
   })
   assertOkResponse(ok, 200)
@@ -8159,7 +8160,7 @@ async function testReadSourceResolverReadRoute() {
     },
     adapterRegistry: { createAdapter() { return { async read() { return { records: [], raw: { Data: { Rows: [{ FItemID: 1 }, { FItemID: 2 }] } } } }, async upsert() { return {} }, async save() { return {} } } } },
   }).services
-  const ambRes = await invoke(mountRoutes(many).routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const ambRes = await invoke(mountRoutes(many).routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_resolver' }, body: { inputs: { key: 'M-001' } },
   })
   assertOkResponse(ambRes, 200)
@@ -8168,7 +8169,7 @@ async function testReadSourceResolverReadRoute() {
   assert.equal(ambRes.body.data.data, null)
 
   // approved-only still holds for resolver configs.
-  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', { authenticatedTenantId: 'tenant_1',
     user: READ_USER, params: { id: 'rsc_draft' }, body: { inputs: { key: 'M-001' } },
   })
   assert.equal(draft.statusCode, 409)
@@ -8262,7 +8263,7 @@ async function testReadSourceCompositionRoutes() {
       itemRows: [{ FItemID: 'ITEM-777' }], bomRows: [{ FBOMNumber: 'BOM-2026-X' }],
     })
     const { routes } = mountRoutes(services)
-    const ok = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const ok = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
     })
     assertOkResponse(ok, 200)
@@ -8283,7 +8284,7 @@ async function testReadSourceCompositionRoutes() {
   // ── approved-only gate #1: composition not approved → 409 ──
   {
     const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], compositionStatus: 'draft' })
-    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_draft' }, body: { inputs: { key: 'M-001' } },
     })
     assert.equal(res.statusCode, 409)
@@ -8294,7 +8295,7 @@ async function testReadSourceCompositionRoutes() {
   // ── approved-only gate #2: a step read config not approved → 409, no chain execution ──
   {
     const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], bomConfigStatus: 'draft' })
-    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
     })
     assert.equal(res.statusCode, 409)
@@ -8308,7 +8309,7 @@ async function testReadSourceCompositionRoutes() {
   //    design-lock requires; without it, gate #2 (approval) alone would let a wrong-mode config through. ──
   {
     const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], bomConfigMode: 'single_record' })
-    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
     })
     assertOkResponse(res, 200)
@@ -8328,7 +8329,7 @@ async function testReadSourceCompositionRoutes() {
     const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }] })
     const { routes } = mountRoutes(services)
     for (const badBody of [{ inputs: { key: 'M-001' }, config: { steps: [] } }, { inputs: { key: 'M-001' }, sheetId: 'x' }]) {
-      const res = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      const res = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
         user: READ_USER, params: { id: 'rscc_1' }, body: badBody,
       })
       assert.equal(res.statusCode, 400)
@@ -8336,7 +8337,7 @@ async function testReadSourceCompositionRoutes() {
     }
     assert.equal(reads.length, 0, 'a config-override request must be rejected before any store/adapter access')
     // A per-hop key inside inputs (only { key } allowed) → contract invalid from the executor's normalizer.
-    const perHopKey = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const perHopKey = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001', key1: 'ITEM-777' } },
     })
     assert.equal(perHopKey.statusCode, 400)
@@ -8346,7 +8347,7 @@ async function testReadSourceCompositionRoutes() {
   // ── hop-0 abort: ambiguous → chain aborts, hop 1 never reads, 200 values-free ──
   {
     const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I1' }, { FItemID: 'I2' }], bomRows: [{ FBOMNumber: 'B' }] })
-    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
     })
     assertOkResponse(res, 200)
@@ -8363,7 +8364,7 @@ async function testReadSourceCompositionRoutes() {
     const { services } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }] })
     const { routes } = mountRoutes(services)
     // Save requires write; a read-only principal is rejected.
-    const denied = await invoke(routes, 'POST', '/api/integration/read-source-compositions', {
+    const denied = await invoke(routes, 'POST', '/api/integration/read-source-compositions', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, body: { config: COMPOSITION_CONFIG },
     })
     assert.equal(denied.statusCode, 403, 'authoring a composition is write-tier')
@@ -8373,20 +8374,20 @@ async function testReadSourceCompositionRoutes() {
   {
     const { calls, services } = createMockServices()
     const { routes } = mountRoutes(services)
-    const saved = await invoke(routes, 'POST', '/api/integration/read-source-compositions', {
+    const saved = await invoke(routes, 'POST', '/api/integration/read-source-compositions', { authenticatedTenantId: 'tenant_1',
       user: WRITE_USER, body: { config: COMPOSITION_CONFIG },
     })
     assert.equal(saved.statusCode, 201)
     findCall(calls, 'readSourceCompositionSaveVersion')
-    const listed = await invoke(routes, 'GET', '/api/integration/read-source-compositions', { user: READ_USER, query: {} })
+    const listed = await invoke(routes, 'GET', '/api/integration/read-source-compositions', { authenticatedTenantId: 'tenant_1', user: READ_USER, query: {} })
     assertOkResponse(listed, 200)
     findCall(calls, 'readSourceCompositionList')
-    const approved = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/approve', {
+    const approved = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/approve', { authenticatedTenantId: 'tenant_1',
       user: WRITE_USER, params: { id: 'rscc_1' },
     })
     assertOkResponse(approved, 200)
     findCall(calls, 'readSourceCompositionApprove')
-    const audited = await invoke(routes, 'GET', '/api/integration/read-source-compositions/:id/audit', {
+    const audited = await invoke(routes, 'GET', '/api/integration/read-source-compositions/:id/audit', { authenticatedTenantId: 'tenant_1',
       user: READ_USER, params: { id: 'rscc_1' }, query: {},
     })
     assertOkResponse(audited, 200)
@@ -9894,11 +9895,60 @@ async function testC6AdapterBackedTargetLoadsWithCredentials() {
   console.log('  PASS  C6 adapter-backed target loads with credentials')
 }
 
+async function testSelfServiceTenantBoundaryDirectHandlers() {
+  const names = [
+    'externalSystemReadSmoke', 'externalSystemReadSourceProbe',
+    'readSourceConfigsSave', 'readSourceConfigsList', 'readSourceConfigsGet', 'readSourceConfigsAudit',
+    'readSourceConfigsApprove', 'readSourceConfigsRetire', 'readSourceConfigsRead',
+    'readSourceCompositionsSave', 'readSourceCompositionsList', 'readSourceCompositionsGet', 'readSourceCompositionsAudit',
+    'readSourceCompositionsApprove', 'readSourceCompositionsRetire', 'readSourceCompositionsRun',
+  ]
+  const refusals = [
+    [{ authenticatedTenantId: undefined, headers: { 'x-tenant-id': 'tenant_1' } }, 'TENANT_CLAIM_REQUIRED'],
+    [{ authenticatedTenantId: undefined, user: TENANTLESS_ADMIN }, 'TENANT_CLAIM_REQUIRED'],
+    [{ user: { ...ADMIN_USER, tenantId: 'tenant_other' } }, 'TENANT_MISMATCH'],
+    [{ headers: { 'x-tenant-id': 'tenant_other' } }, 'TENANT_MISMATCH'],
+    [{ headers: { 'X-Tenant-ID': 'tenant_other' } }, 'TENANT_MISMATCH'],
+    [{ headers: { 'x-tenant-id': ['tenant_1'] } }, 'TENANT_MISMATCH'],
+    [{ headers: { 'x-tenant-id': '' } }, 'TENANT_MISMATCH'],
+    [{ body: { tenantId: 'tenant_other' }, query: { tenantId: 'tenant_1' } }, 'TENANT_MISMATCH'],
+    [{ params: { id: 'sys_1', tenantId: 'tenant_other' }, query: { tenantId: 'tenant_1' } }, 'TENANT_MISMATCH'],
+    [{ params: { id: 'sys_1', tenantId: ['tenant_1'] } }, 'TENANT_MISMATCH'],
+    [{ query: { tenantId: ['tenant_1', 'tenant_other'] } }, 'TENANT_MISMATCH'],
+    [{ query: { tenantId: { value: 'tenant_1' } } }, 'TENANT_MISMATCH'],
+    [{ body: { tenantId: ['tenant_1'] } }, 'TENANT_MISMATCH'],
+    [{ body: { tenantId: null } }, 'TENANT_MISMATCH'],
+    [{ body: { tenantId: ' ' } }, 'TENANT_MISMATCH'],
+  ]
+  for (const flag of [null, 'false']) await withTenantClaimFlag(flag, async () => {
+    const { services, calls } = createMockServices()
+    const handlers = httpRoutes.createHandlers(services)
+    for (const name of names) {
+      for (const [override, code] of refusals) {
+        calls.length = 0
+        const req = { user: ADMIN_USER, authenticatedTenantId: 'tenant_1', body: {}, query: {},
+          params: { id: 'sys_1' }, headers: {}, ...override }
+        await assert.rejects(() => handlers[name](req, createResponse()),
+          error => error.status === 403 && error.code === code, `${name}: explicit tenant refusal`)
+        assert.equal(calls.length, 0, `${name}: refused before any service IO`)
+      }
+      if (/(?:Save|Approve|Retire|Smoke|Probe)$/.test(name)) {
+        calls.length = 0
+        await assert.rejects(() => handlers[name]({ user: READ_USER, body: {}, query: {}, params: {} }, createResponse()),
+          error => error.status === 403 && error.code === 'FORBIDDEN', `${name}: original write tier`)
+        assert.equal(calls.length, 0)
+      }
+    }
+  })
+  console.log('  testSelfServiceTenantBoundaryDirectHandlers OK (16 handlers; fixed scope oracle; no dependency IO)')
+}
+
 async function main() {
   const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
   delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
   try {
   await testC6AdapterBackedTargetLoadsWithCredentials()
+  await testSelfServiceTenantBoundaryDirectHandlers()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
   await testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree()

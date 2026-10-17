@@ -210,12 +210,13 @@ function harness(payloads = goodPages()) {
     bridgeAgentChecklistStore: inert(['saveVersion', 'approve', 'retire', 'getForApply']),
   }, logger: { info() {}, warn() {}, error() {} } })
   const httpCalls = []
-  const call = async (method, path, { user = ADMIN, body = {}, query = {}, params = {} } = {}) => {
+  // This isolated HTTP fixture explicitly models a claim-bearing synthetic session, not JWT proof.
+  const call = async (method, path, { user = ADMIN, authenticatedTenantId = TENANT, body = {}, query = {}, params = {} } = {}) => {
     httpCalls.push({ method, path, body: clone(body), query: clone(query), params: clone(params) })
     const handler = routes.get(`${method} ${path}`)
     assert.equal(typeof handler, 'function', `${method} ${path} registered`)
     const res = { statusCode: 200, status(code) { this.statusCode = code; return this }, json(value) { this.body = value; return this } }
-    await handler({ user, body, query, params }, res)
+    await handler({ user, authenticatedTenantId, body, query, params }, res)
     assert.notEqual(res.body, undefined)
     return res
   }
@@ -588,7 +589,7 @@ for (const status of ['draft', 'retired']) {
 }
 
 for (const [label, options] of [
-  ['tenant', { user: { ...READER, tenantId: 'other-tenant' } }],
+  ['tenant', { user: { ...READER, tenantId: 'other-tenant' }, authenticatedTenantId: 'other-tenant' }],
   ['workspace', { query: { workspaceId: 'other-workspace' } }],
 ]) {
   test(`B4 /read refuses an approved selected id from another ${label} before external read`, async () => {
@@ -818,7 +819,7 @@ for (const status of ['draft', 'retired']) {
 }
 
 for (const [scope, options] of [
-  ['tenant', { user: { ...READER, tenantId: 'another-tenant' } }],
+  ['tenant', { user: { ...READER, tenantId: 'another-tenant' }, authenticatedTenantId: 'another-tenant' }],
   ['workspace', { query: { workspaceId: 'another-workspace' } }],
 ]) {
   test(`BL2 /read cross-${scope} selected id is denied before K3`, async () => {

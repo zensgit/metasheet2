@@ -4,6 +4,9 @@
  */
 
 export type AutomationActionType =
+  // Authoring only. Ordinary live/simulate dispatch refuses this action; the
+  // owner-bound private read runtime remains its sole execution authority.
+  | 'integration_read_preview'
   | 'update_record'
   | 'create_record'
   | 'delete_record'
@@ -33,6 +36,7 @@ export type AutomationActionType =
   | 'write_approval_form_values'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
+  'integration_read_preview',
   'update_record',
   'create_record',
   'delete_record',
