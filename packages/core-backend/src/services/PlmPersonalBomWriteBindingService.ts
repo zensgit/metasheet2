@@ -1,0 +1,706 @@
+import { randomUUID } from 'node:crypto'
+import type { Pool, PoolClient } from 'pg'
+import {
+  decryptStoredSecretValue,
+  encryptStoredSecretValue,
+  isEncryptedSecretValue,
+} from '../security/encrypted-secrets'
+import {
+  bindingAuthorizesFrozen,
+  freezeDispatchAttempt,
+  freezeNativeOperation,
+  grantPublicId,
+  normalizeMetaTenant,
+  personalBomWriteManagementUrl,
+  requirePlmPersonalBomWrite,
+  personalBomWriteBindingInput,
+  personalBomWriteFreezeInput,
+  personalBomWriteGrantSchema,
+  resolvePersistedPlmSource,
+  linePatchBody,
+  type PersonalBomWriteAuthority,
+  PlmPersonalBomWriteError as Failure,
+  type BindingAuthorizationView,
+  type FrozenDispatchAttempt,
+  type FrozenNativeOperation,
+  type PersonalBomWriteTransport,
+} from './plm-personal-bom-write-wire'
+
+const SCOPE_KINDS = new Set(['legacy_private', 'private', 'workspace'])
+
+interface SourceRow {
+  id: string
+  owner_id: string
+  workspace_id: string | null
+  tenant_id: string | null
+  scope_kind: string | null
+  type: string
+  config: unknown
+  is_active: boolean
+  deleted_at: Date | string | null
+}
+
+interface Binding {
+  id: string
+  owner_id: string
+  data_source_id: string
+  connection_id: string
+  subject_id: string
+  meta_tenant_id: string | null
+  yuantus_tenant_id: string
+  yuantus_org_id: string
+  target_origin: string
+  workspace_id: string | null
+  scope_kind: string
+  grant_id: string
+  expires_at: Date | string
+  encrypted_grant: string | null
+  generation: number
+  purpose: string
+  remote_revoke_state: string | null
+  previous_grant_revoke_state: string | null
+}
+
+interface RetiredGrant {
+  id: string
+  binding_id: string
+  owner_id: string
+  connection_id: string
+  yuantus_tenant_id: string
+  yuantus_org_id: string
+  target_origin: string
+  grant_id: string
+  encrypted_grant: string | null
+  state: string
+  slot: string
+  binding_generation: number
+  successor_grant_id: string
+}
+
+export interface PersonalBomWriteBindingMetadata extends BindingAuthorizationView {
+  id: string
+  workspaceId: string | null
+  scopeKind: string
+  expiresAt: string
+  bound: boolean
+  remoteRevokeState: string | null
+  previousGrantRevokeState: string | null
+}
+
+const BINDING_COLUMNS = `id, owner_id, data_source_id, connection_id, subject_id, meta_tenant_id,
+  yuantus_tenant_id, yuantus_org_id, target_origin, workspace_id, scope_kind, grant_id, expires_at,
+  encrypted_grant, generation, purpose, remote_revoke_state, previous_grant_revoke_state`
+
+export class PlmPersonalBomWriteBindingService {
+  constructor(
+    readonly pool: Pick<Pool, 'connect'>,
+    readonly provider: () => PersonalBomWriteTransport,
+  ) {}
+
+  private async tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await fn(client)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* the original error is the caller-facing result */
+      }
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  private async activeOwner(client: PoolClient, owner: string): Promise<void> {
+    const found = await client.query('SELECT id FROM users WHERE id=$1 AND is_active=true FOR SHARE', [owner])
+    if (!found.rowCount) throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+  }
+
+  private async lockSource(client: PoolClient, dataSourceId: string, owner: string): Promise<SourceRow> {
+    const found = await client.query<SourceRow>(
+      `SELECT id, owner_id, workspace_id, tenant_id, scope_kind, type, config, is_active, deleted_at
+       FROM data_sources WHERE id=$1 FOR UPDATE`,
+      [dataSourceId],
+    )
+    const source = found.rows[0]
+    if (
+      !source ||
+      source.owner_id !== owner ||
+      source.type !== 'plm' ||
+      source.is_active !== true ||
+      source.deleted_at != null ||
+      !SCOPE_KINDS.has(String(source.scope_kind))
+    )
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    return source
+  }
+
+  private configOf(source: SourceRow): unknown {
+    if (typeof source.config === 'string') {
+      try {
+        return JSON.parse(source.config) as unknown
+      } catch {
+        throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      }
+    }
+    return source.config
+  }
+
+  private metadata(row: Binding): PersonalBomWriteBindingMetadata {
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      dataSourceId: row.data_source_id,
+      connectionId: row.connection_id,
+      subjectId: row.subject_id,
+      metaTenantId: row.meta_tenant_id,
+      targetOrigin: row.target_origin,
+      yuantusTenantId: row.yuantus_tenant_id,
+      yuantusOrgId: row.yuantus_org_id,
+      workspaceId: row.workspace_id,
+      scopeKind: row.scope_kind,
+      grantId: row.grant_id,
+      generation: Number(row.generation),
+      expiresAt: new Date(row.expires_at).toISOString(),
+      bound: !!row.encrypted_grant,
+      remoteRevokeState: row.remote_revoke_state,
+      previousGrantRevokeState: row.previous_grant_revoke_state,
+    }
+  }
+
+  /** Current persisted origin and Y scope must still be the bound target. Cache is not consulted. */
+  private assertCurrentTarget(source: SourceRow, row: Binding): void {
+    const resolved = resolvePersistedPlmSource(this.configOf(source))
+    if (
+      resolved.origin.origin !== row.target_origin ||
+      resolved.tenantId !== row.yuantus_tenant_id ||
+      resolved.orgId !== row.yuantus_org_id
+    )
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+  }
+
+  /** Source owner and the current Meta tenant snapshot. Feature flag is not authority. */
+  private async ownedSource(client: PoolClient, dataSourceId: string, owner: string): Promise<SourceRow | undefined> {
+    const found = await client.query<SourceRow>(
+      `SELECT id, owner_id, workspace_id, tenant_id, scope_kind, type, config, is_active, deleted_at
+       FROM data_sources WHERE id=$1 FOR UPDATE`,
+      [dataSourceId],
+    )
+    const source = found.rows[0]
+    if (!source || source.owner_id !== owner || source.type !== 'plm' || source.deleted_at != null) return undefined
+    return source
+  }
+
+  private snapshotMatches(source: SourceRow, row: Binding): boolean {
+    const metaTenantId = normalizeMetaTenant(source.tenant_id)
+    const workspaceId = source.workspace_id ?? null
+    return (
+      metaTenantId === row.meta_tenant_id &&
+      workspaceId === row.workspace_id &&
+      source.scope_kind === row.scope_kind
+    )
+  }
+
+  private sameSnapshot(source: SourceRow, row: Binding): void {
+    const metaTenantId = normalizeMetaTenant(source.tenant_id)
+    const workspaceId = source.workspace_id ?? null
+    if (
+      source.owner_id !== row.owner_id ||
+      metaTenantId !== row.meta_tenant_id ||
+      workspaceId !== row.workspace_id ||
+      source.scope_kind !== row.scope_kind
+    )
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    this.assertCurrentTarget(source, row)
+  }
+
+  private secret(row: Binding): string | null {
+    if (!row.encrypted_grant || !isEncryptedSecretValue(row.encrypted_grant)) return null
+    return this.secretValue(row.encrypted_grant)
+  }
+
+  async managementUrl(owner: string, dataSourceId: string): Promise<string> {
+    requirePlmPersonalBomWrite()
+    return this.tx(async (client) => {
+      await this.activeOwner(client, owner)
+      const source = await this.lockSource(client, dataSourceId, owner)
+      return personalBomWriteManagementUrl(resolvePersistedPlmSource(this.configOf(source)).origin)
+    })
+  }
+
+  async bind(owner: string, input: unknown): Promise<PersonalBomWriteBindingMetadata> {
+    requirePlmPersonalBomWrite()
+    const parsed = personalBomWriteBindingInput.safeParse(input)
+    if (!parsed.success) {
+      const grant = input && typeof input === 'object' ? (input as { grant?: unknown }).grant : undefined
+      if (typeof grant === 'string' && grant.startsWith('yua_'))
+        throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+    }
+    const body = parsed.data
+    const bound = await this.tx(async (client) => {
+      await this.activeOwner(client, owner)
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `plm-personal-bom-write:${owner}:${body.dataSourceId}`,
+      ])
+      const source = await this.lockSource(client, body.dataSourceId, owner)
+      const resolved = resolvePersistedPlmSource(this.configOf(source))
+      const authority: PersonalBomWriteAuthority = {
+        origin: resolved.origin.origin,
+        tenantId: resolved.tenantId,
+        orgId: resolved.orgId,
+      }
+      const raw = await this.provider().personalBomWriteRequest('verify', body.grant, body.connectionId, authority)
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+      if ((raw as { purpose?: unknown }).purpose !== 'bom_write')
+        throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      const verified = personalBomWriteGrantSchema.safeParse(raw)
+      if (!verified.success) throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+      const grant = verified.data
+      if (
+        grant.grant_id !== grantPublicId(body.grant) ||
+        grant.connection_id !== body.connectionId ||
+        grant.tenant_id !== resolved.tenantId ||
+        grant.org_id !== resolved.orgId ||
+        grant.purpose !== 'bom_write'
+      )
+        throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      if (new Date(grant.expires_at).getTime() <= Date.now())
+        throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+      const previous = (
+        await client.query<Binding>(
+          `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings
+           WHERE owner_id=$1 AND data_source_id=$2 FOR UPDATE`,
+          [owner, body.dataSourceId],
+        )
+      ).rows[0]
+      if (previous) {
+        await this.rejectRetiredReuse(client, previous.id, owner, {
+          grantId: grant.grant_id,
+          connectionId: grant.connection_id,
+          tenantId: grant.tenant_id,
+          orgId: grant.org_id,
+          origin: authority.origin,
+        })
+      }
+      const encrypted = encryptStoredSecretValue(body.grant)
+      if (!isEncryptedSecretValue(encrypted)) throw new Failure(503, 'PLM_BOM_WRITE_UNAVAILABLE')
+      const metaTenantId = normalizeMetaTenant(source.tenant_id)
+      const saved = (
+        await client.query<Binding>(
+          `INSERT INTO plm_personal_bom_write_bindings(
+             id, owner_id, data_source_id, connection_id, subject_id, meta_tenant_id,
+             yuantus_tenant_id, yuantus_org_id, target_origin, workspace_id, scope_kind, grant_id,
+             expires_at, encrypted_grant, purpose
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'bom_write')
+           ON CONFLICT (owner_id, data_source_id) DO UPDATE SET
+             connection_id=EXCLUDED.connection_id,
+             subject_id=EXCLUDED.subject_id,
+             meta_tenant_id=EXCLUDED.meta_tenant_id,
+             yuantus_tenant_id=EXCLUDED.yuantus_tenant_id,
+             yuantus_org_id=EXCLUDED.yuantus_org_id,
+             target_origin=EXCLUDED.target_origin,
+             workspace_id=EXCLUDED.workspace_id,
+             scope_kind=EXCLUDED.scope_kind,
+             grant_id=EXCLUDED.grant_id,
+             expires_at=EXCLUDED.expires_at,
+             encrypted_grant=EXCLUDED.encrypted_grant,
+             purpose='bom_write',
+             generation=plm_personal_bom_write_bindings.generation+1,
+             remote_revoke_state=NULL,
+             previous_grant_revoke_state=CASE
+               WHEN plm_personal_bom_write_bindings.encrypted_grant IS NOT NULL
+                AND plm_personal_bom_write_bindings.grant_id IS DISTINCT FROM EXCLUDED.grant_id
+               THEN 'pending' ELSE NULL END,
+             updated_at=now()
+           WHERE plm_personal_bom_write_bindings.generation=$15
+           RETURNING ${BINDING_COLUMNS}`,
+          [
+            randomUUID(),
+            owner,
+            body.dataSourceId,
+            grant.connection_id,
+            grant.auth_user_id,
+            metaTenantId,
+            grant.tenant_id,
+            grant.org_id,
+            authority.origin,
+            source.workspace_id ?? null,
+            source.scope_kind,
+            grant.grant_id,
+            new Date(grant.expires_at),
+            encrypted,
+            previous?.generation ?? 0,
+          ],
+        )
+      ).rows[0]
+      if (!saved) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+      const retiredId =
+        previous?.encrypted_grant &&
+        isEncryptedSecretValue(previous.encrypted_grant) &&
+        previous.grant_id !== grant.grant_id
+          ? await this.insertRetired(
+              client,
+              previous,
+              previous.encrypted_grant,
+              'previous',
+              Number(saved.generation),
+              saved.grant_id,
+            )
+          : null
+      return { saved, retiredId }
+    })
+    if (bound.retiredId) await this.attemptRetired(owner, bound.retiredId)
+    const current = await this.readOwn(owner, bound.saved.id)
+    return this.metadata(current ?? bound.saved)
+  }
+
+  /** Owned metadata. The enable flag is not consulted. */
+  async list(owner: string): Promise<PersonalBomWriteBindingMetadata[]> {
+    return this.tx(async (client) => {
+      await this.activeOwner(client, owner)
+      const rows = (
+        await client.query<Binding>(
+          `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings WHERE owner_id=$1 ORDER BY id`,
+          [owner],
+        )
+      ).rows
+      const visible: PersonalBomWriteBindingMetadata[] = []
+      for (const row of rows) {
+        const source = await this.ownedSource(client, row.data_source_id, owner)
+        if (!source || !this.snapshotMatches(source, row)) continue
+        visible.push(this.metadata(row))
+      }
+      return visible
+    })
+  }
+
+  /**
+   * Local invalidation, then exact-secret self-revoke.
+   * Remains available when the feature flag is off, the grant is expired, or the native registry no longer issues.
+   */
+  async unbind(owner: string, bindingId: string): Promise<PersonalBomWriteBindingMetadata> {
+    const cleared = await this.tx(async (client) => {
+      await this.activeOwner(client, owner)
+      const dataSourceId = await this.mapOwn(client, owner, bindingId)
+      const source = await this.ownedSource(client, dataSourceId, owner)
+      if (!source) throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      const row = await this.lockOwn(client, owner, bindingId)
+      this.assertMappedSource(row, owner, dataSourceId, source.id)
+      if (!this.snapshotMatches(source, row)) throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+      if (!row.encrypted_grant) return { row, changed: false, retiredId: null as string | null }
+      const saved = (
+        await client.query<Binding>(
+          `UPDATE plm_personal_bom_write_bindings
+           SET encrypted_grant=NULL, generation=generation+1, remote_revoke_state='pending', updated_at=now()
+           WHERE id=$1 AND owner_id=$2 AND generation=$3
+           RETURNING ${BINDING_COLUMNS}`,
+          [row.id, owner, row.generation],
+        )
+      ).rows[0]
+      if (!saved) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+      const retiredId = isEncryptedSecretValue(row.encrypted_grant)
+        ? await this.insertRetired(
+            client,
+            row,
+            row.encrypted_grant,
+            'current',
+            Number(saved.generation),
+            saved.grant_id,
+          )
+        : null
+      return { row: saved, changed: true, retiredId }
+    })
+    if (!cleared.changed) return this.metadata(cleared.row)
+    if (cleared.retiredId) await this.attemptRetired(owner, cleared.retiredId)
+    else await this.markCurrentUnresolved(owner, cleared.row)
+    const current = await this.readOwn(owner, cleared.row.id)
+    return this.metadata(current ?? cleared.row)
+  }
+
+  /**
+   * Restart entry for a retired grant whose remote revoke did not finish.
+   * Pending and unknown keep the ciphertext. Revoked and rejected do not.
+   * The enable flag is not consulted: exact self-revoke stays available after disablement.
+   */
+  async retryRetiredRevocations(owner: string): Promise<void> {
+    const ids = await this.tx(async (client) => {
+      await this.activeOwner(client, owner)
+      const found = await client.query<{ id: string }>(
+        `SELECT id FROM plm_personal_bom_write_retired_grants
+         WHERE owner_id=$1 AND state IN ('pending', 'unknown') AND encrypted_grant IS NOT NULL
+         ORDER BY created_at, id`,
+        [owner],
+      )
+      return found.rows.map((row) => row.id)
+    })
+    for (const id of ids) await this.attemptRetired(owner, id)
+  }
+
+  async requireUsable(owner: string, bindingId: string): Promise<PersonalBomWriteBindingMetadata> {
+    requirePlmPersonalBomWrite()
+    return this.tx(async (client) => this.metadata(await this.usable(client, owner, bindingId)))
+  }
+
+  async freezeForOperation(
+    owner: string,
+    bindingId: string,
+    input: unknown,
+  ): Promise<{
+    binding: PersonalBomWriteBindingMetadata
+    operation: FrozenNativeOperation
+    attempt: FrozenDispatchAttempt
+    authorizes: boolean
+  }> {
+    requirePlmPersonalBomWrite()
+    const parsed = personalBomWriteFreezeInput.safeParse(input)
+    if (!parsed.success) throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+    const request = parsed.data
+    if (request.operationKind === 'line' && !request.bomLineId)
+      throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+    if (request.operationKind === 'eco-intent' && (request.bomLineId !== undefined || request.patch !== undefined))
+      throw new Failure(422, 'PLM_BOM_WRITE_INVALID')
+    const payload = request.operationKind === 'line' ? linePatchBody(request.patch) : { partId: request.partId }
+    return this.tx(async (client) => {
+      const row = await this.usable(client, owner, bindingId)
+      const operation = freezeNativeOperation({
+        operationKind: request.operationKind,
+        ownerId: row.owner_id,
+        dataSourceId: row.data_source_id,
+        metaTenantId: row.meta_tenant_id,
+        targetOrigin: row.target_origin,
+        connectionId: row.connection_id,
+        yuantusTenantId: row.yuantus_tenant_id,
+        yuantusOrgId: row.yuantus_org_id,
+        subjectId: row.subject_id,
+        partId: request.partId,
+        bomLineId: request.operationKind === 'line' ? request.bomLineId! : null,
+        clientKey: request.clientKey,
+        payload,
+      })
+      const attempt = freezeDispatchAttempt(operation, Number(row.generation), 1)
+      return {
+        binding: this.metadata(row),
+        operation,
+        attempt,
+        authorizes: bindingAuthorizesFrozen(this.metadata(row), operation),
+      }
+    })
+  }
+
+  private async usable(client: PoolClient, owner: string, bindingId: string): Promise<Binding> {
+    await this.activeOwner(client, owner)
+    const dataSourceId = await this.mapOwn(client, owner, bindingId)
+    const source = await this.lockSource(client, dataSourceId, owner)
+    const row = await this.lockOwn(client, owner, bindingId)
+    this.assertMappedSource(row, owner, dataSourceId, source.id)
+    this.sameSnapshot(source, row)
+    if (row.purpose !== 'bom_write' || !row.encrypted_grant || row.remote_revoke_state)
+      throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+    if (!this.secret(row) || new Date(row.expires_at).getTime() <= Date.now())
+      throw new Failure(401, 'PLM_BOM_WRITE_UNAUTHORIZED')
+    return row
+  }
+
+  /** Id to source, without a row lock. Callers lock the source before lockOwn. */
+  private async mapOwn(client: PoolClient, owner: string, bindingId: string): Promise<string> {
+    const mapped = (
+      await client.query<{ data_source_id: string }>(
+        `SELECT data_source_id FROM plm_personal_bom_write_bindings
+         WHERE id=$1 AND owner_id=$2`,
+        [bindingId, owner],
+      )
+    ).rows[0]
+    if (!mapped) throw new Failure(404, 'PLM_BOM_WRITE_NOT_FOUND')
+    return mapped.data_source_id
+  }
+
+  /** The binding id keeps its owner and source. A mismatch is not followed into a second source lock. */
+  private assertMappedSource(row: Binding, owner: string, dataSourceId: string, lockedSourceId: string): void {
+    if (row.owner_id !== owner || row.data_source_id !== dataSourceId || row.data_source_id !== lockedSourceId)
+      throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+  }
+
+  private async lockOwn(client: PoolClient, owner: string, bindingId: string): Promise<Binding> {
+    const row = (
+      await client.query<Binding>(
+        `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings
+         WHERE id=$1 AND owner_id=$2 FOR UPDATE`,
+        [bindingId, owner],
+      )
+    ).rows[0]
+    if (!row) throw new Failure(404, 'PLM_BOM_WRITE_NOT_FOUND')
+    return row
+  }
+
+  private async readOwn(owner: string, bindingId: string): Promise<Binding | undefined> {
+    const found = await this.pool.connect()
+    try {
+      const row = (
+        await found.query<Binding>(
+          `SELECT ${BINDING_COLUMNS} FROM plm_personal_bom_write_bindings WHERE id=$1 AND owner_id=$2`,
+          [bindingId, owner],
+        )
+      ).rows[0]
+      return row
+    } finally {
+      found.release()
+    }
+  }
+
+  /**
+   * A pending or unknown retirement still holds this credential for the binding's native scope.
+   * Installing it again would let retryRetiredRevocations revoke the live grant.
+   */
+  private async rejectRetiredReuse(
+    client: PoolClient,
+    bindingId: string,
+    owner: string,
+    scope: { grantId: string; connectionId: string; tenantId: string; orgId: string; origin: string },
+  ): Promise<void> {
+    const found = await client.query(
+      `SELECT id FROM plm_personal_bom_write_retired_grants
+       WHERE binding_id=$1 AND owner_id=$2 AND grant_id=$3
+         AND connection_id=$4 AND yuantus_tenant_id=$5 AND yuantus_org_id=$6
+         AND target_origin=$7
+         AND state IN ('pending', 'unknown') AND encrypted_grant IS NOT NULL
+       LIMIT 1`,
+      [bindingId, owner, scope.grantId, scope.connectionId, scope.tenantId, scope.orgId, scope.origin],
+    )
+    if (found.rowCount) throw new Failure(409, 'PLM_BOM_WRITE_CONFLICT')
+  }
+
+  private async insertRetired(
+    client: PoolClient,
+    row: Binding,
+    ciphertext: string,
+    slot: 'current' | 'previous',
+    bindingGeneration: number,
+    successorGrantId: string,
+  ): Promise<string> {
+    const id = randomUUID()
+    await client.query(
+      `INSERT INTO plm_personal_bom_write_retired_grants(
+         id, binding_id, owner_id, connection_id, yuantus_tenant_id, yuantus_org_id,
+         target_origin, grant_id, encrypted_grant, state, binding_generation, successor_grant_id, slot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,$12)`,
+      [
+        id,
+        row.id,
+        row.owner_id,
+        row.connection_id,
+        row.yuantus_tenant_id,
+        row.yuantus_org_id,
+        row.target_origin,
+        row.grant_id,
+        ciphertext,
+        bindingGeneration,
+        successorGrantId,
+        slot,
+      ],
+    )
+    return id
+  }
+
+  private async markCurrentUnresolved(owner: string, row: Binding): Promise<void> {
+    await this.tx(async (client) => {
+      await client.query(
+        `UPDATE plm_personal_bom_write_bindings
+         SET remote_revoke_state='unknown', updated_at=now()
+         WHERE id=$1 AND owner_id=$2 AND generation=$3 AND remote_revoke_state='pending' AND encrypted_grant IS NULL`,
+        [row.id, owner, row.generation],
+      )
+    })
+  }
+
+  /** Decrypt the stored retired credential, revoke at its original origin, then record the outcome. */
+  private async attemptRetired(owner: string, retiredId: string): Promise<void> {
+    const row = await this.readRetired(owner, retiredId)
+    if (!row?.encrypted_grant || (row.state !== 'pending' && row.state !== 'unknown')) return
+    const secret = isEncryptedSecretValue(row.encrypted_grant) ? this.secretValue(row.encrypted_grant) : null
+    const outcome = secret
+      ? await this.revokeOutcome(secret, row.connection_id, {
+          origin: row.target_origin,
+          tenantId: row.yuantus_tenant_id,
+          orgId: row.yuantus_org_id,
+        })
+      : 'unknown'
+    await this.tx(async (client) => {
+      const settled = await client.query(
+        `UPDATE plm_personal_bom_write_retired_grants
+         SET state=$2,
+             encrypted_grant=CASE WHEN $2 IN ('revoked', 'rejected') THEN NULL ELSE encrypted_grant END,
+             updated_at=now()
+         WHERE id=$1 AND owner_id=$3 AND encrypted_grant=$4 AND state IN ('pending', 'unknown')`,
+        [row.id, outcome, owner, row.encrypted_grant],
+      )
+      if (!settled.rowCount) return
+      if (row.slot === 'current') {
+        await client.query(
+          `UPDATE plm_personal_bom_write_bindings
+           SET remote_revoke_state=$3, updated_at=now()
+           WHERE id=$1 AND generation=$2 AND remote_revoke_state IN ('pending', 'unknown') AND encrypted_grant IS NULL`,
+          [row.binding_id, row.binding_generation, outcome],
+        )
+        return
+      }
+      await client.query(
+        `UPDATE plm_personal_bom_write_bindings
+         SET previous_grant_revoke_state=$4, updated_at=now()
+         WHERE id=$1 AND generation=$2 AND grant_id=$3 AND previous_grant_revoke_state IN ('pending', 'unknown')`,
+        [row.binding_id, row.binding_generation, row.successor_grant_id, outcome],
+      )
+    })
+  }
+
+  private secretValue(ciphertext: string): string | null {
+    try {
+      return decryptStoredSecretValue(ciphertext)
+    } catch {
+      return null
+    }
+  }
+
+  private async readRetired(owner: string, retiredId: string): Promise<RetiredGrant | undefined> {
+    const found = await this.pool.connect()
+    try {
+      const row = (
+        await found.query<RetiredGrant>(
+          `SELECT id, binding_id, owner_id, connection_id, yuantus_tenant_id, yuantus_org_id,
+                  target_origin, grant_id, encrypted_grant, state, binding_generation, successor_grant_id, slot
+           FROM plm_personal_bom_write_retired_grants
+           WHERE id=$1 AND owner_id=$2`,
+          [retiredId, owner],
+        )
+      ).rows[0]
+      return row
+    } finally {
+      found.release()
+    }
+  }
+
+  /**
+   * One attempt. 408 and 429 refuse this call and leave the native grant valid, so the
+   * ciphertext stays for a later caller-driven retry. There is no delay and no internal loop.
+   * A definite received 4xx, such as 401, is rejected and drops the ciphertext.
+   */
+  private async revokeOutcome(
+    secret: string,
+    connectionId: string,
+    authority: PersonalBomWriteAuthority,
+  ): Promise<'revoked' | 'unknown' | 'rejected'> {
+    try {
+      await this.provider().personalBomWriteRequest('revoke', secret, connectionId, authority)
+      return 'revoked'
+    } catch (error) {
+      if (!(error instanceof Failure) || !error.received || error.status >= 500) return 'unknown'
+      if (error.status === 408 || error.status === 429) return 'unknown'
+      return 'rejected'
+    }
+  }
+}

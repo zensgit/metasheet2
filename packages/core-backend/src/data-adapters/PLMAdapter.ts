@@ -4,6 +4,20 @@ import { verifyEmbedToken, type EmbedTokenClaims } from '../auth/embed-token-ver
 import { consumeVisualPreviewJti, verifyVisualPreviewToken, type VisualPreviewDescriptor } from '../auth/visual-preview-token'
 import { visualReviewSourceConfigured } from '../auth/visual-review-source'
 import { requirePlmApprovalCard, PlmPersonalApprovalError } from '../services/plm-personal-approval-wire'
+import {
+  parsePersonalBomWriteSuccess,
+  personalBomWriteHttpError,
+  personalBomWriteManagementUrl as bomWriteManagementHref,
+  preparePersonalBomWriteCall,
+  requirePlmPersonalBomWrite,
+  resolvePersistedPlmSource,
+  trustedRequestOrigin,
+  PlmPersonalBomWriteError,
+  YUW_GRANT,
+  type PersonalBomWriteAuthority,
+  type PersonalBomWriteOperation,
+  type PersonalBomWriteTarget,
+} from '../services/plm-personal-bom-write-wire'
 import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
 import { createHash, randomUUID } from 'node:crypto'
@@ -2518,6 +2532,70 @@ export class PLMAdapter extends HTTPAdapter {
     } catch (error) {
       if (error instanceof PlmPersonalApprovalError) throw error
       throw new PlmPersonalApprovalError(503, 'PLM_PROVIDER_UNAVAILABLE')
+    }
+  }
+
+  /**
+   * Same native page as approval, with the bom_write deep link. This does not mint a grant.
+   * The origin comes from the caller-supplied persisted source, not this adapter's cached config.
+   */
+  personalBomWriteManagementUrl(sourceConfig: unknown): string {
+    requirePlmPersonalBomWrite()
+    return bomWriteManagementHref(resolvePersistedPlmSource(sourceConfig).origin)
+  }
+
+  /**
+   * Personal bom_write fetch. No HTTPAdapter interceptor, source credential, redirect, or retry.
+   * The host, tenant, and org are the explicit authority argument. this.config is not consulted.
+   * Verify and product writes follow the enable flag. Exact self-revoke does not.
+   */
+  async personalBomWriteRequest(
+    operation: PersonalBomWriteOperation,
+    grant: string,
+    connectionId: string,
+    authority: PersonalBomWriteAuthority,
+    data?: unknown,
+    target?: PersonalBomWriteTarget,
+  ): Promise<unknown> {
+    if (operation !== 'revoke') requirePlmPersonalBomWrite()
+    if (this.mockMode || !YUW_GRANT.test(grant)) throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const origin = trustedRequestOrigin(authority?.origin)
+    const tenant = authority?.tenantId
+    const org = authority?.orgId
+    if (
+      typeof tenant !== 'string' ||
+      typeof org !== 'string' ||
+      !tenant ||
+      !org ||
+      /[\u0000-\u001f\u007f]/.test(tenant) ||
+      /[\u0000-\u001f\u007f]/.test(org)
+    )
+      throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const prepared = preparePersonalBomWriteCall(operation, connectionId, data, target)
+    const url = new URL(prepared.path, origin)
+    if (url.origin !== origin.origin) throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${grant}`,
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenant,
+      'x-org-id': org,
+    }
+    if (prepared.idempotencyKey) headers['Idempotency-Key'] = prepared.idempotencyKey
+    if (prepared.ifMatch) headers['If-Match'] = prepared.ifMatch
+    try {
+      const response = await fetch(url, {
+        method: prepared.method,
+        redirect: 'error',
+        signal: AbortSignal.timeout(8000),
+        headers,
+        ...(prepared.body !== undefined ? { body: JSON.stringify(prepared.body) } : {}),
+      })
+      const body = await response.text()
+      if (!response.ok) throw personalBomWriteHttpError(response.status, body)
+      return parsePersonalBomWriteSuccess(operation, response.status, body)
+    } catch (error) {
+      if (error instanceof PlmPersonalBomWriteError) throw error
+      throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE')
     }
   }
 

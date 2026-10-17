@@ -144,3 +144,47 @@ Recorded from the eight uploads against this checkout. Historical counts in thos
 This increment closes the two generic shared-account approval entries, including when the personal-card feature is disabled. It removes only private dispatch/version helpers and their now-unused flag import. History still reads existing decisions; a refusal creates no decision history. Platform approve/reject remain functional. No new flag, schema or credential is introduced.
 
 The distinct personal BOM-line and ECO-intent grant chain remains unfinished. Workbench writes still use the configured integration identity on this source; the MetaSheet attempt audit is not proof of a Yuantus personal subject. The next increment must implement and verify the actual positive chain, independently scoped credentials, current permissions, immutable retry identity and revocation/concurrency behavior. This guard increment does not complete PR #6425 or the master goal.
+
+
+## Personal BOM write identity — current implementation contract (2026-10-17)
+
+This increment is in progress. The earlier shared-account gap is being repaired
+under the explicit implementation authorization; it is not a completed positive
+write chain. Approval credentials remain separate from native `bom_write` grants.
+Both BOM line PATCH and ECO-intent POST must use the requesting person's verified
+Yuantus grant, with no shared-account fallback under any flag value.
+
+The binding records the current persistent source owner, MetaSheet tenant,
+workspace/scope and canonical native target origin, plus the separately verified
+Yuantus tenant, organization and subject. Source configuration is re-read under
+locks; a cached adapter URL is not authority to receive a personal bearer. Lock
+order is owner, source, binding, including rebind and use. A first mapping read
+must be rechecked after locking; it must not follow a changed mapping into an
+inverted second lock. Transfer or scope/target changes invalidate further use.
+
+Remaining consumer integration must compare the source's MetaSheet tenant against
+`req.authenticatedTenantId`, the JWT-verified carrier. The compatibility header
+may populate `req.user.tenantId`; that field must not establish tenant authority.
+A source snapshot alone does not prove the caller's tenant. Nullable legacy
+private sources remain a distinct explicit case, never copied from Yuantus scope.
+This request-context check must be made inside the source/dispatch lock boundary.
+For tenant-scoped callers, the active `user_orgs` membership must also be
+rechecked/locked through dispatch; a previously verified token is not a lock
+against concurrent membership revocation. Ordinary auth resolves that membership
+on admission, but that earlier query does not serialize the later provider call.
+
+A durable logical intent is unique by MetaSheet owner/source/operation kind and
+client operation key before resolving today's personal binding. Its frozen
+origin/person/native scope/payload cannot change on retries. Replacing a grant
+for the same person can authorize a fresh dispatch attempt; changing the person
+or target cannot reinterpret the old key as a different operation. Grant generation
+belongs to the attempt, not the logical operation identity. ECO browser requests
+need an operation key as well as line writes. Provider receipts, current authority
+checks and native commit remain the final business authority.
+
+Local unbinding invalidates use before remote self-revoke. Remote uncertainty is
+not revocation proof: an encrypted retired credential and its original target
+must survive a process restart until revocation can be reconciled. Replacement
+must not revoke the replacement credential or lose older pending revocations.
+The encrypted retirement/restart foundation is implemented and independently
+verified below. Consumer admission and automatic reconciliation wiring remain pending.

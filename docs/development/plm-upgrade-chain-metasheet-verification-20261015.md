@@ -158,3 +158,92 @@ Input source: `70af11cadb2393f1fe6e477ea539a6924184d347`. Grok 4.7 (xhigh) imple
 Reproduce from `packages/core-backend` under Node 20: `node node_modules/vitest/vitest.mjs run tests/unit/approvals-bridge-routes.test.ts tests/unit/federation.contract.test.ts tests/unit/plm-personal-approval-routes.test.ts tests/unit/plm-personal-approval-transport.test.ts`. The package manager wrapper rejected symlinked task-state dependencies (`ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH`); the existing locked Vitest binary was invoked directly, without dependency changes.
 
 Exact pushed-head CI is tracked separately in the PR description. The purpose-specific personal BOM-line/ECO chain, split identity/RBAC/PLM topology and cross-process revocation remain pending; these guard tests are not their acceptance evidence.
+
+
+## Personal BOM foundation review checkpoint — 2026-10-17
+
+Native provider Draft PR349 now has source
+`e75a9f4cb56ef772618035e93528487e78f3d2b0`; its exact-head CI is pending.
+It includes independent-purpose grants, controlled line/ECO APIs and native
+purpose-selection UI. The complete local native workflow passed328 tests without
+skips on owned PostgreSQL15; canonical JWT/REST/RPC/UI/org controls passed87.
+These overlapping counts are not MetaSheet integration proof. Native first-use
+password login/PATCH compatibility was repaired and reviewed with Astra ultra.
+
+Grok4.7(xhigh) is implementing the MetaSheet binding/wire foundation. Codex
+independently reproduced and checked the following with Node20.20.2 and existing
+locked dependencies; no real provider account, external notification or deployment
+was used:
+
+- A stale cached adapter origin received a synthetic personal bearer before the
+  repair. With persistent target origin carried explicitly through the actual
+  adapter, the real-PG positive control targets only the current native origin.
+- A real PostgreSQL15 row-lock barrier and `pg_blocking_pids` reproduced40P01
+  between public rebind and use on service hash06c40de9. Stable repaired hash
+  `6c87903c3362a66b6f5bd38d8479855be374dad5c2f08313ef8825f1127a8035`
+  passed both concurrent calls with an actual observed wait and no deadlock.
+  The two repository PG lock-order cases then passed,0 skipped; owned cluster
+  shutdown and cleanup succeeded. Their native responses are transport fixtures,
+  so this is database/concurrency proof, not the paired native write chain.
+- Actual native HTTP accepted Unicode connection/part/line identifiers and
+  separately140-character part/line identifiers. Original consumer validation
+  refused them; repaired wire hash
+  `d350c15c088b68e69c362f684728c909516f00df9c4f571560f3aeb49b806d8f`
+  independently accepts the captured successful native response and constructs
+  the correctly percent-encoded PATCH path. A reserved-character hypothesis was
+  refuted by native401; reserved delimiters remain rejected.
+
+These are checkpoints of uncommitted foundation files, not completion of PR6425.
+Durable retired-grant restart/revoke behavior, JWT-verified MetaSheet tenant
+admission, persisted frozen intents, route/UI integration, CI execution without
+skip substitution, and the actual two-process personal line/ECO chain remain
+pending. Historical approval-guard green CI cannot stand in for those checks.
+
+
+Durable-revoke review found two additional reproducible gaps on candidate service
+hash9b8522ea, using actual PostgreSQL/migration/service/adapter and a synthetic
+native transport: (1) A→B with uncertain A revoke, then A rebind, lets cleanup
+revoke the now-current A; (2) a429 response clears the retired ciphertext as
+terminal rejection, so a restart cannot retry the still-valid old credential.
+Both original red controls preserve source hashes and owned-cluster cleanup.
+The A→B→A control passes on stable service hash
+`372f6134b28962457843f5296cb0f8dea3b0218416c0f54e6c1cdf93645ae64a`:
+rebind is refused409, B stays bound and is not revoked, and A's durable cleanup
+remains possible. Recoverable-response retry repair and final source validation
+are still pending; these intermediate hashes are not the eventual committed head.
+
+
+### Verified foundation follow-up
+
+Final foundation source fingerprints and limits are recorded in
+`plm-personal-bom-foundation-verification-20261017.json`. Grok finished and
+released its write lock; Codex independently reviewed the new service/wire and
+adapter diff, repaired the CI admission wiring and registered the independent
+exact-literal flag. Backend `tsc --noEmit` and workflow actionlint both pass.
+Two complete unit files: **42 passed in2.43s**. Flag registry: **50 passed in2.099s**.
+The complete PostgreSQL lock/restart file: **6 passed,0 skipped in1.20s**,
+wrapper1.68s, PostgreSQL15, stable source fingerprints, shutdown/cleanup confirmed.
+Its later429→204 restart now retains the encrypted retired secret until successful
+revoke, then clears the ciphertext. Independent actual-PG429 control also passes.
+
+The dedicated workflow supplies only its disposable PostgreSQL service URL;
+there is no implicit production/default database fallback. Missing explicit URL
+or execution gate makes the actual CLI fail before collection. CI parses its
+JUnit report and refuses zero tests, any failure/error or skipped test. The
+non-default `.realdb.ts` suffix avoids a misleading skipped unit-lane pass.
+Local testing used owned socket-only PostgreSQL, not a shared database.
+
+Reproduce against a disposable loopback PostgreSQL database named
+`plm_personal_disposable`, from `packages/core-backend`:
+
+```sh
+EXPECT_PLM_PERSONAL_BOM_WRITE_DB=1 PLM_PERSONAL_BOM_WRITE_TEST_PG_URL='<disposable-url>' node ../../node_modules/vitest/vitest.mjs run --config vitest.plm-personal-bom-write-lock.config.ts
+node ../../node_modules/vitest/vitest.mjs run tests/unit/plm-personal-bom-write-binding.test.ts tests/unit/plm-personal-bom-write-transport.test.ts
+node ../../node_modules/typescript/bin/tsc --noEmit
+```
+
+The native provider remains authoritative. This foundation does not yet replace
+the existing workbench line/ECO routes: trusted MetaSheet request tenant and
+membership admission, durable frozen intents (including preconditions), actual
+personal dispatch, binding/settings UI and paired native positive/retry/permission
+proof remain required next work. Remote CI of this candidate is pending.

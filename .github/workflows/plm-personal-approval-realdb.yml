@@ -6,7 +6,9 @@ on:
     paths:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
       - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
+      - 'packages/core-backend/tests/unit/plm-personal-bom-write-*.test.ts'
       - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
       - 'packages/core-backend/tests/plm-personal-approval/**'
       - 'packages/core-backend/tests/plm-bom-review/auth-bootstrap.ts'
@@ -35,7 +37,9 @@ on:
     paths:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/integration/plm-personal-approval-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts'
       - 'packages/core-backend/tests/unit/plm-personal-approval-*.test.ts'
+      - 'packages/core-backend/tests/unit/plm-personal-bom-write-*.test.ts'
       - 'packages/core-backend/tests/fixtures/plm-personal-approval-error-family.mts'
       - 'packages/core-backend/tests/plm-personal-approval/**'
       - 'packages/core-backend/tests/plm-bom-review/auth-bootstrap.ts'
@@ -100,6 +104,8 @@ jobs:
           tests/unit/plm-personal-approval-transport.test.ts
           tests/unit/plm-personal-approval-routes.test.ts
           tests/unit/plm-personal-approval-worker.test.ts
+          tests/unit/plm-personal-bom-write-binding.test.ts
+          tests/unit/plm-personal-bom-write-transport.test.ts
           tests/unit/dingtalk-interactive-card-callback.test.ts
           tests/unit/dingtalk-interactive-card-stream.test.ts
           tests/unit/dingtalk-interactive-card-stream-lifecycle.test.ts
@@ -130,6 +136,25 @@ jobs:
           --config vitest.plm-personal-approval.config.ts run
           tests/integration/plm-personal-approval-realdb.test.ts
           --reporter=verbose --reporter=junit --outputFile=plm-personal-junit.xml
+      - name: Personal BOM binding PostgreSQL and restart boundaries
+        env:
+          EXPECT_PLM_PERSONAL_BOM_WRITE_DB: '1'
+          PLM_PERSONAL_BOM_WRITE_TEST_PG_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_personal_disposable
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.plm-personal-bom-write-lock.config.ts run
+          --reporter=verbose --reporter=junit --outputFile=plm-personal-bom-write-junit.xml
+      - name: Require personal BOM PostgreSQL execution without skips
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('packages/core-backend/plm-personal-bom-write-junit.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else list(root.findall('testsuite'))
+          counts = {key: sum(int(row.get(key, 0)) for row in suites)
+                    for key in ('tests', 'failures', 'errors', 'skipped')}
+          assert counts['tests'] > 0 and all(counts[key] == 0 for key in ('failures', 'errors', 'skipped')), counts
+          print(counts)
+          PY
       - name: Require executed tests without skips
         run: |
           python3 - <<'PY'
@@ -145,5 +170,7 @@ jobs:
         if: always()
         with:
           name: plm-personal-approval-postgres
-          path: packages/core-backend/plm-personal-junit.xml
+          path: |
+            packages/core-backend/plm-personal-junit.xml
+            packages/core-backend/plm-personal-bom-write-junit.xml
           if-no-files-found: error

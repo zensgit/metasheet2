@@ -55,6 +55,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     rules: [{ kind: 'requires', id: 'plm-personal-cards-without-durable', description: 'Personal PLM task projection requires transactional durable approval events.' }],
   },
   {
+    key: 'PLM_PERSONAL_BOM_WRITE_ENABLED', type: 'boolean', activationValue: 'true',
+    dependsOn: [], conflictsWith: [], danger: 'high',
+    purpose: 'Default-off personal Yuantus BOM line and ECO-intent writes. Requires migrated durable binding/intent schema, current source ownership and independent bom_write grants. No approval-grant or shared-account fallback; disablement preserves owned cleanup.',
+    source: 'packages/core-backend/src/services/plm-personal-bom-write-wire.ts#isPlmPersonalBomWriteEnabled',
+  },
+  {
     key: 'PLM_RECORD_INGRESS_ENABLED', type: 'boolean', activationValue: 'true',
     dependsOn: ['AUTOMATION_DURABLE_DELIVERY_ENABLED', 'MULTITABLE_ENABLE_WRITER_FENCE'], conflictsWith: [], danger: 'high',
     purpose: 'Default-off bounded Yuantus BOM source record ingress. Exact true only. Requires current mst_ creator/binding authority, writer fence/operation and durable automation schema; source columns remain protected after disable.',
