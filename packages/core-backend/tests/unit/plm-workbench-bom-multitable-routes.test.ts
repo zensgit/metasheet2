@@ -1,7 +1,11 @@
 import express from 'express'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PlmPersonalBomWriteError } from '../../src/services/plm-personal-bom-write-wire'
 import { usePinnedServer } from '../utils/pinned-server'
+
+const LOGIN = `Bearer ${jwt.sign({ userId: 'owner-1', email: 'o@x', role: 'user' }, 'synthetic-route-key')}`
 
 // Controllable DataSourceManager mock (configured per test).
 // `assertAccess` models the real manager's per-user ownership gate; the default no-op stands for
@@ -12,15 +16,29 @@ const dsMocks = vi.hoisted(() => ({
   getDataSource: vi.fn(),
   assertAccess: vi.fn(),
 }))
+const dispatchMocks = vi.hoisted(() => ({
+  dispatchOperation: vi.fn(),
+}))
 
 vi.mock('../../src/db/db', () => ({ db: {} }))
 vi.mock('../../src/db/pg', () => ({ pool: {}, query: vi.fn() }))
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.user = { id: 'owner-1', tenantId: 'tenant-a' } as never
+    req.user = { id: 'owner-1', tenantId: 'header-tenant-not-authority', role: 'admin' } as never
+    req.authenticatedTenantId = 'tenant-a'
+    req.verifiedTenantClaim = { kind: 'present', value: 'tenant-a' }
     next()
   },
 }))
+vi.mock('../../src/services/plm-personal-bom-write-http', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/plm-personal-bom-write-http')>(
+    '../../src/services/plm-personal-bom-write-http',
+  )
+  return {
+    ...actual,
+    plmPersonalBomWriteService: () => ({ dispatchOperation: dispatchMocks.dispatchOperation }),
+  }
+})
 vi.mock('../../src/middleware/validation', () => ({
   validate: (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
@@ -79,16 +97,28 @@ const manifest = (
 const URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/context'
 const WRITE_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/lines/R1'
 
+const LINE_NATIVE = { ok: true, bom_line_id: 'R1' }
+const ECO_NATIVE = { eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' }
 const pinned = usePinnedServer()
 
+function withLogin(app: express.Express): express.Express {
+  app.use((req, _res, next) => {
+    if (!req.headers.authorization) req.headers.authorization = LOGIN
+    next()
+  })
+  return app
+}
+
 describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
-  const app = express()
+  const app = withLogin(express())
   app.use(express.json())
   app.use(plmWorkbenchRouter)
 
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
+    dispatchMocks.dispatchOperation.mockReset()
+    dispatchMocks.dispatchOperation.mockResolvedValue({ native: LINE_NATIVE })
     pinned.setApp(app)
   })
 
@@ -271,6 +301,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('not-entitled')
     expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).not.toHaveBeenCalled()
   })
 
   // #4020: the write gate is re-keyed through isFeatureAvailable too -- an entitled:false
@@ -294,7 +325,9 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
     expect(res.status).toBe(200)
-    expect(updateBomMultitableLine).toHaveBeenCalledTimes(1)
+    expect(res.body).toEqual(LINE_NATIVE)
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledTimes(1)
   })
 
   it('write route rejects a missing Idempotency-Key before calling the provider', async () => {
@@ -316,6 +349,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.status).toBe(400)
     expect(res.body.reason).toBe('missing-idempotency-key')
     expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).not.toHaveBeenCalled()
   })
 
   it('write route forwards whitelisted patch cells with the caller-owned Idempotency-Key', async () => {
@@ -338,17 +372,26 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5, refdes: null, applied: true })
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, bom_line_id: 'R1' })
-    expect(updateBomMultitableLine).toHaveBeenCalledWith(
-      'P1',
-      'R1',
-      { quantity: 5, refdes: null },
-      { idempotencyKey: 'submit-1' },
+    expect(res.body).toEqual(LINE_NATIVE)
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledWith(
+      { userId: 'owner-1', metaTenantId: 'tenant-a' },
+      'ds-1',
+      {
+        operationKind: 'line',
+        partId: 'P1',
+        bomLineId: 'R1',
+        clientKey: 'submit-1',
+        patch: { quantity: 5, refdes: null },
+      },
     )
   })
 
-  it('write route relays provider 409 conflicts as actionable failures', async () => {
-    const conflict = Object.assign(new Error('locked'), { response: { status: 409 } })
+  it('write route reports an allowlist-miss native 409 as unknown and does not call the shared adapter', async () => {
+    const updateBomMultitableLine = vi.fn()
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', undefined, true),
+    )
     dsMocks.getDataSource.mockReturnValue({
       getIntegrationCapabilities: vi.fn().mockResolvedValue({
         available: true,
@@ -358,33 +401,25 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
         ),
       }),
       getBomMultitableContext: vi.fn(),
-      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: conflict }),
+      updateBomMultitableLine,
     })
     const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
-    expect(res.status).toBe(409)
-    expect(res.body.reason).toBe('provider-rejected')
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unknown')
+    expect(res.body.code).toBe('PLM_BOM_WRITEBACK_FAILED')
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
   })
 
   // ECO Phase 0: the provider 409 is discriminated by detail.code (lifecycle_locked vs
   // idempotency_conflict); the relay surfaces the code as the reason instead of flattening.
   // A bodyless or unknown-code 409 still flattens to 'provider-rejected' (test above).
   it('write route surfaces a discriminated lifecycle_locked 409 reason', async () => {
-    const locked = Object.assign(new Error('Request failed with status code 409'), {
-      response: {
-        status: 409,
-        data: {
-          detail: {
-            code: 'lifecycle_locked',
-            message: "Item is locked in state 'Released'",
-            state: 'Released',
-            eco_required: true,
-          },
-        },
-      },
-    })
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'lifecycle_locked', message: "Item is locked in state 'Released'" }, true),
+    )
     dsMocks.getDataSource.mockReturnValue({
       getIntegrationCapabilities: vi.fn().mockResolvedValue({
         available: true,
@@ -394,7 +429,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
         ),
       }),
       getBomMultitableContext: vi.fn(),
-      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: locked }),
+      updateBomMultitableLine: vi.fn(),
     })
     const res = await request(pinned.url())
       .patch(WRITE_URL)
@@ -405,17 +440,9 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
   })
 
   it('write route surfaces a discriminated idempotency_conflict 409 reason', async () => {
-    const burned = Object.assign(new Error('Request failed with status code 409'), {
-      response: {
-        status: 409,
-        data: {
-          detail: {
-            code: 'idempotency_conflict',
-            message: 'Idempotency-Key reused for a different write',
-          },
-        },
-      },
-    })
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'idempotency_conflict' }, true),
+    )
     dsMocks.getDataSource.mockReturnValue({
       getIntegrationCapabilities: vi.fn().mockResolvedValue({
         available: true,
@@ -425,7 +452,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
         ),
       }),
       getBomMultitableContext: vi.fn(),
-      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: burned }),
+      updateBomMultitableLine: vi.fn(),
     })
     const res = await request(pinned.url())
       .patch(WRITE_URL)
@@ -435,13 +462,10 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.body.reason).toBe('idempotency_conflict')
   })
 
-  it('write route flattens an unknown discriminated 409 code to provider-rejected (forward-compat)', async () => {
-    const future = Object.assign(new Error('Request failed with status code 409'), {
-      response: {
-        status: 409,
-        data: { detail: { code: 'some_future_code', message: 'new provider semantics' } },
-      },
-    })
+  it('write route reports an unknown native 409 code as unknown and does not leak the message', async () => {
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'some_future_code', message: 'new provider semantics' }, true),
+    )
     dsMocks.getDataSource.mockReturnValue({
       getIntegrationCapabilities: vi.fn().mockResolvedValue({
         available: true,
@@ -451,14 +475,17 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
         ),
       }),
       getBomMultitableContext: vi.fn(),
-      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: future }),
+      updateBomMultitableLine: vi.fn(),
     })
     const res = await request(pinned.url())
       .patch(WRITE_URL)
       .set('Idempotency-Key', 'submit-1')
       .send({ quantity: 5 })
-    expect(res.status).toBe(409)
-    expect(res.body.reason).toBe('provider-rejected')
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unknown')
+    expect(res.body.code).toBe('PLM_BOM_WRITEBACK_FAILED')
+    expect(JSON.stringify(res.body)).not.toContain('some_future_code')
+    expect(JSON.stringify(res.body)).not.toContain('new provider semantics')
   })
 
   it('write route forwards the client If-Match header to the provider (optimistic concurrency)', async () => {
@@ -480,16 +507,25 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
       .set('If-Match', '"bom-line:etag-x"')
       .send({ quantity: 5 })
     expect(res.status).toBe(200)
-    expect(updateBomMultitableLine).toHaveBeenCalledWith(
-      'P1',
-      'R1',
-      { quantity: 5 },
-      { idempotencyKey: 'submit-1', ifMatch: '"bom-line:etag-x"' },
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledWith(
+      { userId: 'owner-1', metaTenantId: 'tenant-a' },
+      'ds-1',
+      {
+        operationKind: 'line',
+        partId: 'P1',
+        bomLineId: 'R1',
+        clientKey: 'submit-1',
+        patch: { quantity: 5 },
+        ifMatch: '"bom-line:etag-x"',
+      },
     )
   })
 
   it('write route relays a provider 412 as a distinct precondition-failed conflict', async () => {
-    const stale = Object.assign(new Error('If-Match precondition failed'), { response: { status: 412 } })
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(412, 'PLM_BOM_WRITE_PROVIDER', undefined, true),
+    )
     dsMocks.getDataSource.mockReturnValue({
       getIntegrationCapabilities: vi.fn().mockResolvedValue({
         available: true,
@@ -499,7 +535,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
         ),
       }),
       getBomMultitableContext: vi.fn(),
-      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: stale }),
+      updateBomMultitableLine: vi.fn(),
     })
     const res = await request(pinned.url())
       .patch(WRITE_URL)
@@ -538,13 +574,15 @@ function intentAdapter(overrides: Record<string, unknown> = {}) {
 }
 
 describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
-  const app = express()
+  const app = withLogin(express())
   app.use(express.json())
   app.use(plmWorkbenchRouter)
 
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
+    dispatchMocks.dispatchOperation.mockReset()
+    dispatchMocks.dispatchOperation.mockResolvedValue({ native: ECO_NATIVE })
     pinned.setApp(app)
   })
 
@@ -616,9 +654,15 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
       }),
       requestBomEcoRevisionIntent,
     }))
-    const res = await request(pinned.url()).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
     expect(res.status).toBe(200)
-    expect(requestBomEcoRevisionIntent).toHaveBeenCalledTimes(1)
+    expect(res.body).toEqual(ECO_NATIVE)
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledWith(
+      { userId: 'owner-1', metaTenantId: 'tenant-a' },
+      'ds-1',
+      { operationKind: 'eco-intent', partId: 'P1', clientKey: 'eco-1' },
+    )
   })
 
   it('404 unsupported when the descriptor omits the eco_revision_intent action; intent never called', async () => {
@@ -636,78 +680,84 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
   })
 
-  it('relays the provider success envelope (eco_id/state/attached) verbatim', async () => {
+  it('relays the personal success envelope and does not call the shared adapter', async () => {
     const adapter = intentAdapter()
     dsMocks.getDataSource.mockReturnValue(adapter)
-    const res = await request(pinned.url()).post(INTENT_URL)
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1').set('If-Match', '"etag"').send({ bomLineId: 'R1', patch: { quantity: 1 } })
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({
-      eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2',
-    })
-    expect(adapter.requestBomEcoRevisionIntent).toHaveBeenCalledWith('P1')
+    expect(res.body).toEqual(ECO_NATIVE)
+    expect(adapter.requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledWith(
+      { userId: 'owner-1', metaTenantId: 'tenant-a' },
+      'ds-1',
+      { operationKind: 'eco-intent', partId: 'P1', clientKey: 'eco-1' },
+    )
   })
 
   it('surfaces the discriminated not_locked 409 reason', async () => {
-    const notLocked = Object.assign(new Error('409'), {
-      response: { status: 409, data: { detail: { code: 'not_locked', message: 'editable' } } },
-    })
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: notLocked }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'not_locked' }, true),
+    )
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('not_locked')
+    expect(res.body.code).toBe('PLM_ECO_INTENT_FAILED')
   })
 
   it('surfaces the discriminated eco_intent_rejected 409 reason', async () => {
-    const rejected = Object.assign(new Error('409'), {
-      response: { status: 409, data: { detail: { code: 'eco_intent_rejected', message: 'race' } } },
-    })
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: rejected }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'eco_intent_rejected' }, true),
+    )
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('eco_intent_rejected')
   })
 
-  it('degrades an UNKNOWN 409 code to provider-rejected (fail-closed, never leaks raw)', async () => {
-    const weird = Object.assign(new Error('409'), {
-      response: { status: 409, data: { detail: { code: 'lifecycle_locked', message: 'wrong namespace' } } },
-    })
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: weird }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
-    expect(res.status).toBe(409)
-    expect(res.body.reason).toBe('provider-rejected')
+  it('reports a wrong-namespace 409 as unknown and does not leak the message', async () => {
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_PROVIDER', { code: 'lifecycle_locked', message: 'wrong namespace' }, true),
+    )
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unknown')
+    expect(res.body.code).toBe('PLM_ECO_INTENT_FAILED')
+    expect(JSON.stringify(res.body)).not.toContain('wrong namespace')
+    expect(JSON.stringify(res.body)).not.toContain('lifecycle_locked')
   })
 
-  it('passes through a provider 403 as provider-rejected (entitlement drift at the provider)', async () => {
-    const forbidden = Object.assign(new Error('403'), { response: { status: 403, data: { detail: 'nope' } } })
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: forbidden }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
+  it('passes through a received provider 403 as provider-rejected', async () => {
+    dispatchMocks.dispatchOperation.mockRejectedValue(
+      new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_PROVIDER', undefined, true),
+    )
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('provider-rejected')
+    expect(res.body.code).toBe('PLM_ECO_INTENT_FAILED')
+    expect(res.body.attempt_outcome).toBe('refused')
+    expect(res.body.operation_may_have_applied).toBe(true)
+    expect(res.body.retry_policy).toBe('same-operation')
   })
 
-  it('502 provider-unavailable for a transport error with no response', async () => {
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: new Error('ECONNREFUSED') }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
-    expect(res.status).toBe(502)
-    expect(res.body.reason).toBe('provider-unavailable')
+  it('reports a transport error with no native receipt as unknown', async () => {
+    dispatchMocks.dispatchOperation.mockRejectedValue(new Error('ECONNREFUSED'))
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unknown')
+    expect(res.body.code).toBe('PLM_ECO_INTENT_FAILED')
+    expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED')
   })
 
-  it('502 malformed-response when the provider payload lacks the contract keys', async () => {
-    dsMocks.getDataSource.mockReturnValue(intentAdapter({
-      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [{ eco_id: 'ECO-1' }] }),
-    }))
-    const res = await request(pinned.url()).post(INTENT_URL)
-    expect(res.status).toBe(502)
-    expect(res.body.reason).toBe('malformed-response')
+  it('reports an incomplete native success as unknown', async () => {
+    dispatchMocks.dispatchOperation.mockResolvedValue({ native: { eco_id: 'ECO-1' } })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter())
+    const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-1')
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unknown')
+    expect(res.body.code).toBe('PLM_ECO_INTENT_FAILED')
   })
 })

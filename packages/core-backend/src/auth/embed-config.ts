@@ -57,3 +57,8 @@ export function embedAudience(): string {
 export function embedDataSourceId(): string {
   return (process.env.PLM_EMBED_DATA_SOURCE_ID || '').trim()
 }
+
+/** Visual preview relay switch: byte-exact 'true' only (registered in the global flag manifest). */
+export function isPlmEmbedVisualPreviewEnabled(): boolean {
+  return process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED === 'true'
+}

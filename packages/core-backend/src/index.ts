@@ -445,6 +445,9 @@ import { PlmPersonalApprovalBindingService } from './services/PlmPersonalApprova
 import { PlmPersonalApprovalWorker } from './services/PlmPersonalApprovalWorker'
 import { isPlmApprovalCardEnabled } from './services/plm-personal-approval-wire'
 import { createPlmApprovalBindingsRouter } from './routes/plm-approval-bindings'
+import { PlmPersonalBomWriteBindingService } from './services/PlmPersonalBomWriteBindingService'
+import { bindPlmPersonalBomWriteService } from './services/plm-personal-bom-write-http'
+import { createPlmPersonalBomWriteBindingsRouter } from './routes/plm-personal-bom-write-bindings'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -637,6 +640,7 @@ export class MetaSheetServer {
   private metricsStreamService?: MetricsStreamService
   private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
   private readonly plmPersonalCards: PlmPersonalApprovalBindingService
+  private readonly plmPersonalBomWrites: PlmPersonalBomWriteBindingService
   private plmPersonalApprovalWorker?: PlmPersonalApprovalWorker
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
@@ -721,6 +725,11 @@ export class MetaSheetServer {
       poolManager.get().getInternalPool(),
       () => this.injector.get(IPLMAdapter) as PLMAdapter,
     )
+    this.plmPersonalBomWrites = new PlmPersonalBomWriteBindingService(
+      poolManager.get().getInternalPool(),
+      () => this.injector.get(IPLMAdapter) as PLMAdapter,
+    )
+    bindPlmPersonalBomWriteService(this.plmPersonalBomWrites)
     
     this.snapshotService = new SnapshotService()
 
@@ -1966,6 +1975,7 @@ export class MetaSheetServer {
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
     this.app.use('/api/me/plm-approval-bindings', createPlmApprovalBindingsRouter(this.plmPersonalCards))
+    this.app.use('/api/me/plm-bom-write-bindings', createPlmPersonalBomWriteBindingsRouter(this.plmPersonalBomWrites))
 
     // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
     // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would

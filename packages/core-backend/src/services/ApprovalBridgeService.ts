@@ -284,21 +284,6 @@ function extractExternalId(id: string): string {
   return id.replace(/^plm:/, '')
 }
 
-function normalizeSourceVersion(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
-    return value
-  }
-
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number.parseInt(value.trim(), 10)
-    if (Number.isInteger(parsed) && parsed >= 0) {
-      return parsed
-    }
-  }
-
-  return null
-}
-
 function compareHistoryDescending(
   left: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
   right: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
@@ -1295,7 +1280,12 @@ export class ApprovalBridgeService {
       }
 
       if (instance.source_system === 'plm') {
-        await this.dispatchPlmAction(id, this.resolvePlmSourceVersion(instance), request)
+        // Shared-account refusal at every flag value, before adapter dispatch or local decision writes.
+        throw new ServiceError(
+          'PLM approvals are decided through a personal Yuantus binding',
+          409,
+          APPROVAL_ERROR_CODES.PLM_PERSONAL_BINDING_REQUIRED,
+        )
       }
 
       const nextStatus = request.action === 'approve' ? 'approved' : 'rejected'
@@ -1560,23 +1550,6 @@ export class ApprovalBridgeService {
     }))
   }
 
-  private resolvePlmSourceVersion(instance: ApprovalInstanceRow): number {
-    const sourceVersion =
-      normalizeSourceVersion(instance.metadata?.source_version) ??
-      normalizeSourceVersion(instance.metadata?.sourceVersion)
-
-    if (sourceVersion !== null) {
-      return sourceVersion
-    }
-
-    throw new ServiceError(
-      'PLM source version is unavailable',
-      502,
-      APPROVAL_ERROR_CODES.SOURCE_ACTION_FAILED,
-      { approvalId: instance.id },
-    )
-  }
-
   private async upsertPlmMirror(source: PlmApprovalBridgeSource): Promise<void> {
     if (!pool) throw new Error('Database not available')
 
@@ -1725,22 +1698,6 @@ export class ApprovalBridgeService {
     const localHistory = await this.loadLocalHistory(id)
 
     return [...sourceHistory, ...localHistory].sort(compareHistoryDescending)
-  }
-
-  private async dispatchPlmAction(id: string, version: number, request: ApprovalActionRequest): Promise<void> {
-    const externalApprovalId = extractExternalId(id)
-    const result = request.action === 'approve'
-      ? await this.requirePlmAdapter().approveApproval(externalApprovalId, version, request.comment)
-      : await this.requirePlmAdapter().rejectApproval(externalApprovalId, version, request.comment || '')
-
-    if (result.error) {
-      throw new ServiceError(
-        `PLM ${request.action} failed`,
-        502,
-        APPROVAL_ERROR_CODES.SOURCE_ACTION_FAILED,
-        { upstream: String(result.error) },
-      )
-    }
   }
 
   private async markSyncError(id: string, error: unknown): Promise<void> {

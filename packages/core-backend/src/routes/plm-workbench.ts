@@ -1,4 +1,5 @@
-import type { Request, Response } from 'express'
+import { createHash, randomUUID } from 'crypto'
+import type { NextFunction, Request, Response } from 'express'
 import { Router } from 'express'
 import { Logger } from '../core/logger'
 import { db } from '../db/db'
@@ -38,6 +39,13 @@ import type {
 // visibility judgment (entry.available when the provider sends it, else the pre-#4020
 // supported+entitled derivation), so these routes never re-derive it locally.
 import { isFeatureAvailable } from '../data-adapters/PLMAdapter'
+import {
+  personalBomWriteActor,
+  personalBomWriteFailureBody,
+  plmPersonalBomWriteService,
+  rejectPersonalBomWriteCredential,
+  relayPersonalBomWriteFailure,
+} from '../services/plm-personal-bom-write-http'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -877,47 +885,105 @@ function isPlmBomEcoIntentAdapter(adapter: unknown): adapter is PlmBomEcoIntentA
   )
 }
 
-// The intent endpoint's own discriminated-409 namespace (distinct from the write PATCH's
-// lifecycle_locked/idempotency_conflict): `not_locked` = the part is editable, use the direct
-// edit path; `eco_intent_rejected` = the provider declined (concurrent open ECO race /
-// non-versionable part). Unknown/absent code degrades to 'provider-rejected' (fail-closed,
-// same idiom as providerConflictReasonCode).
-const PROVIDER_ECO_INTENT_409_CODES = new Set(['not_locked', 'eco_intent_rejected'])
-
-function providerEcoIntentConflictCode(error: unknown): string | null {
-  const candidate = error as { response?: { data?: unknown } } | null
-  const data = candidate?.response?.data
-  if (!data || typeof data !== 'object') return null
-  const detail = (data as { detail?: unknown }).detail
-  if (!detail || typeof detail !== 'object') return null
-  const code = (detail as { code?: unknown }).code
-  return typeof code === 'string' && PROVIDER_ECO_INTENT_409_CODES.has(code) ? code : null
-}
-
-// Values-free 500/4xx body for the two BOM write-back routes (write PATCH + ECO revision-intent
-// POST). The provider/axios error's own `.message` can carry a connection target, an axios request
-// URL, or (for some drivers) credential-shaped detail; relayProviderWritebackError /
-// relayProviderEcoIntentError below only classify `status` + `reason`, never `.message`. So the two
-// call sites stop forwarding `result.error.message` and answer one of these fixed strings instead;
-// the real error still reaches `logger.error()` (server side only). Shape mirrors #6066's
-// admin-failure-envelope.ts (fixed code + fixed human string, original error logged not echoed).
+// Values-free body for the two BOM write routes. Personal dispatch failures are classified from
+// PlmPersonalBomWriteError status/detail/received. The original error is logged and is not copied
+// into the response. Unknown outcomes stay `unknown` and are never reported as refused.
 export const PLM_BOM_WRITEBACK_FAILED_CODE = 'PLM_BOM_WRITEBACK_FAILED'
 export const PLM_BOM_WRITEBACK_FAILED_MESSAGE = 'BOM 写入失败，详情见服务端日志'
 export const PLM_ECO_INTENT_FAILED_CODE = 'PLM_ECO_INTENT_FAILED'
 export const PLM_ECO_INTENT_FAILED_MESSAGE = 'ECO 意图请求失败，详情见服务端日志'
 
-function relayProviderEcoIntentError(error: unknown): { status: number; reason: string } {
-  const status = providerErrorStatus(error)
-  // 409 = discriminated by the intent endpoint's own namespace: `not_locked` (editable part —
-  // use the direct edit path) vs `eco_intent_rejected` (provider declined). Unknown/absent code
-  // degrades to the legacy flattened reason (same fail-closed rule as the write PATCH).
-  if (status === 409) {
-    return { status: 409, reason: providerEcoIntentConflictCode(error) ?? 'provider-rejected' }
+export const PLM_WRITEBACK_AUDIT_RESOURCE_TYPE = 'plm-bom-writeback'
+export const PLM_WRITEBACK_AUDIT_UNAVAILABLE_CODE = 'PLM_WRITEBACK_AUDIT_UNAVAILABLE'
+const PLM_LINE_WRITEBACK_ROUTE = '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/lines/:bomLineId'
+const PLM_ECO_INTENT_ROUTE = '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent'
+
+type PlmWritebackAuditAction =
+  | 'line_writeback_attempt'
+  | 'line_writeback_outcome'
+  | 'eco_intent_attempt'
+  | 'eco_intent_outcome'
+
+// Unlike the best-effort collaborative audit above, a write-back attempt row must be stored before
+// Yuantus is called, so no provider write can happen without a MetaSheet record of who asked for it.
+// `status_code` 0 marks an attempt whose provider outcome is not yet known.
+async function insertPlmWritebackAudit(params: {
+  actorId: string | undefined
+  action: PlmWritebackAuditAction
+  attemptId: string
+  route: string
+  statusCode: number
+  meta: Record<string, unknown>
+}): Promise<void> {
+  await pgQuery(
+    `INSERT INTO operation_audit_logs (
+      actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent,
+      route, status_code, latency_ms, meta, occurred_at, created_at
+    ) VALUES ($1,'user',$2,$3,$4,$5,NULL,NULL,$6,$7,0,$8::jsonb, now(), now())`,
+    [
+      params.actorId ?? null,
+      params.action,
+      PLM_WRITEBACK_AUDIT_RESOURCE_TYPE,
+      params.attemptId,
+      params.attemptId,
+      params.route,
+      params.statusCode,
+      JSON.stringify({ attemptId: params.attemptId, ...params.meta }),
+    ],
+  )
+}
+
+// The outcome row never changes what the caller is told: the provider result is authoritative and
+// the committed attempt row (with the idempotency-key digest) remains for reconciliation.
+async function recordPlmWritebackOutcome(params: {
+  actorId: string | undefined
+  action: 'line_writeback_outcome' | 'eco_intent_outcome'
+  attemptId: string
+  route: string
+  statusCode: number
+  meta: Record<string, unknown>
+}): Promise<void> {
+  try {
+    await insertPlmWritebackAudit(params)
+  } catch (error: unknown) {
+    logger.error('BOM write-back outcome audit failed', error as Error)
   }
-  if (status && [400, 403, 404, 422].includes(status)) {
-    return { status, reason: 'provider-rejected' }
+}
+
+function writebackAuditUnavailable(res: Response, dataSourceId: string) {
+  return res.status(503).json({
+    error: 'BOM write-back audit unavailable',
+    code: PLM_WRITEBACK_AUDIT_UNAVAILABLE_CODE,
+    data_source_id: dataSourceId,
+    reason: 'audit-unavailable',
+  })
+}
+
+function personalBomLoginGate(message: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!rejectPersonalBomWriteCredential(req)) {
+      next()
+      return
+    }
+    res.status(401).json({
+      error: message,
+      code: 'PLM_BOM_WRITE_UNAUTHORIZED',
+      data_source_id: req.params.id,
+      reason: 'unauthorized',
+    })
   }
-  return { status: 502, reason: 'provider-unavailable' }
+}
+
+function bomWriteErrorBody(
+  message: string,
+  dataSourceId: string,
+  relayed: Parameters<typeof personalBomWriteFailureBody>[2],
+) {
+  return personalBomWriteFailureBody(message, dataSourceId, relayed)
+}
+
+function logBomWriteFailure(message: string, error: unknown): void {
+  logger.error(message, error instanceof Error ? error : new Error(message))
 }
 
 function normalizeBomLineWritebackPatch(value: unknown): BomMultitableLinePatch | null {
@@ -952,51 +1018,6 @@ function normalizeBomLineWritebackPatch(value: unknown): BomMultitableLinePatch 
     patch.refdes = refdes as string | null
   }
   return Object.keys(patch).length > 0 ? patch : null
-}
-
-function providerErrorStatus(error: unknown): number | null {
-  const candidate = error as {
-    response?: { status?: unknown }
-    status?: unknown
-    statusCode?: unknown
-  } | null
-  const status = candidate?.response?.status ?? candidate?.status ?? candidate?.statusCode
-  return typeof status === 'number' ? status : null
-}
-
-// ECO Phase 0 (Yuantus provider contract, plm-collab-eco-phase0-contract-taskbook-20260704.md):
-// the provider's write-back 409 carries a discriminated body {detail: {code, ...}} with
-// code ∈ lifecycle_locked | idempotency_conflict. The AxiosError reaches this route with
-// response.data intact, so read the code here. Contract rule: an UNKNOWN or absent code must
-// degrade to the legacy flattened reason ('provider-rejected'), never leak through raw.
-const PROVIDER_409_REASON_CODES = new Set(['lifecycle_locked', 'idempotency_conflict'])
-
-function providerConflictReasonCode(error: unknown): string | null {
-  const candidate = error as { response?: { data?: unknown } } | null
-  const data = candidate?.response?.data
-  if (!data || typeof data !== 'object') return null
-  const detail = (data as { detail?: unknown }).detail
-  if (!detail || typeof detail !== 'object') return null
-  const code = (detail as { code?: unknown }).code
-  return typeof code === 'string' && PROVIDER_409_REASON_CODES.has(code) ? code : null
-}
-
-function relayProviderWritebackError(error: unknown): { status: number; reason: string } {
-  const status = providerErrorStatus(error)
-  // 412 = stale If-Match (optimistic-concurrency conflict): distinct reason so the UI reloads.
-  if (status === 412) {
-    return { status: 412, reason: 'precondition-failed' }
-  }
-  // 409 = discriminated by the provider since ECO Phase 0: surface the code as the reason so the
-  // UI can distinguish "lifecycle-locked, needs the ECO route" from "Idempotency-Key burned for a
-  // different write". Unknown/absent code falls back to the legacy flattened reason.
-  if (status === 409) {
-    return { status: 409, reason: providerConflictReasonCode(error) ?? 'provider-rejected' }
-  }
-  if (status && [400, 403, 404, 422].includes(status)) {
-    return { status, reason: 'provider-rejected' }
-  }
-  return { status: 502, reason: 'provider-unavailable' }
 }
 
 router.get(
@@ -1062,6 +1083,7 @@ router.get(
 
 router.patch(
   '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/lines/:bomLineId',
+  personalBomLoginGate(PLM_BOM_WRITEBACK_FAILED_MESSAGE),
   authenticate,
   param('id').isString(),
   param('partId').isString(),
@@ -1131,42 +1153,81 @@ router.patch(
       })
     }
 
-    // Optional optimistic-concurrency: forward the client's If-Match to the provider unchanged.
+    // Optional optimistic-concurrency token. It is forwarded only on the personal line dispatch.
     const ifMatch = (req.header('If-Match') || '').trim()
-    const result = await adapter.updateBomMultitableLine(partId, bomLineId, patch, {
-      idempotencyKey,
-      ...(ifMatch ? { ifMatch } : {}),
+    let actor: ReturnType<typeof personalBomWriteActor>
+    try {
+      actor = personalBomWriteActor(req)
+    } catch (error: unknown) {
+      const relayed = relayPersonalBomWriteFailure(error, 'line')
+      logBomWriteFailure('BOM write-back failed', error)
+      return res.status(relayed.status).json(bomWriteErrorBody(PLM_BOM_WRITEBACK_FAILED_MESSAGE, dataSourceId, relayed))
+    }
+    const actorId = actor.userId
+    const attemptId = randomUUID()
+    try {
+      await insertPlmWritebackAudit({
+        actorId,
+        action: 'line_writeback_attempt',
+        attemptId,
+        route: PLM_LINE_WRITEBACK_ROUTE,
+        statusCode: 0,
+        meta: {
+          dataSourceId,
+          partId,
+          bomLineId,
+          fields: Object.keys(patch),
+          patch,
+          idempotencyKeySha256: createHash('sha256').update(idempotencyKey).digest('hex'),
+          ifMatchPresent: ifMatch.length > 0,
+        },
+      })
+    } catch (error: unknown) {
+      logger.error('BOM write-back attempt audit failed', error as Error)
+      return writebackAuditUnavailable(res, dataSourceId)
+    }
+    const outcome = (statusCode: number, meta: Record<string, unknown>) => recordPlmWritebackOutcome({
+      actorId, action: 'line_writeback_outcome', attemptId, route: PLM_LINE_WRITEBACK_ROUTE, statusCode,
+      meta: { statusCode, ...meta },
     })
-    if (result.error) {
-      const relayed = relayProviderWritebackError(result.error)
-      logger.error('BOM write-back failed', result.error)
-      return res.status(relayed.status).json({
+    let receipt: Awaited<ReturnType<ReturnType<typeof plmPersonalBomWriteService>['dispatchOperation']>>
+    try {
+      receipt = await plmPersonalBomWriteService().dispatchOperation(actor, dataSourceId, {
+        operationKind: 'line',
+        partId,
+        bomLineId,
+        clientKey: idempotencyKey,
+        patch,
+        ...(ifMatch ? { ifMatch } : {}),
+      })
+    } catch (error: unknown) {
+      const relayed = relayPersonalBomWriteFailure(error, 'line')
+      logBomWriteFailure('BOM write-back failed', error)
+      await outcome(relayed.status, { outcome: relayed.outcome, reason: relayed.reason })
+      return res.status(relayed.status).json(bomWriteErrorBody(PLM_BOM_WRITEBACK_FAILED_MESSAGE, dataSourceId, relayed))
+    }
+    const payload = receipt.native
+    if (!payload || !('bom_line_id' in payload) || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
+      await outcome(503, { outcome: 'unknown', reason: 'unknown' })
+      return res.status(503).json({
         error: PLM_BOM_WRITEBACK_FAILED_MESSAGE,
         code: PLM_BOM_WRITEBACK_FAILED_CODE,
         data_source_id: dataSourceId,
-        reason: relayed.reason,
+        reason: 'unknown',
       })
     }
-    const payload = result.data?.[0]
-    if (!payload || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
-      return res.status(502).json({
-        error: 'BOM write-back returned a malformed response',
-        data_source_id: dataSourceId,
-        reason: 'malformed-response',
-      })
-    }
+    await outcome(200, { outcome: 'accepted' })
     return res.json(payload)
   },
 )
 
-// ECO Phase 3 consumer CTA relay: opt-in that opens/attaches a PENDING ECO revision for a
-// lifecycle-LOCKED part. Pre-gates on the capabilities advisory descriptor `bom_eco_revision`
+// ECO revision intent for a lifecycle-locked part. Pre-gates on `bom_eco_revision`
 // (supported + available (#4020: `isFeatureAvailable`) + actions includes
-// `eco_revision_intent` — Phase-0 Lock 3: availability discovery is the advisory, never the
-// error payload). Provider owns idempotency
-// (attach-before-create), so no Idempotency-Key here. Never a raw 500.
+// `eco_revision_intent`). The caller Idempotency-Key is required and is digested before
+// the personal dispatch. There is no shared-account fallback. Never a raw 500.
 router.post(
   '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent',
+  personalBomLoginGate(PLM_ECO_INTENT_FAILED_MESSAGE),
   authenticate,
   param('id').isString(),
   param('partId').isString(),
@@ -1226,30 +1287,74 @@ router.post(
       })
     }
 
-    const result = await adapter.requestBomEcoRevisionIntent(partId)
-    if (result.error) {
-      const relayed = relayProviderEcoIntentError(result.error)
-      logger.error('ECO revision intent failed', result.error)
-      return res.status(relayed.status).json({
-        error: PLM_ECO_INTENT_FAILED_MESSAGE,
-        code: PLM_ECO_INTENT_FAILED_CODE,
+    const idempotencyKey = (req.header('Idempotency-Key') || '').trim()
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        error: 'Idempotency-Key header is required',
         data_source_id: dataSourceId,
-        reason: relayed.reason,
+        reason: 'missing-idempotency-key',
       })
     }
-    const payload = result.data?.[0]
+
+    let actor: ReturnType<typeof personalBomWriteActor>
+    try {
+      actor = personalBomWriteActor(req)
+    } catch (error: unknown) {
+      const relayed = relayPersonalBomWriteFailure(error, 'eco-intent')
+      logBomWriteFailure('ECO revision intent failed', error)
+      return res.status(relayed.status).json(bomWriteErrorBody(PLM_ECO_INTENT_FAILED_MESSAGE, dataSourceId, relayed))
+    }
+    const actorId = actor.userId
+    const attemptId = randomUUID()
+    try {
+      await insertPlmWritebackAudit({
+        actorId, action: 'eco_intent_attempt', attemptId, route: PLM_ECO_INTENT_ROUTE, statusCode: 0,
+        meta: {
+          dataSourceId,
+          partId,
+          idempotencyKeySha256: createHash('sha256').update(idempotencyKey).digest('hex'),
+        },
+      })
+    } catch (error: unknown) {
+      logger.error('ECO revision intent attempt audit failed', error as Error)
+      return writebackAuditUnavailable(res, dataSourceId)
+    }
+    const outcome = (statusCode: number, meta: Record<string, unknown>) => recordPlmWritebackOutcome({
+      actorId, action: 'eco_intent_outcome', attemptId, route: PLM_ECO_INTENT_ROUTE, statusCode,
+      meta: { statusCode, ...meta },
+    })
+    let receipt: Awaited<ReturnType<ReturnType<typeof plmPersonalBomWriteService>['dispatchOperation']>>
+    try {
+      receipt = await plmPersonalBomWriteService().dispatchOperation(actor, dataSourceId, {
+        operationKind: 'eco-intent',
+        partId,
+        clientKey: idempotencyKey,
+      })
+    } catch (error: unknown) {
+      const relayed = relayPersonalBomWriteFailure(error, 'eco-intent')
+      logBomWriteFailure('ECO revision intent failed', error)
+      await outcome(relayed.status, { outcome: relayed.outcome, reason: relayed.reason })
+      return res.status(relayed.status).json(bomWriteErrorBody(PLM_ECO_INTENT_FAILED_MESSAGE, dataSourceId, relayed))
+    }
+    const payload = receipt.native
     if (
       !payload
+      || !('eco_id' in payload)
       || typeof payload.eco_id !== 'string'
       || typeof payload.state !== 'string'
       || typeof payload.attached !== 'boolean'
     ) {
-      return res.status(502).json({
-        error: 'ECO revision intent returned a malformed response',
+      await outcome(503, { outcome: 'unknown', reason: 'unknown' })
+      return res.status(503).json({
+        error: PLM_ECO_INTENT_FAILED_MESSAGE,
+        code: PLM_ECO_INTENT_FAILED_CODE,
         data_source_id: dataSourceId,
-        reason: 'malformed-response',
+        reason: 'unknown',
       })
     }
+    await outcome(200, {
+      outcome: 'accepted', ecoId: payload.eco_id, ecoState: payload.state, attached: payload.attached,
+    })
     return res.json(payload)
   },
 )

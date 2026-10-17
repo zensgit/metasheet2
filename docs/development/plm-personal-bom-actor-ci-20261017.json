@@ -1,0 +1,41 @@
+{
+  "source_head": "a410cfe929f22790fd328f0f26d6ec42f98b4cf1",
+  "tested_merge": "0fa8fe01f4d212e3013e880eb6ed0f7c4faa3f64",
+  "base": "a5977db1c2afb0106d87e60fe066cd4a3427dc4c",
+  "checks": {
+    "success": 49,
+    "workflows": 46,
+    "failure": 0,
+    "pending": 0
+  },
+  "selected_run": "https://github.com/zensgit/metasheet2/actions/runs/39009409287",
+  "selected_job": "https://github.com/zensgit/metasheet2/actions/runs/39009409287/job/117328481850",
+  "lanes": {
+    "backend_units": {
+      "files": 12,
+      "passed": 173,
+      "seconds": 9.11
+    },
+    "web_units": {
+      "files": 5,
+      "passed": 54,
+      "seconds": 3.33
+    },
+    "personal_approval_realdb": {
+      "passed": 16,
+      "seconds": 7.88
+    },
+    "personal_bom_realpg": {
+      "passed": 7,
+      "seconds": 1.52,
+      "skipped": 0
+    },
+    "backend_types_exit": 0,
+    "web_types_exit": 0
+  },
+  "limits": [
+    "covers committed actor slice, not current durable-intent WIP",
+    "realPG native wire controlled, not live paired provider chain",
+    "all Draft; no merge/deploy/production enablement"
+  ]
+}

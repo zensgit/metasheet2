@@ -1,0 +1,52 @@
+{
+  "read_utc": "2026-10-17T07:42:40.493004+00:00",
+  "source_head": "14b8b222c4ab75b41843779b9ae70c29700b3a09",
+  "draft": true,
+  "checks": {
+    "success": 49,
+    "failure": 0,
+    "pending": 0,
+    "skipped": 0
+  },
+  "workflow_runs": 46,
+  "personal_workflow": {
+    "conclusion": "success",
+    "event": "pull_request",
+    "headSha": "14b8b222c4ab75b41843779b9ae70c29700b3a09",
+    "url": "https://github.com/zensgit/metasheet2/actions/runs/39013933001"
+  },
+  "actual_checkout_merge": "26cce14b542734e2ea33f6de702ff5f5216dd701",
+  "merge_base": "a5977db1c2afb0106d87e60fe066cd4a3427dc4c",
+  "job_url": "https://github.com/zensgit/metasheet2/actions/runs/39013933001/job/117342008831",
+  "postgres_major": 16,
+  "results": {
+    "backend_unit": {
+      "files": 13,
+      "passed": 204,
+      "seconds": 15.77
+    },
+    "web_unit": {
+      "files": 5,
+      "passed": 54,
+      "seconds": 5.49
+    },
+    "personal_approval_realdb": {
+      "passed": 16,
+      "seconds": 13.33,
+      "skipped": 0
+    },
+    "personal_bom_realdb": {
+      "files": 2,
+      "passed": 22,
+      "seconds": 5.73,
+      "skipped": 0
+    },
+    "backend_types": "success",
+    "web_types": "success"
+  },
+  "limits": [
+    "current service slice only, actual routes/UI and paired native chain pending",
+    "not whole master goal completion",
+    "subsequent source/document commits require their own checks"
+  ]
+}

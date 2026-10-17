@@ -1,0 +1,696 @@
+{
+  "source_heads": {
+    "meta": "14b8b222c4ab75b41843779b9ae70c29700b3a09",
+    "native": "1f2e36ceaf29536a82f6d6a35f69b22b913be0e4"
+  },
+  "source_sha256": {
+    "meta": {
+      "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "55c5296b48a0f5d06e9faccd43b78f14f34da66a0679cb72159f28fe83e72f6c",
+      "packages/core-backend/src/services/plm-personal-bom-write-http.ts": "08c5a4bdd3f7867b0c9745f5e8aeccf211a7aa4d5d94d6ea0616207a6ae57a0e",
+      "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "8261516182f59c48b51f879eec089fa2096cc1690f450a5bee180ade66bf92df",
+      "packages/core-backend/src/routes/plm-personal-bom-write-bindings.ts": "1de12ce2c9972b43287a9f0b805e8870d5d2870c028f51514d1cddda7db9dbe3",
+      "packages/core-backend/src/routes/plm-workbench.ts": "287faddc10729164b1f82e2019cd56c6973293b146c6f4a76e67ee05a3184883",
+      "packages/core-backend/src/auth/AuthService.ts": "9b3ed4c284fdeeb4b98360ba89df9bae2e9b8975c20a93123d5e5cccb488acda",
+      "packages/core-backend/src/auth/jwt-middleware.ts": "9fe10b08bae4357804f64cb33c582f8033762d73db2eb9fbfdb1b3e1576d7f22",
+      "packages/core-backend/src/auth/verified-tenant-claim.ts": "b27b593584a73a3bc3d9cbd97a0fd9b8647485e3a5293e617f6ab1a6618367a5",
+      "packages/core-backend/src/data-adapters/PLMAdapter.ts": "675f2606b7be49c2a91736ba1a560d65e18d97d127ea32c9ad7ad110418ccd1a"
+    },
+    "native": {
+      "src/yuantus/meta_engine/web/bom_router.py": "363922f426388c30e16f2b767bb238cf1917f30290c8efddec62a9859e4b66cf",
+      "src/yuantus/meta_engine/models/meta_bom_eco_intent_audit.py": "43fa6b51817351911edb77a3a7aef3be881472f5de165c9fab3d0fc6d452f525",
+      "src/yuantus/meta_engine/web/bom_multitable_router.py": "f9fe0a6c4247eeb5346e1095ace4d71a10990ab6782e03d3b611431fc6803c72",
+      "src/yuantus/api/dependencies/plm_bom_write.py": "c37f45310979c891d908953690a4ad2b5e33876589476a9793ddd01afb85f5d3",
+      "src/yuantus/meta_engine/models/meta_bom_writeback_audit.py": "3026581d6b1a4a80098e4c9f9f56bc45ec42d64815ead7d907d9f26c8956aed3",
+      "src/yuantus/meta_engine/services/bom_multitable_writeback_service.py": "d340fb2cb49e248415cb8b84cee51c4c030e80952a5f039b374df54802810bca",
+      "src/yuantus/security/auth/plm_approval_grant_service.py": "16ff93344eec114ded36ae7380cf9ca04b586938573c14265de3d20b69785899"
+    }
+  },
+  "harness_sha256": {
+    "verify.py": "8daab484bd37d831ec73c7f5b0ac088e7c0c62683ca563b4451d6eb9d86391ce",
+    "native_server.py": "1c70c5d22f1da118c74719cc1911185c2650315ee182867e11d60d1c94efdc9f",
+    "meta_server.mts": "b57c469209933400db605a72ddcc867c5649103ca92c59f486233cd24a282387",
+    "browser_check.mts": "84fad325b2c6438a48c1ef2520965ad91f4fc769a8c715b9c62488082139d894"
+  },
+  "untrusted_certificate_rejected": true,
+  "meta_phases": [
+    {
+      "phase": "line-unknown",
+      "meta_pid": 54915,
+      "actual_meta_http": true,
+      "actual_native_http": true,
+      "fetch_mocked": false,
+      "personal_provider_cache": "deliberately stale origin/native tenant/org/shared header; real persisted source authority must win",
+      "read_adapter": "explicit ordinary connect with configured native read JWT; only yuw mutations permitted",
+      "auth_middleware": "actual signed JWT trusted-claims mode; current users/user_orgs checked by real service",
+      "meta_owner": "meta-owner",
+      "meta_tenant": "meta-a",
+      "native_subject": "42",
+      "native_tenant": "default",
+      "native_org": "fixture-org",
+      "lost_line_status": 503,
+      "changed_payload_refused": 409,
+      "nonowner_admin_refused": 404,
+      "intents": [
+        {
+          "kind": "line",
+          "outcome": "unknown",
+          "saw_unknown": true,
+          "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+        }
+      ],
+      "audit_rows": 4,
+      "no_secret_echo": true,
+      "child_exit": 0,
+      "native_after_exit": {
+        "quantity": 8,
+        "ecos": 0,
+        "eco_receipts": 0,
+        "domain_audits": 0,
+        "exact_audit_authority": true,
+        "no_tenant_authority_copies": true,
+        "traffic": [
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          }
+        ],
+        "dropped_response_count": 1,
+        "dependency_overrides": 0,
+        "line_audits": [
+          {
+            "auth_user_id": 42,
+            "tenant_id": "default",
+            "org_id": "fixture-org",
+            "part_id": "part",
+            "bom_line_id": "line",
+            "before": {
+              "quantity": 1
+            },
+            "after": {
+              "quantity": 8
+            },
+            "status": "applied",
+            "key_sha256": "9db014f9d4b3c6b9aa205d86969ba71f2cd05c458cdafdabdd2201dabc77c9e0"
+          }
+        ],
+        "grants": 1,
+        "revoked_grants": 0,
+        "exact_grant_authority": true
+      }
+    },
+    {
+      "phase": "eco-unknown",
+      "meta_pid": 54955,
+      "actual_meta_http": true,
+      "actual_native_http": true,
+      "fetch_mocked": false,
+      "personal_provider_cache": "deliberately stale origin/native tenant/org/shared header; real persisted source authority must win",
+      "read_adapter": "explicit ordinary connect with configured native read JWT; only yuw mutations permitted",
+      "auth_middleware": "actual signed JWT trusted-claims mode; current users/user_orgs checked by real service",
+      "meta_owner": "meta-owner",
+      "meta_tenant": "meta-a",
+      "native_subject": "42",
+      "native_tenant": "default",
+      "native_org": "fixture-org",
+      "line_retry_denied": 401,
+      "line_recovered": 200,
+      "lost_eco_status": 503,
+      "binding_rotation_same_person": true,
+      "intents": [
+        {
+          "kind": "eco-intent",
+          "outcome": "unknown",
+          "saw_unknown": true,
+          "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+        },
+        {
+          "kind": "line",
+          "outcome": "accepted",
+          "saw_unknown": true,
+          "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+        }
+      ],
+      "audit_rows": 10,
+      "no_secret_echo": true,
+      "child_exit": 0,
+      "native_after_exit": {
+        "quantity": 8,
+        "ecos": 1,
+        "eco_receipts": 1,
+        "domain_audits": 1,
+        "exact_audit_authority": true,
+        "no_tenant_authority_copies": true,
+        "traffic": [
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/auth/plm-bom-write-grants/623ee13d6e6941c6ab735cfce9264005",
+            "status": 204,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 401,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/plm-bom-write-grant/grant",
+            "status": 204,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+          }
+        ],
+        "dropped_response_count": 2,
+        "dependency_overrides": 0,
+        "line_audits": [
+          {
+            "auth_user_id": 42,
+            "tenant_id": "default",
+            "org_id": "fixture-org",
+            "part_id": "part",
+            "bom_line_id": "line",
+            "before": {
+              "quantity": 1
+            },
+            "after": {
+              "quantity": 8
+            },
+            "status": "applied",
+            "key_sha256": "9db014f9d4b3c6b9aa205d86969ba71f2cd05c458cdafdabdd2201dabc77c9e0"
+          }
+        ],
+        "grants": 2,
+        "revoked_grants": 1,
+        "exact_grant_authority": true
+      }
+    },
+    {
+      "phase": "complete",
+      "meta_pid": 54977,
+      "actual_meta_http": true,
+      "actual_native_http": true,
+      "fetch_mocked": false,
+      "personal_provider_cache": "deliberately stale origin/native tenant/org/shared header; real persisted source authority must win",
+      "read_adapter": "explicit ordinary connect with configured native read JWT; only yuw mutations permitted",
+      "auth_middleware": "actual signed JWT trusted-claims mode; current users/user_orgs checked by real service",
+      "meta_owner": "meta-owner",
+      "meta_tenant": "meta-a",
+      "native_subject": "42",
+      "native_tenant": "default",
+      "native_org": "fixture-org",
+      "eco_retry_denied": 401,
+      "eco_recovered": 200,
+      "wrong_meta_tenant_refused": 403,
+      "after_unbind": 409,
+      "binding_rotation_same_person": true,
+      "all_binding_secrets_cleared": true,
+      "intents": [
+        {
+          "kind": "eco-intent",
+          "outcome": "accepted",
+          "saw_unknown": true,
+          "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+        },
+        {
+          "kind": "line",
+          "outcome": "accepted",
+          "saw_unknown": true,
+          "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+        }
+      ],
+      "audit_rows": 18,
+      "no_secret_echo": true,
+      "child_exit": 0,
+      "native_after_exit": {
+        "quantity": 8,
+        "ecos": 1,
+        "eco_receipts": 1,
+        "domain_audits": 1,
+        "exact_audit_authority": true,
+        "no_tenant_authority_copies": true,
+        "traffic": [
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/auth/plm-bom-write-grants/623ee13d6e6941c6ab735cfce9264005",
+            "status": 204,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 401,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/plm-bom-write-grant/grant",
+            "status": 204,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "PATCH",
+            "path": "/api/v1/bom/multitable/part/lines/line",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+          },
+          {
+            "method": "GET",
+            "path": "/api/v1/integrations/capabilities",
+            "status": 200,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/auth/plm-bom-write-grants/35bccfb39c1c4a4d9dc1ff7d1233c517",
+            "status": 204,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+            "status": 401,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/plm-bom-write-grants",
+            "status": 201,
+            "credential": "other",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/plm-bom-write-grant/verify",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/plm-bom-write-grant/grant",
+            "status": 204,
+            "credential": "bom_write",
+            "mutation": false
+          },
+          {
+            "method": "POST",
+            "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+            "status": 200,
+            "credential": "bom_write",
+            "mutation": true,
+            "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/v1/plm-bom-write-grant/grant",
+            "status": 204,
+            "credential": "bom_write",
+            "mutation": false
+          }
+        ],
+        "dropped_response_count": 2,
+        "dependency_overrides": 0,
+        "line_audits": [
+          {
+            "auth_user_id": 42,
+            "tenant_id": "default",
+            "org_id": "fixture-org",
+            "part_id": "part",
+            "bom_line_id": "line",
+            "before": {
+              "quantity": 1
+            },
+            "after": {
+              "quantity": 8
+            },
+            "status": "applied",
+            "key_sha256": "9db014f9d4b3c6b9aa205d86969ba71f2cd05c458cdafdabdd2201dabc77c9e0"
+          }
+        ],
+        "grants": 3,
+        "revoked_grants": 3,
+        "exact_grant_authority": true
+      }
+    }
+  ],
+  "same_provider_keys_across_process_restarts": true,
+  "seconds": 2.82,
+  "native": {
+    "quantity": 8,
+    "ecos": 1,
+    "eco_receipts": 1,
+    "domain_audits": 1,
+    "exact_audit_authority": true,
+    "no_tenant_authority_copies": true,
+    "traffic": [
+      {
+        "method": "GET",
+        "path": "/api/v1/integrations/capabilities",
+        "status": 200,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/auth/plm-bom-write-grants",
+        "status": 201,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/plm-bom-write-grant/verify",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": false
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/bom/multitable/part/lines/line",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/integrations/capabilities",
+        "status": 200,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/auth/plm-bom-write-grants/623ee13d6e6941c6ab735cfce9264005",
+        "status": 204,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/bom/multitable/part/lines/line",
+        "status": 401,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/auth/plm-bom-write-grants",
+        "status": 201,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/plm-bom-write-grant/verify",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": false
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/plm-bom-write-grant/grant",
+        "status": 204,
+        "credential": "bom_write",
+        "mutation": false
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/bom/multitable/part/lines/line",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "d233def077871b48870bd70999374d8c975323ad4896ae09fc7ea6225a2c034c"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/integrations/capabilities",
+        "status": 200,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/auth/plm-bom-write-grants/35bccfb39c1c4a4d9dc1ff7d1233c517",
+        "status": 204,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+        "status": 401,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/auth/plm-bom-write-grants",
+        "status": 201,
+        "credential": "other",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/plm-bom-write-grant/verify",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": false
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/plm-bom-write-grant/grant",
+        "status": 204,
+        "credential": "bom_write",
+        "mutation": false
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/locked-part/eco-intent",
+        "status": 200,
+        "credential": "bom_write",
+        "mutation": true,
+        "key_sha256": "9b51b99f399558a3f8225cea507fbae75944cb2fc96a7b5c81cfe01e753b6bf9"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/plm-bom-write-grant/grant",
+        "status": 204,
+        "credential": "bom_write",
+        "mutation": false
+      }
+    ],
+    "dropped_response_count": 2,
+    "dependency_overrides": 0,
+    "line_audits": [
+      {
+        "auth_user_id": 42,
+        "tenant_id": "default",
+        "org_id": "fixture-org",
+        "part_id": "part",
+        "bom_line_id": "line",
+        "before": {
+          "quantity": 1
+        },
+        "after": {
+          "quantity": 8
+        },
+        "status": "applied",
+        "key_sha256": "9db014f9d4b3c6b9aa205d86969ba71f2cd05c458cdafdabdd2201dabc77c9e0"
+      }
+    ],
+    "grants": 3,
+    "revoked_grants": 3,
+    "exact_grant_authority": true
+  },
+  "native_mutations_use_only_personal_write_grants": true,
+  "schema_limits": "Native official tenant provisioning metadata builder, not full native Alembic acceptance. Meta personal migrations actual, ancillary tables minimal fixture. HTTP application assembled from actual routes/global JWT middleware and actual DataSourceManager; no full index lifecycle acceptance.",
+  "native_cleanup_message": {
+    "native_cleanup": true
+  },
+  "native_child_exit": 0,
+  "postgres_stopped": true,
+  "owned_runtime_removed": true,
+  "source_stable": true,
+  "recorded_utc": "2026-10-17T11:19:59.647612+00:00",
+  "limits": [
+    "Three distinct Meta processes after recorded unknown outcomes; not forced kill before outcome persistence.",
+    "Signed trusted-claims mode with live membership checks; ordinary JWT entry has separate current approval-browser evidence.",
+    "Native official tenant metadata provisioning and actual Meta personal migrations; not whole index lifecycle or full native Alembic acceptance.",
+    "Candidate uncommitted; remote14b CI does not validate this candidate. Browser proof is recorded separately."
+  ],
+  "audit_key_note": "Native keys are namespaced by purpose, connection, native subject and tenant/org; raw provider header hashes are independently checked across replays."
+}

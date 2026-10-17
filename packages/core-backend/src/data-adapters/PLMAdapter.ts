@@ -4,9 +4,23 @@ import { verifyEmbedToken, type EmbedTokenClaims } from '../auth/embed-token-ver
 import { consumeVisualPreviewJti, verifyVisualPreviewToken, type VisualPreviewDescriptor } from '../auth/visual-preview-token'
 import { visualReviewSourceConfigured } from '../auth/visual-review-source'
 import { requirePlmApprovalCard, PlmPersonalApprovalError } from '../services/plm-personal-approval-wire'
+import {
+  parsePersonalBomWriteSuccess,
+  personalBomWriteHttpError,
+  personalBomWriteManagementUrl as bomWriteManagementHref,
+  preparePersonalBomWriteCall,
+  requirePlmPersonalBomWrite,
+  resolvePersistedPlmSource,
+  trustedRequestOrigin,
+  PlmPersonalBomWriteError,
+  YUW_GRANT,
+  type PersonalBomWriteAuthority,
+  type PersonalBomWriteOperation,
+  type PersonalBomWriteTarget,
+} from '../services/plm-personal-bom-write-wire'
 import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'
@@ -830,7 +844,8 @@ export interface BomMultitableContextResult {
 // editable business cells of BomMultitableLine are whitelisted; all are optional (a PATCH carries
 // only the cells the user actually changed). `quantity` is numeric in the read model but the editor
 // may hand us a string before coercion, so the consumer type accepts number|string|null. Anything
-// outside this whitelist is stripped before the request is issued (see updateBomMultitableLine).
+// outside this whitelist is stripped by the workbench route before a personal dispatch.
+// updateBomMultitableLine and requestBomEcoRevisionIntent refuse uncredentialed entry and do not select.
 export interface BomMultitableLinePatch {
   quantity?: number | string | null;
   uom?: string | null;
@@ -2521,6 +2536,70 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  /**
+   * Same native page as approval, with the bom_write deep link. This does not mint a grant.
+   * The origin comes from the caller-supplied persisted source, not this adapter's cached config.
+   */
+  personalBomWriteManagementUrl(sourceConfig: unknown): string {
+    requirePlmPersonalBomWrite()
+    return bomWriteManagementHref(resolvePersistedPlmSource(sourceConfig).origin)
+  }
+
+  /**
+   * Personal bom_write fetch. No HTTPAdapter interceptor, source credential, redirect, or retry.
+   * The host, tenant, and org are the explicit authority argument. this.config is not consulted.
+   * Verify and product writes follow the enable flag. Exact self-revoke does not.
+   */
+  async personalBomWriteRequest(
+    operation: PersonalBomWriteOperation,
+    grant: string,
+    connectionId: string,
+    authority: PersonalBomWriteAuthority,
+    data?: unknown,
+    target?: PersonalBomWriteTarget,
+  ): Promise<unknown> {
+    if (operation !== 'revoke') requirePlmPersonalBomWrite()
+    if (this.mockMode || !YUW_GRANT.test(grant)) throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const origin = trustedRequestOrigin(authority?.origin)
+    const tenant = authority?.tenantId
+    const org = authority?.orgId
+    if (
+      typeof tenant !== 'string' ||
+      typeof org !== 'string' ||
+      !tenant ||
+      !org ||
+      /[\u0000-\u001f\u007f]/.test(tenant) ||
+      /[\u0000-\u001f\u007f]/.test(org)
+    )
+      throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const prepared = preparePersonalBomWriteCall(operation, connectionId, data, target)
+    const url = new URL(prepared.path, origin)
+    if (url.origin !== origin.origin) throw new PlmPersonalBomWriteError(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${grant}`,
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenant,
+      'x-org-id': org,
+    }
+    if (prepared.idempotencyKey) headers['Idempotency-Key'] = prepared.idempotencyKey
+    if (prepared.ifMatch) headers['If-Match'] = prepared.ifMatch
+    try {
+      const response = await fetch(url, {
+        method: prepared.method,
+        redirect: 'error',
+        signal: AbortSignal.timeout(8000),
+        headers,
+        ...(prepared.body !== undefined ? { body: JSON.stringify(prepared.body) } : {}),
+      })
+      const body = await response.text()
+      if (!response.ok) throw personalBomWriteHttpError(response.status, body)
+      return parsePersonalBomWriteSuccess(operation, response.status, body)
+    } catch (error) {
+      if (error instanceof PlmPersonalBomWriteError) throw error
+      throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE')
+    }
+  }
+
   // W20 uses only the caller's freshly revalidated, persisted per-source configuration.
   // Legacy connect() may normalize config or choose global defaults; none are authority for sharing.
   async getBomShareContext(partId: string, sourceConfig: DataSourceConfig): Promise<unknown> {
@@ -2686,96 +2765,30 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   /**
-   * Write back a single governed BOM multi-table line (方案1 — line-addressed PATCH; `partId` is the
-   * context boundary, `bomLineId` selects the row). THIN consumer contract: the payload is restricted
-   * to the four editable business cells (quantity / uom / find_num / refdes), an empty patch (nothing
-   * changed) is REJECTED before any mock/network branch, any non-whitelisted key is stripped, and the
-   * success envelope is the minimal { ok, bom_line_id }. The workbench UI may pass the logical
-   * submit's Idempotency-Key so a retry dedupes at the governed provider (Yuantus #905); direct
-   * callers that omit it keep the old fallback behavior and mint a fresh per-call key. Permission/
-   * unauthorized (403) and the provider's line∈part validation are intentionally OUT of this
-   * consumer contract; success-only.
+   * Uncredentialed shared-account line write. Refused before select, including mock mode.
+   * Personal writes go through personalBomWriteRequest.
    */
   async updateBomMultitableLine(
-    partId: string,
-    bomLineId: string,
-    patch: BomMultitableLinePatch,
-    options: BomMultitableLineUpdateOptions = {},
+    _partId: string,
+    _bomLineId: string,
+    _patch: BomMultitableLinePatch,
+    _options: BomMultitableLineUpdateOptions = {},
   ): Promise<QueryResult<BomMultitableLineUpdateResult>> {
-    // Build the request payload from ONLY the four whitelisted, defined keys. `null` is a real value
-    // (a "clear this cell" edit) and is preserved; `undefined` (untouched) and any unknown key are
-    // dropped. Copying the four keys individually makes the unknown-key strip structural.
-    const payload: BomMultitableLinePatch = {}
-    if (patch.quantity !== undefined) payload.quantity = patch.quantity
-    if (patch.uom !== undefined) payload.uom = patch.uom
-    if (patch.find_num !== undefined) payload.find_num = patch.find_num
-    if (patch.refdes !== undefined) payload.refdes = patch.refdes
-
-    // Reject an empty body (a PATCH that changes nothing) BEFORE any mock/network branch.
-    if (Object.keys(payload).length === 0) {
-      return {
-        data: [],
-        error: new Error('updateBomMultitableLine requires at least one of quantity, uom, find_num, refdes'),
-      }
+    return {
+      data: [],
+      error: new Error('PLM_BOM_WRITE_UNCREDENTIALED_REFUSED'),
     }
-
-    if (this.mockMode) {
-      return {
-        data: [{ ok: true, bom_line_id: bomLineId }],
-        metadata: { totalCount: 1 },
-      }
-    }
-    if (this.apiMode !== 'yuantus') {
-      return { data: [], error: new Error('BOM multitable line write-back is not supported for this PLM API mode') }
-    }
-
-    // Prefer the caller-owned logical-submit key; fall back to a fresh per-call key so older direct
-    // callers keep the pre-existing behavior. It rides as a request header alongside the axios
-    // instance's auth/tenant defaults, which HTTPAdapter.select merges in.
-    const idempotencyKey =
-      typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
-        ? options.idempotencyKey.trim()
-        : randomUUID()
-
-    const headers: Record<string, string> = { 'Idempotency-Key': idempotencyKey }
-    // Forward the caller's write_etag verbatim as If-Match (strong ETag incl. its literal quotes).
-    const ifMatch = typeof options.ifMatch === 'string' ? options.ifMatch.trim() : ''
-    if (ifMatch) headers['If-Match'] = ifMatch
-    return this.select<BomMultitableLineUpdateResult>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
-      method: 'PATCH',
-      data: payload,
-      headers,
-    })
   }
 
-  // ECO Phase 3 consumer callsite: opt-in that opens (or attaches to) a PENDING ECO revision
-  // for a lifecycle-LOCKED part — the door the Phase-0 discriminated 409 (`eco_required: true`)
-  // points at. Provider contract (POST /api/v1/bom/multitable/{part_id}/eco-intent, no body):
-  // 200 {eco_id, state, attached, source_version_id, target_version_id};
-  // 409 {detail:{code: 'not_locked' | 'eco_intent_rejected', message}}; entitlement-first 403.
-  // Idempotency = the provider's attach-before-create (at most ONE open intent per part), so no
-  // Idempotency-Key header is minted here (mirrors the provider docstring, NOT the write PATCH).
-  async requestBomEcoRevisionIntent(partId: string): Promise<QueryResult<BomEcoRevisionIntentResult>> {
-    if (this.mockMode) {
-      return {
-        data: [
-          {
-            eco_id: `mock-eco-${partId}`,
-            state: 'progress',
-            attached: false,
-            source_version_id: 'mock-v1',
-            target_version_id: 'mock-v2',
-          },
-        ],
-        metadata: { totalCount: 1 },
-      }
+  /**
+   * Uncredentialed shared-account ECO intent. Refused before select, including mock mode.
+   * Personal writes go through personalBomWriteRequest.
+   */
+  async requestBomEcoRevisionIntent(_partId: string): Promise<QueryResult<BomEcoRevisionIntentResult>> {
+    return {
+      data: [],
+      error: new Error('PLM_BOM_WRITE_UNCREDENTIALED_REFUSED'),
     }
-    if (this.apiMode !== 'yuantus') {
-      return { data: [], error: new Error('BOM ECO revision intent is not supported for this PLM API mode') }
-    }
-    return this.select<BomEcoRevisionIntentResult>(`/api/v1/bom/multitable/${partId}/eco-intent`, {
-      method: 'POST',
-    })
   }
 
   /**

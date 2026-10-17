@@ -2,7 +2,7 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId } from '../auth/embed-config'
+import { embedAllowedOrigins, embedDataSourceId, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { VisualPreviewFileList, VisualPreviewImage } from '../data-adapters/PLMAdapter'
@@ -12,6 +12,7 @@ interface PreviewAdapter {
   getVisualPreviewImage(token: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage>
   isVisualReviewEnabled(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -22,6 +23,7 @@ function isPreviewAdapter(value: unknown): value is PreviewAdapter {
     && typeof a?.getVisualPreviewImage === 'function'
     && typeof a?.isVisualReviewEnabled === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
@@ -51,6 +53,11 @@ async function guardedAdapter(req: Request, res: Response): Promise<PreviewAdapt
     res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH' } })
     return null
   }
+  const org = adapter.getEffectiveOrgId()
+  if (!org || org !== claims.org_id) {
+    res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH' } })
+    return null
+  }
   const now = Math.floor(Date.now() / 1000)
   const ttl = Math.min(typeof claims.exp === 'number' ? claims.exp - now : 0, 600)
   if (!claims.jti || ttl < 1) {
@@ -73,7 +80,7 @@ async function guardedAdapter(req: Request, res: Response): Promise<PreviewAdapt
 export default function plmEmbedVisualPreviewRouter(): Router {
   const router = Router()
   router.use('/api/plm-embed/visual-preview', (req, res, next) => {
-    if (process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED !== 'true') {
+    if (!isPlmEmbedVisualPreviewEnabled()) {
       return res.status(404).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE' } })
     }
     next()

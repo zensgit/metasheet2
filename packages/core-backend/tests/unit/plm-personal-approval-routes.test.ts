@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
+import { usePinnedServer } from '../utils/pinned-server'
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: any, _res: any, next: any) => {
     req.user = { id: 'current-owner' }
@@ -11,6 +12,7 @@ vi.mock('../../src/middleware/auth', () => ({
 import { createPlmApprovalBindingsRouter } from '../../src/routes/plm-approval-bindings'
 const loginJwt = jwt.sign({ userId: 'current-owner', email: 'synthetic@example.invalid', role: 'user' }, 'synthetic-route-key')
 afterEach(() => vi.unstubAllEnvs())
+const pinned = usePinnedServer()
 function fixture() {
   vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'true')
   vi.stubEnv('PLM_APPROVAL_CARD_CONNECTION_ID', 'fixed')
@@ -24,14 +26,15 @@ function fixture() {
   const app = express()
   app.use(express.json())
   app.use('/api/me/plm-approval-bindings', createPlmApprovalBindingsRouter(service as never))
-  return { app, service }
+  pinned.setApp(app)
+  return { service }
 }
 describe('personal binding JWT owner route', () => {
   it.each([undefined, 'mst_token', 'yua_token', 'service-token'])(
     'rejects nonlogin credential %s before service',
     async (token) => {
-      const { app, service } = fixture()
-      let call = request(app).get('/api/me/plm-approval-bindings')
+      const { service } = fixture()
+      let call = request(pinned.url()).get('/api/me/plm-approval-bindings')
       if (token) call = call.set('Authorization', `Bearer ${token}`)
       const res = await call
       expect(res.status).toBe(401)
@@ -41,16 +44,16 @@ describe('personal binding JWT owner route', () => {
   it.each([{ type: 'invite' }, { typ: 'embed' }, { aud: 'purpose-bound' }])(
     'refuses a purpose credential %j even when the legacy authenticator accepts it',
     async (purpose) => {
-      const { app, service } = fixture()
+      const { service } = fixture()
       const token = jwt.sign({ userId: 'current-owner', ...purpose }, 'synthetic-route-key')
-      const res = await request(app).get('/api/me/plm-approval-bindings').set('Authorization', `Bearer ${token}`)
+      const res = await request(pinned.url()).get('/api/me/plm-approval-bindings').set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(401)
       expect(service.list).not.toHaveBeenCalled()
     },
   )
   it('list uses current authenticated owner and no-store', async () => {
-    const { app, service } = fixture()
-    const res = await request(app)
+    const { service } = fixture()
+    const res = await request(pinned.url())
       .get('/api/me/plm-approval-bindings')
       .set('Authorization', `Bearer ${loginJwt}`)
     expect(res.status).toBe(200)
@@ -58,8 +61,8 @@ describe('personal binding JWT owner route', () => {
     expect(service.list).toHaveBeenCalledWith('current-owner')
   })
   it('disabled is inert 404 and strict reconciliation rejects actor override', async () => {
-    const { app, service } = fixture()
-    const res = await request(app)
+    const { service } = fixture()
+    const res = await request(pinned.url())
       .post('/api/me/plm-approval-bindings/00000000-0000-4000-8000-000000000001/reconcile')
       .set('Authorization', `Bearer ${loginJwt}`)
       .send({ actor: 'other' })
@@ -68,7 +71,7 @@ describe('personal binding JWT owner route', () => {
     vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'false')
     expect(
       (
-        await request(app)
+        await request(pinned.url())
           .get('/api/me/plm-approval-bindings')
           .set('Authorization', `Bearer ${loginJwt}`)
       ).status,
