@@ -1,6 +1,56 @@
 # 既有 #6337 收口验证
 
+## 2026-10-17 family-4 修复获准推入原草稿与既有CI
+
+Owner明确授权本轮三文件（family-4版本断言+两份既有MD）推入原草稿#6337并运行既有合成CI；不新增切片、不合并/部署/客户读取/真实发送。执行前远端仍OPEN/draft、head=0a8634fd35bb0e651db490eb65f418429def0bc2，原base/head分支不变，本地仅这三文件改动。候选测试SHA仍d4f2d53793db640f01b5fa81f2035090a40235014965a482438b3bb0dafaab3d，本地两轮11/11及两类变异各五条致红、临时库清理证据见下节，不替代新head正式CI。
+
+仅精确暂存三文件、逐一验证index与受验工作副本原字节一致后正常fast-forward推送；不force或转正式。仅dispatch一次既有Plugin System Tests，记录正确新head/run。新head正式门包括晚期family-4版本断言、后置SQL、PLM manual/interval、闭合POST202完整传输/ABORTED、实际停止清理及宜搭71=66+5；pending/skipped不计通过，不借旧run成功冒充新head。整轮成功、当前PR head仍匹配且全部证据齐备后才安排一次Chrome合成初始化/两行预览；真实发送OFF，不点击发送、不交换真实token。Chrome未连接不启动短TTL环境；无额外推送、重跑或系统时间同步变更授权。
+
+## 2026-10-17 获准本地修复 family-4：两轮整文件通过、两类变异被杀
+
+Owner明确授权现有#6337内最小修复版本断言、保留消费者/完整性检查、本地合成及变异验证和MD；不推送、不重跑CI、不新增切片、不合并/部署/客户读取/真实发送。代码仅原family-4测试共用断言3改4及两行注释；静态按HEAD原块精确替换后与候选全文比较为true，生产源码改动0。候选文件SHA `d4f2d53793db640f01b5fa81f2035090a40235014965a482438b3bb0dafaab3d`，Windows发布检出与Linux受验副本原字节一致。显式版本期望保留，不改为跟随生产常量自动求值。
+
+本地新owner-bound PG14完成462项迁移，迁移输出SHA `437c779f10a62dbc83f59d8757d1dba4e4e457cb2714e05594087b949a091703`。子进程仅允许列表环境，真实宜搭发送false，原native网络/.env守卫；原整文件不做名称过滤、无跳过。运行依次为：
+
+- baseline：仅内存将候选版本期望还原3，生产模块不变；6通过/5失败，五条均4对3版本错配，变换恰一次，精确复现正式CI的五条失败。日志SHA `35c1be5eef46f0a396d78e889f5e234c1d5d4624263ae40b01cf7223bdf7b049`。
+- candidate：无变换，11/11（10原文件测试+1外置隔离哨兵），0失败/跳过。日志SHA `21b47fc8a8667209ca2472a6c0c48d61845f37a98b67e864a5930e775b4e41ed`。
+- wrong-version：仅内存变换真实生产enqueue的入库版本参数为3，不改变测试期望或数据库返回值；6通过/5失败，五个ON入口均3对4断言致红，变换恰一次。日志SHA `02d56604d33747af731cf87402fa5dcb99bf0de0e03a7b574a0430f28d88d06b`。
+- missing-consumer：仅内存从真实生产enqueue的路由展开结果删去webhook-event-bridge，不改变测试或查询结果；6通过/5失败，五条错误的expected包含该consumer而actual不含，变换恰一次。证明版本修正后独立fan-out守卫真接线，不是被版本错误提前兜住。日志SHA `241d9f98fee8948cfc61b4744c70dc53c2bfbefa8189f3ebb9dc3859eca401ca`。
+- final：无变换再跑原整文件，11/11、0失败/跳过，日志SHA `2f74e50c6441ec3f407d36441c48932050f5b76b14b51b268485b1f41d64b616`。五轮均无unrun、出网/.env违规均0；测试依旧走真实RecordService/RecordWriteService与实际PG写入，ON/OFF、冲突回滚、payload、eventId、depth、零/单条outbox及两消费者pending检查均未删减。
+
+闭合：受验三文件SHA前后不变，owner校验stop成功、owned PG移除，宿主只读检查该scratch下pg-*目录0。整轮脱敏回执SHA `9cf02410ca42be9fe1ff1c2e3302c3392c9d1ee5f1ad8ffbcf9dd54fab7216cc`；只复制此回执至tmp/pr6337-proxy-drain-local-20261014/family4-local-20261017并核对原SHA，未复制私有日志/报告/.env。临时工具位于Linux source/tmp/family4-local-20261017，不进入发布改动。
+
+范围与门禁：本地仅原测试+两份既有MD，未提交/推送/重跑CI。正式CI仍为0a8634/run39015466444晚期失败；本地通过不能冒充新head正式绿，旧head宜搭71/71及停止清理证据保留。Chrome条件试用尚未启动，需后续明确授权推入原草稿及既有CI后，以正确新head整轮成功及71项/停止清理证据判断；本轮不自动采取该下一步。
+
+## 2026-10-17 本轮正式终态：目标链路通过，晚期断言仍阻断整轮
+
+终态后的只读定因补证：五个真实FAIL窗口均精确命中固定断言分类expectedFourToBeThree=true，不输出原日志或业务值。生产automation-outbox-enqueue.ts L65默认CURRENT_ROUTING_MANIFEST，L89-91将manifest.version写入outbox；automation-routing-manifest.ts L200-208新增v4只展开v3旧路由并增私有只读事件，CURRENT明确为v4。测试共用expectDurableRow在L116仍钉3，L117继续独立钉两项record fan-out；五个ON路径均在版本断言先失败。workflow L2192将该文件登记于晚期attendance步骤，故早先multitable步骤成功不能替代它。由此确认本轮五条失败为同一旧版本测试期望，不是新出现的SQL超时、ABORTED或停止失败；尚未修改/执行候选，不能宣称更新版本后其它断言必绿。建议仅更新显式版本期望与注释、保留独立两consumer/payload/事务断言，先运行原整文件并做错误版本及缺consumer变异，再另申请推送CI；本轮授权未扩展到这项新修复。
+
+已按授权将三文件推入原草稿，head `0a8634fd35bb0e651db490eb65f418429def0bc2`；run `39015466444` attempt1 / test(20.x) job `117346576987` 最终 completed/failure，当前PR仍同head、draft。固定浏览器、前置锁协议、PLM manual/interval、宜搭与后置SQL步骤均success。公开日志70247行，LF拼接SHA `0eeb903fbf81867ae982d31daa7dd252693af924588fee4ba4ff886221dba59d`；未读取私有产物、凭据或客户数据。
+
+后置multitable real-DB正式汇总：266文件通过，3102测试通过、2 skipped；原atomic binding测试文件存在实际成功行，SQL取消闭合帧0。此为本轮统计准备补丁的同head正式证据，不是仅借用本地40/40；两条skip不记作通过。
+
+PLM两条RESULT均passed、failurePresent=false、cleanup=stopped-and-owned-database-removed、sourceFiles=6588，回执SHA分别 `13919f0cd41dcbdf886e0f6ad4dbd22ce026b47fe5a2bfa9bf04c1c14c6e7aa8` / `91d6832bd2a855ec853ca882dd279267acc01fb42b2a97fab22989b531beee7d`。actual-stop-resolved=2、actual-stop-failed=0、production-stop-failed=0；336条transport帧内ABORTED/ABORT/signalAborted均0，SDK与PLAYWRIGHT POST202 BODY_DONE complete各1，PROXY DOWNSTREAM_FINISH/UPSTREAM_COMPLETE/UPSTREAM_END complete各1。宜搭正式RESULT：passed=true，71=66业务+5哨兵。清理来自受审runner强制校验后的公开成功帧，未读取私有清理产物。旧ABORTED、lease、SQL超时与WSL回拨历史证据仍保留，不宣称全部历史根因消失。
+
+新增阻断在step121（Run attendance integration tests）：严格大写FAIL头对应5条断言，全部位于 `packages/core-backend/tests/integration/multitable-automation-producer-family4-realdb.test.ts`，均为AssertionError，非statement/test/hook timeout；窗口含manifest_version。只读源码L116仍钉manifest_version=3，生产 `src/multitable/automation-routing-manifest.ts` L201已定义version=4；当前证据指向清单版本断言漂移，未通过修改断言或重新运行来证明最终修复，不擅改生产语义。失败窗口SHA依次 `875a6b76c7bb971db050f90ded4f4a5af44970cca0e1bbb45a6be5a0dbac6ced` / `f082b6a52673c8168d6a15097370da1191a22f39cd7752933a2e3fc8444ad81a` / `d6b7b0adbe86055add92b3082164bb159faab69629e729ae3e74e2465ff6e2b8` / `c5876bc70f930bb11eec2365025f462a0a09566357d6a981eda0d5b3bc03c789` / `2df33548600749fbce766c5de66abebe3f7c02313be928cf757190165cc85367`。
+
+整轮未绿，原条件授权的Chrome合成试用未启动；不以目标步骤成功替代整轮门禁。终态报告后已暂停6337-ci跟踪，无自动重跑、额外推送、合并、部署或真实发送。本节仅本地续记，未再推送；新增断言修复需另获授权。
+
 ## 2026-10-17 本轮三文件推送与既有合成CI授权
+
+后置SQL正式步骤已绿：同head0a8634fd3/run39015466444的step110 multitable real-DB已completed/success，98/100/101/102亦success，后续step111仍in_progress、整轮未结束。补丁已通过本轮正式SQL步骤元数据验收，尚需公开日志确认实际目标用例、取消帧与71项/停止清理结果；不能据此宣称整轮成功或所有历史SQL根因已消除，未启动Chrome试用。
+
+后置SQL步骤已启动：同head0a8634fd3/run39015466444的step110 multitable real-DB现in_progress，正式执行包含本轮统计准备补丁的原测试；98/100/101/102均success，暂无失败job。尚不把执行中、旧head或本地复现通过当作本轮SQL完成，继续等待最终日志与停止/71项证据闭合。
+
+宜搭步骤正式状态：同head0a8634fd3/run39015466444的step102已completed/success，后续已推进至step109；step110后置SQL仍pending。尚需可用公开日志中的71=66+5结果、ABORTED与actual-stop/清理帧，以及后置SQL正式成功，不据步骤元数据单独解除试用门禁。
+
+PLM步骤状态变化：同head0a8634fd3/run39015466444的step101 manual/interval已completed/success，step102 owner宜搭JWT HTTP/browser real-DB已in_progress，step110后置SQL仍pending。此处只确认步骤元数据，不将尚未读取的71项、ABORTED或actual-stop/清理闭合帧当作通过；整轮仍in_progress，未启动Chrome试用。
+
+最新正式推进：同head0a8634fd3/run39015466444的step100前置锁协议real-DB completed/success，step101 PLM manual/interval已in_progress；102宜搭与110后置SQL仍pending，暂无失败job。不借前置通过推定ABORTED、实际停止或71项已通过，旧风险继续保留。
+
+正式目标推进：同head0a8634fd3/run39015466444 attempt1的step98固定官方Chromium安装已completed/success，step100前置删除/指针锁协议real-DB已in_progress，step101 PLM、102宜搭、110后置SQL仍pending，未见失败job。安装成功不代替ABORTED、实际停止清理或71项结果；旧lease/SQL超时风险仍保留。
+
+执行后本地续记（未再推）：精确暂存三文件，staged blob与受验原字节一致；commit `0a8634fd35bb0e651db490eb65f418429def0bc2`正常fast-forward推入原草稿，OPEN/draft/base/head分支不变。仅dispatch一次既有plugin-tests.yml，run `39015466444` attempt1，test(20.x) job `117346576987`，head严格匹配；最新目标job已in_progress至早期flag合同，98/100/101/102/110仍pending。同head自动Integration Guard为run `39015449458`。复用了原PAUSED的6337-ci heartbeat，更新为本轮run/head并启用，每10分钟只读检查；不建重复监视器。仅有意义状态变化通知，终结即核证据并停用；正式整轮成功且所有门齐备才安排本次授权Chrome合成试用。旧失败、40/40本地与正式新head证据仍严格区分。
 
 Owner已明确批准将本轮测试统计准备及两份既有MD推入原草稿#6337，并运行既有合成CI。推送前只读核验远端仍OPEN/draft，head=ad9056f888e44da9e1f01359c2c9c84e63fbe844，原base/head分支未变；本地仅这三文件有改动。授权不包含新增切片、合并、部署、客户读取或真实发送。
 

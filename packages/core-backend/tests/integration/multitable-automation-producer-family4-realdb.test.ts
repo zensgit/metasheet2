@@ -111,9 +111,9 @@ const expectDurableRow = async (recordId: string, eventType: string, payloadShap
   expect(row.payload).toEqual({ ...payloadShape, _eventId: expect.any(String) })
   expect(row.event_id).toBe(row.payload._eventId) // stable identity shared by both phases
   expect(row.automation_depth).toBe(0)
-  // Rows are stamped with the CURRENT manifest version (v3 since the dingtalk-todo-mirror consumer
-  // landed). The record families' FAN-OUT is unchanged by v2/v3 — MANIFEST_FANOUT still pins it.
-  expect(row.manifest_version).toBe(3)
+  // v4 adds the private read-preview route and stamps new rows with version 4.
+  // Record-family fan-out is unchanged; MANIFEST_FANOUT independently pins both consumers.
+  expect(row.manifest_version).toBe(4)
   expect(await consumersOf(row.id)).toEqual(MANIFEST_FANOUT.map((consumer_key) => ({ consumer_key, status: 'pending' })))
 }
 
