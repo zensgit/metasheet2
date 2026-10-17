@@ -88,10 +88,30 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
   const owner = `sa02l-owner-${nonce}`
   const otherAdmin = `sa02l-admin-${nonce}`
   const foreignOwner = `sa02l-foreign-owner-${nonce}`
+  const selfServiceReader = `sa02l-self-service-reader-${nonce}`
   const connection = `sa02l-connection-${nonce}`
   const foreignConnection = `sa02l-foreign-connection-${nonce}`
   const system = `sa02l-system-${nonce}`
   const foreignSystem = `sa02l-foreign-system-${nonce}`
+  // Independent, fixed scope oracle for the GOV-08 decision; do not derive this from ROUTES.
+  const selfServiceRoutes = [
+    ['POST', '/api/integration/external-systems/:id/read-smoke'],
+    ['POST', '/api/integration/external-systems/:id/read-source-probe'],
+    ['POST', '/api/integration/read-source-configs'],
+    ['GET', '/api/integration/read-source-configs'],
+    ['GET', '/api/integration/read-source-configs/:id'],
+    ['GET', '/api/integration/read-source-configs/:id/audit'],
+    ['POST', '/api/integration/read-source-configs/:id/approve'],
+    ['POST', '/api/integration/read-source-configs/:id/retire'],
+    ['POST', '/api/integration/read-source-configs/:id/read'],
+    ['POST', '/api/integration/read-source-compositions'],
+    ['GET', '/api/integration/read-source-compositions'],
+    ['GET', '/api/integration/read-source-compositions/:id'],
+    ['GET', '/api/integration/read-source-compositions/:id/audit'],
+    ['POST', '/api/integration/read-source-compositions/:id/approve'],
+    ['POST', '/api/integration/read-source-compositions/:id/retire'],
+    ['POST', '/api/integration/read-source-compositions/:id/run'],
+  ] as const
   const pluginName = 'plugin-integration-core'
   const actionId = 'plm.stock-preparation.pull-bom.v1'
   const projectId = `${tenant}:integration-core`
@@ -311,13 +331,13 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
         source text, granted_by text, updated_by text, created_at timestamptz, updated_at timestamptz);
       CREATE TABLE user_session_revocations (user_id text PRIMARY KEY REFERENCES users(id),
         revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text);
-      INSERT INTO role_permissions VALUES ('admin','integration:admin');
+      INSERT INTO role_permissions VALUES ('admin','integration:admin'), ('self-service-reader','integration:read');
     `)
-    for (const [id, tenantId] of [[owner, tenant], [otherAdmin, tenant], [foreignOwner, foreignTenant]]) {
+    for (const [id, tenantId] of [[owner, tenant], [otherAdmin, tenant], [foreignOwner, foreignTenant], [selfServiceReader, tenant]]) {
       await fixturePool.query(`INSERT INTO users (id,email,name,role,is_active,must_change_password,activation_status,local_password_set)
         VALUES ($1,$2,'Synthetic host user','user',true,false,'activated',true)`, [id, `${id}@example.invalid`])
       await fixturePool.query('INSERT INTO user_orgs VALUES ($1,$2,true)', [id, tenantId])
-      await fixturePool.query("INSERT INTO user_roles VALUES ($1,'admin')", [id])
+      await fixturePool.query('INSERT INTO user_roles VALUES ($1,$2)', [id, id === selfServiceReader ? 'self-service-reader' : 'admin'])
     }
     // All host/auth/singleton imports occur AFTER synthetic env and schema setup. No transport
     // replacement: host CoreAPI.database and AuthService use their actual production pool.
@@ -458,6 +478,76 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
       }
     }
   }, 30000)
+
+  it.each(selfServiceRoutes)('requires real JWT tenant provenance before self-service IO: %s %s', async (method, template) => {
+    const jwt = await import('jsonwebtoken')
+    const path = template.replace(':id', system)
+    const claimless = authService.createToken({ id: owner, email: `${owner}@example.invalid`,
+      name: 'Synthetic claimless user', role: 'user', permissions: [], created_at: new Date(), updated_at: new Date() })
+    // Real signature verification, DB-refreshed role and middleware; no verifyToken replacement.
+    expect(await authService.verifyToken(claimless)).toMatchObject({ id: owner, role: 'admin' })
+    expect((await authService.verifyToken(claimless))?.tenantId).toBeUndefined()
+    const refusal = (reply: Reply, code: string) => {
+      expect(reply).toMatchObject({ status: 403, error: { code } })
+      for (const value of [tenant, foreignTenant, owner, system]) expect(JSON.stringify(reply)).not.toContain(value)
+    }
+    const noSourceIo = () => {
+      for (const observer of sourceObservers) expect(observer.mock.calls).toHaveLength(0)
+      for (const observer of [hostQueryObserver, transactionQueryObserver]) {
+        expect(observer.mock.calls.filter(call => {
+          const sql = observedSql(call)?.text ?? ''
+          return /\b(integration_read_source_configs|integration_read_source_config_audit|integration_read_source_compositions|integration_read_source_composition_audit|integration_external_systems|data_sources)\b/.test(sql)
+        })).toHaveLength(0)
+      }
+    }
+    const clear = () => { for (const observer of observers) observer.mockClear() }
+    const prior = process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+    try {
+      for (const flag of [undefined, 'false']) {
+        if (flag === undefined) delete process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+        else process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = flag
+        clear()
+        refusal(await request(method, path, method === 'POST' ? {} : undefined, claimless, { 'x-tenant-id': tenant }), 'TENANT_CLAIM_REQUIRED')
+        noSourceIo()
+      }
+      for (const query of [`?tenantId=${foreignTenant}`, `?tenantId=${tenant}&tenantId=${foreignTenant}`]) {
+        clear()
+        refusal(await request(method, path + query, method === 'POST' ? {} : undefined), 'TENANT_MISMATCH')
+        noSourceIo()
+      }
+      clear()
+      refusal(await request(method, path, method === 'POST' ? {} : undefined, ownerToken, { 'x-tenant-id': foreignTenant }), 'TENANT_MISMATCH')
+      noSourceIo()
+      if (method === 'POST') for (const carrier of [foreignTenant, [tenant], { tenantId: tenant }, null, ' ']) {
+        clear()
+        refusal(await request(method, path, { tenantId: carrier }), 'TENANT_MISMATCH')
+        noSourceIo()
+      }
+      clear()
+      expect(await request(method, path, method === 'POST' ? {} : undefined, '')).toMatchObject({ status: 401 })
+      noSourceIo()
+      for (const invalid of [ownerToken + 'invalid-signature', jwt.sign({ userId: owner, tenantId: tenant }, process.env.JWT_SECRET!, { expiresIn: -1 })]) {
+        clear()
+        expect(await request(method, path, method === 'POST' ? {} : undefined, invalid)).toMatchObject({ status: 401 })
+        noSourceIo()
+      }
+      if (method === 'POST' && !path.endsWith('/read') && !path.endsWith('/run')) {
+        const readerToken = authService.createToken({ id: selfServiceReader, email: `${selfServiceReader}@example.invalid`,
+          name: 'Synthetic read-only user', role: 'user', permissions: [], tenantId: tenant, created_at: new Date(), updated_at: new Date() })
+        clear()
+        expect(await request(method, path, {}, readerToken)).toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+        noSourceIo()
+      }
+      clear()
+      // A verified same-tenant session reaches the original contract/store (including its 400/404).
+      const positive = await request(method, path + `?tenantId=${tenant}`, method === 'POST' ? {} : undefined,
+        ownerToken, { 'x-tenant-id': tenant })
+      expect([200, 400, 404]).toContain(positive.status)
+    } finally {
+      if (prior === undefined) delete process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+      else process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = prior
+    }
+  })
 
   it('uses DB-refreshed JWT roles and the canonical facade registered by the actual host', async () => {
     expect(await authService.verifyToken(ownerToken)).toMatchObject({ id: owner, role: 'admin', tenantId: tenant, permissions: ['integration:admin'] })

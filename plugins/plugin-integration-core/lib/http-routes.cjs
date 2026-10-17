@@ -1246,6 +1246,23 @@ function requireAccess(req, action) {
   return user
 }
 
+// GOV-08: integration-self-service-tenant-claim-design-20261017.md.
+// Local to the sixteen existing self-service handlers; never change legacy scope defaults.
+function requireSelfServiceReadAccess(req, action) {
+  const user = requireAccess(req, action)
+  const tenantId = resolveVerifiedClaimTenantId(req)
+  const carriers = [user.tenantId, requestBody(req).tenantId, requestQuery(req).tenantId, requestParams(req).tenantId]
+  for (const [name, value] of Object.entries(req.headers || {})) {
+    if (name.toLowerCase() === 'x-tenant-id') carriers.push(value)
+  }
+  for (const value of carriers) {
+    if (value !== undefined && (typeof value !== 'string' || value.trim() !== tenantId)) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return user
+}
+
 /**
  * 拉取人员拉数据 — THE TABLE-ACTION GATE, WITH THE PULL SPLIT (was 一线自己拉数据).
  *
@@ -6110,7 +6127,7 @@ function requireStockPreparationAudit() {
       // Requires WRITE access: although the operation is read-only, this is an active credentialed outbound
       // probe of K3 and returns an existence signal (recordPresent) a read user could enumerate against keys.
       // Per the conservative discipline it is a connection/probe action → operator/integration-write only.
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       // C2: normalize the contract via the C1 normalizer — accepts the shipped { presetId, key } subset AND
       // the forward { presetId, intent:{ object, mode, key } } shape, normalizing both to one output. The
       // normalizer is fail-closed + values-free: a raw path/method/payload/config can never ride in, and an
@@ -6150,7 +6167,7 @@ function requireStockPreparationAudit() {
     async externalSystemReadSourceProbe(req, res) {
       // Same conservative tier as read-smoke (S2 design-lock lock 10): an active credentialed outbound
       // probe is a connection/probe action → operator/integration-write only, never end-user reachable.
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       let probe
       try {
         probe = prepareReadSourceProbe(requestBody(req))
@@ -6189,7 +6206,7 @@ function requireStockPreparationAudit() {
     async readSourceConfigsSave(req, res) {
       // Consultant/admin tier (S2 design-lock lock 10): minting a persisted version is config-time
       // trust — integration write only, never end-user reachable.
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       const body = requestBody(req)
       try {
         const saved = await readSourceConfigs.saveVersion(scopedInput(req, {
@@ -6203,7 +6220,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceConfigsList(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const query = requestQuery(req)
       try {
         return sendOk(res, await readSourceConfigs.list(scopedInput(req, {
@@ -6218,7 +6235,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceConfigsGet(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       try {
         return sendOk(res, await readSourceConfigs.get(scopedInput(req, { id: requestParams(req).id })))
       } catch (error) {
@@ -6227,7 +6244,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceConfigsAudit(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const query = requestQuery(req)
       try {
         return sendOk(res, await readSourceConfigs.listAudit(scopedInput(req, {
@@ -6241,7 +6258,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceConfigsApprove(req, res) {
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       try {
         return sendOk(res, await readSourceConfigs.approve(scopedInput(req, {
           id: requestParams(req).id,
@@ -6253,7 +6270,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceConfigsRetire(req, res) {
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       try {
         return sendOk(res, await readSourceConfigs.retire(scopedInput(req, {
           id: requestParams(req).id,
@@ -6272,7 +6289,7 @@ function requireStockPreparationAudit() {
     // the designed runtime tier: config-time surfaces (save/approve/probe) stay write-tier, and an
     // approved preset + key-only body is exactly the end-user surface S0 defines.
     async readSourceConfigsRead(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const body = requestBody(req)
       // Strict body allowlist BEFORE anything else: only { inputs } may ride in from the runtime request.
       if (body !== undefined && body !== null) {
@@ -6348,7 +6365,7 @@ function requireStockPreparationAudit() {
     // route is the runtime tier — approved-only, key-only, values-free, read-only.
     async readSourceCompositionsSave(req, res) {
       // Consultant/admin tier: minting a persisted composition version is config-time trust.
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       const body = requestBody(req)
       try {
         const saved = await readSourceCompositions.saveVersion(scopedInput(req, {
@@ -6362,7 +6379,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceCompositionsList(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const query = requestQuery(req)
       try {
         return sendOk(res, await readSourceCompositions.list(scopedInput(req, {
@@ -6376,7 +6393,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceCompositionsGet(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       try {
         return sendOk(res, await readSourceCompositions.get(scopedInput(req, { id: requestParams(req).id })))
       } catch (error) {
@@ -6385,7 +6402,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceCompositionsAudit(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const query = requestQuery(req)
       try {
         return sendOk(res, await readSourceCompositions.listAudit(scopedInput(req, {
@@ -6399,7 +6416,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceCompositionsApprove(req, res) {
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       try {
         return sendOk(res, await readSourceCompositions.approve(scopedInput(req, {
           id: requestParams(req).id,
@@ -6411,7 +6428,7 @@ function requireStockPreparationAudit() {
     },
 
     async readSourceCompositionsRetire(req, res) {
-      requireAccess(req, 'write')
+      requireSelfServiceReadAccess(req, 'write')
       try {
         return sendOk(res, await readSourceCompositions.retire(scopedInput(req, {
           id: requestParams(req).id,
@@ -6430,7 +6447,7 @@ function requireStockPreparationAudit() {
     // endpoint/filter/body/response-path or per-hop key can enter. Evidence stays values-free; chain data
     // is only the last hop's single resolver output.
     async readSourceCompositionsRun(req, res) {
-      requireAccess(req, 'read')
+      requireSelfServiceReadAccess(req, 'read')
       const body = requestBody(req)
       // Strict body allowlist BEFORE any store access: only { inputs } may ride in (the deep
       // { inputs: { key } } bound is enforced by the executor's own normalizer below).

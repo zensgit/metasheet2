@@ -1,6 +1,191 @@
 # 既有 #6337 收口验证
 
+## 2026-10-18 独立决策PR已创建；获准推入原草稿及运行原CI
+
+owner最新明确授权：独立GOV-08提交/推送/文档PR在先，然后既有草稿#6337追加已验证补丁及MD、运行既有合成CI。不新增功能切片，不合并/部署/客户读取/真实发送。本节取代下方历史段落中的“待授权推送/CI”当前状态，保留当时证据。
+
+只读GitHub核实#6337仍OPEN/DRAFT，远端head仍`dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395`，base为`codex/plm-read-plan-self-service-final-20261011`。未改变base或重写他人提交。fetch得到当前main `d671019f2baf925b1651b8c9ade6131b22ec28ae`；独立干净文档分支`codex/selfservice16-gov08-20261018`以它为基底，commit `d0daac73d`只有47行决策MD，已推送并创建[#6438](https://github.com/zensgit/metasheet2/pull/6438)。其它带未提交内容的决策工作树保持原样。
+
+代码候选五文件与封存补丁`git apply --reverse --check`一致，LF runtime/pin再次核对。2026-10-18推送前在同字节Linux候选执行原完整`sealed-export-package-provenance.test.cjs` exit0，原network/.env守卫禁止连接/读取0；未改hash算法或先归一化字节。代码提交仅这五文件及两份closeout MD；独立GOV-08留在#6438，不夹带进代码PR。后续CI必须按实际新head记录，pending/skipped不算通过。
+
+首个GitHub只读检查因进程继承的本机代理不可达失败；只在后续命令子进程清空HTTP/HTTPS/ALL_PROXY并为git显式关闭该次代理，恢复访问。不改系统/全局代理配置，不读取或输出token/凭据。
+
+## 2026-10-17 本轮局部候选封存（未提交）
+
+已封存五文件统一diff（仅runtime、三个原测试及一个pin；不包含其它历史产品改动），`artifacts/selfservice16-local-candidate.patch` SHA `057cb74098accb4db6aeca97326918316a28fe666c67969ac610863cd232db8f`；托管目录同下。`git apply --reverse --check <该文件>`在当前未提交候选exit0，仅检查、不应用，确认补丁与工作树匹配。首次捕获因Git的LF→CRLF warning前缀被完整性检查拒绝，没有保存半件；再次仅移除首个diff之前的warning，校验恰好5个文件、无中途warning/截断，再保存并反向只读校验。
+
+基线仍dcc82a1，生产diff33增/16删，只在http-routes.cjs局部执行。独立GOV-08及两份closeout MD留在工作树，不混入代码补丁。`artifacts/selfservice16-candidate-handoff.json` SHA `a6a8b63c5a7b6cc6fd0039ada4b57ec1fc89b6e367a5e1ba09f8c1523dc7510f`记录各项本地证据、哨兵口径与未执行外部动作；不是全部目标完成/正式CI/发布清单。原目标仍active。
+
+当前授权仅本地实施与验证，不执行下一步推送/CI。若owner批准进入正式审阅，应先按GOV-08独立决策与代码的既定顺序处理，再将同一候选推入原草稿并核验同head正式步骤；不得自行另开PR或将两类PR的独立性省略。其余SA批次证据仍各自按准确源码/接口/测试范围审计，不在这份五文件局部补丁中追加功能。
+
+## 2026-10-17 SA-05既有发送端口：当前候选真实PG补证
+
+继续核原目标SA-05的持久领取、一次许可与未知结果处理，不增加产品功能或切片。复用原owned-PG helper、原network/.env guard及原Vitest整文件`stock-preparation-yida-owner-send-port-realdb.test.ts`，无testNamePattern、不替换SQL结果/授权服务、不修改原测试或生产文件。临时驱动及脱敏回执由Codex Security托管，不进入候选产品diff。
+
+实际结果：**49项原测试+1项外加隔离哨兵=50/50**，failed/notExecuted/mutations均0，exit0；禁止连接与环境读取均0。新建PG14先执行462迁移；测试按原定义在自己的随机schema执行090–095 DDL，真实PluginRuntimeSecurityService加密、内部审批authority、private admission、runner与ledger均参与。独立PG会话/PID及pg_blocking_pids证明竞争，不把两个JS Promise误称两个实际数据库会话。
+
+亲读并执行的关键路径：原`:430`并发提交只产生一个permit及一次合成token/form请求；`:447`权限/材料/grant在token阶段撤销后不发form；`:467`私有材料加载后重查exact-literal开关；`:489`最终resolver撤权转unknown且不公开body；`:506`取消token/form后不返还CREATE机会；`:529`admission/claim实际COMMIT回执丢失不恢复许可；`:543`真实ACK SQL失败转unknown且不自动重发；`:611/646`数据库期限复查；`:690`关闭/取消后的晚结果丢弃；`:707`孤儿prepared不生成capability。无token或form真实HTTP，原`:161`明确合成fetch返回假响应且不调用global fetch；不能把表中acknowledged或合成计数当真实宜搭业务成功。
+
+隔离入口保留原非root、新user/net/PID namespace、只有lo、五capabilities全0。环境白名单仅传新owned PG地址及自产随机材料；父环境真实发送flag为false，原测试的正例通过显式合成依赖选择true，默认/false/TRUE/空格/非字符串等负例仍保留。未修改系统时间/时间同步、未接继承数据库；测试结束宿主连接正常关闭，外层PG stop及pg-*目录移除成功，源文件前后SHA未变。此次不启动浏览器；临时驱动仍保留原浏览器二进制hash预检，但不将其记作浏览器执行证据。
+
+运行入口：`unshare`→`setpriv`→托管`artifacts/yida-owner-realpg-run.mjs`→`yida-owner-realpg-worker.mjs`→原Vitest integration config整文件；驱动SHA `98374db6702260248b87e2718b6c06cca04d28aae14bfe3838efaa350680afe2`，worker SHA `894c6ddbc6089da6fcd6e70df321038ff0146698f45ce4b8292ee1516250a3a2`。原test/source哈希在实际回执中，不借上轮409的内存DB范围替代真实PG。
+
+日志SHA `4690c05d57316a04c416824a87b189da38f34ed8659f8be11430d8074db503b8`；持久回执`artifacts/selfservice16-yida-owner-realpg-receipt.json`与下节同托管目录，SHA `fb5d8796d8fc36d953ff2f4b470ce791712cbe99f4cebeb52b86ed168c757594`。这补上当前候选的内部持久发送端口证据，不替代JWT HTTP授权入口、其它PG整文件、正式71项/Chrome交互或真实表单对账。无额外变异或独立新审查，不借此前Astra审查冒称它已审本临时驱动。完整目标继续active，未推送、重跑CI、合并、部署、客户读取或真实发送。
+
+## 2026-10-17 原目标续推进：相邻宜搭合同及既有CI接线补验
+
+上一轮属于实际进展（16口生产修改、真实JWT/变异/清理证据），不是等待或状态复述。当前发布检出和main均没有目标MD；从既有goals worktree重新读取原文§5/§6/§9，原SHA `410961bbe4fea14cbb2d04e6e52fb9e970f69f3b9e3a43c9a637da9b55f50c26`未变。原六批目标不缩为16口修复，不把大量历史阶段数字当当前结果。
+
+只读核对当前`.github/workflows/plugin-tests.yml:1357`确实把`stock-preparation-read-plan-host-realdb.test.ts`作为整文件交给原real-DB job，未加testNamePattern；本轮16个真实JWT用例将沿已有接线执行，不需要另建workflow或CI切片。此为静态接线事实，**不代表未推送候选已经在CI执行**。
+
+补跑当前Linux候选的15整文件：yida-token-exchange、token-client、static-plan、send-authority-primitives、readback-observation、owner-send-port、owner-runtime-factory、initialization-producer、form-transport、form-readback、delivery-store、delivery-runner、credential-material-store、approved-target-store及write-target-dry-run-runtime。实际`node --test --test-reporter=tap <15文件>` **409/409**，fail/cancel/skip/todo均0、exit0、无超时；原network/.env守卫16帧，禁止连接/环境读取均0；测试文件前后哈希一致。测试只使用原合成fetch/DB边界，不访问真实宜搭、凭据或客户数据。
+
+该集合比先前10文件307项多了静态预演、token-client、owner runtime factory、初始化producer和dry-run；不是新增102项测试代码，也不能将409再与包含在内的307相加。亲读static-plan原测试`:322`的实际fetch零调用正控及`:346`的canApply降级拒绝，owner-runtime-factory`:36`的网络must-not-start依赖和默认false、初始化producer原合同，证明这些不是单纯按文件名推断的能力。它支持SA-04静态不可apply和SA-05默认关闭/合成发送边界回归，不替代真实PG并发、正式宜搭71项、新候选Chrome交互或真实发送授权。
+
+日志SHA `8cbd51ac6fd63568498c46745094c95b7cb02752a41487d4ddc4b84ab7898e0e`；持久回执与下节同目录`artifacts/selfservice16-yida-nearby-final-receipt.json`，SHA `5d0710e33b02bc3c199e288cee32573b7ea3a641aff7d066f17ac9af01fe9762`。未改生产/原测试，无新增端点、推送、CI执行或部署。
+
+下一交付门仍是当前五文件局部候选及独立GOV-08的审核/提交次序与正式CI；现行授权明确禁止推送和CI重跑，因此不自动执行。后续完整目标还须逐项核验SA-03其它已支持具名操作、SA-05真实PG状态机及SA-06消费者的当前冻结证据，不能用这次409或原71项代替。需要新增端点/消费者/授权合同的任何差异另走GOV-08，不能从自动goal续推取得扩权。
+
+## 2026-10-17 已授权16口可信租户：本地修复及验证完成
+
+结论：**fixed（当时仅本地候选）**。本节取代下方“待裁/未获批准”的当前状态，历史证据保留。当时冻结HEAD `dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395` 未变；先写独立 [GOV-08决策PR#6438](https://github.com/zensgit/metasheet2/pull/6438)，再按owner批准实施。无新端点/切片/迁移/权限/开关，不改全局默认；当时未提交、推送、运行CI、合并、部署、读取客户或真实发送。2026-10-18提交/CI授权及执行见顶节。
+
+### 边界与最小补丁
+
+旧JWT链允许无tenant claim的有效token通过header回填user.tenantId；W4 OFF时通用scope可能只与该回填值比较。K3非SQL绑定不经过SQL Connection owner resolver，单读、组合与probe均受影响。现在局部requireSelfServiceReadAccess保留原requireAccess在先，再验证真实中间件提供的authenticatedTenantId。7 configs+7 compositions+2 probes共16个既有handler全部直接接线；缺claim 403 TENANT_CLAIM_REQUIRED，显式user/body/query/params/x-tenant-id冲突或非字符串/空值403 TENANT_MISMATCH，错误不回显tenant值。未登录401、原权限不足403及原read/write分层不变。
+
+没有改变全局JWT、W4默认、其它旧入口、workspace或owner模型；相同显式tenant可进入原流程，但原body allowlist仍有效，不能把“过租户门”误称“任意body合法”。合法claimless会话现在必须换取含已验证tenant的会话，这是获准的兼容收紧，不做header兼容旁路。
+
+实际修改五个代码/测试/pin文件：`lib/http-routes.cjs`、`__tests__/http-routes.test.cjs`、`__tests__/k3-b4-http-source-run.test.cjs`、core的`stock-preparation-read-plan-host-realdb.test.ts`及`s6a-package-provenance-pins.json`。生产diff为局部helper及16次调用替换，没有其它生产模块修改。旧测试只显式补独立claim，不在公共测试invoke中从user自动伪造可信身份。
+
+### 有序验证与实际结果
+
+1. **语法/类型/封装**：`pnpm --filter @metasheet/core-backend exec tsc --noEmit`；`pnpm exec tsc -p scripts/tsconfig.recovery-archive-acceptance.json`、`scripts/tsconfig.stock-preparation-plm-full-app.json`、`scripts/tsconfig.stock-preparation-yida-synthetic-trial.json`均exit0。额外`tsc -p <临时宿主测试配置>`最终exit0：extends原core配置、仅改为ESNext以支持import.meta、保留原Node模块解析并补齐已有ambient声明。最初临时配置沿用CommonJS且漏ambient导致TS1343等；中间Bundler版本引出23条依赖类型错误。两次失败证据保留，未改产品/断言或降低类型严格度；最终配置SHA `895c91b0aece47e55e67a9134e2092488d04689ce0dd06baa8fff3186b3798dc`。
+2. **真实攻击替代与正常控制**：原`stock-preparation-read-plan-host-realdb.test.ts`整文件不筛选，**23原测试+16逐入口矩阵+1隔离哨兵=40/40**，两轮无变异通过。使用真实AuthService签发/验签、JWT中间件、真实DB RBAC与注册宿主路由，不mock verifyToken。W4 unset/false均拒绝claimless+header；逐口覆盖foreign/duplicate query、foreign header、POST畸形body、坏签名/过期token/无token，8个write口真实reader角色403。拒绝时实际配置/审计/组合/外部系统/连接表SQL、source facade、解密调用均为零，values-free负例检查不回显合成身份。合法同claim控制进入原契约/存储（200/400/404，不谎称16个完整业务动作全部200）；原23项包括真实UI第二owner复用继续成功。
+3. **有限变异**：内存删除局部门后运行16条真实JWT矩阵，**16失败、0通过**，其余24条有意未执行；不是整文件通过或结果注入。另在完整CJS路由测试执行23种内存变异：删除总门、信任user、依赖flag、漏header/body/query/params，以及逐一漏16个handler，**23/23被杀死**。原磁盘源码未改。该集合非穷举；不声明能防同进程恶意代码伪造可信req字段。
+4. **最近回归**：`node --test --test-reporter=tap .../__tests__/http-routes.test.cjs` exit0，直接16口及畸形params/header等矩阵完成；该文件手动main在TAP中计1，不把内部矩阵虚增为TAP数量。K3原八整文件`node --test --test-reporter=tap <八个文件>` **130/130**，fail/cancel/skip/todo=0，含B4 HTTP67项、受审POST读取、分页、重定向拒绝及永久禁写。最终本地日志SHA分别 `45536827bfdba7840119bd73eca746b17eb9948d0ffb54fa887aec84b8d9e37a`、`4113b4bac8c580744d50cfd5fcac16ef2a8d1778b9bc1e820c8058814a8b09a1`。所有原网络/.env守卫计数为0。
+5. **完整provenance**：`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` exit0。使用实际computePackageProvenancePinSet核对全部66项，只有runtimeFiles.pluginHttpRoutes需更新；更新后0差异。被pin文件LF字节不做哈希前归一化，未改其它pin。日志SHA `3c48c585665b48e52a0994374a884944d9386c4e51822da0fd7c10644a482856`。
+
+真实DB验证入口是本地`tmp/sa02-reuse-local-20261017/boot.sh`→run-local.mjs→worker.mjs，用户/网络/PID namespace、非root、仅lo、五capabilities全0；清空继承环境，新建owner-bound PG14、自产随机材料、发送OFF、原网络/.env守卫。462迁移完成；两次正常测试均40/40，最后日志SHA `f95550e1b09d76d388f5ace0755cbe3b06752fe9e8b3bd9f28381266aabc0829`。宿主正常close、PG stop、pg-*目录移除、自然exit0、原受验文件前后SHA不变；未改WSL时钟/同步服务，无客户库连接。这是隔离合成复用入口，不冒称正式CLI、宜搭固定候选浏览器或新head CI验收。
+
+### 候选字节与独立复核
+
+Windows发布检出与Linux受验副本下列五文件SHA一致；runtime为独立Astra ultra所审git blob `179495204e1075837f41a5d6788e1912d003925d`。
+
+| 文件 | SHA256 |
+| --- | --- |
+| http-routes.cjs | `8eaa3e375b6ed2cb90213926a002e1ab66bfdfb8ccde7d667c17f05002b7a0f4` |
+| http-routes.test.cjs | `3478ce0a8996801663bd88e477daa2e1578182b0021a87f2a69693043d9f72f2` |
+| k3-b4-http-source-run.test.cjs | `eefbca23e70b526c0267c4afba53e46b44b731f8ce249f20647b1ce44b9c0bd8` |
+| stock-preparation-read-plan-host-realdb.test.ts | `e6265711230c1fa0c7cf27fe91b1f4971f7bcf620a9ceb342d42741f2a02cae2` |
+| s6a-package-provenance-pins.json | `880d5c13eb44f1fc7af096267909859afd8843089df49fd55aca83f67902a9cc` |
+
+按fix-finding流程，独立Astra high前置调查与新Astra ultra补丁只读复核完成一次审查循环，无新增具体绕过/回归阻断。保留其提醒：正常scope到达原400/404仅证明可信租户门未误挡，不单独证明业务全成功。依靠原整文件业务正例与K3回归补充，而不夸大矩阵结论。
+
+脱敏持久回执由Codex Security存储，目录`C:/Users/zen08/.codex/state/plugins/codex-security/scans/pr6337-ci-publish-20261016/artifacts-49fb3d64fc14ef1d27e0ee28e18e2759b7a6bb22b57cd042240e7b0a1bf984ce/artifacts/`：
+
+- selfservice16-final-realjwt-receipt.json：`604ab3bcd9f2360ed688eb599767a1f4c4f0216387ab7cc5f66a93c7f65a095d`
+- selfservice16-realjwt-mutation-receipt.json：`8c8a31c2c5840832d8c1e76f750490a73cdb40472bce762c4768eb27671dd953`
+- selfservice16-mutations-receipt.json：`1347db13dcbf556755d588c010adc00d07b1ea8bd0724b44b91d95f4ad6d3f10`
+- selfservice16-k3-final-receipt.json：`6834bb38bfb14e2336914674379c973f65a3cea34edaf6b30a069d8a29e6505d`
+- selfservice16-ordered-checks-receipt.json：`a98d09f10e8526de3aa10425df58ae6da1182432f456036ba1c5febc78053159`（保留首次额外类型配置失败）；selfservice16-host-test-types-final-receipt.json：`57b48e106de1889673c8149685f9ae2938886f4e96e2f2088e29756e5db2cfbb`。
+
+剩余边界：这只关闭获准16口的已知可信tenant缺口，不是完整集成目标完成或全平台安全认证。旧正式CI/宜搭71项/Chrome试用各属其原head，不替代新候选证据；本轮没有重跑正式71项或新浏览器试用。提交、推送、CI、发布与真实外部操作仍须独立授权；独立GOV-08文档与代码的未来提交/PR次序亦未执行。
+
+## 2026-10-17 授权前安全独立工作：自助入口平行路径盘点
+
+本轮未获得A的明确批准，不更改身份合同。亲读http-routes.cjs L6349–6498：组合run入口L6432只requireAccess(read)，L6450从scopedInput取组合，L6470按同scope取step read config，L6474取adapter系统；它与单读共享同一flag受控租户来源。externalSystemReadSmoke L6107起及externalSystemReadSourceProbe L6150起也用scopedAdapterInput。故只保护单读配置七口不足以保护自助读面，上一建议需订正，不能先做七口再宣称闭合。
+
+用纯文本提取当前注册表并逐项核对handler，现有范围为7 configs+7 compositions+2 probes，共16口；有序method/route/handler映射JSON SHA `3d503e794f04596781b56ba8815ce313cf6663c0de985d58be560ddec2868ada`。不执行路由、不访问DB/凭据/网络。read/write分层仍保留（configs/compositions的save/approve/retire及两probe为write，其余read）；目标仅可信scope前置，不引入新权限或owner模型。所有类型共用这些接口，不能假称只影响K3。完整待裁方案范围见设计MD顶节，尚未创建独立ADR/PR或实施。
+
+此前本地24/24复用、K3 130/130、宜搭307/307及正式CI/Chrome证据的各自范围不变。原完整目标仍active；不能以这些绿灯跨越尚未批准的GOV-08授权兼容决策。
+
+## 2026-10-17 SA-03／SA-05当前安全独立核验
+
+独立Astra ultra只读反驳已完成：在当前HEAD、flag OFF、有效claimless且有integration:read、目标存在approved K3配置和可用来源的前提下，未能推翻静态可达性。AuthService.ts L290只对含tenant claim的token查membership；jwt-middleware L101–108随后回填header tenant；index.ts L1535/1941传播后直接调用注册handler，没有补membership。read-source-config-store.cjs L362只验证给定scope/approved；external-systems.cjs L1061起只有sql-readonly才走带principal的Connection resolver，K3走Binding凭据路径；K3 factory L1808/read L2121不提供额外owner阻断。无攻击执行、真实环境读取或部署配置推断；保留为既有#6323风险，不改称#6337回归。
+
+下一裁决建议A（尚未批准/实施）：只在自助read-source-configs接口族采用既有resolveVerifiedClaimTenantId，缺可信claim或显式scope冲突在配置/凭据读取及网络前拒绝；不更改全局W4 flag默认、不扩其他历史入口。无claim的合法账户须取得含已验证tenant的会话，不能用header兼容回退。该方案改变既有claimless授权兼容行为，PR模板L62的GOV-08要求独立前置决策；先请求owner裁决，不能夹入#6337收尾。本地合成真实JWT负例及针对性变异应在裁决后实施，不以当前fake-user HTTP测试冒充已覆盖。若owner要求保留claimless多组织用户，应另裁宿主membership证明方案，而非允许自报tenant。当前未创建新ADR/PR/端点、未翻开关或改代码。
+
+继续保留原完整目标，不以SA-01/02本地复用闭合缩小为只交宜搭。当前Linux候选与dcc82a1发布检出6735相关跟踪非.env文件一致，未改生产代码或原测试。
+
+K3原八整文件：k3-read-operation-profiles、read-source-k3-material-list-b4-contract、k3-b4-response-contract、k3-b4-source-run、k3-b4-http-source-run、k3-external-write-permanent-fence、k3-wise-redirect-fence、k3-wise-material-presets。净化环境、原Node网络/.env守卫，只合成依赖/自有loopback HTTP，**130/130**、fail/cancel/skip/todo均0、exit0，9个守卫帧中禁止网络/环境读取均0。显式TAP输出SHA `3153aebf6f40caf394d438606c096459d5cf66eb9e76628786a8896226372206`。第一次同8文件exit0且守卫零，但默认reporter计数未被TAP解析器识别（null），未报计数通过；随后只为固定输出协议显式TAP运行，不修改断言、不把计数null解释为失败或业务修复。K3永久写围栏、受审POST读取、分页合同、原生fetch重定向拒绝及内存批准守卫变异属于本证据范围；不证明真实JWT/租户membership链或客户K3兼容。
+
+宜搭原十整文件：yida-owner-send-port、yida-credential-material-store、yida-send-authority-primitives、yida-delivery-runner、yida-delivery-store、yida-approved-target-store、yida-token-exchange、yida-form-transport、yida-form-readback、yida-readback-observation。**307/307**、fail/cancel/skip/todo均0、exit0，11守卫帧禁止网络/环境读取均0；测试文件前后SHA未变，输出SHA `4764905b6be2eeaa756288e3c7a124b165d31db00b405daca607b851fa75c909`。正例发送/token/readback均为合成fetch边界，不访问宜搭；原用例覆盖默认OFF、精确开关、一次授权、abort/timeout/回拨、未知结果不重试及有限回读合同。不将内存DB合同替代真实PG并发、正式71项或真实客户/宜搭验证。
+
+可信tenant残余风险仍在当前源：jwt-middleware.ts L101–108保存可信claim但兼容回填user.tenantId；http-routes.cjs L6274的readSourceConfigsRead经L6300起getForRuntime(scopedInput)与scopedAdapterInput取K3配置；L1569的scopedInput调用L1345 resolveTenantId。L1541的assertVerifiedTenantClaim受L1634默认OFF开关控制，L1238 requireAccess本身只检查权限。故上述130/307或宜搭专用可信JWT路径不支持“所有自助入口可信tenant已经闭合”。此为前期已记录的继承风险，不是本轮新增回归；不读取真实部署flag、不执行越租户攻击、不趁#6337收尾翻全局默认。改变K3自助入口的兼容授权合同须先按GOV-08单独裁决，再写实现和真实JWT负例；当前尚未取得该新增授权边界裁决。
+
+仅本地MD续记。未新增产品切片/外部动作、推送、CI重跑、合并、部署、客户访问或真实发送。
+
+## 2026-10-17 SA-02第二owner／第二布局：当前源码本地执行闭合
+
+本节补上此前“仅有测试定义、尚未取得当次执行事实”的本地缺口，不改写公开CI日志读取失败。当前HEAD仍dcc82a1；Windows发布检出与Linux受验源的core/web/plugin/ops/workflow及根workspace文件共6735个跟踪非.env文件，收尾逐SHA比较全部相同、0缺失，未读取.env。运行前五项直接受验文件逐SHA也全部一致，运行后五项未变。
+
+只在Linux源码tmp/sa02-reuse-local-20261017中新增临时验收包，不修改原产品/测试/CLI：boot创建新user/net/PID namespace，只启用loopback，降权后实际验证非root、独立netns、仅一个lo及五种capabilities全0；复用现有owned-PG helper和原Node网络/.env守卫。显式白名单子进程环境只注入新建PG地址和自产随机加密/JWT材料，发送与durable delivery OFF；没有继承数据库地址或真实凭据。与正式CLI隔离合同是不同入口，回执明确formalCi=false，不冒称原CLI正式acceptance或固定候选浏览器验收。
+
+实际462迁移成功（日志SHA `437c779f10a62dbc83f59d8757d1dba4e4e457cb2714e05594087b949a091703`）；原host-realdb整文件不筛选、不改断言、不注入结果，**23项原测试+1项外加隔离哨兵=24/24**，failed/notExecuted均0。第二owner原用例恰好1项且pass，SA02Q_SECOND_OWNER_REUSE完成标记恰好1次；forbiddenConnections/forbiddenEnvReads均0。完整测试日志只保留本机私有文件、不读取输出原文，SHA `87ef48ae4493ad2cd70ba7f021ee9911710d48a9c26e53a402c329907b263a9a`。
+
+真实整链覆盖前浏览器下载→新owner/tenant/private Connection与七种不同物理表列→UI导入只改配置→目录/样本校验→显式确认→批准/激活→预览。断言根物料P9与订单BOM B7不混同、根数量4/子数量20、原owner不可访问、原激活/版本不变、源及业务表快照不变。使用原helper选择的本地Playwright Chromium，执行前固定检查二进制SHA `2e61bc3fd990bd4d7b419ef6b6303c67aaed683e5b83b3b25e416f015f343209`；不是宜搭固定upstream-1719529候选，也不是Chrome密码登录验收。
+
+原测试宿主清理及Vitest.close完成，外层owned PG正常stop；pg-*目录移除，namespace父命令自然exit0，无强杀/重试。脱敏回执位于Linux源 `tmp/sa02-reuse-local-20261017/9227a9a6-d4c8-4378-ad68-3b5e9429faba.receipt.json`，SHA `1759557f7d31e476347130974af1e293549e11df29bab93b2f9d5ac610d63ac7`。保留诊断目录，无手工递归清理；没有单独声明未测量的浏览器进程残留计数。
+
+Astra ultra同一只读代理补审四个验收文件：无新增阻断，确认原整文件、无结果替换、清洁环境/自有PG/namespace/0caps、清理失败致红；特别要求计数区分23原测试与1哨兵，以及五文件未变不能单独代表整树。本节另列6735文件收尾对照，不掩盖边界。审查未运行测试、写文件或读取私有日志。
+
+裁决：SA-01/02最低纵切片的本地生产路径与复用执行证据已补齐；不是完整六批目标已完成，不证明并行多租户、客户MSSQL、客户数据对账、现网迁移或发布。公开CI具体第二owner用例日志仍未取回，不能将本地24/24当正式CI计数。没有推送/重跑CI/开PR/合并/部署/客户读取/真实宜搭发送。
+
+## 2026-10-17 SA-02复用验收入口复核（尚不签本轮执行通过）
+
+独立只读复核已完成：`gpt-6-astra` / `ultra`，任务sa01_sa02_closeout_readonly，冻结同HEAD；未写文件、运行测试、访问客户或读取凭据。裁决无新增产品阻断，未发现为满足SA-01/02最低退出条件而必须新增实现的项。错误配置链：validation-read.cjs L147/163/177拒目录不匹配/异常分页/不完整展开，management.cjs L178起真实reader成功才完成收据、异常转失败；store.cjs L236的批准requireConfirmed经ledger.cjs L155检查同actor/Connection/binding修订与确认状态。host-realdb L501起验证未测量/未确认不可批准。第二owner导出白名单及去身份句柄见browser helper L565，导入零POST见L718，版本/数量见L750，源目标/原owner状态不变见host L1133。该审查是代码与测试定义核验，不伪称执行回执或当前逐守卫变异已完成；第二owner当次执行仍待签。
+
+续核：使用45秒上限的独立子进程读取同一公开job日志，两次均timeout；第二次按大小写清除子进程HTTP/HTTPS/ALL代理变量，未修改用户持久环境。现有GitHub连接器也返回读取错误，没有取得日志正文/私有产物，未重跑CI。三个请求均已终结，不保留伪监视等待。此前291/291的11套测试当前SHA逐一匹配11/11；fcb20→当前HEAD的plugin生产目录、web目录、core src目录无Git差异。这支持已有回归证据连续性，但不代替第二owner用例的执行事实。
+
+当前HEAD仍为 `dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395`。亲读host-realdb套件L1046–1163和browser-acceptance helper L622起：已有第二owner/第二tenant及独立Connection、七组不同字段布局、第一浏览器下载文件的真实UI导入和修改、重新验证/确认样本/批准/激活/预览。独立断言BOM版本B7、物料版本P9/P3及数量4/20；原owner访问拒绝，来源/业务表不变，原版本与原激活不变，新的回执/版本/预览token绑定第二owner。不是缺功能，不能另造向导。
+
+workflow plugin-tests.yml L1357已将整文件接入既有lock-protocol real-DB步骤。尚须核对本轮公开日志中用例成功及SA02Q_SECOND_OWNER_REUSE完成标记；仅步骤成功/登记行不能替代具体用例证据。本轮只读公开日志请求已终结，返回PUBLIC_LOG_FETCH_FAILED，未取得可计数正文；不签具体用例通过、不重跑CI。该取证失败不撤销此前已取得的整轮正式CI结果，也不证明测试失败。
+
+边界：该测试继承DATABASE_URL并创建schema，本轮未直接启动它、未读取继承地址或提供任意数据库地址。浏览器helper使用测试自产token注入localStorage，是真实组件/HTTP/宿主路径，但不是整站密码登录；其chromium.executablePath()也不是公开trial中固定候选的同一入口，不能混称固定候选验收。文件SHA256：host-realdb `8b05eff465b54870239b627cf1eecc4842071b21c15f3bbd8d0a36918b281e29`；browser helper `f32ae082eaee3d007435059cefe9fc5da944b59c72271d9309b26ee9c953e7fb`。未改生产代码、测试、权限或浏览器选择。本节仅本地MD续记，完整目标未标完成。
+
+## 2026-10-17 Chrome单次合成试用完成：初始化、两行预览及带连接停止清理
+
+本节终态覆盖下方“进行中/Chrome未连接”的历史状态。原草稿#6337仍OPEN/draft，远端head `dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395` 未变；同head run39025079404正式success及71项/SQL/传输/停止证据见下文。Owner明确授权Chrome合成初始化和两行推送预览，未授权客户读取、真实token/发送、合并或部署。
+
+实际入口为原公开run-stock-preparation-yida-synthetic-trial.mjs，非root Linux runner、PG14、TTL900、净化环境、全新owner-bound临时库、发送强制OFF；未替换构建/迁移/认证/guard。启动前发布检出与Linux受验源6577个相关非.env跟踪文件逐SHA全部一致；未借旧构建启动。只在内存读取本次READY标识的合成交接文件，校验syntheticOnly/localSyntheticTrial/defaultOff=true及TTL和loopback登录入口，不输出随机密码、不读.env或真实凭据。
+
+Chrome扩展绑定已确认，使用单独新建试用标签。首次新标签创建后的观察中断，但随后只读列表证实标签已存在；重新绑定同一标签继续，未再起环境、未新增重复标签、未重发业务POST。初次绑定变量未建立仅产生工具赋值错误，无业务请求。通过正常账号/随机密码UI登录，执行页面明确确认的“当前租户”切换，打开已有合成项目；未点击PLM拉取/同步、Automation执行或单行发送确认。
+
+实际页面链：宜搭静态预演→协议v2→七项身份合成样例A→只在本地预演；结果2行、计划创建2、更新0、无效0、本地重复键0，canApply=false、远端未核验。行中0数量保留，第二行通过父件角色形成不同本地身份；这是预演候选，不是远端创建成功或幂等证明。随后打开本地初始化，手动GET确认空槽，仅输入本次自产假材料/假审核编号/假组织并人工确认，单次点击本地初始化POST。提交过程中短暂unknown状态未触发重试；后续页面明确已初始化，再次手动GET确认同一2行草稿以及canSend=false/tokenIssued=false/externalWriteAttempted=false，无grant/发送许可。
+
+保存本机合成截图（无登录口令/输入材料，不上传PR/CI）：
+
+- `E:/Projects/metasheet/tmp/pr6337-chrome-trial-20261017/initialization.png`，SHA `7946e45d775501cc316350cb76b01ca996524844123d916e32154f18eaba66ec`，显示初始化成功、2行草稿及三个false。画面中仅临时合成身份/编号，不是客户材料。
+- `E:/Projects/metasheet/tmp/pr6337-chrome-trial-20261017/two-row-preview.png`，SHA `276523600cb00f64804e902a4f35d385649225fcf4f57cd1f5001ae20bc71d9e`，显示2行统计、canApply=false及data-fields-only/远端未核验边界。
+
+真实停止：Chrome页面保持连接时，通过原CLI stdin发送stop一次；原exec session16853以exit0终结，公开STOPPED帧ownedDatabaseRemoved=true、prototype=false、localSyntheticTrial=true、acceptancePassed=false。原受审脚本正常执行host.stop→preview.close、pool ended/address null、构建回执/guard复验与owner-bound PG stop，并非kill/删库替代正常宿主停止。宿主再实查本次scratch的pg-*目录0、trial.private.json已移除；未手工删除目录。之后关闭仅本次创建的Chrome标签，并清空工具内合成材料引用。保留诊断目录与构建回执供复核，不读取/复制其中私有原始日志或凭据。
+
+本轮Chrome交互合成验收已完成，但公开CLI自身acceptancePassed=false准确保留：它不是完整隔离正式验收入口；bootstrap parent及普通Chrome网络未获得kernel isolation attestation，服务器侧原guard成功不冒充整个浏览器零网络证明。正式隔离71项/PLM及停止证据来自同head CI，两类证据不互相替代。本轮没有真实宜搭查询/token交换/发送、客户读取、业务同步、推送、CI重跑、合并或部署。原完整自助适配目标未标完成，SA-01/02第二owner/第二物理布局等独立证据范围与剩余发布裁决继续按原目标审计，不由本轮两行预览替代。
+
+## 2026-10-17 Chrome重新连接后的单次合成试用（进行中）
+
+Owner明确要求重新检查已连接Chrome并继续原合成初始化/两行预览；无合并/部署/客户读取/真实发送授权。cua实时清单已出现Chrome family=chrome/type=extension，绑定原返回browser id=3并命名本次会话，未读取其它用户标签内容。重新核对run39025079404/dcc82a1de仍completed/success。公开CLI及typed入口、core/web/plugin/ops等6577个非.env跟踪源与Linux独立源逐SHA全部一致；Linux唯一相关untracked浏览器candidate模块也包含在发布检出逐SHA匹配集合，不是额外未审来源。
+
+已调用原公开CLI（非root runner、PG14、全新owned库、TTL900、净化父环境、原默认OFF/网络与.env守卫）一次，当前exec session16853处于构建/准备中，尚未收到READY或操作UI。不得另起重复环境；后续必须记录真实READY、正常密码登录、初始化/两行静态预览及公开STOPPED/自有PG和交接文件移除，未完成前不预填成功。本段仅本地续记，不再推送/重跑CI。
+
+## 2026-10-17 本轮正式CI成功；Chrome未连接，未启动交互环境
+
+Plugin System Tests run `39025079404` attempt1 / test(20.x) job `117374375899` 已completed/success；run与当前PR head均严格匹配 `dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395`，PR仍OPEN/draft。98固定官方浏览器、100前置锁协议、101 PLM manual/interval、102宜搭、110后置SQL及121晚期attendance均success。只读公开job日志70142行，LF拼接SHA `1f0ed3775ba4837f6038217c87697f880b0d52d31c8587f5c4982a28b0644b86`；先剥job/step列和ANSI，真正大写FAIL头扫描中晚期失败0，family-4实际成功行1，原atomic-binding文件实际成功行存在。不将预期负例console内的failed字样误当失败。
+
+后置SQL正式汇总：266文件通过，3102测试通过、2跳过、0失败；SQL取消闭合帧0。family-4候选字面量v4、独立两consumer/payload/回滚等原检查保持，晚期整步成功补齐原run39015466444缺口。本地两轮11/11和两类变异各五条红仍为各自证据，不与正式CI计数混算。
+
+同head PLM manual/interval两条RESULT均passed、failurePresent=false、cleanup=stopped-and-owned-database-removed、sourceFiles=6588，回执SHA分别 `38a32629477aab50dab7d68311badb8ea103d9a6d327678957222d0373ed9eb0` / `2876a4813b5a50c7de791a02799fd8b8b87e6c5be94b90af6bbf50f2b9b957c0`。actual-stop-resolved=2、actual-stop-failed=0、production-stop-failed=0；360条transport帧内ABORTED/ABORT/signalAborted均0，SDK/PLAYWRIGHT POST202 BODY_DONE complete各1，PROXY DOWNSTREAM_FINISH/UPSTREAM_COMPLETE/UPSTREAM_END complete各1。宜搭闭合RESULT passed=true、71=66业务+5哨兵。清理依据受审runner强制校验后公开闭合帧，不读取私有产物或凭据；本轮正式浏览器/宜搭/SQL/停止清理门已闭合，不反向宣称全部历史风险唯一根因已证明或完整自助集成目标已交付。
+
+试用前置实查：已完整阅读computer-use技能及guidance/confirmations，阅读现有公开trial CLI，检查MD未对本head重复开启试用。cua.getState实际清单仅内置浏览器与MCP Apps，无Chrome、无已连接Chrome扩展入口。依owner“Chrome未连接不得启动短TTL环境，不擅换浏览器”的条件，未创建PG、未启动trial CLI、未读取任何交接文件/口令、未打开业务页或点击初始化/预览/发送。不能把CI内浏览器合成成功称为Chrome人工试用已完成；需用户连接Chrome后才继续已授权的单次合成初始化和两行预览。
+
+本轮跟踪按终态约定停用；本节仅本地续记，未再推送。无新增切片、自动重跑、合并、部署、客户数据/凭据读取、真实token交换或真实发送；既有lease、ABORTED、SQL超时、WSL回拨历史证据继续保留。完整原目标仍未标完成：SA-01/02第二owner/第二布局等各自当前生产路径证据不能由本轮宜搭71项代替。
+
 ## 2026-10-17 family-4 修复获准推入原草稿与既有CI
+
+新head正式SQL步骤已通过：run39025079404 attempt1/head dcc82a1de的step110 completed/success；98固定浏览器、100前置锁协议、101 PLM manual/interval、102宜搭步骤亦success，当前step111仍in_progress，暂无失败job。晚期attendance/family-4尚未核验，公开日志闭合71项/ABORTED/actual-stop与清理结果仍待读取；整轮未结束，不提前启动Chrome或宣称本轮完整通过。
+
+执行后本地续记（未再推）：三文件staged blob与受验原字节逐一一致、diff --check通过；commit `dcc82a1de0c3434342fc8fdb3f7aa0b3b3de1395`已正常fast-forward推入原草稿，保持OPEN/draft与原base/head分支，仅dispatch一次既有plugin-tests.yml。新run `39025079404` attempt1、event=workflow_dispatch，严格head匹配；test(20.x) job `117374375899`已in_progress，整run仍queued，其余job尚queued，未计任何目标通过。原6337-ci每10分钟heartbeat已更新为本轮run/head并恢复ACTIVE，不重复建监视器；只通知有意义变化，终态核证据后停用。保留原晚期断言/SQL/浏览器历史证据，不据本地或旧head绿启动Chrome。未新增切片、额外推送、合并、部署、客户读取或真实发送。
 
 Owner明确授权本轮三文件（family-4版本断言+两份既有MD）推入原草稿#6337并运行既有合成CI；不新增切片、不合并/部署/客户读取/真实发送。执行前远端仍OPEN/draft、head=0a8634fd35bb0e651db490eb65f418429def0bc2，原base/head分支不变，本地仅这三文件改动。候选测试SHA仍d4f2d53793db640f01b5fa81f2035090a40235014965a482438b3bb0dafaab3d，本地两轮11/11及两类变异各五条致红、临时库清理证据见下节，不替代新head正式CI。
 

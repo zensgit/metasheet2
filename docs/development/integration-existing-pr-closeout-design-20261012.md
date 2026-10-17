@@ -1,5 +1,43 @@
 # 既有 #6337 收口设计
 
+## 2026-10-18 已获准按顺序提交独立决策与原草稿
+
+owner明确批准先提交/推送独立GOV-08并开文档PR，再将已验证补丁及MD推入原草稿#6337，运行既有合成CI。独立决策现为[#6438](https://github.com/zensgit/metasheet2/pull/6438)，文档commit d0daac73d、基底main d671019f2；只含一份决策，不夹带代码或这些closeout记录。下方“禁止提交/推送/CI”及“待授权”文字保留为此前阶段，不再代表本轮授权状态。
+
+#6337仍以PLM分支为base，不擅自改为main。当前只追加已冻结的runtime/三个既有测试/一个pin及两份closeout MD，不增加功能切片。独立决策文档不复制进代码提交；代码PR通过链接引用#6438。已有本地证据仅证明准确候选；新推送head的CI、正式71项及清理需另核，不移用旧head绿灯。仍不合并、部署、客户读取或真实发送。
+
+## 2026-10-17 当前裁决已获准并本地实施：16口可信租户
+
+本节替代下方历史记录中的“未获批准/待裁”当前状态，不删除原调查证据。owner已明确批准16个既有自助接口的完整范围，先形成独立 [GOV-08决策PR#6438](https://github.com/zensgit/metasheet2/pull/6438)，再实施。当时HEAD为dcc82a1，修改仅在本地候选；后续提交授权见顶节。
+
+用局部requireSelfServiceReadAccess保留原read/write权限第一道门，随后只认authenticatedTenantId；缺claim拒绝，user/body/query/params/header的冲突或畸形显式租户在配置/凭据/适配器IO前拒绝。16个导出handler本身接线，不能靠绕过路由包装避开。保持全局JWT/W4默认、Connection owner、workspace及原参数allowlist不变，不增加端点/开关/迁移。
+
+真实JWT/宿主/自有PG整文件40/40，K3八整文件130/130，直接handler矩阵通过；23种有限变异被杀，删除门另使真实JWT矩阵16条全红。provenance与类型检查通过，独立Astra ultra复核无新增阻断。实现、测试与哈希详见验证MD顶节。只关闭本次16口的已知可信tenant缺口，不宣称全平台隔离或完整自助集成目标完成。没有提交、推送、CI重跑、合并、部署、真实客户访问或宜搭发送。
+
+## 2026-10-17 待裁范围订正：只保护单读配置不足
+
+尚未收到A明确批准，不将自动goal续推进解释为授权。后续亲读发现此前“只保护read-source-configs七口”的建议不完整：同文件L6432 readSourceCompositionsRun同样经scopedInput加载已批准组合，L6470加载步骤read config，L6474用scopedAdapterInput取得系统凭据再执行；没有独立可信claim检查。只改七口会留下组合平行路径。因此撤回“仅七口即可收口”的暗示，不实施该残缺方案。
+
+待裁推荐范围更新为现有自助读取接口集合共16口：7个read-source-configs（save/list/get/audit/approve/retire/read）、7个read-source-compositions（save/list/get/audit/approve/retire/run）、2个external-system探测（read-smoke/read-source-probe）。这是待批准的单一授权合同，不是16个新动作；所有现有read/write权限分层及参数合同保持，可信claim门位于任何配置/凭据读取及adapter网络前。范围覆盖这些通用接口的已有支持类型，不谎称可以在无可信scope读取配置后才判断是否K3。目录中其它旧integration入口不在此授权合同，不宣称全平台隔离由此完成。
+
+建议仍是独立GOV-08先决策：缺可信claim或scope冲突则拒绝，不接受header自证；不翻全局flag默认、不改变全局JWT中间件、不增加tenant选择端点、无workspace共享扩展。若合法claimless多组织会话必须保留，应在该独立决策选择宿主membership验证，而非用兼容回退留洞。批准后才可准备实现及真实JWT/零依赖IO负例和守卫变异。本轮没有生产/测试代码变更、额外授权或外部动作。
+
+## 2026-10-17 下一授权边界前置（待裁，不实施）
+
+SA-01/02本地纵切片证据已补齐，K3八整文件130/130与宜搭十整文件307/307安全合成通过。但当前K3自助读取仍继承flag OFF下claimless token可使用header填入tenant的静态可达路径，Astra ultra独立反驳未能否定；细节与冻结行号见验证MD顶节。这不是#6337新回归，也不能因合成绿灯宣称完整可信tenant目标完成。
+
+建议先独立裁决A：自助read-source-configs接口族强制现有可信claim resolver，拒绝claimless/header自证，不翻全局flag默认、不改变其他历史入口；随后才在获准范围本地实现及真实JWT合成负例/变异。合法claimless多组织兼容若必需，则另选宿主membership证明方案。按GOV-08先决定授权兼容合同，当前未新增ADR/切片/端点/生产修改或外部动作。
+
+## 2026-10-17 SA-02复用本地证据补齐（非新增产品切片）
+
+复用已有host-realdb整文件及真实Vue/HTTP/宿主/配置版本路径，只在tmp验收包提供自有PG、原Node守卫、新loopback-only net/PID namespace与0caps环境，不更改产品/原测试/固定浏览器CLI。462迁移成功，23原测试+1隔离哨兵24/24，第二owner/第二物理布局导入再验证、样本确认、批准、激活、预览成功，源/目标不变；PG移除、自然exit0。6735相关跟踪非.env文件与当前dcc82a1发布检出全部逐SHA一致，Astra ultra只读审验收包无新增阻断。精确回执、浏览器默认路径与正式CI的区别见验证MD顶节。本地缺口已闭合，不再以此为由追加功能；完整目标和真实客户/发送/发布授权门仍保留。
+
+## 2026-10-17 本轮收口状态：正式CI与Chrome合成试用完成
+
+本轮family-4仅更新旧版本断言及注释，保留独立consumer与完整性检查；本地两轮整文件11/11、两类降级各五条致红之后，owner授权三文件推入原草稿并运行原CI。head dcc82a1de/run39025079404已正式success，晚期版本断言、后置SQL、固定浏览器、PLM/宜搭71项及实际停止清理闭合；并非以另一路绿灯代替正式目标。
+
+Chrome连接恢复后，原公开CLI新建隔离合成库/随机账号，普通密码UI登录→合成项目→v2七身份两行静态预演→手动GET空槽→假材料单次本地初始化→手动GET回读2行草稿。页面canApply=false与canSend/tokenIssued/externalWriteAttempted三false分别保留。Chrome仍连接时原stdin stop正常exit0/STOPPED，自有PG和交接文件移除；无源码新改、无真实读写或发送。普通Chrome不冒充kernel网络隔离，public CLI的acceptancePassed=false亦不改写。具体截图/哈希和工具恢复边界见验证MD顶节；未因此合并、部署、推送或宣告完整原目标完成。
+
 ## 2026-10-17 晚期 family-4 版本断言最小修复（本地授权）
 
 本轮owner授权仅现有#6337内最小修复、保留消费者/完整性检查、本地合成与变异验证及MD；不新增切片、不推送、不重跑CI、不合并/部署/客户读取/真实发送。冻结head为0a8634fd35bb0e651db490eb65f418429def0bc2；旧run39015466444晚期五条失败均精确为4对3版本断言，而其宜搭71项、后置SQL及实际停止清理已通过。
