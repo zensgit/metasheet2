@@ -299,7 +299,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     )
     await ready.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
-      [sourceId, owner, JSON.stringify(config)],
+      [sourceId, owner, JSON.stringify({ connection: config.connection, options: config.options })],
     )
     let enteredVerify = () => {}
     const verifyStarted = new Promise<void>((resolve) => {
@@ -440,7 +440,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     )
     await pool.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
-      [sourceId, owner, JSON.stringify(config)],
+      [sourceId, owner, JSON.stringify({ connection: config.connection, options: config.options })],
     )
     const targets: string[] = []
     vi.stubGlobal('fetch', async (url: string, init: { method?: string; headers: Record<string, string> }) => {
@@ -590,7 +590,7 @@ describe.skipIf(!rawUrl)('personal BOM write binding postgres lock order', () =>
     )
     await pool.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
-      [sourceId, owner, JSON.stringify(config)],
+      [sourceId, owner, JSON.stringify({ connection: config.connection, options: config.options })],
     )
     const interrupt: { on: boolean; status?: number } = { on: true }
     const revoked = new Set<string>()

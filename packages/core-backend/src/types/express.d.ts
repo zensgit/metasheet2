@@ -8,6 +8,8 @@
  * auth middleware implementations across the codebase.
  */
 
+import type { VerifiedTenantClaim } from '../auth/verified-tenant-claim'
+
 declare global {
   namespace Express {
     interface Request {
@@ -32,6 +34,13 @@ declare global {
 
       /** Tenant claim carried by the verified session token, before header fallback. */
       authenticatedTenantId?: string
+
+      /**
+       * Claim-presence of the signature-verified JWT tenant field.
+       * A missing field is not legacy-private admission. Header backfill of `user.tenantId`
+       * does not change this value.
+       */
+      verifiedTenantClaim?: VerifiedTenantClaim
 
       /**
        * Request ID for tracing/logging purposes.

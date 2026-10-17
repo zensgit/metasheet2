@@ -238,14 +238,18 @@ export class PlmPersonalBomWriteBindingService {
   }
 
   private configOf(source: SourceRow): unknown {
-    if (typeof source.config === 'string') {
+    let config: unknown = source.config
+    if (typeof config === 'string') {
       try {
-        return JSON.parse(source.config) as unknown
+        config = JSON.parse(config) as unknown
       } catch {
         throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
       }
     }
-    return source.config
+    if (!config || typeof config !== 'object' || Array.isArray(config))
+      throw new Failure(403, 'PLM_BOM_WRITE_FORBIDDEN')
+    // DataSourceManager persists type in its column; config contains connection/options.
+    return { ...config, type: source.type }
   }
 
   private metadata(row: Binding): PersonalBomWriteBindingMetadata {

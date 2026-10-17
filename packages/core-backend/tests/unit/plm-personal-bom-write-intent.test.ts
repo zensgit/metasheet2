@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { PlmPersonalBomWriteBindingService } from '../../src/services/PlmPersonalBomWriteBindingService'
 import {
+  personalBomWriteFailureBody,
+  relayPersonalBomWriteFailure,
+} from '../../src/services/plm-personal-bom-write-http'
+import {
   clientKeySha256,
   linePatchBody,
   PlmPersonalBomWriteError,
@@ -959,5 +963,132 @@ describe('personal BOM write intent dispatch', () => {
     expect(writes(eco)).toHaveLength(2)
     expect(JSON.parse(ecoConfirmed!)).toEqual(first.native)
     expect(eco.queries.some((sql) => sql.startsWith('DELETE'))).toBe(false)
+  })
+
+  function publicFailure(kind: 'line' | 'eco-intent', error: unknown) {
+    const relayed = relayPersonalBomWriteFailure(error, kind)
+    return { relayed, body: personalBomWriteFailureBody('fixed', SOURCE, relayed) }
+  }
+
+  const sameOperation = [
+    {
+      kind: 'line' as const,
+      input: () => lineInput({ ifMatch: 'etag-1' }),
+      lost: { ok: true },
+      code: 'PLM_BOM_WRITEBACK_FAILED',
+    },
+    {
+      kind: 'eco-intent' as const,
+      input: () => ecoInput(),
+      lost: { eco_id: 'eco-1' },
+      code: 'PLM_ECO_INTENT_FAILED',
+    },
+  ]
+
+  const nativeRefusals = sameOperation.flatMap((spec) => [401, 403].map((status) => ({
+    ...spec, status, nativeCode: status === 401 ? 'PLM_BOM_WRITE_UNAUTHORIZED' : 'PLM_BOM_WRITE_FORBIDDEN',
+  })))
+
+  it.each(nativeRefusals)('lost response then native $status for $kind stays a refused attempt', async (spec) => {
+    const state = memory()
+    await service(state).bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const svc = service(state)
+    const input = spec.input()
+    state.nextWire = spec.lost
+    await expect(svc.dispatchOperation(actor(), SOURCE, input)).rejects.toMatchObject({
+      status: 503,
+      received: true,
+    })
+    expect(state.intents[0]).toMatchObject({ outcome: 'unknown', saw_unknown: true, confirmed_response: null })
+    state.nextWire = new PlmPersonalBomWriteError(spec.status, spec.nativeCode, { message: 'hidden native text' }, true)
+    let receipt: unknown
+    let caught: unknown
+    try {
+      receipt = await svc.dispatchOperation(actor(), SOURCE, input)
+    } catch (error) {
+      caught = error
+    }
+    expect(receipt).toBeUndefined()
+    expect(caught).toMatchObject({ status: spec.status, code: spec.nativeCode, received: true })
+    expect(caught).not.toHaveProperty('native')
+    const { relayed, body } = publicFailure(spec.kind, caught)
+    expect(relayed.status).toBe(spec.status)
+    expect(body).toEqual({
+      error: 'fixed',
+      code: spec.code,
+      data_source_id: SOURCE,
+      reason: 'provider-rejected',
+      attempt_outcome: 'refused',
+      operation_may_have_applied: true,
+      retry_policy: 'same-operation',
+    })
+    expect(JSON.stringify(body)).not.toContain('hidden native text')
+    expect(state.intents[0]).toMatchObject({ outcome: 'denied', saw_unknown: true, confirmed_response: null })
+    expect(state.intents).toHaveLength(1)
+    const sent = writes(state)
+    expect(sent).toHaveLength(2)
+    expect(sent[1].target).toEqual(sent[0].target)
+    expect(sent[1].data).toEqual(sent[0].data)
+    expect(state.queries.some((sql) => sql.startsWith('DELETE'))).toBe(false)
+  })
+
+  it.each(nativeRefusals)('confirmed then native $status for $kind does not return the cached receipt', async (spec) => {
+    const state = memory()
+    await service(state).bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const svc = service(state)
+    const input = spec.input()
+    const sent = await svc.dispatchOperation(actor(), SOURCE, input)
+    const confirmed = state.intents[0].confirmed_response
+    expect(JSON.parse(confirmed!)).toEqual(sent.native)
+    state.nextWire = new PlmPersonalBomWriteError(spec.status, spec.nativeCode, undefined, true)
+    let receipt: unknown
+    let caught: unknown
+    try {
+      receipt = await svc.dispatchOperation(actor(), SOURCE, input)
+    } catch (error) {
+      caught = error
+    }
+    expect(receipt).toBeUndefined()
+    expect(caught).toMatchObject({ status: spec.status, code: spec.nativeCode, received: true })
+    expect(caught).not.toHaveProperty('native')
+    expect(state.intents[0].confirmed_response).toBe(confirmed)
+    expect(state.intents[0].outcome).toBe('denied')
+    expect(state.intents[0].saw_unknown).toBe(false)
+    const { body } = publicFailure(spec.kind, caught)
+    expect(body.operation_may_have_applied).toBe(true)
+    expect(body.attempt_outcome).toBe('refused')
+    expect(body.retry_policy).toBe('same-operation')
+    expect(body.reason).toBe('provider-rejected')
+    expect(JSON.stringify(body)).not.toContain(JSON.stringify(sent.native))
+    expect(writes(state)).toHaveLength(2)
+    expect(state.intents).toHaveLength(1)
+  })
+
+  it.each(sameOperation)('same-person replacement retry for $kind preserves the native key and request', async (spec) => {
+    const state = memory()
+    await service(state).bind(actor(), { dataSourceId: SOURCE, connectionId: 'conn-1', grant: yuw('a') })
+    const svc = service(state)
+    const first = await svc.dispatchOperation(actor(), SOURCE, spec.input())
+    const frozen = {
+      request_body: state.intents[0].request_body,
+      if_match: state.intents[0].if_match,
+      part_id: state.intents[0].part_id,
+      bom_line_id: state.intents[0].bom_line_id,
+      provider_idempotency_key: state.intents[0].provider_idempotency_key,
+    }
+    state.bindings[0].encrypted_grant = encryptStoredSecretValue(yuw('b'))
+    state.bindings[0].grant_id = 'b'.repeat(32)
+    const second = await svc.dispatchOperation(actor(), SOURCE, spec.input())
+    expect(second.intentId).toBe(first.intentId)
+    expect(second.providerIdempotencyKey).toBe(first.providerIdempotencyKey)
+    expect(second.providerIdempotencyKey).toBe(frozen.provider_idempotency_key)
+    expect(state.intents[0]).toMatchObject(frozen)
+    const sent = writes(state)
+    expect(sent.map((call) => call.grant)).toEqual([yuw('a'), yuw('b')])
+    expect(sent[1].target).toEqual(sent[0].target)
+    expect(sent[1].data).toEqual(sent[0].data)
+    expect(sent[1].op).toBe(spec.kind)
+    expect(sent.every((call) => call.target?.idempotencyKey === first.providerIdempotencyKey)).toBe(true)
+    expect(state.intents).toHaveLength(1)
   })
 })

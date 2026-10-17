@@ -225,7 +225,7 @@ export function resolvePersistedPlmSource(config: unknown): ResolvedPersistedPlm
   if (!connection || typeof connection !== 'object' || Array.isArray(connection)) fail()
   const raw = connection as { url?: unknown; baseURL?: unknown; headers?: unknown }
   const primary = typeof raw.url === 'string' ? raw.url : raw.baseURL
-  if (typeof primary !== 'string') fail()
+  if (typeof primary !== 'string') return fail()
   let origin: URL
   try {
     origin = new URL(primary)

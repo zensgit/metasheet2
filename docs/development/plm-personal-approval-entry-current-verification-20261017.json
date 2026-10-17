@@ -1,0 +1,259 @@
+{
+  "source_sha256": {
+    "packages/core-backend/src/auth/AuthService.ts": "9b3ed4c284fdeeb4b98360ba89df9bae2e9b8975c20a93123d5e5cccb488acda",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "9fe10b08bae4357804f64cb33c582f8033762d73db2eb9fbfdb1b3e1576d7f22",
+    "packages/core-backend/src/auth/verified-tenant-claim.ts": "b27b593584a73a3bc3d9cbd97a0fd9b8647485e3a5293e617f6ab1a6618367a5",
+    "packages/core-backend/src/routes/auth.ts": "55dc74263e6acf44f21642a722356a6393f170c781523ec7e60f9e1f15b39c96",
+    "packages/core-backend/src/routes/approvals.ts": "374691add410c4805441e9f9ab8060e90290546003f13b87fd73288e8ec03af9",
+    "packages/core-backend/src/routes/plm-approval-bindings.ts": "52727f0f341b89fb2f1c48129067b8aad5d74af9e97c65dd083bf30c97d6c40c",
+    "packages/core-backend/src/services/PlmPersonalApprovalBindingService.ts": "8f6369bb0b48fcca059b6f769095d6c7f66020289e590dc23b368ed5fb841c4b",
+    "packages/core-backend/tests/e2e/plm-personal-approval-entry-browser.mts": "88aa8d3fc1f57a466a0edd604c93ec5bc517f75aac7aabc1aad43b5bca259677",
+    "apps/web/src/main.ts": "00bdfb35a5791ece371e7e4aedc18266c90d33d7e9fc8bdfadab61a5fd4c13ab",
+    "apps/web/src/router/appRoutes.ts": "f9c24ac1731ffe58323e9ea874738e876805c3ca669151ed513f16a3b94f4304",
+    "apps/web/src/views/SessionCenterView.vue": "e9eb23af811a9e94737e903885da12cd550fe58e4e342c373a6b52d9376a1cab",
+    "apps/web/src/components/plm/PlmApprovalBindingsPanel.vue": "3039cc69e3c65773f05b79509255c1821c5bf07ab75cd3ca1ab919b9c7b77a7f",
+    "apps/web/src/views/approval/ApprovalCardDecisionView.vue": "a7ccf0d15f0a28414babf84707043410c04c0c12e2d3a9d44c754d138a4079d1"
+  },
+  "source_stable": true,
+  "private_environment_removed": true,
+  "limits": "Current ordinary JWT and actual frontend main.ts approval entry compatibility. Assembled actual backend routes, not index.ts startup; no native grant issuance, DingTalk delivery or BOM UI acceptance. BOM worker concurrently owns only separate BOM web files.",
+  "recorded_utc": "2026-10-17T10:44:52.242669+00:00",
+  "source_head": "14b8b222c4ab75b41843779b9ae70c29700b3a09 plus explicitly uncommitted Auth/BOM candidate",
+  "checks": {
+    "real-auth-plm-focus": true,
+    "ordinary-user": true,
+    "anonymous-binding-denied": true,
+    "settings-binding-entry-visible": true,
+    "real-binding-api": true,
+    "actual-grant-management-link": true,
+    "settings-refresh-stays": true,
+    "both-real-main-entry-paths": true,
+    "real-invalid-ledger-request-404": true,
+    "invalid-card-zero-actions": true,
+    "missing-parameters-no-summary": true,
+    "signed-revoked-summary-no-actions": true,
+    "existing-card-bad-hmac-denied": true,
+    "foreign-recipient-no-actions": true,
+    "settings-requires-login": true,
+    "decision-keeps-local-login-flow": true,
+    "no-card-command-or-grant-write": true,
+    "no-page-errors": true
+  },
+  "assertions": 18,
+  "seconds": 8.622,
+  "runtime": {
+    "node": "v20.20.2",
+    "pg": "postgres (PostgreSQL) 15.17 (Homebrew)",
+    "api": "http://127.0.0.1:59462",
+    "webOrigin": "http://127.0.0.1:59460",
+    "ownedDirectory": "/tmp/plm-entry-env-z1diqzyj/tmp/w22-entry-browser-BqJLhz"
+  },
+  "cleanup": {
+    "failures": [],
+    "postgresStopped": true,
+    "viteStopped": true,
+    "browserDisconnected": true,
+    "httpStopped": true,
+    "directoryRemoved": true
+  },
+  "observations": {
+    "settingsPath": "/settings",
+    "settingsVisible": true,
+    "decisionPath": "/m/approval-decision",
+    "decisionVisible": true
+  },
+  "http_statuses": [
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/me/plm-approval-bindings",
+      "status": 401
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/auth/me",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 200
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/method-probe",
+      "status": 204
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/method-probe",
+      "status": 204
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/auth/sessions",
+      "status": 204
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/auth/dingtalk/access",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dingtalk/access",
+      "status": 200
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/me/plm-approval-bindings",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/me/plm-approval-bindings",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 304
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/method-probe",
+      "status": 204
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/method-probe",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/sessions",
+      "status": 304
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dingtalk/access",
+      "status": 304
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 304
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/approval-card-deliveries/00000000-0000-4000-8000-000000000022",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/approval-card-deliveries/00000000-0000-4000-8000-000000000022",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 304
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 304
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 304
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 404
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/auth/me",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me",
+      "status": 200
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/approval-card-deliveries/1a6f300a-1412-4728-aca5-dd863f5f40c0",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dev-token",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dingtalk/launch",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/plugins",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dev-token",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/plugins",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/dingtalk/launch",
+      "status": 503
+    }
+  ],
+  "visual_inspection": "Main inspected binding panel and revoked-card screenshots: actual settings entry renders, revoked card contains no action buttons. This is approval-entry compatibility only.",
+  "screenshots_sha256": {
+    "decision.png": "3c04a3f34d93a4e874ae0c6083ec67dde173ac0165527b0725ce719257c1fac3",
+    "settings.png": "7c14ed87f714e0996b3b81dd1954d107df2dee5654aef80f3855000bdbbe4ccd",
+    "binding-panel.png": "01eb7833a9af2a53a1d3565d4f4bb697b31fcb831ea47cc509ebf1741deaf18c",
+    "revoked-card.png": "1eb18b1a652ef1320da85227e42c60b89f205a33f6b2a941e320831515f7d6f7"
+  }
+}

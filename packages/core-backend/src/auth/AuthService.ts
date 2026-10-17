@@ -29,6 +29,7 @@ import type { AliasQueryClient } from './login-alias-service'
 import { assignUserRoles } from '../rbac/role-assignment'
 import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
+import { attachVerifiedTenantClaim, classifyVerifiedTenantClaim, type VerifiedTenantClaim } from './verified-tenant-claim'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
 export interface User {
@@ -195,6 +196,11 @@ export class AuthService {
       .filter(Boolean)
   }
 
+  /** Raw verified payload field. Blank and malformed stay distinct from a missing claim. */
+  private verifiedTenantProvenance(payload: { tenantId?: unknown }): VerifiedTenantClaim {
+    return classifyVerifiedTenantClaim(payload.tenantId)
+  }
+
   private normalizeClaimString(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined
     const trimmed = value.trim()
@@ -266,6 +272,7 @@ export class AuthService {
         payload as TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
       )
       if (trustedUser) {
+        attachVerifiedTenantClaim(trustedUser, this.verifiedTenantProvenance(payload))
         return trustedUser
       }
 
@@ -293,11 +300,21 @@ export class AuthService {
         }
       }
 
-      const tenantClaim = this.normalizeClaimString(payload.tenantId)
-      const tenantId = tenantClaim
-        ? await this.resolveSessionTenantId(user.id, tenantClaim)
-        : undefined
-      return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
+      const classified = classifyVerifiedTenantClaim((payload as { tenantId?: unknown }).tenantId)
+      let provenance: VerifiedTenantClaim = classified
+      let tenantId: string | undefined
+      if (classified.kind === 'present') {
+        const resolved = await this.resolveSessionTenantId(user.id, classified.value)
+        if (resolved) {
+          tenantId = resolved
+          provenance = { kind: 'present', value: resolved }
+        } else {
+          provenance = { kind: 'rejected' }
+        }
+      }
+      const safe = this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
+      attachVerifiedTenantClaim(safe, provenance)
+      return safe
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null

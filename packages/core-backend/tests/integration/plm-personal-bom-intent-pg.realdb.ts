@@ -774,7 +774,7 @@ describe.skipIf(!rawUrl)('personal BOM write intent postgres durability', () => 
     await ready.query('INSERT INTO user_orgs(user_id, org_id, is_active) VALUES($1,$2,true)', [owner, 'meta-a'])
     await ready.query(
       "INSERT INTO data_sources VALUES($1,$2,'workspace-1','meta-a','private','plm',$3,true,NULL)",
-      [sourceId, owner, JSON.stringify(config)],
+      [sourceId, owner, JSON.stringify({ connection: config.connection, options: config.options })],
     )
     return { pool: ready, db, config }
   }

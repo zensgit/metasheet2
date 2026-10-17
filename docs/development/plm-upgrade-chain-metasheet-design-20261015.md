@@ -269,3 +269,22 @@ broad secret substrings. The standalone native provider retains authority over
 PLM business state and permission. Route/UI integration and live paired-service
 verification are subsequent slices; this design does not authorize production
 enablement or represent the whole upgrade package as completed.
+
+### Personal BOM HTTP admission and actual provider integration (2026-10-17 candidate)
+
+Both workbench mutations now require a client operation key and use the durable personal dispatcher. An attempt audit must commit before dispatch; outcome-audit failure cannot change a native business success into a retry failure. The legacy shared-account line and ECO adapter methods refuse every mode. A configured integration JWT may still read capabilities; the mutation transport receives only the independently issued `bom_write` grant and the frozen source-derived native authority. Approval grants remain a separate purpose.
+
+Owner management is `/api/me/plm-bom-write-bindings`. Ordinary signed login JWTs carry a distinct verified tenant-claim provenance through normal and trusted-claims authentication paths. A truly absent claim may become explicit null only for the persisted legacy-private policy. Blank, malformed or rejected claims cannot downgrade through `req.user`, a header or a body. The service still locks and checks the current Meta user, membership and persisted owner/source. Native tenant/org/person are validated independently. Cleanup remains owner-scoped after feature disablement or membership loss. The native grant page is the existing `/personal-approval-grants#bom-write` page.
+
+The persisted `data_sources.type` column is authoritative. The ordinary data-source writer omits type from its config JSON, so personal resolution reconstructs it from the column after validating the parsed object. JSON claiming PLM cannot override a non-PLM column. Origin, scope, source-transfer and frozen-context comparisons continue to use current locked storage.
+
+A native 401 or 403 describes the current attempt, not proof that the logical operation had no earlier effect. The public failure keeps the HTTP refusal and adds `attempt_outcome=refused`, `operation_may_have_applied=true`, and `retry_policy=same-operation`. It exposes no prior cached receipt. A later authorized retry preserves key, payload and If-Match and reaches native authorization again. No new durable-engine state or approval authority is introduced.
+
+The backend candidate has actual paired HTTP/SQL evidence with separate Meta processes restarting after unknown line and ECO outcomes. Browser binding/recovery UI is a separate candidate still awaiting independent validation. This increment does not establish the whole application installation, production enablement, default migration chain or the master goal.
+
+
+### Browser recovery for personal BOM writes (2026-10-17)
+
+Binding requires an explicit connection registration identifier and a native `bom_write` grant. Verified binding metadata supplies the Meta owner/tenant and independent native person, origin, tenant/org, workspace and source scope. The browser stores one frozen request per operation, including the original key, body and If-Match, and never persists a grant or login JWT in that store. Reload only lists pending work; it does not send a mutation. Receipt-confirmed success removes that operation, then refreshes the current line ETag for a separate later edit without replacing drafts.
+
+Pending display compares the complete server identity, and exact pinned/current-scope requests resolve before unrelated old scope records. Explicit recovery may create a separate logical operation after an irrecoverable request or identity change while retaining the old snapshot; there is no automatic key rotation. Business JSON cells preserve their exact scalar value rather than passing through metadata trimming or header length rules. Per-operation local storage prevents one tab from overwriting another operation; it is not a cross-tab admission lock. Server transactions, frozen identities, native authorization and idempotency remain authoritative. Feature disablement denies new writes/creation while keeping owner metadata and unbind/revocation cleanup available.

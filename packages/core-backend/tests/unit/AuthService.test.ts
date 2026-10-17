@@ -58,6 +58,7 @@ vi.mock('../../src/security/SecretManager', () => ({
 }))
 
 import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError, authService } from '../../src/auth/AuthService'
+import { readVerifiedTenantClaim } from '../../src/auth/verified-tenant-claim'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { createTenantPrincipalDirectoryBoundaryV1 } from '../../src/services/tenant-principal-directory-boundary'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
@@ -188,6 +189,7 @@ describe('AuthService.verifyToken', () => {
     expect(user?.role).toBe('admin')
     expect(user?.permissions).toContain('attendance:admin')
     expect((user as any).password_hash).toBeUndefined()
+    expect(readVerifiedTenantClaim(user)).toEqual({ kind: 'absent' })
   })
 
   // P23: resolveRbacProfile's attendance self-service backfill calls the SAME assignUserRoles
@@ -273,6 +275,7 @@ describe('AuthService.verifyToken', () => {
 
     expect(user?.tenantId).toBe('tenant_42')
     expect((user as any).password_hash).toBeUndefined()
+    expect(readVerifiedTenantClaim(user)).toEqual({ kind: 'present', value: 'tenant_42' })
   })
 
   it('drops a signed legacy tenant claim when active membership does not prove it', async () => {
@@ -309,6 +312,7 @@ describe('AuthService.verifyToken', () => {
 
     expect(user).toBeTruthy()
     expect(user?.tenantId).toBeUndefined()
+    expect(readVerifiedTenantClaim(user)).toEqual({ kind: 'rejected' })
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('uo.org_id = $2'),

@@ -18,24 +18,42 @@
  */
 import { EventEmitter } from 'node:events'
 import express from 'express'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+
+const LOGIN = `Bearer ${jwt.sign({ userId: 'alice', email: 'a@x', role: 'user' }, 'synthetic-route-key')}`
 
 // The manager the mocked `getDataSourceManager()` hands to the routes. Swapped per test so a
 // single probe id can be tested in a world where it exists and a world where it never did.
 const managerRef = vi.hoisted(() => ({ current: null as unknown }))
 // The authenticated caller, swapped per test (owner / non-owner / anonymous).
 const authRef = vi.hoisted(() => ({ user: undefined as unknown }))
+const dispatchMocks = vi.hoisted(() => ({ dispatchOperation: vi.fn() }))
 
 vi.mock('../../src/db/db', () => ({ db: {} }))
 vi.mock('../../src/db/pg', () => ({ pool: {}, query: vi.fn() }))
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.user = authRef.user as never
+    const user = authRef.user as { id?: string; userId?: string; sub?: string } | undefined
+    req.user = user as never
+    if (user && (user.id || user.userId || user.sub)) {
+      req.authenticatedTenantId = 'tenant-a'
+      req.verifiedTenantClaim = { kind: 'present', value: 'tenant-a' }
+    }
     next()
   },
 }))
+vi.mock('../../src/services/plm-personal-bom-write-http', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/plm-personal-bom-write-http')>(
+    '../../src/services/plm-personal-bom-write-http',
+  )
+  return {
+    ...actual,
+    plmPersonalBomWriteService: () => ({ dispatchOperation: dispatchMocks.dispatchOperation }),
+  }
+})
 vi.mock('../../src/middleware/validation', () => ({
   validate: (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
@@ -158,6 +176,7 @@ const ROUTES = [
     send: (id: string) =>
       request(pinned.url())
         .patch(`/api/plm-workbench/data-sources/${id}/bom-multitable/P1/lines/R1`)
+        .set('Authorization', LOGIN)
         .set('Idempotency-Key', 'k-1')
         .send({ quantity: 5 }),
     expectOwner: (body: Record<string, unknown>) => {
@@ -168,7 +187,11 @@ const ROUTES = [
   {
     name: 'POST bom eco-intent',
     send: (id: string) =>
-      request(pinned.url()).post(`/api/plm-workbench/data-sources/${id}/bom-multitable/P1/eco-intent`).send({}),
+      request(pinned.url())
+        .post(`/api/plm-workbench/data-sources/${id}/bom-multitable/P1/eco-intent`)
+        .set('Authorization', LOGIN)
+        .set('Idempotency-Key', 'k-eco')
+        .send({}),
     expectOwner: (body: Record<string, unknown>) => {
       expect(body.eco_id).toBe('ECO-1')
     },
@@ -182,8 +205,15 @@ describe('plm-workbench data-source routes enforce per-user ownership', () => {
 
   beforeEach(async () => {
     pinned.setApp(app)
-    authRef.user = { id: OWNER, tenantId: 'tenant-a' }
+    authRef.user = { id: OWNER, tenantId: 'tenant-a', role: 'admin' }
     managerRef.current = await buildManager([{ id: PROBE_ID, owner: OWNER }])
+    dispatchMocks.dispatchOperation.mockReset()
+    dispatchMocks.dispatchOperation.mockImplementation(async (_actor: unknown, _id: unknown, input: { operationKind?: string }) => {
+      if (input?.operationKind === 'eco-intent') {
+        return { native: { eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' } }
+      }
+      return { native: { ok: true, bom_line_id: 'R1' } }
+    })
   })
 
   for (const route of ROUTES) {
@@ -255,11 +285,55 @@ describe('plm-workbench data-source routes enforce per-user ownership', () => {
     authRef.user = { id: INTRUDER, tenantId: 'tenant-a' }
     const res = await request(pinned.url())
       .patch(`/api/plm-workbench/data-sources/${PROBE_ID}/bom-multitable/P1/lines/R1`)
+      .set('Authorization', LOGIN)
       .set('Idempotency-Key', 'k-1')
       .send({ quantity: 5 })
 
     expect(res.status).toBe(404)
     // The refusal happens BEFORE the adapter is touched — the intruder's patch never reaches PLM.
     expect(spy).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).not.toHaveBeenCalled()
+  })
+
+  it('refuses an admin non-owner with the same 404 and does not dispatch', async () => {
+    const manager = await buildManager([{ id: PROBE_ID, owner: OWNER }])
+    managerRef.current = manager
+    const adapter = manager.getDataSource(PROBE_ID) as unknown as FakePlmAdapter
+    const line = vi.spyOn(adapter, 'updateBomMultitableLine')
+    const eco = vi.spyOn(adapter, 'requestBomEcoRevisionIntent')
+    authRef.user = { id: INTRUDER, role: 'admin', tenantId: 'tenant-a' }
+    const res = await request(pinned.url())
+      .patch(`/api/plm-workbench/data-sources/${PROBE_ID}/bom-multitable/P1/lines/R1`)
+      .set('Authorization', LOGIN)
+      .set('Idempotency-Key', 'k-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(404)
+    expect(dispatchMocks.dispatchOperation).not.toHaveBeenCalled()
+    expect(line).not.toHaveBeenCalled()
+    expect(eco).not.toHaveBeenCalled()
+  })
+
+  it('owner writes dispatch personally and do not call the shared adapter methods', async () => {
+    const manager = await buildManager([{ id: PROBE_ID, owner: OWNER }])
+    managerRef.current = manager
+    const adapter = manager.getDataSource(PROBE_ID) as unknown as FakePlmAdapter
+    const line = vi.spyOn(adapter, 'updateBomMultitableLine')
+    const eco = vi.spyOn(adapter, 'requestBomEcoRevisionIntent')
+    authRef.user = { id: OWNER, role: 'admin', tenantId: 'header-tenant-not-authority' }
+    const lineRes = await request(pinned.url())
+      .patch(`/api/plm-workbench/data-sources/${PROBE_ID}/bom-multitable/P1/lines/R1`)
+      .set('Authorization', LOGIN)
+      .set('Idempotency-Key', 'k-1')
+      .send({ quantity: 5 })
+    const ecoRes = await request(pinned.url())
+      .post(`/api/plm-workbench/data-sources/${PROBE_ID}/bom-multitable/P1/eco-intent`)
+      .set('Authorization', LOGIN)
+      .set('Idempotency-Key', 'k-eco')
+    expect(lineRes.status).toBe(200)
+    expect(ecoRes.status).toBe(200)
+    expect(line).not.toHaveBeenCalled()
+    expect(eco).not.toHaveBeenCalled()
+    expect(dispatchMocks.dispatchOperation).toHaveBeenCalledTimes(2)
+    expect(dispatchMocks.dispatchOperation.mock.calls[0]?.[0]).toEqual({ userId: OWNER, metaTenantId: 'tenant-a' })
   })
 })

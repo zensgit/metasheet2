@@ -394,6 +394,24 @@ beforeEach(() => {
 })
 
 describe('personal BOM write binding', () => {
+  it.each(['object', 'json'] as const)('binds canonical persisted %s config using the source type column', async (encoding) => {
+    const { mem, svc } = service()
+    const row = mem.sources.get(SOURCE)!
+    // DataSourceManager.configToRecord stores type in its column, not inside config.
+    const { type: _redundantType, ...persistedConfig } = row.config
+    row.config = (encoding === 'json' ? JSON.stringify(persistedConfig) : persistedConfig) as never
+    const bound = await bindId(mem, svc, 'a')
+    expect(bound).toMatchObject({ dataSourceId: SOURCE, subjectId: '42', bound: true })
+    expect(mem.calls.filter((call) => call.op === 'verify')).toHaveLength(1)
+  })
+
+  it('refuses a non-PLM source column even if its JSON claims PLM', async () => {
+    const { mem, svc } = service()
+    mem.sources.get(SOURCE)!.type = 'http'
+    await expect(bindId(mem, svc, 'a')).rejects.toMatchObject({ status: 403 })
+    expect(mem.calls).toHaveLength(0)
+  })
+
   it('stores a verified yuw binding encrypted and keeps Meta and Yuantus identities apart', async () => {
     const { mem, svc } = service()
     const grant = yuw('a')
