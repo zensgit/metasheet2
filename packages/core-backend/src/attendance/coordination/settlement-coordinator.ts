@@ -73,6 +73,8 @@ export interface SettlementCoordinationAttemptEventV1 {
 
 /** §3.2 step 10: one record per attempt, with every try, the handover and every wait. */
 export interface SettlementCoordinationAttemptRecordV1 {
+  /** The entry label of the unit (appendix D registration). */
+  readonly entryLabel: string
   readonly attempt: number
   readonly org: string | null
   readonly quotaClass: SettlementCoordinationQuotaClassV1
@@ -605,6 +607,7 @@ export class SettlementCoordinationUnitV1 {
   #emit(record: AttemptRecorder, outcome: 'handed-over' | 'failed', code: string | null): void {
     this.#deps.onAttempt?.(
       Object.freeze({
+        entryLabel: this.#request.handover.entryLabel,
         attempt: record.attempt,
         org: record.org,
         quotaClass: record.quotaClass,
