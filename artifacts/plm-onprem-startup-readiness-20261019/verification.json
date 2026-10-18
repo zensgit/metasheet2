@@ -1,0 +1,70 @@
+{
+  "status": "source-and-local-integration-verified-ci-pending",
+  "base": "519184d6414c0eededb9fde1b55fe211d7ce8e54",
+  "source_commit": "72f956c9092e1ba645e94109731932467624b050",
+  "ci_source_commit": "bb4640363626a0973008dc59e535cddf3873fe79",
+  "script_sha256": "be9722ddacac3bcffca07b860b95d84c9608bb541df53fcd84e480dcb495c60f",
+  "red": {
+    "tests": 5,
+    "pass": 0,
+    "fail": 5,
+    "skip": 0
+  },
+  "green": {
+    "tests": 5,
+    "pass": 5,
+    "fail": 0,
+    "skip": 0,
+    "duration_ms": 5238.7845
+  },
+  "test_scope": "actual full shell with real curl/owned loopback HTTP; companion install/admin/health scripts controlled; retry sleeps shortened; invocation sentinel checks admin not called on transport failure",
+  "cases": [
+    "immediate-200",
+    "503-then-200",
+    "never-healthy-503",
+    "redirect-302",
+    "transport-refused"
+  ],
+  "real_application_integration": {
+    "yuantus_runtime_source": "f46f51d6a5137189370458cd9b22e51511c78136",
+    "checks": 69,
+    "gaps": [],
+    "installer": {
+      "authenticated_product_mode": "plm-workbench",
+      "exit": 0,
+      "published_web": {
+        "files": 162,
+        "sha256": "60ff56b0435591a5694dfed96428ad4dd764da09f07c4ef89584037b19c01446"
+      },
+      "same_origin_health_and_plugins": true,
+      "service_manager_verified": true,
+      "transport": "owned pinned-template Nginx"
+    },
+    "pm2": {
+      "cleanup": true,
+      "ecosystem_sha256": "35ddabd77ff744792e0ee6c120f74b9be6fb27e5d464ab2e90dddac64cd7788a",
+      "private_namespace": true,
+      "requested": true,
+      "starts": 3,
+      "version": "7.0.4"
+    },
+    "readiness_overlay": {
+      "frozen_package_overwritten": false,
+      "provider_commit": "72f956c9092e1ba645e94109731932467624b050",
+      "sha256": "be9722ddacac3bcffca07b860b95d84c9608bb541df53fcd84e480dcb495c60f"
+    },
+    "all_owned_cleanup": true
+  },
+  "checks": {
+    "shellcheck": "passed",
+    "actionlint": "passed",
+    "diff_check": "passed"
+  },
+  "frozen_archive_and_ledgers_modified": false,
+  "limits": [
+    "No packaging/release/HOLD override",
+    "Exact document-head CI pending",
+    "No production/customer/OS reboot claim",
+    "Existing operator log redaction remains separate source work"
+  ]
+}
