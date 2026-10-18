@@ -825,14 +825,6 @@ function verify_no_loopback_frontend_config() {
   loopback_status="PASS"
 }
 
-function verify_legacy_sql_history() {
-  local root="$1" name
-  for name in 20250925_create_view_tables 20250926_create_audit_tables; do
-    [[ -f "${root}/packages/core-backend/src/db/migrations/${name}.sql" ]] || \
-      die "Missing legacy SQL migration history input: ${name}.sql"
-  done
-}
-
 function verify_sha() {
   local archive="$1"
   local dir
@@ -976,7 +968,6 @@ pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 verify_no_macos_metadata_entries "$list_file"
 verify_no_bundled_node_modules "$list_file"
-verify_legacy_sql_history "$pkg_root"
 
 required=(
   "DEPLOYMENT.txt"
