@@ -20,6 +20,7 @@ import {
   rollbackSettlementCoordinationTransactionV1,
   runSettlementCoordinationHandoverV1,
   runSettlementCoordinationS1V1,
+  verifySettlementCoordinationCredentialV1,
   type SettlementCoordinationPlanV1,
 } from '../../src/attendance/coordination/settlement-coordination-handover'
 import { SETTLEMENT_COORDINATION_KEY1 } from '../../src/attendance/coordination/settlement-coordination-key'
@@ -225,6 +226,8 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
         handover.credential,
       )
       expect(outcome.kind === 'uncertain' && outcome.reason).toBe('rollback-failed')
+      // Invalidated before ROLLBACK was sent, so a failed ROLLBACK cannot leave it live.
+      expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: true })).toBe(false)
     })
   })
 
@@ -240,6 +243,8 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
         handover.credential,
       )
       expect(outcome).toEqual({ kind: 'uncertain', reason: 'commit-failed', error: ambiguous })
+      // Invalidated before COMMIT was sent, so an unknown COMMIT outcome cannot leave it live.
+      expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: true })).toBe(false)
     })
   })
 
@@ -266,6 +271,7 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
       const outcome = await commitSettlementCoordinationTransactionV1(client, handover.credential)
       expect(outcome.kind).toBe('retryable')
       expect(outcome.kind === 'retryable' && (outcome.error as { code?: string }).code).toBe('40001')
+      expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: false })).toBe(false)
       const state = await client.query('SELECT now() = statement_timestamp() AS idle')
       expect(state.rows[0].idle).toBe(true)
       expect(await advisoryLocksOf(observer, pid)).toEqual([])

@@ -8,7 +8,8 @@
  *  - The handover's snapshot is formed only by S2: a SERIALIZABLE transaction that starts after a
  *    blocker committed and released sees the blocker's write; a negative control shows that a
  *    snapshot formed before the release would not. The transaction-level lock is held before the
- *    session-level lock is released.
+ *    session-level lock is released, so an exclusive request queued before the handover stays
+ *    queued through it; a handover on a connection other than the S1 connection is uncertain.
  *  - S1 depends on the simple protocol: over the extended protocol the idle proof must not hold.
  *
  * Every observation is made from a separate connection.
@@ -340,6 +341,41 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       if (waiting) await (waiting as Promise<unknown>).catch(() => undefined)
       await waiter.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`).catch(() => undefined)
       waiter.release()
+    }
+  })
+
+  it('a handover attempted on a connection other than the S1 connection is uncertain and takes nothing over', async () => {
+    const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: true })
+    const holder = await pool.connect()
+    const holderPid = await backendPid(holder)
+    try {
+      expect(await runSettlementCoordinationS1V1(holder, plan)).toEqual({ kind: 'acquired' })
+      const stranger = await pool.connect()
+      const strangerPid = await backendPid(stranger)
+      try {
+        // The stranger holds no session-level lock: its re-grant succeeds (shared is compatible
+        // with the holder's shared hold), but its session unlocks find nothing, so the unit rolls
+        // back and reports uncertain instead of handing over a transaction nobody protects.
+        expect(await runSettlementCoordinationHandoverV1(stranger, plan, {
+          isolation: 'SERIALIZABLE',
+          timeouts: { kind: 'none' },
+          entryLabel: 'test.wrong-connection',
+        })).toEqual({ kind: 'uncertain', reason: 's2-unlock-failed' })
+        const state = await stranger.query('SELECT now() = statement_timestamp() AS idle')
+        expect(state.rows[0].idle).toBe(true)
+        await expectNoAdvisory(strangerPid)
+      } finally {
+        stranger.release(new Error('test: destroy after uncertain handover'))
+      }
+      expect(await waitForBackendGone(observer, strangerPid)).toBe(true)
+      // The S1 connection still holds both families at session level and releases them itself.
+      const held = await advisoryLocksOf(observer, holderPid)
+      expect(held.some((row) => isDedicatedLock(row, plan.key.key2) && row.granted)).toBe(true)
+      expect(held.some((row) => isBigintLock(row, plan.classZeroKey as bigint) && row.granted)).toBe(true)
+      expect(await releaseSettlementCoordinationSessionLocksV1(holder, plan)).toEqual({ kind: 'released' })
+      await expectNoAdvisory(holderPid)
+    } finally {
+      holder.release()
     }
   })
 
