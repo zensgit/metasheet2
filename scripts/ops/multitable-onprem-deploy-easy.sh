@@ -27,7 +27,8 @@ function info() {
 }
 
 function run() {
-  info "+ $*"
+  # Environment arguments include credentials; log only the executable.
+  info "+ $1"
   "$@"
 }
 

@@ -5,12 +5,14 @@ on:
     paths:
       - 'scripts/ops/multitable-onprem-deploy-easy.sh'
       - 'scripts/ops/multitable-onprem-startup-readiness.test.mjs'
+      - 'scripts/ops/multitable-onprem-private-command-logs.test.mjs'
       - '.github/workflows/plm-onprem-startup-readiness.yml'
   push:
     branches: [main]
     paths:
       - 'scripts/ops/multitable-onprem-deploy-easy.sh'
       - 'scripts/ops/multitable-onprem-startup-readiness.test.mjs'
+      - 'scripts/ops/multitable-onprem-private-command-logs.test.mjs'
       - '.github/workflows/plm-onprem-startup-readiness.yml'
 
 permissions:
@@ -22,7 +24,7 @@ concurrency:
 
 jobs:
   readiness:
-    name: Actual shell and loopback HTTP readiness
+    name: Actual shell and loopback HTTP contracts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,4 +32,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node --test scripts/ops/multitable-onprem-startup-readiness.test.mjs
+      - run: >-
+          node --test scripts/ops/multitable-onprem-startup-readiness.test.mjs
+          scripts/ops/multitable-onprem-private-command-logs.test.mjs
