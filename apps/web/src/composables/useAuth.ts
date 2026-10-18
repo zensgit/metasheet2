@@ -7,11 +7,19 @@ import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSIO
 // `authPrincipal.ts` for why that separation exists.
 import {
   TOKEN_KEYS,
+  bumpManagedEpoch,
+  clearManagedDescriptor,
   explicitSessionOrg,
   getAuthPrincipalKey,
+  installManagedDescriptor,
+  isManagedEntryActive,
   notifyAuthPrincipalChange,
   parseJwtPayload,
+  readAuthSessionSignature,
+  readManagedDescriptor,
+  readManagedEpoch,
   readStoredToken,
+  setManagedProbeMarker,
 } from './authPrincipal'
 
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
@@ -35,6 +43,7 @@ type SessionBootstrapResult = {
 }
 
 let sessionPromise: Promise<SessionBootstrapResult> | null = null
+let managedFlight: { key: string; promise: Promise<SessionBootstrapResult> } | null = null
 let sessionToken: string | null = null
 let sessionCache: SessionBootstrapResult | null = null
 let explicitSessionRevision = 0
@@ -123,6 +132,7 @@ function persistUserSnapshot(user: unknown): void {
 function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false, preserveExplicitSession = false) {
   if (!preserveExplicitSession) clearExplicitSessionOrg()
   sessionPromise = null
+  managedFlight = null
   sessionToken = null
   sessionCache = null
   sessionIdentity = null
@@ -133,6 +143,8 @@ function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = fals
   if (clearTenantHint) {
     clearStoredTenantHint()
   }
+  clearManagedDescriptor()
+  bumpManagedEpoch()
   // THE app's single "the principal may have changed" announcement. Every transition routes here:
   // `setToken` (login, invite acceptance, DingTalk callback, forced password change, dev-token
   // refresh), `clearToken` (sign-out, and `bootstrapSession`'s 401 branch, which clears with NO
@@ -345,6 +357,7 @@ export function useAuth() {
   }
 
   async function refreshDevToken(): Promise<string | null> {
+    if (isManagedEntryActive()) return null
     if (import.meta.env.PROD) return null
 
     try {
@@ -387,7 +400,112 @@ export function useAuth() {
   async function ensureToken(): Promise<string | null> {
     const existing = getToken()
     if (existing) return existing
+    if (isManagedEntryActive()) return null
     return refreshDevToken()
+  }
+
+  function staleManagedAttempt(startedEpoch: number, startedSignature: string): boolean {
+    return readManagedEpoch() !== startedEpoch || readAuthSessionSignature() !== startedSignature
+  }
+
+  async function bootstrapManagedCookie(
+    force: boolean,
+    keepSessionOnFailure: boolean,
+  ): Promise<SessionBootstrapResult> {
+    let currentUrl: URL
+    try {
+      currentUrl = new URL(`${getApiBase()}/api/plm/managed-login/current`, window.location.origin)
+      if (currentUrl.origin !== window.location.origin) throw new Error('Managed origin mismatch')
+    } catch {
+      resetSessionBootstrap(true)
+      return { ok: false, status: 0, payload: null }
+    }
+    const startedEpoch = readManagedEpoch()
+    const startedSignature = readAuthSessionSignature()
+    const startedToken = readStoredToken()
+    const startedIdentity = (() => {
+      try { return getAuthPrincipalKey() } catch { return null }
+    })()
+    const flightKey = `${startedEpoch}:${startedIdentity ?? ''}`
+    if (!force && sessionCache && sessionToken === null && sessionIdentity === startedIdentity && startedIdentity) {
+      return sessionCache
+    }
+    if (managedFlight?.key === flightKey) return managedFlight.promise
+    const pending = (async (): Promise<SessionBootstrapResult> => {
+      const response = await fetch(currentUrl.toString(), {
+        credentials: 'include',
+        headers: { accept: 'application/json' },
+      }).catch(() => null)
+      if (staleManagedAttempt(startedEpoch, startedSignature)) {
+        return { ok: false, status: 0, payload: null }
+      }
+      if (!response) {
+        if (keepSessionOnFailure) return { ok: false, status: 0, payload: null }
+        sessionCache = { ok: false, status: 0, payload: null }
+        return sessionCache
+      }
+      let payload: SessionBootstrapPayload | null = null
+      try {
+        payload = await response.json() as SessionBootstrapPayload
+      } catch {
+        payload = null
+      }
+      if (staleManagedAttempt(startedEpoch, startedSignature)) {
+        return { ok: false, status: 0, payload: null }
+      }
+      if (!response.ok) {
+        if (keepSessionOnFailure && response.status !== 401) {
+          return { ok: false, status: response.status, payload }
+        }
+        clearManagedDescriptor()
+        clearStoredUserSnapshot()
+        sessionToken = null
+        sessionIdentity = null
+        sessionCache = { ok: false, status: response.status, payload }
+        notifyAuthPrincipalChange()
+        return sessionCache
+      }
+      const data = payload?.data
+      const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+      const user = record.user
+      const userId = extractUserId(user)
+      const installed = installManagedDescriptor(record.managedSession)
+      if (!installed || !userId || installed.userId !== userId) {
+        clearManagedDescriptor()
+        sessionCache = { ok: false, status: 401, payload }
+        return sessionCache
+      }
+      if (readManagedEpoch() !== startedEpoch || readStoredToken() !== startedToken) {
+        const current = readManagedDescriptor()
+        if (
+          current
+          && current.userId === installed.userId
+          && current.tenantId === installed.tenantId
+          && current.sessionId === installed.sessionId
+          && current.revision === installed.revision
+        ) {
+          clearManagedDescriptor()
+        }
+        return { ok: false, status: 0, payload: null }
+      }
+      setManagedProbeMarker()
+      persistUserSnapshot(user)
+      persistTenantHint(installed.tenantId)
+      sessionToken = null
+      sessionWasExplicit = false
+      sessionIdentity = getAuthPrincipalKey()
+      sessionCache = { ok: true, status: response.status, payload }
+      notifyAuthPrincipalChange()
+      return sessionCache
+    })()
+    sessionPromise = pending
+    managedFlight = { key: flightKey, promise: pending }
+    try {
+      return await pending
+    } finally {
+      if (sessionPromise === pending) sessionPromise = null
+      if (managedFlight?.promise === pending) managedFlight = null
+    }
   }
 
   /**
@@ -409,12 +527,15 @@ export function useAuth() {
     const startedExplicit = Boolean(explicitSessionOrg(existingToken))
     const startedIdentity = getAuthPrincipalKey()
     if (!existingToken) {
-      resetSessionBootstrap(true)
-      return {
-        ok: false,
-        status: 401,
-        payload: null,
+      if (!isManagedEntryActive()) {
+        resetSessionBootstrap(true)
+        return {
+          ok: false,
+          status: 401,
+          payload: null,
+        }
       }
+      return bootstrapManagedCookie(force, keepSessionOnFailure)
     }
 
     const matchingIdentity = (!startedExplicit && !sessionWasExplicit) || sessionIdentity === startedIdentity
@@ -530,7 +651,7 @@ export function useAuth() {
     const tenantHint = explicitSessionOrg(token) || readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
     if (tenantHint) headers['x-tenant-id'] = tenantHint
     // Dev/test fallback aligns with backend flag behaviour
-    if (!headers['Authorization']) headers['x-user-id'] = 'dev-user'
+    if (!headers['Authorization'] && !isManagedEntryActive()) headers['x-user-id'] = 'dev-user'
     return headers
   }
 
@@ -677,7 +798,7 @@ function announceUserSnapshotChange(
 async function refreshUserSnapshotOnFocus(): Promise<void> {
   // No session: return BEFORE touching `bootstrapSession` at all. Its no-token branch clears the
   // stored snapshot and announces a principal change, which a background refresh must never do.
-  if (!readStoredToken()) return
+  if (!readStoredToken() && !isManagedEntryActive()) return
   // `focus` can reach a document that is not actually on screen; a hidden document is not "the
   // user came back to the tab".
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return

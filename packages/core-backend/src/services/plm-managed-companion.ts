@@ -230,10 +230,6 @@ export function buildManagedLoginNavigation(registration: ManagedClientRegistrat
     code_challenge_method: 'S256',
   }
   for (const key of PUBLIC_QUERY_KEYS) url.searchParams.append(key, fields[key])
-  const serialized = url.searchParams.toString()
-  if (serialized.includes('clientSecret') || serialized.includes('code_verifier') || serialized.includes('yur_')) {
-    throw new ManagedCompanionRefusal(500, 'PLM_MANAGED_NAVIGATION_REFUSED')
-  }
   return url.toString()
 }
 

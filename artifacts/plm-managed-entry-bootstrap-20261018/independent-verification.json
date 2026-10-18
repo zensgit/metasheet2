@@ -1,0 +1,136 @@
+{
+  "recorded_at": "2026-10-18T03:04:26.021673+00:00",
+  "parent": "28d2125719895310d8289bb685a36fe96d8ccfa0",
+  "native_source": "991d8a62849df9576af164e935785bcdd15774c0",
+  "verification_owner": "Codex independent review, refutations, fixes and actual reruns after Grok RELEASE",
+  "unit": {
+    "numPassedTests": 22,
+    "numFailedTests": 0,
+    "numPendingTests": 0,
+    "success": true
+  },
+  "web": {
+    "numPassedTests": 68,
+    "numFailedTests": 0,
+    "numPendingTests": 0,
+    "success": true
+  },
+  "pg": {
+    "numPassedTests": 34,
+    "numFailedTests": 0,
+    "numPendingTests": 0,
+    "success": true
+  },
+  "pg_cleanup": {
+    "ok": true,
+    "command": "cleanup",
+    "nonce": "b5861b416f36cacd",
+    "postgresStopped": true,
+    "postgresRunning": false,
+    "directoryRemoved": true,
+    "locale": "C",
+    "markerMatched": true,
+    "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+  },
+  "combined_workspace_full_spa": {
+    "nonce": "c_s0_trm",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 0,
+      "write_subjects": [],
+      "write_lines": []
+    },
+    "meta": {
+      "ok": true,
+      "bom_line": "line",
+      "open_sessions": 1,
+      "dev_token_requests": 0,
+      "embed_requests": 0,
+      "ordinary_owner_start": true,
+      "meta_user": "meta-owner",
+      "native_subject_hint": "42",
+      "native_workspace_launch": true,
+      "root_part_id": "yur_public-part"
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "paired_business": {
+    "nonce": "9tv6swy2",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 1,
+      "write_subjects": [
+        42
+      ],
+      "write_lines": [
+        "line"
+      ]
+    },
+    "meta": {
+      "ok": true,
+      "handshakes": 2,
+      "bom_line": "line",
+      "write_patch": 200,
+      "meta_audit_rows": 2,
+      "native_logout": 204,
+      "transfer": "acked",
+      "rebind_generation": 2,
+      "revoke_outage": "pending-then-acked",
+      "late_callback_open_sessions": 0,
+      "callback_urls_observed": 3
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "source_sha256": {
+    ".github/workflows/plm-managed-companion-consumer.yml": "9c80659291f34d3eb29fa7c2668dc641af1f225a963014d8b50e5ad715844e69",
+    "apps/web/src/composables/authPrincipal.ts": "0ec3d9bc3394b18eb11ff30431a827e8b12a8412274b52f068421be6204f4bab",
+    "apps/web/src/composables/useAuth.ts": "0b53f882451b5b49425bf7ff72e929d70576e316c34de3467f1fbb0acb166b27",
+    "apps/web/src/main.ts": "76514128efc2128c8d1d0f386f10cfcea4144cc8e2ab0375f1bdc1b38b4d5642",
+    "apps/web/src/router/appRoutes.ts": "41e58ceadab0c27cc89afa4ad25b58501f1f62972d0c8891fc7b42620e62ea9b",
+    "apps/web/src/services/plm/plmManagedCompanion.ts": "2ed228ee8b4d7965e7c6a882d13c3d0ce9d2b2768ad8b1e1c21a1c95b5ac8c1c",
+    "apps/web/src/stores/featureFlags.ts": "6a88a03596971ce718c24183d33a4ebd2fb0241fbb5e614b9d6829f847c2cba1",
+    "apps/web/src/utils/api.ts": "dc3de2f25a6c3f0c1d108afaaa271fa3317dc326a3e8ae5bc1e636e03bb9d18e",
+    "packages/core-backend/src/auth/api-path-policy.ts": "344b4f35dbc9790376550bc01274ec3add655b65112bdc47da3233f17101b64d",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "8149f3a8986d9bb70f698fc5f67b05b2bfd4223650db2cac4916c2ad1ce01ab7",
+    "packages/core-backend/src/routes/auth.ts": "8b410b579cfe03cc3de45864b5d87fe9db7ff5a5856e039251d7264e1c68873e",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "a6e4c335706cb912bc3c87bcf8b5f30c5f80d4fff474e8014862f48f5c38ed99",
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": "992fbd82d4f1b5e2c55be1d48e5ab2f4ec419ffb5f6c6a4f055214836023449c",
+    "packages/core-backend/src/services/plm-managed-companion.ts": "3870f7ac2532fb0e7cf4924247ebf4a1949c6f2323873f7e51e57575cf5b5b60",
+    "packages/core-backend/tests/integration/plm-managed-companion-pg.realdb.ts": "cd248cfe87ea100b9903a97b18f3abc768a2ebbd824e793d156495a8af71db00",
+    "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "aa15d8af777ac1b629940ead713cef4c5592945697e5964b99f3a72f046d4cd9",
+    "scripts/verification/plm-managed-companion-paired/native_server.py": "02bd0e66981c0427aea39ea787f4d41f073b9121502b5d9a642545a4268cb1b4",
+    "scripts/verification/plm-managed-companion-paired/run.mts": "c448d2cd82df2ed3957d452e57f2d48c529e0890437e9f54157efc13b11a21ce",
+    "scripts/verification/plm-managed-companion-paired/verify.py": "409b16ecc53211ca39f23e8b073783fb2dcd5c17a2eb330e3e11334142c45fa0",
+    "apps/web/src/views/PlmManagedEntryView.vue": "6603eb215793f7214ef93eef47402d5d5d9c2c56cb2f0f701b64bde949fe4328",
+    "apps/web/src/views/PlmManagedReturnView.vue": "6d43217fe2536c907281af4d2a4af857beaf29f8534356a4ab4686e4e2b6a09e",
+    "apps/web/tests/plmManagedEntryBridge.spec.ts": "65654f6ce35c4942af3e5804a9ec4f28baaaf677a645521e38cc09b016c6d74d",
+    "scripts/verification/plm-managed-companion-paired/entry-run.mts": "25b27111c789e0b3ed40a92eca815f5304645926fef076ececd0786b17dafd1c"
+  },
+  "limits": [
+    "Cross-tab auth writers not yet interlocked with final cookie installation; stale body discarded but Set-Cookie not withheld.",
+    "Local browser and owned fixtures are not full installation/production acceptance.",
+    "Current source remote CI and master-goal closeout remain pending."
+  ]
+}

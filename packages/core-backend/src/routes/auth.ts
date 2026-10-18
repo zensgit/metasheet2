@@ -286,7 +286,7 @@ function sanitizeName(name: string): string {
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
 }
 
-function buildFeaturePayload(authUser: User) {
+export function buildFeaturePayload(authUser: User) {
   const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
   const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
   const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')

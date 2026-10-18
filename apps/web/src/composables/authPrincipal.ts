@@ -26,6 +26,109 @@ import { readExplicitSession } from '../utils/explicitSessionOrg'
 /** The storage keys a session token may be found under, in priority order. */
 export const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 
+/** Advisory only. A forged value is not a session and cannot authenticate. */
+export const MANAGED_PROBE_MARKER_KEY = 'metasheet_managed_probe'
+
+export interface ManagedSessionDescriptor {
+  mode: 'managed-cookie'
+  userId: string
+  tenantId: string
+  sessionId: string
+  revision: number
+  expiresAt: string
+}
+
+let managedDescriptor: ManagedSessionDescriptor | null = null
+let managedEpoch = 0
+
+export function readManagedEpoch(): number {
+  return managedEpoch
+}
+
+export function bumpManagedEpoch(): void {
+  managedEpoch += 1
+}
+
+export function readManagedDescriptor(): ManagedSessionDescriptor | null {
+  if (managedDescriptor && Date.parse(managedDescriptor.expiresAt) <= Date.now()) {
+    managedDescriptor = null
+  }
+  return managedDescriptor
+}
+
+export function clearManagedDescriptor(): void {
+  managedDescriptor = null
+}
+
+export function installManagedDescriptor(value: unknown): ManagedSessionDescriptor | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const userId = record.userId
+  const tenantId = record.tenantId
+  const sessionId = record.sessionId
+  const revision = record.revision
+  const expiresAt = record.expiresAt
+  if (record.mode !== 'managed-cookie') return null
+  if (typeof userId !== 'string' || userId.length === 0 || userId !== userId.trim()) return null
+  if (typeof tenantId !== 'string' || tenantId.length === 0 || tenantId !== tenantId.trim()) return null
+  if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId !== sessionId.trim()) return null
+  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) return null
+  if (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) return null
+  const installed: ManagedSessionDescriptor = {
+    mode: 'managed-cookie',
+    userId,
+    tenantId,
+    sessionId,
+    revision,
+    expiresAt,
+  }
+  managedDescriptor = installed
+  return installed
+}
+
+export function readManagedProbeMarker(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(MANAGED_PROBE_MARKER_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function setManagedProbeMarker(): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(MANAGED_PROBE_MARKER_KEY, '1')
+  } catch {
+    // The marker is advisory. A storage failure still leaves the in-memory descriptor as the cache key.
+  }
+}
+
+export function clearManagedProbeMarker(): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.removeItem(MANAGED_PROBE_MARKER_KEY)
+  } catch {
+    // Logout still clears the in-memory descriptor.
+  }
+}
+
+export function isManagedEntryLocation(): boolean {
+  if (typeof window === 'undefined') return false
+  const path = window.location.pathname || ''
+  if (path === '/plm/managed-entry' || path === '/plm/managed-return') return true
+  const managed = new URLSearchParams(window.location.search || '').get('managed')
+  return managed === 'ready' || managed === 'refused'
+}
+
+export function isManagedEntryActive(): boolean {
+  return managedDescriptor !== null || readManagedProbeMarker() || isManagedEntryLocation()
+}
+
+export async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 export function readStoredToken(): string | null {
   try {
     if (typeof localStorage === 'undefined') return null
@@ -80,7 +183,11 @@ export function getAuthPrincipalKey(): string | null {
   const token = readStoredToken()
   const explicit = readExplicitSession(token, token ? parseJwtPayload(token) : null)
   if (explicit) return JSON.stringify(['explicit', explicit.actor, explicit.tenantId, explicit.epoch])
-  if (!token) return null
+  if (!token) {
+    const managed = readManagedDescriptor()
+    if (!managed) return null
+    return JSON.stringify(['managed-cookie', managed.userId, managed.tenantId, managed.sessionId, managed.revision])
+  }
   const payload = parseJwtPayload(token)
   const subject = payload?.sub ?? payload?.userId ?? payload?.id
   if (typeof subject === 'string' && subject.trim().length > 0) return `sub:${subject.trim()}`

@@ -3,7 +3,7 @@
  */
 
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
-import { explicitSessionOrg } from '../composables/authPrincipal'
+import { explicitSessionOrg, isManagedEntryActive } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
 import { sendDelete } from './delete-fallback'
@@ -350,6 +350,18 @@ export async function apiFetch(
   options: ApiFetchOptions = {},
 ): Promise<Response> {
   const base = getApiBase()
+  if (isManagedEntryActive() && typeof window !== 'undefined') {
+    const page = window.location.origin
+    let apiOrigin = ''
+    try {
+      apiOrigin = new URL(base, page || undefined).origin
+    } catch {
+      apiOrigin = ''
+    }
+    if (!page || apiOrigin !== page) {
+      throw new Error('托管接口源不匹配')
+    }
+  }
   const { suppressUnauthorizedRedirect = false, omitHeaders = [], bypassDeleteFallback = false, ...requestOptions } = options
   // `headers` is a HeadersInit: a plain record, `[name, value]` pairs, OR a Headers instance.
   // OBJECT-SPREADING the last shape yields `{}` — every entry lives behind prototype methods, none
@@ -374,6 +386,7 @@ export async function apiFetch(
   const response = await fetchWithTransportCopy(`${base}${path}`, {
     ...requestOptions,
     headers,
+    ...(isManagedEntryActive() ? { credentials: 'include' as const } : {}),
   }, bypassDeleteFallback)
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {

@@ -219,6 +219,106 @@ export async function verifyManagedCompanionToken(token: string): Promise<User |
   }
 }
 
+/** Locally live managed cookie identity. No native status call. Null is not another person. */
+export async function readLiveManagedCookieIdentity(token: string): Promise<{
+  userId: string
+  tenantId: string
+  sessionId: string
+} | null> {
+  if (!isPlmManagedCompanionEnabled() || !explicitDatabaseUrl()) return null
+  let payload: ManagedPayload
+  try {
+    payload = jwt.verify(token, jwtSecret()) as ManagedPayload
+  } catch {
+    return null
+  }
+  if (!isManagedCompanionPurpose(payload.purpose)) return null
+  const userId = text(payload.userId)
+  const sessionId = text(payload.sid)
+  const tenantId = typeof payload.tenantId === 'string' ? payload.tenantId.trim() : ''
+  if (!userId || !sessionId || !tenantId) return null
+  try {
+    const found = await query(
+      `SELECT meta_user_id, meta_tenant_id, revoked_at, expires_at
+       FROM plm_managed_sessions WHERE id = $1`,
+      [sessionId],
+    )
+    const row = found.rows[0]
+    const expiresAt = asDate(row?.expires_at)
+    if (!row || row.revoked_at || !expiresAt || expiresAt.getTime() <= Date.now()) return null
+    if (text(row.meta_user_id) !== userId || text(row.meta_tenant_id) !== tenantId) return null
+    return { userId, tenantId, sessionId }
+  } catch {
+    return null
+  }
+}
+
+export async function describeManagedCookie(token: string): Promise<{
+  user: User
+  descriptor: {
+    mode: 'managed-cookie'
+    userId: string
+    tenantId: string
+    sessionId: string
+    revision: number
+    expiresAt: string
+  }
+} | null> {
+  const user = await verifyManagedCompanionToken(token)
+  const rawSessionId = user?.managedSessionId
+  const sessionId = typeof rawSessionId === 'string' ? rawSessionId.trim() : ''
+  const tenantId = typeof user?.tenantId === 'string' ? user.tenantId.trim() : ''
+  if (!user || !sessionId || !tenantId) return null
+  try {
+    const found = await query(
+      `SELECT generation, expires_at, revoked_at FROM plm_managed_sessions WHERE id = $1`,
+      [sessionId],
+    )
+    const row = found.rows[0]
+    const expiresAt = asDate(row?.expires_at)
+    const revision = Number(row?.generation)
+    if (!row || row.revoked_at || !expiresAt || expiresAt.getTime() <= Date.now()) return null
+    if (!Number.isInteger(revision) || revision < 1) return null
+    return {
+      user,
+      descriptor: {
+        mode: 'managed-cookie',
+        userId: user.id,
+        tenantId,
+        sessionId,
+        revision,
+        expiresAt: expiresAt.toISOString(),
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Client origin stored on the session, readable after expiry and with the flag off. */
+export async function managedSessionClientOrigin(token: string): Promise<string | null> {
+  if (!explicitDatabaseUrl()) return null
+  let payload: ManagedPayload
+  try {
+    payload = jwt.verify(token, jwtSecret(), { ignoreExpiration: true }) as ManagedPayload
+  } catch {
+    return null
+  }
+  if (!isManagedCompanionPurpose(payload.purpose)) return null
+  const sessionId = text(payload.sid)
+  if (!sessionId) return null
+  try {
+    const found = await query(
+      'SELECT client_origin FROM plm_managed_sessions WHERE id = $1 AND meta_user_id = $2',
+      [sessionId, text(payload.userId)],
+    )
+    const origin = text(found.rows[0]?.client_origin)
+    return origin || null
+  } catch {
+    return null
+  }
+}
+
 export async function revokePresentedManagedSession(token: string): Promise<{
   userId: string
   sessionId: string

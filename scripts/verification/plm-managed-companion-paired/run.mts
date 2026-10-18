@@ -108,6 +108,7 @@ assert.equal(link.generation, 1)
 const ds = await import(root + '/src/routes/data-sources.ts')
 await ds.initializeDataSourceManager(db)
 const { jwtAuthMiddleware } = await import(root + '/src/auth/jwt-middleware.ts')
+const { isGateException } = await import(root + '/src/auth/api-path-policy.ts')
 const managed = (await import(root + '/src/routes/plm-managed-companion.ts')).default
 const { PlmPersonalBomWriteBindingService } = await import(root + '/src/services/PlmPersonalBomWriteBindingService.ts')
 const { bindPlmPersonalBomWriteService } = await import(root + '/src/services/plm-personal-bom-write-http.ts')
@@ -137,7 +138,7 @@ const workbench = (await import(root + '/src/routes/plm-workbench.ts')).default
 const app = express()
 app.use(express.json())
 app.use((req, res, next) => {
-  if (req.path === '/api/plm/managed-login/callback') return next()
+  if (isGateException(req.path)) return next()
   return jwtAuthMiddleware(req, res, next)
 })
 app.use('/api/plm/managed-login', managed)
@@ -168,6 +169,10 @@ const vite = await createServer({
       server.middlewares.use('/plm/bom-review', async (_req, res) => {
         res.setHeader('Content-Type', 'text/html')
         res.end(await server.transformIndexHtml('/plm/bom-review', entryHtml))
+      })
+      server.middlewares.use('/plm/managed-return', (_req, res) => {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.end('<!doctype html><title>managed-return</title><p>handoff</p>')
       })
     },
   }],
@@ -204,7 +209,33 @@ async function handshake(label: string): Promise<void> {
     await page.waitForURL(/\/managed-login/)
   }
   await page.locator('#continue:not([disabled])').click()
-  await page.waitForURL(/managed=ready/)
+  await page.waitForURL(/\/plm\/managed-return/)
+  const returned = new URL(page.url())
+  const code = returned.searchParams.get('code')
+  const state = returned.searchParams.get('state')
+  assert(code && state)
+  const completed = await page.evaluate(async (presented: { code: string; state: string }) => {
+    const response = await fetch('/api/plm/managed-login/complete', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'content-type': 'application/json',
+        'x-metasheet-managed-bridge': 'complete',
+      },
+      body: JSON.stringify(presented),
+    })
+    const body = await response.json() as { ok?: boolean; destination?: unknown }
+    return {
+      status: response.status,
+      ok: body.ok === true,
+      destination: typeof body.destination === 'string' ? body.destination : '',
+    }
+  }, { code, state })
+  assert.equal(completed.status, 200)
+  assert.equal(completed.ok, true)
+  assert(completed.destination.startsWith('/plm/bom-review'))
+  assert(!completed.destination.includes('code=') && !completed.destination.includes('yur_'))
+  await page.goto(input.origin + completed.destination)
   assert(page.url().startsWith(input.origin + '/plm/bom-review'))
   assert(!page.url().includes('code='))
   await page.locator('[data-testid="plm-bom-review-row"][data-bom-line-id="line"]').waitFor()

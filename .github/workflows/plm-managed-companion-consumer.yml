@@ -91,7 +91,7 @@ jobs:
             tests/unit/plm-managed-companion-refute.test.ts \
             tests/unit/plm-managed-adapter-refute.test.ts \
             tests/unit/plm-managed-companion.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 21
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 22
 
       - name: Start owned socket PostgreSQL 16
         run: |
@@ -132,7 +132,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
             --config vitest.plm-managed-companion.config.ts \
             --reporter=json --outputFile=/tmp/plm-managed-pg.json
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 27
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 34
 
       - name: Remove owned socket PostgreSQL
         if: always()
@@ -174,8 +174,9 @@ jobs:
             --reporter=json --outputFile=/tmp/plm-managed-web.json \
             tests/plmManagedCompanion.spec.ts \
             tests/PlmManagedCompanionView.spec.ts \
-            tests/PlmBomReviewWorkspaceView.spec.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 13
+            tests/PlmBomReviewWorkspaceView.spec.ts \
+            tests/plmManagedEntryBridge.spec.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 26
 
       - name: Backend types
         run: pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false --incremental false

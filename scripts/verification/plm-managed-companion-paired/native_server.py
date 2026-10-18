@@ -8,6 +8,7 @@ origin = cfg['origin']
 callback = cfg['callback']
 issuer = cfg['issuer']
 secret = cfg['secret']
+root_part_id = cfg.get('root_part_id', 'part')
 for key, value in {
     'JWT_SECRET_KEY': 'synthetic-native-managed-read-configured-only',
     'DATABASE_URL': 'sqlite:///' + str(root / 'global.db'),
@@ -86,11 +87,11 @@ with tenant() as db:
     ])
     db.commit()
     db.add_all([
-        Item(id='part', item_type_id='Part', config_id='part', generation=1, is_current=True, state='Draft', properties={'item_number': 'P-001', 'name': 'Fixture assembly'}),
+        Item(id=root_part_id, item_type_id='Part', config_id=root_part_id, generation=1, is_current=True, state='Draft', properties={'item_number': 'P-001', 'name': 'Fixture assembly'}),
         Item(id='child', item_type_id='Part', config_id='child', generation=1, is_current=True, state='Draft', properties={'item_number': 'C-001', 'name': 'Fixture child'}),
     ])
     db.commit()
-    db.add(Item(id='line', item_type_id='Part BOM', config_id='line', generation=1, is_current=True, source_id='part', related_id='child', properties={'quantity': 1}))
+    db.add(Item(id='line', item_type_id='Part BOM', config_id='line', generation=1, is_current=True, source_id=root_part_id, related_id='child', properties={'quantity': 1}))
     db.add(AppLicense(id='read-lic', app_name='plm.bom_multitable', license_key='fixture-read', status='Active', tenant_id='default', org_id='fixture-org'))
     db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
     db.commit()
