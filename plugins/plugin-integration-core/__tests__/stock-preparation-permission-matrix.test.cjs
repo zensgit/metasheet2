@@ -1225,6 +1225,19 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   // matters because the decision function refuses an unknown token for EVERYONE, admins included: a
   // literal typo would be a silent outage, whereas a misspelt identifier is a load-time ReferenceError.
   const gates = requireAccessGateExpressionsInSource(HTTP_ROUTES_SOURCE)
+  // GOV-08 #6438 adds one named delegation, not a new stock-prep permission token.
+  // Keep its exact location and single occurrence pinned: accepting `action` in
+  // the vocabulary must not silently allow dynamic gates anywhere else.
+  assert.equal(
+    [...HTTP_ROUTES_SOURCE.matchAll(/function requireSelfServiceReadAccess\(req, action\) \{\s*const user = requireAccess\(req, action\)\s*const tenantId = resolveVerifiedClaimTenantId\(req\)/g)].length,
+    1,
+    'M-08: the self-service delegation preserves permission-first and verified-tenant ordering',
+  )
+  assert.equal(
+    [...HTTP_ROUTES_SOURCE.matchAll(/(?<!function )requireAccess\(\s*req\s*,\s*action\s*\)/g)].length,
+    1,
+    'M-08: the named self-service helper is the only dynamic action delegation',
+  )
   assert.deepEqual(
     stockPrepGateTokensInSource(HTTP_ROUTES_SOURCE),
     [],
@@ -1236,8 +1249,8 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   // stays pinned here rather than relaxed to "any frozen constant".
   assert.deepEqual(
     gates.identifiers,
-    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_PULL', 'STOCK_PREP_READ'],
-    'M-08: exactly the admin, operate, pull and read constants are used as gate expressions',
+    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_PULL', 'STOCK_PREP_READ', 'action'],
+    'M-08: the four frozen stock-prep constants and the single named delegation are the only identifier gates',
   )
   // S5b (R-39) added exactly the four 「成员与权限」 handlers, each a manifest member (members.*) whose
   // plugin gate is necessary and never sufficient: the host's narrow members port re-derives the caller

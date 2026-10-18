@@ -1,5 +1,70 @@
 # 既有 #6337 收口验证
 
+## 2026-10-18 已获准推送M-08两文件修复及既有合成CI
+
+owner明确批准将本轮两文件（原权限矩阵测试+本文MD）推入现有草稿#6337并运行既有合成CI。下方“未推送/等待授权”保留为此前阶段，不再代表本次授权状态。推送前GitHub核实草稿OPEN/DRAFT，远端head与本地父提交均为75ea803ab，base仍PLM分支，无他人新提交需要覆盖。
+
+本轮再次执行原权限矩阵整文件：exit0、TAP1/1、禁止网络/.env读取0，日志SHA `6f5706007fa3439a3595babfa608d5cb05f2ac0dc5a736f9181460a2415bba0a`。四项结构变异重新执行，缺转交/额外动态/错顺序/新identifier均在M-08失败，每项实际变异1次、原守卫0；完整provenance再次exit0。源码runtime/pin未改，测试候选仍为`06e9625629bef339dbb429b5bdeb1ba2b602f65b98307ebe9b997da4a2535a1e`，不重打无变化的pin。
+
+首次复用变异驱动时四项均按预期致红，但驱动防覆盖写回旧回执遇EEXIST、整体exit1，保留该失败及旧证据；只将临时驱动的输出回执名改为新文件，保留wx防覆盖与全部断言，重新四项后驱动exit0。不是删除旧文件、隐藏失败或改产品以换绿。新回执由Codex Security持久保存为`artifacts/selfservice16-permission-census-publish-20261018-receipt.json`，不提交私有日志。
+
+仅stage该测试和本文，不带独立GOV-08文档、临时驱动或其它文件。新head的CI须另行核验，旧75ea正式JWT/71项/stop成功与原Guard失败均继续保留，不能因只改测试而直接移用。仍不新增切片、不合并/部署/客户访问/真实发送。
+
+## 2026-10-18 正式CI终态：Plugin全绿，Guard旧结构断言仍红
+
+准确head `75ea803ab40b9e16d8ec45e6f594c4b522894ad2`的[Plugin System Tests run39048439856](https://github.com/zensgit/metasheet2/actions/runs/39048439856) attempt1已completed/success，精确job`test (20.x)` id117441812301 success，其它三个job亦success。原锁协议/宿主真实DB、PLM manual+interval、固定官方Chromium、owner宜搭JWT HTTP/browser、后置multitable SQL及attendance步骤均实际completed/success，无pending/skipped替代通过。
+
+只读公开job日志，先剥job/step列、时间戳及ANSI，再按固定枚举/数字/布尔/哈希投影，未读私有artifact、.env或凭据，也未输出原响应、URL参数、业务ID或堆栈。完整文本按LF拼接的归一化公开日志SHA `0e488df8446342c66823b6b710d906a3d3c25078fb939e5f9c7adc7b082a15b5`，不是宣称原下载zip/字节流哈希。
+
+- 真实宿主整文件逐case成功行**39**，其中明确标题`requires real JWT tenant provenance`成功行**16**。本地40项中的外加隔离哨兵不在正式文件，不虚报CI40。首次汇总器只查`(N tests)`文件汇总格式，未命中；未将空数组当通过，改从原verbose逐用例成功标记精确计数39/16。命令回显和无成功标记行不计入。
+- 正式`YIDA_BROWSER_CI_RESULT`恰好1条，passed=true、tests=71、business=66、sentinels=5。原外层reportOuterResult还先验owner/source哈希、子进程终态和持久receipt的cleanup为stopped-owned-pg-removed，才允许passed；不以另一路绿或本地71/409替代。
+- 闭合browser-transport-diagnostic **336帧**，failure ABORT/ABORTED计数**0**；automationRequests的POST202，SDK BODY_DONE+complete、PLAYWRIGHT BODY_DONE+complete、PROXY UPSTREAM_COMPLETE+complete各**1**。不把REQUEST_FINISHED默认status0当响应body完成；interval没有manual POST202不算缺失。
+- 独立actual-stop-resolved公开帧**2**，actual-stop-failed/production-stop-failed **0**。两条PLM_FULL_APP_RESULT均passed、failure=null、cleanup=stopped-and-owned-database-removed，各6588sourceFiles，receipt SHA依次`90df714d558c5379970ee676c006f84b6f75b1026b70557ec8b3f77ad2462833`、`d1484677f69e2319ba051731aa06c77917c675a8f32ed3eca4102abae8121fa9`。
+
+停止证明范围明确：成功的production-stop-verified完整字段不由原CLI公开转发，故日志投影该字段计数0，**不谎称直接读取到2条完整stop私有帧**。当前原CLI `run-stock-preparation-plm-full-app.mjs:990`在产生passed前必调`:376`的validateProductionStopEvidence，强制单次actual stop→proof顺序、双池结束/HTTP与collaboration关闭/2断连/0维护timer/无emergency；随后finally实际owned PG stop。上述同head真实CLI两次passed与cleanup给出按原验收合同验证的停止证据，公开actual-resolved提供独立印证。不为补该可见性读取私有产物或弱化assertion。
+
+GitHub同时核实[#6438](https://github.com/zensgit/metasheet2/pull/6438)文档head d0daac73d当前21项success、0pending、0failure，OPEN未合并；#6337仍OPEN/DRAFT、head未变、0pending，**唯一failure是integration-guard**（run39048441736的M-08旧oracle，修复/变异见下）。因此不能称PR全绿/可合并或完整集成目标完成；本地权限矩阵修复未提交/推送，等待明确追加授权，不重跑失败job。
+
+本轮CI闭合当前候选的正式浏览器/宜搭/PLM停止目标，不倒推旧ABORTED、250ms租约、SQL57014、版本断言或WSL回拨全部历史根因已修。本节和脱敏CI汇总仅本地续记；原独立文档与代码PR均不合并、不部署、不读客户/真实宜搭token、不真实发送。
+
+## 2026-10-18 最后一套本地守卫拒绝分类（不改守卫）
+
+亲读`sealed-export-s6a-product-runtime.test.cjs:27–32`，原负例显式使用本机不可达PG目标和假driver材料验证错误脱敏，不是客户数据库。限定重执行该原整文件，仅追加读取原guard.snapshot的exit观察器，未改目标/异常/SQL/守卫：实际blockedOrigins唯一`{kind:socket, origin:postgres}`，forbiddenConnections=1、allowedConnections=0、forbiddenEnvReads=0。故已经把“未知调用”缩窄到这条原负例的PG socket，不能误报为真实外部发送；也没有允许该socket穿过守卫。
+
+原套件终点OK标记未出现，Node --test包装报告1失败/0通过，原子进程仍被exit92守卫拒绝。**不宣称该套件业务断言全部执行通过，也不因此报283/283**。这次仅分类本地受限环境，不等于证明普通CI无守卫环境下它必绿；不改本机网络/连接豁免、不提供真实数据库、不做无守卫重跑。限定日志SHA `5609c01d6ba97298e8328c5e586ddf9735a35130dfb987b420dc926d0f3db267`，观察器SHA `cf4edd2dbaa2f122a1138abc5c6dbea1c693132ad3a33e5839f34607983f9f08`。源/测试均未编辑，此证据不扩大到原整链或远端结果。
+
+## 2026-10-18 原插件283套链本地扩展检查（保留守卫拒绝，不报全绿）
+
+为减少逐条推送返修，复用原`plugins/plugin-integration-core/scripts/test-chain.cjs`及其loadChain/toArgv/无shell/fail-fast语义，在新user/net/PID namespace、非root、仅lo、五capabilities零及原Node网络/.env守卫下执行；不改test-chain.txt或原suite，当前只含未推送的M-08测试oracle修复。配置命令恰好283个，实际source/provenance和三项源哈希前后不变。
+
+第一次净化环境没有测试模式/原可选tsx管道抑制设置，停在host-loader-smoke，exit92、禁止连接2/环境读取0；没有把这轮当业务回归。第二次只补原验收已使用的NODE_ENV=test与PLM_FULL_APP_BLOCK_OPTIONAL_TSX_PIPE=1，保留相同原守卫与隔离，执行到链最后一个`sealed-export-s6a-product-runtime.test.cjs`后被守卫exit92，禁止连接1/环境读取0，无超时。原runner第一处非零即停，配合实际清单确认**前282个命令exit0，第283个守卫拒绝，后续0个**；不是283/283，也不是仅凭290个守卫帧推算suite数量。没有放宽守卫、删测试、skip该套件或再做无守卫运行；具体被拒调用来源仍未归因，不谎称它是产品漏洞或已修环境根因。
+
+第二次完整私有日志SHA `56910b2f6482d6945c6faf4ef6ff30e6002aba10d83434ef45992206600ad4d3`。初次回执`artifacts/selfservice16-plugin-chain-guard-refusal-receipt.json` SHA `0ffacaa6ae7b25282bf935129f785fca6a7720a8cda67dae3245ead1134d9c47`；补测试环境回执`artifacts/selfservice16-plugin-chain-test-env-receipt.json` SHA `124b03b732c32b09a7f0556217c0e224004200213e5ee1e76d34552469a0dab2`，均在前述Codex Security托管目录。回执completedSuites=null如实保留原链未输出全通过，firstStoppedFile=null是驱动只识别不含node前缀的旧regex限制；另对原日志末行固定停止文件和原清单索引核对，不伪造回执值。
+
+远端run39048439856仍在test(20.x)的Run core-backend tests，尚无失败步骤，关键PLM/宜搭/stop不预判成功。本地链扩验不替代失败Guard或远端正式证据；M-08修复及MD未提交/推送，未重跑/取消CI，仍无合并、部署、客户读取或真实发送。
+
+## 2026-10-18 同head Guard失败及权限矩阵局部候选（未推送）
+
+同head75ea803ab的Integration Guard run39048441736已终结failure，真实失败为`stock-preparation-permission-matrix.test.cjs`的vocabularyIsFrozenAndRoutesAreRegistered，M-08原断言只认可四个STOCK_PREP常量。新具名helper内部唯一`requireAccess(req, action)`被原源码census识别成第五个identifier；不是生产权限被放开，也不是JWT负例失败。公开失败日志只在内存提取固定错误类型/文件/行号，未输出原响应或业务值；日志过长发生工具截断，未把截断内容当完整日志哈希/全链统计证据。末尾实际M-08栈及exit1足以定位该断言，未假称其它suite都通过。
+
+在当前同字节Linux候选运行该原整文件，修前exit1，TAP1失败，失败函数/行1237与CI一致，禁止网络/.env读取0；日志SHA `16c9710ec1dc6d320300827eefa36568cc60f9ae52ea16f105dbe2a2f5e896e0`。随后只改这个原测试的结构oracle：保留四个冻结常量，明确列出action，同时钉死具名helper中permission-first→verified-tenant的精确位置，以及全模块非声明的动态action转交**恰好一次**。没有在census生产helper增加通配豁免，没有改任何runtime/JWT/原权限矩阵业务断言。
+
+修后原整文件exit0、TAP1/1（manual main，不虚增内部矩阵计数），日志SHA `9788f24161fe7875d9c4fb471b5a38daf8c3df92db90ae3a2a751e2cee6a97e3`，原守卫0。追加四项有限源码census变异：删具名action转交、其它位置再加一次动态转交、调换权限与tenant检查顺序、增加未知identifier，4/4均在M-08 AssertionError致红、实际变异次数各1、无超时/禁止IO。变异预先加载真实runtime后只改测试读取的源码字符串，不改生产磁盘或执行行为；它们是结构oracle的负控，**不是新增四项真实JWT/runtime变异证明**。原真实JWT及23runtime变异证据保持各自范围。
+
+本地Windows/Linux测试候选SHA均`06e9625629bef339dbb429b5bdeb1ba2b602f65b98307ebe9b997da4a2535a1e`。该测试不在实际pin输入；完整provenance再次exit0，未改pin。四探针持久回执`artifacts/selfservice16-permission-census-mutations-receipt.json`，SHA `49f7c39926d68783ac5b574fc81379aa46e51ec66d54e7f5d7d4eafe3d8acec4`，同此前托管目录。
+
+Plugin System Tests run39048439856的test(20.x)仍in_progress，当前Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors，尚无失败步骤；不能把Guard失败混称整轮Plugin终结，也不能把后续真实JWT/PLM/宜搭/stop未执行算通过。没有取消/重跑当前run或再推送。此次局部测试修复及本节留在本地，需owner明确批准下一次推送/合成CI；原独立文档PR与代码草稿均未合并，未部署/客户访问/真实发送。
+
+## 2026-10-18 实际推送及同head CI跟踪（本节仅本地续记）
+
+已先创建独立GOV-08文档[#6438](https://github.com/zensgit/metasheet2/pull/6438)，完整head `d0daac73dc9bd760c234e5376a863bc15abb6b4c`；随后七文件代码/测试/pin/closeout提交 `75ea803ab40b9e16d8ec45e6f594c4b522894ad2` fast-forward推入原分支。GitHub核实#6337仍OPEN/DRAFT、head准确匹配、base未变。未force push、未把独立决策文档放进代码提交、未合并或改base。
+
+原Plugin System Tests没有因这个stacked base自动触发，故按授权显式dispatch既有`plugin-tests.yml`一次，得到[run39048439856](https://github.com/zensgit/metasheet2/actions/runs/39048439856)，attempt1，workflow_dispatch，head准确为75ea803ab。精确job名`test (20.x)`，job id117441812301，当前in_progress，已到Global History flag manifest contract，失败步骤0；**前置/真实JWT宿主/PLM manual+interval/宜搭71项/实际停止与后置SQL尚待正式证据，不能判PASS**。
+
+同head自动Integration Guard为[run39048441736](https://github.com/zensgit/metasheet2/actions/runs/39048441736)，当前in_progress；其它自动PR checks未手工重复触发。#6337正文顶节已更新独立决策、准确head/run、本地范围及历史风险，不再让旧4e9等“当前head”口述误导审查。文档PR当前checks无失败、仍有pending，未合并；其main基底检查不替代代码候选检查。
+
+本节写在推送后，仅本地保存，不为续记再造提交/再次触发CI。旧正文及本地40/130/409/50、有限变异和旧head71各自范围保留，任何新失败均先报告，不自动重跑。未经再授权，不真实客户读取、宜搭token/发送、合并或部署。
+
 ## 2026-10-18 独立决策PR已创建；获准推入原草稿及运行原CI
 
 owner最新明确授权：独立GOV-08提交/推送/文档PR在先，然后既有草稿#6337追加已验证补丁及MD、运行既有合成CI。不新增功能切片，不合并/部署/客户读取/真实发送。本节取代下方历史段落中的“待授权推送/CI”当前状态，保留当时证据。
