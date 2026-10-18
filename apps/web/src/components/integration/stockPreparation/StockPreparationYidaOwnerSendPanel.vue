@@ -57,6 +57,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { randomUuid } from '../../../utils/uuid'
 import {
   createYidaOwnerClient,
   YidaOwnerClientError,
@@ -158,7 +159,7 @@ function approve(): void {
   if (!approvalCommand.value) {
     try {
       approvalCommand.value = Object.freeze({ operationId: preview.value.operationId, rowKey: preview.value.rowKey,
-        confirmationId: crypto.randomUUID(), acknowledgeOnce: true, ttlMs: 900000 })
+        confirmationId: randomUuid(), acknowledgeOnce: true, ttlMs: 900000 })
     } catch { errorCode.value = 'YIDA_OWNER_UNAVAILABLE'; return }
   }
   const command = approvalCommand.value
@@ -179,7 +180,7 @@ function submitOnce(): void {
   }
   // Retain this exact command before transport begins. Neither an unknown
   // response nor a history refresh creates a new key or another POST.
-  try { submissionCommand.value = Object.freeze({ grantId: grant.value.grantId, submissionId: crypto.randomUUID() }) }
+  try { submissionCommand.value = Object.freeze({ grantId: grant.value.grantId, submissionId: randomUuid() }) }
   catch { errorCode.value = 'YIDA_OWNER_UNAVAILABLE'; return }
   const command = submissionCommand.value
   void perform(current => current.submit(command), result => { applyObservation(result) })
