@@ -87,12 +87,46 @@ describe('AttendanceAdminRail', () => {
     await flushUi()
 
     expect(container!.querySelector('.attendance__admin-nav-header')?.textContent).toContain('Jump to')
+    const search = container!.querySelector<HTMLInputElement>('[data-admin-nav-search]')
+    expect(search).toBeTruthy()
+    expect(search?.getAttribute('aria-label')).toBe('Search workbench sections')
+    const header = container!.querySelector('.attendance__admin-nav-header')
+    expect(header?.compareDocumentPosition(search!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(search?.compareDocumentPosition(container!.querySelector('.attendance__admin-nav')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(container!.querySelector('.attendance__admin-nav-group-title')?.textContent).toContain('Workspace')
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-settings"]')?.textContent).toContain('Settings')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-settings"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(container!.querySelector('.attendance__admin-nav-current')).toBeNull()
     expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
     expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
     expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
+  })
+
+  it('emits the live section query without clearing the active highlight', async () => {
+    const handlers = mountRail()
+    await flushUi()
+
+    const search = container!.querySelector<HTMLInputElement>('[data-admin-nav-search]')!
+    search.value = '补卡'
+    search.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(handlers['onUpdate:sectionFilter']).toHaveBeenCalledWith('补卡')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-settings"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-page-search]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+  })
+
+  it('shows the empty hint only after a section query matches nothing', async () => {
+    mountRail({ adminSectionFilter: '', visibleAdminSectionNavGroups: [] })
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    app!.unmount()
+    mountRail({ adminSectionFilter: 'zzz', visibleAdminSectionNavGroups: [] })
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-anchor]')).toBeNull()
   })
 
   it('emits interaction events for compact toggle, grouped sections, and item selection', async () => {

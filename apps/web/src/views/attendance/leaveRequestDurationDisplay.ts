@@ -18,8 +18,19 @@ export function parseDateTimeLocalMs(value: string | null | undefined): number |
   if (typeof value !== 'string') return null
   const text = value.trim()
   if (text.length === 0) return null
-  const ms = new Date(text).getTime()
-  return Number.isFinite(ms) ? ms : null
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(text)
+  if (!match) return null
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(part => Number(part ?? 0))
+  const millisecond = Number((match[7] ?? '').padEnd(3, '0'))
+  // Calendar coordinates for display arithmetic, not a UTC attendance instant.
+  // Destination gap/fold validation belongs to the target-context submit path.
+  const date = new Date(0)
+  date.setUTCFullYear(year, month - 1, day)
+  date.setUTCHours(hour, minute, second, millisecond)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day || date.getUTCHours() !== hour
+    || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second) return null
+  return date.getTime()
 }
 
 export function snapMinutesToHalfHour(minutes: number): number {

@@ -115,4 +115,16 @@ describe('computeRequesterPreviewFields', () => {
     expect(r.visible.map((f) => f.id)).toEqual(['trip', 'reason'])
     expect(r.hidden).toEqual([])
   })
+
+  // R-43 (B): the hidden-field reason names the option, not its opaque value.
+  it('a select dependency reason shows the option NAME, never the stored option value', () => {
+    const s = schema([
+      { id: 'kind', type: 'select', label: '类型', options: [{ label: '加急', value: 'opt_x' }, { label: '普通', value: 'opt_y' }] },
+      { id: 'reason', type: 'text', label: '说明', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'opt_x' } },
+    ] as FormSchema['fields'])
+    const r = computeRequesterPreviewFields(s, { kind: 'opt_y' })
+    expect(r.hidden).toHaveLength(1)
+    expect(r.hidden[0]!.reason).toContain('加急')
+    expect(r.hidden[0]!.reason).not.toContain('opt_x')
+  })
 })

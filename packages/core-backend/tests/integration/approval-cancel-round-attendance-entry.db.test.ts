@@ -118,6 +118,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   const createdApprovalIds = new Set<string>()
   const createdRequestIds = new Set<string>()
   const createdLeaveTypeIds = new Set<string>()
+  let createdDefaultRuleId: string | undefined
   // Phase D A3: fixture-only leave-balance lots (their events cascade with them).
   const createdLeaveBalanceIds = new Set<string>()
   const seededUserIds = new Set<string>()
@@ -370,6 +371,14 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     // A2 OFF case removes it explicitly.
     process.env[ENTRY_FLAG] = 'true'
     await ensureApprovalSchemaReady()
+    // Fresh request admission requires an explicit organization default, even with multi-timezone OFF.
+    const defaultRule = await pool().query<{ id: string }>(
+      `INSERT INTO attendance_rules (id, org_id, name, timezone, is_default)
+       VALUES ($1, 'default', $2, 'UTC', TRUE)
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [randomUUID(), `g4a-entry-timezone-${TS}`],
+    )
+    createdDefaultRuleId = defaultRule.rows[0]?.id
     passwordHash = await bcrypt.hash(password, 4)
     const repoRoot = path.resolve(__dirname, '../../../..')
     server = new MetaSheetServer({
@@ -439,15 +448,25 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       const userIds = [...new Set([...seededUserIds, ...devTokenUserIds])]
       if (userIds.length > 0) {
         // The LEAVE ONLY case approves a real missed_check_in through the plugin, which writes the
-        // punch-side rows below. Their append-only revision history row is left in place by design
-        // (direct mutation is refused by its guard).
+        // punch-side rows below. Append-only revision history and timezone companion rows remain;
+        // records referenced by immutable companions must remain with them.
         await pool().query('DELETE FROM attendance_events WHERE user_id = ANY($1::text[])', [userIds])
-        await pool().query('DELETE FROM attendance_records WHERE user_id = ANY($1::text[])', [userIds])
+        await pool().query(
+          `DELETE FROM attendance_records r WHERE r.user_id = ANY($1::text[])
+             AND NOT EXISTS (
+               SELECT 1 FROM attendance_timezone_context_companions c
+                WHERE c.record_id = r.id AND c.org_id = r.org_id
+             )`,
+          [userIds],
+        )
         await pool().query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_sessions WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
         await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...seededUserIds]])
+      }
+      if (createdDefaultRuleId) {
+        await pool().query("DELETE FROM attendance_rules WHERE id = $1 AND org_id = 'default'", [createdDefaultRuleId])
       }
       const roleIds = [...createdRoleIds]
       if (roleIds.length > 0) {
@@ -475,6 +494,38 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     const malformed = await http('GET', entryPath('not-a-uuid'), token)
     expect(malformed.status).toBe(400)
     expect(malformed.json?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('fresh attendance request without an organization default remains 422 with no business writes', async () => {
+    const employee = `g4a-no-default-${TS}`
+    const orgId = `g4a-no-default-${randomUUID()}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    await pool().query(
+      'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)',
+      [employee, orgId],
+    )
+    const token = await loginToken(employee)
+    const create = await http('POST', '/api/attendance/requests', token, {
+      orgId,
+      workDate: new Date().toISOString().slice(0, 10),
+      requestType: 'missed_check_in',
+      requestedInAt: new Date().toISOString(),
+    })
+    expect({ status: create.status, body: create.json }).toEqual({
+      status: 422,
+      body: { ok: false, error: {
+        code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED',
+        message: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED',
+      } },
+    })
+    const counts = await pool().query<{ requests: number; events: number; records: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_requests WHERE org_id = $1 AND user_id = $2) AS requests,
+         (SELECT count(*)::int FROM attendance_events WHERE org_id = $1 AND user_id = $2) AS events,
+         (SELECT count(*)::int FROM attendance_records WHERE org_id = $1 AND user_id = $2) AS records`,
+      [orgId, employee],
+    )
+    expect(counts.rows).toEqual([{ requests: 0, events: 0, records: 0 }])
   })
 
   it('P-10 + P-1: an employee REAL token (attendance_employee only, no approvals:*) — read 200 (none) → launch 201 → read 200; duplicate launch 409 ALREADY_PENDING', async () => {

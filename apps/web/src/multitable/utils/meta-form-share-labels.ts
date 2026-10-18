@@ -62,6 +62,7 @@ export type MetaFormShareLabelKey =
   | 'link.label'
   | 'link.copy'
   | 'link.copied'
+  | 'link.copyFailed'
   | 'link.regenerate'
   | 'link.preview'
   | 'expiry.label'
@@ -170,6 +171,7 @@ const LABELS: Record<MetaFormShareLabelKey, { en: string; zh: string }> = {
   'link.label': { en: 'Public link', zh: '公开链接' },
   'link.copy': { en: 'Copy', zh: '复制' },
   'link.copied': { en: 'Copied!', zh: '已复制！' },
+  'link.copyFailed': { en: 'Copy failed: select it manually', zh: '复制失败，请手动选择复制' },
   'link.regenerate': { en: 'Regenerate token', zh: '重新生成令牌' },
   'link.preview': { en: 'Preview', zh: '预览' },
   'expiry.label': { en: 'Expiry', zh: '过期时间' },

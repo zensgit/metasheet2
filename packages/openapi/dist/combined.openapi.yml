@@ -11,6 +11,475 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    AttendanceTimezoneTarget:
+      type: object
+      additionalProperties: false
+      required:
+        - orgId
+        - userId
+        - workDate
+        - timezone
+        - contextFingerprint
+        - frozen
+        - referenceId
+        - provenance
+        - window
+        - rule
+        - isWorkingDay
+      properties:
+        orgId:
+          type: string
+        userId:
+          type: string
+        workDate:
+          type: string
+          format: date
+        timezone:
+          type: string
+          description: Actual IANA timezone of the selected target shift.
+        contextFingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+          description: >-
+            Target context identity to compare again on fresh submission.
+            Preview does not reserve the target.
+        frozen:
+          type: boolean
+        referenceId:
+          type: string
+          nullable: true
+        provenance:
+          type: object
+          nullable: true
+          description: >-
+            Existing source identity. Null only for a complete historical freeze
+            that predates timezone provenance; no source revision is invented.
+          additionalProperties: false
+          required:
+            - timezone
+            - source
+            - mode
+            - referenceId
+            - version
+            - policyVersion
+            - calculationGroupMembership
+          properties:
+            timezone:
+              type: string
+            source:
+              type: string
+              enum:
+                - system_default
+                - trip
+                - employee_override
+                - calculation_group
+            mode:
+              type: string
+              enum:
+                - default_only
+                - multi_timezone
+            referenceId:
+              type: string
+            version:
+              type: integer
+              minimum: 1
+            policyVersion:
+              type: integer
+              minimum: 0
+            calculationGroupMembership:
+              type: object
+              nullable: true
+              description: >-
+                Actual effective membership identity retained by the selected
+                context.
+        window:
+          type: object
+          additionalProperties: false
+          required:
+            - startAt
+            - endAt
+          properties:
+            startAt:
+              type: string
+              format: date-time
+            endAt:
+              type: string
+              format: date-time
+        rule:
+          type: object
+          description: >-
+            Target calculation rule snapshot returned by the trusted runtime,
+            not client-selected rule input.
+        isWorkingDay:
+          type: boolean
+    AttendanceTimezoneTargetResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - data
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        data:
+          $ref: '#/components/schemas/AttendanceTimezoneTarget'
+    AttendanceTimezonePolicyImpact:
+      type: object
+      additionalProperties: false
+      required:
+        - currentVersion
+        - proposedEnabled
+        - evaluatedUsers
+        - affectedUsers
+        - conflictingUsers
+        - conflictCounts
+      properties:
+        currentVersion:
+          type: integer
+          minimum: 0
+        proposedEnabled:
+          type: boolean
+        evaluatedUsers:
+          type: integer
+          minimum: 0
+        affectedUsers:
+          type: integer
+          minimum: 0
+        conflictingUsers:
+          type: integer
+          minimum: 0
+        conflictCounts:
+          type: object
+          additionalProperties: false
+          required:
+            - startedContext
+            - tripContext
+            - invalidTargetContext
+          properties:
+            startedContext:
+              type: integer
+              minimum: 0
+            tripContext:
+              type: integer
+              minimum: 0
+            invalidTargetContext:
+              type: integer
+              minimum: 0
+    AttendanceTimezonePolicyImpactResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - data
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        data:
+          $ref: '#/components/schemas/AttendanceTimezonePolicyImpact'
+    AttendanceTimezonePolicyWrite:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - expectedVersion
+      properties:
+        enabled:
+          type: boolean
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: Current policy revision. Zero only for an absent disabled policy.
+    AttendanceEmployeeTimezoneOverrideCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - timezone
+        - effectiveFrom
+        - effectiveTo
+        - expectedPolicyVersion
+      properties:
+        timezone:
+          type: string
+          description: Valid IANA attendance timezone; no device fallback.
+        effectiveFrom:
+          type: string
+          format: date-time
+          description: >-
+            Explicit RFC3339 instant with seconds, optional millisecond
+            precision, and Z or UTC offset.
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Exclusive end instant after effectiveFrom, or null for an open
+            interval.
+        expectedPolicyVersion:
+          type: integer
+          minimum: 0
+    AttendanceEmployeeTimezoneOverrideClose:
+      type: object
+      additionalProperties: false
+      required:
+        - endAt
+        - expectedVersion
+      properties:
+        endAt:
+          type: string
+          format: date-time
+          description: >-
+            Explicit RFC3339 exclusive end with seconds and Z or UTC offset. May
+            shorten, never extend, an existing interval.
+        expectedVersion:
+          type: integer
+          minimum: 1
+    AttendanceTimezonePolicyWriteResponse:
+      type: object
+      required:
+        - ok
+        - data
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - enabled
+            - version
+          properties:
+            enabled:
+              type: boolean
+            version:
+              type: integer
+              minimum: 1
+    AttendanceEmployeeTimezoneOverrideWriteResponse:
+      type: object
+      required:
+        - ok
+        - data
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - orgId
+            - userId
+            - referenceId
+            - timezone
+            - version
+            - effectiveFrom
+            - effectiveTo
+          properties:
+            orgId:
+              type: string
+            userId:
+              type: string
+            referenceId:
+              type: string
+            timezone:
+              type: string
+            version:
+              type: integer
+              minimum: 1
+            effectiveFrom:
+              type: string
+              format: date-time
+            effectiveTo:
+              type: string
+              format: date-time
+              nullable: true
+    AttendanceBusinessTripCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - destinationTimezone
+        - startAt
+        - endAt
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          description: >-
+            Defaults to the authenticated employee. Another employee requires
+            attendance administrator access and active same-organization
+            membership.
+        destinationTimezone:
+          type: string
+          minLength: 1
+          description: Valid IANA destination timezone. No browser timezone fallback.
+        startAt:
+          type: string
+          format: date-time
+          description: >-
+            Explicit RFC3339 instant with seconds and Z or UTC offset. Zone-free
+            local values are rejected.
+        endAt:
+          type: string
+          format: date-time
+          description: Explicit RFC3339 instant after startAt.
+        reason:
+          type: string
+          maxLength: 2000
+        approvalFlowId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+          description: Reuse the same identity and payload after an uncertain submission.
+    AttendanceBusinessTripDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - orgId
+        - userId
+        - destinationTimezone
+        - startAt
+        - endAt
+        - arrangement
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+        userId:
+          type: string
+        destinationTimezone:
+          type: string
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        arrangement:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required:
+            - effectiveEndAt
+            - version
+            - publishedAt
+            - cancelledAt
+          properties:
+            effectiveEndAt:
+              type: string
+              format: date-time
+            version:
+              type: integer
+              minimum: 1
+            publishedAt:
+              type: string
+              format: date-time
+            cancelledAt:
+              type: string
+              format: date-time
+              nullable: true
+    AttendanceBusinessTripResponse:
+      type: object
+      required:
+        - ok
+        - data
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        data:
+          type: object
+          required:
+            - request
+            - businessTrip
+          properties:
+            request:
+              $ref: '#/components/schemas/AttendanceRequest'
+            businessTrip:
+              $ref: '#/components/schemas/AttendanceBusinessTripDetail'
+            requestSnapshot:
+              type: object
+              description: >-
+                Existing versioned attendance request snapshot, when issued by
+                the canonical boundary.
+    AttendanceTimezonePolicyRead:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - version
+        - systemDefault
+      properties:
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+          description: >-
+            Zero only for an absent disabled policy; persisted revisions start
+            at one.
+        systemDefault:
+          type: object
+          additionalProperties: false
+          required:
+            - orgId
+            - referenceId
+            - timezone
+            - version
+          properties:
+            orgId:
+              type: string
+            referenceId:
+              type: string
+            timezone:
+              type: string
+              description: Valid IANA timezone identifier
+            version:
+              type: integer
+              minimum: 1
+    AttendanceEmployeeTimezoneOverrideRead:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required:
+        - orgId
+        - userId
+        - referenceId
+        - timezone
+        - version
+        - effectiveFrom
+        - effectiveTo
+      properties:
+        orgId:
+          type: string
+        userId:
+          type: string
+        referenceId:
+          type: string
+        timezone:
+          type: string
+          description: Valid IANA timezone identifier
+        version:
+          type: integer
+          minimum: 1
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
     StandardResponse:
       type: object
       properties:
@@ -494,9 +963,200 @@ components:
     AttendancePunchEvent:
       allOf:
         - $ref: '#/components/schemas/AttendanceEvent'
+    AttendanceCurrentTimeContext:
+      type: object
+      additionalProperties: false
+      required:
+        - resolvedForInstant
+        - effectiveTimezone
+        - timezoneSource
+        - mode
+        - policyVersion
+        - referenceId
+        - version
+        - currentLocalDate
+        - nextEffectiveBoundary
+      description: >-
+        Current server-instant attendance timezone, independent of the requested
+        asOf schedule date.
+      properties:
+        resolvedForInstant:
+          type: string
+          format: date-time
+        effectiveTimezone:
+          type: string
+        timezoneSource:
+          type: string
+          enum:
+            - system_default
+            - trip
+            - employee_override
+            - calculation_group
+        mode:
+          type: string
+          enum:
+            - default_only
+            - multi_timezone
+        policyVersion:
+          type: integer
+          minimum: 0
+        referenceId:
+          type: string
+          minLength: 1
+        version:
+          type: integer
+          minimum: 0
+        currentLocalDate:
+          type: string
+          format: date
+        nextEffectiveBoundary:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Earliest future governed source boundary. Refresh the current
+            context at this instant; default-only mode has no optional-source
+            boundary.
+    AttendanceEffectiveCalendarDay:
+      type: object
+      required:
+        - date
+        - base
+        - effective
+        - layers
+        - overlays
+      properties:
+        date:
+          type: string
+          format: date
+        base:
+          type: object
+          required:
+            - isWorkingDay
+            - source
+          properties:
+            isWorkingDay:
+              type: boolean
+            source:
+              type: string
+              enum:
+                - rule
+                - shift
+                - rotation
+                - national
+                - manual
+                - org
+                - group
+                - role
+                - user
+                - stored_record
+            holidayId:
+              type: string
+            dayIndex:
+              type: integer
+            name:
+              type: string
+              nullable: true
+        effective:
+          type: object
+          required:
+            - isWorkingDay
+            - source
+          properties:
+            isWorkingDay:
+              type: boolean
+            source:
+              type: string
+              enum:
+                - rule
+                - shift
+                - rotation
+                - national
+                - manual
+                - org
+                - group
+                - role
+                - user
+                - stored_record
+            label:
+              type: string
+            policyId:
+              type: string
+            plannedMinutes:
+              type: number
+            slots:
+              type: array
+              items:
+                type: object
+        layers:
+          type: array
+          items:
+            type: object
+        overlays:
+          type: array
+          items:
+            type: object
+        attendanceTimeContext:
+          $ref: '#/components/schemas/AttendanceStoredTimeContext'
+          description: >-
+            Present in userId mode. Future dates use their target context;
+            persisted dates use stored identity, including legacy null
+            provenance.
+    AttendanceStoredTimeContext:
+      type: object
+      additionalProperties: false
+      required:
+        - targetWorkDate
+        - effectiveTimezone
+        - timezoneSource
+        - mode
+        - policyVersion
+        - contextFingerprint
+        - frozen
+      properties:
+        targetWorkDate:
+          type: string
+          format: date
+        effectiveTimezone:
+          type: string
+        timezoneSource:
+          type: string
+          enum:
+            - system_default
+            - trip
+            - employee_override
+            - calculation_group
+            - legacy_record
+        mode:
+          type: string
+          enum:
+            - default_only
+            - multi_timezone
+            - null
+          nullable: true
+        policyVersion:
+          type: integer
+          minimum: 0
+          nullable: true
+        contextFingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+          nullable: true
+        frozen:
+          type: boolean
     AttendanceRecord:
       type: object
       properties:
+        attendanceTimeContext:
+          $ref: '#/components/schemas/AttendanceStoredTimeContext'
+        timezone_source:
+          type: string
+          enum:
+            - system_default
+            - trip
+            - employee_override
+            - calculation_group
+            - legacy_record
         id:
           type: string
         user_id:
@@ -917,6 +1577,7 @@ components:
             - outdoor_punch
             - shift_swap
             - schedule_dispatch
+            - business_trip
         requested_in_at:
           type: string
           format: date-time
@@ -10213,6 +10874,35 @@ components:
         - succeeded
         - failed
         - expired
+    ElearningAnalyticsExportAvailable:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+      properties:
+        available:
+          type: boolean
+          enum:
+            - true
+    ElearningAnalyticsExportUnavailable:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - reason
+      properties:
+        available:
+          type: boolean
+          enum:
+            - false
+        reason:
+          type: string
+          enum:
+            - storage_unavailable
+    ElearningAnalyticsExportAvailability:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningAnalyticsExportAvailable'
+        - $ref: '#/components/schemas/ElearningAnalyticsExportUnavailable'
     ElearningAnalyticsExportResult:
       type: object
       additionalProperties: false
@@ -12320,6 +13010,189 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/attendance/effective-calendar:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read effective attendance calendar dates
+      description: >-
+        Provide from and to and exactly one selector: userId, groupId, or
+        orgOnly=true. The inclusive range is limited to 366 days. Cross-user and
+        group selectors require the existing attendance administration
+        permissions. User dates carry individual timezone contexts; a mixed-zone
+        result has timezone=null and timezoneMode=per_day. Stored historical
+        dates are not reinterpreted through current policy or trips.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          required: true
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: groupId
+          schema:
+            type: string
+        - in: query
+          name: orgOnly
+          schema:
+            type: boolean
+        - in: query
+          name: includePending
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Calendar with individual timezone identity in user mode
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    required:
+                      - mode
+                      - from
+                      - to
+                      - timezone
+                      - items
+                    properties:
+                      mode:
+                        type: string
+                        enum:
+                          - userId
+                          - groupId
+                          - orgOnly
+                      from:
+                        type: string
+                        format: date
+                      to:
+                        type: string
+                        format: date
+                      timezone:
+                        type: string
+                        nullable: true
+                      timezoneMode:
+                        type: string
+                        enum:
+                          - single
+                          - per_day
+                        description: Present in userId mode.
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceEffectiveCalendarDay'
+        '400':
+          description: Invalid selectors or date range
+        '401':
+          description: Authentication required
+        '403':
+          description: Attendance permission or active organization membership required
+        '409':
+          description: Conflicting target or stored timezone context
+        '422':
+          description: Missing or invalid timezone configuration
+        '503':
+          description: Authoritative calendar context unavailable
+  /api/attendance/rules/me:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read the authenticated employee's attendance rules and current timezone
+      description: >-
+        The employee and organization come from the authenticated session. asOf
+        selects schedule rules; attendanceTimeContext is resolved independently
+        for one captured server instant, which also supplies resolvedAt. A
+        missing or conflicting timezone source fails explicitly.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: asOf
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Schedule rules plus current server-instant timezone
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    required:
+                      - userId
+                      - orgId
+                      - resolvedAt
+                      - resolvedForDate
+                      - attendanceTimeContext
+                    properties:
+                      userId:
+                        type: string
+                      orgId:
+                        type: string
+                      resolvedAt:
+                        type: string
+                        format: date-time
+                      resolvedForDate:
+                        type: string
+                        format: date
+                      attendanceTimeContext:
+                        $ref: '#/components/schemas/AttendanceCurrentTimeContext'
+                      assignment:
+                        type: object
+                      runtimeRule:
+                        type: object
+                      configuredGroupRule:
+                        type: object
+                        nullable: true
+                      punchPolicy:
+                        type: object
+                        nullable: true
+                      warnings:
+                        type: array
+                        items:
+                          type: object
+        '401':
+          description: Authentication required
+        '403':
+          description: >-
+            Active organization membership and attendance read permission
+            required
+        '409':
+          description: Current timezone context is ambiguous
+        '422':
+          description: Invalid date or missing timezone configuration
+        '503':
+          description: Timezone authority unavailable
   /api/attendance/punch:
     x-plugin: plugin-attendance
     post:
@@ -12725,6 +13598,20 @@ paths:
     x-plugin: plugin-attendance
     post:
       summary: Create attendance adjustment request
+      description: >
+        Supplied timestamps on a fresh request must identify an absolute instant
+        with Z or an explicit UTC offset.
+
+        Local times without an offset, DST gaps, and unresolved DST folds are
+        rejected.
+
+        The server resolves and freezes the target shift context; a client
+        fingerprint is an optional
+
+        optimistic concurrency check, never an authority to select a timezone.
+
+        Existing sealed idempotent requests replay before fresh-input
+        validation.
       security:
         - bearerAuth: []
       requestBody:
@@ -12801,6 +13688,13 @@ paths:
                   type: string
                   format: date-time
                   description: Compatibility alias for requestedOutAt.
+                expectedTimezoneContextFingerprint:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+                  description: >-
+                    Optional target-context fingerprint from the
+                    target-timezone-context endpoint. A changed context returns
+                    409.
                 reason:
                   type: string
                 leaveTypeId:
@@ -14868,6 +15762,390 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/timezone-context/me:
+    x-plugin: plugin-attendance
+    get:
+      summary: Preview the authenticated employee target shift timezone
+      description: >-
+        Requires attendance:read and active organization membership. Accepts
+        only workDate; user, organization, group, and timezone query overrides
+        are rejected. Reads frozen context first, otherwise resolves the actual
+        target context in the same transaction. Does not create attendance or
+        configuration records. Submission must recheck context identity.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: workDate
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Actual target context preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceTimezoneTargetResponse'
+        '400':
+          description: Invalid date or extra query fields
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch
+        '409':
+          description: Conflicting contexts or incomplete historical freeze
+        '422':
+          description: Invalid timezone
+          required source: null
+          or ambiguous wall time: null
+        '503':
+          description: Trusted runtime unavailable or unbound result
+  /api/attendance/timezone-context/employees/{userId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Preview an administrator selected employee target shift timezone
+      description: >-
+        Requires attendance:admin plus actual transaction-bound management
+        authorization and active actor and target memberships in the
+        authenticated organization. Accepts only workDate query and the path
+        subject. Uses the same trusted target resolution as the employee self
+        preview.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: workDate
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Actual target context preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceTimezoneTargetResponse'
+        '400':
+          description: Invalid date or extra query fields
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch
+        '409':
+          description: Conflicting contexts or incomplete historical freeze
+        '422':
+          description: Invalid timezone
+          required source: null
+          or ambiguous wall time: null
+        '503':
+          description: Trusted runtime unavailable or unbound result
+  /api/attendance/timezone-policy/preview:
+    x-plugin: plugin-attendance
+    post:
+      summary: Preview attendance timezone policy impact without saving
+      description: >-
+        Requires attendance:admin and actual transaction-bound management
+        authority. Runs in a read-only transaction and compares the supplied
+        policy revision with the current row. Counts active organization
+        members, changes to their prospective current context, and conflicts
+        with started or frozen shifts and remaining approved trips. Does not
+        reserve a change or guarantee all future calendar dates; saving
+        revalidates authority and source contexts. Invalid default sources and
+        stale revisions return errors without partial counts.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceTimezonePolicyWrite'
+      responses:
+        '200':
+          description: Actual version-bound save-admission impact counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceTimezonePolicyImpactResponse'
+        '400':
+          description: Unknown fields
+          invalid boolean: null
+          or invalid safe-integer revision: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch
+        '409':
+          description: Stale policy revision
+        '422':
+          description: Required default source or timezone is invalid
+        '503':
+          description: Trusted preview unavailable or counts do not bind to the proposal
+  /api/attendance/timezone-policy:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read organization attendance timezone policy
+      description: >-
+        Requires attendance:admin and active membership in the authenticated
+        organization. An absent policy is OFF with version 0. The organization
+        must have one valid default attendance rule; no global fallback is used.
+        This read does not enable the feature or select a target shift.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/AttendanceTimezonePolicyRead'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector differs from the authenticated organization
+        '409':
+          description: Ambiguous persisted timezone configuration
+        '422':
+          description: Required timezone configuration is missing or invalid
+        '503':
+          description: Timezone configuration store unavailable
+    put:
+      summary: Set the organization attendance timezone policy
+      description: >-
+        Requires attendance:admin and transaction-bound management
+        authorization. Organization and actor come from the authenticated
+        session; client selectors are rejected. Enabling validates the unique
+        organization default in the same transaction. Disabling does not require
+        a valid default, but still preserves already started shifts and approved
+        trip boundaries. All source writes and audit share the guarded
+        transaction.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceTimezonePolicyWrite'
+      responses:
+        '200':
+          description: Saved at the returned revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceTimezonePolicyWriteResponse'
+        '400':
+          description: Unknown fields or malformed strict input
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch or unavailable override
+        '409':
+          description: Stale revision
+          overlapping interval: null
+          or changed started-shift context: null
+        '422':
+          description: Required default
+          timezone: null
+          revision: null
+          or interval is invalid: null
+        '503':
+          description: Trusted management authorizer
+          combined source guard: null
+          or store unavailable: null
+  /api/attendance/timezone-policy/employees/{userId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read current effective employee attendance timezone override
+      description: >-
+        Requires attendance:admin and active administrator and target employee
+        memberships in the authenticated organization. Uses the server instant
+        and a half-open effective interval. Null means inheritance, not a
+        selected shift timezone.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - override
+                    properties:
+                      override:
+                        $ref: >-
+                          #/components/schemas/AttendanceEmployeeTimezoneOverrideRead
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector differs from the authenticated organization
+        '409':
+          description: Ambiguous persisted timezone configuration
+        '422':
+          description: Required timezone configuration is missing or invalid
+        '503':
+          description: Timezone configuration store unavailable
+    post:
+      summary: Create an employee attendance timezone interval
+      description: >-
+        Requires attendance:admin and active same-organization administrator and
+        target employee membership. The half-open UTC interval cannot overlap
+        another override. Source guards preserve started and frozen shift
+        contexts and remaining approved trip boundaries. An override does not
+        enable multiple timezones.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceEmployeeTimezoneOverrideCreate'
+      responses:
+        '201':
+          description: Saved at the returned revision
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/AttendanceEmployeeTimezoneOverrideWriteResponse
+        '400':
+          description: Unknown fields or malformed strict input
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch or unavailable override
+        '409':
+          description: Stale revision
+          overlapping interval: null
+          or changed started-shift context: null
+        '422':
+          description: Required default
+          timezone: null
+          revision: null
+          or interval is invalid: null
+        '503':
+          description: Trusted management authorizer
+          combined source guard: null
+          or store unavailable: null
+  /api/attendance/timezone-policy/employees/{userId}/{referenceId}/close:
+    x-plugin: plugin-attendance
+    post:
+      summary: Shorten an employee attendance timezone interval
+      description: >-
+        Requires attendance:admin and transaction-bound management
+        authorization. Only the named employee override in the authenticated
+        organization may be shortened at its expected revision; history is
+        retained. Started shifts and approved trips remain guarded.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - in: path
+          name: referenceId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceEmployeeTimezoneOverrideClose'
+      responses:
+        '200':
+          description: Saved at the returned revision
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/AttendanceEmployeeTimezoneOverrideWriteResponse
+        '400':
+          description: Unknown fields or malformed strict input
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector mismatch or unavailable override
+        '409':
+          description: Stale revision
+          overlapping interval: null
+          or changed started-shift context: null
+        '422':
+          description: Required default
+          timezone: null
+          revision: null
+          or interval is invalid: null
+        '503':
+          description: Trusted management authorizer
+          combined source guard: null
+          or store unavailable: null
   /api/attendance/settings:
     x-plugin: plugin-attendance
     get:
@@ -15617,6 +16895,59 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >
+            The batch is not an active member of the authenticated organization.
+            details are values-free: error code, rejected count, and request
+            indexes. They do not echo userId.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - error
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - false
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                      - details
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - USER_NOT_IN_ORG
+                      message:
+                        type: string
+                      details:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: object
+                          required:
+                            - code
+                            - rejectedCount
+                            - indexes
+                          additionalProperties: false
+                          properties:
+                            code:
+                              type: string
+                              enum:
+                                - USER_NOT_IN_ORG
+                            rejectedCount:
+                              type: integer
+                              minimum: 1
+                            indexes:
+                              type: array
+                              items:
+                                type: integer
+                                minimum: 0
   /api/attendance/groups/{id}/members/{userId}:
     x-plugin: plugin-attendance
     delete:
@@ -18803,6 +20134,81 @@ paths:
             Unknown, cross-org, or inaccessible group, including a delegated
             admin without active target-org membership; one shared values-free
             shape (red line W6-R3).
+  /api/attendance/business-trip-requests:
+    x-plugin: plugin-attendance
+    post:
+      summary: Create a business trip approval request
+      description: >-
+        Requires attendance:write. Only this dedicated route creates a
+        business_trip request. Pending requests do not change attendance
+        timezone or create attendance entitlements. Only final approval may
+        publish a destination arrangement, subject to whole-shift boundaries and
+        one context per work date. Multiple timezones remain disabled unless
+        separately configured.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceBusinessTripCreate'
+      responses:
+        '201':
+          description: Created or replayed with the original operation identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceBusinessTripResponse'
+        '400':
+          description: Invalid strict input
+          timezone: null
+          interval or reference: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector differs from the authenticated organization
+        '409':
+          description: Operation identity or approval configuration conflict
+        '503':
+          description: Canonical write boundary unavailable
+  /api/attendance/business-trip-requests/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read a business trip request and its effective arrangement
+      description: >-
+        Requires attendance:read and same-organization ownership or attendance
+        access to other employees. A cancelled request may retain an arrangement
+        through an already started shift boundary; effectiveEndAt determines
+        eligibility.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceBusinessTripResponse'
+        '400':
+          description: Invalid request reference
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Unknown or cross-organization business trip request
+        '503':
+          description: Business trip store unavailable
   /api/audit-logs:
     get:
       summary: Admin-only audit log query
@@ -23119,6 +24525,36 @@ paths:
         '503':
           description: unavailable
           $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/analytics/export-availability:
+    get:
+      operationId: getElearningAnalyticsExportAvailability
+      summary: Report whether this deployment can store analytics exports
+      description: >
+        Same authentication, organization, RBAC, and exact feature gates as the
+        export routes.
+
+        Lets the admin UI disable export creation up front instead of offering a
+        button whose
+
+        task can only fail. Values-free: no storage provider, location, or
+        configuration is
+
+        returned, only availability and a closed reason.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current export storage availability.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAnalyticsExportAvailability'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
   /api/elearning/admin/analytics/exports:
     post:
       operationId: createElearningAnalyticsExport
@@ -23141,7 +24577,13 @@ paths:
         requestId returns a values-free conflict. The export never contains
         individual answers,
 
-        traces, grades, or unsuppressed small-group values.
+        traces, grades, or unsuppressed small-group values. When this deployment
+        has no export
+
+        storage the request is rejected with 409
+        `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before
+
+        any export task is created.
       security:
         - bearerAuth: []
       requestBody:
@@ -29886,6 +31328,115 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/admin/roles/{roleId}/members:
+    get:
+      operationId: listAdminRoleMembers
+      summary: List role member display names
+      description: >-
+        Platform-admin read of persisted role members. Page defaults are 1 and
+        20, and pageSize is capped at 100. Items contain only id and
+        displayName.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: roleId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    required:
+                      - items
+                      - page
+                      - pageSize
+                      - total
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          required:
+                            - id
+                            - displayName
+                          additionalProperties: false
+                          properties:
+                            id:
+                              type: string
+                            displayName:
+                              type: string
+                      page:
+                        type: integer
+                        minimum: 1
+                      pageSize:
+                        type: integer
+                        minimum: 1
+                        maximum: 100
+                      total:
+                        type: integer
+                        minimum: 0
+        '400':
+          description: Role id is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Role members are temporarily unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - error
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - false
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - ROLE_MEMBERS_UNAVAILABLE
+                      message:
+                        type: string
   /api/spreadsheets/{id}/permissions:
     get:
       summary: List spreadsheet permissions

@@ -366,7 +366,7 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
        3. **上机步骤**见 `runbook-operator-merge-20261012.md`（老机器上执行，owner 动作）：R66 升级 → 只读预检 → 带拆分参数的 dry-run → owner 放行 → 维护窗口里 `--apply --split-extra-codes-to-role approvals_operator` → 视情况 `--delete-empty-old-role` → 角色管理里核对 → 审批模板计数大于 0 时在设计器里改指向。脚本保证的是每个成员的**平台权限码**不变；按角色 id / 显示名匹配人的其它配置（考勤调度权限、日历 / 节假日覆盖规则、钉钉同步的「成员组默认业务角色」）脚本不读，由 owner 按手册第 1 步人工预检、第 5 步核对（修复轮 2）。
   4. **定时试拉换账号**：脚本只调 dry-run 和 apply（`scheduled-pull.mjs:368-374`），用的如果是一线账号，升级后会 403；换成拉取人员账号。走 legacy `integration:read` / `integration:write` 的账号不受影响（`workbench-access.cjs:272,278`）。
   5. **撤销一线在旧表上的授权**，或降为只读（`univer-meta.ts:9797`），免得一线继续往一张没人读的表里填；暂停挂在旧表上的自动化（0924 §1）。
-  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。
+  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。上机手册（owner 决策清单、只读预检、核对、回退）见 `runbook-stock-prep-project-sheets-switch-on-20261014.md`。
   7. 拉取人员把每个项目建一次表；建表前定时试拉会把它们当 ABSENT 跳过。
   8. 只读核对：GET target 的行数要和表格 All Records 一致。
   9. 通知客户：自动化、提醒、自建视图都是按表配置的，新项目表不会自动带过去；旧表里已填的人工列不会带进新表，新表第一次拉取后人工列是空的。
@@ -418,6 +418,7 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 ### 11.2 命名陷阱（S0 / S5a 落实）
 
 1. 演示机现有的一线角色 id 是 `stock-prep-operator`（连字符，frontline plan `:16`）。它不匹配 `stock-prep_` 前缀，委托管理员在可选清单里看不到它、任命路由也会拒（`admin-users.ts:1009`、`:3160`）。**任务**：迁成 `stock-prep_frontline`——新角色由 S5a 播种（原写 S0，2026-10-10 订正），演示机上用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 把成员和表级授权行搬过去，旧角色清空后经单独的 `--delete-empty-old-role` 删除；备选是在应用页里给旧 id 一个只读别名。默认走迁移，写进 §8 第 3 步。**owner 2026-10-12**：合并在上机时做（不再等开开关；随 R66，R65 未含），合并后的内置角色显示名为「操作人员」（id 不变，迁移 `zzzz20261012090000`）；旧角色上多出的平台码由脚本的 `--split-extra-codes-to-role` 按方案 ① 拆到单独的平台角色（§8 第 3 步；拆分是 T 层 `Ratified-by-default-2026-10-12`，不是 owner 原话）。
+   > **2026-10-13 订正（演示机现状）**：旧一线角色 `stock-prep-operator` 已于 2026-10-13 在演示机上删除；一线角色现为「操作人员」（`stock-prep_frontline`）+「审批与提交」（`approvals_operator`），见 `runbook-operator-merge-20261012.md`「执行记录」。
 2. **不能直接用 e-learning 的 `buildPluginRoleId`**：它把非字母数字一律换成 `_`（`rbac/plugin-role-template.ts:21-37`），`stock-prep` 会变成 `stock_prep_<kind>`，同样不匹配。四个内置角色的 id 写成字面量。（e-learning 自己的角色前缀 `plugin-elearning` 和码的命名空间 `elearning` 也不一致：`…add_elearning_role_templates.ts:17-18`。）
 3. **只有主管理员的 id 能以 `_admin` 结尾**。`deriveDelegatedAdminNamespace` 只看后缀（`namespace-admission.ts:105-106`）：如果数据管理员叫 `stock-prep_data_admin`，持有者会被当成命名空间 `stock-prep_data` 的委托管理员（这个名字对 `isNamespaceAdmissionControlledResource` 为真，`:133-137`），能进委托页；只要有人给这个命名空间配了范围，就能把 `stock-prep_data_*` 角色授给别人。自定义角色的 id 由服务端生成，同样禁止 `_admin` 结尾。
 

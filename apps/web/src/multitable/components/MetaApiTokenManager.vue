@@ -56,7 +56,7 @@
             <div class="meta-api-mgr__token-display">
               <code data-new-token-value="true">{{ newTokenPlaintext }}</code>
               <MtButton variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary" data-copy-new-token="true" @click="onCopyNewToken">
-                {{ copiedNewToken ? a('token.action.copied') : a('token.action.copy') }}
+                {{ copiedNewToken ? a('token.action.copied') : copyNewTokenFailed ? a('token.action.copyFailed') : a('token.action.copy') }}
               </MtButton>
             </div>
             <p class="meta-api-mgr__warning">{{ a('token.saveWarning') }}</p>
@@ -423,6 +423,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
@@ -486,6 +487,7 @@ const tokensLoading = ref(false)
 const showTokenForm = ref(false)
 const newTokenPlaintext = ref<string | null>(null)
 const copiedNewToken = ref(false)
+const copyNewTokenFailed = ref(false)
 const tokenDraft = ref({ name: '', scopes: [] as string[], expiresAt: '' })
 // Must match the backend enum ALL_API_TOKEN_SCOPES (packages/core-backend/src/multitable/api-tokens.ts).
 // The old ['read','write','admin'] were rejected by the server (400) — a contract/UI drift.
@@ -718,9 +720,16 @@ async function onCreateToken() {
 
 function onCopyNewToken() {
   if (!newTokenPlaintext.value) return
-  void navigator.clipboard.writeText(newTokenPlaintext.value)
-  copiedNewToken.value = true
-  setTimeout(() => { copiedNewToken.value = false }, 2000)
+  // The plaintext token is never logged; on failure the button says so and the token stays visible
+  // in the <code> block above for a manual copy.
+  void copyText(newTokenPlaintext.value).then((ok) => {
+    copiedNewToken.value = ok
+    copyNewTokenFailed.value = !ok
+    setTimeout(() => {
+      copiedNewToken.value = false
+      copyNewTokenFailed.value = false
+    }, 2000)
+  })
 }
 
 async function onRevokeToken(tokenId: string) {

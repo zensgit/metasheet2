@@ -19,10 +19,22 @@
   ONE notice and NOTHING else: there is deliberately no free-text template-id input, because typing an id
   you cannot read is not a permission the FE may hand out.
 
-  FORM: `client.getApprovalTemplate(id)` gives the active version's fields, rendered GENERICALLY for
-  text / longText / number / select / date / checkbox. Any other type (user, department, attachment,
+  FORM: `client.getApprovalTemplate(id)` gives the served (latest) version's fields, rendered GENERICALLY
+  for text / longText / number / select / date / checkbox. Any other type (user, department, attachment,
   detail, record-link, date_range, …) makes the dialog REFUSE to submit and say so — a partial submit
   that silently drops a field the template requires would create an approval nobody can finish.
+
+  显示条件 / VISIBILITY RULES: fields carrying a visibility rule are shown/hidden by the approval centre's
+  own evaluator (src/approvals/fieldVisibility.ts) over the TYPED values (a number box's '5' is the
+  number 5 the server sees). Hidden fields are not required, lose their draft, and are pruned from the
+  payload — the same contract ApprovalNewView and the server create path apply. An unsupported field
+  type still refuses the whole template even when hidden (its row stays on screen to say which field).
+
+  发起人自选 / REQUESTER CHOICE: record submission carries no requester choice, so a template whose
+  published route has a requester-choice approver/handler is always refused (422
+  APPROVAL_REQUESTER_CHOICE_REQUIRED). The dialog says so in plain language and points at the approval
+  centre. It predicts this BEFORE submit only when the served version IS the active one (equal version
+  ids); otherwise the 422 mapping is the only signal.
 
   409: the route answers RECORD_APPROVAL_IN_FLIGHT when this (record, template) pair already has a
   creating/pending submission. We surface the in-flight request number and — only when a router is
@@ -74,6 +86,7 @@
               class="meta-approval__select"
               data-testid="record-approval-template-select"
               :value="selectedTemplateId"
+              :disabled="submitting"
               @change="onSelectTemplate($event)"
             >
               <option value="">{{ l('approval.templatePlaceholder') }}</option>
@@ -103,7 +116,7 @@
           >{{ l('approval.templateDraftPending') }}</p>
 
           <div v-if="formHasLoaded && selectedTemplateId" class="meta-approval__fields">
-            <div v-for="field in formFields" :key="field.id" class="meta-approval__row">
+            <div v-for="field in renderedFormFields" :key="field.id" class="meta-approval__row">
               <label class="meta-approval__label" :for="fieldControlId(field.id)">
                 {{ field.label }}
                 <span v-if="field.required" class="meta-approval__required" :title="l('approval.requiredMark')">*</span>
@@ -159,13 +172,32 @@
           </div>
 
           <p
+            v-if="formHasLoaded && requesterChoiceBlocked"
+            class="meta-approval__hint meta-approval__hint--warn"
+            role="alert"
+            data-testid="record-approval-requester-choice-notice"
+          >
+            {{ l('approval.errorRequesterChoiceRequired') }}
+            <!-- No query on purpose: a request started there is NOT bound to this record, and the link
+                 must not suggest otherwise. -->
+            <RouterLink
+              v-if="hasRouter && selectedTemplateId"
+              class="meta-approval__link"
+              data-testid="record-approval-requester-choice-link"
+              :to="{ name: 'approval-create', params: { templateId: selectedTemplateId } }"
+            >{{ l('approval.openApprovalCenter') }}</RouterLink>
+          </p>
+
+          <!-- No "fill the required fields" hint while the template is blocked by 发起人自选: filling them
+               would not make it submittable, and the hint would say otherwise. -->
+          <p
             v-if="hasUnsupportedField"
             class="meta-approval__hint meta-approval__hint--warn"
             role="alert"
             data-testid="record-approval-unsupported-notice"
           >{{ l('approval.unsupportedField') }}</p>
           <p
-            v-else-if="selectedTemplateId && !formLoading && !formLoadFailed && missingRequired"
+            v-else-if="selectedTemplateId && !formLoading && !formLoadFailed && !requesterChoiceBlocked && missingRequired"
             class="meta-approval__hint"
             data-testid="record-approval-required-notice"
           >{{ l('approval.requiredMissing') }}</p>
@@ -219,6 +251,8 @@ import {
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { MtButton, MtIconButton } from '../ui'
+import { getVisibleFormFields, pruneHiddenFormData } from '../../approvals/fieldVisibility'
+import type { FormField, FormFieldType, FormSchema } from '../../types/approval'
 import {
   isRecordApprovalInFlightError,
   RECORD_APPROVAL_TEMPLATE_PAGE_SIZE,
@@ -270,6 +304,13 @@ const submitting = ref(false)
 const submitError = ref<string | null>(null)
 const inFlightNotice = ref<{ requestNo?: string; approvalInstanceId?: string } | null>(null)
 
+const REQUESTER_CHOICE_REQUIRED_CODE = 'APPROVAL_REQUESTER_CHOICE_REQUIRED'
+// Values-free boolean from the template read: the SERVED graph has a requester-choice approver/handler.
+const formServedGraphRequiresRequesterChoice = ref(false)
+// Set when the server refused THIS template with 422 APPROVAL_REQUESTER_CHOICE_REQUIRED — the backstop
+// for every case the pre-check below cannot call reliably.
+const requesterChoiceRefused = ref(false)
+
 // Stale-response guard, same closure-counter discipline as MetaRecordProvenancePanel: a load that
 // settles after the dialog closed (or after the actor picked another template) must not write state.
 let activeLoadVersion = 0
@@ -312,9 +353,95 @@ const templateDraftPending = computed(() => Boolean(
   && formActiveVersionId.value !== formLatestVersionId.value,
 ))
 
+// Every draft → the TYPED value that would be sent (checkbox ⇒ boolean, number ⇒ number when it parses,
+// blank ⇒ absent). Visibility is evaluated over THIS, never over the raw string drafts, because the
+// server evaluates the rules over the typed payload.
+function buildTypedFormData(
+  fields: MetaApprovalFormField[],
+  draftValues: Record<string, string | boolean>,
+): Record<string, unknown> {
+  const formData: Record<string, unknown> = {}
+  for (const field of fields) {
+    const kind = renderKind(field)
+    const value = draftValues[field.id]
+    if (kind === 'checkbox') {
+      formData[field.id] = value === true
+      continue
+    }
+    if (typeof value !== 'string' || value.trim().length === 0) continue
+    if (kind === 'number') {
+      const parsed = Number(value)
+      // A non-numeric string in a number box goes over as-is: the server owns validation, and silently
+      // sending NaN (or dropping the field) would turn a typo into an invisible data loss.
+      formData[field.id] = Number.isFinite(parsed) ? parsed : value
+      continue
+    }
+    formData[field.id] = value
+  }
+  return formData
+}
+
+const typedFormData = computed(() => buildTypedFormData(formFields.value, drafts.value))
+
+// The ONE adapter point to the approval centre's schema type. `type` is the RAW wire string (never the
+// render kind): the evaluator only special-cases `date_range` / `explanation`, both of which this
+// dialog refuses as unsupported anyway.
+function toVisibilitySchema(fields: MetaApprovalFormField[]): FormSchema {
+  return {
+    fields: fields.map((field): FormField => ({
+      id: field.id,
+      type: field.type as FormFieldType,
+      label: field.label,
+      ...(field.visibilityRule ? { visibilityRule: field.visibilityRule } : {}),
+    })),
+  }
+}
+
+const visibilitySchema = computed(() => toVisibilitySchema(formFields.value))
+
+const visibleFieldIds = computed(() => new Set(
+  getVisibleFormFields(visibilitySchema.value, typedFormData.value).map((field) => field.id),
+))
+
+const visibleFormFields = computed(() => formFields.value.filter((field) => visibleFieldIds.value.has(field.id)))
+
+// Rows on screen: every visible field, PLUS any unsupported field even when hidden — the template is
+// refused as a whole (hasUnsupportedField below), and the row is what tells the actor which field.
+const renderedFormFields = computed(() => formFields.value.filter(
+  (field) => visibleFieldIds.value.has(field.id) || renderKind(field) === 'unsupported',
+))
+
+// Parity with the approval centre's syncVisibleFormState: a field that becomes hidden LOSES its draft,
+// so hiding then re-showing it comes back empty (never a stale value the actor no longer sees). Watched
+// as a joined id string so an equal set does not re-fire. Deleting a hidden field's draft cannot change
+// any other field's visibility (a field depending on a hidden one is itself hidden), so one pass settles.
+watch(() => [...visibleFieldIds.value].join('\u0000'), () => {
+  const visible = visibleFieldIds.value
+  const stale = Object.keys(drafts.value).filter((fieldId) => !visible.has(fieldId))
+  if (stale.length === 0) return
+  const next = { ...drafts.value }
+  for (const fieldId of stale) delete next[fieldId]
+  drafts.value = next
+})
+
+// Conservative on purpose: evaluated over ALL fields, hidden ones included.
 const hasUnsupportedField = computed(() => formFields.value.some((field) => renderKind(field) === 'unsupported'))
 
-const missingRequired = computed(() => formFields.value.some((field) => {
+// Pre-check ONLY when the served graph IS the active one. The read serves the LATEST version; the server
+// validates the ACTIVE published definition, whose runtime graph is a deep copy of that same version's
+// stored graph (publish reads the latest version row, copies its graph into the published definition and
+// points active_version_id at it; version rows are never re-written except status / publish note). So
+// with equal ids the served graph's requester-choice sources ARE the runtime ones. Unequal or missing
+// ids ⇒ no prediction; the 422 mapping is the backstop.
+const requesterChoicePredicted = computed(() => Boolean(
+  formServedGraphRequiresRequesterChoice.value
+  && formActiveVersionId.value
+  && formLatestVersionId.value
+  && formActiveVersionId.value === formLatestVersionId.value,
+))
+const requesterChoiceBlocked = computed(() => requesterChoicePredicted.value || requesterChoiceRefused.value)
+
+const missingRequired = computed(() => visibleFormFields.value.some((field) => {
   if (!field.required) return false
   const value = drafts.value[field.id]
   if (renderKind(field) === 'checkbox') return value !== true
@@ -329,6 +456,7 @@ const canSubmit = computed(() => Boolean(
   && !formLoadFailed.value
   && !hasUnsupportedField.value
   && !missingRequired.value
+  && !requesterChoiceBlocked.value
   && !submitting.value,
 ))
 
@@ -351,6 +479,8 @@ function resetFormState(): void {
   formLoadFailed.value = false
   formActiveVersionId.value = undefined
   formLatestVersionId.value = undefined
+  formServedGraphRequiresRequesterChoice.value = false
+  requesterChoiceRefused.value = false
   drafts.value = {}
   submitError.value = null
   inFlightNotice.value = null
@@ -418,6 +548,7 @@ async function loadTemplateForm(templateId: string): Promise<void> {
     formFields.value = detail.formFields
     formActiveVersionId.value = detail.activeVersionId
     formLatestVersionId.value = detail.latestVersionId
+    formServedGraphRequiresRequesterChoice.value = detail.servedGraphRequiresRequesterChoice === true
     drafts.value = {}
   } catch {
     if (loadVersion !== activeLoadVersion) return
@@ -428,45 +559,42 @@ async function loadTemplateForm(templateId: string): Promise<void> {
   }
 }
 
+// What is sent: the typed values with every HIDDEN field pruned — exactly what the approval centre's
+// buildSubmitFormData sends and what the server create path keeps after its own prune.
 function buildFormData(): Record<string, unknown> {
-  const formData: Record<string, unknown> = {}
-  for (const field of formFields.value) {
-    const kind = renderKind(field)
-    const value = drafts.value[field.id]
-    if (kind === 'checkbox') {
-      formData[field.id] = value === true
-      continue
-    }
-    if (typeof value !== 'string' || value.trim().length === 0) continue
-    if (kind === 'number') {
-      const parsed = Number(value)
-      // A non-numeric string in a number box goes over as-is: the server owns validation, and silently
-      // sending NaN (or dropping the field) would turn a typo into an invisible data loss.
-      formData[field.id] = Number.isFinite(parsed) ? parsed : value
-      continue
-    }
-    formData[field.id] = value
-  }
-  return formData
+  return pruneHiddenFormData(visibilitySchema.value, typedFormData.value)
 }
 
 async function onSubmit(): Promise<void> {
   if (!canSubmit.value) return
+  // The template this request is FOR. The picker is disabled while `submitting`, so within one dialog
+  // session a failure lands — visibly — on the template it was sent for. A close/reopen resets
+  // `submitting`, though, and the actor may then pick another template while this request is still in
+  // flight: every failure state below is about THIS template, and is dropped once the selection differs.
+  // A success is still emitted unconditionally — the server did create the request.
+  const submitTemplateId = selectedTemplateId.value
   submitting.value = true
   submitError.value = null
   inFlightNotice.value = null
   try {
     const submission = await props.client.submitRecordApproval(props.sheetId, props.recordId, {
-      templateId: selectedTemplateId.value,
+      templateId: submitTemplateId,
       formData: buildFormData(),
     })
     emit('submitted', submission)
   } catch (error) {
-    if (isRecordApprovalInFlightError(error)) {
+    if (selectedTemplateId.value !== submitTemplateId) {
+      // Stale: the actor moved on (resetFormState already cleared the previous template's notices).
+    } else if (isRecordApprovalInFlightError(error)) {
       inFlightNotice.value = {
         ...(error.requestNo ? { requestNo: error.requestNo } : {}),
         ...(error.approvalInstanceId ? { approvalInstanceId: error.approvalInstanceId } : {}),
       }
+    } else if ((error as { code?: string })?.code === REQUESTER_CHOICE_REQUIRED_CODE) {
+      // Not a transient failure: resubmitting this template from here can never succeed, so the
+      // dedicated notice (with the approval-centre link) replaces the generic error and submit stays off.
+      requesterChoiceRefused.value = true
+      submitError.value = null
     } else {
       // The route's refusals are fixed ENGLISH sentences ('Insufficient permissions', 'Approval template
       // is not published', …) which the shared client surfaces verbatim — render them by CODE instead. An

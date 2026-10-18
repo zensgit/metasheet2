@@ -1,9 +1,32 @@
 <template>
-  <section class="grading-view" aria-labelledby="grading-view-title">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="grading-view"
+    aria-labelledby="grading-view-title"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <header class="grading-view__header">
       <h1 id="grading-view-title">{{ elearningLabel('grading.title', isZh) }}</h1>
       <p>{{ elearningLabel('grading.subtitle', isZh) }}</p>
     </header>
+
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="loading"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
 
     <ElearningManualGradingAttempt
       v-if="selectedAttemptId"
@@ -49,7 +72,7 @@
         data-testid="elearning-grading-error"
         role="alert"
       >
-        {{ errorMessage }}
+        {{ explainOrgContext(errorMessage) }}
       </p>
       <template v-else>
         <p
@@ -89,7 +112,7 @@
               <td>{{ item.userId }}</td>
               <td>{{ item.examTitle }}</td>
               <td>{{ item.courseTitle }}</td>
-              <td>{{ item.submittedAt }}</td>
+              <td>{{ formatElearningDate(item.submittedAt, isZh) }}</td>
               <td>{{ elearningManualGradingProgressLabel(item.gradedQuestions, item.manualQuestions) }}</td>
               <td>
                 <button
@@ -134,6 +157,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import { ElearningApiError } from '../services/elearning'
 import {
   listElearningManualGradingQueue,
@@ -145,9 +171,27 @@ import {
   elearningManualGradingErrorMessage,
   elearningManualGradingProgressLabel,
   elearningManualGradingQueuePageLabel,
+  formatElearningDate,
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
+  changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
 
 const loading = ref(false)
 const closed = ref(false)

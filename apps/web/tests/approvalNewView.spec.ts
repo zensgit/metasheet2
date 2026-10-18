@@ -289,7 +289,11 @@ const ElInput = defineComponent({
     return h('input', {
       'data-el-input': 'true',
       value: this.modelValue ?? '',
-      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): no update when the typed text is unchanged.
+      onInput: (e: Event) => {
+        const text = (e.target as HTMLInputElement).value
+        if (text !== String(this.modelValue ?? '')) this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -2788,6 +2792,9 @@ describe('O-8 / F8-1 — ApprovalNewView English render scan', () => {
     const steps = Array.from(container!.querySelectorAll('[data-testid="approval-flow-preview-step"]')).map((el) => el.textContent ?? '')
     expect(steps.length, 'flow preview walks to the condition node').toBe(5)
     expect(steps.join(' | ')).toContain('Continues by condition')
+    // R-43 (B): the branch rule `kind in ['travel', 'other']` shows the option NAMES, not the values.
+    expect(steps.join(' | ')).toContain('Kind in "Travel", "Other"')
+    expect(steps.join(' | ')).not.toContain('"travel"')
     ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
     await flushUi()
     const route = Array.from(container!.querySelectorAll('[data-testid="approval-route-preview-node"]')).map((el) => el.textContent ?? '')

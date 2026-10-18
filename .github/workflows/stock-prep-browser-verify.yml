@@ -107,8 +107,10 @@ jobs:
                 apps/web/src/utils/api.ts|\
                 apps/web/src/utils/delete-fallback.ts|\
                 apps/web/src/utils/explicitSessionOrg.ts|\
+                apps/web/src/utils/uuid.ts|\
                 apps/web/src/utils/authRedirect.ts|\
                 apps/web/src/views/plm/plmClipboard.ts|\
+                apps/web/src/utils/clipboard.ts|\
                 apps/web/tests/StockPreparation*.spec.ts|\
                 apps/web/tests/stockPrep*.spec.ts|\
                 apps/web/verification/stock-prep-*|\

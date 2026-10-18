@@ -154,8 +154,8 @@
         </button>
         <!-- Copy-link icon: PR-A shipped the button + `copy-link` emit; record inspector v3 PR-B1
              (§1.3 "Copy link") adds the disabled-when-absent gate here (`copyLinkAvailable`, read once
-             at setup — the Clipboard API is a page-lifetime capability, not a live signal) and, in the
-             workbench, the `navigator.clipboard.writeText(window.location.href)` write plus the
+             at setup via `canCopyText()` — a page-lifetime capability, not a live signal) and, in the
+             workbench, the `copyText(window.location.href)` write plus the
              `record.copyLinkDone` / `record.copyLinkFailed` status through MetaToast's existing
              `aria-live="polite"` region. This component still only EMITS — no clipboard access here. -->
         <MtIconButton size="sm" :disabled="!copyLinkAvailable" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
@@ -225,6 +225,18 @@
             :title="l('record.submitApprovalTitle')"
             @select="showApprovalSubmit = true"
           >{{ l('record.submitApproval') }}</MtMenuItem>
+          <!-- 派发任务 (R-45 step 1): creates a real task in the task centre from this record. Shown only
+               where the top bar's 任务 entry is (same rule, `canDispatchTasks` in tasks/tasksAccess.ts)
+               and the viewer holds tasks:write, only when the page hands a dispatch binding, and only
+               with the ids the source link needs (sheetId + viewId + record). Otherwise the menu is
+               unchanged. -->
+          <MtMenuItem
+            v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-dispatch-task"
+            :title="l('record.dispatchTaskTitle')"
+            @select="showTaskDispatch = true"
+          >{{ l('record.dispatchTask') }}</MtMenuItem>
           <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
@@ -496,6 +508,26 @@
       @close="showApprovalSubmit = false"
       @submitted="onApprovalSubmitted"
     />
+    <!-- 派发任务 dialog: a child with its own local open state, like the 送审 dialog above. Keyed by
+         record id so each record gets a fresh form. The state of a dispatch that is out or done
+         (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
+         (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
+         lose a result or allow a second create, and the dialog captures the record link at submit.
+         `binding` is the page's dispatch binding (the signed-in user and org the page was set up
+         under, changed for good once another is seen); the dialog sends nothing under any other
+         (tasks/recordTaskDispatchIdentity.ts). -->
+    <MetaRecordTaskDispatchDialog
+      v-if="canDispatchTask && dispatchBinding && sheetId && viewId && record"
+      :key="record.id"
+      :visible="showTaskDispatch"
+      :default-title="dispatchDefaultTitle"
+      :person-fields="dispatchPersonFields"
+      :person-summaries="personSummariesByField"
+      :record-link="dispatchRecordLink"
+      :binding="dispatchBinding"
+      :run-key="dispatchRunKey(dispatchBinding.identity, sheetId, record.id)"
+      @close="showTaskDispatch = false"
+    />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
          LAST — absolute positioning (unchanged, see this element's own style rule) keeps it
          visually pinned to the panel's left edge either way, but DOM order also drives Tab order,
@@ -518,6 +550,7 @@
 </template>
 
 <script setup lang="ts">
+import { canCopyText } from '../../utils/clipboard'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import type {
@@ -547,6 +580,7 @@ import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
 import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
 import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
+import MetaRecordTaskDispatchDialog, { type DispatchPersonField } from './MetaRecordTaskDispatchDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
@@ -558,6 +592,15 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { useLocale } from '../../composables/useLocale'
+import { useAuth } from '../../composables/useAuth'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { canDispatchTasks } from '../../tasks/tasksAccess'
+import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
+import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import type { DispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
+import { AppRouteNames } from '../../router/types'
+import { isNativePersonField } from '../utils/link-fields'
 import {
   recordLabel,
   recordPosition,
@@ -571,6 +614,7 @@ import {
   resolveCanComment,
   resolvePrimaryField,
   textControlValue,
+  visibleRecordFields,
   type MetaRecordInspectorFieldLayout,
 } from '../utils/recordDisplay'
 
@@ -600,6 +644,16 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
   sheetId?: string
+  /** 派发任务 (R-45 step 1): the ids of the record's deep link written into the task description.
+   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden. The deprecated
+   *  MetaRecordDrawer shell does not declare it (a caller of that shell that passes `view-id` still
+   *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
+  viewId?: string
+  baseId?: string
+  /** 派发任务: the binding of the page holding this drawer (`createDispatchBinding()`, made by the
+   *  workbench, which also checks it before each multitable request). Without it 派发任务 is not
+   *  offered: only the owner of the record data can say which identity it was read under. */
+  dispatchBinding?: DispatchBinding | null
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
@@ -768,13 +822,16 @@ const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
 // See the inbox-link template comment above: `inject(routerKey, null)` is a defaulted (non-throwing)
 // `inject()`, so capturing it once here is safe even in the several pre-existing router-less test
 // harnesses that mount this shell.
-const hasRouter = !!inject(routerKey, null)
+const injectedRouter = inject(routerKey, null)
+const hasRouter = !!injectedRouter
 
 const showRecordPermissions = ref(false)
 // 记录级送审 (阶段二 §5): local open state for the child submit dialog + the counter that tells the
 // approvals panel to re-read after a successful submit (see both components' own comments).
 const showApprovalSubmit = ref(false)
 const approvalRefreshToken = ref(0)
+// 派发任务 (R-45 step 1): local open state for the child dispatch dialog.
+const showTaskDispatch = ref(false)
 
 function onApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
   showApprovalSubmit.value = false
@@ -1383,6 +1440,7 @@ watch(() => props.record, (next, prev) => {
   if (next?.id === prev?.id) return
   showApprovalSubmit.value = false
   showRecordPermissions.value = false
+  showTaskDispatch.value = false
 })
 
 watch(
@@ -1430,11 +1488,11 @@ const canEditPrimaryTitle = computed(() => {
 // (not in the fields panel) because the control sits in the tabs bar, outside the details tabpanel,
 // and must survive tab switches + record navigation within one open panel; a remount resets it.
 const hideEmpty = ref(false)
-// Copy-link availability: `navigator.clipboard.writeText` is a page-lifetime capability (secure
-// context + browser support), read ONCE at setup; the icon is disabled when it is absent (design
-// §1.3 "item disabled when clipboard API absent"). The write itself lives in the workbench.
-const copyLinkAvailable = typeof navigator !== 'undefined'
-  && typeof navigator.clipboard?.writeText === 'function'
+// Copy-link availability: any copy mechanism (the async Clipboard API, or the execCommand fallback
+// that plain-HTTP intranet deployments rely on — see utils/clipboard.ts) is a page-lifetime
+// capability, read ONCE at setup; the icon is disabled only when neither exists (design §1.3 "item
+// disabled when clipboard API absent"). The write itself lives in the workbench.
+const copyLinkAvailable = canCopyText()
 const primaryFieldRawValue = computed(() => {
   const field = primaryField.value
   return field && props.record ? props.record.data[field.id] : undefined
@@ -1453,6 +1511,66 @@ const primaryFieldDisplayText = computed(() => {
     attachmentSummariesByField: props.attachmentSummariesByField,
     isZh: isZh.value,
   })
+})
+
+// --- 派发任务 (R-45 step 1) -----------------------------------------------------------------------
+// The entry's gate is the top bar's 任务 rule plus tasks:write (`canDispatchTasks`). `hasPermission`
+// reads the stored access snapshot, which is not reactive, so the gate is re-read on every open and
+// record move, the way App.vue re-reads it on every route change.
+const featureFlags = useFeatureFlags()
+const auth = useAuth()
+const canDispatchTask = computed(() => {
+  void props.visible
+  void props.record?.id
+  return canDispatchTasks({
+    hasFeature: featureFlags.hasFeature,
+    hasPermission: auth.hasPermission,
+    isAttendanceFocused: featureFlags.isAttendanceFocused,
+    isPlmWorkbenchFocused: featureFlags.isPlmWorkbenchFocused,
+  })
+})
+// The page's dispatch binding (tasks/recordTaskDispatchIdentity.ts): a dispatch is sent only under the
+// identity it holds, and not at all once another identity has been seen on the page. No binding, no
+// 派发任务 (see the prop).
+const dispatchBinding = computed(() => props.dispatchBinding ?? null)
+// The title the dispatcher confirms: the header's own display text of the primary field, or nothing
+// when that value is empty (the header's '—' placeholder is not a title).
+const dispatchDefaultTitle = computed(() => {
+  const raw = primaryFieldRawValue.value
+  const empty = raw === null || raw === undefined
+    || (typeof raw === 'string' && raw.trim() === '')
+    || (Array.isArray(raw) && raw.length === 0)
+  return empty ? '' : primaryFieldDisplayText.value
+})
+// Native person fields the viewer can see (a legacy link-backed person stores record ids, not user
+// ids, so it is not offered), each with this record's valid user ids. "Can see" is both masks the
+// details tab applies: the field permission and the field's own hidden property.
+const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
+  const record = props.record
+  if (!record) return []
+  return filterPropertyVisibleFields(visibleRecordFields(props.fields, props.fieldPermissions))
+    .filter((field) => isNativePersonField(field))
+    .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
+})
+// The record's deep link, ids only: the same route + `?recordId=` query the comment inbox opens a
+// record with. Resolved through the router when there is one (the app may be served under a base
+// path), built by hand otherwise.
+const dispatchRecordLink = computed(() => {
+  const sheetId = props.sheetId
+  const viewId = props.viewId
+  const recordId = props.record?.id
+  if (!sheetId || !viewId || !recordId) return ''
+  const query: Record<string, string> = {}
+  if (props.baseId) query.baseId = props.baseId
+  query.recordId = recordId
+  if (injectedRouter) {
+    try {
+      return injectedRouter.resolve({ name: AppRouteNames.MULTITABLE, params: { sheetId, viewId }, query }).href
+    } catch {
+      // A router without the multitable route (a test harness): fall through to the plain path.
+    }
+  }
+  return `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${new URLSearchParams(query).toString()}`
 })
 
 function onTitleChange(event: Event) {

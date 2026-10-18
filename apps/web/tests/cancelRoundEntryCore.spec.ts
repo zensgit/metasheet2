@@ -67,7 +67,7 @@ afterEach(() => {
 
 describe('cancelRound status domain (P-2)', () => {
   it('every round state names its subject and differs from the approvalInstance words', () => {
-    const subjects = ['撤销', '请假']
+    const subjects = ['撤销', '请假', '出差']
     for (const key of CANCEL_ROUND_STATUS_KEYS) {
       const zh = resolveStatusDisplay('cancelRound', key, true)
       expect(subjects.some((subject) => zh.label.includes(subject)), `${key}: ${zh.label}`).toBe(true)
@@ -208,12 +208,12 @@ describe('error copy (P-7 / P-8 / P-6′)', () => {
   it('business_blocked: CANCEL_ROUND_DOCUMENT_NOT_APPROVED (original leave no longer approved at decision time) has its own pinned copy — one example cause, never the category or the creation-time copy', () => {
     const code = 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED'
     expect(describeCancelRoundBlock(code, true)).toEqual({
-      message: '该请假已不再是已通过状态(例如已被取消),本次撤销未执行',
+      message: '该申请已不再是已通过状态(例如已被取消),本次撤销未执行',
       code,
       known: true,
     })
     expect(describeCancelRoundBlock(code, false)).toEqual({
-      message: 'This leave is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
+      message: 'This request is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
       code,
       known: true,
     })

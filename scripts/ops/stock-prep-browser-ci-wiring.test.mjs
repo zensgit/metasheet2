@@ -186,7 +186,10 @@ function openClassifierSession(script) {
       return relevant === 'true'
     },
     close() {
-      rmSync(fixtureRoot, { recursive: true, force: true })
+      // The last `git commit` may leave a detached child (auto maintenance) still writing under
+      // `.git/objects`; a plain recursive rm then races it and fails with ENOTEMPTY (seen twice on
+      // CI, 2026-10-13). Retry the removal instead of failing the suite on fixture cleanup.
+      rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 150 })
     },
   }
 }

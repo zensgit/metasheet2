@@ -9,9 +9,7 @@ import { restoreAttendanceSettingsRow, snapshotAttendanceSettingsRow } from '../
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 if (!dbUrl) throw new Error('LIVE_PUNCH_ORDER_REQUIRES_DATABASE_URL')
-const orgId = `punch_order_${randomUUID().replace(/-/g, '')}`
-const userIds: string[] = []
-const shiftIds: string[] = []
+let orgId = ''
 const day = '2026-08-19'
 
 type Punch = { eventType: 'check_in' | 'check_out'; occurredAt: string; timezone?: string }
@@ -32,19 +30,30 @@ describe('live punch order and original event evidence (real HTTP and PostgreSQL
     return { status: response.status, body: await response.json() as WireResponse }
   }
 
-  async function user() {
+  async function user(timezone = 'Asia/Shanghai') {
+    orgId = 'punch_order_' + randomUUID().replace(/-/g, '')
     const id = randomUUID()
-    userIds.push(id)
     await pool.query(
       `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
        VALUES ($1, $2, $1, 'punch order fixture', 'fixture', 'user', '[]'::jsonb, true, false)`,
       [id, `${id}@punch-order.test`],
     )
     await pool.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)', [id, orgId])
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [id, ['attendance:read', 'attendance:write', 'attendance:admin']],
+    )
     const minted = await request(`/api/auth/dev-token?userId=${id}&tenantId=${orgId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`, undefined, undefined, 'GET')
     expect(minted.status).toBe(200)
     const token = minted.body.token
     if (!token) throw new Error('LIVE_PUNCH_ORDER_TOKEN_MISSING')
+    const configured = await request('/api/attendance/rules/default', token, {
+      orgId, timezone, workStartTime: '09:00', workEndTime: '18:00',
+      lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [0, 1, 2, 3, 4, 5, 6],
+    }, 'PUT')
+    expect(configured.status).toBe(200)
     return { id, token }
   }
 
@@ -77,26 +86,13 @@ describe('live punch order and original event evidence (real HTTP and PostgreSQL
     if (!address || typeof address === 'string') throw new Error('LIVE_PUNCH_ORDER_HTTP_UNAVAILABLE')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
-    const admin = await user()
-    const configured = await request('/api/attendance/rules/default', admin.token, {
-      orgId, timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00',
-      lateGraceMinutes: 10, earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [0, 1, 2, 3, 4, 5, 6],
-    }, 'PUT')
-    expect(configured.status).toBe(200)
   }, 180_000)
 
   afterAll(async () => {
     await server?.stop()
-    if (pool) {
-      await pool.query('DELETE FROM attendance_events WHERE org_id = $1', [orgId])
-      await pool.query('DELETE FROM attendance_records WHERE org_id = $1', [orgId])
-      await pool.query('DELETE FROM attendance_shift_assignments WHERE org_id = $1', [orgId])
-      await pool.query('DELETE FROM attendance_shifts WHERE org_id = $1 AND id = ANY($2::uuid[])', [orgId, shiftIds])
-      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [orgId])
-      await pool.query('DELETE FROM user_orgs WHERE org_id = $1', [orgId])
-      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds])
-      await pool.end()
-    }
+    // Frozen companions and their original record/source rows are immutable history.
+    // Each actor owns a fresh org; the isolated database owns final cleanup.
+    await pool?.end()
     for (const [key, value] of Object.entries(previousEnv)) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
@@ -104,7 +100,7 @@ describe('live punch order and original event evidence (real HTTP and PostgreSQL
   }, 60_000)
 
   it.each(['Asia/Shanghai', 'Asia/Taipei'])('keeps an early-in / late-out day in %s together with original instants and polarity', async (timezone) => {
-    const actor = await user()
+    const actor = await user(timezone)
     const inputs: Punch[] = [
       { eventType: 'check_in', occurredAt: `${day}T08:55:00+08:00`, timezone },
       { eventType: 'check_out', occurredAt: `${day}T18:05:00+08:00`, timezone },
@@ -164,8 +160,7 @@ describe('live punch order and original event evidence (real HTTP and PostgreSQL
     })
     expect(shift.status).toBe(201)
     const shiftId = String(shift.body.data?.id)
-    shiftIds.push(shiftId)
-    expect((await request('/api/attendance/assignments', actor.token, { orgId, userId: actor.id, shiftId, startDate: day, isActive: true })).status).toBe(201)
+    expect((await request('/api/attendance/assignments', actor.token, { orgId, userId: actor.id, shiftId, startDate: day, endDate: day, isActive: true })).status).toBe(201)
     const inputs: Punch[] = [
       { eventType: 'check_in', occurredAt: `${day}T22:05:00+08:00` },
       { eventType: 'check_out', occurredAt: '2026-08-20T05:55:00+08:00' },

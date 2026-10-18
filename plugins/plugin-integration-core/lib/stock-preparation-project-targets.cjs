@@ -59,6 +59,8 @@ const {
   preflightCustomerPackInstallCapabilities,
 } = require('./stock-preparation-customer-pack-installer.cjs')
 const { LIVE_STATUSES: PACK_INSTALL_LIVE_STATUSES } = require('./stock-preparation-pack-install-store.cjs')
+// G1 field defect (R67): the contract option sets (server-held), written onto THIS project sheet.
+const { syncStockPreparationContractOptionsForObject } = require('./stock-preparation-option-sync.cjs')
 
 const PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
 // G1: comma-separated role ids that receive `spreadsheet:write` on every project sheet at create
@@ -240,9 +242,23 @@ async function resolveProjectTargetForAction({
  * `permission: 'admin'` is the module's server-side capability constant (target-provisioning.cjs
  * `REQUIRED_PERMISSION`), passed by the ROUTE after its own `stock-prep:pull` gate — it says nothing
  * about the caller's tier. The route is the named exception to R-11 (register R-35).
+ *
+ * G1 FIELD DEFECT (R67): THE CONTRACT OPTION SETS. `ensureObject` lands the template's columns but no
+ * option list, and the only writer of the contract set (`syncStockPreparationOptionsForTarget`) always
+ * targets the DEPLOYMENT object — so every project sheet was born with an empty 最近刷新决定 select and
+ * every apply row failed `select_option_not_found`. The sync now runs here, on EVERY call (the create
+ * leg and an already-ready sheet alike: a retry after a failure later in the create re-runs it; it is
+ * idempotent), contract fields only, server-held sets only. A host without the field-metadata port is
+ * refused BEFORE anything is provisioned (a sheet that cannot carry the set is the defect itself); a
+ * patch that fails AFTER the ensure propagates as one typed code — the route registers nothing, and
+ * the same POST reuses the one table (ensure-if-absent by the derived objectId) and syncs again.
  */
 async function provisionProjectSheet({ context, projectId, tenantId, projectNo, env = process.env, locale } = {}) {
   const template = projectSheetTemplate({ tenantId, projectNo })
+  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+  if (!provisioning || typeof provisioning.patchObjectFieldProperty !== 'function') {
+    throw new StockPreparationProjectTargetError(503, 'STOCK_PREPARATION_PROJECT_TARGET_PROVISIONING_UNAVAILABLE', 'a project sheet needs its contract option sets; this host cannot write field metadata (multitable.provisioning.patchObjectFieldProperty)', { requiredMethods: ['patchObjectFieldProperty'] })
+  }
   const ensured = await ensureStockPreparationCanonicalTarget({
     context,
     projectId,
@@ -253,7 +269,6 @@ async function provisionProjectSheet({ context, projectId, tenantId, projectNo, 
     env,
     locale,
   })
-  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
   const sheetId = ensured && ensured.target && ensured.target.sheetId ? String(ensured.target.sheetId) : null
   if (!sheetId) {
     throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_SHEET_UNKNOWN', 'the project sheet was ensured but no sheet id came back', { objectId: template.objectId })
@@ -276,6 +291,7 @@ async function provisionProjectSheet({ context, projectId, tenantId, projectNo, 
       todoView = { created: false, skipped: 'ensure_failed', viewId: null }
     }
   }
+  const options = await syncProjectSheetContractOptions({ provisioning, projectId, objectId: template.objectId })
   return {
     created: ensured.mode === 'canonical_create',
     mode: ensured.mode,
@@ -285,6 +301,41 @@ async function provisionProjectSheet({ context, projectId, tenantId, projectNo, 
     fillView: ensured.fillView || null,
     todoView,
     ownBaseSource: ensured.evidence ? ensured.evidence.ownBaseSource : null,
+    options,
+  }
+}
+
+/**
+ * G1 field defect (R67): the contract option sets onto ONE project sheet — the create path above and
+ * the registry-resolved repair route. `objectId` is the caller's server-held handle (the derived id it
+ * just ensured, or the registry row's). Returns a values-free summary (`synced` = contract fields
+ * written, `skipped` = contract fields with no server-held set, `fieldIds`, `optionCount`) plus the
+ * kernel's own evidence; any failure is ONE typed code carrying the option-sync code, never a value.
+ */
+async function syncProjectSheetContractOptions({ provisioning, projectId, objectId } = {}) {
+  let result
+  try {
+    result = await syncStockPreparationContractOptionsForObject({ provisioning, projectId, objectId })
+  } catch (error) {
+    const status = error && Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500
+    const code = error && typeof error.code === 'string' && PROJECT_SHEET_PACK_INSTALL_CODE_PATTERN.test(error.code) ? error.code : 'OPTION_SYNC_FAILED'
+    const wrapped = new StockPreparationProjectTargetError(
+      status,
+      'STOCK_PREPARATION_PROJECT_TARGET_OPTIONS_SYNC_FAILED',
+      'the project sheet\'s contract option sets could not be written; the same request can be retried',
+      { objectId, optionSyncCode: code },
+    )
+    wrapped.cause = error
+    throw wrapped
+  }
+  const fields = result.evidence && Array.isArray(result.evidence.fields) ? result.evidence.fields : []
+  const skipped = result.evidence && Array.isArray(result.evidence.skipped) ? result.evidence.skipped : []
+  return {
+    synced: fields.length,
+    skipped: skipped.length,
+    fieldIds: fields.map((entry) => entry.field),
+    optionCount: fields.reduce((total, entry) => total + (Number.isInteger(entry.optionCount) ? entry.optionCount : 0), 0),
+    evidence: result.evidence,
   }
 }
 
@@ -605,6 +656,7 @@ module.exports = {
   buildProjectTargetBinding,
   resolveProjectTargetForAction,
   provisionProjectSheet,
+  syncProjectSheetContractOptions,
   grantProjectSheetRoles,
   PROJECT_SHEET_TENANT_CLAIM_REQUIRED_CODE,
   planProjectSheetCustomerPacks,

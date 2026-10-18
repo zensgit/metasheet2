@@ -298,6 +298,39 @@ function templateOptionFields(template) {
   return template.fields.filter((field) => field.type === 'select' && field.optionSource)
 }
 
+/** The template's CONTRACT select fields only — never a `config_info` one (those come from the customer). */
+function templateContractOptionFields(template) {
+  return templateOptionFields(template).filter((field) => field.optionSource.type === 'contract')
+}
+
+// The stock-prep patch body and skip vocabulary, shared by the deployment-target sync below and the
+// project-sheet contract sync, so the two cannot write different field metadata for the same set.
+function stockPreparationOptionPropertyPatch(field, set) {
+  return {
+    options: set.options.map((option) => {
+      const out = { value: option.value }
+      if (option.label) out.label = option.label
+      if (option.color) out.color = option.color
+      if (option.disabled) out.disabled = true
+      return out
+    }),
+    stockPreparation: {
+      optionSource: { ...field.optionSource },
+      optionSync: {
+        sourceType: field.optionSource.type,
+        sourceKey: field.optionSource.key,
+        optionCount: set.options.length,
+        actionBindingCount: set.actionBindings.length,
+      },
+      optionActionBindings: set.actionBindings,
+    },
+  }
+}
+
+function stockPreparationOptionSkipReason(field) {
+  return field.optionSource.type === 'config_info' ? 'config_info_not_supplied' : 'contract_not_available'
+}
+
 function summarizeOptionSyncEvidence({ template, synced, skipped, includeObjectId = true }) {
   const targetIdentity = includeObjectId
     ? { objectId: template.objectId }
@@ -404,27 +437,8 @@ async function syncStockPreparationOptionsForTarget(input = {}) {
     targetObjectId: template.objectId,
     optionFields: templateOptionFields(template),
     optionSets,
-    buildPropertyPatch: (field, set) => ({
-      options: set.options.map((option) => {
-        const out = { value: option.value }
-        if (option.label) out.label = option.label
-        if (option.color) out.color = option.color
-        if (option.disabled) out.disabled = true
-        return out
-      }),
-      stockPreparation: {
-        optionSource: { ...field.optionSource },
-        optionSync: {
-          sourceType: field.optionSource.type,
-          sourceKey: field.optionSource.key,
-          optionCount: set.options.length,
-          actionBindingCount: set.actionBindings.length,
-        },
-        optionActionBindings: set.actionBindings,
-      },
-    }),
-    resolveSkipReason: (field) =>
-      field.optionSource.type === 'config_info' ? 'config_info_not_supplied' : 'contract_not_available',
+    buildPropertyPatch: stockPreparationOptionPropertyPatch,
+    resolveSkipReason: stockPreparationOptionSkipReason,
     errorFactory: {
       patchFailed: ({ field, sourceKey, error }) =>
         new StockPreparationOptionSyncError(422, 'OPTION_SYNC_FIELD_PATCH_FAILED', 'failed to patch stock-preparation option field metadata', {
@@ -464,6 +478,82 @@ async function syncStockPreparationOptions(input = {}) {
   return syncStockPreparationOptionsForTarget(input)
 }
 
+/**
+ * G1 field defect (R67): THE CONTRACT OPTION SETS ON ONE NAMED OBJECT — a project sheet.
+ *
+ * `syncStockPreparationOptionsForTarget` always writes the template's own objectId (the deployment
+ * target), so a `_p_` project sheet was created with NO options on its contract select column
+ * (`lastPlmRefreshDecision`) and every apply row failed `select_option_not_found` on `createRecord`.
+ * This writes the SAME field metadata the deployment sync writes for a contract source — the same
+ * patch body (`stockPreparationOptionPropertyPatch`), through the same kernel — onto `objectId`, with
+ * three narrowings that are the point of it:
+ *
+ *   * CONTRACT FIELDS ONLY. A `config_info` select (材料类型 / 毛胚类型 / 备料状态 / 自制外购) is never
+ *     touched: its options come from the customer's config tables, by design, through the admin route.
+ *   * SERVER-HELD SETS ONLY. The option sets are `DEFAULT_CONTRACT_OPTION_SETS`; there is no input for
+ *     a caller-supplied set, so no request can put a value onto a project sheet through this path.
+ *   * THE OBJECT IS THE CALLER'S DECISION, AND ONLY TWO CALLERS MAKE IT: `provisionProjectSheet` (the
+ *     objectId it just derived and ensured) and the registry-resolved repair route (the registry row's
+ *     objectId). Neither takes an objectId from a request.
+ *
+ * Idempotent: `replace` + `update_from_source` writes the same body every time. Values-free result:
+ * field ids, source keys, counts — the same evidence shape the deployment sync returns.
+ */
+async function syncStockPreparationContractOptionsForObject(input = {}) {
+  const provisioning = input.provisioning
+  if (!provisioning || typeof provisioning.patchObjectFieldProperty !== 'function') {
+    throw new StockPreparationOptionSyncError(
+      503,
+      'OPTION_SYNC_API_UNAVAILABLE',
+      'C6 option sync requires multitable.provisioning patchObjectFieldProperty API',
+      { requiredMethods: ['patchObjectFieldProperty'] },
+    )
+  }
+  const projectId = assertSafeString(input.projectId, 'projectId')
+  const objectId = assertSafeString(input.objectId, 'objectId')
+  const template = normalizeStockPreparationTemplate({
+    ...(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE),
+    objectId,
+  })
+  const optionSets = {}
+  for (const [key, options] of Object.entries(DEFAULT_CONTRACT_OPTION_SETS)) {
+    optionSets[key] = normalizeOptionSet(options, key)
+  }
+  const { synced: syncedRaw, skipped } = await syncFieldOptions({
+    provisioning,
+    projectId,
+    targetObjectId: objectId,
+    optionFields: templateContractOptionFields(template),
+    optionSets,
+    buildPropertyPatch: stockPreparationOptionPropertyPatch,
+    resolveSkipReason: stockPreparationOptionSkipReason,
+    errorFactory: {
+      patchFailed: ({ field, sourceKey, error }) =>
+        new StockPreparationOptionSyncError(422, 'OPTION_SYNC_FIELD_PATCH_FAILED', 'failed to patch stock-preparation option field metadata', {
+          field,
+          sourceKey,
+          errorCode: (error && (error.code || error.name)) || 'FIELD_PATCH_FAILED',
+        }),
+      noFieldsSynced: ({ targetObjectId, skipped: skippedEntries }) =>
+        new StockPreparationOptionSyncError(422, 'OPTION_SYNC_NO_FIELDS', 'no stock-preparation option fields were synchronized', {
+          targetObjectId,
+          skipped: skippedEntries.map((entry) => ({ field: entry.field, reason: entry.reason })),
+        }),
+    },
+  })
+  const synced = syncedRaw.map((entry) => ({
+    field: entry.field,
+    optionSource: entry.optionSource,
+    optionCount: entry.set.options.length,
+    actionBindingCount: entry.set.actionBindings.length,
+  }))
+  return {
+    ok: true,
+    target: { objectId, fieldCount: synced.length },
+    evidence: summarizeOptionSyncEvidence({ template, synced, skipped, includeObjectId: true }),
+  }
+}
+
 async function syncStockPreparationSandboxOptions(input = {}) {
   const context = input.context || {}
   const projectId = assertSafeString(input.projectId, 'projectId')
@@ -495,6 +585,7 @@ module.exports = {
   optionSetsFromInput,
   syncStockPreparationOptions,
   syncStockPreparationSandboxOptions,
+  syncStockPreparationContractOptionsForObject,
   summarizeOptionSyncEvidence,
   __internals: {
     isPlainObject,
@@ -503,5 +594,7 @@ module.exports = {
     normalizeActionBinding,
     publicOptionSyncConfig,
     templateOptionFields,
+    templateContractOptionFields,
+    stockPreparationOptionPropertyPatch,
   },
 }

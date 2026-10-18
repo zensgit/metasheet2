@@ -3,8 +3,8 @@
  * below with a reason, a date, an echo claim the scanner re-checks (h), and a follow-up.
  *
  * WHY. tests/unit/admin-tree-5xx-values-free.test.ts keeps caught-error text out of 5xx bodies only in the files it
- * reaches: the tree it DISCOVERS from routes/admin-routes.ts (mounted at /api/admin) and routes/admin-users.ts, scanned
- * BY NAME because index.ts mounts it path-less. The /api/admin/directory family, /api/admin/canary and the path-less
+ * reaches: the tree it DISCOVERS from routes/admin-routes.ts (mounted at /api/admin) and, scanned BY NAME because
+ * index.ts mounts them path-less, routes/admin-users.ts and routes/admin-role-members.ts. The /api/admin/directory family, /api/admin/canary and the path-less
  * routes/permissions.ts (/api/admin/permission-templates) were reached by no scan, and nothing would have flagged the
  * next router mounted under /api/admin (docs/development/autonomous-run-20260928-29-integration-outcome.md §12,
  * '挂在 /api/admin 下的根级路由'). This guard enumerates the mounts and makes each one an explicit decision.
@@ -62,7 +62,7 @@ const ADMIN = '/api/admin'
 const ADMIN_LITERAL = /^\/api\/admin(?=\/|$)/i
 
 /** Routers whose 5xx branches an existing values-free scanner covers — each one backed by check (d). */
-const SCANNED: readonly string[] = ['admin-routes.ts', 'admin-users.ts']
+const SCANNED: readonly string[] = ['admin-routes.ts', 'admin-users.ts', 'admin-role-members.ts']
 
 /** `echo` is what the scanner must find in the file today (h): 'none' = zero offenders, 'known' = at least one (a recorded gap). */
 interface AllowlistEntry { reason: string; since: string; followUp: string; echo: 'none' | 'known' }
@@ -85,7 +85,7 @@ const ALLOWLIST: Readonly<Record<string, AllowlistEntry>> = {
 
 /** Today's in-scope mounts, `<path> -> <file under src/routes/>`, pinned so an extraction regression cannot pass (e). */
 const EXPECTED_IN_SCOPE: readonly string[] = [
-  '/api/admin -> admin-routes.ts', 'root -> admin-users.ts', 'root -> permissions.ts', '/api/admin/canary -> canary-routes.ts',
+  '/api/admin -> admin-routes.ts', 'root -> admin-users.ts', 'root -> admin-role-members.ts', 'root -> permissions.ts', '/api/admin/canary -> canary-routes.ts',
   '/api/admin/directory -> admin-directory.ts', '/api/admin/directory/local -> admin-directory-local.ts',
   '/api/admin/directory/org-transfers -> admin-directory-org-transfers.ts',
   '/api/admin/directory/department-bindings -> admin-directory-department-bindings.ts',
@@ -486,6 +486,7 @@ describe('every /api/admin mount in src/index.ts is covered by a values-free 5xx
     expect(targets.unconsumed.filter((file) => SCANNED.includes(file))).toEqual([])
     expect(targets.roots).toContain('admin-routes.ts') // the discovery root
     expect(targets.byName).toContain('admin-users.ts') // the ADMIN_USERS constant
+    expect(targets.byName).toContain('admin-role-members.ts')
   })
   it('(e) extraction is not vacuous: the pinned in-scope mounts are all found on the real index.ts', () => {
     const found = keysOf(realScan())

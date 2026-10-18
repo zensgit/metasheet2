@@ -15,6 +15,12 @@ import {
   type ElearningContentRevisionDb,
 } from '../services/elearning-content-revision-postgres'
 import {
+  ELEARNING_ASSIGNEE_SEARCH_DEFAULT_LIMIT,
+  ELEARNING_ASSIGNEE_SEARCH_MAX_LIMIT,
+  ELEARNING_ASSIGNEE_SEARCH_MAX_QUERY_LENGTH,
+  searchElearningAssignees,
+} from '../services/elearning-assignee-directory'
+import {
   ElearningOpenCompletionStoreError,
   recordElearningOpenCompletion,
   type ElearningOpenCompletionDb,
@@ -72,6 +78,7 @@ export interface ElearningContentRouteDeps {
   storeElearningContentRevision?: typeof storeElearningContentRevision
   publishElearningContentCourse?: typeof publishElearningContentCourse
   recordElearningOpenCompletion?: typeof recordElearningOpenCompletion
+  searchElearningAssignees?: typeof searchElearningAssignees
 }
 
 function readObject(value: unknown): Record<string, unknown> | null {
@@ -91,6 +98,31 @@ function hasExactKeys(
 function uuidParam(req: Request, name: string): string | null {
   const value = (req.params as Record<string, unknown>)[name]
   return typeof value === 'string' && UUID_RE.test(value) ? value.toLowerCase() : null
+}
+
+const ASSIGNEE_SEARCH_KEYS = new Set(['q', 'limit'])
+const ASSIGNEE_LIMIT_RE = /^[1-9][0-9]{0,2}$/
+
+/**
+ * Closed query for GET /api/elearning/admin/assignees: optional `q` (trimmed, at most
+ * ELEARNING_ASSIGNEE_SEARCH_MAX_QUERY_LENGTH chars, no NUL) and optional `limit`
+ * (1..ELEARNING_ASSIGNEE_SEARCH_MAX_LIMIT). Any other key, a repeated key, or a malformed
+ * value is invalid_input; the org is never read from the request.
+ */
+function readAssigneeSearchQuery(req: Request): { query: string; limit: number } | null {
+  const raw = req.query as Record<string, unknown>
+  if (Object.keys(raw).some((key) => !ASSIGNEE_SEARCH_KEYS.has(key))) return null
+  const q = raw.q === undefined ? '' : raw.q
+  if (typeof q !== 'string') return null
+  const query = q.trim()
+  if (query.length > ELEARNING_ASSIGNEE_SEARCH_MAX_QUERY_LENGTH || query.includes('\0')) return null
+  let limit = ELEARNING_ASSIGNEE_SEARCH_DEFAULT_LIMIT
+  if (raw.limit !== undefined) {
+    if (typeof raw.limit !== 'string' || !ASSIGNEE_LIMIT_RE.test(raw.limit)) return null
+    limit = Number(raw.limit)
+    if (limit > ELEARNING_ASSIGNEE_SEARCH_MAX_LIMIT) return null
+  }
+  return { query, limit }
 }
 
 function parseJson(parser: RequestHandler): RequestHandler {
@@ -118,6 +150,7 @@ export function createElearningContentRouter(
   const storeRevision = deps.storeElearningContentRevision ?? storeElearningContentRevision
   const publishCourse = deps.publishElearningContentCourse ?? publishElearningContentCourse
   const recordOpen = deps.recordElearningOpenCompletion ?? recordElearningOpenCompletion
+  const searchAssignees = deps.searchElearningAssignees ?? searchElearningAssignees
 
   const requireFlags = (_req: Request, res: Response, next: NextFunction): void => {
     if (!isElearningContentSurfaceEnabled(env)) {
@@ -228,6 +261,34 @@ export function createElearningContentRouter(
         }
         res.status(500).json({ error: 'internal_error' })
       }
+    }),
+  )
+
+  // F13 (no-video rehearsal 2026-10-12): the course forms' assignee picker. Same gate
+  // chain as the content admin commands above (flags -> identity -> org -> adminGuard);
+  // read-only, scoped to the JWT-bound org, returns id + name + email only.
+  router.get(
+    '/api/elearning/admin/assignees',
+    requireFlags,
+    requireIdentity,
+    requireOrg,
+    deps.adminGuard,
+    asyncHandler(async (req, res) => {
+      const ctx = context(req, res)
+      if (!ctx) return
+      const parsed = readAssigneeSearchQuery(req)
+      if (!parsed) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      const result = await searchAssignees(deps.db, {
+        orgId: ctx.orgId,
+        query: parsed.query,
+        limit: parsed.limit,
+      })
+      res.status(200).json({
+        items: result.items.map((item) => ({ id: item.id, name: item.name, email: item.email })),
+      })
     }),
   )
 

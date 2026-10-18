@@ -16,7 +16,7 @@ export type MetaApiTokenLabelKey =
   | 'token.scope.none' | 'token.scope.read' | 'token.scope.write' | 'token.scope.admin'
   | 'token.scope.records-read' | 'token.scope.records-write' | 'token.scope.fields-read'
   | 'token.scope.comments-read' | 'token.scope.comments-write' | 'token.scope.webhooks-manage'
-  | 'token.action.copy' | 'token.action.copied' | 'token.action.create'
+  | 'token.action.copy' | 'token.action.copied' | 'token.action.copyFailed' | 'token.action.create'
   | 'token.action.rotate' | 'token.action.revoke'
   | 'webhook.newTitle' | 'webhook.editTitle' | 'webhook.name'
   | 'webhook.namePlaceholder' | 'webhook.url' | 'webhook.urlPlaceholder'
@@ -107,6 +107,7 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'token.scope.webhooks-manage': { en: 'Webhooks: manage', zh: 'Webhook：管理' },
   'token.action.copy': { en: 'Copy', zh: '复制' },
   'token.action.copied': { en: 'Copied!', zh: '已复制！' },
+  'token.action.copyFailed': { en: 'Copy failed: select it manually', zh: '复制失败，请手动选择复制' },
   'token.action.create': { en: 'Create', zh: '创建' },
   'token.action.rotate': { en: 'Rotate', zh: '轮换' },
   'token.action.revoke': { en: 'Revoke', zh: '撤销' },

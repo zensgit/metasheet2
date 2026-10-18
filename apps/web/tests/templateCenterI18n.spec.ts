@@ -1045,7 +1045,8 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
     { file: 'src/approvals/components/ApprovalRecordLinkPicker.vue' },
     { file: 'src/approvals/components/ApprovalUserPicker.vue', ternary: 1 },
     { file: 'src/approvals/components/approvalPickerLabels.ts', zhTable: 3 },
-    { file: 'src/approvals/conditionSummary.ts', ternary: 11, zhTable: 1 },
+    // R-43 (B): +1 ternary — the zh/en "not a current option" marker on an option value no option carries.
+    { file: 'src/approvals/conditionSummary.ts', ternary: 12, zhTable: 1 },
     { file: 'src/approvals/dateRangeField.ts', ternary: 4 },
     {
       file: 'src/approvals/delegations.ts',

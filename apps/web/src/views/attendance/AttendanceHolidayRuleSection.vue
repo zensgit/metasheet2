@@ -2,6 +2,7 @@
   <div class="attendance__admin-section">
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Holiday Policy', '节假日策略') }}</h4>
+      <AttendanceHolidayIndexHelp :tr="tr" />
     </div>
     <div class="attendance__admin-grid">
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
@@ -76,22 +77,11 @@
                     </tr>
                     <tr class="attendance__table-row--meta">
                       <td colspan="7">
-                        <div class="attendance__override-filters">
-                          <label class="attendance__override-field">
-                            <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                            <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
-                            <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">{{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}</small>
-                          </label>
-                          <label class="attendance__override-field"><span>{{ tr('Roles', '角色') }}</span><input v-model="override.roles" type="text" placeholder="司机,工段长" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Role tags', '角色标签') }}</span><input v-model="override.roleTags" type="text" placeholder="车间,仓储" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('User IDs', '用户ID') }}</span><input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('User names', '用户名') }}</span><input v-model="override.userNames" type="text" placeholder="张三,李四" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Exclude user IDs', '排除用户ID') }}</span><input v-model="override.excludeUserIds" type="text" placeholder="uuid3" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Exclude user names', '排除用户名') }}</span><input v-model="override.excludeUserNames" type="text" placeholder="王五" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index start', '节假日序号起始') }}</span><input v-model.number="override.dayIndexStart" type="number" min="1" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index end', '节假日序号结束') }}</span><input v-model.number="override.dayIndexEnd" type="number" min="1" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index list', '节假日序号列表') }}</span><input v-model="override.dayIndexList" type="text" placeholder="1,2,3" /></label>
-                        </div>
+                        <AttendanceOverrideAudienceFields
+                          :override="override"
+                          :group-options="attendanceGroupOptions"
+                          :tr="tr"
+                        />
                       </td>
                     </tr>
                   </template>
@@ -119,6 +109,7 @@
           <p class="attendance__field-hint attendance__field-hint--warn">
             {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
           </p>
+          <AttendanceHolidayIndexHelp :tr="tr" />
           <AttendanceCalendarPolicyQuickAdd
             :attendance-group-options="attendanceGroupOptions"
             :tr="tr"
@@ -161,9 +152,9 @@
                     <tr>
                       <td>
                         <div class="attendance__inline-fields">
-                          <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
-                          <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
-                          <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
+                          <AttendanceLocaleDateInput v-model="override.date" class="attendance__table-input" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
+                          <AttendanceLocaleDateInput v-model="override.from" class="attendance__table-input" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
+                          <AttendanceLocaleDateInput v-model="override.to" class="attendance__table-input" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
                         </div>
                       </td>
                       <td>
@@ -193,22 +184,12 @@
                     </tr>
                     <tr class="attendance__table-row--meta">
                       <td colspan="6">
-                        <div class="attendance__override-filters">
-                          <label class="attendance__override-field">
-                            <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                            <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
-                            <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">{{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}</small>
-                          </label>
-                          <label class="attendance__override-field"><span>{{ tr('Roles', '角色') }}</span><input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Role tags', '角色标签') }}</span><input v-model="override.roleTags" type="text" placeholder="attendance_admin,班组长" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('User IDs', '用户ID') }}</span><input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('User names', '用户名') }}</span><input v-model="override.userNames" type="text" placeholder="张三,李四" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Exclude user IDs', '排除用户ID') }}</span><input v-model="override.excludeUserIds" type="text" placeholder="uuid3" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Exclude user names', '排除用户名') }}</span><input v-model="override.excludeUserNames" type="text" placeholder="王五" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index start', '节假日序号起始') }}</span><input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index end', '节假日序号结束') }}</span><input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index list', '节假日序号列表') }}</span><input v-model="override.dayIndexList" type="text" placeholder="1,2,3" /></label>
-                        </div>
+                        <AttendanceOverrideAudienceFields
+                          :override="override"
+                          :group-options="attendanceGroupOptions"
+                          :tr="tr"
+                          mark-calendar-policy
+                        />
                       </td>
                     </tr>
                   </template>
@@ -248,21 +229,17 @@
       </label>
       <label class="attendance__field" for="attendance-holiday-sync-auto-run">
         <span>{{ tr('Auto sync time', '自动同步时间') }}</span>
-        <input id="attendance-holiday-sync-auto-run" v-model="settingsForm.holidaySyncAutoRunAt" name="holidaySyncAutoRunAt" type="time" />
+        <AttendanceLocaleTimeInput id="attendance-holiday-sync-auto-run" v-model="settingsForm.holidaySyncAutoRunAt" name="holidaySyncAutoRunAt" />
       </label>
       <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
         <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-        <select id="attendance-holiday-sync-auto-tz" v-model="settingsForm.holidaySyncAutoTimezone" name="holidaySyncAutoTimezone">
-          <optgroup
-            v-for="group in holidaySyncTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-holiday-sync-auto-tz"
+          name="holidaySyncAutoTimezone"
+          v-model="settingsForm.holidaySyncAutoTimezone"
+          :tr="tr"
+          :groups="holidaySyncTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
         <span>{{ tr('Append day index', '追加节假日序号') }}</span>
@@ -304,7 +281,12 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import { computed, ref, watch, type Ref } from 'vue'
+import AttendanceHolidayIndexHelp from './AttendanceHolidayIndexHelp.vue'
+import AttendanceOverrideAudienceFields from './AttendanceOverrideAudienceFields.vue'
 import AttendanceCalendarPolicyQuickAdd from './AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './AttendanceCalendarPolicyPreviewPanel.vue'
 import {
@@ -312,6 +294,7 @@ import {
   type CalendarPolicyOverrideDiagnostic,
   type CalendarPolicyOverrideFormState,
 } from './attendanceCalendarPolicyOverrides'
+import { useLocale } from '../../composables/useLocale'
 import { buildTimezoneOptionGroups } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -392,7 +375,11 @@ const holidaySyncLastRun = props.config.holidaySyncLastRun
 const holidaySyncLoading = props.config.holidaySyncLoading
 const saveSettings = () => props.config.saveSettings()
 const settingsForm = props.config.settingsForm
-const holidaySyncTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(settingsForm.holidaySyncAutoTimezone))
+const { isZh } = useLocale()
+const holidaySyncTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(
+  settingsForm.holidaySyncAutoTimezone,
+  isZh.value ? 'zh' : 'en',
+))
 const settingsLoading = props.config.settingsLoading
 const syncHolidays = () => props.config.syncHolidays()
 const syncHolidaysForYears = (years: number[]) => props.config.syncHolidaysForYears(years)
@@ -487,7 +474,7 @@ const syncNextYear = () => syncHolidaysForYears([currentYear + 1])
 .attendance__override-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .attendance__admin-subsection, .attendance__field, .attendance__override-field, .attendance__accordion-copy, .attendance__admin-meta { display: flex; flex-direction: column; gap: 6px; }
 .attendance__field--full { grid-column: 1 / -1; }
-.attendance__field--checkbox { justify-content: flex-end; }
+.attendance__field--checkbox { flex-direction: row; align-items: center; justify-content: flex-start; justify-self: start; width: fit-content; max-width: 100%; gap: 8px; }
 .attendance__field-hint { color: #777; font-size: 11px; }
 .attendance__field-hint--warn { color: #9a6700; }
 .attendance__calendar-policy-diagnostics { border: 1px solid #f2c94c; background: #fff8e1; color: #7a4f00; border-radius: 6px; padding: 10px 12px; font-size: 12px; }

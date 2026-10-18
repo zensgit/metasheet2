@@ -70,7 +70,10 @@ import {
 export const STOCK_PREP_PROJECT_TARGET_STATUSES = Object.freeze(['absent', 'active', 'archived'] as const)
 export type StockPrepProjectTargetStatus = (typeof STOCK_PREP_PROJECT_TARGET_STATUSES)[number]
 
-export const STOCK_PREP_PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused'] as const)
+// G1 field defect (R67): `failed` — an apply whose target refused rows (the registry stamps it with the
+// dominant row error code instead of `applied`). Mirrors the plugin's closed PROJECT_TARGET_PULL_OUTCOMES;
+// the plugin suite pins the two lists set-equal, so a value the server stamps is never clamped to null here.
+export const STOCK_PREP_PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused', 'failed'] as const)
 export type StockPrepProjectTargetPullOutcome = (typeof STOCK_PREP_PROJECT_TARGET_PULL_OUTCOMES)[number]
 
 /** The switch-off answer of all three routes. A deployment setting, not a fault. */

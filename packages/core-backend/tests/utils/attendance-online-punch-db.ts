@@ -13,7 +13,7 @@ export const punchPlugin = requireCjs('../../../../plugins/plugin-attendance/ind
   resetAttendanceSettingsCacheForTests(): void
   __setAttendanceW4LivePunchPreBoundarySeamForTests(value: ((args: unknown) => Promise<void>) | null): void
 }
-export function createOnlinePunchDbFixture() {
+export function createOnlinePunchDbFixture(options: { retainHistoryInIsolatedDatabase?: boolean } = {}) {
   const url = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
   if (!url) throw new Error('ONLINE_PUNCH_REAL_DATABASE_REQUIRED')
   const pool = new Pool({ connectionString: url })
@@ -84,6 +84,15 @@ export function createOnlinePunchDbFixture() {
     await restoreAttendanceSettingsRow(pool, settings)
     punchPlugin.resetAttendanceSettingsCacheForTests()
     await server?.stop()
+    // Trip history is immutable and references its synthetic users. Dedicated
+    // isolated-DB suites retain the whole owned database for audit inspection.
+    if (options.retainHistoryInIsolatedDatabase === true) {
+      await pool.end()
+      for (const [key,value] of Object.entries(priorEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value
+      }
+      return
+    }
     // These suites share CI's database with the annual accrual scheduler. Remove
     // only this fixture's mutable configuration and identities. Canonical audit
     // rows remain append-only; the isolated database owner removes them by drop.
@@ -105,5 +114,5 @@ export function createOnlinePunchDbFixture() {
       if (value === undefined) delete process.env[key]; else process.env[key] = value
     }
   }
-  return { pool, orgId, start, stop, user, request, configure, counts }
+  return { pool, orgId, start, stop, user, request, configure, counts, getBaseUrl: () => base }
 }

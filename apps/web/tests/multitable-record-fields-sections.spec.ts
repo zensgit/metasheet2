@@ -853,15 +853,32 @@ describe('link chips (§1.3 "Link chips", HI-1)', () => {
 
 // =====================================================================================================
 describe('copy link (§1.3 "Copy link", inspector side)', () => {
-  it('the copy-link icon is DISABLED when the Clipboard API is absent', async () => {
+  it('the copy-link icon is DISABLED when no copy mechanism exists (no Clipboard API, no execCommand — jsdom default)', async () => {
     const restore = stubClipboard(undefined)
     try {
+      expect(typeof (document as unknown as { execCommand?: unknown }).execCommand).not.toBe('function')
       const { container } = mountInspector()
       await flushUi()
       const btn = container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-copy-link"]')!
       expect(btn).not.toBeNull()
       expect(btn.disabled).toBe(true)
     } finally {
+      restore()
+    }
+  })
+
+  it('plain-HTTP (non-secure context): no Clipboard API but execCommand exists — the icon is ENABLED', async () => {
+    const restore = stubClipboard(undefined)
+    const original = Object.getOwnPropertyDescriptor(document, 'execCommand')
+    Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: vi.fn(() => true) })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      const btn = container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-copy-link"]')!
+      expect(btn.disabled).toBe(false)
+    } finally {
+      if (original) Object.defineProperty(document, 'execCommand', original)
+      else Reflect.deleteProperty(document, 'execCommand')
       restore()
     }
   })
@@ -892,7 +909,7 @@ describe('copy link (§1.3 "Copy link", inspector side)', () => {
     expect(wb).toMatch(/@copy-link="onCopyRecordLink"/)
     expect(wb).toMatch(/recordLabel\('record\.copyLinkDone'/)
     expect(wb).toMatch(/recordLabel\('record\.copyLinkFailed'/)
-    expect(wb).toMatch(/clipboard\.writeText\(window\.location\.href\)/)
+    expect(wb).toMatch(/copyText\(window\.location\.href\)/)
   })
 })
 

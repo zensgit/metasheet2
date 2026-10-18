@@ -27,6 +27,7 @@
         {{ tr('Cancel', '取消') }}
       </button>
     </header>
+    <slot name="timezone" />
 
     <label class="leave-card__field" for="attendance-leave-card-type">
       <span>{{ tr('Leave type', '假期类型') }}</span>
@@ -158,7 +159,7 @@
         class="leave-card__btn leave-card__btn--primary"
         type="button"
         data-leave-card-submit
-        :disabled="submitting || leaveTypes.length === 0"
+        :disabled="submitting || canSubmit === false || leaveTypes.length === 0"
         @click="emit('submit')"
       >
         {{ submitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
@@ -168,11 +169,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { AttendanceLeaveQuickFillKind } from './halfDayLeaveHelper'
 import {
   formatLeaveDurationHours,
   minutesFromDateTimeRange,
+  snapMinutesToHalfHour,
   workDateFromDateTimeLocal,
   type LeaveDurationDisplayUnit,
 } from './leaveRequestDurationDisplay'
@@ -201,6 +203,8 @@ const props = defineProps<{
   leaveTypes: LeaveTypeOption[]
   canQuickFill: boolean
   submitting: boolean
+  canSubmit?: boolean
+  resolveTimes?: () => { requestedInAt: string; requestedOutAt: string } | null
 }>()
 
 const emit = defineEmits<{
@@ -211,6 +215,7 @@ const emit = defineEmits<{
 
 const durationUnit = ref<LeaveDurationDisplayUnit>('hours')
 const activePreset = ref<AttendanceLeaveQuickFillKind | null>(null)
+const manualRange = ref(false)
 
 const presets = computed(() => [
   { kind: 'full_day' as const, label: props.tr('Full day', '全天') },
@@ -243,13 +248,23 @@ const durationUnitLabel = computed(() => (
     : props.tr('hours', '小时')
 ))
 
-function syncMinutesFromRange(): void {
-  const minutes = minutesFromDateTimeRange(
-    props.requestForm.requestedInAt,
-    props.requestForm.requestedOutAt,
+const rangeMinutes = computed(() => {
+  if (!props.resolveTimes) return minutesFromDateTimeRange(
+    props.requestForm.requestedInAt, props.requestForm.requestedOutAt,
   )
-  props.requestForm.minutes = minutes === null ? '' : String(minutes)
+  const times = props.resolveTimes()
+  const absolute = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+  if (!times || !absolute.test(times.requestedInAt) || !absolute.test(times.requestedOutAt)) return null
+  const start = Date.parse(times.requestedInAt)
+  const end = Date.parse(times.requestedOutAt)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+  return snapMinutesToHalfHour((end - start) / 60_000)
+})
+
+function syncMinutesFromRange(): void {
+  props.requestForm.minutes = rangeMinutes.value === null ? '' : String(rangeMinutes.value)
 }
+watch(rangeMinutes, () => { if (manualRange.value) syncMinutesFromRange() }, { flush: 'sync' })
 
 function onLeaveTypeChange(event: Event): void {
   props.requestForm.leaveTypeId = (event.target as HTMLSelectElement).value
@@ -259,6 +274,7 @@ function onStartInput(event: Event): void {
   const value = (event.target as HTMLInputElement).value
   props.requestForm.requestedInAt = value
   activePreset.value = null
+  manualRange.value = true
   const workDate = workDateFromDateTimeLocal(value)
   if (workDate) props.requestForm.workDate = workDate
   syncMinutesFromRange()
@@ -267,11 +283,13 @@ function onStartInput(event: Event): void {
 function onEndInput(event: Event): void {
   props.requestForm.requestedOutAt = (event.target as HTMLInputElement).value
   activePreset.value = null
+  manualRange.value = true
   syncMinutesFromRange()
 }
 
 function onPreset(kind: AttendanceLeaveQuickFillKind): void {
   activePreset.value = kind
+  manualRange.value = false
   emit('quickFill', kind)
 }
 

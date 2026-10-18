@@ -1,3 +1,4 @@
+import { acquireBusinessTripRequestPrefixV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3b P13: canonical request-operation owner for create/edit/decision/cancel.
  *
@@ -54,6 +55,7 @@ export const ATTENDANCE_REQUEST_CREATE_ROUTE_VARIANTS_V1 = Object.freeze([
   'outdoor',
   'schedule_dispatch',
   'shift_swap',
+  'business_trip',
 ] as const)
 
 export type AttendanceRequestCreateRouteVariantV1 =
@@ -245,6 +247,7 @@ export interface AttendanceRequestOperationContextV1 {
    * `{ effectiveState: 'legacy', referenceSegments: false }`).
    */
   readonly referenceSegments: boolean
+  readonly cancelRoundAuthorized?: boolean
   /** Host-validated route family; null is the generic non-create surface. */
   readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
 }
@@ -266,6 +269,14 @@ export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
     routeInput: unknown,
     operation: AttendanceRequestOperationContextV1,
   ): Promise<AttendanceRequestOperationPreparedV1<TState>>
+  /** Trusted fresh source/target preparation before every request parent lock.
+   * Sealed replay never calls this hook. Returned verification shares this TX. */
+  prepareFreshTimezoneContext?(
+    trx: AttendanceRequestPluginTrxV1,
+    identity: AttendanceRequestOperationPreparedV1<unknown>,
+    routeInput: unknown,
+    operation: AttendanceRequestOperationContextV1,
+  ): Promise<(() => Promise<void>) | void>
   execute(
     trx: AttendanceRequestPluginTrxV1,
     prepared: AttendanceRequestOperationPreparedV1<TState>,
@@ -376,6 +387,7 @@ export const ATTENDANCE_REQUEST_CREATE_SOURCE_REFS_V1: Readonly<
   outdoor: 'plugin-attendance:POST /api/attendance/punch#outdoor-approval',
   schedule_dispatch: 'plugin-attendance:POST /api/attendance/schedule-dispatch-requests',
   shift_swap: 'plugin-attendance:POST /api/attendance/shift-swap-requests',
+  business_trip: 'plugin-attendance:POST /api/attendance/business-trip-requests',
 })
 
 const NON_CREATE_SOURCE_REFS: Readonly<
@@ -781,10 +793,22 @@ async function runRequestOperationProtocolV1(
             // writes. Fail-closed until a resolve under the rollout lock supplies it.
             referenceSegments: false,
             routeVariant: input.routeVariant,
+            cancelRoundAuthorized: mode?.externalTransaction === true,
           })
-          const identityPrepared = input.operationId === null
-            ? await adapter.prepare(shapedTrx, input.routeInput, operation)
-            : await adapter.prepareIdentity(shapedTrx, input.routeInput, operation)
+          const identityPrepared = await adapter.prepareIdentity(shapedTrx,input.routeInput,operation)
+
+          const takeTripPrefix = () => acquireBusinessTripRequestPrefixV1(trx, {
+            orgId: identityPrepared.orgId,
+            userId: identityPrepared.subjectUserId,
+            actorId: identityPrepared.actorId,
+            creatingTrip: input.kind === 'request_create' && input.routeVariant === 'business_trip',
+            requestId: input.kind === 'request_create' ? undefined : String((identityPrepared.commandPayload as Record<string, unknown>).requestId ?? ''),
+            external: mode?.externalTransaction === true,
+          })
+
+          const prepareTimezone = () => adapter.prepareFreshTimezoneContext?.(
+            shapedTrx,identityPrepared,input.routeInput,operation,
+          )
 
           let canonicalOrg = true
           try {
@@ -815,7 +839,10 @@ async function runRequestOperationProtocolV1(
           }
           if (!canonicalOrg) {
             if (input.operationId !== null) fail('W4C3B_REQUEST_ORG_OUTSIDE_W4_DOMAIN')
-            const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
+            const verifyScheduleSource = await takeTripPrefix()
+            const verifyTimezone = await prepareTimezone()
+            const legacyPrepared = await adapter.prepare(shapedTrx,input.routeInput,operation)
+            const result = await adapter.execute(shapedTrx, legacyPrepared, Object.freeze({
               ...operation,
               acceptedWritePosture: 'legacy_projection_only' as const,
               // Outside the canonical W4 domain the port itself answers
@@ -823,6 +850,8 @@ async function runRequestOperationProtocolV1(
               referenceSegments: false,
             }))
             if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
+            if (verifyTimezone) await verifyTimezone()
+            if (verifyScheduleSource) await verifyScheduleSource()
             return { kind: 'legacy' as const, response: result.response }
           }
 
@@ -839,7 +868,10 @@ async function runRequestOperationProtocolV1(
               throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
             }
             if (posture.writePosture === 'legacy_projection_only') {
-              const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
+              const verifyScheduleSource = await takeTripPrefix()
+              const verifyTimezone = await prepareTimezone()
+              const legacyPrepared = await adapter.prepare(shapedTrx,input.routeInput,operation)
+              const result = await adapter.execute(shapedTrx, legacyPrepared, Object.freeze({
                 ...operation,
                 acceptedWritePosture: 'legacy_projection_only' as const,
                 // Read the RESOLVED bit rather than hardcoding `false`. It is false for
@@ -848,6 +880,8 @@ async function runRequestOperationProtocolV1(
                 referenceSegments: posture.referenceSegments,
               }))
               if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
+              if (verifyTimezone) await verifyTimezone()
+            if (verifyScheduleSource) await verifyScheduleSource()
               return { kind: 'legacy' as const, response: result.response }
             }
           }
@@ -875,10 +909,10 @@ async function runRequestOperationProtocolV1(
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
 
-          const prepared = input.operationId === null
-            ? identityPrepared
-            : await adapter.prepare(shapedTrx, input.routeInput, operation)
-          if (!preparedIdentityCongruent(identityPrepared, prepared)) {
+          const verifyScheduleSource = await takeTripPrefix()
+          const verifyTimezone = await prepareTimezone()
+          const prepared = await adapter.prepare(shapedTrx,input.routeInput,operation)
+          if (input.operationId !== null && !preparedIdentityCongruent(identityPrepared, prepared)) {
             fail('W4C3B_REQUEST_IDENTITY_CHANGED', 409)
           }
 
@@ -894,6 +928,8 @@ async function runRequestOperationProtocolV1(
           // returned immediately at its refusal point, so no statement runs between the old throw
           // site and this one.
           if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
+          if (verifyTimezone) await verifyTimezone()
+            if (verifyScheduleSource) await verifyScheduleSource()
           if (preflight.kind === 'legacy_no_operation') {
             return { kind: 'legacy' as const, response: result.response }
           }

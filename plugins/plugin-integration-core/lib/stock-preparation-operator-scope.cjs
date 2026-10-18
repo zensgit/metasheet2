@@ -165,6 +165,13 @@
 //           S3 fix round 1 (R-37, R6): the PULL tier creates the proven tenant's read-only overview in
 //           the staging project derived from this scope with no request projectId, and grants the
 //           configured roles READ on it (the host's overview read port).
+//       20. POST …/stock-preparation/options/sync WITH `projectNo`  `stockPreparationOptionsSync`
+//           (its repair leg, `repairProjectSheetContractOptions`) — G1 field defect (R67): a WRITE of
+//           field metadata (the server-held contract option sets) onto the sheet the proven tenant's
+//           registry row names, in the staging project derived from this scope with no request
+//           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
+//           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
+//           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

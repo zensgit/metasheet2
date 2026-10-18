@@ -864,6 +864,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -1545,14 +1546,15 @@ function openInternalView(viewId: string) {
 
 function copyPreviewText(key: string, text: string) {
   const trimmed = text.trim()
-  if (!trimmed || !navigator.clipboard?.writeText) return
-  void navigator.clipboard.writeText(trimmed).then(() => {
+  if (!trimmed) return
+  void copyText(trimmed).then((ok) => {
+    if (!ok) return
     copiedPreviewKey.value = key
     if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
     copiedPreviewResetTimer = window.setTimeout(() => {
       if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
     }, 1500)
-  }).catch(() => {})
+  })
 }
 
 const dingTalkPersonRecipientSummary = computed(() => {

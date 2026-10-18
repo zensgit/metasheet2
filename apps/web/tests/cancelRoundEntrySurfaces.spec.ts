@@ -185,7 +185,7 @@ describe('ApprovalMobileList (P-2 list surface)', () => {
     await flushUi()
     expect(tagOf(root, 'm1')!.dataset).toMatchObject({ domain: 'approvalInstance', status: 'rejected' })
     expect(tagOf(root, 'm2')!.dataset).toMatchObject({ domain: 'cancelRound', status: 'cancellation_blocked' })
-    expect(tagOf(root, 'm2')!.textContent).toBe('该请假已无法撤销(业务原因)')
+    expect(tagOf(root, 'm2')!.textContent).toBe('该申请已无法撤销(业务原因)')
   })
 })
 

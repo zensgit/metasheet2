@@ -1513,6 +1513,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
+  adminPageContentSearch.spec.ts \
   amountAutoSum \
   approval-amount-in-words \
   approval-assignee-source \
@@ -1614,19 +1615,31 @@ exec npx vitest run \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
+  attendanceAdminGuide.spec.ts \
+  attendanceAudienceChipField.spec.ts \
+  attendanceBusinessTripRequestCard \
   attendanceCapabilityUnavailable \
+  attendanceCurrentTimeContext \
+  attendanceDayTimeContext \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
   attendanceEmployeeQuickActionIcons \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceLegacyPermissionPayload \
+  attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
+  attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
+  attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \
+  attendanceTimezonePolicyPanel \
+  attendanceTimezoneTarget \
   attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
+  attendanceWallTime \
   automation-action-summary \
   automation-condition-legacy-person-picker \
   automation-condition-typing-editor \
@@ -1640,6 +1653,7 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  builtinCatalogPresentation \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
@@ -1649,6 +1663,7 @@ exec npx vitest run \
   cancelRoundEntrySurfaces \
   cancelRoundEntryTodoCenter \
   categoryCandidateInput \
+  clipboard-no-bare-navigator-clipboard \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
@@ -1908,11 +1923,14 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionManagementView \
   personal-view-client \
   public-multitable-form \
+  recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
@@ -1985,8 +2003,10 @@ exec npx vitest run \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
+  tasks-record-dispatch.spec.ts \
   tasks-routes.spec.ts \
   tasks-settings-view.spec.ts \
+  tasks-status-filter.spec.ts \
   tasks-view-transitions.spec.ts \
   tasks-view.spec.ts \
   templateArchiveConfirm \
@@ -2003,9 +2023,12 @@ exec npx vitest run \
   useAttendanceAdminConfig \
   useAttendanceAdminProvisioning \
   useAttendanceAdminUsers \
+  useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
+  userManagementRoleMembership \
   userManagementView \
+  uuid-no-bare-randomuuid \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
