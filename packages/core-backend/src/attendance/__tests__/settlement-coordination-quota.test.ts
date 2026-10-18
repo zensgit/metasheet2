@@ -116,10 +116,10 @@ describe('coordination semaphore: first come first served, atomic grant and canc
     const clock = new ManualCoordinationClock()
     const semaphore = new CoordinationSemaphoreV1(1)
     const holder = semaphore.tryAcquire() as CoordinationPermitV1
-    const cancelled = semaphore.acquire({ clock, deadline: 100 })
+    const cancelled = semaphore.acquire({ clock, deadline: 100 }).then(() => 'granted', (error) => error)
     clock.setTimer(100, () => holder.release())
     await clock.advance(100)
-    await expect(cancelled).rejects.toBeInstanceOf(CoordinationWaitEndedError)
+    expect(await cancelled).toBeInstanceOf(CoordinationWaitEndedError)
     expect(semaphore.held).toBe(0)
     expect(semaphore.waiting).toBe(0)
 
