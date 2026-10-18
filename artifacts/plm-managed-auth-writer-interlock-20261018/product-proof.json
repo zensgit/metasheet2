@@ -1,0 +1,121 @@
+{
+  "ok": true,
+  "kind": "product-module-browser-proof",
+  "node": "/Users/chouhua/.nvm/versions/node/v20.20.2/bin/node",
+  "playwright": "1.57.0",
+  "browser": "143.0.7499.4",
+  "scenarios": [
+    {
+      "name": "same-tab",
+      "completePosts": 1,
+      "completed": {
+        "destination": "/plm/bom-review?managed=ready",
+        "stale": false
+      },
+      "during": {
+        "bare": "AUTH_IDENTITY_LOCK_REQUIRED",
+        "tokenDuring": null,
+        "depthDuringFetch": false,
+        "pending": "1"
+      },
+      "after": {
+        "token": "person-b-token",
+        "marker": null,
+        "pending": null
+      },
+      "cookieDuring": true,
+      "cookieAfterPublish": false,
+      "logoutPosts": 1
+    },
+    {
+      "name": "two-tab",
+      "otherTabDuring": null,
+      "completed": {
+        "destination": "/plm/bom-review?managed=ready",
+        "stale": false
+      },
+      "tokenAfter": "tab-b-token",
+      "logoutPosts": 1,
+      "cookieAfter": false
+    },
+    {
+      "name": "login-logout-current",
+      "status": 401,
+      "logoutPosts": 1,
+      "currentGets": 1
+    },
+    {
+      "name": "unsupported-locks",
+      "unsupported": "AUTH_IDENTITY_LOCK_UNAVAILABLE",
+      "posts": 0,
+      "pending": null,
+      "marker": null
+    },
+    {
+      "name": "storage-fail",
+      "storageFail": "AUTH_IDENTITY_PENDING_STORAGE",
+      "posts": 0
+    },
+    {
+      "name": "revoke-outage",
+      "error": "REVOKE_DOWN",
+      "token": "kept-b",
+      "marker": "1"
+    },
+    {
+      "name": "cancel-crash-pending",
+      "pendingBeforeClose": "1",
+      "cookieBeforeClose": true,
+      "recovered": {
+        "pending": null,
+        "token": "recovered-b",
+        "current": 401
+      },
+      "cookieAfterRecovery": false,
+      "completePosts": 1
+    },
+    {
+      "name": "org-rollback",
+      "applied": false,
+      "authToken": "header.eyJ1c2VySWQiOiJhY3RvciIsInRlbmFudElkIjoib3JnLWEiLCJleHAiOjE3OTIzMDIyNzV9.signature",
+      "jwt": "header.eyJ1c2VySWQiOiJhY3RvciIsInRlbmFudElkIjoib3JnLWEiLCJleHAiOjE3OTIzMDIyNzV9.signature",
+      "expected": "header.eyJ1c2VySWQiOiJhY3RvciIsInRlbmFudElkIjoib3JnLWEiLCJleHAiOjE3OTIzMDIyNzV9.signature",
+      "nextOrg": "org-b"
+    },
+    {
+      "name": "dev-refresh",
+      "token": "dev-from-server",
+      "authToken": "dev-from-server",
+      "jwt": "dev-from-server",
+      "devToken": "dev-from-server",
+      "devWrite": "devToken:same-turn"
+    },
+    {
+      "name": "api-401-revoke-outage",
+      "thrown": "",
+      "path": "/proof",
+      "token": "person-b",
+      "marker": "1"
+    },
+    {
+      "name": "api-401-clears",
+      "cleared": null,
+      "url": "http://127.0.0.1:52974/login?redirect=%2Fproof"
+    },
+    {
+      "name": "late-features",
+      "plm": false
+    },
+    {
+      "name": "late-features-stable-adopts",
+      "plm": true
+    }
+  ],
+  "limits": [
+    "Cooperating normal-app writers on one browser profile only.",
+    "Web Locks are not an XSS boundary.",
+    "The complete endpoint is a controlled header-then-body harness, not the product server.",
+    "Set-Cookie is still applied before the response body is read."
+  ],
+  "sha256": "e741a092d6de2448773b38699595c534154e5d90961899415832f2e1e13f279b"
+}

@@ -74,12 +74,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { readAuthRequestStamp } from '../composables/authPrincipal'
 import { useAuth } from '../composables/useAuth'
 import { ROUTE_PATHS } from '../router/types'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
-import { apiFetch, clearStoredAuthState } from '../utils/api'
+import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
 import { ensureDingTalkJsApi, isDingTalkContainer, requestContainerAuthCode } from '../utils/dingtalkContainer'
 
@@ -113,7 +114,7 @@ interface DingTalkRuntimeStatus {
 
 const router = useRouter()
 const route = useRoute()
-const { getToken, setToken, primeSession } = useAuth()
+const { commitClearedOrdinaryAuth, commitOrdinaryAuthTransition, getToken, primeSession, setToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
@@ -246,6 +247,8 @@ function onLocaleChange(event: Event): void {
 async function onSubmit(): Promise<void> {
   errorMessage.value = ''
   submitting.value = true
+  // The session this attempt may clean up. Replaced after this attempt publishes a token.
+  let issued = readAuthRequestStamp()
 
   try {
     const response = await apiFetch('/api/auth/login', {
@@ -272,19 +275,21 @@ async function onSubmit(): Promise<void> {
     const featurePayload = (payload?.data?.features ?? null) as AuthFeaturePayload | null
     const passwordChangeRequired = requiresPasswordChange(userPayload)
 
-    setToken(token)
-    primeSession({
-      success: true,
-      data: {
-        user: payload?.data?.user ?? null,
-        features: payload?.data?.features ?? null,
-      },
+    await commitOrdinaryAuthTransition(() => {
+      setToken(token)
+      issued = readAuthRequestStamp()
+      primeSession({
+        success: true,
+        data: {
+          user: payload?.data?.user ?? null,
+          features: payload?.data?.features ?? null,
+        },
+      })
+      persistAuthContext(
+        userPayload,
+        featurePayload,
+      )
     })
-
-    persistAuthContext(
-      userPayload,
-      featurePayload,
-    )
 
     if (passwordChangeRequired) {
       await router.replace(ROUTE_PATHS.FORCE_PASSWORD_CHANGE)
@@ -297,7 +302,11 @@ async function onSubmit(): Promise<void> {
     await router.replace(redirect || resolveHomePath())
   } catch {
     errorMessage.value = text.value.networkError
-    clearStoredAuthState()
+    try {
+      await commitClearedOrdinaryAuth(issued)
+    } catch {
+      // Revoke failed. Leave markers and tokens in place and do not navigate.
+    }
   } finally {
     submitting.value = false
   }
@@ -340,9 +349,11 @@ async function attemptContainerLogin(corpId?: string): Promise<boolean> {
     if (typeof token !== 'string' || token.trim().length === 0) return false
     const userPayload = (payload?.data?.user ?? null) as AuthUserPayload | null
     const featurePayload = (payload?.data?.features ?? null) as AuthFeaturePayload | null
-    setToken(token)
-    primeSession({ success: true, data: { user: userPayload, features: featurePayload } })
-    persistAuthContext(userPayload, featurePayload)
+    await commitOrdinaryAuthTransition(() => {
+      setToken(token)
+      primeSession({ success: true, data: { user: userPayload, features: featurePayload } })
+      persistAuthContext(userPayload, featurePayload)
+    })
     await loadProductFeatures(true, { skipSessionProbe: true })
     await router.replace(normalizePostLoginRedirect(route.query.redirect) || resolveHomePath())
     return true

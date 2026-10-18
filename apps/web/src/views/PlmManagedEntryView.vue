@@ -7,7 +7,6 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { setManagedProbeMarker } from '../composables/authPrincipal'
 import { PlmManagedCompanionError, startManagedBrowserBridge } from '../services/plm/plmManagedCompanion'
 
 const message = ref('正在连接已映射的元图账号…')
@@ -21,7 +20,6 @@ function pinNoReferrer(): void {
 
 onMounted(async () => {
   pinNoReferrer()
-  setManagedProbeMarker()
   try {
     const started = await startManagedBrowserBridge(window.location.search)
     window.location.assign(started.navigationUrl)

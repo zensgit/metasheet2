@@ -260,6 +260,28 @@ export function readAuthSessionSignature(): string {
   return JSON.stringify([key, readStoredToken()])
 }
 
+/** Session a request was issued for. Compared again inside the identity lock. */
+export interface AuthRequestStamp {
+  token: string | null
+  signature: string
+  epoch: number
+}
+
+export function readAuthRequestStamp(): AuthRequestStamp {
+  return {
+    token: readStoredToken(),
+    signature: readAuthSessionSignature(),
+    epoch: readManagedEpoch(),
+  }
+}
+
+export function sameAuthRequest(stamp: AuthRequestStamp): boolean {
+  const current = readAuthRequestStamp()
+  return current.token === stamp.token
+    && current.signature === stamp.signature
+    && current.epoch === stamp.epoch
+}
+
 /**
  * Subscribe to "the session actually CHANGED", as opposed to `onAuthPrincipalChange`'s "the reset
  * funnel ran". Returns an unsubscribe, same as its base.

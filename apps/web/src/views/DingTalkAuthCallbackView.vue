@@ -177,17 +177,19 @@ async function handleCallback(): Promise<void> {
       return
     }
 
-    auth.setToken(token)
-    persistAuthContext(
-      (payload?.data?.user ?? null) as AuthUserPayload | null,
-      (payload?.data?.features ?? null) as AuthFeaturePayload | null,
-    )
-    auth.primeSession({
-      success: true,
-      data: {
-        user: payload?.data?.user ?? null,
-        features: payload?.data?.features ?? null,
-      },
+    await auth.commitOrdinaryAuthTransition(() => {
+      auth.setToken(token)
+      persistAuthContext(
+        (payload?.data?.user ?? null) as AuthUserPayload | null,
+        (payload?.data?.features ?? null) as AuthFeaturePayload | null,
+      )
+      auth.primeSession({
+        success: true,
+        data: {
+          user: payload?.data?.user ?? null,
+          features: payload?.data?.features ?? null,
+        },
+      })
     })
 
     let fallbackPath = resolveHomePath()

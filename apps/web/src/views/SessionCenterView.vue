@@ -317,8 +317,10 @@ function clearFeatureCache() {
 }
 
 async function redirectToLogin() {
-  auth.clearToken()
-  clearFeatureCache()
+  await auth.commitOrdinaryAuthTransition(() => {
+    auth.clearToken()
+    clearFeatureCache()
+  })
   await router.replace({
     name: 'login',
     query: {

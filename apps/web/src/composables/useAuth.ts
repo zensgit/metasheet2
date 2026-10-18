@@ -1,4 +1,15 @@
 import { getApiBase } from '../utils/api'
+import {
+  AuthIdentityLockError,
+  assertOrdinarySyncWriterAllowed,
+  authIdentityLocksAvailable,
+  managedResidueRemains,
+  ordinaryTakeoverRequired,
+  readManagedCompletePending,
+  runSyncAuthMutation,
+  withAuthIdentityLock,
+} from './authIdentityLock'
+import { postManagedLogoutUnlocked } from '../services/plm/plmManagedCompanion'
 import { matchesPermission } from '../utils/permission-match'
 import { getCurrentScope, onScopeDispose } from 'vue'
 import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSION_ORG_KEY, installExplicitSessionOrg, ownsExplicitSessionOrgChange, restoreExplicitSessionOrg } from '../utils/explicitSessionOrg'
@@ -15,11 +26,14 @@ import {
   isManagedEntryActive,
   notifyAuthPrincipalChange,
   parseJwtPayload,
+  readAuthRequestStamp,
   readAuthSessionSignature,
   readManagedDescriptor,
   readManagedEpoch,
   readStoredToken,
+  sameAuthRequest,
   setManagedProbeMarker,
+  type AuthRequestStamp,
 } from './authPrincipal'
 
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
@@ -243,6 +257,7 @@ export function useAuth() {
   }
 
   function setToken(token: string) {
+    assertOrdinarySyncWriterAllowed()
     resetSessionBootstrap(false, false, true)
     try {
       if (typeof localStorage === 'undefined') return
@@ -258,6 +273,7 @@ export function useAuth() {
   }
 
   function clearToken() {
+    assertOrdinarySyncWriterAllowed()
     resetSessionBootstrap(true, true, true)
     try {
       if (typeof localStorage === 'undefined') return
@@ -275,6 +291,7 @@ export function useAuth() {
   // hook. Payload checks are consistency checks, not signature verification.
   // Login hints and login/logout behavior are intentionally unchanged.
   function setExplicitSessionOrg(token: string, orgId: string, expectedToken: string): boolean {
+    assertOrdinarySyncWriterAllowed()
     if (!expectedToken || getToken() !== expectedToken || !orgId
       || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) return false
     const previous = parseJwtPayload(expectedToken)
@@ -356,10 +373,64 @@ export function useAuth() {
     }
   }
 
+  async function publishOrdinary<T>(mutate: () => T): Promise<T> {
+    if (ordinaryTakeoverRequired()) {
+      await postManagedLogoutUnlocked()
+      if (managedResidueRemains()) throw new AuthIdentityLockError('AUTH_IDENTITY_REVOKE_FAILED')
+    }
+    return runSyncAuthMutation(mutate)
+  }
+
+  async function commitOrdinaryAuthTransition<T>(
+    mutate: () => T,
+    options: { refuseTakeover?: boolean; expectedSignature?: string } = {},
+  ): Promise<T> {
+    const run = async () => {
+      if (options.expectedSignature !== undefined && readAuthSessionSignature() !== options.expectedSignature) {
+        throw new AuthIdentityLockError('AUTH_IDENTITY_STALE')
+      }
+      if (options.refuseTakeover && ordinaryTakeoverRequired()) {
+        throw new AuthIdentityLockError('AUTH_IDENTITY_LOCK_REQUIRED')
+      }
+      return publishOrdinary(mutate)
+    }
+    if (authIdentityLocksAvailable()) return withAuthIdentityLock(run, { failClosed: true })
+    return run()
+  }
+
+  async function commitClearedOrdinaryAuth(expected?: AuthRequestStamp): Promise<boolean> {
+    const { clearStoredAuthState } = await import('../utils/api')
+    const run = async (): Promise<boolean> => {
+      if (expected && !sameAuthRequest(expected)) return false
+      await publishOrdinary(() => {
+        clearToken()
+        clearStoredAuthState()
+      })
+      return true
+    }
+    if (authIdentityLocksAvailable()) return withAuthIdentityLock(run, { failClosed: true })
+    return run()
+  }
+
+  async function commitExplicitSessionOrg(token: string, orgId: string, expectedToken: string): Promise<boolean> {
+    const run = async () => {
+      if (getToken() !== expectedToken) return false
+      if (ordinaryTakeoverRequired()) {
+        await postManagedLogoutUnlocked()
+        if (managedResidueRemains()) throw new AuthIdentityLockError('AUTH_IDENTITY_REVOKE_FAILED')
+      }
+      if (getToken() !== expectedToken) return false
+      return runSyncAuthMutation(() => setExplicitSessionOrg(token, orgId, expectedToken))
+    }
+    if (authIdentityLocksAvailable()) return withAuthIdentityLock(run, { failClosed: true })
+    return run()
+  }
+
   async function refreshDevToken(): Promise<string | null> {
-    if (isManagedEntryActive()) return null
+    if (isManagedEntryActive() || managedResidueRemains()) return null
     if (import.meta.env.PROD) return null
 
+    const expectedSignature = readAuthSessionSignature()
     try {
       const devTokenUrl = new URL('/api/auth/dev-token', getApiBase())
       const tenantHint = readTenantHint()
@@ -379,19 +450,19 @@ export function useAuth() {
             : null
 
       if (!token) return null
-      setToken(token)
-      if (tenantHint) {
-        persistTenantHint(tenantHint)
-      }
-
-      try {
-        if (typeof localStorage !== 'undefined') localStorage.setItem('devToken', token)
-      } catch (err) {
-        console.warn('[auth] failed to persist devToken alias in localStorage', err)
-      }
+      await commitOrdinaryAuthTransition(() => {
+        setToken(token)
+        if (tenantHint) persistTenantHint(tenantHint)
+        try {
+          if (typeof localStorage !== 'undefined') localStorage.setItem('devToken', token)
+        } catch (err) {
+          console.warn('[auth] failed to persist devToken alias in localStorage', err)
+        }
+      }, { refuseTakeover: true, expectedSignature })
 
       return token
     } catch (err) {
+      if (err instanceof AuthIdentityLockError && err.code === 'AUTH_IDENTITY_STALE') return null
       console.warn('[auth] failed to refresh dev token', err)
       return null
     }
@@ -412,6 +483,9 @@ export function useAuth() {
     force: boolean,
     keepSessionOnFailure: boolean,
   ): Promise<SessionBootstrapResult> {
+    if (readManagedCompletePending()) {
+      return { ok: false, status: 0, payload: null }
+    }
     let currentUrl: URL
     try {
       currentUrl = new URL(`${getApiBase()}/api/plm/managed-login/current`, window.location.origin)
@@ -556,6 +630,7 @@ export function useAuth() {
         || ((startedExplicit || Boolean(explicitSessionOrg(getToken())))
           && (resolvedToken !== getToken() || startedIdentity !== getAuthPrincipalKey()))
       const staleResult = (): SessionBootstrapResult => ({ ok: false, status: 0, payload: null })
+      let failedRequest = readAuthRequestStamp()
       let response = await fetch(`${getApiBase()}/api/auth/me`, {
         headers: buildAuthHeaders(resolvedToken),
       }).catch(() => null)
@@ -566,6 +641,7 @@ export function useAuth() {
         if (refreshedToken && refreshedToken !== resolvedToken) {
           resolvedToken = refreshedToken
           sessionToken = refreshedToken
+          failedRequest = readAuthRequestStamp()
           response = await fetch(`${getApiBase()}/api/auth/me`, {
             headers: buildAuthHeaders(resolvedToken),
           }).catch(() => null)
@@ -598,7 +674,8 @@ export function useAuth() {
         // session stays exactly as it was before this background request.
         if (keepSessionOnFailure) return { ok: false, status: response.status, payload }
         if (response.status === 401) {
-          clearToken()
+          const cleared = await commitClearedOrdinaryAuth(failedRequest)
+          if (!cleared) return staleResult()
         }
         sessionCache = {
           ok: false,
@@ -651,7 +728,7 @@ export function useAuth() {
     const tenantHint = explicitSessionOrg(token) || readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
     if (tenantHint) headers['x-tenant-id'] = tenantHint
     // Dev/test fallback aligns with backend flag behaviour
-    if (!headers['Authorization'] && !isManagedEntryActive()) headers['x-user-id'] = 'dev-user'
+    if (!headers['Authorization'] && !isManagedEntryActive() && !managedResidueRemains()) headers['x-user-id'] = 'dev-user'
     return headers
   }
 
@@ -694,6 +771,9 @@ export function useAuth() {
     getToken,
     setToken,
     setExplicitSessionOrg,
+    commitOrdinaryAuthTransition,
+    commitClearedOrdinaryAuth,
+    commitExplicitSessionOrg,
     clearToken,
     bootstrapSession,
     primeSession,

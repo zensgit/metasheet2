@@ -59,11 +59,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { readAuthRequestStamp } from '../composables/authPrincipal'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { ROUTE_PATHS } from '../router/types'
-import { apiFetch, clearStoredAuthState } from '../utils/api'
+import { apiFetch } from '../utils/api'
 import { getPasswordRequirementCopy } from '../utils/passwordRequirements'
 
 type AuthUserRecord = {
@@ -98,9 +99,17 @@ async function ensureEligibleSession(): Promise<boolean> {
     return false
   }
 
+  // Only the session that started this bootstrap may be cleared. A newer sign-in stays put.
+  const issued = readAuthRequestStamp()
   const session = await auth.bootstrapSession()
   if (!session.ok) {
-    clearStoredAuthState()
+    let cleared = false
+    try {
+      cleared = await auth.commitClearedOrdinaryAuth(issued)
+    } catch {
+      return false
+    }
+    if (!cleared && auth.getToken()) return false
     await router.replace(ROUTE_PATHS.LOGIN)
     return false
   }
@@ -150,13 +159,15 @@ async function submit(): Promise<void> {
       throw new Error(message)
     }
 
-    auth.setToken(token)
-    auth.primeSession({
-      success: true,
-      data: {
-        user: payload?.data?.user ?? null,
-        features: payload?.data?.features ?? null,
-      },
+    await auth.commitOrdinaryAuthTransition(() => {
+      auth.setToken(token)
+      auth.primeSession({
+        success: true,
+        data: {
+          user: payload?.data?.user ?? null,
+          features: payload?.data?.features ?? null,
+        },
+      })
     })
     await loadProductFeatures(true, { skipSessionProbe: true })
     await router.replace(resolveHomePath())
@@ -173,18 +184,25 @@ async function logout(): Promise<void> {
   if (loggingOut.value) return
   loggingOut.value = true
   error.value = ''
+  const token = auth.getToken()
+
+  try {
+    await auth.commitClearedOrdinaryAuth()
+  } catch {
+    loggingOut.value = false
+    return
+  }
 
   try {
     await apiFetch('/api/auth/logout', {
       method: 'POST',
       suppressUnauthorizedRedirect: true,
+      ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
     })
   } catch {
-    // Local session cleanup below is still the source of truth for account switching.
+    // The managed cookie is already revoked. Ordinary bearer logout is best-effort after that.
   }
 
-  auth.clearToken()
-  clearStoredAuthState()
   try {
     await router.replace(ROUTE_PATHS.LOGIN)
   } finally {
