@@ -1,14 +1,30 @@
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
+
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 import fixtures from '../fixtures/plm-change-event-v1-fixtures.json'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
 
-afterEach(() => vi.unstubAllEnvs())
+const classificationCalls: DurableUnboundCall[] = []
+// This adapter is constructed without a config, so admission classifies the product default id.
+const unboundSourceId = 'plm'
+
+afterEach(() => {
+  finishDurableUnboundClassification(classificationCalls, unboundSourceId)
+})
 describe('PLM source fact verification', () => {
   it.each(fixtures.cases)('verifies HTTP for $name and rejects altered facts or revoked credentials', async ({ event }) => {
     vi.unstubAllGlobals() // setup.ts stubs fetch; this suite exercises the real HTTP transport.
     vi.stubEnv('NODE_ENV', 'test')
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
     const expected = { ...event, source: { ...event.source, tenant_id: 'tenant-one' } }
     const requests: Array<{ url: string; authorization?: string; tenant?: string | string[] }> = []
     let body: unknown = expected, status = 200

@@ -1,7 +1,23 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
+
 import { PlmBomReviewService } from '../../src/multitable/plm-bom-review-service'
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
-afterEach(() => vi.unstubAllEnvs())
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
+// This adapter is constructed without a config, so admission classifies the product default id.
+const unboundSourceId = 'plm'
+
+afterEach(() => {
+  finishDurableUnboundClassification(classificationCalls, unboundSourceId)
+})
 describe('BOM review bounded provider and runtime', () => {
   it.each(['false', 'TRUE', '1', ''])(
     'disabled %s constructs inert and rejects before SQL/network',
@@ -37,6 +53,7 @@ describe('BOM review bounded provider and runtime', () => {
   })
   it('transport rejects implicit credentials, unsafe endpoints and mismatched scope', async () => {
     vi.stubEnv('NODE_ENV', 'test')
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
     const a = new PLMAdapter(
       { get: vi.fn() } as never,
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,

@@ -233,5 +233,84 @@
       "seconds": 13.43
     },
     "next": "Exact new-head all necessary CI pending"
+  },
+  "source_hashes_snapshot_source": "d9c89dd4b7c796771e724a8de449ac8751ce3f74",
+  "later_workflow_compat_followup": {
+    "source_before": "a8f448ec1332f143caccd56d3f2c10c3f53878e3",
+    "actual_remote_red": {
+      "listener": {
+        "run": 39083044141,
+        "job": 117543798313,
+        "passed": 108,
+        "failed": 3,
+        "total": 111
+      },
+      "visual_pg": {
+        "run": 39083044093,
+        "job": 117543798529,
+        "passed": 13,
+        "failed": 1,
+        "total": 14
+      }
+    },
+    "change": "Only two legacy unit fixtures run real durable empty-binding classification; visual isolatedPG fixture explicitly aligns classifier DATABASE_URL to its own DSN and installs actual public managed schema. All old business assertions preserved; no product/classifier/gate change.",
+    "main_wire": {
+      "exit": 0,
+      "files": 10,
+      "source_stable": true,
+      "counts": {
+        "numPassedTests": 111,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTotalTests": 111,
+        "success": true
+      }
+    },
+    "main_visual_pg": {
+      "start_nonce": "c8b46f0be59b2fd8",
+      "test_exit": 0,
+      "counts": {
+        "numPassedTests": 14,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTotalTests": 14,
+        "success": true
+      },
+      "cleanup_exit": 0,
+      "cleanup": {
+        "ok": true,
+        "command": "cleanup",
+        "nonce": "c8b46f0be59b2fd8",
+        "root": "/tmp/plm-managed-consumer-pg-c8b46f0be59b2fd8",
+        "data": "/tmp/plm-managed-consumer-pg-c8b46f0be59b2fd8/data",
+        "socket": "/tmp/plm-managed-consumer-pg-c8b46f0be59b2fd8/s",
+        "postgresStopped": true,
+        "postgresRunning": false,
+        "directoryRemoved": true,
+        "locale": "C",
+        "markerMatched": true,
+        "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+      },
+      "source_stable": true,
+      "seconds": 2.9
+    },
+    "worker_remaining_steps": {
+      "visual_units": {
+        "files": 8,
+        "passed": 201,
+        "failed": 0,
+        "report": "/tmp/pr6439-a8f-visual-unit.json"
+      },
+      "visual_web": {
+        "files": 10,
+        "passed": 199,
+        "failed": 0,
+        "report": "/tmp/pr6439-a8f-visual-web.json"
+      },
+      "backend_types": "exit0 /tmp/pr6439-a8f-backend-tsc.log",
+      "web_app_types": "exit0 /tmp/pr6439-a8f-web-vue-tsc.log",
+      "limit": "Worker evidence not relabeled main; overlapping cases not added."
+    },
+    "limit": "Fresh exact new-head remote checks pending; no all-green claim."
   }
 }
