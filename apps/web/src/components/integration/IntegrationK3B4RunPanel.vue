@@ -31,6 +31,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { randomUuid } from '../../utils/uuid'
 import { onAuthPrincipalChange, onAuthSessionSwitch, readAuthSessionSignature } from '../../composables/authPrincipal'
 import type { ReadSourceConfigRow } from '../../services/integration/readSourceConfigs'
 import type { IntegrationScope, WorkbenchExternalSystem } from '../../services/integration/workbench'
@@ -124,7 +125,7 @@ async function run(kind: 'preview' | 'sync'): Promise<void> {
       const result = await readK3B4Page(id, workspaceId)
       if (current()) preview.value = result
     } else {
-      const runId = `k3-b4-${crypto.randomUUID()}`
+      const runId = `k3-b4-${randomUuid()}`
       const result = await syncK3B4Materials(id, runId, workspaceId)
       if (current()) sync.value = result
     }

@@ -1356,6 +1356,15 @@ describe('AuthService tenant claim -> jwtAuthMiddleware -> stock-prep source pre
         readSourceConfigStore: inert(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
         readSourceCompositionConfigStore: inert(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
         bridgeAgentChecklistStore: inert(['saveVersion', 'approve', 'retire', 'getForApply']),
+        // This smoke fixture has an explicit legacy binding, not an activated read plan.
+        // Missing runtime wiring must still fail closed; only a scoped null permits legacy.
+        stockPreparationReadPlanStore: {
+          async getActiveForRuntime(scope: Record<string, unknown>) {
+            expect(scope).toEqual({ tenantId: TENANT_A, workspaceId: null,
+              actionId: plugin.tableActions.PLM_STOCK_PREPARATION_ACTION_ID, systemId: BOUND_SOURCE })
+            return null
+          },
+        },
         // THE HOST's directory, the same factory index.ts wires for this plugin, over the same pool.
         tenantPrincipalDirectory: createTenantPrincipalDirectoryBoundaryV1({ query: chainQuery as never }),
         stockPreparationSourceBindingStore: {
