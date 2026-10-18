@@ -248,9 +248,12 @@ describe('settlement coordination budget (§3.2 step 9)', () => {
     const clock = new ManualCoordinationClock()
     await clock.advance(1000)
     const budget = new SettlementCoordinationBudgetV1({ clock, background: true })
+    expect(budget.quotaDeadline()).toBe(1000 + SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS)
+    await clock.advance(20_000)
     budget.record('quota', 20_000)
     expect(budget.waits().quota).toBe(0)
-    expect(budget.quotaDeadline()).toBe(1000 + SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS)
+    // The quota wait is taken out of the elapsed time: the full 5000 ms remain.
+    expect(budget.remaining()).toBe(5000)
     const request = new SettlementCoordinationBudgetV1({ clock })
     request.record('quota', 20)
     expect(request.waits().quota).toBe(20)

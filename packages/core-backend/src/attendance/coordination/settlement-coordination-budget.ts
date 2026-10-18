@@ -8,7 +8,8 @@
  * stage that accumulated the longest wait; waiting for a prober counts towards the family waited for.
  *
  * Background units (scheduled absence, sweep, import workers) do not count quota waits against the
- * budget; each of their quota waits has its own 30 s cap instead.
+ * budget; each of their quota waits has its own 30 s cap instead, and the time spent in it is taken
+ * out of the budget's elapsed time (their deadline moves out by the quota wait).
  */
 import type { CoordinationClockV1 } from './settlement-coordination-clock'
 
@@ -43,6 +44,8 @@ export class SettlementCoordinationBudgetV1 {
   readonly limitMs: number
   readonly background: boolean
   readonly #waits: Record<SettlementCoordinationStageV1, number> = { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 }
+  /** Background units: quota-wait time that does not count against the budget. */
+  #excludedMs = 0
 
   constructor(options: SettlementCoordinationBudgetOptionsV1) {
     this.#clock = options.clock
@@ -52,7 +55,7 @@ export class SettlementCoordinationBudgetV1 {
   }
 
   get deadline(): number {
-    return this.startedAt + this.limitMs
+    return this.startedAt + this.limitMs + this.#excludedMs
   }
 
   remaining(): number {
@@ -68,10 +71,13 @@ export class SettlementCoordinationBudgetV1 {
     return this.background ? this.#clock.now() + SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS : this.deadline
   }
 
-  /** Adds a wait to a stage. Background units do not count quota waits. */
+  /** Adds a wait to a stage. Background units do not count quota waits (their deadline moves out instead). */
   record(stage: SettlementCoordinationStageV1, ms: number): void {
     if (!(ms > 0)) return
-    if (stage === 'quota' && this.background) return
+    if (stage === 'quota' && this.background) {
+      this.#excludedMs += ms
+      return
+    }
     this.#waits[stage] += ms
   }
 
