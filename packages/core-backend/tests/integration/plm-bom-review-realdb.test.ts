@@ -1,4 +1,5 @@
 import { registerChangeCrossprocess } from '../plm-bom-review/change-crossprocess'
+import { up as managedCompanionUp } from '../../src/db/migrations/zzzz20261018010000_create_plm_managed_companion'
 import { up as listenerUp, down as listenerDown } from '../../src/db/migrations/zzzz20261015010000_add_plm_change_listeners'
 import { up as listenerAuthorityUp, down as listenerAuthorityDown } from '../../src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version'
 import { up as changeDispatchUp, down as changeDispatchDown } from '../../src/db/migrations/zzzz20261014080000_dispatch_plm_change_events'
@@ -181,6 +182,8 @@ beforeAll(async () => {
       }),
     ],
   )
+  const managedSchema = await pool.query("SELECT to_regclass('public.plm_managed_source_bindings') AS rel")
+  if (managedSchema.rows[0]?.rel == null) await managedCompanionUp(db)
 })
 afterAll(async () => {
   await pool.end()
@@ -1488,6 +1491,15 @@ describe('actual PG native BOM collaboration', () => {
           }),
         ],
       )
+      const emptyBinding = await pool.query(
+        `SELECT b.data_source_id
+         FROM plm_managed_source_bindings b
+         JOIN plm_managed_identity_links l ON l.id = b.link_id
+         LEFT JOIN data_sources d ON d.id = b.data_source_id
+         WHERE b.data_source_id = $1`,
+        ['real'],
+      )
+      expect(emptyBinding.rows).toEqual([])
       const realService = new PlmBomReviewService({
         pool: tx,
         dataSourceManager: { getDataSource: () => connected },

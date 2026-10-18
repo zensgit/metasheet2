@@ -1,6 +1,17 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
+
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
 
 const redis = vi.hoisted(() => ({ consume: vi.fn() }))
 vi.mock('../../src/auth/embed-jti-store', () => ({ consumeEmbedJti: (...args: unknown[]) => redis.consume(...args) }))
@@ -45,6 +56,7 @@ function raster(type = 'image/png', bytes = PNG): Response {
 describe('PLM visual-preview signed transport', () => {
   const fetchMock = vi.fn()
   beforeEach(() => {
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
     vi.spyOn(Date, 'now').mockReturnValue(now * 1000)
     vi.stubEnv('YUANTUS_EMBED_PUBLIC_KEY', pub)
     vi.stubEnv('YUANTUS_EMBED_KEY_ID', 'embed-1')
@@ -53,7 +65,12 @@ describe('PLM visual-preview signed transport', () => {
     fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock)
     redis.consume.mockReset().mockResolvedValue(true)
   })
-  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks() })
+  afterEach(() => {
+    finishDurableUnboundClassification(classificationCalls, 'preview')
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
 
   it('lists with an embed token and exposes only the signed descriptor with raster bytes', async () => {
     const files = [{ file_id: 'F1', version_id: 'V1', filename: 'drawing.png', version_is_current: true }]

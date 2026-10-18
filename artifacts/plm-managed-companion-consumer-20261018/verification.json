@@ -170,5 +170,68 @@
     "Paired proof uses existing ordinary Meta owner bootstrap JWT and exported C1 customer route, not full main.ts or no-Meta-login SSO.",
     "Unresolved consumed native exchange remains pending until exact observed delegation revoke ACK; no false elapsed-time cleanup. Operational cancellation/reconciliation is later provider work.",
     "No deployed/customer topology/production or real device acceptance."
-  ]
+  ],
+  "exact_source_remote_managed_gate": {
+    "source": "d9c89dd4b7c796771e724a8de449ac8751ce3f74",
+    "run": 39081203748,
+    "job": 117538312419,
+    "url": "https://github.com/zensgit/metasheet2/actions/runs/39081203748/job/117538312419",
+    "result": "SUCCESS:21unit/27PG16/13web; ownedrunnerrestart/nonce/statuscontrols+cleanup verified; backend/app types pass",
+    "limit": "Not whole-PR green: visual/listener legacy fixtures failed; this correction requires fresh exact-head CI."
+  },
+  "visual_listener_compat_followup": {
+    "source_before": "d9c89dd4b7c796771e724a8de449ac8751ce3f74",
+    "actual_remote_red": {
+      "visual": {
+        "run": 39081203732,
+        "job": 117538312424,
+        "failed": 40,
+        "cause": "Legacy visual tests lacked DATABASE_URL and durable empty-binding fixture"
+      },
+      "listener": {
+        "run": 39081203831,
+        "job": 117538312703,
+        "passed": 131,
+        "failed": 1,
+        "cause": "Synthetic predecessor bootstrap missing new managed schema; current connected adapter correctly fails closed"
+      }
+    },
+    "change": "Only visual fixture proves actual empty classification query; listener synthetic isolated catalog runs actual additive managed migration and asserts empty binding for real source. Original visual signature/replay/raster and fresh raw-config assertions preserved. No product guard changed.",
+    "independent_visual": {
+      "passed": 40,
+      "failed": 0,
+      "pending": 0,
+      "source_stable": true,
+      "report": "/tmp/pr6439-main-visual-after.json"
+    },
+    "independent_listener": {
+      "start_nonce": "0e724ecee61c529a",
+      "test_exit": 0,
+      "counts": {
+        "numPassedTests": 132,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTotalTests": 132,
+        "success": true
+      },
+      "cleanup_exit": 0,
+      "cleanup": {
+        "ok": true,
+        "command": "cleanup",
+        "nonce": "0e724ecee61c529a",
+        "root": "/tmp/plm-managed-consumer-pg-0e724ecee61c529a",
+        "data": "/tmp/plm-managed-consumer-pg-0e724ecee61c529a/data",
+        "socket": "/tmp/plm-managed-consumer-pg-0e724ecee61c529a/s",
+        "postgresStopped": true,
+        "postgresRunning": false,
+        "directoryRemoved": true,
+        "locale": "C",
+        "markerMatched": true,
+        "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+      },
+      "source_stable": true,
+      "seconds": 13.43
+    },
+    "next": "Exact new-head all necessary CI pending"
+  }
 }
