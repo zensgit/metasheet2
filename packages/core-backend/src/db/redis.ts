@@ -26,8 +26,9 @@ export async function getRedisClient(): Promise<Redis | null> {
   if (!url) return null
 
   connectionAttempted = true
+  let redis: Redis | null = null
   try {
-    const redis = new Redis(url, {
+    redis = new Redis(url, {
       maxRetriesPerRequest: 1,
       lazyConnect: true,
       enableReadyCheck: true,
@@ -41,6 +42,7 @@ export async function getRedisClient(): Promise<Redis | null> {
     client = redis
     return client
   } catch (err) {
+    redis?.disconnect()
     console.warn(
       '[redis] failed to connect:',
       err instanceof Error ? err.message : err,

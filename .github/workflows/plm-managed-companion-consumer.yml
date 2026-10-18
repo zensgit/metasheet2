@@ -90,8 +90,10 @@ jobs:
             --reporter=json --outputFile=/tmp/plm-managed-unit.json \
             tests/unit/plm-managed-companion-refute.test.ts \
             tests/unit/plm-managed-adapter-refute.test.ts \
-            tests/unit/plm-managed-companion.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 22
+            tests/unit/plm-managed-companion.test.ts \
+            tests/unit/redis-startup-cleanup.test.ts \
+            tests/unit/embed-jti-store.test.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 29
 
       - name: Start owned socket PostgreSQL 16
         run: |
