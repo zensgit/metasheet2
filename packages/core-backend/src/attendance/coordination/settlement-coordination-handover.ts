@@ -7,8 +7,9 @@
  *   - `contended`: the try lost; give the connection back normally, then back off;
  *   - `uncertain`: the protocol state of the connection is unknown (idle proof failed, a statement
  *     errored or its result was lost, a re-grant or an unlock returned false, ROLLBACK failed,
- *     COMMIT failed with anything but 40001 / 40P01, or COMMIT was not acknowledged with the COMMIT
- *     tag — PostgreSQL answers COMMIT in an already failed transaction with ROLLBACK and no error).
+ *     COMMIT failed with anything but 40001 / 40P01, or BEGIN / COMMIT was not acknowledged with its
+ *     command tag — PostgreSQL answers COMMIT in an already failed transaction with ROLLBACK and no
+ *     error, and a client that reports no tags cannot prove either).
  *     The caller must destroy the connection with
  *     `release(err)`; destroying the backend is also what drops any session-level advisory lock it
  *     may still hold. Nothing here ever calls `pg_advisory_unlock_all`.
@@ -60,6 +61,7 @@ export type SettlementCoordinationUncertainReasonV1 =
   | 's1-result-invalid'
   | 's1-undo-failed'
   | 'begin-failed'
+  | 'begin-unacknowledged'
   | 's2-statement-failed'
   | 's2-result-invalid'
   | 's2-regrant-failed'
@@ -268,10 +270,18 @@ export async function runSettlementCoordinationHandoverV1(
     timeouts: options.timeouts,
     entryLabel: options.entryLabel,
   })
+  let begun: unknown
   try {
-    await client.query(`BEGIN ISOLATION LEVEL ${options.isolation}`)
+    begun = await client.query(`BEGIN ISOLATION LEVEL ${options.isolation}`)
   } catch (error) {
     return uncertain('begin-failed', error)
+  }
+  // COMMIT is trusted only on its COMMIT tag. A client that does not report command tags would turn
+  // every real commit into `commit-not-committed` after the business work is done; refuse it here,
+  // before anything happens inside the transaction.
+  if ((begun as { command?: unknown } | null)?.command !== 'BEGIN') {
+    await rollbackQuietly(client)
+    return uncertain('begin-unacknowledged')
   }
   let row: Record<string, unknown> | null
   try {

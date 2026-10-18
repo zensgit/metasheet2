@@ -129,6 +129,12 @@ describe('settlement coordination handover outcome mapping', () => {
     expect(client.calls.map((call) => call.text)).toEqual(['BEGIN ISOLATION LEVEL SERIALIZABLE', s2, 'ROLLBACK'])
   })
 
+  it('a BEGIN answered without the BEGIN tag is uncertain before anything runs inside the transaction', async () => {
+    const client = new ScriptedClient([{ rows: [], command: null }, []])
+    expect(await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)).toEqual({ kind: 'uncertain', reason: 'begin-unacknowledged' })
+    expect(client.calls.map((call) => call.text)).toEqual(['BEGIN ISOLATION LEVEL SERIALIZABLE', 'ROLLBACK'])
+  })
+
   it('a BEGIN error is uncertain and sends nothing else', async () => {
     const error = sqlError('08006')
     const client = new ScriptedClient([error])
