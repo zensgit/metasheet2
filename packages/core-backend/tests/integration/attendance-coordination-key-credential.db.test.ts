@@ -8,14 +8,12 @@
  *    class-00 key equal to the W4 builder's key, for upper- and lower-case spellings of one org;
  *  - the credential verifies only on the same connection, for the same org, inside the same
  *    transaction; never after COMMIT / ROLLBACK, never in a later transaction on the same client;
- *  - guard ④: every two-int4 advisory call in production source whose key1 is a constant is in the
- *    fixed key1 registry, the registry's values are pairwise distinct, and none but the coordination
- *    entry equals 0x4D533243. The population is read from source, values are computed in PostgreSQL.
+ *  - guard ④, value half: every entry of the fixed key1 registry is computed in PostgreSQL; the values
+ *    are pairwise distinct and none but the coordination entry equals 0x4D533243. The population
+ *    half (the closed-world census of two-int4 calls) is in the unit key-space guard.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
-import fs from 'node:fs'
-import path from 'node:path'
 import { Pool } from 'pg'
 
 import {
@@ -54,7 +52,6 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have a database URL (a DB-expected r
 const DESTROY = new Error('test: never hand a test connection to the next test')
 
 const HANDOVER = { isolation: 'READ COMMITTED' as const, timeouts: { kind: 'none' as const }, entryLabel: 'test.credential' }
-const REPO_ROOT = path.resolve(__dirname, '../../../..')
 
 describeIfDatabase('attendance settlement coordination — key and credential (real database)', () => {
   let pool: Pool
@@ -193,62 +190,22 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
     }
   })
 
-  it('guard ④: every constant two-int4 key1 in production source is registered, distinct, and not 0x4D533243', async () => {
-    const ROOTS = ['packages', 'plugins', 'scripts']
-    const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', '.git', '__tests__', 'tests', '__fixtures__'])
-    const EXTENSIONS = new Set(['.ts', '.mts', '.cts', '.js', '.cjs', '.mjs', '.sql'])
-    const CALL = /pg_(?:try_)?advisory_(?:xact_)?(?:un)?lock(?:_shared)?\s*\(\s*(?:hashtext\s*\(\s*'([^']*)'\s*\)|\(?\s*(-?\d+)\s*\)?(?:\s*::\s*int4)?)\s*,/gi
-    const files: string[] = []
-    const walk = (dir: string): void => {
-      let entries: fs.Dirent[]
-      try {
-        entries = fs.readdirSync(dir, { withFileTypes: true })
-      } catch {
-        return
-      }
-      for (const entry of entries) {
-        if (entry.isSymbolicLink()) continue
-        const full = path.join(dir, entry.name)
-        if (entry.isDirectory()) {
-          if (!SKIP_DIRS.has(entry.name)) walk(full)
-        } else if (entry.isFile() && EXTENSIONS.has(path.extname(entry.name)) && !/\.(test|spec)\.[cm]?[jt]s$/.test(entry.name)) {
-          files.push(full)
-        }
-      }
-    }
-    for (const root of ROOTS) walk(path.join(REPO_ROOT, root))
-    const relative = files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/'))
-    // The scan must reach the known constant-key1 user.
-    expect(relative).toContain('packages/core-backend/src/audit/AuditRepository.ts')
-
-    const foundHashtext = new Set<string>()
-    const foundLiterals = new Set<number>()
-    for (const file of files) {
-      const text = fs.readFileSync(file, 'utf8')
-      for (const match of text.matchAll(CALL)) {
-        if (match[1] !== undefined) foundHashtext.add(match[1])
-        else if (match[2] !== undefined) foundLiterals.add(Number(match[2]))
-      }
-    }
-    expect(foundHashtext.has('audit_logs_partition')).toBe(true)
-
-    const registeredHashtext = new Set(ADVISORY_FIXED_KEY1_REGISTRY.flatMap((entry) => ('hashtext' in entry.key1 ? [entry.key1.hashtext] : [])))
-    const registeredLiterals = new Set(ADVISORY_FIXED_KEY1_REGISTRY.flatMap((entry) => ('literal' in entry.key1 ? [entry.key1.literal] : [])))
-    expect([...foundHashtext].filter((value) => !registeredHashtext.has(value))).toEqual([])
-    expect([...foundLiterals].filter((value) => !registeredLiterals.has(value))).toEqual([])
-
+  it('guard ④ (values): every fixed key1, computed in PostgreSQL, is distinct and only the coordination entry is 0x4D533243', async () => {
+    // The population half (every two-int4 call in production source classified, every constant site
+    // tied to the registry entry it binds) is the closed-world census in the unit key-space guard.
+    expect(ADVISORY_FIXED_KEY1_REGISTRY.length).toBeGreaterThanOrEqual(26)
     const values: Array<{ name: string; value: number }> = []
     for (const entry of ADVISORY_FIXED_KEY1_REGISTRY) {
-      if ('literal' in entry.key1) {
-        values.push({ name: entry.name, value: entry.key1.literal })
-      } else {
-        const { rows } = await pool.query('SELECT hashtext($1)::int AS v', [entry.key1.hashtext])
-        values.push({ name: entry.name, value: Number(rows[0].v) })
-      }
+      const { rows } = 'literal' in entry.key1
+        ? await pool.query('SELECT ($1::int4)::int AS v', [entry.key1.literal])
+        : await pool.query('SELECT hashtext($1)::int AS v', [entry.key1.hashtext])
+      values.push({ name: entry.name, value: Number(rows[0].v) })
     }
-    expect(new Set(values.map((entry) => entry.value)).size).toBe(values.length)
-    for (const entry of values) {
-      if (entry.name !== 'attendance-settlement-coordination') expect(entry.value).not.toBe(SETTLEMENT_COORDINATION_KEY1)
-    }
+    const byValue = new Map<number, string[]>()
+    for (const entry of values) byValue.set(entry.value, [...(byValue.get(entry.value) ?? []), entry.name])
+    expect([...byValue.values()].filter((names) => names.length > 1)).toEqual([])
+    expect(values.filter((entry) => entry.value === SETTLEMENT_COORDINATION_KEY1).map((entry) => entry.name)).toEqual([
+      'attendance-settlement-coordination',
+    ])
   })
 })
