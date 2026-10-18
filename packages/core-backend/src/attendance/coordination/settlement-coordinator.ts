@@ -15,6 +15,14 @@
  * a late client is released at once, then the quota returns. Leaving without success (budget, error,
  * abort) hands every probe the unit holds to the head of its queue.
  *
+ * After every step that hands the attempt something (quota, a connection, S1's session locks, the
+ * open transaction) the attempt checks that it may go on. A closed or aborted unit, or a budget that
+ * step used up, undoes what the step left — the session locks are unlocked, the transaction is rolled
+ * back, and anything uncertain destroys the connection — gives everything back and fails: nothing is
+ * handed over once the budget is gone (§3.2 step 9 "零业务写入"). A unit runs one acquisition,
+ * candidate read or restart at a time; closing it while one is in flight cancels that one, which
+ * leaves the ledger itself once everything is back.
+ *
  * Nothing here is wired into production in P1-1: there is no module-level instance, no timer and no
  * environment read; `createSettlementCoordinatorV1` builds everything from what it is given.
  */
@@ -34,12 +42,14 @@ import {
 } from './settlement-coordination-clock'
 import {
   AttendanceCoordinationConnectionUncertainError,
+  SettlementCoordinationCredentialV1,
   invalidateSettlementCoordinationCredentialsV1,
   planSettlementCoordinationV1,
+  releaseSettlementCoordinationSessionLocksV1,
   rollbackSettlementCoordinationTransactionV1,
   runSettlementCoordinationHandoverV1,
   runSettlementCoordinationS1V1,
-  type SettlementCoordinationCredentialV1,
+  type SettlementCoordinationCommitOutcomeV1,
   type SettlementCoordinationHandoverOptionsV1,
   type SettlementCoordinationPlanV1,
   type SettlementCoordinationUncertainReasonV1,
@@ -84,10 +94,20 @@ export interface SettlementCoordinationAttemptRecordV1 {
   readonly waits: Readonly<Record<SettlementCoordinationStageV1, number>>
 }
 
-/** A record is worth a log line only when the attempt tried more than once or waited at all. */
+/**
+ * §3.2 step 10: a record is worth a log line only when the attempt tried more than once or actually
+ * waited — queued for quota, lost a connect race, waited for a prober or backed off. The budget still
+ * counts every millisecond; an immediate grant or a fast round trip is not a wait here.
+ */
 export function shouldLogSettlementCoordinationAttemptV1(record: SettlementCoordinationAttemptRecordV1): boolean {
-  const tries = record.events.filter((event) => event.kind === 's1').length
-  return tries > 1 || Object.values(record.waits).some((ms) => ms > 0)
+  let tries = 0
+  for (const event of record.events) {
+    if (event.kind === 's1') tries += 1
+    else if (event.kind === 'prober-wait' || event.kind === 'backoff') return true
+    else if (event.kind === 'quota' && event.detail?.queued === true) return true
+    else if (event.kind === 'connect' && (event.detail?.kind === 'timeout' || event.detail?.kind === 'aborted')) return true
+  }
+  return tries > 1
 }
 
 export interface SettlementCoordinatorDepsV1 {
@@ -108,7 +128,7 @@ export interface SettlementCoordinationUnitRequestV1 {
   readonly handover: SettlementCoordinationHandoverOptionsV1
   /** Scheduled absence, sweep, import workers: quota waits capped at 30 s and outside the budget. */
   readonly background?: boolean
-  /** Scanner, CLI and other callers that try exactly once: no contention state is made or read. */
+  /** Scanner, CLI and other callers that try exactly once: no contention state is made, read or ended. */
   readonly oneShot?: boolean
   readonly signal?: AbortSignal
   readonly budgetMs?: number
@@ -127,7 +147,7 @@ export class SettlementCoordinationAcquireError extends Error {
   }
 }
 
-/** The request was aborted while the unit waited; nothing was written. */
+/** The request was aborted, or the unit closed, before anything was handed over; nothing was written. */
 export class SettlementCoordinationAbortedError extends Error {
   readonly code = 'ATTENDANCE_COORDINATION_ABORTED'
 
@@ -151,24 +171,41 @@ export class SettlementCoordinationScopeChangedError extends Error {
   }
 }
 
+/**
+ * A restart whose claim about the transaction does not hold: the connection has been destroyed (which
+ * ends whatever was open on it) and nothing is counted. `transaction-still-open`: called `ended` while
+ * no COMMIT or ROLLBACK went through the primitives. `commit-not-retryable`: the COMMIT that ended it
+ * was not a 40001 / 40P01 (an uncertain COMMIT is never followed by another business attempt).
+ */
+export class SettlementCoordinationRestartRefusedError extends Error {
+  readonly code = 'ATTENDANCE_COORDINATION_RESTART_REFUSED'
+  readonly reason: 'transaction-still-open' | 'commit-not-retryable'
+
+  constructor(reason: 'transaction-still-open' | 'commit-not-retryable') {
+    super(`ATTENDANCE_COORDINATION_RESTART_REFUSED:${reason}`)
+    this.name = 'SettlementCoordinationRestartRefusedError'
+    this.reason = reason
+  }
+}
+
 export const SETTLEMENT_COORDINATION_SCOPE_CHANGED = 'ATTENDANCE_COORDINATION_SCOPE_CHANGED'
 /** `W4_TRANSACTION_MAX_RETRIES`: each inner counter allows two restarts. */
 export const SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT = 2
 
-export interface SettlementCoordinationRestartV1 {
-  /** `serialization`: 40001 / 40P01; `recheck`: the post-lock recheck disagreed with the candidate. */
-  readonly reason: 'serialization' | 'recheck'
+export type SettlementCoordinationRestartV1 =
   /**
    * `live`: the handed-over transaction is still open (its credential is live) and is rolled back.
-   * `ended`: it already ended at COMMIT (retryable 40001 / 40P01): the server rolled it back, so no
-   * ROLLBACK is sent and the rollback primitive is not called.
+   * `serialization`: 40001 / 40P01 inside the transaction; `recheck`: the post-lock recheck disagreed
+   * with the candidate. `error` is rethrown unchanged when the serialization counter is used up;
+   * `conflictCode` is the entry's registered code for a used-up recheck counter.
    */
-  readonly transaction: 'live' | 'ended'
-  /** The original error; rethrown unchanged when the serialization counter is used up. */
-  readonly error: unknown
-  /** The entry's registered conflict code for a used-up recheck counter. */
-  readonly conflictCode?: string
-}
+  | Readonly<{ reason: 'serialization' | 'recheck'; transaction: 'live'; error: unknown; conflictCode?: string }>
+  /**
+   * `ended`: the transaction already ended at COMMIT with 40001 / 40P01 — the server rolled it back, so
+   * no ROLLBACK is sent. `commit` is the outcome the commit primitive returned; only `retryable` is
+   * accepted, and its error is the one rethrown when the counter is used up.
+   */
+  | Readonly<{ reason: 'serialization'; transaction: 'ended'; commit: SettlementCoordinationCommitOutcomeV1 }>
 
 export const SETTLEMENT_COORDINATION_CONNECTION_UNAVAILABLE = 'ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE'
 export const SETTLEMENT_COORDINATION_CAPACITY_BUSY = 'ATTENDANCE_COORDINATION_CAPACITY_BUSY'
@@ -191,6 +228,7 @@ interface ActiveAttempt {
   readonly lease: SettlementCoordinationQuotaLeaseV1
   readonly plan: SettlementCoordinationPlanV1
   readonly credential: SettlementCoordinationCredentialV1
+  ended: boolean
 }
 
 class AttemptRecorder {
@@ -214,11 +252,17 @@ export class SettlementCoordinationUnitV1 {
   readonly #id = Symbol('settlement-coordination-unit')
   readonly budget: SettlementCoordinationBudgetV1
   readonly #tickets = new Map<SettlementCoordinationFamilyV1, SettlementCoordinationProbeTicketV1>()
+  /** Aborted by the request's signal or by `close()`; every wait of the unit listens to it. */
+  readonly #abort = new AbortController()
+  readonly #forwardAbort = (): void => this.#abort.abort()
   #attempt = 0
   #retry = 0
   #active: ActiveAttempt | null = null
   #activeHandle: SettlementCoordinationHandleV1 | null = null
+  /** An acquisition, candidate read or restart is in flight (set before its first await). */
+  #busy = false
   #closed = false
+  #left = false
   #serializationRestarts = 0
   #recheckRestarts = 0
 
@@ -227,6 +271,8 @@ export class SettlementCoordinationUnitV1 {
     this.#request = request
     this.budget = new SettlementCoordinationBudgetV1({ clock: deps.clock, limitMs: request.budgetMs, background: request.background })
     deps.ledger.enter(this.#id, request.quotaClass)
+    if (request.signal?.aborted) this.#abort.abort()
+    else request.signal?.addEventListener('abort', this.#forwardAbort, { once: true })
   }
 
   /** Whether the unit currently holds a handed-over attempt. */
@@ -240,46 +286,68 @@ export class SettlementCoordinationUnitV1 {
    */
   async readCandidate<T>(read: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
     this.#assertIdle()
-    const client = await this.#borrow(null, null)
-    const started = this.#deps.clock.now()
-    let destroyWith: unknown
+    this.#busy = true
     try {
-      return await read(client)
-    } catch (error) {
-      destroyWith = error instanceof Error ? error : new Error('candidate read failed')
-      throw error
+      this.#throwIfStopped()
+      const client = await this.#borrow(null, null)
+      const started = this.#deps.clock.now()
+      let destroyWith: unknown
+      try {
+        return await read(client)
+      } catch (error) {
+        destroyWith = error instanceof Error ? error : new Error('candidate read failed')
+        throw error
+      } finally {
+        this.budget.record('connect', this.#deps.clock.now() - started)
+        invalidateSettlementCoordinationCredentialsV1(client)
+        client.release(destroyWith)
+        this.#deps.ledger.dropClient(this.#id)
+      }
     } finally {
-      this.budget.record('connect', this.#deps.clock.now() - started)
-      client.release(destroyWith)
-      this.#deps.ledger.dropClient(this.#id)
+      this.#busy = false
+      if (this.#closed) this.#leave()
     }
   }
 
   async acquire(org: unknown): Promise<SettlementCoordinationHandleV1> {
     this.#assertIdle()
-    const plan = planSettlementCoordinationV1(org, { needsClassZero: this.#request.needsClassZero })
-    const lexical = plan.key.org.lexical
-    const families: SettlementCoordinationFamilyV1[] = plan.classZeroKey === null ? ['dedicated'] : ['dedicated', 'class-00']
-    this.#attempt += 1
-    const record = new AttemptRecorder(this.#deps.clock, this.#attempt, this.#request.quotaClass, lexical)
+    this.#busy = true
+    let record: AttemptRecorder | null = null
     try {
+      const plan = planSettlementCoordinationV1(org, { needsClassZero: this.#request.needsClassZero })
+      const lexical = plan.key.org.lexical
+      const families: SettlementCoordinationFamilyV1[] = plan.classZeroKey === null ? ['dedicated'] : ['dedicated', 'class-00']
+      this.#attempt += 1
+      record = new AttemptRecorder(this.#deps.clock, this.#attempt, this.#request.quotaClass, lexical)
       for (;;) {
-        this.#throwIfAborted()
-        if (this.budget.exhausted()) throw this.#exhausted()
+        this.#throwIfStopped()
         if (!this.#request.oneShot && (await this.#waitForContention(lexical, families, record))) continue
 
         const lease = await this.#takeQuota(lexical, record)
+        // The lease is this attempt's to give back until `#borrow` takes it over.
+        const stopBeforeBorrow = this.#stopReason()
+        if (stopBeforeBorrow) {
+          this.#returnLease(lease)
+          record.event('released')
+          throw stopBeforeBorrow
+        }
         const client = await this.#borrow(lease, record)
         // From here until the resources are given back, destroyed or handed over, this attempt owns
         // them; anything unexpected destroys the connection and returns the quota.
         let owned = true
         try {
+          const stopBeforeTry = this.#stopReason()
+          if (stopBeforeTry) {
+            owned = false
+            this.#giveBack(client, lease, record)
+            throw stopBeforeTry
+          }
           const tryStarted = this.#deps.clock.now()
           const s1 = await runSettlementCoordinationS1V1(client, plan)
           record.event('s1', { kind: s1.kind, ...(s1.kind === 'contended' ? { family: s1.family } : {}), ...(s1.kind === 'uncertain' ? { reason: s1.reason } : {}) })
+          this.budget.record(s1.kind === 'contended' ? s1.family : 'dedicated', this.#deps.clock.now() - tryStarted)
 
           if (s1.kind === 'uncertain') {
-            this.budget.record('dedicated', this.#deps.clock.now() - tryStarted)
             owned = false
             this.#destroy(client, lease, s1.reason, record)
             for (const ticket of this.#tickets.values()) this.#deps.prober.reportUndetermined(ticket)
@@ -287,34 +355,49 @@ export class SettlementCoordinationUnitV1 {
           }
 
           if (s1.kind === 'acquired') {
-            this.budget.record('dedicated', this.#deps.clock.now() - tryStarted)
-            for (const family of families) this.#deps.prober.reportFree(lexical, family)
+            if (!this.#request.oneShot) for (const family of families) this.#deps.prober.reportFree(lexical, family)
             this.#tickets.clear()
+            const stopAfterTry = this.#stopReason()
+            if (stopAfterTry) {
+              owned = false
+              await this.#unlockAndGiveBack(client, lease, plan, record)
+              throw stopAfterTry
+            }
+            const handoverStarted = this.#deps.clock.now()
             const handover = await runSettlementCoordinationHandoverV1(client, plan, this.#request.handover)
             record.event('handover', { kind: handover.kind, ...(handover.kind === 'uncertain' ? { reason: handover.reason } : {}) })
+            // S2's transaction-level re-grant is part of the try (§3.2 step 6.4).
+            this.budget.record('dedicated', this.#deps.clock.now() - handoverStarted)
             if (handover.kind === 'uncertain') {
               owned = false
               this.#destroy(client, lease, handover.reason, record)
               throw new AttendanceCoordinationConnectionUncertainError(handover.reason)
             }
+            const stopAfterHandover = this.#stopReason()
+            if (stopAfterHandover) {
+              owned = false
+              await this.#rollbackAndGiveBack(client, lease, handover.credential, record)
+              throw stopAfterHandover
+            }
             owned = false
-            this.#active = { client, lease, plan, credential: handover.credential }
+            const active: ActiveAttempt = { client, lease, plan, credential: handover.credential, ended: false }
+            this.#active = active
+            this.#activeHandle = this.#handle(active, this.#attempt)
+            this.#busy = false
             this.#emit(record, 'handed-over', null)
-            this.#activeHandle = this.#handle(this.#active, this.#attempt)
             return this.#activeHandle
           }
 
           // Contended: give everything back before anyone backs off.
           const family = s1.family
-          this.budget.record(family, this.#deps.clock.now() - tryStarted)
+          owned = false
+          this.#giveBack(client, lease, record)
+          if (this.#request.oneShot) throw new SettlementCoordinationAcquireError(SETTLEMENT_COORDINATION_EXHAUSTION_CODES[family], this.budget.waits())
           if (family === 'class-00') {
             // k_ok was true: the dedicated family's contention is over even though class-00 lost.
             this.#deps.prober.reportFree(lexical, 'dedicated')
             this.#tickets.delete('dedicated')
           }
-          owned = false
-          this.#giveBack(client, lease, record)
-          if (this.#request.oneShot) throw new SettlementCoordinationAcquireError(SETTLEMENT_COORDINATION_EXHAUSTION_CODES[family], this.budget.waits())
           const role = this.#deps.prober.reportFailure(lexical, family, this.#id, this.#tickets.get(family))
           if (role.role === 'prober') {
             this.#tickets.set(family, role.ticket)
@@ -323,7 +406,7 @@ export class SettlementCoordinationUnitV1 {
             record.event('backoff', { family, ms: delay })
             const slept = this.#deps.clock.now()
             try {
-              await this.#deps.clock.sleep(delay, this.#request.signal)
+              await this.#deps.clock.sleep(delay, this.#abort.signal)
             } finally {
               this.budget.record(family, this.#deps.clock.now() - slept)
             }
@@ -335,16 +418,17 @@ export class SettlementCoordinationUnitV1 {
             invalidateSettlementCoordinationCredentialsV1(client)
             client.release(new Error('settlement coordination attempt failed unexpectedly'))
             this.#deps.ledger.dropClient(this.#id)
-            lease.release()
-            this.#deps.ledger.dropLease(this.#id)
+            this.#returnLease(lease)
             record.event('destroyed', { reason: 'unexpected' })
           }
         }
       }
     } catch (error) {
+      this.#busy = false
       this.#handOverProbes()
       const mapped = this.#mapError(error)
-      this.#emit(record, 'failed', (mapped as { code?: unknown }).code as string | undefined ?? null)
+      if (record) this.#emit(record, 'failed', (mapped as { code?: unknown }).code as string | undefined ?? null)
+      if (this.#closed) this.#leave()
       throw mapped
     }
   }
@@ -366,63 +450,100 @@ export class SettlementCoordinationUnitV1 {
    * says, gives the connection back (destroyed when ROLLBACK failed), returns global then org quota,
    * and counts the restart. Only the budget and the two inner counters survive into the next
    * acquisition. When a counter goes past its limit the restart still converts the resources first,
-   * then a serialization restart rethrows `input.error` unchanged and a recheck restart throws the
-   * registered conflict code.
+   * then a serialization restart rethrows the original error unchanged and a recheck restart throws
+   * the registered conflict code. A claim that does not hold (a live transaction called `ended`, an
+   * `ended` one without a retryable COMMIT, an ended one called `live`) destroys the connection and
+   * is refused without counting.
    */
   async restart(handle: SettlementCoordinationHandleV1, input: SettlementCoordinationRestartV1): Promise<void> {
-    if (this.#activeHandle !== handle || !this.#active) throw new Error('settlement coordination restart for an attempt this unit does not hold')
-    let destroyWith: unknown
-    let refused: unknown
-    if (input.transaction === 'live') {
-      try {
-        const rolled = await rollbackSettlementCoordinationTransactionV1(handle.client, handle.credential)
-        if (rolled.kind === 'uncertain') destroyWith = new AttendanceCoordinationConnectionUncertainError(rolled.reason)
-      } catch (error) {
-        // The credential did not match: the transaction state is unknown, so the connection goes.
-        refused = error
-        destroyWith = error
+    const active = this.#active
+    if (this.#activeHandle !== handle || !active) throw new Error('settlement coordination restart for an attempt this unit does not hold')
+    if (this.#busy) throw new Error('settlement coordination unit is already busy (overlapping restart)')
+    this.#busy = true
+    try {
+      let destroyWith: unknown
+      let refused: unknown
+      if (input.transaction === 'live') {
+        try {
+          const rolled = await rollbackSettlementCoordinationTransactionV1(active.client, active.credential)
+          if (rolled.kind === 'uncertain') destroyWith = new AttendanceCoordinationConnectionUncertainError(rolled.reason)
+        } catch (error) {
+          // The credential did not match: the transaction state is unknown, so the connection goes.
+          refused = error
+          destroyWith = error
+        }
+      } else if (SettlementCoordinationCredentialV1.isLiveOn(active.credential, active.client)) {
+        // No COMMIT or ROLLBACK went through the primitives, so the transaction is still open: only
+        // destroying the connection is sure to end it.
+        refused = new SettlementCoordinationRestartRefusedError('transaction-still-open')
+        destroyWith = refused
+      } else if (input.commit?.kind !== 'retryable') {
+        refused = new SettlementCoordinationRestartRefusedError('commit-not-retryable')
+        destroyWith = refused
       }
-    }
-    handle.end(destroyWith)
-    if (refused !== undefined) throw refused
-    if (input.reason === 'serialization') {
-      this.#serializationRestarts += 1
-      if (this.#serializationRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) throw input.error
-    } else {
-      this.#recheckRestarts += 1
-      if (this.#recheckRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) {
-        throw new SettlementCoordinationScopeChangedError(input.conflictCode ?? SETTLEMENT_COORDINATION_SCOPE_CHANGED)
+      this.#endAttempt(active, destroyWith)
+      if (refused !== undefined) throw refused
+      if (input.reason === 'serialization') {
+        this.#serializationRestarts += 1
+        if (this.#serializationRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) {
+          throw input.transaction === 'live' ? input.error : (input.commit as { error: unknown }).error
+        }
+      } else {
+        this.#recheckRestarts += 1
+        if (this.#recheckRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) {
+          throw new SettlementCoordinationScopeChangedError(input.conflictCode ?? SETTLEMENT_COORDINATION_SCOPE_CHANGED)
+        }
       }
+    } finally {
+      this.#busy = false
+      if (this.#closed) this.#leave()
     }
   }
 
-  /** Leaves the coordinator. A unit that still holds an attempt is a programming error: it is destroyed. */
+  /**
+   * Leaves the coordinator. Closing while an acquisition, candidate read or restart is in flight
+   * cancels it: its waits end, it gives back whatever it holds and leaves the ledger itself once it
+   * settles. Closing while the unit holds a handed-over attempt is a programming error: the attempt is
+   * destroyed and close throws.
+   */
   close(): void {
     if (this.#closed) return
     this.#closed = true
-    this.#handOverProbes()
+    this.#abort.abort()
+    if (this.#busy) return
     const active = this.#active
     if (active) {
-      this.#active = null
-      this.#activeHandle = null
-      invalidateSettlementCoordinationCredentialsV1(active.client)
-      active.client.release(new Error('settlement coordination unit closed while holding an attempt'))
-      this.#deps.ledger.dropClient(this.#id)
-      active.lease.release()
-      this.#deps.ledger.dropLease(this.#id)
-      this.#deps.ledger.exit(this.#id)
+      this.#endAttempt(active, new Error('settlement coordination unit closed while holding an attempt'))
+      this.#leave()
       throw new Error('settlement coordination unit closed while holding an attempt')
     }
+    this.#leave()
+  }
+
+  #leave(): void {
+    if (this.#left) return
+    this.#left = true
+    this.#handOverProbes()
+    this.#request.signal?.removeEventListener('abort', this.#forwardAbort)
     this.#deps.ledger.exit(this.#id)
   }
 
   #assertIdle(): void {
     if (this.#closed) throw new Error('settlement coordination unit is closed')
+    if (this.#busy) throw new Error('settlement coordination unit is already busy (overlapping acquisition)')
     if (this.#active) throw new Error('settlement coordination unit already holds an attempt (overlapping acquisition)')
   }
 
-  #throwIfAborted(): void {
-    if (this.#request.signal?.aborted) throw new SettlementCoordinationAbortedError()
+  /** Why the attempt may not go on (closed or aborted first, then a spent budget), or null. */
+  #stopReason(): Error | null {
+    if (this.#closed || this.#abort.signal.aborted) return new SettlementCoordinationAbortedError()
+    if (this.budget.exhausted()) return this.#exhausted()
+    return null
+  }
+
+  #throwIfStopped(): void {
+    const stop = this.#stopReason()
+    if (stop) throw stop
   }
 
   #exhausted(): SettlementCoordinationAcquireError {
@@ -448,7 +569,7 @@ export class SettlementCoordinationUnitV1 {
       record.event('prober-wait', { family })
       let result
       try {
-        result = await this.#deps.prober.wait(org, family, this.#id, { deadline: this.budget.deadline, signal: this.#request.signal })
+        result = await this.#deps.prober.wait(org, family, this.#id, { deadline: this.budget.deadline(), signal: this.#abort.signal })
       } finally {
         this.budget.record(family, this.#deps.clock.now() - started)
       }
@@ -466,7 +587,7 @@ export class SettlementCoordinationUnitV1 {
       lease = await this.#deps.quota.acquire(org, this.#request.quotaClass, {
         clock: this.#deps.clock,
         deadline: this.budget.quotaDeadline(),
-        signal: this.#request.signal,
+        signal: this.#abort.signal,
       })
     } catch (error) {
       this.budget.record('quota', this.#deps.clock.now() - started)
@@ -478,18 +599,25 @@ export class SettlementCoordinationUnitV1 {
       throw error
     }
     this.budget.record('quota', this.#deps.clock.now() - started)
-    this.#deps.ledger.takeLease(this.#id)
-    record.event('quota', { waitedMs: this.#deps.clock.now() - started })
+    try {
+      this.#deps.ledger.takeLease(this.#id)
+    } catch (error) {
+      lease.release()
+      throw error
+    }
+    record.event('quota', { waitedMs: this.#deps.clock.now() - started, queued: lease.queued })
     return lease
   }
 
   /**
-   * Borrows a connection, raced against min(remaining budget, DB_CONNECT_TIMEOUT). A connect that
-   * loses the race keeps `lease` until it settles: a late client is released, then the lease.
+   * Borrows a connection, raced against min(remaining budget, DB_CONNECT_TIMEOUT). Whatever happens,
+   * `lease` is taken care of when this throws: returned at once on a connect error, kept on the
+   * abandoned tab after a lost race until the connect settles (a late client is released, then the
+   * lease).
    */
   async #borrow(lease: SettlementCoordinationQuotaLeaseV1 | null, record: AttemptRecorder | null): Promise<SettlementCoordinationClientV1> {
     const clock = this.#deps.clock
-    const signal = this.#request.signal
+    const signal = this.#abort.signal
     const started = clock.now()
     const raceMs = Math.max(0, Math.min(this.budget.remaining(), this.#deps.connectTimeoutMs))
     const connecting = this.#deps.pool.connect()
@@ -504,15 +632,15 @@ export class SettlementCoordinationUnitV1 {
         if (settled) return false
         settled = true
         timer?.cancel()
-        signal?.removeEventListener('abort', onAbort)
+        signal.removeEventListener('abort', onAbort)
         resolve(value)
         return true
       }
-      if (signal?.aborted) {
+      if (signal.aborted) {
         finish({ kind: 'aborted' })
       } else {
         timer = clock.setTimer(raceMs, () => finish({ kind: 'timeout' }))
-        signal?.addEventListener('abort', onAbort, { once: true })
+        signal.addEventListener('abort', onAbort, { once: true })
       }
       connecting.then(
         (client) => void finish({ kind: 'client', client }),
@@ -522,19 +650,22 @@ export class SettlementCoordinationUnitV1 {
     this.budget.record('connect', clock.now() - started)
     record?.event('connect', { kind: outcome.kind, waitedMs: clock.now() - started })
     if (outcome.kind === 'client') {
-      this.#deps.ledger.takeClient(this.#id)
+      try {
+        this.#deps.ledger.takeClient(this.#id)
+      } catch (error) {
+        outcome.client.release(error instanceof Error ? error : new Error('settlement coordination ledger refused the connection'))
+        if (lease) this.#returnLease(lease)
+        throw error
+      }
       return outcome.client
     }
     if (outcome.kind === 'error') {
-      if (lease) {
-        lease.release()
-        this.#deps.ledger.dropLease(this.#id)
-      }
+      if (lease) this.#returnLease(lease)
       throw new SettlementCoordinationAcquireError(SETTLEMENT_COORDINATION_CONNECTION_UNAVAILABLE, this.budget.waits(), outcome.error)
     }
-    // Lost the race: the connect may still settle. Its quota stays out until it does.
+    // Lost the race: the connect may still settle, and its quota stays out until it does. The handler
+    // is in place before any bookkeeping below, so nothing can strand the late client.
     const settle = lease ? this.#deps.ledger.abandonConnect(this.#request.quotaClass) : () => undefined
-    if (lease) this.#deps.ledger.dropLease(this.#id)
     connecting.then(
       (late) => {
         try {
@@ -549,17 +680,55 @@ export class SettlementCoordinationUnitV1 {
         settle()
       },
     )
+    if (lease) this.#deps.ledger.dropLease(this.#id)
     if (outcome.kind === 'aborted') throw new SettlementCoordinationAbortedError()
     throw new SettlementCoordinationAcquireError(SETTLEMENT_COORDINATION_CONNECTION_UNAVAILABLE, this.budget.waits())
   }
 
-  /** A lost try: the connection is clean (S1 left nothing held), so it goes back; then global, then org. */
-  #giveBack(client: SettlementCoordinationClientV1, lease: SettlementCoordinationQuotaLeaseV1, record: AttemptRecorder): void {
-    client.release()
-    this.#deps.ledger.dropClient(this.#id)
+  #returnLease(lease: SettlementCoordinationQuotaLeaseV1): void {
     lease.release()
     this.#deps.ledger.dropLease(this.#id)
+  }
+
+  /** A clean connection (nothing held on its session) goes back; then global, then org. */
+  #giveBack(client: SettlementCoordinationClientV1, lease: SettlementCoordinationQuotaLeaseV1, record: AttemptRecorder): void {
+    invalidateSettlementCoordinationCredentialsV1(client)
+    client.release()
+    this.#deps.ledger.dropClient(this.#id)
+    this.#returnLease(lease)
     record.event('released')
+  }
+
+  /** S1 took the session locks but the attempt may not go on: unlock exactly those, then give back. */
+  async #unlockAndGiveBack(
+    client: SettlementCoordinationClientV1,
+    lease: SettlementCoordinationQuotaLeaseV1,
+    plan: SettlementCoordinationPlanV1,
+    record: AttemptRecorder,
+  ): Promise<void> {
+    const unlocked = await releaseSettlementCoordinationSessionLocksV1(client, plan)
+    if (unlocked.kind === 'uncertain') {
+      this.#destroy(client, lease, unlocked.reason, record)
+      return
+    }
+    record.event('unlocked')
+    this.#giveBack(client, lease, record)
+  }
+
+  /** The transaction is open on the connection but the attempt may not go on: roll it back, then give back. */
+  async #rollbackAndGiveBack(
+    client: SettlementCoordinationClientV1,
+    lease: SettlementCoordinationQuotaLeaseV1,
+    credential: SettlementCoordinationCredentialV1,
+    record: AttemptRecorder,
+  ): Promise<void> {
+    const rolled = await rollbackSettlementCoordinationTransactionV1(client, credential)
+    if (rolled.kind === 'uncertain') {
+      this.#destroy(client, lease, rolled.reason, record)
+      return
+    }
+    record.event('rolled-back')
+    this.#giveBack(client, lease, record)
   }
 
   #destroy(
@@ -571,8 +740,7 @@ export class SettlementCoordinationUnitV1 {
     invalidateSettlementCoordinationCredentialsV1(client)
     client.release(new AttendanceCoordinationConnectionUncertainError(reason))
     this.#deps.ledger.dropClient(this.#id)
-    lease.release()
-    this.#deps.ledger.dropLease(this.#id)
+    this.#returnLease(lease)
     record.event('destroyed', { reason })
   }
 
@@ -581,26 +749,28 @@ export class SettlementCoordinationUnitV1 {
     this.#tickets.clear()
   }
 
+  /** Ends a handed-over attempt exactly once: connection (destroyed when `error` is given), then global, then org quota. */
+  #endAttempt(active: ActiveAttempt, error?: unknown): void {
+    if (active.ended) throw new Error('settlement coordination attempt ended twice')
+    active.ended = true
+    if (this.#active === active) {
+      this.#active = null
+      this.#activeHandle = null
+    }
+    invalidateSettlementCoordinationCredentialsV1(active.client)
+    active.client.release(error)
+    this.#deps.ledger.dropClient(this.#id)
+    active.lease.release()
+    this.#deps.ledger.dropLease(this.#id)
+  }
+
   #handle(active: ActiveAttempt, attempt: number): SettlementCoordinationHandleV1 {
-    let ended = false
     return Object.freeze({
       client: active.client,
       credential: active.credential,
       plan: active.plan,
       attempt,
-      end: (error?: unknown) => {
-        if (ended) throw new Error('settlement coordination attempt ended twice')
-        ended = true
-        if (this.#active === active) {
-          this.#active = null
-          this.#activeHandle = null
-        }
-        invalidateSettlementCoordinationCredentialsV1(active.client)
-        active.client.release(error)
-        this.#deps.ledger.dropClient(this.#id)
-        active.lease.release()
-        this.#deps.ledger.dropLease(this.#id)
-      },
+      end: (error?: unknown) => this.#endAttempt(active, error),
     })
   }
 

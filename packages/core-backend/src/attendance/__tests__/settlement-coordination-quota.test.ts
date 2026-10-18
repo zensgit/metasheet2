@@ -10,7 +10,7 @@ import {
   deriveSettlementCoordinationCapacityV1,
   validateSettlementCoordinationCapacityV1,
 } from '../coordination/settlement-coordination-capacity'
-import { CoordinationWaitEndedError } from '../coordination/settlement-coordination-clock'
+import { CoordinationWaitEndedError, createSystemCoordinationClockV1 } from '../coordination/settlement-coordination-clock'
 import { SettlementCoordinationQuotaV1 } from '../coordination/settlement-coordination-quota'
 import { CoordinationSemaphoreV1, type CoordinationPermitV1 } from '../coordination/settlement-coordination-semaphore'
 import { ManualCoordinationClock, settle } from '../../../tests/helpers/settlement-coordination-manual-clock'
@@ -137,6 +137,19 @@ describe('coordination semaphore: first come first served, atomic grant and canc
     expect(semaphore2.held).toBe(0)
   })
 
+  it('a permit says whether it was handed over after queueing', async () => {
+    const clock = new ManualCoordinationClock()
+    const semaphore = new CoordinationSemaphoreV1(1)
+    const immediate = await semaphore.acquire({ clock })
+    expect(immediate.queued).toBe(false)
+    const waited = semaphore.acquire({ clock })
+    await settle()
+    immediate.release()
+    const handedOver = await waited
+    expect(handedOver.queued).toBe(true)
+    handedOver.release()
+  })
+
   it('a permit cannot be released twice', () => {
     const permit = new CoordinationSemaphoreV1(1).tryAcquire() as CoordinationPermitV1
     permit.release()
@@ -177,7 +190,7 @@ describe('settlement coordination quota: org first, global second; global back f
     expect(quota.snapshot().global.short).toEqual({ held: 0, waiting: 0 })
   })
 
-  it('releasing global before org: a waiter of another org gets the global permit ahead of the same org\'s next unit', async () => {
+  it('a released lease serves waiters in arrival order: another org\'s global waiter is served before the same org\'s next unit', async () => {
     const clock = new ManualCoordinationClock()
     const quota = new SettlementCoordinationQuotaV1(capacity)
     const order: string[] = []
@@ -211,6 +224,19 @@ describe('settlement coordination quota: org first, global second; global back f
     short.release()
   })
 
+  it('a lease is queued when either level made the unit wait', async () => {
+    const clock = new ManualCoordinationClock()
+    const quota = new SettlementCoordinationQuotaV1(capacity)
+    const first = await quota.acquire('org-a', 'short', { clock })
+    expect(first.queued).toBe(false)
+    const second = quota.acquire('org-a', 'short', { clock })
+    await settle()
+    first.release()
+    const lease = await second
+    expect(lease.queued).toBe(true)
+    lease.release()
+  })
+
   it('a lease cannot be released twice', async () => {
     const lease = await new SettlementCoordinationQuotaV1(capacity).acquire('org-a', 'short', { clock: new ManualCoordinationClock() })
     lease.release()
@@ -219,20 +245,34 @@ describe('settlement coordination quota: org first, global second; global back f
 })
 
 describe('settlement coordination budget (§3.2 step 9)', () => {
-  it('counts down from 5000 ms and names the stage that waited longest', async () => {
+  it('is spent only by recorded waits and names the stage that waited longest', async () => {
     const clock = new ManualCoordinationClock()
     const budget = new SettlementCoordinationBudgetV1({ clock })
     expect(budget.limitMs).toBe(SETTLEMENT_COORDINATION_REQUEST_BUDGET_MS)
     budget.record('quota', 300)
     budget.record('dedicated', 1200)
     budget.record('connect', 900)
-    await clock.advance(4999)
+    // Time that passes outside the recorded waits (business, cleanup, the outer loop) spends nothing.
+    await clock.advance(60_000)
+    expect(budget.spentMs).toBe(2400)
+    expect(budget.remaining()).toBe(2600)
+    budget.record('dedicated', 2599)
     expect(budget.exhausted()).toBe(false)
-    await clock.advance(1)
+    budget.record('dedicated', 1)
     expect(budget.exhausted()).toBe(true)
+    expect(budget.remaining()).toBe(0)
     expect(budget.exhaustionCode()).toBe('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY')
-    budget.record('class-00', 1500)
+    budget.record('class-00', 3800)
     expect(budget.exhaustionCode()).toBe('ATTENDANCE_CALCULATION_ROLLOUT_BUSY')
+  })
+
+  it('a wait that starts now may run until what remains is spent', async () => {
+    const clock = new ManualCoordinationClock()
+    const budget = new SettlementCoordinationBudgetV1({ clock })
+    budget.record('connect', 1000)
+    await clock.advance(7000)
+    expect(budget.deadline()).toBe(7000 + 4000)
+    expect(budget.quotaDeadline()).toBe(budget.deadline())
   })
 
   it('maps quota and connection stages to their codes and breaks ties in a fixed order', () => {
@@ -249,15 +289,14 @@ describe('settlement coordination budget (§3.2 step 9)', () => {
     await clock.advance(1000)
     const budget = new SettlementCoordinationBudgetV1({ clock, background: true })
     expect(budget.quotaDeadline()).toBe(1000 + SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS)
-    await clock.advance(20_000)
     budget.record('quota', 20_000)
     expect(budget.waits().quota).toBe(0)
-    // The quota wait is taken out of the elapsed time: the full 5000 ms remain.
+    expect(budget.spentMs).toBe(0)
     expect(budget.remaining()).toBe(5000)
     const request = new SettlementCoordinationBudgetV1({ clock })
     request.record('quota', 20)
     expect(request.waits().quota).toBe(20)
-    expect(request.quotaDeadline()).toBe(request.deadline)
+    expect(request.remaining()).toBe(4980)
   })
 })
 
@@ -273,5 +312,30 @@ describe('settlement coordination backoff (§3.2 step 3)', () => {
   it('never sleeps past the remaining budget', () => {
     expect(settlementCoordinationBackoffMsV1(4, () => 0.9, 40)).toBe(40)
     expect(settlementCoordinationBackoffMsV1(4, () => 0.9, 0)).toBe(0)
+  })
+})
+
+describe('system coordination clock', () => {
+  it('its timers never keep the process alive, and cancel clears them', async () => {
+    const original = globalThis.setTimeout
+    const handles: Array<{ hasRef?: () => boolean }> = []
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      const handle = original(fn, ms)
+      handles.push(handle as unknown as { hasRef?: () => boolean })
+      return handle
+    }) as unknown as typeof setTimeout
+    const controller = new AbortController()
+    try {
+      const clock = createSystemCoordinationClockV1()
+      const timer = clock.setTimer(60_000, () => undefined)
+      const sleeping = clock.sleep(60_000, controller.signal).then(() => 'slept', (error) => error)
+      expect(handles).toHaveLength(2)
+      expect(handles.map((handle) => handle.hasRef?.())).toEqual([false, false])
+      timer.cancel()
+      controller.abort()
+      expect(await sleeping).toMatchObject({ reason: 'aborted' })
+    } finally {
+      globalThis.setTimeout = original
+    }
   })
 })

@@ -20,6 +20,8 @@ export type SettlementCoordinationQuotaClassV1 = 'short' | 'long'
 export interface SettlementCoordinationQuotaLeaseV1 {
   readonly org: string
   readonly quotaClass: SettlementCoordinationQuotaClassV1
+  /** Whether either level made the unit queue (an immediate grant is not a wait, §3.2 step 10). */
+  readonly queued: boolean
   /** Global first, then org. A second call is a programming error and throws. */
   release(): void
 }
@@ -69,6 +71,7 @@ export class SettlementCoordinationQuotaV1 {
     return Object.freeze({
       org,
       quotaClass,
+      queued: orgPermit.queued || globalPermit.queued,
       release: () => {
         if (released) throw new Error('coordination quota lease released twice')
         released = true

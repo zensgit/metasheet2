@@ -11,6 +11,8 @@
 import { CoordinationWaitEndedError, type CoordinationClockV1, type CoordinationTimerV1 } from './settlement-coordination-clock'
 
 export interface CoordinationPermitV1 {
+  /** Whether the permit was handed over after queueing (false: it was free when asked for). */
+  readonly queued: boolean
   /** Returns the permit; a second call is a programming error and throws. */
   release(): void
 }
@@ -55,7 +57,7 @@ export class CoordinationSemaphoreV1 {
   tryAcquire(): CoordinationPermitV1 | null {
     if (this.#queue.length > 0 || this.#available < 1) return null
     this.#available -= 1
-    return this.#permit()
+    return this.#permit(false)
   }
 
   acquire(options: CoordinationAcquireOptionsV1): Promise<CoordinationPermitV1> {
@@ -93,9 +95,10 @@ export class CoordinationSemaphoreV1 {
     })
   }
 
-  #permit(): CoordinationPermitV1 {
+  #permit(queued: boolean): CoordinationPermitV1 {
     let released = false
     return {
+      queued,
       release: () => {
         if (released) throw new Error('coordination permit released twice')
         released = true
@@ -110,7 +113,7 @@ export class CoordinationSemaphoreV1 {
       if (waiter.state !== 'waiting') continue
       waiter.state = 'granted'
       waiter.cleanup()
-      waiter.resolve(this.#permit())
+      waiter.resolve(this.#permit(true))
       return
     }
     this.#available += 1
