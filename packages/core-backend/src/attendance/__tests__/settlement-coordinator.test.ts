@@ -370,16 +370,20 @@ describe('settlement coordinator: connect race and late connections', () => {
   })
 
   it('the candidate short read borrows outside quota, is counted against the budget, and destroys on error', async () => {
-    const { pool, coordinator, quota, baseline } = setup()
+    const { clock, pool, coordinator, quota, baseline } = setup()
     const unit = coordinator.openUnit(REQUEST)
     const seen: number[] = []
-    const value = await unit.readCandidate(async (client) => {
+    const reading = unit.readCandidate(async (client) => {
       seen.push(quota.snapshot().global.short.held)
       await client.query('SELECT 1')
+      await clock.sleep(120)
       return 'candidate-org'
     })
-    expect(value).toBe('candidate-org')
+    await clock.advance(120)
+    expect(await reading).toBe('candidate-org')
     expect(seen).toEqual([0])
+    expect(unit.budget.waits().connect).toBe(120)
+    expect(unit.budget.remaining()).toBe(5000 - 120)
     expect(pool.clients[0].released).toEqual([null])
     await expect(unit.readCandidate(async () => Promise.reject(new Error('test: read failed')))).rejects.toThrow(/read failed/)
     expect(pool.clients[1].released[0]).toBeInstanceOf(Error)
