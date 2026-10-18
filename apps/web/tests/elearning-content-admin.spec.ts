@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   createRevision: vi.fn(),
   publishCourse: vi.fn(),
   assign: vi.fn(),
+  searchAssignees: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningContent', async () => {
@@ -16,6 +17,7 @@ vi.mock('../src/services/elearningContent', async () => {
     ...actual,
     createElearningContentRevision: h.createRevision,
     publishElearningContentCourse: h.publishCourse,
+    searchElearningAssignees: h.searchAssignees,
   }
 })
 
@@ -76,6 +78,8 @@ describe('ElearningContentAdminSection', () => {
     h.createRevision.mockReset()
     h.publishCourse.mockReset()
     h.assign.mockReset()
+    h.searchAssignees.mockReset()
+    h.searchAssignees.mockResolvedValue([])
     let serial = 0
     uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => {
       serial += 1
@@ -140,6 +144,161 @@ describe('ElearningContentAdminSection', () => {
       courseVersionId: VERSION,
     }))
     expect(root.querySelector('[data-testid="elearning-content-admin-status"]')?.textContent).toContain('完成指派')
+  })
+
+  // F13 (no-video rehearsal 2026-10-12): the teacher picks a person by name/email instead of
+  // typing a raw UUID; the request still carries only the id.
+  const PICKED_ID = '77777777-7777-4777-8777-777777777777'
+  const OTHER_ID = '88888888-8888-4888-8888-888888888888'
+
+  function pickerSearch(root: HTMLElement, value: string, immediate = true): KeyboardEvent | null {
+    const search = root.querySelector('[data-testid="elearning-content-assignee-search"]') as HTMLInputElement
+    fill(search, value)
+    if (!immediate) return null
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    search.dispatchEvent(enter)
+    return enter
+  }
+
+  it('F13: searches people by name, stores the picked id, and sends only that id', async () => {
+    h.searchAssignees.mockResolvedValue([
+      { id: PICKED_ID, name: '张三', email: 'zhangsan@example.test' },
+      { id: OTHER_ID, name: null, email: 'nameless@example.test' },
+    ])
+    const root = mountView()
+    await fillArticleAndLink(root)
+    const enter = pickerSearch(root, ' 张 ')
+    await flushUi()
+    // Enter searches now and is consumed, so it can never submit the surrounding course form.
+    expect(enter?.defaultPrevented).toBe(true)
+    expect(h.searchAssignees).toHaveBeenCalledTimes(1)
+    expect(h.searchAssignees.mock.calls[0]?.[0]).toBe('张')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-option-0"]')?.textContent)
+      .toContain('张三')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-option-0"]')?.textContent)
+      .toContain('zhangsan@example.test')
+    // A nameless hit is labelled by its email, never by its raw id.
+    expect(root.querySelector('[data-testid="elearning-content-assignee-option-1"]')?.textContent)
+      .toContain('nameless@example.test')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-results"]')?.textContent)
+      .not.toContain(OTHER_ID)
+
+    ;(root.querySelector('[data-testid="elearning-content-assignee-option-0"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-selected"]')?.textContent)
+      .toContain('已选择：张三')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-results"]')).toBeNull()
+    expect((root.querySelector('[data-testid="elearning-content-target-user"]') as HTMLInputElement).value)
+      .toBe(PICKED_ID)
+
+    ;(root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    expect(h.assign).toHaveBeenCalledTimes(1)
+    const payload = h.assign.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(payload.targetUserId).toBe(PICKED_ID)
+    expect(Object.keys(payload).sort()).toEqual(['courseVersionId', 'sourceKey', 'targetUserId'])
+    expect(JSON.stringify(payload)).not.toContain('张三')
+    expect(JSON.stringify(payload)).not.toContain('zhangsan@example.test')
+  })
+
+  it('F13: debounces typing, drops stale answers, and keeps the paste fallback authoritative', async () => {
+    let resolveFirst: (value: unknown) => void = () => {}
+    h.searchAssignees
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+      .mockResolvedValueOnce([{ id: OTHER_ID, name: '李四', email: null }])
+    const root = mountView()
+    await fillArticleAndLink(root)
+    // Typing alone waits for the debounce; two keystrokes inside the window send one request.
+    pickerSearch(root, '张', false)
+    pickerSearch(root, '张三', false)
+    await flushUi()
+    expect(h.searchAssignees).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    await flushUi()
+    expect(h.searchAssignees).toHaveBeenCalledTimes(1)
+    expect(h.searchAssignees.mock.calls[0]?.[0]).toBe('张三')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-status"]')?.textContent).toContain('正在搜索')
+
+    // A newer search wins even when the older answer arrives last.
+    pickerSearch(root, '李')
+    await flushUi()
+    resolveFirst([{ id: PICKED_ID, name: '张三', email: null }])
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-option-0"]')?.textContent).toContain('李四')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-option-1"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="elearning-content-assignee-option-0"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-selected"]')?.textContent).toContain('李四')
+
+    // Pasting a different id replaces the pick: the name line goes away and the pasted id is sent.
+    fill(root.querySelector('[data-testid="elearning-content-target-user"]') as HTMLInputElement, ' pasted-user ')
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-selected"]')).toBeNull()
+    ;(root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    expect(h.assign).toHaveBeenCalledWith(expect.objectContaining({ targetUserId: 'pasted-user' }))
+  })
+
+  it('F13: a person whose mailbox the server withheld (email null) is shown by name only', async () => {
+    h.searchAssignees.mockResolvedValueOnce([{ id: PICKED_ID, name: '钉钉用户', email: null }])
+    const root = mountView()
+    pickerSearch(root, '钉钉')
+    await flushUi()
+    const option = root.querySelector('[data-testid="elearning-content-assignee-option-0"]') as HTMLButtonElement
+    expect(option.textContent?.trim()).toBe('钉钉用户')
+    expect(option.querySelector('small')).toBeNull()
+    expect(option.textContent).not.toContain('@')
+    expect(option.textContent).not.toContain(PICKED_ID)
+  })
+
+  it('F13: clear empties the assignee, and 403 / empty / failed searches say so without blocking paste', async () => {
+    h.searchAssignees.mockResolvedValueOnce([{ id: PICKED_ID, name: '张三', email: null }])
+    const root = mountView()
+    await fillArticleAndLink(root)
+    pickerSearch(root, '张')
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-content-assignee-option-0"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-content-assignee-clear"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((root.querySelector('[data-testid="elearning-content-target-user"]') as HTMLInputElement).value).toBe('')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-selected"]')).toBeNull()
+
+    h.searchAssignees.mockResolvedValueOnce([])
+    pickerSearch(root, '无此人')
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-status"]')?.textContent).toContain('没有匹配的人员')
+
+    h.searchAssignees.mockRejectedValueOnce(new ElearningApiError('forbidden', 403))
+    pickerSearch(root, '张')
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-status"]')?.textContent).toContain('粘贴用户 ID')
+    expect(root.querySelector('[data-testid="elearning-content-assignee-status"]')?.textContent).toContain('没有搜索人员的权限')
+
+    h.searchAssignees.mockRejectedValueOnce(new ElearningApiError('internal_error', 500))
+    pickerSearch(root, '张')
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-content-assignee-status"]')?.textContent).toContain('暂时无法搜索人员')
+
+    // Enter in the search box searches; it never submits the course form.
+    expect(h.publishCourse).not.toHaveBeenCalled()
+    // Publishing with no assignee publishes without assigning.
+    ;(root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    expect(h.publishCourse).toHaveBeenCalledTimes(1)
+    expect(h.assign).not.toHaveBeenCalled()
+  })
+
+  it('explains ORG_CONTEXT_REQUIRED instead of printing the raw code', async () => {
+    const root = mountView(false)
+    await fillArticleAndLink(root)
+    h.createRevision.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    ;(root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.createRevision).toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-content-admin-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
   })
 
   it('preserves the request id for retry and rotates it after body or order changes', async () => {

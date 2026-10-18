@@ -33,6 +33,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
   getElearningTitleSnapshot,
@@ -71,9 +72,7 @@ function remove(index: number): void {
 }
 
 function newRequestId(): string {
-  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : ''
+  return randomUuid()
 }
 
 function commandRows(): ElearningTitleRow[] {

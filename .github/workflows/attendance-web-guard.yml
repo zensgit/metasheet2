@@ -153,6 +153,15 @@
 # apps/web/tests/delete-fallback.spec.ts, is deliberately NOT listed: it already runs in the
 # always-on required-web-tests lane (apps/web/scripts/run-required-web-tests.sh), and a spec-only
 # change cannot alter this lane's module graph.
+# UUID helper (2026-10-12): apps/web/src/utils/uuid.ts is imported by utils/explicitSessionOrg.ts
+# (itself imported by utils/api.ts) and by AttendanceView.vue, so it joins the same module graph;
+# listed at both wiring points for the same reason as delete-fallback.ts. Its spec
+# (apps/web/tests/uuid-no-bare-randomuuid.spec.ts) runs in the always-on required-web-tests lane.
+# Clipboard helper (2026-10-13): apps/web/src/utils/clipboard.ts (copyText with the execCommand
+# fallback for plain-HTTP deployments) is imported by AttendanceView.vue and by
+# views/attendance/useAttendanceAdminRail.ts + AttendanceImportBatchesSection.vue, so it joins this
+# lane's module graph the same way uuid.ts does; listed at both wiring points. Its spec
+# (apps/web/tests/clipboard-no-bare-navigator-clipboard.spec.ts) runs in the required-web-tests lane.
 # A1 "hints and actual status" (2026-10-09, gate r1 P3-2): the slice's five attendance specs -
 # attendance-approval-option-hint.spec.ts, attendance-approval-option-wiring.spec.ts,
 # attendance-scheduled-feature-status.spec.ts, attendance-scheduled-feature-status-wiring.spec.ts and
@@ -186,6 +195,8 @@ on:
       - 'apps/web/src/utils/api.ts'
       - 'apps/web/src/utils/delete-fallback.ts'
       - 'apps/web/src/utils/explicitSessionOrg.ts'
+      - 'apps/web/src/utils/uuid.ts'
+      - 'apps/web/src/utils/clipboard.ts'
       - 'apps/web/src/services/attendance/effectiveCalendar.ts'
       - 'apps/web/src/services/attendance/teamAvailability.ts'
       - 'apps/web/tests/useAuth.spec.ts'
@@ -246,6 +257,12 @@ on:
       - 'apps/web/src/views/attendance/reportXlsxExport.ts'
       - 'apps/web/tests/attendance-report-xlsx-export.spec.ts'
       - 'apps/web/tests/attendance-reports-analytics.spec.ts'
+      - 'apps/web/tests/adminPageContentSearch.spec.ts'
+      - 'apps/web/tests/attendanceAdminGuide.spec.ts'
+      - 'apps/web/tests/attendanceAudienceChipField.spec.ts'
+      - 'apps/web/tests/attendanceLocaleControls.spec.ts'
+      - 'apps/web/tests/attendancePayrollHelp.spec.ts'
+      - 'apps/web/tests/recordReportPresentation.spec.ts'
       - 'apps/web/tests/attendance-overview-priority.spec.ts'
       - 'apps/web/tests/AttendanceAdminTaskHome.spec.ts'
       - 'apps/web/tests/attendanceAdminTaskHomeStatus.spec.ts'
@@ -282,8 +299,27 @@ on:
       - 'apps/web/tests/attendanceUserPickerEndpoint.spec.ts'
       - 'apps/web/tests/attendanceAdminEndpointCompatibility.spec.ts'
       - 'apps/web/tests/useAttendanceAdminProvisioning.spec.ts'
+      - 'apps/web/tests/attendanceLegacyPermissionPayload.spec.ts'
+      - 'apps/web/src/views/attendance/readAttendanceLegacyPermissionPayload.ts'
       - 'apps/web/tests/useAttendanceAdminUsers.spec.ts'
       - 'apps/web/tests/attendanceEmployeeQuickActionIcons.spec.ts'
+      - 'apps/web/tests/attendanceTimezonePolicyPanel.spec.ts'
+      - 'apps/web/tests/attendanceWallTime.spec.ts'
+      - 'apps/web/tests/attendanceTimezoneTarget.spec.ts'
+      - 'apps/web/tests/attendanceCurrentTimeContext.spec.ts'
+      - 'apps/web/tests/attendanceDayTimeContext.spec.ts'
+      - 'apps/web/tests/useAttendanceRequestTimezone.spec.ts'
+      - 'apps/web/tests/attendanceRequestTimezoneIntegration.spec.ts'
+      - 'apps/web/tests/attendanceBusinessTripRequestCard.spec.ts'
+      - 'apps/web/src/views/attendance/AttendanceTimezonePolicyPanel.vue'
+      - 'apps/web/src/views/attendance/AttendanceBusinessTripRequestCard.vue'
+      - 'apps/web/src/views/attendance/attendanceWallTime.ts'
+      - 'apps/web/src/views/attendance/attendanceTimezoneTarget.ts'
+      - 'apps/web/src/views/attendance/attendanceTimezoneError.ts'
+      - 'apps/web/src/views/attendance/attendanceCurrentTimeContext.ts'
+      - 'apps/web/src/views/attendance/attendanceDayTimeContext.ts'
+      - 'apps/web/src/views/attendance/useAttendanceRequestTimezone.ts'
+      - 'apps/web/src/views/attendance/AttendanceRequestTimezoneFields.vue'
       - 'apps/web/tests/attendanceEmployeeWorkspaceCommonIcons.spec.ts'
       - 'apps/web/tests/attendanceEmployeeWorkspacePresentation.spec.ts'
       - 'apps/web/tests/attendance-record-timeline.spec.ts'
@@ -337,6 +373,8 @@ jobs:
               apps/web/src/utils/api.ts|\
               apps/web/src/utils/delete-fallback.ts|\
               apps/web/src/utils/explicitSessionOrg.ts|\
+              apps/web/src/utils/uuid.ts|\
+              apps/web/src/utils/clipboard.ts|\
               apps/web/src/services/attendance/effectiveCalendar.ts|\
               apps/web/src/services/attendance/teamAvailability.ts|\
               apps/web/tests/useAuth.spec.ts|\
@@ -397,6 +435,12 @@ jobs:
               apps/web/src/views/attendance/reportXlsxExport.ts|\
               apps/web/tests/attendance-report-xlsx-export.spec.ts|\
               apps/web/tests/attendance-reports-analytics.spec.ts|\
+              apps/web/tests/adminPageContentSearch.spec.ts|\
+              apps/web/tests/attendanceAdminGuide.spec.ts|\
+              apps/web/tests/attendanceAudienceChipField.spec.ts|\
+              apps/web/tests/attendanceLocaleControls.spec.ts|\
+              apps/web/tests/attendancePayrollHelp.spec.ts|\
+              apps/web/tests/recordReportPresentation.spec.ts|\
               apps/web/tests/attendance-overview-priority.spec.ts|\
               apps/web/tests/AttendanceAdminTaskHome.spec.ts|\
               apps/web/tests/attendanceAdminTaskHomeStatus.spec.ts|\
@@ -432,8 +476,27 @@ jobs:
               apps/web/tests/attendanceUserPickerEndpoint.spec.ts|\
               apps/web/tests/attendanceAdminEndpointCompatibility.spec.ts|\
               apps/web/tests/useAttendanceAdminProvisioning.spec.ts|\
+              apps/web/tests/attendanceLegacyPermissionPayload.spec.ts|\
+              apps/web/src/views/attendance/readAttendanceLegacyPermissionPayload.ts|\
               apps/web/tests/useAttendanceAdminUsers.spec.ts|\
               apps/web/tests/attendanceEmployeeQuickActionIcons.spec.ts|\
+              apps/web/tests/attendanceTimezonePolicyPanel.spec.ts|\
+              apps/web/tests/attendanceWallTime.spec.ts|\
+              apps/web/tests/attendanceTimezoneTarget.spec.ts|\
+              apps/web/tests/attendanceCurrentTimeContext.spec.ts|\
+              apps/web/tests/attendanceDayTimeContext.spec.ts|\
+              apps/web/tests/useAttendanceRequestTimezone.spec.ts|\
+              apps/web/tests/attendanceRequestTimezoneIntegration.spec.ts|\
+              apps/web/tests/attendanceBusinessTripRequestCard.spec.ts|\
+              apps/web/src/views/attendance/AttendanceTimezonePolicyPanel.vue|\
+              apps/web/src/views/attendance/AttendanceBusinessTripRequestCard.vue|\
+              apps/web/src/views/attendance/attendanceWallTime.ts|\
+              apps/web/src/views/attendance/attendanceTimezoneError.ts|\
+              apps/web/src/views/attendance/attendanceTimezoneTarget.ts|\
+              apps/web/src/views/attendance/attendanceCurrentTimeContext.ts|\
+              apps/web/src/views/attendance/attendanceDayTimeContext.ts|\
+              apps/web/src/views/attendance/useAttendanceRequestTimezone.ts|\
+              apps/web/src/views/attendance/AttendanceRequestTimezoneFields.vue|\
               apps/web/tests/attendanceEmployeeWorkspaceCommonIcons.spec.ts|\
               apps/web/tests/attendanceEmployeeWorkspacePresentation.spec.ts|\
               apps/web/tests/attendance-record-timeline.spec.ts|\
@@ -517,7 +580,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=8192
         # Cancel-round entry (reviewer F4, 2026-10-08): the eight `cancelRoundEntry*` specs are named here, in `paths:`
         # and in the classifier above; attendance-web-guard-workflow.spec.ts pins all three registration points.
-        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-server-clock.spec.ts attendance-server-clock-view.spec.ts attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation attendanceTodayWorkbench attendanceRecordRequestPrefill attendance-record-timeline useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard attendance-approval-option-hint attendance-approval-option-wiring attendance-scheduled-feature-status.spec.ts attendance-scheduled-feature-status-wiring AttendanceScheduledFeatureStatus tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot cancelRoundEntryApproverList cancelRoundEntryAttendancePanel cancelRoundEntryCenterRoute cancelRoundEntryContract cancelRoundEntryCore cancelRoundEntryDetailView cancelRoundEntrySurfaces cancelRoundEntryTodoCenter
+        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-server-clock.spec.ts attendance-server-clock-view.spec.ts attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics adminPageContentSearch.spec.ts attendanceAdminGuide.spec.ts attendanceAudienceChipField.spec.ts attendanceLocaleControls.spec.ts attendancePayrollHelp.spec.ts recordReportPresentation.spec.ts attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning attendanceLegacyPermissionPayload useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceTimezonePolicyPanel attendanceWallTime attendanceTimezoneTarget attendanceCurrentTimeContext attendanceDayTimeContext useAttendanceRequestTimezone attendanceRequestTimezoneIntegration attendanceBusinessTripRequestCard attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation attendanceTodayWorkbench attendanceRecordRequestPrefill attendance-record-timeline useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard attendance-approval-option-hint attendance-approval-option-wiring attendance-scheduled-feature-status.spec.ts attendance-scheduled-feature-status-wiring AttendanceScheduledFeatureStatus tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot attendanceTimezones.spec.ts recordReportColumnVisibility.spec.ts attendanceLocaleTime.spec.ts cancelRoundEntryApproverList cancelRoundEntryAttendancePanel cancelRoundEntryCenterRoute cancelRoundEntryContract cancelRoundEntryCore cancelRoundEntryDetailView cancelRoundEntrySurfaces cancelRoundEntryTodoCenter
 
       - name: Install Chromium for makeup request browser regression
         if: steps.changes.outputs.relevant == 'true'

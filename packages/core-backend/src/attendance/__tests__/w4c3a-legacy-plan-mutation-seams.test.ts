@@ -26,6 +26,11 @@ import {
   W4C3A_LEGACY_PLAN_WORKER_PRODUCTION_IMPORTER,
 } from '../w4c3a-legacy-plan-processor'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../w4c3a-legacy-plan-worker'
+import {
+  acquireAttendanceImportTimezonePrefixV1,
+  prepareAttendanceImportTimezoneSourceV1,
+  registerAttendanceRequestTimezoneSourceGuardV1,
+} from '../attendance-business-trip-locks'
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -229,8 +234,14 @@ describe('blueprint mutations — real production surfaces', () => {
     const trx = {
       query: async (sql: string) => {
         calls.push(sql)
+        if (sql.includes('FROM pg_locks')) return { rows: [{ held: 1 }] }
+        if (sql.includes('to_regclass')) return { rows: [{ present: true }] }
+        if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'unit-transaction' }] }
         if (sql.includes('INSERT INTO attendance_groups')) {
           return { rows: [{ id: GROUP_ID }] }
+        }
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          return { rows: [{ user_id: 'user-a' }] }
         }
         if (sql.includes('INSERT INTO attendance_group_members')) {
           // Conflict-ignore: zero rows.
@@ -259,7 +270,19 @@ describe('blueprint mutations — real production surfaces', () => {
       },
     ])
     // Positive: ensure_group RETURNING contributes groupCreated=1; member conflict → 0.
-    const result = await applyAttendanceLegacyGroupEffectsV1(trx as never, withEffects)
+    // This counting fixture supplies a trusted verifier; it does not prove
+    // timezone SQL semantics (covered by the real import/runtime DB suites).
+    const verifySource = vi.fn(async () => {})
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => verifySource)
+    let result
+    try {
+      await acquireAttendanceImportTimezonePrefixV1(trx as never, ORG)
+      await prepareAttendanceImportTimezoneSourceV1(trx as never, ORG)
+      result = await applyAttendanceLegacyGroupEffectsV1(trx as never, withEffects)
+      expect(verifySource).toHaveBeenCalledTimes(1)
+    } finally {
+      registerAttendanceRequestTimezoneSourceGuardV1(null)
+    }
     expect(result).toEqual({ groupCreated: 1, groupMembersAdded: 0 })
     expect(calls.some((s) => s.includes('INSERT INTO attendance_groups'))).toBe(true)
     expect(calls.some((s) => s.includes('INSERT INTO attendance_group_members'))).toBe(true)
@@ -274,14 +297,61 @@ describe('blueprint mutations — real production surfaces', () => {
     expect(calls).toEqual([])
 
     const mismatchedIdTrx = {
-      query: async (sql: string) =>
-        sql.includes('INSERT INTO attendance_groups')
-          ? { rows: [{ id: MEMBER_ID }] }
-          : { rows: [] },
+      query: async (sql: string) => {
+        if (sql.includes('FROM pg_locks')) return { rows: [{ held: 1 }] }
+        if (sql.includes('to_regclass')) return { rows: [{ present: true }] }
+        if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'mismatch-transaction' }] }
+        return sql.includes('INSERT INTO attendance_groups')
+          ? { rows: [{ id: MEMBER_ID }] } : { rows: [] }
+      },
     }
-    await expect(
-      applyAttendanceLegacyGroupEffectsV1(
-        mismatchedIdTrx as never,
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => verifySource)
+    try {
+      await acquireAttendanceImportTimezonePrefixV1(mismatchedIdTrx as never, ORG)
+      await prepareAttendanceImportTimezoneSourceV1(mismatchedIdTrx as never, ORG)
+      await expect(
+        applyAttendanceLegacyGroupEffectsV1(
+          mismatchedIdTrx as never,
+          planWithGroups([
+            {
+              kind: 'ensure_group',
+              groupId: GROUP_ID,
+              normalizedName: 'engineering',
+              displayName: 'Engineering',
+              code: null,
+              timezone: 'UTC',
+              ruleSetId: null,
+              groupExistedAtPrepare: true,
+            },
+          ]),
+        ),
+      ).rejects.toThrowError('W4C3A_GROUP_EFFECT_ROW_MISMATCH')
+      // A failed effect never reaches the post-write verifier.
+      expect(verifySource).toHaveBeenCalledTimes(1)
+    } finally {
+      registerAttendanceRequestTimezoneSourceGuardV1(null)
+    }
+  })
+
+  it('rejects an inactive ensure_member before any group or member insert', async () => {
+    const calls: string[] = []
+    const trx = {
+      query: async (sql: string) => {
+        calls.push(sql)
+        if (sql.includes('INSERT INTO')) throw new Error(`insert ran: ${sql}`)
+        if (sql.includes('FROM pg_locks')) return { rows: [{ held: 1 }] }
+        if (sql.includes('to_regclass')) return { rows: [{ present: true }] }
+        if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'inactive-member' }] }
+        return { rows: [] }
+      },
+    }
+    const verifySource = vi.fn(async () => {})
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => verifySource)
+    try {
+      await acquireAttendanceImportTimezonePrefixV1(trx as never, ORG)
+      await prepareAttendanceImportTimezoneSourceV1(trx as never, ORG)
+      await expect(applyAttendanceLegacyGroupEffectsV1(
+        trx as never,
         planWithGroups([
           {
             kind: 'ensure_group',
@@ -291,11 +361,29 @@ describe('blueprint mutations — real production surfaces', () => {
             code: null,
             timezone: 'UTC',
             ruleSetId: null,
-            groupExistedAtPrepare: true,
+            groupExistedAtPrepare: false,
+          },
+          {
+            kind: 'ensure_member',
+            memberId: MEMBER_ID,
+            groupRef: GROUP_ID,
+            userId: 'ghost-user',
+            membershipExistedAtPrepare: false,
           },
         ]),
-      ),
-    ).rejects.toThrowError('W4C3A_GROUP_EFFECT_ROW_MISMATCH')
+      )).rejects.toMatchObject({
+        code: 'W4C3A_MEMBER_NOT_ACTIVE_IN_ORG',
+        message: 'W4C3A_MEMBER_NOT_ACTIVE_IN_ORG',
+        status: 404,
+        details: [],
+      })
+      expect(verifySource).not.toHaveBeenCalled()
+    } finally {
+      registerAttendanceRequestTimezoneSourceGuardV1(null)
+    }
+    expect(calls.some((sql) => sql.includes('FROM user_orgs'))).toBe(true)
+    expect(calls.some((sql) => sql.includes('FOR SHARE OF uo, u'))).toBe(true)
+    expect(calls.some((sql) => sql.includes('INSERT INTO'))).toBe(false)
   })
 
   it('9) OD-60 result slots and terminal summary refuse opaque/plan overrides', () => {

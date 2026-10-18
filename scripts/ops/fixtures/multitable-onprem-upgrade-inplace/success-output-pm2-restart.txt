@@ -31,7 +31,8 @@ BACKUP_PATH=<ROOT>/backups/upgrade-backup-<TIMESTAMP>
 [multitable-onprem-upgrade-inplace] === Step 6/8: run migrations ===
 [multitable-onprem-upgrade-inplace] RunMigrations=0: skipped
 [multitable-onprem-upgrade-inplace] === Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ===
-[multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health); dropping the maintenance gate before the nginx probe
+[multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health)
+[multitable-onprem-upgrade-inplace] Post-restart gate: <ROOT>/live/output/logs/metasheet-backend.out-0.log shows 'Plugin loaded: plugin-integration-core' stamped <PM2_TIMESTAMP>, at or after T0 <PM2_TIMESTAMP>; dropping the maintenance gate before the nginx probe
 [multitable-onprem-upgrade-inplace] Maintenance flag removed: <ROOT>/live/output/maintenance.flag
 [multitable-onprem-upgrade-inplace] Plugins summary:
 [multitable-onprem-upgrade-inplace]   plugin-integration-core          version=unknown
@@ -44,6 +45,7 @@ migration exit:   skipped
 pm2 home:         <ROOT>/profile/.pm2-runtime (source: pm2-runtime (.pm2-runtime + scheduled task 'MetaSheet-PM2'))
 backend started:  pm2-restart
 backend health:   OK (attempt=1, url=http://127.0.0.1:<PORT>/health)
+plugin loaded:    OK (Plugin loaded: plugin-integration-core after T0; log=<ROOT>/live/output/logs/metasheet-backend.out-0.log)
 health:           OK (attempt=1, status=200)
 maintenance flag: <ROOT>/live/output/maintenance.flag (removed)
 maintenance gate: WIRED (probed http://127.0.0.1:<PORT>/api/health while the flag was up; NOT_WIRED = this nginx.conf never got the gate, the window was unshielded)

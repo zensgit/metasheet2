@@ -623,24 +623,129 @@
             @change="onVisibilityOperatorChange($event)"
           >
             <option
-              v-for="option in VISIBILITY_OPERATOR_OPTIONS"
+              v-for="option in visibilityOperatorChoices"
               :key="option.value"
               :value="option.value"
+              :disabled="option.disabled"
             >
               {{ option.label }}
             </option>
           </select>
-          <input
-            v-if="visibilityNeedsValue"
-            class="approval-form-field-inspector__control"
-            data-testid="approval-form-field-inspector-visibility-value"
-            type="text"
-            aria-label="条件值"
-            :value="textValue('valueText')"
-            @input="onTextInput('valueText', $event)"
-            @blur="commitTextBuffer('valueText')"
-            @keydown.enter.prevent="commitTextBuffer('valueText')"
-          />
+          <template v-if="visibilityNeedsValue">
+            <!-- R-43 (B): option fields pick from the options (name shown, option value saved). -->
+            <template v-if="visibilityIsOption">
+              <p
+                v-if="dependencyOptions.length === 0"
+                class="approval-form-field-inspector__hint"
+                data-testid="approval-form-field-inspector-visibility-no-options"
+              >
+                {{ conditionCopy.noOptions }}
+              </p>
+              <select
+                v-else-if="field.visibility.operator !== 'in'"
+                class="approval-form-field-inspector__control"
+                data-testid="approval-form-field-inspector-visibility-option-value"
+                aria-label="条件值"
+                :value="optionScalarValue"
+                @change="onVisibilityOptionValueChange($event)"
+              >
+                <option value="">{{ conditionCopy.chooseOption }}</option>
+                <option
+                  v-for="option in dependencyOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+                <option
+                  v-if="optionScalarStale"
+                  :value="optionScalarValue"
+                  disabled
+                >
+                  {{ conditionCopy.invalidValue }}
+                </option>
+              </select>
+              <fieldset
+                v-else
+                class="approval-form-field-inspector__option-choices"
+                data-testid="approval-form-field-inspector-visibility-option-values"
+                aria-label="条件值"
+              >
+                <label
+                  v-for="(option, optionIndex) in dependencyOptions"
+                  :key="option.value"
+                  class="approval-form-field-inspector__row--inline"
+                >
+                  <input
+                    type="checkbox"
+                    :data-testid="`approval-form-field-inspector-visibility-option-${optionIndex}`"
+                    :checked="optionListSelected.includes(option.value)"
+                    @change="onVisibilityOptionToggle(option.value, $event)"
+                  />
+                  {{ option.label }}
+                </label>
+                <p
+                  v-if="optionListStaleCount > 0"
+                  class="approval-form-field-inspector__hint"
+                  data-testid="approval-form-field-inspector-visibility-stale-count"
+                >
+                  {{ conditionCopy.staleListHint(optionListStaleCount) }}
+                </p>
+              </fieldset>
+            </template>
+            <!-- `in` over text / number: one value per line. A textarea keeps the newlines and has
+                 no Enter-to-commit (that collapsed multi-value rules into one value). -->
+            <textarea
+              v-else-if="field.visibility.operator === 'in'"
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-values"
+              rows="3"
+              aria-label="条件值"
+              :placeholder="visibilityKind === 'number' ? conditionCopy.oneNumberPerLine : conditionCopy.oneValuePerLine"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+            ></textarea>
+            <input
+              v-else-if="visibilityKind === 'number'"
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-number-value"
+              type="text"
+              inputmode="decimal"
+              aria-label="条件值"
+              :placeholder="conditionCopy.enterNumber"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+              @keydown.enter.prevent="commitTextBuffer('valueText')"
+            />
+            <input
+              v-else
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-value"
+              type="text"
+              aria-label="条件值"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+              @keydown.enter.prevent="commitTextBuffer('valueText')"
+            />
+          </template>
+          <p
+            v-if="visibilityIssueText"
+            class="approval-form-field-inspector__error"
+            role="note"
+            data-testid="approval-form-field-inspector-visibility-issue"
+          >
+            {{ visibilityIssueText }}
+          </p>
+          <!-- R-43 (B): a marked value its box shows EMPTY (re-entering it is a real edit) is shown
+               here read-only; plain-text interpolation, cut short. -->
+          <p
+            v-if="visibilityStoredValueNote !== null"
+            class="approval-form-field-inspector__hint approval-form-field-inspector__stored-value"
+            data-testid="approval-form-field-inspector-visibility-stored-value"
+          >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-form-field-inspector-visibility-stored-value-text">{{ visibilityStoredValueNote }}</span></p>
         </template>
       </section>
 
@@ -819,12 +924,38 @@ import type { FormAdapterResult } from '../approvalFormAuthoringAdapter'
 // dependency types are imported in the sibling <script> block above; the two
 // blocks share one module scope, so they must not be imported twice.
 import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from '../detailField'
-import type { FormFieldType } from '../../types/approval'
-import type {
-  AuthorableFieldType,
-  FieldAuthoringDraft,
-  FieldVisibilityDraft,
+import type { FormFieldType, FormOption } from '../../types/approval'
+import {
+  buildVisibilityRule,
+  visibilityStoredValuePreview,
+  visibilityDraftForDependencyChange,
+  visibilityDraftList,
+  visibilityDraftListText,
+  visibilityDraftScalar,
+  visibilityDraftScalarText,
+  visibilityDraftWithList,
+  visibilityDraftWithListText,
+  visibilityDraftWithOperator,
+  visibilityDraftWithScalar,
+  visibilityDraftWithScalarText,
+  type AuthorableFieldType,
+  type FieldAuthoringDraft,
+  type FieldVisibilityDraft,
 } from '../templateAuthoring'
+import {
+  conditionValueCopy,
+  conditionValueIssueText,
+  conditionValueKind,
+  isCurrentOptionValue,
+  isOptionKind,
+  STALE_OPTION_KEY,
+  parseConditionListText,
+  parseConditionNumber,
+  visibilityOperatorsForField,
+  visibilityRuleValueIssues,
+  type ConditionValueField,
+} from '../conditionValueTyping'
+import { useLocale } from '../../composables/useLocale'
 import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
@@ -845,8 +976,18 @@ const props = withDefaults(
     field: FieldAuthoringDraft | null
     /** FB-D6 current-draft reference set for the selected field. */
     references?: readonly FormFieldDependency[]
-    /** Business options for the visibility depends-on picker (no self/record-link/detail). */
-    visibilityOptions?: readonly { id: string; label: string }[]
+    /**
+     * Business options for the visibility depends-on picker (no self/record-link/detail). R-43 (B):
+     * `type` + `options` (optional) let the value control follow the dependency's field type.
+     */
+    visibilityOptions?: readonly {
+      id: string
+      label: string
+      type?: FormFieldType
+      options?: readonly FormOption[]
+      /** A multi-person picker (its submitted value is a list); follow-up (b) narrows its operators. */
+      listValued?: boolean
+    }[]
     readOnly?: boolean
     /**
      * FB-D4 seam: run one typed command through the ONE adapter path. Returns
@@ -876,16 +1017,108 @@ const emit = defineEmits<{
   (e: 'retry-record-link-catalog'): void
 }>()
 
-const VISIBILITY_OPERATOR_OPTIONS: readonly {
-  value: FieldVisibilityDraft['operator']
-  label: string
-}[] = [
-  { value: 'eq', label: '等于' },
-  { value: 'neq', label: '不等于' },
-  { value: 'in', label: '包含任一（每行一个值）' },
-  { value: 'isEmpty', label: '为空' },
-  { value: 'notEmpty', label: '不为空' },
-]
+const VISIBILITY_OPERATOR_LABELS: Record<FieldVisibilityDraft['operator'], string> = {
+  eq: '等于',
+  neq: '不等于',
+  in: '包含任一（每行一个值）',
+  isEmpty: '为空',
+  notEmpty: '不为空',
+}
+
+// --- R-43 (B): typed visibility values ----------------------------------------
+const { isZh } = useLocale()
+const conditionCopy = computed(() => conditionValueCopy(isZh.value))
+
+function visibilityDependencyFor(dependsOnFieldId: string): ConditionValueField | null {
+  const id = dependsOnFieldId.trim()
+  if (!id) return null
+  const option = props.visibilityOptions.find((candidate) => candidate.id === id)
+  if (!option?.type) return null
+  // Keep `listValued` (a multi-person picker): its operators are narrowed and its stored eq/neq
+  // rules marked (follow-up (b)), exactly like the legacy editor and the branch editor.
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
+}
+
+const visibilityDependency = computed(() =>
+  props.field ? visibilityDependencyFor(props.field.visibility.dependsOnFieldId) : null,
+)
+const visibilityKind = computed(() => conditionValueKind(visibilityDependency.value))
+const visibilityIsOption = computed(() => isOptionKind(visibilityKind.value))
+const dependencyOptions = computed<FormOption[]>(() => [...(visibilityDependency.value?.options ?? [])])
+
+/** Effective operators for the dependency; a stored ineffective one stays visible but disabled. */
+const visibilityOperatorChoices = computed(() => {
+  const inLabel = visibilityIsOption.value
+    ? conditionCopy.value.visibilityInLabelOption
+    : conditionCopy.value.visibilityInLabelText
+  const label = (operator: FieldVisibilityDraft['operator']) =>
+    operator === 'in' ? inLabel : VISIBILITY_OPERATOR_LABELS[operator]
+  const choices: { value: FieldVisibilityDraft['operator']; label: string; disabled: boolean }[] =
+    visibilityOperatorsForField(visibilityDependency.value).map((operator) => ({
+      value: operator,
+      label: label(operator),
+      disabled: false,
+    }))
+  const current = props.field?.visibility.operator
+  if (current && !choices.some((choice) => choice.value === current)) {
+    choices.push({
+      value: current,
+      label: `${label(current)}${conditionCopy.value.notApplicableSuffix}`,
+      disabled: true,
+    })
+  }
+  return choices
+})
+
+const visibilityIssueText = computed(() => {
+  const current = props.field
+  if (!current || !current.visibility.dependsOnFieldId) return ''
+  return conditionValueIssueText(
+    visibilityRuleValueIssues(buildVisibilityRule(current.visibility), visibilityDependency.value),
+    isZh.value,
+  )
+})
+
+const visibilityStoredValueNote = computed(() => {
+  const current = props.field
+  if (!current || !current.visibility.dependsOnFieldId) return null
+  return visibilityStoredValuePreview(current.visibility, visibilityDependency.value)
+})
+
+// Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
+// option '1') never matches `===`, so it shows as the invalid placeholder — never as that option
+// selected — and re-picking the option is a real change that fixes it.
+const optionScalarRaw = computed(() => {
+  const current = props.field
+  return current ? visibilityDraftScalar(current.visibility) : undefined
+})
+const optionScalarStale = computed(() => {
+  const raw = optionScalarRaw.value
+  if (raw === undefined || raw === null || raw === '' || (Array.isArray(raw) && raw.length === 0)) return false
+  return !isCurrentOptionValue(visibilityDependency.value, raw)
+})
+const optionScalarValue = computed(() => {
+  const raw = optionScalarRaw.value
+  if (optionScalarStale.value) return typeof raw === 'string' ? raw : STALE_OPTION_KEY
+  return typeof raw === 'string' ? raw : ''
+})
+const optionListSelected = computed<string[]>(() => {
+  const current = props.field
+  if (!current) return []
+  const list = visibilityDraftList(current.visibility)
+  return dependencyOptions.value
+    .map((option) => option.value)
+    .filter((value) => list.includes(value))
+})
+const optionListStaleCount = computed(() => {
+  const current = props.field
+  if (!current) return 0
+  return visibilityDraftList(current.visibility).filter(
+    (value) => !isCurrentOptionValue(visibilityDependency.value, value),
+  ).length
+})
 
 const typeOptions = APPROVAL_FORM_PALETTE_GROUPS.flatMap(
   (group) => group.entries,
@@ -1051,7 +1284,17 @@ watch(
 function committedText(key: TextBufferKey): string {
   const current = field.value
   if (!current) return ''
-  if (key === 'valueText') return current.visibility.valueText
+  if (key === 'valueText') {
+    // R-43 (B): what the value box shows for the committed draft, by dependency type. A stored
+    // non-number on a number dependency shows '' so re-typing the same digits is a real edit.
+    if (current.visibility.operator === 'in') {
+      return visibilityDraftListText(current.visibility, visibilityKind.value)
+    }
+    return visibilityDraftScalarText(
+      current.visibility,
+      visibilityKind.value === 'number' ? 'number' : 'text',
+    )
+  }
   return current[key]
 }
 
@@ -1245,6 +1488,18 @@ function bufferValidationError(): string | null {
       return INSPECTOR_INVALID_BUFFER_MESSAGE
     }
   }
+  const valueText = buffer.text.valueText
+  // R-43 (B): a number dependency only accepts numbers (one per line for `in`). Only while the
+  // operator still takes a value: under isEmpty/notEmpty the value box is hidden, so its leftover
+  // text must not block (an error pointing at an invisible control).
+  if (valueText !== undefined && visibilityKind.value === 'number' && visibilityNeedsValue.value) {
+    const entries = current.visibility.operator === 'in'
+      ? parseConditionListText(valueText, 'number')
+      : valueText.trim() === '' ? [] : [parseConditionNumber(valueText) ?? valueText]
+    if (entries.some((entry) => typeof entry !== 'number')) {
+      return conditionCopy.value.invalidNumber
+    }
+  }
   for (const value of Object.values(buffer.optionLabels)) {
     if (value.trim() === '') return INSPECTOR_INVALID_BUFFER_MESSAGE
   }
@@ -1262,13 +1517,31 @@ function onTextInput(key: TextBufferKey, event: Event): void {
   }
 }
 
+function visibilityPatchForText(
+  value: string,
+  current: FieldAuthoringDraft,
+): FieldVisibilityDraft {
+  // R-43 (B): `in` keeps the line text (numbers parsed for a number dependency); a number
+  // dependency's eq/neq saves a NUMBER; anything else stays text.
+  if (current.visibility.operator === 'in') {
+    return visibilityDraftWithListText(current.visibility, value, visibilityKind.value)
+  }
+  if (visibilityKind.value === 'number') {
+    const parsed = parseConditionNumber(value)
+    return parsed === null
+      ? visibilityDraftWithScalarText(current.visibility, '')
+      : visibilityDraftWithScalar(current.visibility, parsed)
+  }
+  return visibilityDraftWithScalarText(current.visibility, value)
+}
+
 function textPatchFor(
   key: TextBufferKey,
   value: string,
   current: FieldAuthoringDraft,
 ): FormFieldPropertyPatch {
   if (key === 'valueText') {
-    return { visibility: { ...current.visibility, valueText: value } }
+    return { visibility: visibilityPatchForText(value, current) }
   }
   return { [key]: value }
 }
@@ -1297,6 +1570,7 @@ function commitTextBuffer(key: TextBufferKey): void {
 
 function keyBlocksCommit(key: TextBufferKey): boolean {
   return (
+    (key === 'valueText' && visibilityKind.value === 'number') ||
     key === 'label' ||
     key === 'minRowsText' ||
     key === 'maxRowsText' ||
@@ -1533,9 +1807,14 @@ function onVisibilityDependsChange(event: Event): void {
   const current = field.value
   if (!current) return
   const value = (event.target as HTMLSelectElement).value
-  const visibility: FieldVisibilityDraft = value
-    ? { ...current.visibility, dependsOnFieldId: value }
-    : { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+  // R-43 (B): a value only carries over text → text; a multi-select dependency switches the
+  // operator to one that can take effect.
+  const visibility = visibilityDraftForDependencyChange(
+    current.visibility,
+    value,
+    visibilityDependencyFor(current.visibility.dependsOnFieldId),
+    visibilityDependencyFor(value),
+  )
   if (!commitPatch({ visibility })) {
     ;(event.target as HTMLSelectElement).value =
       current.visibility.dependsOnFieldId
@@ -1547,8 +1826,36 @@ function onVisibilityOperatorChange(event: Event): void {
   if (!current) return
   const value = (event.target as HTMLSelectElement)
     .value as FieldVisibilityDraft['operator']
-  if (!commitPatch({ visibility: { ...current.visibility, operator: value } })) {
+  if (!commitPatch({ visibility: visibilityDraftWithOperator(current.visibility, value) })) {
     ;(event.target as HTMLSelectElement).value = current.visibility.operator
+  }
+}
+
+function onVisibilityOptionValueChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const visibility = select.value
+    ? visibilityDraftWithScalar(current.visibility, select.value)
+    : visibilityDraftWithScalarText(current.visibility, '')
+  if (!commitPatch({ visibility })) {
+    select.value = optionScalarValue.value
+  }
+}
+
+/** Re-picking drops values no current option carries (the "choose again to fix" path). */
+function onVisibilityOptionToggle(optionValue: string, event: Event): void {
+  const current = field.value
+  if (!current) return
+  const checkbox = event.target as HTMLInputElement
+  const selected = new Set(optionListSelected.value)
+  if (checkbox.checked) selected.add(optionValue)
+  else selected.delete(optionValue)
+  const next = dependencyOptions.value
+    .map((option) => option.value)
+    .filter((value) => selected.has(value))
+  if (!commitPatch({ visibility: visibilityDraftWithList(current.visibility, next) })) {
+    checkbox.checked = !checkbox.checked
   }
 }
 
@@ -1791,12 +2098,12 @@ function settlePendingEdits(): boolean {
   }
   if (
     buffer.text.valueText !== undefined &&
-    buffer.text.valueText !== current.visibility.valueText
+    visibilityNeedsValue.value &&
+    buffer.text.valueText !== committedText('valueText')
   ) {
-    patch.visibility = {
-      ...current.visibility,
-      valueText: buffer.text.valueText,
-    }
+    // (A hidden value box's leftover text is dropped with the buffer, never folded in: it would
+    // overwrite the kept value as a side effect.)
+    patch.visibility = visibilityPatchForText(buffer.text.valueText, current)
   }
   if (Object.keys(buffer.optionLabels).length > 0) {
     // Same value-preserving rule as the blur/Enter path (P2-3): one shared
@@ -1890,6 +2197,21 @@ defineExpose({ settlePendingEdits, isDirty })
 .approval-form-field-inspector__error {
   font-size: 12px;
   color: var(--el-color-danger);
+}
+
+.approval-form-field-inspector__stored-value {
+  overflow-wrap: anywhere;
+}
+
+.approval-form-field-inspector__option-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
 }
 
 .approval-form-field-inspector__control {

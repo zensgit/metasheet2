@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import type { MetaSheetServer } from '../../src/index'
 import {
   AttendanceCalculationGroupMembershipError,
   listAttendanceCalculationGroupMemberships,
@@ -17,6 +20,9 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 
 describeIfDatabase('W1 effective calculation-group membership (real DB)', () => {
   const pool = new Pool({ connectionString: dbUrl })
+  let server: MetaSheetServer | undefined
+  const priorDatabaseUrl = process.env.DATABASE_URL
+  const priorSkipPlugins = process.env.SKIP_PLUGINS
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const orgA = `calc-w1-a-${suffix}`
   const orgB = `calc-w1-b-${suffix}`
@@ -46,6 +52,37 @@ describeIfDatabase('W1 effective calculation-group membership (real DB)', () => 
 
   beforeAll(async () => {
     if (!dbUrl) throw new Error('DATABASE_URL / ATTENDANCE_TEST_DATABASE_URL is required')
+
+    // Use the product registration path: a missing runtime must never become an OFF bypass.
+    process.env.DATABASE_URL = dbUrl
+    process.env.SKIP_PLUGINS = 'false'
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
+    const loaded = await import('../../src/index')
+    server = new loaded.MetaSheetServer({
+      port: 0,
+      host: '127.0.0.1',
+      pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')],
+    })
+    await server.start()
+
+    for (const orgId of [orgA, orgB]) {
+      const ruleId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, is_default, work_start_time, work_end_time,
+          late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
+         VALUES ($1, $2, 'W1 timezone fixture', 'UTC', true, '09:00', '18:00',
+                 0, 0, 1, '[0,1,2,3,4,5,6]'::jsonb)`,
+        [ruleId, orgId],
+      )
+      const defaults = await pool.query(
+        'SELECT id, timezone, timezone_version FROM attendance_rules WHERE org_id = $1 AND is_default = true',
+        [orgId],
+      )
+      expect(defaults.rows).toEqual([{ id: ruleId, timezone: 'UTC', timezone_version: 1 }])
+      // No policy row is the real default-OFF case; all source guarding still runs.
+      expect((await pool.query('SELECT org_id FROM attendance_timezone_policies WHERE org_id = $1', [orgId])).rows).toEqual([])
+    }
 
     for (const [id, active] of [
       [actorId, true],
@@ -104,7 +141,7 @@ describeIfDatabase('W1 effective calculation-group membership (real DB)', () => 
         [id, orgId, `${name} ${suffix}`, `${name.replaceAll(' ', '-').toLowerCase()}-${suffix}`],
       )
     }
-  })
+  }, 120000)
 
   it('replays the migration down/up path and a second up without schema drift', async () => {
     const migrationPool = new Pool({ connectionString: dbUrl, max: 2 })
@@ -135,6 +172,7 @@ describeIfDatabase('W1 effective calculation-group membership (real DB)', () => 
   })
 
   afterAll(async () => {
+    if (server) await server.stop()
     await pool.query(
       `DELETE FROM attendance_calculation_group_membership_operations
         WHERE org_id = ANY($1::text[])`,
@@ -162,8 +200,16 @@ describeIfDatabase('W1 effective calculation-group membership (real DB)', () => 
       `DELETE FROM users WHERE id = ANY($1::text[])`,
       [userIds],
     ).catch(() => undefined)
+    await pool.query(
+      'DELETE FROM attendance_rules WHERE org_id = ANY($1::text[])',
+      [[orgA, orgB]],
+    ).catch(() => undefined)
     await pool.end()
-  })
+    if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL
+    else process.env.DATABASE_URL = priorDatabaseUrl
+    if (priorSkipPlugins === undefined) delete process.env.SKIP_PLUGINS
+    else process.env.SKIP_PLUGINS = priorSkipPlugins
+  }, 120000)
 
   it('installs inclusive non-overlap, same-org group, and active user-org database guards', async () => {
     const constraints = await pool.query<{ conname: string }>(

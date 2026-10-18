@@ -68,6 +68,32 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // Trip, request and timezone modules supply or protect the frozen calculation context.
+  // Apply both aggregate bans to every new module; no exclusion is introduced.
+  'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',
+  // Archive repair constructs frozen context; default recovery protects existing
+  // freezes before rebuilding their missing source. Both aggregate bans apply.
+  'packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts',
+  'plugins/plugin-attendance/lib/attendance-timezone-default-recovery.cjs',
+  'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts',
+  'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+  'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+  'plugins/plugin-attendance/lib/attendance-calendar-settings-writer.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-calendar-day.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-manage-authority.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-request-instants.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-target-routes.cjs',
+  'plugins/plugin-attendance/lib/attendance-trip-context-transition-dates.cjs',
+  // Multi-timezone policy inputs, configuration and loader feed frozen context;
+  // retain both W6 aggregate bans with no not-calculation carve-out.
+  'plugins/plugin-attendance/lib/attendance-timezone-context-loader.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy-routes.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy.cjs',
   'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
   // Online punch identity and receipt framing feed the live calculation boundary;
   // both W6 aggregate bans apply, with no carve-out.
@@ -101,6 +127,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-group-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-preconditions.ts',
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-commit-connection.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-processor.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-reservation-host.ts',
@@ -163,6 +190,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+  // Import identity resolution selects the employee whose frozen context is built.
+  // Both W6 aggregate bans apply; this is not an exclusion.
+  'plugins/plugin-attendance/lib/attendance-import-user-identity.cjs',
   'plugins/plugin-attendance/lib/attendance-live-punch-order.cjs',
   // The punch route uses this server instant for persisted events and calculations.
   'plugins/plugin-attendance/lib/attendance-online-punch-clock.cjs',

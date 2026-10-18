@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApprovalGraphExecutor,
   canonicalizeRecordLinkFormData,
+  getVisibleFormFieldIds,
   isEmptyValue,
   pruneHiddenFormData,
   validateApprovalFormData,
@@ -2137,5 +2138,163 @@ describe('ApprovalGraphExecutor — OD-L1-7(a) group cc targets', () => {
     // same wiring error — the guard is not site-1-only.
     expect(() => new ApprovalGraphExecutor(runtimeGraph, {}).resolveInitialState())
       .toThrowError(/CC node cc_a_head has a group target but no group member snapshot was supplied/)
+  })
+})
+
+// R-43 (B) + follow-up (c), tests only: the authoring editors store condition values in the type the
+// executor already compares against (option VALUE for a select, an ARRAY for `in`, a NUMBER for a
+// number field) and mark rules that cannot work. These lock the executor semantics those editors rely
+// on; the implementation is unchanged.
+describe('R-43 (B) typed condition values — executor semantics the authoring editors rely on (tests only)', () => {
+  type BranchRules = Array<{ fieldId: string; operator: string; value?: unknown }>
+
+  function routeOn(rules: BranchRules): RuntimeGraph {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: { branches: [{ edgeKey: 'edge-hit', rules }], defaultEdgeKey: 'edge-miss' },
+        },
+        { key: 'hit-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'miss-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-2'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-hit', source: 'route', target: 'hit-review' },
+        { key: 'edge-miss', source: 'route', target: 'miss-review' },
+        { key: 'edge-hit-end', source: 'hit-review', target: 'end' },
+        { key: 'edge-miss-end', source: 'miss-review', target: 'end' },
+      ],
+    } as RuntimeGraph
+  }
+
+  const route = (rules: BranchRules, data: Record<string, unknown>) =>
+    new ApprovalGraphExecutor(routeOn(rules), data).resolveInitialState().currentNodeKey
+  const HIT = 'hit-review'
+  const MISS = 'miss-review'
+
+  describe('branch rules (evaluateRule)', () => {
+    it('B1: in with an ARRAY rule value matches a scalar form value by option value (includes), never by name', () => {
+      const rules = [{ fieldId: 'cat', operator: 'in', value: ['opt_a', 'opt_b'] }]
+      expect(route(rules, { cat: 'opt_b' })).toBe(HIT)
+      expect(route(rules, { cat: 'opt_c' })).toBe(MISS)
+      expect(route(rules, { cat: '乙' })).toBe(MISS)
+    })
+
+    it('B2: in with a NUMBER array compares strictly (a digit string never matches)', () => {
+      const rules = [{ fieldId: 'amount', operator: 'in', value: [100, 200] }]
+      expect(route(rules, { amount: 100 })).toBe(HIT)
+      expect(route(rules, { amount: '100' })).toBe(MISS)
+    })
+
+    it('B3: in with an ARRAY rule value matches an array form value when ANY entry is allowed (some)', () => {
+      const rules = [{ fieldId: 'tags', operator: 'in', value: ['opt_a', 'opt_b'] }]
+      expect(route(rules, { tags: ['opt_x', 'opt_b'] })).toBe(HIT)
+      expect(route(rules, { tags: ['opt_x'] })).toBe(MISS)
+      expect(route(rules, { tags: [] })).toBe(MISS)
+    })
+
+    it('B4: in with a SCALAR rule value only matches an array form value that includes it', () => {
+      const rules = [{ fieldId: 'signers', operator: 'in', value: 'u2' }]
+      expect(route(rules, { signers: ['u1', 'u2'] })).toBe(HIT)
+      expect(route(rules, { signers: 'u2' })).toBe(MISS)
+    })
+
+    it('B5/B6: eq is strict both ways — number equals number; number vs digit string never matches', () => {
+      expect(route([{ fieldId: 'amount', operator: 'eq', value: 5000 }], { amount: 5000 })).toBe(HIT)
+      expect(route([{ fieldId: 'amount', operator: 'eq', value: 5000 }], { amount: '5000' })).toBe(MISS)
+      expect(route([{ fieldId: 'amount', operator: 'eq', value: '5000' }], { amount: 5000 })).toBe(MISS)
+    })
+
+    it('B7: gt normalises a numeric string on either side (numeric, not lexicographic, comparison)', () => {
+      const rules = [{ fieldId: 'amount', operator: 'gt', value: '5000' }]
+      expect(route(rules, { amount: 6000 })).toBe(HIT)
+      expect(route(rules, { amount: '10000' })).toBe(HIT)
+      expect(route(rules, { amount: 4000 })).toBe(MISS)
+    })
+
+    it('B8: a select eq compares the stored option VALUE, never the option name', () => {
+      const rules = [{ fieldId: 'kind', operator: 'eq', value: 'opt_a' }]
+      expect(route(rules, { kind: 'opt_a' })).toBe(HIT)
+      expect(route(rules, { kind: '甲' })).toBe(MISS)
+    })
+
+    it('B9: against a LIST form value (multi-person / multi-select) eq never matches, neq always matches, ordering never matches', () => {
+      const data = { signers: ['u1'] }
+      expect(route([{ fieldId: 'signers', operator: 'eq', value: 'u1' }], data)).toBe(MISS)
+      expect(route([{ fieldId: 'signers', operator: 'neq', value: 'u1' }], data)).toBe(HIT)
+      expect(route([{ fieldId: 'signers', operator: 'gt', value: 'u1' }], data)).toBe(MISS)
+      expect(route([{ fieldId: 'signers', operator: 'gt', value: 0 }], data)).toBe(MISS)
+      expect(route([{ fieldId: 'signers', operator: 'lt', value: 99 }], data)).toBe(MISS)
+    })
+
+    it('B10: single-select ordering on NUMERIC option codes compares numerically (why the editor mark is advisory)', () => {
+      expect(route([{ fieldId: 'level', operator: 'gt', value: '2' }], { level: '10' })).toBe(HIT)
+      expect(route([{ fieldId: 'level', operator: 'gt', value: '2' }], { level: '1' })).toBe(MISS)
+    })
+
+    it('B11: single-select ordering on opt_ codes compares the codes as strings (unrelated to option meaning)', () => {
+      const rules = [{ fieldId: 'level', operator: 'gt', value: 'opt_b' }]
+      expect(route(rules, { level: 'opt_c' })).toBe(HIT)
+      expect(route(rules, { level: 'opt_a' })).toBe(MISS)
+    })
+  })
+
+  describe('visibility rules (evaluateVisibilityRule via getVisibleFormFieldIds / pruneHiddenFormData)', () => {
+    function schemaWith(visibilityRule: unknown): FormSchema {
+      return {
+        fields: [
+          { id: 'kind', type: 'select', label: '类型', options: [{ label: '甲', value: 'opt_a' }, { label: '乙', value: 'opt_b' }] },
+          { id: 'tags', type: 'multi-select', label: '标签', options: [{ label: '甲', value: 'opt_a' }, { label: '乙', value: 'opt_b' }] },
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'note', type: 'text', label: '备注', visibilityRule: visibilityRule as FormSchema['fields'][number]['visibilityRule'] },
+        ],
+      } as FormSchema
+    }
+    const noteVisible = (rule: unknown, data: Record<string, unknown>) =>
+      getVisibleFormFieldIds(schemaWith(rule), data).has('note')
+
+    it('V1: in with a values ARRAY matches a select by option value (never by name)', () => {
+      const rule = { fieldId: 'kind', operator: 'in', values: ['opt_a', 'opt_b'] }
+      expect(noteVisible(rule, { kind: 'opt_b' })).toBe(true)
+      expect(noteVisible(rule, { kind: 'opt_c' })).toBe(false)
+      expect(noteVisible(rule, { kind: '乙' })).toBe(false)
+    })
+
+    it('V2: in with a values ARRAY matches a multi-select when ANY entry is listed (some)', () => {
+      const rule = { fieldId: 'tags', operator: 'in', values: ['opt_a'] }
+      expect(noteVisible(rule, { tags: ['opt_x', 'opt_a'] })).toBe(true)
+      expect(noteVisible(rule, { tags: ['opt_x'] })).toBe(false)
+    })
+
+    it('V3: in WITHOUT a values array never matches (a scalar `value` carrier is ignored)', () => {
+      expect(noteVisible({ fieldId: 'kind', operator: 'in', value: 'opt_a' }, { kind: 'opt_a' })).toBe(false)
+    })
+
+    it('V4: a select eq compares the option VALUE, never the name', () => {
+      const rule = { fieldId: 'kind', operator: 'eq', value: 'opt_a' }
+      expect(noteVisible(rule, { kind: 'opt_a' })).toBe(true)
+      expect(noteVisible(rule, { kind: '甲' })).toBe(false)
+    })
+
+    it('V5: a number eq is strict (a digit string never matches)', () => {
+      const rule = { fieldId: 'amount', operator: 'eq', value: 5000 }
+      expect(noteVisible(rule, { amount: 5000 })).toBe(true)
+      expect(noteVisible(rule, { amount: '5000' })).toBe(false)
+    })
+
+    it('V6: against a LIST value eq never matches and neq always matches', () => {
+      expect(noteVisible({ fieldId: 'tags', operator: 'eq', value: 'opt_a' }, { tags: ['opt_a'] })).toBe(false)
+      expect(noteVisible({ fieldId: 'tags', operator: 'neq', value: 'opt_a' }, { tags: ['opt_a'] })).toBe(true)
+    })
+
+    it('V7: pruneHiddenFormData drops the hidden field under the same in rule and keeps it when shown', () => {
+      const schema = schemaWith({ fieldId: 'kind', operator: 'in', values: ['opt_a', 'opt_b'] })
+      expect(pruneHiddenFormData(schema, { kind: 'opt_c', note: 'x' })).not.toHaveProperty('note')
+      expect(pruneHiddenFormData(schema, { kind: 'opt_a', note: 'x' })).toHaveProperty('note', 'x')
+    })
   })
 })

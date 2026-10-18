@@ -74,6 +74,7 @@ import {
   type TaskSettings,
 } from '../src/tasks/tasksApi'
 import {
+  buildCreateDue,
   buildSettingsPatch,
   buildTaskPatch,
   checkGroupName,
@@ -544,6 +545,25 @@ describe('listTasks — page and total', () => {
     expect(lastCall()[0]).toBe(`/api/tasks?view=assigned&limit=${TASK_PAGE_LIMIT}&offset=100`)
     await listTasks('created', { offset: 0 })
     expect(lastCall()[0]).toBe('/api/tasks?view=created&limit=100&offset=0')
+  })
+
+  it('G2-core: a status is sent after the view and before the page; without one the string is unchanged', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await listTasks('assigned', undefined, 'open')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+    await listTasks('following', undefined, 'done')
+    expect(lastCall()[0]).toBe('/api/tasks?view=following&status=done')
+    await listTasks('any_role', undefined, 'all')
+    expect(lastCall()[0]).toBe('/api/tasks?view=any_role&status=all')
+    await listTasks('created', { offset: 100 }, 'done')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=created&status=done&limit=${TASK_PAGE_LIMIT}&offset=100`)
+    await listTasks('delegated', undefined, undefined)
+    expect(lastCall()[0]).toBe('/api/tasks?view=delegated')
+  })
+
+  it('G2-core: an unknown status answered as predicate_error reads as predicate_error, not as an empty list', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], degraded: true, reason: 'predicate_error' }))
+    await expect(listTasks('assigned', undefined, 'open')).resolves.toEqual({ kind: 'predicate_error' })
   })
 
   it('carries total when the body has it, and omits the key when the body does not', async () => {
@@ -2023,6 +2043,49 @@ describe('buildTaskPatch', () => {
       remindAt: null,
       remindTouched: true,
     }))).toStrictEqual({ title: 'New', description: 'd', dueTime: '12:30', timeZone: 'Asia/Tokyo', remindAt: null })
+  })
+})
+
+// The create form's due keys: none without a date; with one, the date, the minutes-form time when
+// set and the zone; never `remindAt` (its absence on create is what lets the server set the
+// default reminder).
+describe('buildCreateDue', () => {
+  it('no date: no keys, whatever the time and the zone', () => {
+    expect(buildCreateDue('', '', '')).toStrictEqual({ ok: true, keys: {} })
+    expect(buildCreateDue('', '09:30', 'UTC')).toStrictEqual({ ok: true, keys: {} })
+  })
+
+  it('a date alone: the date and the zone', () => {
+    expect(buildCreateDue('2031-03-04', '', 'Asia/Shanghai')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', timeZone: 'Asia/Shanghai' },
+    })
+  })
+
+  it('a date and a time: the time in the minutes form', () => {
+    expect(buildCreateDue('2031-03-04', '09:30', 'UTC')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'UTC' },
+    })
+    expect(buildCreateDue('2031-03-04', '09:30:00', 'UTC')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'UTC' },
+    })
+  })
+
+  it('a date with no usable zone is ZONE_UNAVAILABLE', () => {
+    expect(buildCreateDue('2031-03-04', '', '')).toStrictEqual({ ok: false, code: 'ZONE_UNAVAILABLE' })
+  })
+
+  it('the checkTaskDates rules: a date that is not a real day, a time out of range, a zone that is not a name', () => {
+    expect(buildCreateDue('2031-02-30', '', 'UTC')).toStrictEqual({ ok: false, code: 'INVALID_DATE' })
+    expect(buildCreateDue('2031-03-04', '24:00', 'UTC')).toStrictEqual({ ok: false, code: 'INVALID_DATE' })
+    expect(buildCreateDue('2031-03-04', '', '+08:00')).toStrictEqual({ ok: false, code: 'INVALID_TIME_ZONE' })
+  })
+
+  it('never produces a remindAt key', () => {
+    const result = buildCreateDue('2031-03-04', '09:30', 'UTC')
+    expect(result.ok && 'remindAt' in result.keys).toBe(false)
   })
 })
 

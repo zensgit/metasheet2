@@ -39,12 +39,10 @@
  *                           its OWN independent inline copy of the predicate (not a call into
  *                           permission-service.ts) — the second hand-rolled copy the fix collapsed.
  *
- * `GET /api/multitable/context` is DELIBERATELY OMITTED from the "surfaces this fix reaches" list —
- * see the dedicated test below, which documents it as a VACUOUS control: that route applies NO
- * projection predicate at all (a separate, already-confirmed defect —
- * `docs`/memory `finding_context_endpoint_skips_projection_fence.md` — with an in-flight,
- * NOT-YET-MERGED fix on branch `fix/multitable-context-fenced-capabilities`). This key-derivation
- * fix has no mandate to change /context's behavior, and does not.
+ * `GET /api/multitable/context` takes its read verdict from the same shared fenced resolver; the
+ * dedicated test at the bottom pins that it agrees with the four surfaces above (participant reads,
+ * non-participant answered like an absent sheet). Its full acceptance lives in
+ * `multitable-context-read-verdict.db.test.ts`.
  *
  * FIXTURE SHAPE (one template, ONE assignee P1, three instances on the SAME projection sheet — a
  * template's projection sheet id is deterministic per templateId, `deriveProjectionSheetId`):
@@ -78,6 +76,7 @@ import { ApprovalProductService } from '../../src/services/ApprovalProductServic
 import { eventBus as integrationEventBus } from '../../src/integration/events/event-bus'
 import { requireRecordReadable, univerMetaRouter } from '../../src/routes/univer-meta'
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
+import { SHEET_ABSENT_BODY, SHEET_NOT_LIVE_STATUS } from '../utils/sheet-existence-oracle'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -406,23 +405,17 @@ describeIfDatabase('approval-projection key parity — real reconcile output, fo
     expect(admin.capabilities.canRead).toBe(true)
   })
 
-  // ── /context: VACUOUS control — documented, not claimed as fixed ──────────────────────────
+  // ── /context: agrees with the shared verdict ───────────────────────────────────────────
 
-  it('/context: VACUOUS control — this route applies NO projection predicate at all (pre-existing, separately tracked defect; unaffected by this fix)', async () => {
-    // univer-meta.ts's GET /context builds its OWN `readableSheetRows` from `canReadWithSheetGrant`
-    // only — it never calls `filterReadableSheetRowsForAccess`, `loadApprovalProjectionSheetIds`, or
-    // any approval-projection predicate. So EVERY actor with plain `multitable:read` — participant
-    // or not — currently gets 200 with the sheet's metadata, both BEFORE and AFTER this fix. That is
-    // NOT evidence this fix reaches /context; it is the opposite — documented here so a future
-    // reader does not mistake "200 for a participant" as this fix's doing. Fixing this endpoint's
-    // missing fence is a SEPARATE, already-confirmed defect with its own in-flight branch
-    // (`fix/multitable-context-fenced-capabilities`, not yet merged) — out of scope here: this fix
-    // changes readers of the projection predicate, not routes that never call it.
+  it('/context: participant R1 reads the sheet; non-participant STRANGER is answered exactly like an absent sheet', async () => {
     asUser(R1)
     const participantRes = await request(app).get('/api/multitable/context').query({ sheetId })
     expect(participantRes.status).toBe(200)
+    expect(participantRes.body.data.sheet?.id).toBe(sheetId)
     asUser(STRANGER)
     const strangerRes = await request(app).get('/api/multitable/context').query({ sheetId })
-    expect(strangerRes.status).toBe(200) // unchanged — vacuous, not a pass/fail signal for this fix
+    const absentRes = await request(app).get('/api/multitable/context').query({ sheetId: `${sheetId}_absent` })
+    expect([strangerRes.status, strangerRes.body]).toEqual([SHEET_NOT_LIVE_STATUS, SHEET_ABSENT_BODY])
+    expect(strangerRes.text).toBe(absentRes.text)
   })
 })

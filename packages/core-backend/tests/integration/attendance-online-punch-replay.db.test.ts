@@ -60,13 +60,18 @@ describe('online common receipt replay and real two-connection races', () => {
   function boundary(after?: Hook, before?: Hook, onFailure?: FailureHook) {
     return liveOriginal({ acquireConnection: connection(after, before, onFailure), legacyAdapters: adapters })
   }
-  function frames(actor: Awaited<ReturnType<typeof fixture.user>>, id: string, meta: Record<string, unknown> | null = null) {
+  async function frames(actor: Awaited<ReturnType<typeof fixture.user>>, id: string, meta: Record<string, unknown> | null = null) {
     const online = { orgId: fixture.orgId, userId: actor.userId, tokenSubjectUserId: actor.userId, operationId: id,
       client: { eventType: 'check_in' as const, timezone: 'UTC', source: null, location: null, meta, photoFileId: null, requestNamedOrgId: fixture.orgId } }
+    // Read the production target context; the real writer must revalidate its
+    // fingerprint inside each of the two competing transactions below.
+    const target = await fixture.request('/api/attendance/timezone-context/me?workDate=2026-08-19', actor.token, undefined, 'GET')
+    expect(target.status, target.body.error?.code).toBe(200)
+    expect(target.body.data.contextFingerprint).toMatch(/^[a-f0-9]{64}$/)
     const normal: liveModule.AttendanceLivePunchBoundaryInputV1 = { orgId: fixture.orgId, userId: actor.userId, operationId: id,
       eventType: 'check_in', occurredAtRaw: null, occurredAtResolved: instant, timezone: 'UTC', requestTimezone: 'UTC',
       source: 'manual', location: null, meta, photoFileRef: null, workDate: '2026-08-19', shiftId: null,
-      outerSourceDefinitionFingerprint: null, isWorkday: true, holidayKind: null }
+      outerSourceDefinitionFingerprint: null, timezoneContextFingerprint: target.body.data.contextFingerprint, isWorkday: true, holidayKind: null }
     const outdoor: requestModule.AttendanceRequestOperationBoundaryInputV1 = { kind: 'request_create', operationId: id,
       correlationId: id, routeVariant: 'outdoor', routeInput: { orgId: fixture.orgId, actorId: actor.userId, tokenSubjectUserId: actor.userId,
         requesterName: 'online fixture', workDate: '2026-08-19', eventType: 'check_in', occurredAt: instant, timezone: 'UTC', source: 'mobile',
@@ -122,7 +127,7 @@ describe('online common receipt replay and real two-connection races', () => {
     await fixture.configure(admin.token, { minPunchIntervalMinutes: 0 })
   })
   it.each([['normal','normal'],['outdoor','outdoor'],['normal','outdoor'],['outdoor','normal']] as const)('two physical connections racing %s/%s create one precise common receipt', async (kind, other) => {
-    const actor = await fixture.user(); const id = randomUUID(); const f = frames(actor,id)
+    const actor = await fixture.user(); const id = randomUUID(); const f = await frames(actor,id)
     const started = deferred(); const resume = deferred(); const pids = new Set<number>(); let acquired = 0
     const operationKeys: bigint[]=[]
     const winner = boundary(async (sql,params,client) => {
@@ -155,7 +160,7 @@ describe('online common receipt replay and real two-connection races', () => {
     expect((await rows(id)).every(row=>row.state==='completed')).toBe(true)
   })
   it.each(['normal', 'outdoor'] as const)('new %s winner versus the other branch replays one shared receipt', async kind => {
-    const actor = await fixture.user(); const f = frames(actor,randomUUID(),{ outdoor:true })
+    const actor = await fixture.user(); const f = await frames(actor,randomUUID(),{ outdoor:true })
     const writer=boundary()
     const a=await writer.executeOnlinePunch(f.online,kind==='normal'?{kind,input:f.normal}:{kind,input:f.outdoor})
     const b=await writer.executeOnlinePunch(f.online,kind==='normal'?{kind:'outdoor',input:f.outdoor}:{kind:'normal',input:f.normal})
@@ -163,8 +168,8 @@ describe('online common receipt replay and real two-connection races', () => {
     expect(await fixture.counts(actor.userId)).toEqual(kind==='normal' ? { events:1,records:1,requests:0,operations:1 } : { events:0,records:0,requests:1,operations:2 })
   })
   it('snapshot established before another commit receives an exact-PK fresh-transaction retry, then exact replay', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const winner=boundary();let exactPk=0;const failures:unknown[]=[]
-    const template=frames(actor,randomUUID())
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const winner=boundary();let exactPk=0;const failures:unknown[]=[]
+    const template=await frames(actor,randomUUID())
     const first=await winner.executeOnlinePunch(template.online,{kind:'normal',input:template.normal})
     const commitReceipt=await receiptClone(fixture.orgId,template.online.operationId,f.online.operationId)
     const stale=await forceStaleSnapshot(after=> {
@@ -183,7 +188,7 @@ describe('online common receipt replay and real two-connection races', () => {
     expect(await fixture.counts(actor.userId)).toEqual({events:1,records:1,requests:0,operations:2})
   })
   it('a winner that throws after the claim rolls back before its waiter commits exactly once', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const claimed=deferred();const resume=deferred()
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const claimed=deferred();const resume=deferred()
     const failure=new Error('OWNED_TEST_ROLLBACK')
     const winner=boundary(async(sql)=>{if(sql.includes('INSERT INTO attendance_result_operations')){claimed.resolve();await resume.promise;throw failure}})
     const first=winner.executeOnlinePunch(f.online,{kind:'normal',input:f.normal})
@@ -197,7 +202,7 @@ describe('online common receipt replay and real two-connection races', () => {
     expect(await fixture.counts(actor.userId)).toEqual({events:1,records:1,requests:0,operations:1})
   })
   it('an exact owned PK collision with failed rollback discards its connection and never starts another transaction', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const template=frames(actor,randomUUID())
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const template=await frames(actor,randomUUID())
     await boundary().executeOnlinePunch(template.online,{kind:'normal',input:template.normal})
     const commitReceipt=await receiptClone(fixture.orgId,template.online.operationId,f.online.operationId)
     let acquisitions=0;let begins=0;let rollbacks=0;let exactPk=0;let backendPid=0
@@ -227,16 +232,16 @@ describe('online common receipt replay and real two-connection races', () => {
     expect(await rows(f.online.operationId)).toHaveLength(1)
   })
   it('mutable refusal fence returns a committed winner; a fresh refusal rolls its common claim back', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const writer=boundary();const refusal=new Error('OWNED_POLICY_REFUSAL')
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const writer=boundary();const refusal=new Error('OWNED_POLICY_REFUSAL')
     const a=await writer.executeOnlinePunch(f.online,{kind:'normal',input:f.normal})
     const b=await writer.executeOnlinePunch(f.online,{kind:'refusal',error:refusal})
     expect(b.receipt).toEqual(a.receipt)
-    const g=frames(await fixture.user(),randomUUID())
+    const g=await frames(await fixture.user(),randomUUID())
     await expect(writer.executeOnlinePunch(g.online,{kind:'refusal',error:refusal})).rejects.toBe(refusal)
     expect(await rows(g.online.operationId)).toEqual([])
   })
   it.each(['membership','activation'] as const)('revocation committed after mint before fresh transaction snapshot refuses completed %s replay', async field => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const writer=boundary()
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const writer=boundary()
     await writer.executeOnlinePunch(f.online,{kind:'normal',input:f.normal})
     const request=buildOnlinePunchRequestV1(f.online)
     const auth=createAuthorizedAttendanceWriteContextV1({actorId:actor.userId,actorPosture:'self',tokenSubjectUserId:actor.userId,orgId:fixture.orgId,subjectScope:{kind:'self',userId:actor.userId},capability:'punch',sourceRef:ONLINE_PUNCH_SOURCE_REF})
@@ -248,29 +253,29 @@ describe('online common receipt replay and real two-connection races', () => {
     expect(await fixture.counts(actor.userId)).toEqual({events:1,records:1,requests:0,operations:1})
   })
   it('old live and old outdoor domain receipts fail closed instead of being reinterpreted', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID());const writer=boundary()
+    const actor=await fixture.user();const f=await frames(actor,randomUUID());const writer=boundary()
     await writer.executeLivePunch({...f.normal,occurredAtRaw:instant})
     await expect(writer.probeOnlinePunchReplay(f.online)).rejects.toMatchObject({code:'ATTENDANCE_OPERATION_CONFLICT'})
-    const b=await fixture.user();const g=frames(b,randomUUID())
+    const b=await fixture.user();const g=await frames(b,randomUUID())
     const old=requestOriginal({acquireConnection:connection(),adapters:requestAdapters})
     await old.execute(g.outdoor)
     await expect(writer.probeOnlinePunchReplay(g.online)).rejects.toMatchObject({code:'ATTENDANCE_OPERATION_CONFLICT'})
     expect((await rows(g.online.operationId)).map(x=>x.entrypoint)).toEqual(['request_create'])
   })
   it('generic request UUID stays independent from normal punch but conflicts with outdoor inner row', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID())
+    const actor=await fixture.user();const f=await frames(actor,randomUUID())
     const generic:requestModule.AttendanceRequestOperationBoundaryInputV1={kind:'request_create',operationId:f.online.operationId,correlationId:f.online.operationId,routeVariant:'generic',routeInput:{orgId:fixture.orgId,actorId:actor.userId,tokenSubjectUserId:actor.userId,requesterName:'online fixture',requestId:null,requestNamedOrgId:fixture.orgId,requestBody:{requestType:'leave',leaveTypeCode:'online-clock-leave',minutes:60,workDate:'2026-08-19',startTime:'18:00',endTime:'19:00',reason:'fixture'}}}
     const requestWriter=requestOriginal({acquireConnection:connection(),adapters:requestAdapters})
     const created=await requestWriter.execute(generic);expect(created.response).toBeDefined()
     const normal=await boundary().executeOnlinePunch(f.online,{kind:'normal',input:f.normal});expect(normal.receipt.status).toBe(200)
     expect((await rows(f.online.operationId)).map(x=>x.entrypoint)).toEqual(['live_punch','request_create'])
-    const other=await fixture.user();const g=frames(other,randomUUID());const genericOther={...generic,operationId:g.online.operationId,routeInput:{...generic.routeInput as Record<string,unknown>,actorId:other.userId,tokenSubjectUserId:other.userId}}
+    const other=await fixture.user();const g=await frames(other,randomUUID());const genericOther={...generic,operationId:g.online.operationId,routeInput:{...generic.routeInput as Record<string,unknown>,actorId:other.userId,tokenSubjectUserId:other.userId}}
     await requestWriter.execute(genericOther)
     await expect(boundary().executeOnlinePunch(g.online,{kind:'outdoor',input:g.outdoor})).rejects.toMatchObject({code:'ATTENDANCE_OPERATION_CONFLICT'})
     expect((await rows(g.online.operationId)).map(x=>x.entrypoint)).toEqual(['request_create'])
   })
   it('an adapter nonclaim error with the same PK metadata is not upgraded or retried', async () => {
-    const actor=await fixture.user(); const f=frames(actor,randomUUID())
+    const actor=await fixture.user(); const f=await frames(actor,randomUUID())
     const error={code:'23505',constraint:'pk_attendance_result_operations',table:'attendance_result_operations'}
     let calls=0; let claims=0
     const writer=liveOriginal({acquireConnection:connection(async(sql,params)=>{
@@ -299,7 +304,7 @@ describe('online common receipt replay and real two-connection races', () => {
   })
 
   it('generic commit after the outdoor snapshot hits only its exact inner claim PK, then a fresh attempt refuses with no common residue', async () => {
-    const actor=await fixture.user();const f=frames(actor,randomUUID())
+    const actor=await fixture.user();const f=await frames(actor,randomUUID())
     const generic:requestModule.AttendanceRequestOperationBoundaryInputV1={kind:'request_create',operationId:f.online.operationId,correlationId:f.online.operationId,routeVariant:'generic',routeInput:{orgId:fixture.orgId,actorId:actor.userId,tokenSubjectUserId:actor.userId,requesterName:'online fixture',requestId:null,requestNamedOrgId:fixture.orgId,requestBody:{requestType:'leave',leaveTypeCode:'online-clock-leave',minutes:60,workDate:'2026-08-19',reason:'fixture'}}}
     let innerPk=0;let snapshots=0
     const requestWriter=requestOriginal({acquireConnection:connection(),adapters:requestAdapters})

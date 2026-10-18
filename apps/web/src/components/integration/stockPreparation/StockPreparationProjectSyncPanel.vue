@@ -545,6 +545,7 @@
 // text, echoed back into their own input, and it never comes from a response — the projects read
 // route deliberately never serves it. Everything else on this panel is a count, a closed status
 // token, an HTTP status or a reason code.
+import { copyText } from '../../../utils/clipboard'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
@@ -1355,19 +1356,17 @@ async function onCopyMissingComponents(): Promise<void> {
   const tsv = [missingComponentExportHeaders.value, ...missingComponentExportRows(list.items)]
     .map((row) => row.map((cell) => escapeTsvCell(cell, { guardFormulas: true })).join('\t'))
     .join('\n')
-  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
-  try {
-    if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable')
-    await clipboard.writeText(tsv)
+  // copyText never rejects; it already falls back to execCommand('copy') when the Clipboard API is
+  // missing (plain-HTTP intranet) or refuses.
+  if (await copyText(tsv)) {
     missingComponentsCopyState.value = 'copied'
-  } catch {
-    // Clipboard API missing, refused, or throwing (insecure context, no permission, …): select the
-    // table for a manual copy and SAY SO — a silent failure here reads as "复制 did nothing".
+  } else {
+    // No copy mechanism worked at all: select the table for a manual copy and SAY SO — a silent
+    // failure here reads as "复制 did nothing".
     selectMissingComponentsTable()
     missingComponentsCopyState.value = 'manual'
-  } finally {
-    scheduleMissingComponentsCopyReset()
   }
+  scheduleMissingComponentsCopyReset()
 }
 
 /** Point 9: characters Windows/macOS/Linux all refuse in a filename, replaced rather than left to fail the download silently. */

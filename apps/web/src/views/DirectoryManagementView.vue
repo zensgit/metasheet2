@@ -1983,6 +1983,7 @@
 </template>
 
 <script setup lang="ts">
+import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
@@ -3099,14 +3100,15 @@ async function writeClipboardText(
     setStatus(options.emptyMessage ?? '没有可复制的部门 ID', 'error')
     return
   }
-  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+  // "Unsupported" now means NO copy mechanism at all — plain-HTTP intranet deployments (no Clipboard
+  // API) still copy through copyText's execCommand fallback.
+  if (!canCopyText()) {
     setStatus(options.unsupportedMessage ?? '当前浏览器不支持自动复制，请从预览框手动复制部门 ID', 'error')
     return
   }
-  try {
-    await navigator.clipboard.writeText(text)
+  if (await copyText(text)) {
     setStatus(successMessage)
-  } catch {
+  } else {
     setStatus(options.failureMessage ?? '复制部门 ID 失败，请从预览框手动复制', 'error')
   }
 }

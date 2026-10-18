@@ -239,6 +239,26 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
   })
 
+  it('downloads the built-in mapped template when the CSV endpoint and template JSON both fail', async () => {
+    const apiFetch = vi.fn(async () => jsonResponse(530, {
+      ok: false,
+      error: { code: 'ORIGIN_ERROR', message: 'tunnel error' },
+    }))
+    const { workflow, downloadText, setStatus } = createWorkflow({ apiFetch })
+
+    await workflow.downloadImportTemplateCsv()
+
+    expect(downloadText).toHaveBeenCalledWith(
+      'attendance-import-template-dingtalk_csv.csv',
+      expect.stringContaining('UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间'),
+      'text/csv;charset=utf-8',
+    )
+    const csv = String(downloadText.mock.calls.at(-1)?.[1] ?? '')
+    expect(csv.charCodeAt(0)).toBe(0xfeff)
+    expect(csv).toContain('user@example.com')
+    expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
+  })
+
   it('builds a selected profile guide with readable field meanings', async () => {
     const { workflow } = createWorkflow({
       apiFetch: vi.fn(async () => jsonResponse(200, {

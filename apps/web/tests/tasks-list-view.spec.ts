@@ -253,16 +253,19 @@ describe('TasksView view switcher', () => {
     h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountReady()
 
-    expect(h.listTasks).toHaveBeenCalledWith('assigned')
+    // G2-core: every list read carries the status filter; with nothing remembered it is `open`.
+    expect(h.listTasks).toHaveBeenCalledWith('assigned', undefined, 'open')
 
     const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
     followingButton.click()
     await flush()
 
-    expect(h.listTasks).toHaveBeenLastCalledWith('following')
+    expect(h.listTasks).toHaveBeenLastCalledWith('following', undefined, 'open')
   })
 })
 
+// The row complete / reopen cells below use "any" mode rows: an "all" mode row has no inline
+// buttons and links to the task detail instead (tasks-detail-view.spec.ts covers that).
 describe('TasksView create / complete / reopen mutations', () => {
   it('submitting the create form calls createTask (no assignees key) then refreshes the list', async () => {
     h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
@@ -342,7 +345,7 @@ describe('TasksView create / complete / reopen mutations', () => {
 
   it('clicking complete calls completeTask for that row id and refreshes the list', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [] })
     h.completeTask.mockResolvedValue({ kind: 'ok', done: true })
     const el = await mountReady()
@@ -359,7 +362,7 @@ describe('TasksView create / complete / reopen mutations', () => {
 
   it('clicking reopen sends scope self and refreshes the list', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [] })
     h.reopenTask.mockResolvedValue({ kind: 'ok' })
     const el = await mountReady()
@@ -378,7 +381,7 @@ describe('TasksView create / complete / reopen mutations', () => {
   // `createTask` already covers above) must show the SAME org-guidance block, not a silently
   // dropped click or the generic action-error message.
   it('completing a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
-    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
     h.completeTask.mockResolvedValue({ kind: 'org_missing' })
     const el = await mountReady()
 
@@ -395,7 +398,7 @@ describe('TasksView create / complete / reopen mutations', () => {
   })
 
   it('reopening a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
-    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
     h.reopenTask.mockResolvedValue({ kind: 'org_missing' })
     const el = await mountReady()
 
@@ -419,7 +422,7 @@ describe('TasksView create / complete / reopen mutations', () => {
       ['not_found', { kind: 'not_found' }, '操作失败，请稍后重试'],
       ['error', { kind: 'error', status: 500 }, '操作失败，请稍后重试'],
     ] as const)('complete -> %s shows the action error and keeps the list', async (_label, result, expectedText) => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       h.completeTask.mockResolvedValue(result)
       const el = await mountReady()
 
@@ -443,7 +446,7 @@ describe('TasksView create / complete / reopen mutations', () => {
       ['not_found', { kind: 'not_found' }, '操作失败，请稍后重试'],
       ['error', { kind: 'error', status: 500 }, '操作失败，请稍后重试'],
     ] as const)('reopen -> %s shows the action error and keeps the list', async (_label, result, expectedText) => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       h.reopenTask.mockResolvedValue(result)
       const el = await mountReady()
 
@@ -460,7 +463,7 @@ describe('TasksView create / complete / reopen mutations', () => {
     })
 
     it('a fresh action clears a stale error from the PREVIOUS action', async () => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       h.completeTask
         .mockResolvedValueOnce({ kind: 'forbidden' })
         .mockResolvedValueOnce({ kind: 'ok', done: true })
@@ -480,7 +483,7 @@ describe('TasksView create / complete / reopen mutations', () => {
     // reset (~:263) — the complete-only test above cannot exercise this: it never calls
     // `reopenTask` at all, so it would stay green even if reopen's own reset were deleted.
     it('a fresh reopen clears a stale action error from a PREVIOUS reopen', async () => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       h.reopenTask
         .mockResolvedValueOnce({ kind: 'forbidden' })
         .mockResolvedValueOnce({ kind: 'ok' })
@@ -508,7 +511,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
   it('a pending complete resolving ok AFTER a reopen set org_missing clears the guidance block', async () => {
     h.listTasks.mockResolvedValue({
       kind: 'ok',
-      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+      items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' }), taskItem({ id: 't2', status: 'done', completion_mode: 'any' })],
     })
     const completeDeferred = deferred<{ kind: 'ok'; done: boolean }>()
     h.completeTask.mockReturnValue(completeDeferred.promise)
@@ -537,7 +540,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
   it('a pending reopen resolving ok AFTER a complete set org_missing clears the guidance block', async () => {
     h.listTasks.mockResolvedValue({
       kind: 'ok',
-      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+      items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' }), taskItem({ id: 't2', status: 'done', completion_mode: 'any' })],
     })
     const reopenDeferred = deferred<{ kind: 'ok' }>()
     h.reopenTask.mockReturnValue(reopenDeferred.promise)
@@ -573,7 +576,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
 describe('TasksView list — late action result after switching list view (M2 list-page-token guard)', () => {
   it('a PENDING error from complete that settles AFTER switching list view shows no banner, and does not reload the new view', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingComplete = deferred<{ kind: 'error'; status: number }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -602,7 +605,7 @@ describe('TasksView list — late action result after switching list view (M2 li
 
   it('a PENDING org_missing from complete that settles AFTER switching list view shows no guidance banner', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingComplete = deferred<{ kind: 'org_missing' }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -627,7 +630,7 @@ describe('TasksView list — late action result after switching list view (M2 li
 
   it('a PENDING ok from reopen that settles AFTER switching list view still notifies the badge bus but does not issue a needless extra reload', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingReopen = deferred<{ kind: 'ok' }>()
     h.reopenTask.mockReturnValue(pendingReopen.promise)
@@ -729,5 +732,174 @@ describe('TasksView /tasks/:id boundary', () => {
     expect(h.listTasks).not.toHaveBeenCalled()
     expect(shown(el, 'tasks-list')).toBeNull()
     expect(shown(el, 'tasks-list-empty')).toBeNull()
+  })
+})
+
+// The create form's optional due date. The server sets a task's default reminder (30 minutes
+// before a timed due, 18:00 on an all-day due, per the creator's own setting) only on a create
+// that carries a due date and no `remindAt` key; a later PATCH never derives one. So the form
+// sends the date, the time when set, and the zone the detail editor would use, and never a
+// reminder key; with the date left empty the body stays `{ title, completionMode }`.
+describe('TasksView create form — optional due date', () => {
+  async function fillTitle(el: HTMLElement, title = 'New task'): Promise<void> {
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = title
+    titleInput.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  async function setControl(el: HTMLElement, testid: string, value: string): Promise<void> {
+    const input = shown(el, testid) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  async function submit(el: HTMLElement): Promise<void> {
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+  }
+
+  function sentBody(): Record<string, unknown> {
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    return h.createTask.mock.calls[0][0] as Record<string, unknown>
+  }
+
+  it('a date and a time send dueDate, dueTime and the browser zone, and no remindAt key', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('Asia/Shanghai')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    const body = sentBody()
+    expect(Object.keys(body).sort()).toEqual(['completionMode', 'dueDate', 'dueTime', 'timeZone', 'title'])
+    expect(body).toEqual({ title: 'New task', completionMode: 'all', dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'Asia/Shanghai' })
+    expect('remindAt' in body).toBe(false)
+  })
+
+  it('a date alone (all-day) sends dueDate and the zone, with no dueTime and no remindAt key', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('Europe/Berlin')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+
+    expect(sentBody()).toEqual({ title: 'New task', completionMode: 'all', dueDate: '2031-03-04', timeZone: 'Europe/Berlin' })
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'dueDate', 'timeZone', 'title'])
+  })
+
+  it('a time control value with seconds is sent in the minutes form', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('UTC')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '23:05:00')
+    await submit(el)
+
+    expect(sentBody().dueTime).toBe('23:05')
+  })
+
+  it('no date: the body keeps only title and completionMode, a stray time is dropped, and the zone is not read', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    const el = await mountReady()
+
+    // The time control is off without a date.
+    expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).disabled).toBe(true)
+    expect(shown(el, 'tasks-create-due-note')).toBeNull()
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'title'])
+    expect(h.resolveViewerTimeZone).not.toHaveBeenCalled()
+  })
+
+  it('a date turns on the time control and shows the reminder note; clearing it clears the time', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    const el = await mountReady()
+
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    const time = shown(el, 'tasks-create-due-time') as HTMLInputElement
+    expect(time.disabled).toBe(false)
+    expect(shown(el, 'tasks-create-due-note')?.textContent?.trim()).toBe('将按任务设置中的「新任务的缺省提醒」生成提醒')
+    expect(shown(el, 'tasks-create-due-date')?.getAttribute('aria-describedby')).toBe('tasks-create-due-note')
+
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await setControl(el, 'tasks-create-due-date', '')
+    expect(time.value).toBe('')
+    expect(time.disabled).toBe(true)
+    expect(shown(el, 'tasks-create-due-note')).toBeNull()
+  })
+
+  it('a successful create empties the title, the date and the time', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('UTC')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).value).toBe('')
+  })
+
+  it('a browser zone that is not a usable name sends nothing and says how to set the date instead', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+
+    expect(h.createTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-create-due-error')?.textContent?.trim()).toBe('无法读取浏览器时区：请先不填截止日期创建，再到任务详情中设置')
+    // The typed values stay for the viewer to change.
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('New task')
+    expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('2031-03-04')
+
+    // Emptying the date and submitting again creates the task without one and drops the message.
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    await setControl(el, 'tasks-create-due-date', '')
+    await submit(el)
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'title'])
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+  })
+
+  it('the due message goes away as soon as the viewer edits the time or the date', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+
+    await submit(el)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+
+    await setControl(el, 'tasks-create-due-date', '')
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+    expect(h.createTask).not.toHaveBeenCalled()
   })
 })

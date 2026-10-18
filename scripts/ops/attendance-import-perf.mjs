@@ -12,9 +12,12 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
 import { scopeAttendanceImportUrl } from './attendance-import-scope.mjs'
+import { createPerfGate, isPerfGateError } from './attendance-import-perf-gate.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
 let token = String(process.env.AUTH_TOKEN || '')
+let perfGate
+let provenance
 
 const orgId = String(process.env.ORG_ID || 'default')
 const timezone = String(process.env.TIMEZONE || 'Asia/Shanghai')
@@ -225,11 +228,17 @@ async function fetchWithRetry(url, init = {}, options = {}) {
   const attempts = Math.max(1, Number(options.attempts || apiRetryAttempts))
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (options.authenticated) provenance = await perfGate.verify(token)
     try {
       const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
         ? AbortSignal.timeout(apiTimeoutMs)
         : undefined
-      const res = await fetch(url, { ...init, signal })
+      const res = await fetch(url, {
+        ...init,
+        ...(options.authenticated ? { headers: { ...init.headers, Authorization: `Bearer ${token}` } } : {}),
+        ...(perfGate?.bound ? { redirect: 'error' } : {}),
+        signal,
+      })
       if (res.status === 401 && allowRefresh && attempt < attempts) {
         const refreshed = await refreshAuthToken()
         if (refreshed) {
@@ -247,6 +256,7 @@ async function fetchWithRetry(url, init = {}, options = {}) {
       }
       return res
     } catch (error) {
+      if (isPerfGateError(error)) throw error
       if (attempt >= attempts) throw error
       const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
       log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${attempts} in ${delayMs}ms`)
@@ -297,6 +307,7 @@ async function refreshAuthToken() {
     }
     const next = body?.data?.token
     if (typeof next === 'string' && next.length > 20) {
+      provenance = await perfGate.verify(next)
       // Some deployments return a "refreshed" token that lacks user identity claims.
       // Keep the old token in that case, otherwise downstream /attendance APIs may 401.
       const claims = decodeJwtPayload(next)
@@ -311,6 +322,7 @@ async function refreshAuthToken() {
     log('WARN: token refresh response missing token')
     return false
   } catch (error) {
+    if (isPerfGateError(error)) throw error
     log(`WARN: token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
@@ -331,7 +343,7 @@ async function apiFetch(pathname, init = {}) {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-  }, { label: `${method} ${pathname}`, attempts })
+  }, { label: `${method} ${pathname}`, attempts, authenticated: true })
   const raw = await res.text()
   let body = null
   try {
@@ -352,7 +364,7 @@ async function apiFetchText(pathname, init = {}) {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
     },
-  }, { label: `${method} ${pathname}`, attempts })
+  }, { label: `${method} ${pathname}`, attempts, authenticated: true })
   const text = await res.text()
   return { url, res, text }
 }
@@ -559,6 +571,7 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
     try {
       job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
     } catch (error) {
+      if (isPerfGateError(error)) throw error
       transientErrors += 1
       const message = (error && error.message) || String(error)
       log(`WARN: transient job poll network error (attempt=${transientErrors}); retrying (${message})`)
@@ -677,6 +690,7 @@ async function recoverAsyncCommitJobWithRetry({
         intervalMs,
       })
     } catch (error) {
+      if (isPerfGateError(error)) throw error
       lastError = error
       const message = (error && error.message) || String(error)
       const timedOut = isAsyncCommitPollTimeoutFailure(error)
@@ -701,8 +715,10 @@ async function recoverAsyncCommitJobWithRetry({
 }
 
 async function run() {
+  perfGate = createPerfGate()
   if (!apiBase) die('API_BASE is required (example: http://23.254.236.11:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
+  provenance = await perfGate.verify(token)
 
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
@@ -879,6 +895,7 @@ async function run() {
       }
       tPreview1 = nowMs()
     } catch (error) {
+      if (isPerfGateError(error)) throw error
       if (attempt >= previewRetryAttempts) throw error
       const delayMs = computeRetryDelayMs({
         baseDelayMs: mutationRetryDelayMs,
@@ -956,6 +973,7 @@ async function run() {
   if (mode === 'preview') {
     const summary = {
       schemaVersion: 2,
+      ...(provenance ? { provenance } : {}),
       startedAt,
       scenario,
       profile: perfProfile,
@@ -1032,6 +1050,7 @@ async function run() {
         }),
       })
     } catch (error) {
+      if (isPerfGateError(error)) throw error
       if (attempt >= activeCommitRetryAttempts) throw error
       const delayMs = computeRetryDelayMs({
         baseDelayMs: mutationRetryDelayMs,
@@ -1075,6 +1094,7 @@ async function run() {
           finalAsyncJobId = finalAsyncJob.id.trim()
         }
       } catch (error) {
+        if (isPerfGateError(error)) throw error
         let retryableError = error
         const pollTimedOut = isAsyncCommitPollTimeoutFailure(retryableError)
         if (pollTimedOut) {
@@ -1094,6 +1114,7 @@ async function run() {
             )
             break
           } catch (recoverError) {
+            if (isPerfGateError(recoverError)) throw recoverError
             retryableError = recoverError
             const recoverMessage = (recoverError && recoverError.message) || String(recoverError)
             log(`WARN: commit-async idempotency recovery failed (${recoverMessage})`)
@@ -1220,6 +1241,7 @@ async function run() {
       }
     }
   } catch (error) {
+    if (isPerfGateError(error)) throw error
     log(`WARN: batch metadata fetch failed: ${(error && error.message) || String(error)}`)
   }
   const tCommit1 = nowMs()
@@ -1291,6 +1313,7 @@ async function run() {
 
   const summary = {
     schemaVersion: 2,
+    ...(provenance ? { provenance } : {}),
     startedAt,
     scenario,
     profile: perfProfile,

@@ -461,6 +461,9 @@
         :opener-el="inspectorOpenerEl"
         :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
+        :view-id="workbench.activeViewId.value ?? undefined"
+        :base-id="activeBaseId || undefined"
+        :dispatch-binding="dispatchBinding"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -771,12 +774,14 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
+import { randomUuid } from '../../utils/uuid'
 import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -886,6 +891,8 @@ import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-vers
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordInspector from '../components/MetaRecordInspector.vue'
+import { createDispatchBinding } from '../../tasks/recordTaskDispatchIdentity'
+import { onMultitableBeforeSend } from '../api/beforeSend'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
@@ -1030,6 +1037,19 @@ const auth = useAuth()
 // useLocale().isZh is a ComputedRef<boolean>; template auto-unwraps it,
 // script reads isZh.value (see T2 i18n dev MD).
 const { isZh } = useLocale()
+// 派发任务 (R-45 step 1): this page's dispatch binding (tasks/recordTaskDispatchIdentity.ts), made before the
+// first request. A dispatch from the record drawer is sent only under the identity it holds, and not at all
+// once any other identity has been seen. Every multitable request of this page checks it right before it is
+// sent (api/beforeSend.ts: told in the same run as apiFetch reads the session headers), so record
+// content read while another user or org was signed in, rows and single records alike, poisons it even when
+// the identity has changed back since. The signal is app-wide (every multitable client tells it), so no
+// client the page reads through is left out.
+const dispatchBinding = createDispatchBinding()
+const stopDispatchSendChecks = onMultitableBeforeSend(() => { dispatchBinding.check() })
+onBeforeUnmount(() => {
+  stopDispatchSendChecks()
+  dispatchBinding.dispose()
+})
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
@@ -1346,7 +1366,7 @@ async function onRunButton({ recordId, field }: { recordId: string; field: MetaF
     if (!window.confirm(prompt)) return
     confirmed = true
   }
-  const requestId = crypto.randomUUID()
+  const requestId = randomUuid()
 
   buttonRunPending.value = [...buttonRunPending.value, key]
   try {
@@ -3413,18 +3433,13 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 // EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
 // while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
 // through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
-// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
-// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+// `record.copyLinkDone` / `record.copyLinkFailed` keys. `copyText` falls back to execCommand('copy')
+// when the Clipboard API is missing (plain-HTTP intranet) or refuses, and never throws; only when no
+// copy mechanism worked at all does this land on the failed copy.
 async function onCopyRecordLink() {
-  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
-  if (!clipboard || typeof clipboard.writeText !== 'function') {
-    showError(recordLabel('record.copyLinkFailed', isZh.value))
-    return
-  }
-  try {
-    await clipboard.writeText(window.location.href)
+  if (await copyText(window.location.href)) {
     showSuccess(recordLabel('record.copyLinkDone', isZh.value))
-  } catch {
+  } else {
     showError(recordLabel('record.copyLinkFailed', isZh.value))
   }
 }

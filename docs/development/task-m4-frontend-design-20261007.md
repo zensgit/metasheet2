@@ -26,7 +26,7 @@
 | 切片 | 做 | 不做 |
 |---|---|---|
 | **FE-a 清单** | `/task-lists/:id` 路由与 `TaskListView.vue`；`/tasks` 左栏「清单」（我的清单，缺省隐藏已归档，可切换显示）；新建 / 改名 / 归档 / 取消归档；成员对话框（read / edit、转让、移除、本人退出）；清单项（按任务 id 加入、移出）；清单内分组与摆放（拖拽 + 键盘）；「分配给我」视角下的个人分组；清单动态面板；详情页「所属清单」区（`listIds` + 加入 / 移出） | 清单删除（`R13`，无路由）；清单 `icon`；分组自身重排（后端不提供）；成员 / 任务选择器（沿用 M3 的 id 输入框）；跨清单搜索 |
-| **FE-b 设置与编辑** | `/tasks/settings` 路由与 `TasksSettingsView.vue`：`badgeScope`、每日提醒、缺省提醒策略、时区（缺省填浏览器 IANA 名）；详情页编辑区（标题、描述、截止 / 开始日期与时间、时区、提醒时刻）走 `PATCH /api/tasks/:id`，带 `expectedVersion`，409 回滚提示 | 创建表单加日期（见 §12-Q3，缺省不加）；每日汇总预览；提醒投递状态（PR-3b 无路由） |
+| **FE-b 设置与编辑** | `/tasks/settings` 路由与 `TasksSettingsView.vue`：`badgeScope`、每日提醒、缺省提醒策略、时区（缺省填浏览器 IANA 名）；详情页编辑区（标题、描述、截止 / 开始日期与时间、时区、提醒时刻）走 `PATCH /api/tasks/:id`，带 `expectedVersion`，409 回滚提示 | 创建表单加日期（见 §12-Q3，缺省不加；2026-10-13 勘误见 `[fe-09]`）；每日汇总预览；提醒投递状态（PR-3b 无路由） |
 | **FE-c 红点、文案、接线** | `fetchPendingCount` 识别 `badgeScope: 'off'`，红点三态常驻节点加 `data-scope`；`useTasksBadge` 订阅 `tasks:counts-updated`，一个窗口里收到的信号合为一次重拉（FE-c，`[fe-51]`），轮询保留且是必需的另一半（§8.2）；`apps/web/src/tasks/labels.ts` + 中英 spec（`R20` 取 (a)：回填 M2 / M3 文案）；新 spec 登记到必跑脚本、token 清单与 `tasks-web-guard`（门 21 / 22） | 改 socket 服务端；改 `App.vue` 的 `navLabels` 表（入口文案留在壳层自己的表里）；接入待办中心（`R22`） |
 
 ### 1.2 依赖与起手时机
@@ -174,7 +174,7 @@ dialog: TaskListMembersDialog（role="dialog"，Esc 关闭，焦点回到触发�
 | 函数 | 方法 路径 | 请求体 | ok 形状 | 失败 kind（码） |
 |---|---|---|---|---|
 | `patchTask(id, patch)` | `PATCH /api/tasks/:id` | `{ expectedVersion, title?, description?, dueDate?, dueTime?, startDate?, startTime?, timeZone?, remindAt? }`；只发调用方给出的键（`undefined` 不序列化） | `{ id, version }`（`version` 正整数） | `not_found`、`forbidden`、`org_missing`；`validation`：`INVALID_VERSION` `INVALID_TITLE` `INVALID_DESCRIPTION` `INVALID_DATE` `INVALID_TIME_ZONE` `TIME_ZONE_REQUIRED` `INVALID_REMIND_AT`；`conflict`：`VERSION_CONFLICT` + `currentVersion`；`error` |
-| `createTask(input)`（扩） | `POST /api/tasks` | M2 三键 + 可选 `dueDate` `dueTime` `startDate` `startTime` `timeZone` `remindAt`（同样「不给不发」） | `{ id, version? }`（`version` 可选：PR-3a 合并前的 main 不回它） | 既有 `invalid_title` / `org_missing` 不变；新增 `validation` **只对枚举的码**：`INVALID_DATE` `INVALID_TIME_ZONE` `TIME_ZONE_REQUIRED` `INVALID_REMIND_AT` `INVALID_ASSIGNEES` `INVALID_MODE` `INACTIVE_ORG_MEMBER`（PR-3a S9：负责人里有不在本 org 在职的人）`LIMIT`；任何其他 422 码仍是 `{ kind: 'error', status: 422 }`（allowlist 语义；既有 `tasks-api.spec.ts:239` 的 `VALIDATION_FAILED` 格不改）。创建表单本期不发日期键，所以这些码在 UI 上只有通用文案 |
+| `createTask(input)`（扩） | `POST /api/tasks` | M2 三键 + 可选 `dueDate` `dueTime` `startDate` `startTime` `timeZone` `remindAt`（同样「不给不发」） | `{ id, version? }`（`version` 可选：PR-3a 合并前的 main 不回它） | 既有 `invalid_title` / `org_missing` 不变；新增 `validation` **只对枚举的码**：`INVALID_DATE` `INVALID_TIME_ZONE` `TIME_ZONE_REQUIRED` `INVALID_REMIND_AT` `INVALID_ASSIGNEES` `INVALID_MODE` `INACTIVE_ORG_MEMBER`（PR-3a S9：负责人里有不在本 org 在职的人）`LIMIT`；任何其他 422 码仍是 `{ kind: 'error', status: 422 }`（allowlist 语义；既有 `tasks-api.spec.ts:239` 的 `VALIDATION_FAILED` 格不改）。创建表单本期不发日期键，所以这些码在 UI 上只有通用文案（2026-10-13 勘误：创建表单已发 `dueDate` / `dueTime` / `timeZone`，这几个日期码按各自文案显示，见 `[fe-09]`） |
 | `getTask(id)`（扩） | 不变 | — | `TaskDetail` 新增：`version?`（正整数）、`description?`（string\|null）、`startDate?` `startTime?` `remindAt?`（string\|null）、`listIds?`（string[]）、`canManageMembers?`（boolean，FE-8：PR-3a 的详情恒带此键，main 上 M3 的详情体没有）。全部可选、出现即校验型；`description` / `startDate` / `startTime` / `remindAt` 作一组（任一出现则四个都须在，同 M3 树字段的组规则；今天的 S4 后端四键同批给出） | 不变 |
 | `listTasks(view, page?)`（扩） | `GET /api/tasks?view=…[&limit=&offset=]` | — | `{ items, total? }`：不传 `page` 时请求串与今天逐字节相同；`total` 出现时须是非负整数，缺失时为 `undefined`（PR-3a 合并前的 main 不回它） | 不变 |
 | `completeTask` / `reopenTask` | 不变 | — | 多出的 `version` 键忽略（不解析，不依赖） | 不变 |
@@ -701,7 +701,7 @@ diff <(D) <(T) && diff <(T) <(G) && echo D=T=G
 | `[fe-06]` | 勾选每日提醒而时区为空时自动填浏览器时区并提示，不硬拒 |
 | `[fe-07]` | 设置页路径 `/tasks/settings`、清单页 `/task-lists/:id`、无 `/task-lists` 索引页 |
 | `[fe-08]` | 红点在线时轮询照跑，不做「在线停轮询」。FE-c 补理由：PR-3c 的 socket 服务是进程内 adapter，别的后端进程处理的写入只能靠轮询到达这个标签页（§8.2、§8.3 第 9 条），所以轮询是必需的，不只是断线回退 |
-| `[fe-09]` | 创建表单本期不加日期字段 |
+| `[fe-09]` | 创建表单本期不加日期字段（2026-10-13 勘误：为让界面创建的任务也得到缺省提醒，创建表单已加可选的截止日期与截止时间，带浏览器时区；不填时请求体不变） |
 | `[fe-10]` | `listTasks` 不传分页参数（请求串与今天相同），`total` 只解析不使用 |
 | `[fe-11]` | 实时组合式的自动连接判据放在独立的 `tasksRealtimePolicy.ts`，spec 用 `vi.mock` 把它换成恒真、用 `vi.mock('socket.io-client')` 注入假 `io`，并另有显式 `connect()`；生产缺省行为与两个既有组合式相同 |
 | `[fe-12]` | 对话框焦点陷阱用最小自实现（Tab 回绕），不引入依赖 |
@@ -754,7 +754,7 @@ diff <(D) <(T) && diff <(T) <(G) && echo D=T=G
 
 1. **`TasksView.vue` 拆分**：是否接受「M4 不拆、M4 之后单独清理片」（§2.3）；若要求先拆，清理片必须重写 6 个守卫，M4 顺延一片。缺省：不拆。
 2. **路由路径**：`/tasks/settings`（静态段压在 `/tasks/:id` 之上）与 `/task-lists/:id`；是否要 `/task-lists` 索引页。缺省：如 §2.1，无索引页。
-3. **创建表单是否加截止日期 / 时区**（`POST /api/tasks` 已收这些键）。缺省：不加（`[fe-09]`），避免 M2 的创建用例与「创建人即负责人」的提醒缺省算法一起进入本期验证面。
+3. **创建表单是否加截止日期 / 时区**（`POST /api/tasks` 已收这些键）。缺省：不加（`[fe-09]`），避免 M2 的创建用例与「创建人即负责人」的提醒缺省算法一起进入本期验证面。（2026-10-13 勘误：已加，见 `[fe-09]`。）
 4. **清单能力标志**：是否请后端在 `TaskList` 形状上加 `canRename` / `canManageMembers` / `canManageGroups` / `canAddItem` / `canRemoveItem` / `canTransfer` / `canArchive` / `canLeave`（同任务详情的做法），让前端不再推断（§5.1）。缺省：本期客户端推断，有标志后只看标志。
 5. **`R20` 取 (a) 还是 (b)**：(a) 回填 M2 / M3 全部文案并给五个既有 spec 加 `useLocale` mock；(b) 只覆盖 M4 新文案。缺省：(a)。**已裁 2026-10-07：(a)（R20）。**
 6. **409 之后的草稿**：保留并提示（§7.3）还是丢弃草稿回到现值。缺省：保留。

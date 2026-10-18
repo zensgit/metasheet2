@@ -28,6 +28,7 @@
         {{ tr('Cancel', '取消') }}
       </button>
     </header>
+    <slot name="timezone" />
 
     <label class="overtime-card__field" for="attendance-overtime-card-rule">
       <span>{{ tr('Overtime rule', '加班规则') }}</span>
@@ -127,7 +128,7 @@
         class="overtime-card__btn overtime-card__btn--primary"
         type="button"
         data-overtime-card-submit
-        :disabled="submitting || overtimeRules.length === 0"
+        :disabled="submitting || canSubmit === false || overtimeRules.length === 0"
         @click="emit('submit')"
       >
         {{ submitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
@@ -166,6 +167,7 @@ const props = defineProps<{
   requestForm: OvertimeRequestFormFields
   overtimeRules: OvertimeRuleOption[]
   submitting: boolean
+  canSubmit?: boolean
 }>()
 
 const emit = defineEmits<{

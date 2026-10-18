@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { copyFileSync, mkdirSync } from 'node:fs'
 
 const OUT = 'verification-output'
-const ARTIFACT = '/opt/cursor/artifacts/attendance-ui'
+const ARTIFACT = process.env.ATTENDANCE_UI_ARTIFACT_DIR || 'verification-output/attendance-ui'
 const HARNESS = '/verification/attendance-admin-calendar-policy-move-harness.html'
 
 function publish(name: string): void {
@@ -117,12 +117,16 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
     const thirds = settings.locator('.attendance__admin-grid--thirds').first()
     const thirdColumns = await thirds.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length)
     expect(thirdColumns, 'short settings groups use three columns').toBe(3)
-    const inputFill = await page.locator('#attendance-auto-absence-run-at').evaluate((node) => {
-      const field = node.closest('.attendance__field')
-      if (!(field instanceof HTMLElement)) return 0
-      return node.getBoundingClientRect().width / field.getBoundingClientRect().width
+    const hours = page.locator('label[for="attendance-holiday-first-day-hours"]')
+    await expect(hours).toContainText('小时')
+    await expect(page.locator('label[for="attendance-auto-absence-lookback"]')).toContainText('天')
+    await expect(settings.locator('label[for="attendance-auto-absence-run-at"] [data-attendance-locale-time]')).toContainText('上午')
+    const fieldFill = await page.locator('label.attendance__field--compact-control').first().evaluate((node) => {
+      const grid = node.parentElement
+      if (!(grid instanceof HTMLElement)) return 1
+      return node.getBoundingClientRect().width / grid.getBoundingClientRect().width
     })
-    expect(inputFill, 'settings input fills its field').toBeGreaterThan(0.85)
+    expect(fieldFill, 'compact settings controls stay shorter than the grid cell').toBeLessThan(0.85)
     await scrollBelowSticky(page, '#attendance-admin-settings h4')
     const name = 'attendance-admin-settings-jump-note-1440.png'
     await page.screenshot({ path: `${OUT}/${name}`, fullPage: false })

@@ -24,19 +24,15 @@
       <strong>{{ tr(`Segment ${segmentIndex + 1}`, `时段 ${segmentIndex + 1}`) }}</strong>
       <label class="shift-segments__field">
         <span>{{ tr('Start', '开始') }}</span>
-        <input
+        <AttendanceLocaleTimeInput
           v-model="segment.startTime"
-          type="time"
-          step="60"
           :data-attendance-shift-segment-start="segmentIndex"
         />
       </label>
       <label class="shift-segments__field">
         <span>{{ tr('End', '结束') }}</span>
-        <input
+        <AttendanceLocaleTimeInput
           v-model="segment.endTime"
-          type="time"
-          step="60"
           :data-attendance-shift-segment-end="segmentIndex"
         />
       </label>
@@ -132,6 +128,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import { Bottom, Delete, Plus, Top } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'

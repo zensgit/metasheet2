@@ -211,7 +211,7 @@ describeIfDatabase('W4C-3a M60 commit-token ordering (real routes, real PostgreS
     )
 
     const auth = await requestHttp(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
     )
     const authToken = auth.body?.token
     if (typeof authToken !== 'string' || !authToken) {

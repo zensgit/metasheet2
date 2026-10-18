@@ -20,6 +20,25 @@ test('import scope preserves other query fields, and refuses a conflicting selec
   }
 })
 
+for (const path of ['/api/attendance/requests', '/api/attendance/requests/request/approve', '/api/attendance/records']) {
+  test(`${path} preserves filters and binds the exact organization`, () => {
+    const scoped = new URL(scopeAttendanceImportUrl(`http://localhost${path}?status=approved&pageSize=50`, 'synthetic-org'))
+    assert.equal(scoped.searchParams.get('orgId'), 'synthetic-org')
+    assert.equal(scoped.searchParams.get('status'), 'approved')
+    assert.equal(scoped.searchParams.get('pageSize'), '50')
+    assert.equal(scopeAttendanceImportUrl(scoped.href, 'synthetic-org'), scoped.href)
+    assert.throws(() => scopeAttendanceImportUrl(scoped.href, 'other-org'), /ATTENDANCE_IMPORT_ORG_MISMATCH/)
+    assert.throws(() => scopeAttendanceImportUrl(`${scoped.href}&orgId=other-org`, 'synthetic-org'), /ATTENDANCE_IMPORT_ORG_MISMATCH/)
+  })
+}
+
+test('unrelated and lookalike routes retain their original selectors', () => {
+  for (const path of ['/api/attendance/requests-extra', '/api/attendance/records-extra', '/api/attendance-admin/users/search', '/api/attendance/settings']) {
+    const url = `http://localhost${path}?orgId=other-org`
+    assert.equal(scopeAttendanceImportUrl(url, 'synthetic-org'), url)
+  }
+})
+
 test('non-default import can preview, commit, read metadata, export and roll back in the same scope', async () => {
   const calls = []
   const server = createServer(async (req, res) => {
@@ -79,7 +98,7 @@ test('non-default import can preview, commit, read metadata, export and roll bac
   }
 })
 
-test('non-default API smoke polls both job kinds, exports and reads batch items in its import scope', async () => {
+test('non-default API smoke keeps import, request approval and record readback in the same scope', async () => {
   const calls = []
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -97,7 +116,7 @@ test('non-default API smoke polls both job kinds, exports and reads batch items 
       res.writeHead(200, { 'Content-Type': 'application/json' })
       return res.end(JSON.stringify([{ name: 'plugin-attendance', status: 'active' }]))
     }
-    if (path.startsWith('/api/attendance/import/')) {
+    if (path.startsWith('/api/attendance/import/') || path.startsWith('/api/attendance/requests') || path === '/api/attendance/records') {
       const effectiveOrg = body.orgId ?? url.searchParams.get('orgId') ?? 'default'
       calls.push({ path, orgId: effectiveOrg })
       if (effectiveOrg !== 'synthetic-org') return reply({ code: 'NOT_FOUND' }, 404)
@@ -143,7 +162,7 @@ test('non-default API smoke polls both job kinds, exports and reads batch items 
       child.on('exit', resolve)
     })
     assert.equal(exitCode, 0, log)
-    for (const endpoint of ['jobs/preview-job', 'jobs/commit-job', 'export.csv', 'batches/async-batch/items', 'rollback/async-batch']) {
+    for (const endpoint of ['jobs/preview-job', 'jobs/commit-job', 'export.csv', 'batches/async-batch/items', 'rollback/async-batch', 'requests', 'requests/synthetic-request/approve', 'records']) {
       assert.ok(calls.some(call => call.path.endsWith(`/${endpoint}`)), endpoint)
     }
     assert.ok(calls.every(call => call.orgId === 'synthetic-org'))

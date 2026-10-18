@@ -109,7 +109,7 @@ vi.mock('../src/composables/useLocale', () => ({
 
 import TasksView from '../src/views/tasks/TasksView.vue'
 
-function taskItem(over: Partial<{ id: string; title: string; status: 'open' | 'done' }> = {}) {
+function taskItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; completion_mode: 'all' | 'any' }> = {}) {
   return {
     id: 't1',
     title: 'Task',
@@ -231,6 +231,8 @@ afterEach(() => {
   app = null
   container = null
   router = null
+  // The status switch remembers its choice in this browser's storage; no cell may leak one.
+  window.localStorage.removeItem('metasheet.tasks.statusFilter')
 })
 
 describe('TasksView route-id watch — real router, SAME component instance (P2-2)', () => {
@@ -333,7 +335,7 @@ describe('TasksView list-generation guard — out-of-order resolution (P2-2)', (
 // `/tasks/:id` page the viewer navigated to before the response landed.
 describe('TasksView list row action — navigate to /tasks/:id while pending (list-page-token guard)', () => {
   it('completing t1 on the list, then navigating to /tasks/t2 before it resolves: a late ok notifies the badge but does not reload the abandoned list', async () => {
-    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
     h_.getTask.mockImplementation(async (id: string) =>
       ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
     const pendingComplete = deferred<{ kind: 'ok'; done: boolean }>()
@@ -357,7 +359,7 @@ describe('TasksView list row action — navigate to /tasks/:id while pending (li
   })
 
   it('reopening t2 on the list, then navigating to /tasks/t1 before it resolves: a late ok notifies the badge but does not reload the abandoned list', async () => {
-    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
     h_.getTask.mockImplementation(async (id: string) =>
       ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
     const pendingReopen = deferred<{ kind: 'ok' }>()
@@ -383,7 +385,7 @@ describe('TasksView list row action — navigate to /tasks/:id while pending (li
     ['error', { kind: 'error' as const, status: 500 }],
     ['org_missing', { kind: 'org_missing' as const }],
   ])('a PENDING %s from a list COMPLETE that settles AFTER navigating to /tasks/t2 shows NO banner/guidance on t2', async (_label, result) => {
-    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
     h_.getTask.mockImplementation(async (id: string) =>
       ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
     const pendingComplete = deferred<typeof result>()
@@ -408,7 +410,7 @@ describe('TasksView list row action — navigate to /tasks/:id while pending (li
     ['error', { kind: 'error' as const, status: 500 }],
     ['org_missing', { kind: 'org_missing' as const }],
   ])('a PENDING %s from a list REOPEN that settles AFTER navigating to /tasks/t2 shows NO banner/guidance on t2', async (_label, result) => {
-    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
     h_.getTask.mockImplementation(async (id: string) =>
       ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
     const pendingReopen = deferred<typeof result>()
@@ -444,5 +446,47 @@ describe('TasksView list READ in flight when navigating to /tasks/:id', () => {
 
     expect(shown(el, 'tasks-view-org-missing')).toBeNull()
     expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+  })
+})
+
+// The notice a create shows while 已完成 hides the new task links to that task's page. Following the
+// link changes the route on the same component instance, and the notice must not come back when
+// the viewer returns to /tasks: by then the task may be completed and listed under 已完成.
+describe('TasksView hidden-by-filter create notice — its link and a route change', () => {
+  it('following the notice link opens the new task, and back on /tasks the notice is gone', async () => {
+    window.localStorage.setItem('metasheet.tasks.statusFilter', 'done')
+    h_.createTask.mockResolvedValueOnce({ kind: 'ok', id: 'n1' })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const el = await mountAt('/tasks')
+    expect(h_.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+
+    const input = shown(el, 'tasks-create-title') as HTMLInputElement
+    input.value = 'Fresh Task'
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+    expect(h_.createTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-create-hidden-notice')).not.toBeNull()
+
+    const link = shown(el, 'tasks-create-hidden-open-task') as HTMLAnchorElement
+    expect(link.tagName).toBe('A')
+    expect(link.getAttribute('href')).toBe('/tasks/n1')
+    link.click()
+    // The link's navigation does not land within one flush in jsdom.
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await flush()
+    }
+    expect(router!.currentRoute.value.path).toBe('/tasks/n1')
+    expect(h_.getTask).toHaveBeenCalledWith('n1')
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-n1')
+
+    await router!.push('/tasks')
+    await flush()
+    expect(router!.currentRoute.value.path).toBe('/tasks')
+    expect(h_.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
   })
 })

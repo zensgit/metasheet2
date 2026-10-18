@@ -59,7 +59,7 @@ describeDb('import template prefs (real DB, route-level, actor-scoped)', () => {
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('attendance:import,attendance:admin')}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent('attendance:import,attendance:admin')}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
   const getPrefs = (token: string, orgId = ORG) =>
@@ -121,10 +121,18 @@ describeDb('import template prefs (real DB, route-level, actor-scoped)', () => {
     expect(row.rows[0].user_id).toBe(USER_A)
   })
 
-  it('org dimension isolates records for the same actor', async () => {
-    await putPrefs(tokenA, { orgId: ORG_B, selectedKeys: ['lateMinutes'] })
-    expect(keysOf(await getPrefs(tokenA, ORG_B))).toEqual(['lateMinutes'])
+  it('org selector cannot read or write another org', async () => {
+    const put = await putPrefs(tokenA, { orgId: ORG_B, selectedKeys: ['lateMinutes'] })
+    expect(put.status).toBe(404)
+    expect((put.body as { error?: { code?: string } }).error?.code).toBe('NOT_FOUND')
+    const read = await getPrefs(tokenA, ORG_B)
+    expect(read.status).toBe(404)
     expect(keysOf(await getPrefs(tokenA, ORG))).toEqual(['firstInAt', 'status', 'overtimeHours'])
+    const leaked = await pool.query(
+      `SELECT 1 FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
+      [ORG_B, USER_A],
+    )
+    expect(leaked.rows).toHaveLength(0)
   })
 
   it('upsert overwrites; trims, dedupes, drops empties', async () => {

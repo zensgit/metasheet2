@@ -5,6 +5,7 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminPageContentSearch.spec.ts
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
@@ -153,19 +154,31 @@ attendance-selfservice-dashboard
 attendance-server-clock-view.spec.ts
 attendance-server-clock.spec.ts
 attendanceAdminEndpointCompatibility
+attendanceAdminGuide.spec.ts
+attendanceAudienceChipField.spec.ts
+attendanceBusinessTripRequestCard
 attendanceCapabilityUnavailable
+attendanceCurrentTimeContext
+attendanceDayTimeContext
 attendanceEmployeeLeaveRequestCard
 attendanceEmployeeMakeupRequestCard
 attendanceEmployeeQuickActionIcons
 attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
+attendanceLegacyPermissionPayload
+attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
+attendancePayrollHelp.spec.ts
 attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
+attendanceRequestTimezoneIntegration
 AttendanceScheduledFeatureStatus
+attendanceTimezonePolicyPanel
+attendanceTimezoneTarget
 attendanceTodayWorkbench
 attendanceUserPickerEndpoint
+attendanceWallTime
 automation-action-summary
 automation-condition-legacy-person-picker
 automation-condition-typing-editor
@@ -179,6 +192,7 @@ automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+builtinCatalogPresentation
 cancelRoundEntryApproverList
 cancelRoundEntryAttendancePanel
 cancelRoundEntryCenterRoute
@@ -188,6 +202,7 @@ cancelRoundEntryDetailView
 cancelRoundEntrySurfaces
 cancelRoundEntryTodoCenter
 categoryCandidateInput
+clipboard-no-bare-navigator-clipboard
 comment-affordance-color-consistency
 conditional-formatting-dialog-i18n
 data-sources-api-preview
@@ -457,14 +472,17 @@ newTodoPill
 pageShell
 parallelBranchRunsView
 permission-match-parity
+permissionManagementView
 personal-view-client
 platform-app-entry-mismatch-inventory
 platform-app-launcher
 platform-app-shell
 public-multitable-form
+recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
+roleMembers
 routePreviewErrors
 run-required-web-tests-shape
 searchApprovalDirectoryDepartments
@@ -541,8 +559,10 @@ tasks-lists-sidebar.spec.ts
 tasks-nav-badge.spec.ts
 tasks-nav-feature-gate.spec.ts
 tasks-nav-relogin.spec.ts
+tasks-record-dispatch.spec.ts
 tasks-routes.spec.ts
 tasks-settings-view.spec.ts
+tasks-status-filter.spec.ts
 tasks-view-transitions.spec.ts
 tasks-view.spec.ts
 templateArchiveConfirm
@@ -600,9 +620,12 @@ useAttendanceAdminImportWorkflow.spec.ts
 useAttendanceAdminProvisioning
 useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
+useAttendanceRequestTimezone
 useAutoSumTotal
 usePlmExportActions
+userManagementRoleMembership
 userManagementView
+uuid-no-bare-randomuuid
 view-manager-multitable-contract
 workflowHubView
 xlsx-mapping

@@ -642,6 +642,11 @@ export default defineConfig({
       // .github/workflows/approval-realdb-projection-key-parity.yml lane (NOT plugin-tests.yml — see
       // that lane's own header for the s6a sha256-pinned-provenance rationale), which arms EXPECT_DB=1.
       'tests/integration/approval-projection-key-parity.db.test.ts',
+      // GET /context read verdict: the sheet verdict, sibling list and capability block come from the
+      // shared fenced resolvers. Requires real PostgreSQL (real approval provisioning). Excluded from the
+      // no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into the
+      // standalone .github/workflows/multitable-realdb-context-read-verdict.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/multitable-context-read-verdict.db.test.ts',
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
@@ -1173,6 +1178,21 @@ export default defineConfig({
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
       'tests/integration/attendance-result-edit.test.ts',
       'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
+      // Multi-timezone D1 requires a real database and must not enter the no-DB lane.
+      'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+      'tests/integration/attendance-business-trip.db.test.ts',
+      'tests/integration/attendance-multitimezone-browser.db.test.ts',
+      'tests/integration/attendance-timezone-policy-write-routes.db.test.ts',
+      'tests/integration/attendance-timezone-target-routes.db.test.ts',
+      'tests/integration/attendance-timezone-read-context.db.test.ts',
+      'tests/integration/attendance-timezone-default-recovery.db.test.ts',
+      'tests/integration/attendance-timezone-legacy-repair.db.test.ts',
+      'tests/integration/attendance-timezone-policy-preview.db.test.ts',
+      'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
+      'tests/integration/attendance-timezone-runtime.db.test.ts',
+      'tests/integration/attendance-timezone-scheduled.db.test.ts',
+      'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
+      'tests/integration/attendance-timezone-policy-store.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -1183,6 +1203,8 @@ export default defineConfig({
       'tests/integration/attendance-online-punch-server-time.db.test.ts',
       'tests/integration/attendance-online-punch-replay.db.test.ts',
       'tests/integration/attendance-schedule-dispatch.test.ts',
+      // Real PostgreSQL; whole-file arg of the approval real-DB step, so the no-DB job must not collect it.
+      'tests/integration/attendance-self-service-revocation-atomicity.db.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
       // OBS-1 completeness sweep (2026-08-07): four more non-.db attendance suites in the same
@@ -1195,6 +1217,8 @@ export default defineConfig({
       'tests/integration/attendance-csv-export-bom.test.ts',
       'tests/integration/attendance-files-acl.test.ts',
       'tests/integration/attendance-import-template-prefs.test.ts',
+      // Actual identifier SQL, optional alias schema and strict membership filters require PostgreSQL.
+      'tests/integration/attendance-import-user-identity.db.test.ts',
       'tests/integration/attendance-makeup-punch-policy.test.ts',
       // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
       // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the
@@ -1907,6 +1931,8 @@ export default defineConfig({
       'tests/integration/task-m4-scheduler.db.test.ts',
       'tests/integration/task-m4-dingtalk.db.test.ts',
       'tests/integration/task-m4-realtime.db.test.ts',
+      // G2-core status filter on GET /api/tasks: real DB, same lane as the files above.
+      'tests/integration/task-g2-status-filter.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

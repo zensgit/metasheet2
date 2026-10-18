@@ -1723,6 +1723,17 @@ export interface PluginServices {
    */
   attendanceW4SegmentCalculation?: {
     validateIanaTimezone(zone: unknown): string
+    resolveLocalWallTime: typeof import('../attendance/w4c1-strict-time').resolveAttendanceLocalWallTimeV1
+    validateFrozenTimezoneContext(context:unknown): boolean
+    validateFrozenTimezoneAttribution(attribution:unknown): boolean
+    registerTimezoneSourceGuard(
+      guard: ((trx: Pick<import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,'query'>,
+        input:{orgId:string;userIds:string[]|null}) => Promise<() => Promise<void>>) | null,
+    ): void
+    acquireTimezoneRuntimeLocks(
+      trx: import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,
+      input: Parameters<typeof import('../attendance/attendance-timezone-runtime-locks').acquireAttendanceTimezoneRuntimeLocksV1>[1],
+    ): Promise<void>
     /**
      * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
      * removes only the second mutable post-upsert pass"). The canonical live
@@ -1812,6 +1823,10 @@ export interface PluginServices {
      * The host acquires the canonical shared rollout lock and resolves the one
      * posture seam on the caller's existing transaction/connection.
      */
+    resolveTimezoneSegmentReferencePosture(
+      trx: Pick<import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
+      orgId: string,
+    ): Promise<{ readonly referenceSegments: boolean }>
     resolveOrgSegmentCalculationPosture(
       trx: DatabaseTransaction,
       orgId: string,

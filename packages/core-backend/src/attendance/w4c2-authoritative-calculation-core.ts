@@ -189,6 +189,7 @@ const AUTHORITATIVE_PROJECTED_STATUSES_V1: ReadonlySet<string> = new Set([
   'partial',
   'absent',
   'adjusted',
+  'off',
 ])
 
 /** True iff `error` is a Postgres unique_violation (23505) on the named constraint. */

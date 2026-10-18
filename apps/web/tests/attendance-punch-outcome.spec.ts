@@ -264,8 +264,8 @@ describe('Attendance punch outcome clarity (mount)', () => {
       if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
         expect((init as RequestInit | undefined)?.method).toBe('POST')
         const body = JSON.parse(String((init as RequestInit).body))
-        expect(Object.keys(body).sort()).toEqual(['eventType', 'timezone'])
-        expect(body.timezone).toBe('Asia/Shanghai')
+        expect(body).toEqual({ eventType: 'check_in' })
+        expect(body).not.toHaveProperty('timezone')
         expect(body).not.toHaveProperty('location')
         expect(body).not.toHaveProperty('meta')
         punchPosted = true
@@ -344,11 +344,10 @@ describe('Attendance punch outcome clarity (mount)', () => {
     await flushUi(6)
 
     expect(punchCalls).toHaveLength(2)
-    expect(Object.keys(punchCalls[0]).sort()).toEqual(['eventType', 'timezone'])
+    expect(punchCalls[0]).toEqual({ eventType: 'check_in' })
     expect(punchCalls[0].eventType).toBe('check_in')
     expect(punchCalls[1]).toEqual({
       eventType: 'check_in',
-      timezone: punchCalls[0].timezone,
       meta: { note: 'Client site visit' },
     })
     // Success clears the inline form (no stale note UI lingering).
@@ -427,7 +426,6 @@ describe('Attendance punch outcome clarity (mount)', () => {
     expect(punchCalls).toHaveLength(2)
     expect(punchCalls[1]).toEqual({
       eventType: 'check_in',
-      timezone: punchCalls[0].timezone,
       meta: { note: 'Still onsite, forgot to note earlier' },
     })
 
@@ -491,7 +489,7 @@ describe('Attendance punch outcome clarity (mount)', () => {
     // plain base payload, not a continuation of Check In's retry (no
     // leftover meta.note, no crossed eventType).
     expect(punchCalls).toHaveLength(2)
-    expect(Object.keys(punchCalls[1]).sort()).toEqual(['eventType', 'timezone'])
+    expect(punchCalls[1]).toEqual({ eventType: 'check_out' })
     expect(punchCalls[1].eventType).toBe('check_out')
 
     // 3) The note form re-opened (Check Out also needs a note this org), but
@@ -517,7 +515,6 @@ describe('Attendance punch outcome clarity (mount)', () => {
     expect(punchCalls).toHaveLength(3)
     expect(punchCalls[2]).toEqual({
       eventType: 'check_out',
-      timezone: punchCalls[0].timezone,
       meta: { note: 'note for check-out' },
     })
     expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeNull()
