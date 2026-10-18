@@ -15,7 +15,7 @@ import {
   readLiveManagedCookieIdentity,
   signManagedSessionToken,
 } from '../auth/plm-managed-session'
-import { isBomMultitableContext } from '../data-adapters/PLMAdapter'
+import { BomReviewError, parseManagedSnapshot, type ManagedSnapshot } from '../multitable/plm-bom-review-wire'
 import { currentManagedRequest } from './plm-managed-request-context'
 import {
   nativeExchange,
@@ -1095,14 +1095,17 @@ export async function readManagedSessionStatus(actor: ManagedActor, dataSourceId
   }
 }
 
-export async function relayManagedBomContext(input: {
+type ManagedBomReadInput = {
   userId: string | undefined
   dataSourceId: string
   partId: string
-}): Promise<
+}
+
+// Server-only projection envelope; it carries no persistent-sharing authority.
+export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promise<
   | { kind: 'legacy' }
   | { kind: 'refusal'; status: number; code: string }
-  | { kind: 'ok'; entitled: boolean; context: unknown }
+  | { kind: 'ok'; entitled: true; snapshot: ManagedSnapshot }
 > {
   const classified = await classifyManagedSource(input.dataSourceId)
   if (classified.kind === 'unbound') return { kind: 'legacy' }
@@ -1146,20 +1149,25 @@ export async function relayManagedBomContext(input: {
     }
     const credential = openCredential(text(session.credential_ciphertext))
     const payload = await nativeManagedContext(registration, credential, input.partId)
-    const body = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
-    const source = body?.source && typeof body.source === 'object' ? body.source as Record<string, unknown> : null
-    if (!body || body.projection_contract !== 'bom_review_managed.v1' || !source) {
-      return { kind: 'refusal', status: 502, code: 'PLM_MANAGED_READ_REFUSED' }
-    }
-    if (source.part_id !== input.partId || source.tenant_id !== text(session.native_tenant_id)
-      || source.org_id !== text(session.native_org_id) || String(source.auth_user_id) !== text(session.native_subject)) {
-      return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_READ_REFUSED' }
-    }
-    if (body.entitled !== true) return { kind: 'ok', entitled: false, context: null }
-    if (!isBomMultitableContext(body.context)) return { kind: 'refusal', status: 502, code: 'PLM_MANAGED_READ_REFUSED' }
-    return { kind: 'ok', entitled: true, context: body.context }
+    const snapshot = parseManagedSnapshot(payload, {
+      part_id: input.partId,
+      tenant_id: text(session.native_tenant_id),
+      org_id: text(session.native_org_id),
+      auth_user_id: text(session.native_subject),
+    })
+    return { kind: 'ok', entitled: true, snapshot }
   } catch (error) {
     if (error instanceof ManagedCompanionRefusal) return { kind: 'refusal', status: error.status, code: error.code }
-    return { kind: 'refusal', status: 502, code: 'PLM_MANAGED_READ_REFUSED' }
+    return { kind: 'refusal', status: error instanceof BomReviewError ? error.status : 502, code: 'PLM_MANAGED_READ_REFUSED' }
   }
+}
+
+export async function relayManagedBomContext(input: ManagedBomReadInput): Promise<
+  | { kind: 'legacy' }
+  | { kind: 'refusal'; status: number; code: string }
+  | { kind: 'ok'; entitled: boolean; context: unknown }
+> {
+  const result = await relayManagedBomSnapshot(input)
+  if (result.kind !== 'ok') return result
+  return { kind: 'ok', entitled: true, context: result.snapshot.context }
 }

@@ -79,6 +79,30 @@ const share = z.object({
   }),
 })
 export type ShareSnapshot = z.infer<typeof share>
+
+// A personal read projection is not authority to publish a persistent review.
+const managed = share.extend({
+  projection_contract: z.literal('bom_review_managed.v1'),
+  context: share.shape.context.extend({
+    part: part.passthrough(),
+    lines: z.array(line.passthrough()),
+  }).passthrough(),
+})
+export type ManagedSnapshot = z.infer<typeof managed>
+export function parseManagedSnapshot(
+  value: unknown,
+  authority: ManagedSnapshot['source'],
+): ManagedSnapshot {
+  const result = managed.safeParse(value)
+  if (!result.success) throw new BomReviewError(502, 'SOURCE_UNAVAILABLE')
+  const snapshot = result.data
+  if (Object.entries(authority).some(([key, expected]) =>
+    snapshot.source[key as keyof typeof snapshot.source] !== expected)
+    || snapshot.context.part.part_id !== authority.part_id) {
+    throw new BomReviewError(403, 'SOURCE_AUTHORITY_MISMATCH')
+  }
+  return snapshot
+}
 export const previewInput = z
   .object({
     dataSourceId: id,
@@ -157,7 +181,7 @@ export function canonical(value: unknown): string {
 export function hash(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex')
 }
-export function snapshotHash(value: ShareSnapshot): string {
+export function snapshotHash(value: Pick<ShareSnapshot, 'source' | 'context'>): string {
   return hash({ source: value.source, context: value.context })
 }
 export const SOURCE_FIELDS = [

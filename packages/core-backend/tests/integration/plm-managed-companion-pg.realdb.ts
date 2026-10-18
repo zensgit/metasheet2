@@ -139,6 +139,9 @@ function enable() {
 function contextBody(part = 'part') {
   return {
     projection_contract: 'bom_review_managed.v1',
+    feature_key: 'bom_multitable',
+    upgrade: { available: false },
+    snapshot_at: '2026-10-18T00:00:00.000000Z',
     entitled: true,
     source: { part_id: part, tenant_id: 'default', org_id: 'fixture-org', auth_user_id: '42' },
     context: {
