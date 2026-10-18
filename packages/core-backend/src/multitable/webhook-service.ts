@@ -36,6 +36,32 @@ const RETRY_CLAIM_LEASE_MS = DELIVERY_TIMEOUT_MS * 4
  *  margin so a live in-flight first attempt is never double-fired. */
 const FIRST_ATTEMPT_STRAY_GRACE_MS = Math.max(5 * 60_000, DELIVERY_TIMEOUT_MS * 10)
 
+/**
+ * Ops switch for outbound subscription webhooks. Explicit-on: only a value in
+ * OUTBOUND_OPS_SWITCH_ON_VALUES (after trim + lowercase) turns it on; a missing,
+ * empty or unrecognised value leaves it off. Read once when this module is first
+ * loaded, so changing it requires restarting every process. It covers the
+ * subscription webhooks handled by WebhookService only. While on: no delivery rows
+ * are written, no requests are sent, and existing rows keep their state; events
+ * seen while on are not replayed.
+ */
+export const OUTBOUND_OPS_SWITCH_ENV = 'MULTITABLE_OUTBOUND_WEBHOOKS_DISABLED'
+const OUTBOUND_OPS_SWITCH_ON_VALUES: ReadonlySet<string> = new Set(['1', 'true', 'yes', 'on'])
+
+function parseOutboundOpsSwitch(raw: string | undefined): boolean {
+  if (typeof raw !== 'string') return false
+  return OUTBOUND_OPS_SWITCH_ON_VALUES.has(raw.trim().toLowerCase())
+}
+
+const outboundOpsSwitchOn: boolean = parseOutboundOpsSwitch(process.env[OUTBOUND_OPS_SWITCH_ENV])
+
+// Startup signal: reports the parsed value that the checks below read, once per process.
+logger.info(
+  outboundOpsSwitchOn
+    ? 'outbound webhook ops switch: on (subscription webhook sends paused)'
+    : 'outbound webhook ops switch: off (normal delivery)',
+)
+
 function generateId(): string {
   return randomBytes(16).toString('hex')
 }
@@ -324,6 +350,8 @@ export class WebhookService {
     // bus bridge, the retry tick) pass nothing → NULL event_id → byte-identical fan-out (no dedup, unchanged).
     eventId?: string,
   ): Promise<WebhookDelivery[]> {
+    // Ops switch on: no webhook lookup, no delivery row, no send.
+    if (outboundOpsSwitchOn) return []
     const rows = await this.db
       .selectFrom('multitable_webhooks')
       .selectAll()
@@ -357,6 +385,8 @@ export class WebhookService {
    * Execute a single webhook delivery attempt.
    */
   async executeDelivery(delivery: WebhookDelivery): Promise<void> {
+    // Ops switch on: send nothing and leave the row as it is (the retry tick handles it once off).
+    if (outboundOpsSwitchOn) return
     const wh = await this.getWebhookById(delivery.webhookId)
     if (!wh) {
       await this.db
@@ -443,6 +473,8 @@ export class WebhookService {
    * Retry all failed deliveries that are due for retry.
    */
   async retryFailedDeliveries(): Promise<number> {
+    // Ops switch on: return before the claim, so due rows are neither selected nor leased.
+    if (outboundOpsSwitchOn) return 0
     // Cross-replica safety (review MINOR-1): claim due rows under
     // FOR UPDATE SKIP LOCKED in a short transaction and lease them forward by
     // bumping next_retry_at, so a concurrent tick on another replica skips

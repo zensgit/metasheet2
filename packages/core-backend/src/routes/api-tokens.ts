@@ -20,6 +20,7 @@ import { WebhookService } from '../multitable/webhook-service'
 import {
   CreateWebhookSchema,
   UpdateWebhookSchema,
+  type WebhookDelivery,
 } from '../multitable/webhooks'
 
 const logger = new Logger('ApiTokenRoutes')
@@ -226,6 +227,21 @@ function requireOrgAdminAccess(req: Request, res: Response): boolean {
   if (isAdminRequest(req)) return true
   res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } })
   return false
+}
+
+/** Delivery list item: status fields only (the stored request and response bodies are not returned). */
+function toDeliveryListItem(delivery: WebhookDelivery) {
+  return {
+    id: delivery.id,
+    webhookId: delivery.webhookId,
+    event: delivery.event,
+    status: delivery.status,
+    httpStatus: delivery.httpStatus,
+    attemptCount: delivery.attemptCount,
+    createdAt: delivery.createdAt,
+    deliveredAt: delivery.deliveredAt,
+    nextRetryAt: delivery.nextRetryAt,
+  }
 }
 
 function getUserId(req: Request): string {
@@ -453,7 +469,7 @@ export function apiTokensRouter(): Router {
     }
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
     const deliveries = await webhookService.listDeliveries(req.params.id, limit)
-    res.json({ ok: true, data: { deliveries } })
+    res.json({ ok: true, data: { deliveries: deliveries.map(toDeliveryListItem) } })
   })
 
   router.get('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {
