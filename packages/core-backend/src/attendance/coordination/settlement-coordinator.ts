@@ -409,7 +409,9 @@ export class SettlementCoordinationUnitV1 {
     const outcome = await new Promise<Outcome>((resolve) => {
       let settled = false
       let timer: CoordinationTimerV1 | null = null
-      const onAbort = (): void => finish({ kind: 'aborted' })
+      const onAbort = (): void => {
+        finish({ kind: 'aborted' })
+      }
       const finish = (value: Outcome): boolean => {
         if (settled) return false
         settled = true
