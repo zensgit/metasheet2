@@ -150,9 +150,26 @@ describe('managed companion registration and navigation', () => {
     expect(cookieSecureFor('http://127.0.0.1:9/api/plm/managed-login/callback')).toBe(false)
   })
 
-  it('keeps the callback as the only exact session-gate exception', () => {
+  it('preserves public root identifiers without adding credential query fields', () => {
+    const url = new URL(buildManagedLoginNavigation(registration, {
+      rootPartId: 'yur_public-part',
+      state: 'synthetic-browser-state',
+      codeChallenge: pkceS256('a'.repeat(43)),
+    }))
+    expect(url.searchParams.get('root_part_id')).toBe('yur_public-part')
+    expect(url.searchParams.has('clientSecret')).toBe(false)
+    expect(url.searchParams.has('code_verifier')).toBe(false)
+    expect([...url.searchParams.keys()]).toHaveLength(10)
+  })
+
+  it('keeps start, unlink, and revoke-retry behind the session gate', () => {
     expect(isGateException('/api/plm/managed-login/callback')).toBe(true)
+    expect(isGateException('/api/plm/managed-login/browser-start')).toBe(true)
+    expect(isGateException('/api/plm/managed-login/complete')).toBe(true)
+    expect(isGateException('/api/plm/managed-login/current')).toBe(true)
+    expect(isGateException('/api/plm/managed-login/logout')).toBe(true)
     expect(isGateException('/api/plm/managed-login/callback/extra')).toBe(false)
+    expect(isGateException('/api/plm/managed-login/browser-start/extra')).toBe(false)
     expect(isGateException('/api/plm/managed-login/start')).toBe(false)
     expect(isGateException('/api/plm/managed-login/unlink')).toBe(false)
     expect(isGateException('/api/plm/managed-login/revoke-retry')).toBe(false)

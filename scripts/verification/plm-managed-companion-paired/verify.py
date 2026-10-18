@@ -320,6 +320,8 @@ parser.add_argument('--node', required=True)
 parser.add_argument('--pg-bin', required=True)
 parser.add_argument('--browser-cache', required=True)
 parser.add_argument('--output', required=True)
+parser.add_argument('--browser-script', default='run.mts')
+parser.add_argument('--workspace-entry', action='store_true')
 args = parser.parse_args()
 meta = Path(args.meta_checkout).resolve()
 native = Path(args.native_checkout).resolve()
@@ -460,6 +462,7 @@ try:
         'callback': origin + '/api/plm/managed-login/callback',
         'issuer': native_origin + '/installation',
         'secret': secret,
+        'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
     }
     env = os.environ.copy()
     env['PYTHONPATH'] = str(native / 'src')
@@ -499,16 +502,21 @@ try:
         'issuer': config['issuer'],
         'secret': secret,
         'nativePid': child.pid,
+        'workspaceEntry': args.workspace_entry,
+        'rootPartId': config['root_part_id'],
     }
     node_log = (owned / 'node.log').open('w')
+    script = Path(__file__).with_name(args.browser_script)
+    if script.parent != Path(__file__).parent or not script.is_file() or script.suffix != '.mts':
+        raise RuntimeError('browser script must be an owned paired runner')
     node = subprocess.Popen(
-        [args.node, str(tsx), str(Path(__file__).with_name('run.mts'))],
+        [args.node, str(tsx), str(script)],
         stdin=subprocess.PIPE, stdout=node_log, stderr=subprocess.STDOUT, text=True, env=node_env, cwd=owned,
     )
     node.stdin.write(json.dumps(payload))
     node.stdin.close()
     try:
-        result_code = node.wait(timeout=240)
+        result_code = node.wait(timeout=300 if args.browser_script != 'run.mts' else 240)
     except subprocess.TimeoutExpired:
         node.kill()
         try:
@@ -532,7 +540,6 @@ try:
         if len(matches) != 1:
             raise SystemExit('paired child missing ' + prefix.strip())
         return json.loads(matches[0][len(prefix):])
-    proof['meta'] = one_line('PAIRED_PROOF ')
     proof['node_cleanup'] = one_line('CLEANUP_PROOF ')
     if proof['node_cleanup'].get('ok') is not True:
         Path(args.output + '.failure.log').write_text(redact(result_text)[-20000:])
@@ -541,13 +548,27 @@ try:
     child.stdin.flush()
     native_report = json.loads(child.stdout.readline())
     proof['native'] = native_report
-    assert proof['meta']['ok'] is True
-    assert proof['meta']['write_patch'] == 200
-    assert proof['meta']['rebind_generation'] == 2
-    assert proof['meta']['revoke_outage'] == 'pending-then-acked'
-    assert proof['meta']['late_callback_open_sessions'] == 0
-    assert native_report['write_audits'] >= 1
-    assert native_report['write_subjects'] == [42]
+    if args.browser_script == 'run.mts':
+        proof['meta'] = one_line('PAIRED_PROOF ')
+        assert proof['meta']['ok'] is True
+        assert proof['meta']['write_patch'] == 200
+        assert proof['meta']['rebind_generation'] == 2
+        assert proof['meta']['revoke_outage'] == 'pending-then-acked'
+        assert proof['meta']['late_callback_open_sessions'] == 0
+        assert native_report['write_audits'] >= 1
+        assert native_report['write_subjects'] == [42]
+    else:
+        proof['meta'] = one_line('ENTRY_BOOTSTRAP_PROOF ')
+        assert proof['meta']['ok'] is True
+        assert proof['meta']['bom_line'] == 'line'
+        assert proof['meta']['open_sessions'] == 1
+        assert proof['meta']['dev_token_requests'] == 0
+        assert proof['meta']['embed_requests'] == 0
+        assert proof['meta']['ordinary_owner_start'] is True
+        assert proof['meta']['meta_user'] == 'meta-owner'
+        assert proof['meta']['native_subject_hint'] == '42'
+        assert native_report['write_audits'] == 0
+        assert native_report['write_subjects'] == []
     tests_ok = True
 except SystemExit as exc:
     failure = str(exc)

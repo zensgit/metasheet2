@@ -1,4 +1,5 @@
 import { computed, reactive, readonly } from 'vue'
+import { getAuthPrincipalKey, isManagedEntryActive, onAuthPrincipalChange, readManagedEpoch } from '../composables/authPrincipal'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 
@@ -90,6 +91,7 @@ interface ProductFeatureState {
   loaded: boolean
   loading: boolean
   sessionAwareLoaded: boolean
+  principalKey: string
   error: string | null
   features: ProductFeatures
 }
@@ -120,8 +122,23 @@ const state = reactive<ProductFeatureState>({
   loaded: false,
   loading: false,
   sessionAwareLoaded: false,
+  principalKey: '',
   error: null,
   features: { ...DEFAULT_FEATURES },
+})
+
+function featurePrincipalKey(): string {
+  try {
+    return getAuthPrincipalKey() ?? 'none'
+  } catch {
+    return 'invalid'
+  }
+}
+
+onAuthPrincipalChange(() => {
+  state.loaded = false
+  state.sessionAwareLoaded = false
+  state.principalKey = ''
 })
 
 const mobileCapabilityPolicy: MobileCapabilityPolicy = {
@@ -130,6 +147,8 @@ const mobileCapabilityPolicy: MobileCapabilityPolicy = {
 }
 
 let loadPromise: Promise<ProductFeatures> | null = null
+let loadPrincipal = ''
+let loadEpoch = 0
 
 function parseJwtPayload(token: string | null): Record<string, unknown> {
   if (!token) return {}
@@ -482,11 +501,21 @@ async function loadProductFeatures(
   options: LoadProductFeatureOptions = {},
 ): Promise<ProductFeatures> {
   const requiresSessionProbe = !options.skipSessionProbe
-  if (state.loaded && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) return state.features
-  if (state.loading && loadPromise) return loadPromise
+  const principal = featurePrincipalKey()
+  const startedEpoch = readManagedEpoch()
+  if (state.loaded && state.principalKey === principal && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) {
+    return state.features
+  }
+  if (state.loading && loadPromise) {
+    if (loadPrincipal === principal && loadEpoch === startedEpoch) return loadPromise
+    await loadPromise
+    return loadProductFeatures(force, options)
+  }
 
   state.loading = true
   state.error = null
+  loadPrincipal = principal
+  loadEpoch = startedEpoch
 
   loadPromise = (async () => {
     let mePayload: any = null
@@ -496,12 +525,13 @@ async function loadProductFeatures(
 
     try {
       const currentToken = getToken()
+      const managedCookie = !currentToken && isManagedEntryActive()
 
-      if (!currentToken && requiresSessionProbe) {
+      if (!currentToken && requiresSessionProbe && !managedCookie) {
         await ensureToken()
       }
 
-      if (requiresSessionProbe && getToken()) {
+      if (requiresSessionProbe && (getToken() || managedCookie)) {
         const session = await bootstrapSession()
         if (session.ok && session.payload) {
           mePayload = session.payload
@@ -523,7 +553,14 @@ async function loadProductFeatures(
     const overrideFeatures = parseOverrideFeatures()
     const adminRole = isAdminRole(mePayload)
 
+    if (featurePrincipalKey() !== principal || readManagedEpoch() !== startedEpoch) {
+      state.loaded = false
+      state.sessionAwareLoaded = false
+      state.loading = false
+      return state.features
+    }
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
+    state.principalKey = principal
     state.loaded = true
     // Session-aware means "resolved from THIS session's payload". A load that skipped the session
     // probe (the login, DingTalk callback and forced-password views run one right after a new token

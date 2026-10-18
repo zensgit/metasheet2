@@ -20,6 +20,7 @@ import './styles/calendar-source-palette.css'
 import './styles/form-layout-utilities.css'
 import App from './App.vue'
 import { probeDeleteTransport } from './utils/delete-fallback'
+import { isManagedEntryActive } from './composables/authPrincipal'
 import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
@@ -93,8 +94,9 @@ router.beforeEach(async (to, _from, next) => {
   if (requiresAuth) {
     const requestedPath = to.fullPath || ROUTE_PATHS.ATTENDANCE
     const redirect = normalizePreLoginRedirect(requestedPath)
-    const ensuredToken = token || await auth.ensureToken()
-    if (!ensuredToken) {
+    const managedEntry = isManagedEntryActive()
+    const ensuredToken = token || (managedEntry ? null : await auth.ensureToken())
+    if (!ensuredToken && !managedEntry) {
       return next(
         shouldSkipPreLoginRedirectQuery(requestedPath)
           ? { path: ROUTE_PATHS.LOGIN }

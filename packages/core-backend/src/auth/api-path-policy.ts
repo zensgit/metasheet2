@@ -157,8 +157,35 @@ export const GLOBAL_GATE_EXCEPTIONS: readonly GateException[] = [
     path: '/api/plm/managed-login/callback',
     kind: 'exact',
     reason:
-      'Native managed-login browser return. Authenticated by the one-use HttpOnly intent cookie and PKCE, ' +
-      'not the SPA session JWT. Exact: start, unlink, and retry stay behind the session gate. POST is not a route.',
+      'Native managed-login browser return. GET only hands the browser to the Meta return view. ' +
+      'It does not consume the intent or set a session cookie. Exact: start, unlink, and retry stay behind the session gate.',
+  },
+  {
+    path: '/api/plm/managed-login/browser-start',
+    kind: 'exact',
+    reason:
+      'Same-origin public bridge POST. Selects one existing mapped row and sets intent cookies. ' +
+      'POST only; the router rejects every other method. Start, unlink, and retry stay gated.',
+  },
+  {
+    path: '/api/plm/managed-login/complete',
+    kind: 'exact',
+    reason:
+      'Same-origin bridge POST that exchanges the intent. Authenticated by the HttpOnly intent cookie and PKCE. ' +
+      'POST only. It is not a session-JWT route.',
+  },
+  {
+    path: '/api/plm/managed-login/current',
+    kind: 'exact',
+    reason:
+      'Cookie snapshot. The handler verifies the purpose cookie itself. GET only. A bearer is not required.',
+  },
+  {
+    path: '/api/plm/managed-login/logout',
+    kind: 'exact',
+    reason:
+      'Monotonic revoke of the presented managed cookie, including expired and flag-off cookies. POST only. ' +
+      'It does not mint an ordinary session.',
   },
   {
     path: '/api/plm-embed',

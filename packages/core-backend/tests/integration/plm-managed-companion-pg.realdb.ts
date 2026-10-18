@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Client, Pool } from 'pg'
 import { authService } from '../../src/auth/AuthService'
+import { isGateException } from '../../src/auth/api-path-policy'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
 import { secretManager } from '../../src/security/SecretManager'
@@ -36,12 +37,15 @@ import {
   sourceFingerprint,
 } from '../../src/services/plm-managed-companion'
 import {
+  completeManagedBrowserLogin,
   completeManagedCallback,
+  handoffManagedCallback,
   provisionManagedLink,
   readManagedSessionStatus,
   relayManagedBomContext,
   retryManagedRevoke,
   revokeManagedLink,
+  startManagedBrowserLogin,
   startManagedLogin,
   transferManagedLink,
   unlinkManagedSource,
@@ -186,6 +190,7 @@ const nativeCalls: Array<{ url: string; body: Record<string, unknown> | null }> 
 let exchangeOverrides: Record<string, unknown> = {}
 let revokeStatus = 204
 let exchangeStatus = 200
+let nativeActive = true
 
 function installNative() {
   setManagedNativeFetchForTests(async (url, init) => {
@@ -201,7 +206,7 @@ function installNative() {
       const delegation = typeof body?.delegation_id === 'string' ? body.delegation_id : ''
       return Response.json({
         ...issued,
-        active: true,
+        active: nativeActive,
         subject: delegation === 'del-other' ? '77' : issued.subject,
         delegation_id: delegation || issued.delegation_id,
       })
@@ -289,6 +294,47 @@ async function beginLogin(root = 'part') {
   const started = await startManagedLogin({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, { dataSourceId: SOURCE, rootPartId: root }, res as never)
   const navigation = new URL(started.navigationUrl)
   return { created, res, navigation, state: navigation.searchParams.get('state') ?? '' }
+}
+
+function browserStartRequest(hint: string, body: Record<string, unknown> = {}) {
+  return {
+    headers: {
+      origin: ORIGIN,
+      'x-metasheet-managed-bridge': 'browser-start',
+    },
+    body: {
+      issuer: ISSUER,
+      nativeTenantId: 'default',
+      nativeOrgId: 'fixture-org',
+      clientId: 'managed-fixture',
+      rootPartId: 'part',
+      nativeSubjectHint: hint,
+      ...body,
+    },
+  }
+}
+
+function browserCompleteRequest(res: ReturnType<typeof responseDouble>, state: string, extras: Record<string, unknown> = {}) {
+  const intent = res.cookies[MANAGED_INTENT_COOKIE]?.value
+  const nonce = res.cookies[MANAGED_NONCE_COOKIE]?.value
+  return {
+    headers: {
+      origin: ORIGIN,
+      'x-metasheet-managed-bridge': 'complete',
+      cookie: `${MANAGED_INTENT_COOKIE}=${intent}; ${MANAGED_NONCE_COOKIE}=${nonce}`,
+      ...(extras.headers as Record<string, string> | undefined),
+    },
+    body: { code: 'one-use-code', state },
+  }
+}
+
+async function insertOwnedSource(id: string, owner: string) {
+  await query(
+    `INSERT INTO data_sources (id, name, owner_id, type, config, is_active)
+     VALUES ($1, $2, $3, 'plm', $4::jsonb, true)
+     ON CONFLICT (id) DO UPDATE SET owner_id = EXCLUDED.owner_id, config = EXCLUDED.config, is_active = true, deleted_at = NULL`,
+    [id, id, owner, JSON.stringify({ connection: { url: `${ORIGIN}/plm` } })],
+  )
 }
 
 function callbackRequest(res: ReturnType<typeof responseDouble>, state: string, extras: Record<string, unknown> = {}) {
@@ -402,6 +448,7 @@ afterEach(async () => {
   exchangeOverrides = {}
   revokeStatus = 204
   exchangeStatus = 200
+  nativeActive = true
   nativeCalls.length = 0
   setManagedFlowHooksForTests(null)
   setManagedNativeFetchForTests(null)
@@ -733,7 +780,7 @@ describe('managed companion postgresql', () => {
     expect(JSON.stringify(conflict.payload)).toContain('PLM_MANAGED_PERSON_CONFLICT')
     expect(conflict.cookies[MANAGED_SESSION_COOKIE]).toBeUndefined()
     expect(nativeCalls.filter((call) => call.url.endsWith('/exchange'))).toHaveLength(0)
-    expect((await query('SELECT status FROM plm_managed_browser_intents')).rows[0].status).toBe('consumed')
+    expect((await query('SELECT status FROM plm_managed_browser_intents')).rows[0].status).toBe('pending')
 
     const freshRes = responseDouble()
     const restarted = await startManagedLogin(
@@ -1447,7 +1494,7 @@ describe('managed companion postgresql', () => {
     expect((await query(
       `SELECT status FROM plm_managed_browser_intents WHERE data_source_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [SOURCE],
-    )).rows[0].status).toBe('consumed')
+    )).rows[0].status).toBe('pending')
   })
 
   it('rejects a managed cookie whose tenant differs from the ordinary bearer', async () => {
@@ -1913,6 +1960,321 @@ describe('managed companion postgresql', () => {
       expect(after.payload.pendingRevoke).toBe(false)
       expect(JSON.stringify([unlinked.payload, session.payload, waiting.payload, acked.payload, after.payload])).not.toMatch(/yur_/)
     } finally {
+      server.close()
+    }
+  })
+
+  it('selects each mapped native person by hint and rejects a swapped exchange', async () => {
+    installNative()
+    await query(
+      `INSERT INTO users (id, email, name, role, permissions, is_active, activation_status, must_change_password, local_password_set, password_hash)
+       VALUES ('meta-peer', 'meta-peer@example.test', 'meta-peer', 'user', '[]'::jsonb, true, 'activated', false, true, 'unused')
+       ON CONFLICT (id) DO NOTHING`,
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('meta-peer', $1, true), ('meta-peer', $2, true)
+       ON CONFLICT (user_id, org_id) DO NOTHING`,
+      [TENANT, ORG],
+    )
+    await insertOwnedSource('source-peer', 'meta-peer')
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody())
+    await provisionManagedLink({ id: 'meta-peer', role: 'user', authenticatedTenantId: TENANT }, provisionBody({
+      nativeAuthUserId: '77',
+      metaUserId: 'meta-peer',
+      dataSourceId: 'source-peer',
+    }))
+    const first = responseDouble()
+    const second = responseDouble()
+    const startedFirst = await startManagedBrowserLogin(browserStartRequest('42') as never, first as never)
+    const startedSecond = await startManagedBrowserLogin(browserStartRequest('77') as never, second as never)
+    expect(startedFirst.navigationUrl).not.toMatch(/meta-owner|meta-peer|yur_/)
+    expect(new URL(startedSecond.navigationUrl).searchParams.get('state')).toBeTruthy()
+    const stateFirst = new URL(startedFirst.navigationUrl).searchParams.get('state') ?? ''
+    const stateSecond = new URL(startedSecond.navigationUrl).searchParams.get('state') ?? ''
+    exchangeOverrides = { subject: '42', delegation_id: 'del-hint-42' }
+    const doneFirst = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(first, stateFirst) as never, doneFirst as never)
+    exchangeOverrides = { subject: '77', delegation_id: 'del-hint-77' }
+    const doneSecond = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(second, stateSecond) as never, doneSecond as never)
+    const sessions = await query<{ meta_user_id: string; native_subject: string }>('SELECT meta_user_id, native_subject FROM plm_managed_sessions ORDER BY native_subject')
+    expect(sessions.rows).toEqual([
+      { meta_user_id: OWNER, native_subject: '42' },
+      { meta_user_id: 'meta-peer', native_subject: '77' },
+    ])
+    expect(JSON.stringify(doneFirst.payload)).not.toMatch(/yur_|code_verifier|clientSecret/)
+    await resetRows()
+    await provisionManagedLink({ id: 'meta-peer', role: 'user', authenticatedTenantId: TENANT }, provisionBody({
+      nativeAuthUserId: '77',
+      metaUserId: 'meta-peer',
+      dataSourceId: 'source-peer',
+    }))
+    const swappedStart = responseDouble()
+    const swapped = await startManagedBrowserLogin(browserStartRequest('77') as never, swappedStart as never)
+    const swappedState = new URL(swapped.navigationUrl).searchParams.get('state') ?? ''
+    exchangeOverrides = { subject: '42', delegation_id: 'del-swapped' }
+    const swappedDone = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(swappedStart, swappedState) as never, swappedDone as never)
+    expect(swappedDone.statusCode).toBe(403)
+    expect(JSON.stringify(swappedDone.payload)).toContain('PLM_MANAGED_EXCHANGE_MISMATCH')
+    expect(swappedDone.cookies[MANAGED_SESSION_COOKIE]).toBeUndefined()
+    expect(await countSessions()).toHaveLength(0)
+    const users = await query<{ n: number }>('SELECT count(*)::int AS n FROM users')
+    expect(users.rows[0].n).toBeGreaterThan(0)
+    await expect(startManagedBrowserLogin(browserStartRequest('meta-peer') as never, responseDouble() as never)).rejects.toMatchObject({
+      code: 'PLM_MANAGED_LINK_NOT_FOUND',
+    })
+  })
+
+  it('refuses a duplicate mapped person and does not create a user for an extra body key', async () => {
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody())
+    await insertOwnedSource('source-dup', OWNER)
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody({ dataSourceId: 'source-dup' }))
+    const beforeUsers = await query<{ n: number }>('SELECT count(*)::int AS n FROM users')
+    await expect(startManagedBrowserLogin(browserStartRequest('42') as never, responseDouble() as never)).rejects.toMatchObject({
+      code: 'PLM_MANAGED_LINK_AMBIGUOUS',
+    })
+    expect((await query<{ n: number }>('SELECT count(*)::int AS n FROM plm_managed_browser_intents')).rows[0].n).toBe(0)
+    await expect(startManagedBrowserLogin(browserStartRequest('42', { email: 'owner@example.test' }) as never, responseDouble() as never)).rejects.toMatchObject({
+      code: 'PLM_MANAGED_BODY_REFUSED',
+    })
+    const afterUsers = await query<{ n: number }>('SELECT count(*)::int AS n FROM users')
+    expect(afterUsers.rows[0].n).toBe(beforeUsers.rows[0].n)
+  })
+
+  it('hands the callback to the return view and exchanges only on same-origin complete', async () => {
+    installNative()
+    const { res, state } = await beginLogin()
+    const handoff = responseDouble()
+    handoffManagedCallback({ query: { code: 'one-use-code', state } } as never, handoff as never)
+    expect(handoff.statusCode).toBe(302)
+    expect(handoff.location.startsWith('/plm/managed-return?')).toBe(true)
+    expect(handoff.location).not.toMatch(/yur_|code_verifier/)
+    expect(nativeCalls.filter((call) => call.url.endsWith('/exchange'))).toHaveLength(0)
+    expect((await query('SELECT status FROM plm_managed_browser_intents')).rows[0].status).toBe('pending')
+    const done = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(res, state) as never, done as never)
+    expect(done.statusCode).toBe(200)
+    expect(done.payload).toMatchObject({ ok: true })
+    expect(JSON.stringify(done.payload)).not.toMatch(/token|yur_|code_verifier/)
+    expect(String((done.payload as { destination: string }).destination)).toContain('managed=ready')
+    expect(done.cookies[MANAGED_SESSION_COOKIE]?.options).toMatchObject({ httpOnly: true, sameSite: 'lax' })
+    expect(await countSessions()).toHaveLength(1)
+  })
+
+  it('refuses an invalid or other-tenant bearer before consume', async () => {
+    installNative()
+    const invalid = await beginLogin()
+    const invalidDone = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(invalid.res, invalid.state, {
+      headers: { authorization: 'Bearer not-a-jwt' },
+    }) as never, invalidDone as never)
+    expect(invalidDone.statusCode).toBe(401)
+    expect(JSON.stringify(invalidDone.payload)).toContain('PLM_MANAGED_BEARER_REFUSED')
+    expect(nativeCalls.filter((call) => call.url.endsWith('/exchange'))).toHaveLength(0)
+    expect((await query('SELECT status FROM plm_managed_browser_intents')).rows[0].status).toBe('pending')
+
+    const secret = resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false }))
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    const other = jwt.sign({
+      userId: OTHER, email: 'other@example.test', role: 'user', tenantId: 'meta-org-other',
+    }, secret, { expiresIn: '5m' })
+    const conflict = responseDouble()
+    await completeManagedBrowserLogin(browserCompleteRequest(invalid.res, invalid.state, {
+      headers: { authorization: `Bearer ${other}` },
+    }) as never, conflict as never)
+    expect(conflict.statusCode).toBe(409)
+    expect(JSON.stringify(conflict.payload)).toContain('PLM_MANAGED_PERSON_CONFLICT')
+    expect((await query('SELECT status FROM plm_managed_browser_intents')).rows[0].status).toBe('pending')
+    expect(await countSessions()).toHaveLength(0)
+    expect(conflict.cleared).not.toContain(MANAGED_SESSION_COOKIE)
+    delete process.env.RBAC_TOKEN_TRUST
+  })
+
+  it('lets concurrent distinct hints succeed and concurrent duplicate mappings refuse', async () => {
+    installNative()
+    await query(
+      `INSERT INTO users (id, email, name, role, permissions, is_active, activation_status, must_change_password, local_password_set, password_hash)
+       VALUES ('meta-peer', 'meta-peer@example.test', 'meta-peer', 'user', '[]'::jsonb, true, 'activated', false, true, 'unused')
+       ON CONFLICT (id) DO NOTHING`,
+    )
+    await query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('meta-peer', $1, true), ('meta-peer', $2, true)
+       ON CONFLICT (user_id, org_id) DO NOTHING`,
+      [TENANT, ORG],
+    )
+    await insertOwnedSource('source-peer', 'meta-peer')
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody())
+    await provisionManagedLink({ id: 'meta-peer', role: 'user', authenticatedTenantId: TENANT }, provisionBody({
+      nativeAuthUserId: '77', metaUserId: 'meta-peer', dataSourceId: 'source-peer',
+    }))
+    const left = responseDouble()
+    const right = responseDouble()
+    const [one, two] = await Promise.all([
+      startManagedBrowserLogin(browserStartRequest('42') as never, left as never),
+      startManagedBrowserLogin(browserStartRequest('77') as never, right as never),
+    ])
+    expect(one.ok).toBe(true)
+    expect(two.ok).toBe(true)
+    expect((await query<{ n: number }>('SELECT count(*)::int AS n FROM plm_managed_browser_intents')).rows[0].n).toBe(2)
+    await resetRows()
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody())
+    await insertOwnedSource('source-dup', OWNER)
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody({ dataSourceId: 'source-dup' }))
+    const refused = await Promise.allSettled([
+      startManagedBrowserLogin(browserStartRequest('42') as never, responseDouble() as never),
+      startManagedBrowserLogin(browserStartRequest('42') as never, responseDouble() as never),
+    ])
+    expect(refused.every((item) => item.status === 'rejected' && (item.reason as { code?: string }).code === 'PLM_MANAGED_LINK_AMBIGUOUS')).toBe(true)
+    expect((await query<{ n: number }>('SELECT count(*)::int AS n FROM plm_managed_browser_intents')).rows[0].n).toBe(0)
+  })
+
+  it('returns a non-credential current snapshot and revokes an expired or flag-off cookie', async () => {
+    installNative()
+    const started = await beginLogin()
+    const done = responseDouble()
+    await completeManagedCallback(callbackRequest(started.res, started.state) as never, done as never)
+    const sessionCookie = done.cookies[MANAGED_SESSION_COOKIE].value
+    const app = express()
+    app.use(express.json())
+    app.use((req, res, next) => {
+      if (isGateException(req.path)) return next()
+      return jwtAuthMiddleware(req, res, next)
+    })
+    app.use('/api/auth', authRouter)
+    app.use('/api/plm/managed-login', managedLoginRouter)
+    const server = await new Promise<Server>((resolve) => {
+      const listening = createServer(app).listen(0, '127.0.0.1', () => resolve(listening))
+    })
+    const port = (server.address() as { port: number }).port
+    const call = async (method: string, path: string, headers: Record<string, string> = {}, body?: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      })
+      return { status: response.status, text: await response.text(), setCookie: response.headers.get('set-cookie') ?? '' }
+    }
+    try {
+      const current = await call('GET', '/api/plm/managed-login/current', { cookie: `${MANAGED_SESSION_COOKIE}=${sessionCookie}` })
+      const payload = JSON.parse(current.text) as {
+        data: {
+          user: {
+            id: string
+            email: string | null
+            name: string
+            role: string
+            permissions: string[]
+            tenantId: string | null
+            must_change_password: boolean
+          }
+          features: { plm: boolean }
+          managedSession: Record<string, unknown>
+        }
+      }
+      expect(current.status).toBe(200)
+      expect(payload.data.user).toEqual({
+        id: OWNER,
+        email: `${OWNER}@example.test`,
+        name: OWNER,
+        role: 'user',
+        permissions: [],
+        tenantId: TENANT,
+        must_change_password: false,
+      })
+      expect(payload.data.features.plm).toBe(true)
+      expect(payload.data.managedSession).toMatchObject({ mode: 'managed-cookie', userId: OWNER, tenantId: TENANT, revision: 1 })
+      expect(Object.keys(payload.data.managedSession).sort()).toEqual(['expiresAt', 'mode', 'revision', 'sessionId', 'tenantId', 'userId'])
+      expect(typeof payload.data.managedSession.sessionId).toBe('string')
+      expect(typeof payload.data.managedSession.expiresAt).toBe('string')
+      expect(current.text).not.toMatch(/yur_|code_verifier|clientSecret|client_secret|eyJ/)
+      nativeActive = false
+      const closed = await call('GET', '/api/plm/managed-login/current', { cookie: `${MANAGED_SESSION_COOKIE}=${sessionCookie}` })
+      expect(closed.status).toBe(401)
+      expect(closed.text).not.toMatch(/yur_/)
+      nativeActive = true
+      const wrongMethod = await call('POST', '/api/plm/managed-login/current', { cookie: `${MANAGED_SESSION_COOKIE}=${sessionCookie}` }, {})
+      expect(wrongMethod.status).toBe(405)
+      const sessionsBefore = await query<{ n: number }>('SELECT count(*)::int AS n FROM user_sessions')
+      const secret = resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false }))
+      const expired = jwt.sign({
+        userId: OWNER,
+        email: 'meta-owner@example.test',
+        role: 'user',
+        tenantId: TENANT,
+        sid: payload.data.managedSession.sessionId,
+        purpose: MANAGED_COMPANION_PURPOSE,
+        exp: Math.floor(Date.now() / 1000) - 60,
+      }, secret)
+      const expiredCurrent = await call('GET', '/api/plm/managed-login/current', { cookie: `${MANAGED_SESSION_COOKIE}=${expired}` })
+      expect(expiredCurrent.status).toBe(401)
+      process.env.PLM_MANAGED_COMPANION_ENABLED = 'false'
+      const loggedOut = await call('POST', '/api/plm/managed-login/logout', {
+        cookie: `${MANAGED_SESSION_COOKIE}=${expired}`,
+        origin: ORIGIN,
+        'content-type': 'application/json',
+        'x-metasheet-managed-bridge': 'logout',
+      }, {})
+      expect(loggedOut.status).toBe(200)
+      expect(JSON.parse(loggedOut.text)).toEqual({ ok: true, revoked: true })
+      expect(loggedOut.setCookie).toContain(MANAGED_SESSION_COOKIE)
+      expect(loggedOut.setCookie).not.toContain(expired)
+      expect(loggedOut.text).not.toMatch(/yur_|eyJ/)
+      const revoked = await query<{ revoked_at: string | null }>('SELECT revoked_at FROM plm_managed_sessions')
+      expect(revoked.rows[0].revoked_at).toBeTruthy()
+      const sessionsAfter = await query<{ n: number }>('SELECT count(*)::int AS n FROM user_sessions')
+      expect(sessionsAfter.rows[0].n).toBe(sessionsBefore.rows[0].n)
+    } finally {
+      server.close()
+      enable()
+    }
+  })
+
+  it('keeps ordinary owner start behind the actor and exposes only exact public methods', async () => {
+    installNative()
+    await provisionManagedLink({ id: OWNER, role: 'user', authenticatedTenantId: TENANT }, provisionBody())
+    const app = express()
+    app.use(express.json())
+    app.use((req, res, next) => {
+      if (isGateException(req.path)) return next()
+      return jwtAuthMiddleware(req, res, next)
+    })
+    app.use('/api/plm/managed-login', managedLoginRouter)
+    const server = await new Promise<Server>((resolve) => {
+      const listening = createServer(app).listen(0, '127.0.0.1', () => resolve(listening))
+    })
+    const port = (server.address() as { port: number }).port
+    try {
+      const anonymousStart = await fetch(`http://127.0.0.1:${port}/api/plm/managed-login/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ dataSourceId: SOURCE, rootPartId: 'part' }),
+      })
+      expect(anonymousStart.status).toBe(401)
+      process.env.RBAC_TOKEN_TRUST = 'true'
+      const secret = resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false }))
+      const owner = jwt.sign({
+        userId: OWNER, email: 'meta-owner@example.test', role: 'user', tenantId: TENANT,
+      }, secret, { expiresIn: '5m' })
+      const owned = await fetch(`http://127.0.0.1:${port}/api/plm/managed-login/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${owner}` },
+        body: JSON.stringify({ dataSourceId: SOURCE, rootPartId: 'part' }),
+      })
+      const ownedBody = await owned.json() as { ok?: boolean; navigationUrl?: string }
+      expect(owned.status).toBe(200)
+      expect(ownedBody.ok).toBe(true)
+      expect(String(ownedBody.navigationUrl)).toContain('/managed-login')
+      const publicStart = await fetch(`http://127.0.0.1:${port}/api/plm/managed-login/browser-start`, {
+        method: 'GET',
+      })
+      expect(publicStart.status).toBe(405)
+      const callback = await fetch(`http://127.0.0.1:${port}/api/plm/managed-login/callback?code=one&state=two`, { redirect: 'manual' })
+      expect(callback.status).toBe(302)
+      expect(callback.headers.get('location')).toContain('/plm/managed-return?')
+      expect(nativeCalls.filter((call) => call.url.endsWith('/exchange'))).toHaveLength(0)
+    } finally {
+      delete process.env.RBAC_TOKEN_TRUST
       server.close()
     }
   })

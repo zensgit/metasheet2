@@ -10,7 +10,11 @@ import { isDatabaseSchemaError } from '../utils/database-errors'
 import { encryptStoredSecretValue, decryptStoredSecretValue } from '../security/encrypted-secrets'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 import { authService } from '../auth/AuthService'
-import { signManagedSessionToken } from '../auth/plm-managed-session'
+import {
+  isManagedCompanionToken,
+  readLiveManagedCookieIdentity,
+  signManagedSessionToken,
+} from '../auth/plm-managed-session'
 import { isBomMultitableContext } from '../data-adapters/PLMAdapter'
 import { currentManagedRequest } from './plm-managed-request-context'
 import {
@@ -349,6 +353,118 @@ async function activeLinkForSource(client: SqlClient, dataSourceId: string, acto
   return row
 }
 
+type PreparedIntent = {
+  registration: ManagedClientRegistration
+  state: string
+  nonce: string
+  challenge: string
+  intentId: string
+  rootPartId: string
+}
+
+function headerValue(req: Request, name: string): string {
+  const raw = req.headers[name]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+export function assertManagedBridge(req: Request, action: 'browser-start' | 'complete' | 'logout'): void {
+  if (headerValue(req, 'x-metasheet-managed-bridge') !== action) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BRIDGE_REFUSED')
+  }
+}
+
+export function assertManagedOrigin(req: Request, expected: string): void {
+  const origin = headerValue(req, 'origin')
+  if (!origin || origin !== expected) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_ORIGIN_REFUSED')
+}
+
+function issueIntentCookies(res: Response, prepared: PreparedIntent): void {
+  const options = { ...cookieBase(prepared.registration.callback), maxAge: MANAGED_INTENT_TTL_SECONDS * 1000 }
+  res.cookie(MANAGED_INTENT_COOKIE, prepared.intentId, options)
+  res.cookie(MANAGED_NONCE_COOKIE, prepared.nonce, options)
+}
+
+function navigationFor(prepared: PreparedIntent): string {
+  return buildManagedLoginNavigation(prepared.registration, {
+    rootPartId: prepared.rootPartId,
+    state: prepared.state,
+    codeChallenge: prepared.challenge,
+  })
+}
+
+/**
+ * Insert one intent for an already locked link. The caller owns the transaction.
+ * Do not call startManagedLogin from here: that opens another transaction.
+ */
+async function prepareManagedIntent(
+  client: SqlClient,
+  actor: ManagedActor,
+  link: LinkRow,
+  rootPartId: string,
+): Promise<PreparedIntent> {
+  if (text(link.root_part_id) !== rootPartId) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_ROOT_REFUSED')
+  const registration = registrationFor({
+    issuer: text(link.installation_issuer),
+    nativeTenantId: text(link.native_tenant_id),
+    nativeOrgId: text(link.native_org_id),
+  })
+  if (registration.clientId !== text(link.client_id) || registration.callback !== text(link.callback)
+    || registration.origin !== text(link.client_origin) || registration.issuer !== text(link.installation_issuer)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+  }
+  await loadUser(client, actor.id)
+  if (trustedTenant(actor) !== text(link.meta_tenant_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_META_MEMBERSHIP_REFUSED')
+  }
+  await requireMembership(client, actor.id, text(link.meta_tenant_id))
+  await requireMembership(client, actor.id, text(link.meta_org_id))
+  const fingerprint = await loadSource(client, text(link.data_source_id), actor.id, registeredPlmOrigin(registration), rootPartId)
+  if (fingerprint !== text(link.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  const verifier = randomUrlToken(32)
+  const state = randomUrlToken(32)
+  const nonce = randomUrlToken(32)
+  const challenge = pkceS256(verifier)
+  const intentId = randomUUID()
+  const expires = new Date(Date.now() + MANAGED_INTENT_TTL_SECONDS * 1000)
+  await client.query(
+    `INSERT INTO plm_managed_browser_intents (
+       id, link_id, generation, meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id,
+       client_origin, installation_issuer, native_tenant_id, native_org_id, callback, client_id, state_hash,
+       nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21
+     )`,
+    [
+      intentId, text(link.id), Number(link.generation), actor.id, text(link.meta_tenant_id), text(link.meta_org_id),
+      text(link.data_source_id), rootPartId, registration.origin, registration.issuer, registration.nativeTenantId,
+      registration.nativeOrgId, registration.callback, registration.clientId, sha256Hex(state), sha256Hex(nonce),
+      challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(),
+    ],
+  )
+  return { registration, state, nonce, challenge, intentId, rootPartId }
+}
+
+async function assertBrowserIdentity(req: Request, userId: string, tenantId: string): Promise<void> {
+  const header = req.headers.authorization
+  const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : ''
+  if (bearer) {
+    if (isManagedCompanionToken(bearer)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BEARER_REFUSED')
+    const current = await authService.verifyToken(bearer)
+    const tenant = typeof current?.tenantId === 'string' ? current.tenantId.trim() : ''
+    if (!current?.id) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_BEARER_REFUSED')
+    if (current.id !== userId || tenant !== tenantId) {
+      throw new ManagedCompanionRefusal(409, 'PLM_MANAGED_PERSON_CONFLICT')
+    }
+  }
+  const sessionCookie = readRequestCookie(req.headers.cookie, MANAGED_SESSION_COOKIE)
+  if (!sessionCookie) return
+  const signedIn = await readLiveManagedCookieIdentity(sessionCookie)
+  if (signedIn && (signedIn.userId !== userId || signedIn.tenantId !== tenantId)) {
+    throw new ManagedCompanionRefusal(409, 'PLM_MANAGED_PERSON_CONFLICT')
+  }
+}
+
 export async function startManagedLogin(actor: ManagedActor, body: unknown, res: Response): Promise<{ ok: true; navigationUrl: string }> {
   if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
   await requireTables()
@@ -357,66 +473,65 @@ export async function startManagedLogin(actor: ManagedActor, body: unknown, res:
   const rootPartId = partIdOf(exactString(record.rootPartId))
   const prepared = await transaction(async (client) => {
     const link = await activeLinkForSource(client, dataSourceId, actor.id)
-    if (text(link.root_part_id) !== rootPartId) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_ROOT_REFUSED')
-    const registration = registrationFor({
-      issuer: text(link.installation_issuer),
-      nativeTenantId: text(link.native_tenant_id),
-      nativeOrgId: text(link.native_org_id),
-    })
-    if (registration.clientId !== text(link.client_id) || registration.callback !== text(link.callback)
-      || registration.origin !== text(link.client_origin) || registration.issuer !== text(link.installation_issuer)) {
-      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
-    }
-    await loadUser(client, actor.id)
-    if (trustedTenant(actor) !== text(link.meta_tenant_id)) {
-      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_META_MEMBERSHIP_REFUSED')
-    }
-    await requireMembership(client, actor.id, text(link.meta_tenant_id))
-    await requireMembership(client, actor.id, text(link.meta_org_id))
-    const fingerprint = await loadSource(client, dataSourceId, actor.id, registeredPlmOrigin(registration), rootPartId)
-    if (fingerprint !== text(link.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
-    const verifier = randomUrlToken(32)
-    const state = randomUrlToken(32)
-    const nonce = randomUrlToken(32)
-    const challenge = pkceS256(verifier)
-    const intentId = randomUUID()
-    const expires = new Date(Date.now() + MANAGED_INTENT_TTL_SECONDS * 1000)
-    await client.query(
-      `INSERT INTO plm_managed_browser_intents (
-         id, link_id, generation, meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id,
-         client_origin, installation_issuer, native_tenant_id, native_org_id, callback, client_id, state_hash,
-         nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at
-       ) VALUES (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21
-       )`,
-      [
-        intentId, text(link.id), Number(link.generation), actor.id, text(link.meta_tenant_id), text(link.meta_org_id),
-        dataSourceId, rootPartId, registration.origin, registration.issuer, registration.nativeTenantId,
-        registration.nativeOrgId, registration.callback, registration.clientId, sha256Hex(state), sha256Hex(nonce),
-        challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(),
-      ],
-    )
-    return { registration, state, nonce, challenge, intentId }
+    return prepareManagedIntent(client, actor, link, rootPartId)
   })
-  const options = { ...cookieBase(prepared.registration.callback), maxAge: MANAGED_INTENT_TTL_SECONDS * 1000 }
-  res.cookie(MANAGED_INTENT_COOKIE, prepared.intentId, options)
-  res.cookie(MANAGED_NONCE_COOKIE, prepared.nonce, options)
-  const navigationUrl = buildManagedLoginNavigation(prepared.registration, {
-    rootPartId,
-    state: prepared.state,
-    codeChallenge: prepared.challenge,
-  })
-  return { ok: true, navigationUrl }
+  issueIntentCookies(res, prepared)
+  return { ok: true, navigationUrl: navigationFor(prepared) }
 }
 
-function callbackQuery(req: Request): { code: string; state: string } {
-  const query = req.query ?? {}
-  const keys = Object.keys(query)
-  if (keys.length !== 2 || !keys.includes('code') || !keys.includes('state')) {
-    throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_CALLBACK_REFUSED')
+const BROWSER_START_KEYS = ['issuer', 'nativeTenantId', 'nativeOrgId', 'clientId', 'rootPartId', 'nativeSubjectHint'] as const
+
+export async function startManagedBrowserLogin(req: Request, res: Response): Promise<{ ok: true; navigationUrl: string }> {
+  if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
+  await requireTables()
+  assertManagedBridge(req, 'browser-start')
+  const record = exactBody(req.body, BROWSER_START_KEYS)
+  const issuer = exactString(record.issuer)
+  const nativeTenantId = exactString(record.nativeTenantId)
+  const nativeOrgId = exactString(record.nativeOrgId)
+  const clientId = exactString(record.clientId)
+  const rootPartId = partIdOf(exactString(record.rootPartId))
+  const hint = exactString(record.nativeSubjectHint)
+  if (hint.length > 128 || /[\s\u0000-\u001f\u007f]/.test(hint)) {
+    throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
   }
-  const code = query.code
-  const state = query.state
+  const registration = registrationFor({ issuer, nativeTenantId, nativeOrgId })
+  if (registration.clientId !== clientId) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+  assertManagedOrigin(req, registration.origin)
+  const prepared = await transaction(async (client) => {
+    const locked = await client.query(
+      `SELECT l.* FROM plm_managed_identity_links l
+       JOIN plm_managed_source_bindings b ON b.link_id = l.id AND b.data_source_id = l.data_source_id
+       WHERE l.installation_issuer = $1
+         AND l.native_tenant_id = $2
+         AND l.native_org_id = $3
+         AND l.client_id = $4
+         AND l.root_part_id = $5
+         AND l.native_auth_user_id = $6
+         AND l.status = 'active'
+         AND b.status = 'active'
+       ORDER BY l.id
+       FOR UPDATE OF l, b`,
+      [issuer, nativeTenantId, nativeOrgId, clientId, rootPartId, hint],
+    )
+    if (locked.rows.length === 0) throw new ManagedCompanionRefusal(404, 'PLM_MANAGED_LINK_NOT_FOUND')
+    if (locked.rows.length !== 1) throw new ManagedCompanionRefusal(409, 'PLM_MANAGED_LINK_AMBIGUOUS')
+    const link = locked.rows[0]
+    const actor: ManagedActor = {
+      id: text(link.meta_user_id),
+      role: null,
+      authenticatedTenantId: text(link.meta_tenant_id),
+    }
+    await assertBrowserIdentity(req, actor.id, text(link.meta_tenant_id))
+    return prepareManagedIntent(client, actor, link, rootPartId)
+  })
+  issueIntentCookies(res, prepared)
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  return { ok: true, navigationUrl: navigationFor(prepared) }
+}
+
+function presentedPair(code: unknown, state: unknown): { code: string; state: string } {
   if (typeof code !== 'string' || typeof state !== 'string') {
     throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_CALLBACK_REFUSED')
   }
@@ -427,6 +542,15 @@ function callbackQuery(req: Request): { code: string; state: string } {
     throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_CALLBACK_REFUSED')
   }
   return { code, state }
+}
+
+function callbackQuery(req: Request): { code: string; state: string } {
+  const query = req.query ?? {}
+  const keys = Object.keys(query)
+  if (keys.length !== 2 || !keys.includes('code') || !keys.includes('state')) {
+    throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_CALLBACK_REFUSED')
+  }
+  return presentedPair(query.code, query.state)
 }
 
 function fixedDestination(row: LinkRow, managed: 'ready' | 'refused', reason?: string): string {
@@ -478,10 +602,51 @@ async function enqueueObservedRevoke(intent: LinkRow, delegationId: string): Pro
   )
 }
 
-export async function completeManagedCallback(req: Request, res: Response): Promise<void> {
+type CompletionDelivery = 'redirect' | 'json'
+
+function deliverCompletion(
+  res: Response,
+  delivery: CompletionDelivery,
+  destination: string,
+  failure?: { status: number; code: string },
+): void {
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  if (delivery === 'redirect') {
+    res.redirect(302, destination)
+    return
+  }
+  if (failure) {
+    res.status(failure.status).json({
+      ok: false,
+      destination,
+      error: { code: failure.code, message: 'Managed companion request refused' },
+    })
+    return
+  }
+  res.status(200).json({ ok: true, destination })
+}
+
+export const MANAGED_RETURN_PATH = '/plm/managed-return'
+
+/** Browser navigation only. Does not read the intent row, exchange, or set a session cookie. */
+export function handoffManagedCallback(req: Request, res: Response): void {
+  const presented = callbackQuery(req)
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  const params = new URLSearchParams({ code: presented.code, state: presented.state })
+  res.redirect(302, `${MANAGED_RETURN_PATH}?${params.toString()}`)
+}
+
+async function runManagedCompletion(
+  req: Request,
+  res: Response,
+  presented: { code: string; state: string },
+  delivery: CompletionDelivery,
+  requireOrigin: boolean,
+): Promise<void> {
   if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
   await requireTables()
-  const presented = callbackQuery(req)
   const intentId = readRequestCookie(req.headers.cookie, MANAGED_INTENT_COOKIE)
   const nonce = readRequestCookie(req.headers.cookie, MANAGED_NONCE_COOKIE)
   if (!intentId || !nonce) throw new ManagedCompanionRefusal(401, 'PLM_MANAGED_BROWSER_REQUIRED')
@@ -499,23 +664,19 @@ export async function completeManagedCallback(req: Request, res: Response): Prom
     clearIntentCookies(res, callback)
     throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
   }
-  const refuseOtherPerson = async (currentId: string | undefined): Promise<boolean> => {
-    if (!currentId || currentId === text(intent.meta_user_id)) return false
-    await consumeIntent(intentId, text(intent.state_hash), text(intent.nonce_hash))
-    clearIntentCookies(res, callback)
-    res.status(409).json({ ok: false, error: { code: 'PLM_MANAGED_PERSON_CONFLICT', message: 'Managed login does not replace another signed-in person' } })
-    return true
-  }
-  const header = req.headers.authorization
-  const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
-  if (bearer) {
-    const current = await authService.verifyToken(bearer)
-    if (await refuseOtherPerson(current?.id)) return
-  }
-  const sessionCookie = readRequestCookie(req.headers.cookie, MANAGED_SESSION_COOKIE)
-  if (sessionCookie) {
-    const signedIn = await authService.verifyToken(sessionCookie)
-    if (await refuseOtherPerson(signedIn?.id)) return
+  if (requireOrigin) assertManagedOrigin(req, text(intent.client_origin))
+  try {
+    await assertBrowserIdentity(req, text(intent.meta_user_id), text(intent.meta_tenant_id))
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal
+      && (error.code === 'PLM_MANAGED_PERSON_CONFLICT' || error.code === 'PLM_MANAGED_BEARER_REFUSED')) {
+      res.status(error.status).json({
+        ok: false,
+        error: { code: error.code, message: 'Managed login does not replace another signed-in person' },
+      })
+      return
+    }
+    throw error
   }
   const consumed = await consumeIntent(intentId, text(intent.state_hash), text(intent.nonce_hash))
   if (!consumed) {
@@ -602,7 +763,7 @@ export async function completeManagedCallback(req: Request, res: Response): Prom
     })
     clearIntentCookies(res, callback)
     res.cookie(MANAGED_SESSION_COOKIE, token, { ...cookieBase(callback), maxAge: issued.expires_in * 1000 })
-    res.redirect(302, fixedDestination(intent, 'ready'))
+    deliverCompletion(res, delivery, fixedDestination(intent, 'ready'))
   } catch (error) {
     if (observed) {
       try {
@@ -627,9 +788,23 @@ export async function completeManagedCallback(req: Request, res: Response): Prom
       }
     }
     clearIntentCookies(res, callback)
-    const code = error instanceof ManagedCompanionRefusal ? error.code : 'PLM_MANAGED_CALLBACK_REFUSED'
-    res.redirect(302, fixedDestination(intent, 'refused', code))
+    const refusal = error instanceof ManagedCompanionRefusal ? error : null
+    const code = refusal?.code ?? 'PLM_MANAGED_CALLBACK_REFUSED'
+    deliverCompletion(res, delivery, fixedDestination(intent, 'refused', code), {
+      status: refusal?.status ?? 400,
+      code,
+    })
   }
+}
+
+export async function completeManagedCallback(req: Request, res: Response): Promise<void> {
+  await runManagedCompletion(req, res, callbackQuery(req), 'redirect', false)
+}
+
+export async function completeManagedBrowserLogin(req: Request, res: Response): Promise<void> {
+  assertManagedBridge(req, 'complete')
+  const record = exactBody(req.body, ['code', 'state'])
+  await runManagedCompletion(req, res, presentedPair(record.code, record.state), 'json', true)
 }
 
 async function stopLink(actor: ManagedActor, reason: StopReason, selector: { linkId?: string; dataSourceId?: string }): Promise<{ ok: true; state: 'pending' | 'acked' }> {
