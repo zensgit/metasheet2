@@ -1,0 +1,192 @@
+{
+  "source_sha": "28d2125719895310d8289bb685a36fe96d8ccfa0",
+  "recorded_utc": "2026-10-18T01:13:56.238157+00:00",
+  "PR": "https://github.com/zensgit/metasheet2/pull/6439",
+  "Draft": true,
+  "reported_checks": 31,
+  "all_reported_terminal_success": true,
+  "checks": [
+    {
+      "name": "approval-attachment-roundtrip-guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762641/job/117548899875"
+    },
+    {
+      "name": "Approval browser verify (chromium)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762632/job/117548899768"
+    },
+    {
+      "name": "s1-evidence replay gate contract (static census \u2014 no DB, no secrets)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762611/job/117548899759"
+    },
+    {
+      "name": "approval-realdb-export-csv",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762699/job/117548900137"
+    },
+    {
+      "name": "approval-realdb-org-writer-w1w2-s1",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762649/job/117548899841"
+    },
+    {
+      "name": "approval-realdb-form-drafts",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762670/job/117548900202"
+    },
+    {
+      "name": "approval-realdb-comments",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762765/job/117548900365"
+    },
+    {
+      "name": "approval-realdb-history-guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762710/job/117548900112"
+    },
+    {
+      "name": "approval-realdb-permission-catalogue",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762684/job/117548900087"
+    },
+    {
+      "name": "approval-realdb-projection-key-parity",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762644/job/117548899857"
+    },
+    {
+      "name": "approval-realdb-todo-center-pending-query",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762677/job/117548900320"
+    },
+    {
+      "name": "approval-realdb-org-writer-plm-mirror-s1",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762630/job/117548899816"
+    },
+    {
+      "name": "approval-realdb-org-writer-w4-s1",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762621/job/117548899836"
+    },
+    {
+      "name": "attendance-web-guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762790/job/117548900425"
+    },
+    {
+      "name": "exposure-inventory contract (values-free, schema-probe-first)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762620/job/117548899871"
+    },
+    {
+      "name": "guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762727/job/117548900222"
+    },
+    {
+      "name": "integration-guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762693/job/117548900045"
+    },
+    {
+      "name": "migration-prod-image-parity (postgres:15-alpine)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762636/job/117548899991"
+    },
+    {
+      "name": "observation-kit contract (read-only SQL census + runbook gating)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762631/job/117548900168"
+    },
+    {
+      "name": "multitable-realdb-context-read-verdict",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762714/job/117548899969"
+    },
+    {
+      "name": "recovery-schema-drift",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762658/job/117548900054"
+    },
+    {
+      "name": "listener-regression",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762667/job/117548899949"
+    },
+    {
+      "name": "plm-embed-web-guard",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762715/job/117548900241"
+    },
+    {
+      "name": "visual-consumer",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762681/job/117548900184"
+    },
+    {
+      "name": "managed-companion-consumer",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762709/job/117548900147"
+    },
+    {
+      "name": "postgres",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762687/job/117548899943"
+    },
+    {
+      "name": "record-ingress-regression",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762711/job/117548900251"
+    },
+    {
+      "name": "pr-validate",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762865/job/117548900592"
+    },
+    {
+      "name": "ssh host-key pin contract (fail-closed known_hosts)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762688/job/117548899895"
+    },
+    {
+      "name": "Stock-prep browser verify (chromium)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762613/job/117548899923"
+    },
+    {
+      "name": "tasks-realdb",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762697/job/117548900062"
+    }
+  ],
+  "actual_business_evidence": {
+    "managed": {
+      "unit": 21,
+      "PG16": 27,
+      "web": 13,
+      "strict_zero_skip": true,
+      "owned_restart_nonce_cleanup": "SUCCESS",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762709/job/117548900147"
+    },
+    "listener": {
+      "PG16": 132,
+      "wire_unit": 111,
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762667/job/117548899949"
+    },
+    "visual": {
+      "unit": 201,
+      "PG16": 14,
+      "web": 199,
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/39084762681/job/117548900184"
+    }
+  },
+  "limits": [
+    "Different suites overlap and are not added.",
+    "31 reported checks are not 31 separate business acceptance suites; conditional workflows are not relabeled.",
+    "This source slice is existing Meta owner personal managed-read consumption, not B2b no-Meta-JWT full-SPA entry or installed service topology.",
+    "Documentation-only follow-up head must be checked separately in operational state; no source-SHA chasing documentation loop."
+  ]
+}

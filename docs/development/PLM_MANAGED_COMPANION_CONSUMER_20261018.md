@@ -55,3 +55,6 @@ No third approval engine. No production enablement, deploy, merge, or external n
 ## Slice boundary after independent verification
 
 B2 binds an existing authenticated Meta owner to a separately verified native person and source, and consumes a dedicated native read grant. It is not the Yuantus-only entry bootstrap; that remains a separate B2b slice. Unresolved consumed exchanges cannot be declared cleaned up from browser expiry or a local HTTP abort. They remain pending until an exact observed native delegation acknowledgement; outbox rows carry the originating intent id. The verification MD and compact artifact record local415-unit/27-PG and real paired-process controls. Dedicated exact-head PG16 CI, full app bootstrap, and installed customer topology remain pending.
+
+
+The B2 source slice at `28d2125719895310d8289bb685a36fe96d8ccfa0` has all31 reported exact-head checks green, including actual managed27-case PostgreSQL16, listener132-case PostgreSQL16 and visual14-case PostgreSQL16 runs. See `artifacts/plm-managed-companion-consumer-20261018/ci-final-source.json`. This closes the existing-Meta-owner consumer slice only; the full-SPA/Yuantus-only entry remains B2b, with installed lifecycle work later. Draft status remains.
