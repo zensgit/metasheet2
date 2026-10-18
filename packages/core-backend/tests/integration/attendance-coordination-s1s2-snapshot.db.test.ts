@@ -118,12 +118,15 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: true })
     const client = await pool.connect()
     const pid = await backendPid(client)
-    await client.query('BEGIN')
-    await client.query('SELECT 1')
-    const outcome = await runSettlementCoordinationS1V1(client, plan)
-    expect(outcome).toEqual({ kind: 'uncertain', reason: 's1-not-idle' })
-    await expectNoAdvisory(pid)
-    client.release(new Error('test: destroy after uncertain S1'))
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT 1')
+      const outcome = await runSettlementCoordinationS1V1(client, plan)
+      expect(outcome).toEqual({ kind: 'uncertain', reason: 's1-not-idle' })
+      await expectNoAdvisory(pid)
+    } finally {
+      client.release(new Error('test: destroy after uncertain S1'))
+    }
     expect(await waitForBackendGone(observer, pid)).toBe(true)
   })
 
@@ -131,13 +134,16 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: true })
     const client = await pool.connect()
     const pid = await backendPid(client)
-    await client.query('BEGIN')
-    await expect(client.query('SELECT 1 / 0')).rejects.toBeTruthy()
-    const outcome = await runSettlementCoordinationS1V1(client, plan)
-    expect(outcome.kind).toBe('uncertain')
-    expect(outcome.kind === 'uncertain' && outcome.reason).toBe('s1-statement-failed')
-    expect(outcome.kind === 'uncertain' && (outcome.error as { code?: string }).code).toBe('25P02')
-    client.release(new Error('test: destroy after uncertain S1'))
+    try {
+      await client.query('BEGIN')
+      await expect(client.query('SELECT 1 / 0')).rejects.toBeTruthy()
+      const outcome = await runSettlementCoordinationS1V1(client, plan)
+      expect(outcome.kind).toBe('uncertain')
+      expect(outcome.kind === 'uncertain' && outcome.reason).toBe('s1-statement-failed')
+      expect(outcome.kind === 'uncertain' && (outcome.error as { code?: string }).code).toBe('25P02')
+    } finally {
+      client.release(new Error('test: destroy after uncertain S1'))
+    }
     expect(await waitForBackendGone(observer, pid)).toBe(true)
   })
 

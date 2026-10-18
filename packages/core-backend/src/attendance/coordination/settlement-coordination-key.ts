@@ -101,7 +101,9 @@ export function buildSettlementCoordinationKeyV1(org: unknown): SettlementCoordi
  * Registry of every two-int4 advisory key1 that is a constant (a literal, or `hashtext()` of a
  * literal). Entries must be pairwise distinct; the coordination key1 must differ from every
  * other entry. The guard test derives the population from source and fails when a constant-key1
- * user is missing here, so this list cannot silently go stale.
+ * user written as a literal is missing here. A constant passed as a bind parameter
+ * (`hashtext($1)` with a fixed value) is invisible to that static scan, so such users are added
+ * here by hand together with their literal-form sibling, as the elearning entry is.
  */
 export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
   name: string
@@ -117,5 +119,10 @@ export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
     name: 'audit-logs-partition',
     key1: Object.freeze({ hashtext: 'audit_logs_partition' }),
     source: 'packages/core-backend/src/audit/AuditRepository.ts',
+  }),
+  Object.freeze({
+    name: 'elearning-title-balance-org',
+    key1: Object.freeze({ hashtext: 'elearning-title-balance-org' }),
+    source: 'packages/core-backend/src/db/migrations/zzzz20260830123000_create_elearning_titles.ts; packages/core-backend/src/services/elearning-title-surface.ts (bind parameter)',
   }),
 ])
