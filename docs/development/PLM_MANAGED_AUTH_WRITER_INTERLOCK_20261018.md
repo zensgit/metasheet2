@@ -22,6 +22,10 @@ Compact evidence: `artifacts/plm-managed-auth-writer-interlock-20261018/independ
 
 Run the production-module timing proof with Node20, the existing web dependencies and an installed Playwright browser cache: `PLAYWRIGHT_BROWSERS_PATH=<cache> node scripts/verification/plm-managed-companion-paired/auth-writer-interlock.mjs`. Run the actual full application proof with the existing paired `verify.py --workspace-entry --browser-script entry-run.mts` and explicit isolated Meta/native checkouts, Python, Node20, PG binaries, browser-cache and output arguments documented in the parent bootstrap MD.
 
+## Initial exact-head CI repair
+
+Draft #6442 initial head `a0982c46855469df914766231f1a5dac73c1f548` finished15 checks successfully and failed the stock-prep browser ownership guard before browser execution. Actual log: [job117589520162](https://github.com/zensgit/metasheet2/actions/runs/39098411626/job/117589520162). The dynamic auth import now makes `authIdentityLock.ts` and `plmManagedCompanion.ts` transitive harness dependencies. Added those exact two paths to the existing workflow classifier; the unchanged ownership/collection guard passed7/7 locally. No gate or assertions were removed. Workflow lint retains its pre-existing SC2086 at the unrelated STORE_PATH echo; the new lines introduce no diagnostic. All initial jobs were terminal before pushing this repair, preserving valuable running jobs. New-head CI remains required.
+
 ## Scope and remaining acceptance
 
 The guarantee covers cooperating normal application writers within one browser profile implementing Web Locks. It is not an XSS boundary, does not coordinate other profiles and cannot make localStorage aliases or browser cookie installation transactional with PostgreSQL. A killed document may leave a cookie already stored; persisted pending state forces normal recovery to revoke before identity publication or managed snapshot adoption. The browser still applies Set-Cookie before script reads a body.
