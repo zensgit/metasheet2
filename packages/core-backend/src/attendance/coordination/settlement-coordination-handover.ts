@@ -1,0 +1,347 @@
+/**
+ * Attendance settlement coordination — S1, the handover (BEGIN + S2), the transaction-ending
+ * primitives, session-lock cleanup and the handover credential.
+ *
+ * Nothing here borrows or releases connections. Every function reports an outcome and leaves the
+ * connection decision to the caller (the coordinator), which owns the connection:
+ *   - `contended`: the try lost; give the connection back normally, then back off;
+ *   - `uncertain`: the protocol state of the connection is unknown (idle proof failed, a statement
+ *     errored or its result was lost, a re-grant or an unlock returned false, ROLLBACK failed, or
+ *     COMMIT failed with anything but 40001 / 40P01). The caller must destroy the connection with
+ *     `release(err)`; destroying the backend is also what drops any session-level advisory lock it
+ *     may still hold. Nothing here ever calls `pg_advisory_unlock_all`.
+ *
+ * The credential proves that THIS transaction on THIS connection was handed over for THIS org. It
+ * is bound to the transaction, not to the connection object: pooled connections are reused, so the
+ * credential is invalidated before COMMIT or ROLLBACK is sent, and a credential from an earlier
+ * transaction never verifies on a later one.
+ */
+import {
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  type AttendanceW4TransactionClientV1,
+} from '../w4c0-identity'
+import {
+  AttendanceCoordinationKeyError,
+  buildSettlementCoordinationKeyV1,
+  canonicalizeSettlementCoordinationOrgV1,
+  type SettlementCoordinationKeyV1,
+} from './settlement-coordination-key'
+import {
+  buildSettlementCoordinationS1Sql,
+  buildSettlementCoordinationS2Sql,
+  buildSettlementCoordinationSessionUnlockSql,
+  type SettlementCoordinationS2TimeoutsV1,
+} from './settlement-coordination-statements'
+
+export interface SettlementCoordinationPlanV1 {
+  readonly key: SettlementCoordinationKeyV1
+  /** Set only for a canonical org whose entry needs the class-00 family. */
+  readonly classZeroKey: bigint | null
+}
+
+export function planSettlementCoordinationV1(
+  org: unknown,
+  options: Readonly<{ needsClassZero: boolean }>,
+): SettlementCoordinationPlanV1 {
+  const key = buildSettlementCoordinationKeyV1(org)
+  const classZeroKey = key.org.kind === 'canonical' && options.needsClassZero === true
+    ? buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(key.org.lexical))
+    : null
+  return Object.freeze({ key, classZeroKey })
+}
+
+export type SettlementCoordinationUncertainReasonV1 =
+  | 's1-not-idle'
+  | 's1-statement-failed'
+  | 's1-result-invalid'
+  | 's1-undo-failed'
+  | 'begin-failed'
+  | 's2-statement-failed'
+  | 's2-result-invalid'
+  | 's2-regrant-failed'
+  | 's2-unlock-failed'
+  | 'unlock-statement-failed'
+  | 'unlock-returned-false'
+  | 'rollback-failed'
+  | 'commit-failed'
+
+export type SettlementCoordinationUncertainV1 = Readonly<{
+  kind: 'uncertain'
+  reason: SettlementCoordinationUncertainReasonV1
+  error?: unknown
+}>
+
+/** Error to hand to `release(err)` when an outcome is `uncertain`. */
+export class AttendanceCoordinationConnectionUncertainError extends Error {
+  readonly code = 'ATTENDANCE_COORDINATION_CONNECTION_UNCERTAIN'
+  readonly reason: SettlementCoordinationUncertainReasonV1
+
+  constructor(reason: SettlementCoordinationUncertainReasonV1) {
+    super(`ATTENDANCE_COORDINATION_CONNECTION_UNCERTAIN:${reason}`)
+    this.name = 'AttendanceCoordinationConnectionUncertainError'
+    this.reason = reason
+  }
+}
+
+function uncertain(reason: SettlementCoordinationUncertainReasonV1, error?: unknown): SettlementCoordinationUncertainV1 {
+  return Object.freeze(error === undefined ? { kind: 'uncertain' as const, reason } : { kind: 'uncertain' as const, reason, error })
+}
+
+function statementKeys(plan: SettlementCoordinationPlanV1) {
+  return { key2: plan.key.key2, classZeroKey: plan.classZeroKey }
+}
+
+function singleRow(result: unknown): Record<string, unknown> | null {
+  const rows = (result as { rows?: unknown } | null)?.rows
+  if (!Array.isArray(rows) || rows.length !== 1) return null
+  const row = rows[0]
+  return typeof row === 'object' && row !== null ? (row as Record<string, unknown>) : null
+}
+
+// ---------------------------------------------------------------------------
+// S1
+// ---------------------------------------------------------------------------
+
+export type SettlementCoordinationS1OutcomeV1 =
+  | Readonly<{ kind: 'acquired' }>
+  | Readonly<{ kind: 'contended'; family: 'dedicated' | 'class-00' }>
+  | SettlementCoordinationUncertainV1
+
+/** Runs S1 in autocommit on an idle, freshly borrowed connection (simple protocol: no values). */
+export async function runSettlementCoordinationS1V1(
+  client: AttendanceW4TransactionClientV1,
+  plan: SettlementCoordinationPlanV1,
+): Promise<SettlementCoordinationS1OutcomeV1> {
+  const sql = buildSettlementCoordinationS1Sql(statementKeys(plan))
+  let row: Record<string, unknown> | null
+  try {
+    row = singleRow(await client.query(sql))
+  } catch (error) {
+    return uncertain('s1-statement-failed', error)
+  }
+  if (row === null) return uncertain('s1-result-invalid')
+  if (row.idle !== true) return uncertain('s1-not-idle')
+  if (row.k_ok === false) return Object.freeze({ kind: 'contended' as const, family: 'dedicated' as const })
+  if (row.k_ok !== true) return uncertain('s1-result-invalid')
+  if (row.c_ok === true) return Object.freeze({ kind: 'acquired' as const })
+  if (row.c_ok !== false) return uncertain('s1-result-invalid')
+  if (row.k_undo !== true) return uncertain('s1-undo-failed')
+  return Object.freeze({ kind: 'contended' as const, family: 'class-00' as const })
+}
+
+// ---------------------------------------------------------------------------
+// Credential
+// ---------------------------------------------------------------------------
+
+const MINT = Symbol('settlement-coordination-credential-mint')
+const activeCredentials = new WeakMap<object, SettlementCoordinationCredentialV1>()
+
+export class SettlementCoordinationCredentialV1 {
+  readonly #connection: object
+  readonly #orgLexical: string
+  readonly #classZeroHeld: boolean
+  #active = true
+
+  constructor(mint: symbol, connection: object, orgLexical: string, classZeroHeld: boolean) {
+    if (mint !== MINT) throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_CREDENTIAL_FORGED')
+    this.#connection = connection
+    this.#orgLexical = orgLexical
+    this.#classZeroHeld = classZeroHeld
+    Object.freeze(this)
+  }
+
+  static matches(
+    credential: unknown,
+    connection: object,
+    orgLexical: string,
+    needsClassZero: boolean,
+  ): boolean {
+    if (!(credential instanceof SettlementCoordinationCredentialV1)) return false
+    if (!credential.#active) return false
+    if (credential.#connection !== connection) return false
+    if (activeCredentials.get(connection) !== credential) return false
+    if (credential.#orgLexical !== orgLexical) return false
+    if (needsClassZero && !credential.#classZeroHeld) return false
+    return true
+  }
+
+  static invalidate(credential: SettlementCoordinationCredentialV1): void {
+    credential.#active = false
+    if (activeCredentials.get(credential.#connection) === credential) activeCredentials.delete(credential.#connection)
+  }
+}
+
+function mintCredential(connection: object, plan: SettlementCoordinationPlanV1): SettlementCoordinationCredentialV1 {
+  const previous = activeCredentials.get(connection)
+  if (previous) SettlementCoordinationCredentialV1.invalidate(previous)
+  const credential = new SettlementCoordinationCredentialV1(MINT, connection, plan.key.org.lexical, plan.classZeroKey !== null)
+  activeCredentials.set(connection, credential)
+  return credential
+}
+
+/**
+ * True only for the live credential of the transaction currently handed over on `connection`,
+ * for the same org, and (when the caller needs it) with the class-00 family held.
+ */
+export function verifySettlementCoordinationCredentialV1(
+  connection: object,
+  credential: unknown,
+  org: unknown,
+  options: Readonly<{ needsClassZero: boolean }>,
+): boolean {
+  let orgLexical: string
+  try {
+    orgLexical = canonicalizeSettlementCoordinationOrgV1(org).lexical
+  } catch {
+    return false
+  }
+  return SettlementCoordinationCredentialV1.matches(credential, connection, orgLexical, options.needsClassZero === true)
+}
+
+/** Safety net for release paths: drops whatever credential is live on `connection`. */
+export function invalidateSettlementCoordinationCredentialsV1(connection: object): void {
+  const live = activeCredentials.get(connection)
+  if (live) SettlementCoordinationCredentialV1.invalidate(live)
+}
+
+// ---------------------------------------------------------------------------
+// Handover: BEGIN, then S2 as the first snapshot-taking statement
+// ---------------------------------------------------------------------------
+
+export type SettlementCoordinationIsolationV1 = 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE'
+const ISOLATIONS: ReadonlySet<string> = new Set(['READ COMMITTED', 'REPEATABLE READ', 'SERIALIZABLE'])
+
+export interface SettlementCoordinationHandoverOptionsV1 {
+  readonly isolation: SettlementCoordinationIsolationV1
+  readonly timeouts: SettlementCoordinationS2TimeoutsV1
+  readonly entryLabel: string
+}
+
+export type SettlementCoordinationHandoverOutcomeV1 =
+  | Readonly<{ kind: 'handed-over'; credential: SettlementCoordinationCredentialV1 }>
+  | SettlementCoordinationUncertainV1
+
+async function rollbackQuietly(client: AttendanceW4TransactionClientV1): Promise<void> {
+  try {
+    await client.query('ROLLBACK')
+  } catch {
+    // The outcome is already `uncertain`; the caller destroys the connection either way.
+  }
+}
+
+/**
+ * Call only after S1 returned `acquired` on the same connection. BEGIN goes as its own statement;
+ * S2 must be the first snapshot-taking statement of the transaction, so nothing else is sent in
+ * between.
+ */
+export async function runSettlementCoordinationHandoverV1(
+  client: AttendanceW4TransactionClientV1,
+  plan: SettlementCoordinationPlanV1,
+  options: SettlementCoordinationHandoverOptionsV1,
+): Promise<SettlementCoordinationHandoverOutcomeV1> {
+  if (!ISOLATIONS.has(options.isolation)) throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_ISOLATION_INVALID')
+  const s2 = buildSettlementCoordinationS2Sql({
+    ...statementKeys(plan),
+    timeouts: options.timeouts,
+    entryLabel: options.entryLabel,
+  })
+  try {
+    await client.query(`BEGIN ISOLATION LEVEL ${options.isolation}`)
+  } catch (error) {
+    return uncertain('begin-failed', error)
+  }
+  let row: Record<string, unknown> | null
+  try {
+    row = singleRow(await client.query(s2))
+  } catch (error) {
+    await rollbackQuietly(client)
+    return uncertain('s2-statement-failed', error)
+  }
+  if (row === null) {
+    await rollbackQuietly(client)
+    return uncertain('s2-result-invalid')
+  }
+  if (row.x_k !== true || row.x_c !== true) {
+    await rollbackQuietly(client)
+    return uncertain('s2-regrant-failed')
+  }
+  if (row.u_k !== true || row.u_c !== true) {
+    await rollbackQuietly(client)
+    return uncertain('s2-unlock-failed')
+  }
+  return Object.freeze({ kind: 'handed-over' as const, credential: mintCredential(client, plan) })
+}
+
+// ---------------------------------------------------------------------------
+// Ending the handed-over transaction
+// ---------------------------------------------------------------------------
+
+export type SettlementCoordinationCommitOutcomeV1 =
+  | Readonly<{ kind: 'committed' }>
+  /** 40001 / 40P01 at COMMIT: the server rolled the transaction back; the connection is intact. */
+  | Readonly<{ kind: 'retryable'; error: unknown }>
+  | SettlementCoordinationUncertainV1
+
+export type SettlementCoordinationRollbackOutcomeV1 =
+  | Readonly<{ kind: 'rolled-back' }>
+  | SettlementCoordinationUncertainV1
+
+function isRetryableCommitError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  return code === '40001' || code === '40P01'
+}
+
+export async function commitSettlementCoordinationTransactionV1(
+  client: AttendanceW4TransactionClientV1,
+  credential: SettlementCoordinationCredentialV1,
+): Promise<SettlementCoordinationCommitOutcomeV1> {
+  SettlementCoordinationCredentialV1.invalidate(credential)
+  try {
+    await client.query('COMMIT')
+  } catch (error) {
+    if (isRetryableCommitError(error)) return Object.freeze({ kind: 'retryable' as const, error })
+    return uncertain('commit-failed', error)
+  }
+  return Object.freeze({ kind: 'committed' as const })
+}
+
+export async function rollbackSettlementCoordinationTransactionV1(
+  client: AttendanceW4TransactionClientV1,
+  credential: SettlementCoordinationCredentialV1,
+): Promise<SettlementCoordinationRollbackOutcomeV1> {
+  SettlementCoordinationCredentialV1.invalidate(credential)
+  try {
+    await client.query('ROLLBACK')
+  } catch (error) {
+    return uncertain('rollback-failed', error)
+  }
+  return Object.freeze({ kind: 'rolled-back' as const })
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup before handover (S1 acquired, unit abandoned)
+// ---------------------------------------------------------------------------
+
+export type SettlementCoordinationReleaseOutcomeV1 =
+  | Readonly<{ kind: 'released' }>
+  | SettlementCoordinationUncertainV1
+
+/**
+ * Releases exactly the session-level shared locks S1 took for this plan. Both unlocks must return
+ * true; anything else means the session's lock state is unknown and the connection must be
+ * destroyed.
+ */
+export async function releaseSettlementCoordinationSessionLocksV1(
+  client: AttendanceW4TransactionClientV1,
+  plan: SettlementCoordinationPlanV1,
+): Promise<SettlementCoordinationReleaseOutcomeV1> {
+  let row: Record<string, unknown> | null
+  try {
+    row = singleRow(await client.query(buildSettlementCoordinationSessionUnlockSql(statementKeys(plan))))
+  } catch (error) {
+    return uncertain('unlock-statement-failed', error)
+  }
+  if (row === null || row.u_k !== true || row.u_c !== true) return uncertain('unlock-returned-false')
+  return Object.freeze({ kind: 'released' as const })
+}

@@ -940,6 +940,13 @@ export default defineConfig({
       // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
       // wiring).
       'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
+      // Attendance settlement coordination (P1-1): dedicated key + credential, S1 / S2 handover
+      // snapshot and lock semantics, and cleanup of unknown results, each against a REAL
+      // PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green them;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-coordination-key-credential.db.test.ts',
+      'tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts',
+      'tests/integration/attendance-coordination-cleanup.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
       // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane

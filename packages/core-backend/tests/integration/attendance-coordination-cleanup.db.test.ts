@@ -1,0 +1,273 @@
+/**
+ * Attendance settlement coordination — cleanup and unknown results against a real PostgreSQL
+ * (P1-1 acceptance A04, S1-scope legs).
+ *
+ * Every `uncertain` outcome is followed by `release(err)`, and a second connection then confirms
+ * that the backend is gone and that its advisory locks left `pg_locks`. A control leg shows why a
+ * normal release is not enough after a lost result: with a one-connection pool the next checkout
+ * gets the same backend, still holding the locks the lost statement really took.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import crypto from 'node:crypto'
+import { Pool, type PoolClient } from 'pg'
+
+import {
+  AttendanceCoordinationConnectionUncertainError,
+  commitSettlementCoordinationTransactionV1,
+  planSettlementCoordinationV1,
+  releaseSettlementCoordinationSessionLocksV1,
+  rollbackSettlementCoordinationTransactionV1,
+  runSettlementCoordinationHandoverV1,
+  runSettlementCoordinationS1V1,
+  type SettlementCoordinationPlanV1,
+} from '../../src/attendance/coordination/settlement-coordination-handover'
+import { SETTLEMENT_COORDINATION_KEY1 } from '../../src/attendance/coordination/settlement-coordination-key'
+import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import {
+  advisoryLocksOf,
+  backendPid,
+  isBigintLock,
+  isDedicatedLock,
+  waitForBackendGone,
+} from '../helpers/settlement-coordination-db'
+
+const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+const describeIfDatabase = dbUrl ? describe : describe.skip
+
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have a database URL (a DB-expected run must never skip-green)', () => {
+  expect(dbUrl).toBeTruthy()
+})
+
+const K1 = SETTLEMENT_COORDINATION_KEY1
+const HANDOVER = { isolation: 'SERIALIZABLE' as const, timeouts: { kind: 'none' as const }, entryLabel: 'test.cleanup' }
+
+function canonicalPlan(): SettlementCoordinationPlanV1 {
+  return planSettlementCoordinationV1(crypto.randomUUID(), { needsClassZero: true })
+}
+
+/** Runs the real statement, then throws as if the result never arrived (client-side timeout). */
+function losingResults(client: PoolClient, lose: (sql: string) => boolean): AttendanceW4TransactionClientV1 {
+  return {
+    async query(sql: string, params?: unknown[]) {
+      const result = params === undefined ? await client.query(sql) : await client.query(sql, params)
+      if (lose(sql)) throw new Error('test: result lost after execution')
+      return result
+    },
+  }
+}
+
+/** Throws before the statement reaches the server. */
+function failing(client: PoolClient, fail: (sql: string) => Error | null): AttendanceW4TransactionClientV1 {
+  return {
+    async query(sql: string, params?: unknown[]) {
+      const error = fail(sql)
+      if (error) throw error
+      return params === undefined ? client.query(sql) : client.query(sql, params)
+    },
+  }
+}
+
+describeIfDatabase('attendance settlement coordination — cleanup and unknown results (real database)', () => {
+  let pool: Pool
+  let observer: Pool
+
+  beforeAll(() => {
+    pool = new Pool({ connectionString: dbUrl, max: 4 })
+    observer = new Pool({ connectionString: dbUrl, max: 2 })
+  })
+
+  afterAll(async () => {
+    await pool.end()
+    await observer.end()
+  })
+
+  async function destroyAndConfirm(client: PoolClient, pid: number, reason: string): Promise<void> {
+    client.release(new AttendanceCoordinationConnectionUncertainError(reason as never))
+    expect(await waitForBackendGone(observer, pid)).toBe(true)
+    expect(await advisoryLocksOf(observer, pid)).toEqual([])
+  }
+
+  it('releases exactly the held families when both unlocks succeed', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    try {
+      expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+      expect(await releaseSettlementCoordinationSessionLocksV1(client, plan)).toEqual({ kind: 'released' })
+      expect(await advisoryLocksOf(observer, pid)).toEqual([])
+    } finally {
+      client.release()
+    }
+  })
+
+  it('an unlock that returns false is uncertain; destroying the connection drops what is still held', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    // The class-00 session hold disappears out from under the unit.
+    await client.query(`SELECT pg_advisory_unlock_shared(${(plan.classZeroKey as bigint).toString()}::bigint)`)
+    const outcome = await releaseSettlementCoordinationSessionLocksV1(client, plan)
+    expect(outcome).toEqual({ kind: 'uncertain', reason: 'unlock-returned-false' })
+    await destroyAndConfirm(client, pid, 'unlock-returned-false')
+  })
+
+  it('S2 unlock returning false (session hold lost before handover) rolls back and is uncertain', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    await client.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
+    const outcome = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+    expect(outcome).toEqual({ kind: 'uncertain', reason: 's2-unlock-failed' })
+    // ROLLBACK already ran: the connection is out of the transaction, still holding class-00 at session level.
+    const state = await client.query('SELECT now() = statement_timestamp() AS idle')
+    expect(state.rows[0].idle).toBe(true)
+    const held = await advisoryLocksOf(observer, pid)
+    expect(held.some((row) => isBigintLock(row, plan.classZeroKey as bigint))).toBe(true)
+    await destroyAndConfirm(client, pid, 's2-unlock-failed')
+  })
+
+  it('S2 re-grant returning false (session hold lost and an exclusive holder slipped in) is uncertain', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    const intruder = await pool.connect()
+    try {
+      expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+      await client.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
+      await intruder.query(`SELECT pg_advisory_lock(${K1}, ${plan.key.key2})`)
+      const outcome = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+      expect(outcome).toEqual({ kind: 'uncertain', reason: 's2-regrant-failed' })
+      await destroyAndConfirm(client, pid, 's2-regrant-failed')
+    } finally {
+      await intruder.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)
+      intruder.release()
+    }
+  })
+
+  it('a lost S1 result is uncertain; the locks it really took vanish only when the backend is destroyed', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    const outcome = await runSettlementCoordinationS1V1(losingResults(client, () => true), plan)
+    expect(outcome.kind === 'uncertain' && outcome.reason).toBe('s1-statement-failed')
+    const held = await advisoryLocksOf(observer, pid)
+    expect(held.some((row) => isDedicatedLock(row, plan.key.key2) && row.granted)).toBe(true)
+    expect(held.some((row) => isBigintLock(row, plan.classZeroKey as bigint) && row.granted)).toBe(true)
+    await destroyAndConfirm(client, pid, 's1-statement-failed')
+  })
+
+  it('control: after a lost result, a normal release hands the next checkout a backend that still holds the locks', async () => {
+    const single = new Pool({ connectionString: dbUrl, max: 1 })
+    const plan = canonicalPlan()
+    try {
+      const first = await single.connect()
+      const pid = await backendPid(first)
+      const outcome = await runSettlementCoordinationS1V1(losingResults(first, () => true), plan)
+      expect(outcome.kind).toBe('uncertain')
+      first.release() // the forbidden mutation: no err, so the pool keeps the backend
+      const second = await single.connect()
+      try {
+        expect(await backendPid(second)).toBe(pid)
+        const held = await advisoryLocksOf(observer, pid)
+        expect(held.some((row) => isDedicatedLock(row, plan.key.key2))).toBe(true)
+        await second.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
+        await second.query(`SELECT pg_advisory_unlock_shared(${(plan.classZeroKey as bigint).toString()}::bigint)`)
+      } finally {
+        second.release()
+      }
+    } finally {
+      await single.end()
+    }
+  })
+
+  it('a lost cleanup-unlock result is uncertain and destroying the connection releases everything', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    const outcome = await releaseSettlementCoordinationSessionLocksV1(failing(client, () => new Error('test: unlock lost')), plan)
+    expect(outcome.kind === 'uncertain' && outcome.reason).toBe('unlock-statement-failed')
+    await destroyAndConfirm(client, pid, 'unlock-statement-failed')
+  })
+
+  it('BEGIN failing after S1 is uncertain (the session holds are dropped with the backend)', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    const outcome = await runSettlementCoordinationHandoverV1(
+      failing(client, (sql) => (sql.startsWith('BEGIN') ? new Error('test: begin lost') : null)),
+      plan,
+      HANDOVER,
+    )
+    expect(outcome.kind === 'uncertain' && outcome.reason).toBe('begin-failed')
+    await destroyAndConfirm(client, pid, 'begin-failed')
+  })
+
+  it('a failed ROLLBACK is uncertain', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+    if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+    const outcome = await rollbackSettlementCoordinationTransactionV1(
+      failing(client, (sql) => (sql === 'ROLLBACK' ? new Error('test: rollback lost') : null)),
+      handover.credential,
+    )
+    expect(outcome.kind === 'uncertain' && outcome.reason).toBe('rollback-failed')
+    await destroyAndConfirm(client, pid, 'rollback-failed')
+  })
+
+  it('COMMIT failing with anything but 40001 / 40P01 is uncertain', async () => {
+    const plan = canonicalPlan()
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+    const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+    if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+    const ambiguous = Object.assign(new Error('test: commit outcome unknown'), { code: '08006' })
+    const outcome = await commitSettlementCoordinationTransactionV1(
+      failing(client, (sql) => (sql === 'COMMIT' ? ambiguous : null)),
+      handover.credential,
+    )
+    expect(outcome).toEqual({ kind: 'uncertain', reason: 'commit-failed', error: ambiguous })
+    await destroyAndConfirm(client, pid, 'commit-failed')
+  })
+
+  it('a real serialization failure at COMMIT is retryable and leaves an idle connection', async () => {
+    const plan = planSettlementCoordinationV1(crypto.randomUUID(), { needsClassZero: false })
+    const schema = `p11_coord_ssi_${crypto.randomUUID().slice(0, 8)}`
+    await observer.query(`CREATE SCHEMA ${schema}`)
+    await observer.query(`CREATE TABLE ${schema}.t (id int PRIMARY KEY, v int NOT NULL)`)
+    await observer.query(`INSERT INTO ${schema}.t VALUES (1, 0), (2, 0)`)
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    const rival = await pool.connect()
+    try {
+      expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+      const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+      if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+      // Classic write skew: each transaction reads the other's row and writes its own.
+      await rival.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      await client.query(`SELECT v FROM ${schema}.t WHERE id = 2`)
+      await rival.query(`SELECT v FROM ${schema}.t WHERE id = 1`)
+      await client.query(`UPDATE ${schema}.t SET v = 1 WHERE id = 1`)
+      await rival.query(`UPDATE ${schema}.t SET v = 1 WHERE id = 2`)
+      await rival.query('COMMIT')
+      const outcome = await commitSettlementCoordinationTransactionV1(client, handover.credential)
+      expect(outcome.kind).toBe('retryable')
+      expect(outcome.kind === 'retryable' && (outcome.error as { code?: string }).code).toBe('40001')
+      const state = await client.query('SELECT now() = statement_timestamp() AS idle')
+      expect(state.rows[0].idle).toBe(true)
+      expect(await advisoryLocksOf(observer, pid)).toEqual([])
+    } finally {
+      client.release()
+      rival.release()
+      await observer.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
+    }
+  })
+})
