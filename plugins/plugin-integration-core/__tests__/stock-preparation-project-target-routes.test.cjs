@@ -170,6 +170,11 @@ function makeProvisioning({ grant = async () => ({ granted: [], alreadyGranted: 
     },
     async findObjectView() { calls.push(['findObjectView']); return null },
     async grantSheetRoleWrite(input) { calls.push(['grantSheetRoleWrite', input]); return grant(input) },
+    // G1 field defect (R67): the create path writes the contract option set onto the new sheet's decision column.
+    async patchObjectFieldProperty({ projectId, objectId, fieldId, propertyPatch }) {
+      calls.push(['patchObjectFieldProperty', objectId, fieldId])
+      return { id: api.getFieldId(projectId, objectId, fieldId), sheetId: sheetIdOf(projectId, objectId), name: fieldId, type: 'select', property: propertyPatch, order: 0 }
+    },
   }
   return api
 }
@@ -548,11 +553,14 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
       // so there is nothing to carry over — the counts say so (the pack suite drives the other case).
       customerPacks: { planned: 0, installed: 0, reinstalled: 0, alreadyInstalled: 0, notInCatalog: 0 },
       todoView: { created: true, skipped: null },
+      // G1 field defect (R67): the contract option set landed on the decision column (counts only).
+      options: { synced: 1, skipped: 0 },
       // S3 fix round 1 (R6): this substrate is an OLDER host (no stamp declaration), so the create's
       // best-effort overview leg refuses before any IO and says so with its closed code — the create stands.
       overview: { ensured: false, created: false, code: 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED' },
     })
     assert.equal(h.provisioning.calls.filter((c) => c[0] === 'ensureObject').length, 1, 'ONE sheet provisioned')
+    assert.deepEqual(h.provisioning.calls.filter((c) => c[0] === 'patchObjectFieldProperty'), [['patchObjectFieldProperty', objectId, 'lastPlmRefreshDecision']], 'G1 field defect (R67): ONE option patch, the decision column of THIS sheet')
     assert.equal(h.provisioning.calls.find((c) => c[0] === 'ensureObject')[1], objectId)
     assert.deepEqual(h.provisioning.calls.filter((c) => c[0] === 'ensureView').map((c) => c[1]), [STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID, STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID])
     assert.equal(h.db.rows.length, 1)

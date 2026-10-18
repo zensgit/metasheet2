@@ -1,4 +1,5 @@
 import type { PlmAuditRouteState } from './plmAuditQueryState'
+import { randomUuid } from '../utils/uuid'
 
 const PLM_AUDIT_SAVED_VIEWS_KEY = 'metasheet_plm_audit_saved_views'
 const PLM_AUDIT_SAVED_VIEWS_LIMIT = 8
@@ -87,11 +88,7 @@ export function canSavePlmAuditSavedViewName(name: string) {
 }
 
 function generateSavedViewId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `plm-audit-view-${crypto.randomUUID()}`
-  }
-
-  return `plm-audit-view-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  return `plm-audit-view-${randomUuid()}`
 }
 
 function writePlmAuditSavedViews(items: readonly PlmAuditSavedView[], storage?: Storage | null) {

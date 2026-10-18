@@ -399,22 +399,21 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       expect(await countCalcs(recordId)).toBe(0)
     })
 
-    it("NEGATIVE (product code, Gate D2 §5.10.1): the pre-check's domain matches chk_arc_projected_status EXACTLY — 'off' is a legal AttendanceDailyStatusV1 but NOT a legal projected_status, and is refused with the product code", async () => {
-      // The eight-member calculator status union includes 'off'; the DB CHECK's domain (seven
-      // members) does not. A pre-check reusing the calculator constant would be WIDER than the
-      // constraint it fronts and 'off' would sail through to a raw 23514 — the exact leak this
-      // check exists to close. This leg reds if the two domains are ever re-aliased.
+    it('POSITIVE: off persists as the existing calculator and migrated database status domain require', async () => {
       const org = `org-b8-${RUN}`
       const recordId = await insertLegacyActiveParent(org)
-      const bad = completedCalculation(1)
-      ;(bad.dailyProjection as { status: string }).status = 'off'
-      await expectProductCode(
-        withTxn((client) =>
-          writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation: bad })),
-        ),
-        CODES.COMPLETED_SHAPE_INVALID,
+      const calculation = completedCalculation(1)
+      ;(calculation.dailyProjection as { status: string }).status = 'off'
+      const result = await withTxn((client) =>
+        writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation })),
       )
-      expect(await countCalcs(recordId)).toBe(0)
+      expect(result.kind).toBe('completed')
+      if (result.kind !== 'completed') throw new Error('off expected completed')
+      const row = await calcRow(result.calculationId)
+      expect({ status: row?.projected_status, outcome: row?.outcome, effect: row?.projection_effect }).toEqual({
+        status: 'off', outcome: 'completed', effect: 'set_active',
+      })
+      expect(await countCalcs(recordId)).toBe(2)
     })
 
     it('NEGATIVE (product code, F3): a baseline with a negative projected minute is refused with BASELINE_PROJECTION_INVALID', async () => {

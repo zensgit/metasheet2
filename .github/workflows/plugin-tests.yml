@@ -170,6 +170,9 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
 
+      - name: Attendance legacy repair package contracts
+        run: node --test scripts/ops/attendance-onprem-package-verify-migrations.test.mjs scripts/ops/onprem-package-runtime-closure.test.mjs
+
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
       - name: W0 exact-anchor L6/L7 CI wiring contract
@@ -654,9 +657,20 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Backend log rotation (runbook-backend-log-rotation-20261012): hermetic, pm2 / schtasks /
+          # ScheduledTasks replaced by functions. The Windows-only cases self-report SKIP here; the
+          # script's PowerShell 5.1 grammar is pinned statically by the suite itself. The explicit
+          # exit check is required: a `shell: pwsh` step only fails on the LAST command's
+          # $LASTEXITCODE, so a script that exits 1 before another script is otherwise swallowed.
+          ./scripts/ops/__tests__/multitable-onprem-backend-log-rotate.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
           # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
           # job, now in .github/workflows/stock-prep-powershell51.yml.
@@ -797,6 +811,27 @@ jobs:
           fi
           echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
 
+      # Multi-timezone D1: whole-file foundation units; runtime remains unconnected.
+      - name: Run attendance timezone policy foundation units
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-timezone-policy.test.ts \
+            tests/unit/attendance-timezone-policy-store.test.ts \
+            tests/unit/attendance-timezone-context-loader.test.ts \
+            tests/unit/attendance-timezone-calendar-day.test.ts \
+            tests/unit/attendance-timezone-policy-routes.test.ts \
+            tests/unit/attendance-timezone-target-routes.test.ts \
+            tests/unit/attendance-timezone-read-context.test.ts \
+            tests/unit/attendance-timezone-default-recovery.test.ts \
+            tests/unit/attendance-timezone-legacy-repair.test.ts \
+            tests/unit/attendance-timezone-legacy-preflight.test.ts \
+            tests/unit/attendance-timezone-request-instants.test.ts \
+            tests/unit/attendance-business-trip.test.ts \
+            tests/unit/attendance-calendar-settings-writer.test.ts \
+            tests/unit/attendance-timezone-runtime-locks.test.ts \
+            tests/unit/attendance-trip-context-transition-dates.test.ts \
+            --reporter=dot
+
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
       # independently load-bearing. Keep whole-file execution explicit.
@@ -869,7 +904,9 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
-          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs scripts/ops/attendance-acceptance-preflight.test.mjs scripts/ops/attendance-import-perf-payload.test.mjs scripts/ops/attendance-import-perf-gate.test.mjs
+          node --test scripts/verify-attendance-production-flow.test.mjs
+          node --test scripts/ops/attendance-verifier-contract.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
@@ -914,14 +951,14 @@ jobs:
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
       # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (44) = 95. Get each file's own
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) = 97. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=95
+          EXPECTED_OPS_TESTS_COUNT=97
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1804,6 +1841,7 @@ jobs:
             tests/integration/directory-activation-source-lock.db.test.ts \
             tests/integration/login-alias-writers.db.test.ts \
             tests/integration/auth-register-atomicity.db.test.ts \
+            tests/integration/attendance-self-service-revocation-atomicity.db.test.ts \
             tests/integration/directory-deprovision-ledger-schema.db.test.ts \
             tests/integration/directory-deprovision-writer-ledger.db.test.ts \
             tests/integration/directory-deprovision-race-supersede.db.test.ts \
@@ -1951,6 +1989,14 @@ jobs:
           pnpm --filter @metasheet/core-backend migrate
           pnpm --filter @metasheet/core-backend exec tsx ../../scripts/ops/attendance-selfservice-fixture-verify.mts
 
+      - name: Prepare real attendance browser qualification
+        run: |
+          mkdir -p "$RUNNER_TEMP/attendance-browser-empty-env"
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Create isolated attendance timezone database
+        run: createdb --host=localhost --username=postgres attendance_timezone_ci
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -1962,6 +2008,8 @@ jobs:
         # own pin is loosened to match (see that file's comment).
         id: attendance-real-db-integration
         env:
+          METASHEET_ENV_DIR: ${{ runner.temp }}/attendance-browser-empty-env
+          ATTENDANCE_BROWSER_OUTPUT_DIR: ${{ runner.temp }}/attendance-browser-evidence
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
@@ -1969,6 +2017,7 @@ jobs:
           : "${ATTENDANCE_TEST_DATABASE_URL:?ATTENDANCE_TEST_DATABASE_URL is required for attendance integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
+            tests/integration/attendance-import-user-identity.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-live-punch-order.db.test.ts \
             tests/integration/attendance-online-punch-server-time.db.test.ts \
@@ -2096,6 +2145,30 @@ jobs:
             tests/integration/attendance-org-resolution-shadow.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
+          # Global calendar policy validates every organization's live sources. Its
+          # real-DB suite owns a fresh database; lower-level legacy fixtures above
+          # intentionally retain partial synthetic schedules and immutable history.
+          DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci pnpm --filter @metasheet/core-backend migrate
+          DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci ATTENDANCE_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/attendance_timezone_ci pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/attendance-timezone-policy-routes.db.test.ts \
+            tests/integration/attendance-business-trip.db.test.ts \
+            tests/integration/attendance-multitimezone-browser.db.test.ts \
+            tests/integration/attendance-timezone-policy-write-routes.db.test.ts \
+            tests/integration/attendance-timezone-target-routes.db.test.ts \
+            tests/integration/attendance-timezone-read-context.db.test.ts \
+            tests/integration/attendance-timezone-default-recovery.db.test.ts \
+            tests/integration/attendance-timezone-legacy-repair.db.test.ts \
+            tests/integration/attendance-timezone-policy-preview.db.test.ts \
+            tests/integration/attendance-timezone-runtime-locks.db.test.ts \
+            tests/integration/attendance-timezone-runtime.db.test.ts \
+            tests/integration/attendance-timezone-scheduled.db.test.ts \
+            tests/integration/attendance-trip-context-transition-dates.db.test.ts \
+            tests/integration/attendance-timezone-policy-store.db.test.ts \
+            --reporter=dot
+
+      - name: Remove isolated attendance timezone database
+        if: always()
+        run: dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
 
       - name: Upload test results
         if: always()

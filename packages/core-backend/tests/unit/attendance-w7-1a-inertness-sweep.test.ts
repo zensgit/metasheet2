@@ -319,6 +319,8 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
  * test edit.
  */
 const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
+  // Timezone runtime reuses the canonical timeline/schedule composite locks.
+  'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts',
   // W7-3 (train merge): the transition writer — REQUIRED by the resolver's own
   // doc contract to import `isAttendanceW7ContextSourceOrgAllowlistedV1` rather
   // than copy the allowlist mechanism. See the W7-3 amendment note below.
@@ -348,6 +350,7 @@ const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
  * selection, and that is precisely the drift ruling 3 forbids. It reds here.
  */
 const W7_1B_PRODUCTION_CALL_SITES_V1 = Object.freeze([
+  { file: 'packages/core-backend/src/attendance/attendance-timezone-runtime-locks.ts', symbol: 'acquireAttendanceW7CompositeFactsLocksV1' },
   // W7-3 (train merge): the writer names the ONE allowlist predicate — the exact
   // wiring the resolver's contract demands, and the only production call site.
   { file: 'packages/core-backend/src/attendance/w7-context-source-transition.ts', symbol: 'isAttendanceW7ContextSourceOrgAllowlistedV1' },
@@ -614,6 +617,8 @@ describe('W7-1a structural inertness: the posture table has no production reader
     //    the matcher.
     expect(postureTableCodeReferences()).toEqual([
       W7_TRANSITION_WRITER,
+      // Preview's read-only cache recognizes posture SELECTs; it never writes posture.
+      'plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs',
       'scripts/attendance/w4c0-dml-inventory/table-classification.cjs',
     ])
   })

@@ -134,6 +134,12 @@ export const ALLOWLIST: MigrationPrefixAllowlist = {
     'zzzz20260826120000_create_meta_recovery_archive_catalog.ts',
     'zzzz20260826120000_harden_elearning_v01_ledger.ts',
   ],
+  // #6051 roster member source ordinals and #6350 business trips independently
+  // chose this prefix. Both files stay: the runner keys by the full filename.
+  zzzz20261013090000: [
+    'zzzz20261013090000_attendance_roster_member_source_ordinals.ts',
+    'zzzz20261013090000_create_attendance_business_trips.ts',
+  ],
 }
 
 /** Prefixes that two independently-authored, already-approved PRs raced on, where this guard must

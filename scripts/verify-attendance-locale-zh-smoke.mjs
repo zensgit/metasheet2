@@ -2,6 +2,7 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
+import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBase = resolveApiBase(process.env.API_BASE || '')
@@ -112,17 +113,27 @@ async function validateTokenWithAuthMe(tokenValue) {
   if (!tokenValue) return { usable: false, reason: 'missing' }
   try {
     const { response, payload } = await apiRequest('/auth/me', { method: 'GET' }, tokenValue)
-    if (response.ok && payload?.ok !== false && payload?.success !== false) {
-      return { usable: true, reason: 'ok' }
-    }
     if (response.status === 401 || response.status === 403) {
       return { usable: false, reason: `http_${response.status}` }
+    }
+    if (process.env.AUTH_EXPECTED_TENANT_ID !== undefined) {
+      if (response.status !== 200 || payload?.success !== true
+        || payload?.data?.user?.tenantId !== process.env.AUTH_EXPECTED_TENANT_ID) {
+        throw new AcceptanceTenantError()
+      }
+      await verifyAcceptanceTokenTenant(apiBase, tokenValue)
+      return { usable: true, reason: 'ok' }
+    }
+    if (response.ok && payload?.ok !== false && payload?.success !== false) {
+      return { usable: true, reason: 'ok' }
     }
     if (response.ok && (payload?.ok === false || payload?.success === false)) {
       return { usable: false, reason: 'payload_rejected' }
     }
     return { usable: null, reason: `http_${response.status}` }
   } catch (error) {
+    if (error instanceof AcceptanceTenantError) throw error
+    if (process.env.AUTH_EXPECTED_TENANT_ID !== undefined) throw new AcceptanceTenantError()
     return { usable: null, reason: `network:${error?.message || error}` }
   }
 }
@@ -133,6 +144,7 @@ async function loginForToken() {
     body: JSON.stringify({
       email: loginEmail,
       password: loginPassword,
+      ...(process.env.AUTH_EXPECTED_TENANT_ID !== undefined ? { tenantId: process.env.AUTH_EXPECTED_TENANT_ID } : {}),
     }),
   }, '')
   const nextToken = extractTokenFromPayload(payload)
@@ -169,6 +181,9 @@ async function resolveAuthToken() {
     try {
       const refreshedToken = await refreshTokenFromApi(authToken)
       const refreshStatus = await validateTokenWithAuthMe(refreshedToken)
+      if (process.env.AUTH_EXPECTED_TENANT_ID !== undefined && refreshStatus.usable === false) {
+        throw new AcceptanceTenantError()
+      }
       if (refreshStatus.usable !== false) {
         authToken = refreshedToken
         if (refreshStatus.usable === null) {
@@ -178,6 +193,7 @@ async function resolveAuthToken() {
       }
       log(`refresh token is not usable (${refreshStatus.reason}), continue to login fallback`)
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       log(`refresh fallback failed: ${error?.message || error}`)
     }
   }
@@ -192,6 +208,7 @@ async function resolveAuthToken() {
   const loginToken = await loginForToken()
   const loginStatus = await validateTokenWithAuthMe(loginToken)
   if (loginStatus.usable === false) {
+    if (process.env.AUTH_EXPECTED_TENANT_ID !== undefined) throw new AcceptanceTenantError()
     throw new Error('Login succeeded but returned token is unusable')
   }
   if (loginStatus.usable === null) {
@@ -589,6 +606,7 @@ async function run() {
 
   try {
     const authSource = await resolveAuthToken()
+    await verifyAcceptanceTokenTenant(apiBase, authToken)
     summary.authSource = authSource
     log(`auth resolved via ${authSource}`)
 

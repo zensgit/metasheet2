@@ -147,6 +147,7 @@ import type {
   MetaField,
 } from '../types'
 import { CONDITIONAL_FORMATTING_RULE_LIMIT } from '../types'
+import { randomUuid } from '../../utils/uuid'
 import { extractRulesFromConfig, operatorRequiresValue } from '../utils/conditional-formatting'
 import {
   formattingOperatorLabel,
@@ -324,9 +325,7 @@ function addRule() {
   if (!firstField) return
   const operator = defaultOperatorFor(firstField.id)
   draftRules.value.push({
-    id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? `cfr_${crypto.randomUUID()}`
-      : `cfr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `cfr_${randomUuid()}`,
     order: draftRules.value.length,
     fieldId: firstField.id,
     operator,

@@ -11,6 +11,7 @@ vi.mock('../src/services/elearningCertificate', async () => {
 })
 
 import ElearningCertificateWalletSection from '../src/views/ElearningCertificateWalletSection.vue'
+import { formatElearningDate } from '../src/views/elearningLabels'
 
 const REVISION = '11111111-1111-4111-8111-111111111111'
 const ISSUE = '22222222-2222-4222-8222-222222222222'
@@ -71,6 +72,9 @@ describe('ElearningCertificateWalletSection', () => {
     expect(view.textContent).toContain(SERIAL)
     expect(view.textContent).toContain('courseName')
     expect(view.textContent).toContain('Safety')
+    // F13: the issue time goes through the shared formatter, never the raw ISO string.
+    expect(view.querySelector('time')?.textContent).toBe(formatElearningDate('2026-08-30T05:00:00.000Z', false))
+    expect(view.textContent).not.toContain('2026-08-30T05:00:00.000Z')
     const image = view.querySelector('img')
     expect(image?.getAttribute('src')).toBe('https://assets.example.test/certificate.png')
     expect(image?.getAttribute('referrerpolicy')).toBe('no-referrer')

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const configServiceLib = require('../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs') as {
@@ -11,7 +11,23 @@ const configServiceLib = require('../../../../plugins/plugin-attendance/lib/atte
     resolveConfigForApplyRebuild: (trx: unknown, input: Record<string, unknown>) => Promise<{ config: any; created: boolean }>
   }
 }
+// These unit seams exercise scheduling/RBAC, not timezone source resolution.
+// Supply the trusted guard collaborator; native runtime tests prove its SQL/locks.
+const runtimeModule = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+const originalRuntimeFactory = runtimeModule.createAttendanceTimezoneRuntime
+const verifyTimezoneSource = vi.fn(async () => {})
+const prepareTimezoneSource = vi.fn(async (_trx: unknown, input: { orgId: string }) => {
+  expect(input.orgId).toBeTruthy()
+  return verifyTimezoneSource
+})
+runtimeModule.createAttendanceTimezoneRuntime = (deps: unknown) => ({
+  ...originalRuntimeFactory(deps),
+  prepareSourceChange: prepareTimezoneSource,
+})
+delete require.cache[require.resolve('../../../../plugins/plugin-attendance/index.cjs')]
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs') as {
+  activate: (context: unknown) => Promise<void>
+  deactivate: () => Promise<void>
   resetAttendanceSettingsCacheForTests?: () => void
   __attendanceGroupFixedScheduleForTests: {
     applyAttendanceGroupFixedSchedule: (db: unknown, input: Record<string, unknown>) => Promise<any>
@@ -20,6 +36,27 @@ const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cj
     runAttendanceGroupFixedScheduleTransaction: (db: unknown, operation: (trx: unknown) => Promise<any>) => Promise<any>
   }
 }
+
+runtimeModule.createAttendanceTimezoneRuntime = originalRuntimeFactory
+
+beforeAll(async () => {
+  await attendancePlugin.activate({
+    api: {
+      database: { query: async () => [] },
+      http: { addRoute: vi.fn() }, events: { emit: vi.fn() },
+    },
+    services: { attendanceW4SegmentCalculation: {} },
+    logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  })
+})
+afterAll(async () => {
+  try { await attendancePlugin.deactivate() }
+  finally {
+    const key = require.resolve('../../../../plugins/plugin-attendance/index.cjs')
+    if (require.cache[key]?.exports === attendancePlugin) delete require.cache[key]
+  }
+})
+
 
 class FakeHttpError extends Error {
   constructor(public status: number, public code: string, message: string) {

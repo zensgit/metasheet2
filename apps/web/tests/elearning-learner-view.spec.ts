@@ -73,6 +73,36 @@ vi.mock('../src/services/elearningPractice', async () => {
   }
 })
 
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
+
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   ElearningApiError,
@@ -80,6 +110,7 @@ import {
   type ElearningLearnerVideoStatus,
 } from '../src/services/elearning'
 import ElearningLearnerView from '../src/views/ElearningLearnerView.vue'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -87,6 +118,7 @@ import {
   elearningLearnerVideoProgressLabel,
   elearningVideoStatusLabel,
   elearningWatchProgressPercent,
+  formatElearningDate,
 } from '../src/views/elearningLabels'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
@@ -475,6 +507,27 @@ describe('ElearningLearnerView', () => {
     expect(h.getProfile).not.toHaveBeenCalled()
     const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
     expect(examBtn.disabled).toBe(true)
+  })
+
+  it('F13: renders the assignment deadline formatted in local time, never the raw ISO string', async () => {
+    const due = new Date(2026, 7, 25, 9, 5, 30).toISOString()
+    h.list.mockResolvedValue({
+      courses: [course({ assignment: { deadline: due, assignedAt: '2026-01-02T03:04:05.000Z' } })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toBe('2026-08-25 09:05')
+    expect(root.textContent).not.toContain(due)
+    useLocale().setLocale('en')
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toContain('Aug 25, 2026')
+    expect(root.textContent).not.toContain(due)
+  })
+
+  it('F13: shows the no-deadline label when the assignment has none', async () => {
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toBe('无')
   })
 
   it('requires visible self-study registration and starts assessment learning after success', async () => {
@@ -1469,6 +1522,52 @@ describe('ElearningLearnerView', () => {
     expect(h.openContent).toHaveBeenCalledTimes(1)
     expect(h.list).toHaveBeenCalledTimes(2)
     expect(root.textContent).toContain('已完成')
+  })
+
+  it('words the subtitle from the media capability: no exam promise on a no-video deployment (F11)', async () => {
+    const subtitle = (root: HTMLElement) => root.querySelector('[data-testid="elearning-learner-subtitle"]')?.textContent?.trim()
+    h.capabilities.mockResolvedValue(v01Capabilities())
+    const on = mountView()
+    await flushUi()
+    expect(subtitle(on)).toBe('学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。')
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: true, media: false }))
+    const off = mountView()
+    await flushUi()
+    expect(subtitle(off)).toBe('本部署未开启视频，暂无正式考试；可学习文章 / 外链课程并做练习。')
+    expect(subtitle(off)).not.toContain('视频完成后开放')
+    useLocale().setLocale('en')
+    await nextTick()
+    expect(subtitle(off)).toBe('Video is not enabled on this deployment, so there are no formal exams yet. You can study article / external-link courses and do practice.')
+
+    app?.unmount()
+    container?.remove()
+    useLocale().setLocale('zh-CN')
+    // A failed capabilities check (here: master flag off) keeps the original wording.
+    h.capabilities.mockResolvedValue(v01Capabilities({ enabled: false }, { media: false }))
+    const disabled = mountView()
+    await flushUi()
+    expect(disabled.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
+    expect(subtitle(disabled)).toBe('学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。')
+  })
+
+  it.each([
+    { content: true, assessment: true, zh: '本部署未开启视频，暂无正式考试；可学习文章 / 外链课程并做练习。' },
+    { content: true, assessment: false, zh: '本部署未开启视频，暂无正式考试；可学习文章 / 外链课程。' },
+    { content: false, assessment: true, zh: '本部署未开启视频，暂无正式考试；可做练习。' },
+    { content: false, assessment: false, zh: '本部署未开启视频，暂无正式考试。' },
+  ])('names only the enabled no-video surfaces in the subtitle (content=$content, practice=$assessment)', async ({ content, assessment, zh }) => {
+    // Practice is gated by isElearningPracticeReady (master + assessment); incentive keeps the
+    // all-off case mounted without a feature_disabled failure.
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { content, assessment, media: false, incentive: true }))
+    h.list.mockResolvedValue({ courses: [] })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-subtitle"]')?.textContent?.trim()).toBe(zh)
+    expect(root.querySelector('[data-testid="elearning-practice-learner-section"]') !== null).toBe(assessment)
   })
 
   it('filters assessment variants only when assessment capability is unavailable', async () => {
@@ -3161,5 +3260,169 @@ describe('ElearningLearnerView', () => {
     vi.advanceTimersByTime(ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS)
     await flushUi()
     expect(heartbeatBodies()).toEqual([expect.objectContaining({ positionMs: 2000, playing: true })])
+  })
+})
+
+describe('ElearningLearnerView organization context', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const realReload = elearningSessionOrgPage.reload
+  const reload = vi.fn()
+
+  function mountView() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ElearningLearnerView)
+    app.mount(container)
+    return container
+  }
+
+  function statusText(root: HTMLElement): string {
+    return root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? ''
+  }
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    elearningSessionOrgPage.reload = reload
+    reload.mockReset()
+    sessionOrgFake.load.mockReset()
+    sessionOrgFake.switch.mockReset()
+    h.capabilities.mockReset()
+    h.list.mockReset()
+    h.capabilities.mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    elearningSessionOrgPage.reload = realReload
+    sessionOrgFake.orgs = []
+    sessionOrgFake.currentOrgId = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED in Chinese instead of printing the raw code', async () => {
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(statusText(root)).not.toContain('ORG_CONTEXT_REQUIRED')
+    expect(root.querySelector('.elearning-status--error')).not.toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+  })
+
+  it('keeps the generic failure text for any other 403 code and for the org code on another status', async () => {
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('forbidden', 403))
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('失败：forbidden（403）')
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 400))
+    const second = mountView()
+    await flushUntil(() => statusText(second).length > 0)
+    expect(statusText(second)).toBe('失败：ORG_CONTEXT_REQUIRED（400）')
+  })
+
+  it('renders the English explanation under the English locale', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toContain('does not have exactly one active organization')
+  })
+
+  it('shows no organization selector to a single-organization member', async () => {
+    sessionOrgFake.orgs = ['org-a']
+    sessionOrgFake.currentOrgId = 'org-a'
+    const root = mountView()
+    await flushUi()
+    expect(sessionOrgFake.load).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(root.querySelector('select[name="sessionOrgId"]')).toBeNull()
+  })
+
+  it('lets a multi-organization member pick an organization and reloads only after an accepted switch', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    const switcher = root.querySelector('[data-testid="session-org-switcher"]') as HTMLElement
+    expect(switcher).not.toBeNull()
+    expect(switcher.textContent).toContain('请选择组织')
+    // The selector sits above the status line the 403 message points at ("在上方选择组织").
+    const status = root.querySelector('[data-testid="elearning-learner-status"]') as HTMLElement
+    expect(switcher.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const select = switcher.querySelector('select') as HTMLSelectElement
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['', 'org-a', 'org-b'])
+
+    sessionOrgFake.switch.mockResolvedValueOnce(false)
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-b')
+    expect(reload).not.toHaveBeenCalled()
+
+    expect(root.querySelector('[data-testid="elearning-session-org-stale"]')).toBeNull()
+
+    sessionOrgFake.switch.mockResolvedValueOnce(true)
+    select.value = 'org-a'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-a')
+    // Accepted switch: nothing is discarded automatically. The page is marked stale (inert)
+    // and only the banner's button reloads — exam answer drafts may still be on screen.
+    expect(reload).not.toHaveBeenCalled()
+    const banner = document.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+    expect(banner?.textContent).toContain('放弃未保存内容并重新加载')
+    expect(root.querySelector('.elearning-learner')?.hasAttribute('inert')).toBe(true)
+    ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells a single-organization member with a pre-membership token to sign in again', async () => {
+    sessionOrgFake.orgs = ['org-a']
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('您的登录状态早于组织归属，请退出后重新登录。')
+    expect(root.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+  })
+
+  it('disables the organization selector while a learner action is in flight', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    h.capabilities.mockReset().mockResolvedValue(v01Capabilities())
+    h.list.mockReset().mockResolvedValue({ courses: [course()] })
+    h.startWatch.mockReset().mockReturnValue(new Promise(() => {}))
+    const root = mountView()
+    await flushUi()
+    const select = root.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+    expect(select.disabled).toBe(false)
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.startWatch).toHaveBeenCalledTimes(1)
+    expect(select.disabled).toBe(true)
+  })
+})
+
+describe('formatElearningDate (F13)', () => {
+  it('formats an ISO instant in local time as YYYY-MM-DD HH:mm for zh', () => {
+    expect(formatElearningDate(new Date(2026, 0, 2, 3, 4, 59).toISOString(), true)).toBe('2026-01-02 03:04')
+    expect(formatElearningDate(new Date(2026, 11, 31, 23, 59).toISOString(), true)).toBe('2026-12-31 23:59')
+  })
+
+  it('uses the en medium date + short time when the viewer is not zh', () => {
+    const text = formatElearningDate(new Date(2026, 7, 25, 9, 5).toISOString(), false)
+    expect(text).toContain('Aug 25, 2026')
+    expect(text).not.toContain('T')
+  })
+
+  it('is null-safe and returns unparseable values unchanged', () => {
+    expect(formatElearningDate(null, true)).toBe('')
+    expect(formatElearningDate(undefined, true)).toBe('')
+    expect(formatElearningDate('', true)).toBe('')
+    expect(formatElearningDate('   ', false)).toBe('')
+    expect(formatElearningDate('not-a-date', true)).toBe('not-a-date')
+    expect(formatElearningDate('2026-13-45T99:00:00Z', false)).toBe('2026-13-45T99:00:00Z')
   })
 })

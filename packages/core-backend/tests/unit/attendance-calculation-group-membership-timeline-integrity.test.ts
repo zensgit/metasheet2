@@ -25,6 +25,7 @@ vi.mock('../../src/db/pg', () => ({
 import {
   AttendanceCalculationGroupMembershipError,
   listAttendanceCalculationGroupMemberships,
+  registerAttendanceCalculationGroupTimezoneSourceGuard,
   transitionAttendanceCalculationGroupMembership,
 } from '../../src/services/AttendanceCalculationGroupMembership'
 
@@ -75,10 +76,12 @@ function executorReturning(rows: Record<string, unknown>[]): Executor {
 
 describe('W1 timeline integrity guard without DB EXCLUDE protection (service level)', () => {
   beforeEach(() => {
+    registerAttendanceCalculationGroupTimezoneSourceGuard(async () => async () => {})
     executedStatements.length = 0
     clientQueryMock.mockReset()
     clientQueryMock.mockImplementation(async (statement: string) => {
       executedStatements.push(statement)
+      if (statement.includes('to_regclass')) return {rows:[{present:true}]}
       if (statement.includes('pg_advisory_xact_lock')) return { rows: [] }
       if (statement.includes('attendance_calculation_group_membership_operations')) {
         return { rows: [] }
@@ -104,6 +107,21 @@ describe('W1 timeline integrity guard without DB EXCLUDE protection (service lev
       }
       return { rows: [] }
     })
+  })
+
+  it('refuses a fresh transition when the timezone schema is missing before any DML', async () => {
+    clientQueryMock.mockImplementation(async (statement: string) => {
+      executedStatements.push(statement)
+      if (statement.includes('FROM attendance_groups')) return { rows: [{ id: GROUP_C }] }
+      if (statement.includes('FROM users u')) return { rows: [{ '?column?': 1 }] }
+      return statement.includes('to_regclass') ? { rows: [{ present: false }] } : { rows: [] }
+    })
+    await expect(transitionAttendanceCalculationGroupMembership({
+      orgId: ORG_ID, userId: USER_ID, targetGroupId: GROUP_C,
+      effectiveOn: '2026-05-01', actorId: ACTOR_ID, reason: 'synthetic', correlationId: randomUUID(),
+    })).rejects.toMatchObject({ code: 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE', status: 503 })
+    expect(executedStatements.some((statement) => statement.includes('to_regclass'))).toBe(true)
+    expect(executedStatements.some((statement) => /^\s*(INSERT|UPDATE|DELETE)/.test(statement))).toBe(false)
   })
 
   it('rejects the list read path with the typed corrupt error on overlapping rows', async () => {

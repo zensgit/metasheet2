@@ -420,6 +420,23 @@ describe('MetaRecordApprovalPanel — server answers that are not the happy path
     expect(container.querySelectorAll('.ms-status-tag')).toHaveLength(0)
   })
 
+  // R-43 A: the same label now covers APPROVAL_REQUESTER_CHOICE_REQUIRED, and the panel renders a failed
+  // row's reason through it — the sentence must read correctly here too (no raw code).
+  it('a failed row refused for 发起人自选 explains itself in Chinese, not by raw code (R-43 A)', async () => {
+    useLocale().setLocale('zh-CN')
+    const rows: MetaRecordApprovalSubmission[] = [
+      { id: 'sub_f', templateId: 'tpl_leave', status: 'failed', error: 'APPROVAL_REQUESTER_CHOICE_REQUIRED', drift: { changed: false, changedFieldIds: [] } },
+    ]
+    const { container } = mountPanel({ client: fakeClient(rows) })
+    await flushUi()
+    await expand(container)
+    const reason = container.querySelector('[data-test="record-approval-failure"]')!
+    expect(reason).not.toBeNull()
+    expect(reason.textContent).toContain('发起人自选')
+    expect(reason.textContent).toContain('审批中心')
+    expect(reason.textContent).not.toContain('APPROVAL_REQUESTER_CHOICE_REQUIRED')
+  })
+
   it('an UNKNOWN failure code prints nothing rather than a raw token', async () => {
     const rows: MetaRecordApprovalSubmission[] = [
       { id: 'sub_f', templateId: 'tpl_leave', status: 'failed', error: 'SOME_NEW_CODE', drift: { changed: false, changedFieldIds: [] } },

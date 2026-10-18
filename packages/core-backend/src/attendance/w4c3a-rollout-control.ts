@@ -890,17 +890,10 @@ function computeStoredRequestSnapshotPayloadFingerprintV1(rawPayload: unknown): 
  * Bucket definitions (mechanically verified against the plugin, not assumed):
  *  - pending: `status = 'pending'`. Every calculation-affecting type can reach this state and can
  *    be cancelled from it through the shared cancel adapter.
- *  - reversible: `status = 'approved' AND request_type = 'leave'` — the ONLY combination the
- *    plugin's shared cancel adapter (`plugins/plugin-attendance/index.cjs`, `requestCancelAdapter`)
- *    permits to cancel an ALREADY-terminal (already-decided) request. `:34091` sets
- *    `approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'`;
- *    `:34174` hard-blocks every other already-resolved request from reaching cancellation
- *    (`if (requestRow.status !== 'pending' && !approvedLeave) throw HttpError(400, ...)`). No
- *    other writer in `plugins/` or `packages/` sets `attendance_requests.status = 'cancelled'`
- *    (swept both raw-SQL and Kysely-builder syntax against current `origin/main`) — a request
- *    reaching `status = 'approved'` for a non-`leave` type is, today, terminal and never
- *    reversible. A future request type gaining a post-approval cancel path would need this bucket
- *    definition revisited explicitly, not silently inherited.
+ *  - reversible: approved leave or business_trip. Leave cancellation reverses its
+ *    existing calculation evidence; business-trip cancellation uses the canonical
+ *    cancel-round adapter and only shortens the future timezone arrangement.
+ *    Other approved request types remain terminal and cannot use either path.
  *
  * Defect kinds:
  *  - missing: no snapshot row exists for the request.
@@ -958,7 +951,7 @@ async function classifyAttendanceRequestSnapshotDefectsV1(
        FROM attendance_requests
       WHERE org_id = $1
         AND request_type = ANY($2::text[])
-        AND (status = 'pending' OR (status = 'approved' AND request_type = 'leave'))
+        AND (status = 'pending' OR (status = 'approved' AND request_type IN ('leave','business_trip')))
       ORDER BY id
       FOR UPDATE`,
     [orgId, ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 as unknown as string[]],

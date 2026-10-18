@@ -95,3 +95,40 @@ describe('summarizeConditionNode', () => {
     expect(summarizeConditionNode({ branches: [], defaultEdgeKey: 'e9' }, SCHEMA)).toEqual(['默认分支 → e9'])
   })
 })
+
+// R-43 (B): select / multi-select rule values are opaque option VALUES — the summary renders the
+// option NAME (both the author-side branch headers and the member-side flow preview read this).
+describe('R-43 (B) option names in condition summaries', () => {
+  const OPTION_SCHEMA = {
+    fields: [
+      { id: 'kind', type: 'select', label: '类型', options: [{ label: '出差', value: 'opt_trip' }, { label: '其他', value: 'opt_other' }] },
+      { id: 'tags', type: 'multi-select', label: '标签', options: [{ label: '加急', value: 'opt_urgent' }, { label: '普通', value: 'opt_normal' }] },
+    ],
+  } as FormSchema
+
+  it('eq on a select renders the option name (zh and en; names are data, not translated)', () => {
+    expect(summarizeConditionRule({ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }, OPTION_SCHEMA)).toBe('类型 = 「出差」')
+    expect(summarizeConditionRule({ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }, OPTION_SCHEMA, false)).toBe('类型 = "出差"')
+  })
+
+  it('in renders every value as its name (select and multi-select)', () => {
+    expect(summarizeConditionRule({ fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] }, OPTION_SCHEMA))
+      .toBe('类型 属于 「出差」、「其他」')
+    expect(summarizeConditionRule({ fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] }, OPTION_SCHEMA, false))
+      .toBe('标签 in "加急", "普通"')
+  })
+
+  it('a value no current option carries falls back to the raw value, marked (zh and en)', () => {
+    expect(summarizeConditionRule({ fieldId: 'kind', operator: 'eq', value: 'opt_gone' }, OPTION_SCHEMA)).toBe('类型 = 「opt_gone」（不在当前选项中）')
+    expect(summarizeConditionRule({ fieldId: 'kind', operator: 'eq', value: 'opt_gone' }, OPTION_SCHEMA, false)).toBe('类型 = "opt_gone" (not a current option)')
+  })
+
+  it('a renamed option shows the new name; the rule value is unchanged', () => {
+    const renamed = {
+      fields: [{ id: 'kind', type: 'select', label: '类型', options: [{ label: '差旅', value: 'opt_trip' }] }],
+    } as FormSchema
+    const rule = { fieldId: 'kind', operator: 'eq' as const, value: 'opt_trip' }
+    expect(summarizeConditionRule(rule, renamed)).toBe('类型 = 「差旅」')
+    expect(rule.value).toBe('opt_trip')
+  })
+})

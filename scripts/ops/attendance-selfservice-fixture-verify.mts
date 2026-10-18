@@ -30,7 +30,7 @@ const vars: Record<string, string | number> = {
   tz: 'Asia/Shanghai', start_date: '2049-06-01', end_date: '2049-06-14',
 }
 let server: { start(): Promise<void>; stop(): Promise<void>; getAddress(): { port: number } | null } | undefined
-const counts = { seedPasses: 0, activeLeaveTypes: 0, activeOvertimeRules: 0, publishedManualSwapAssignments: 0, submittedLeave: 0, submittedOvertime: 0, submittedSwap: 0, cancelledRequests: 0 }
+const counts = { seedPasses: 0, defaultRules: 0, activeLeaveTypes: 0, activeOvertimeRules: 0, publishedManualSwapAssignments: 0, submittedLeave: 0, submittedOvertime: 0, submittedSwap: 0, cancelledRequests: 0 }
 let stage = 'SEED'
 try {
   const source = readFileSync(join(root, 'scripts/ops/attendance-staging-window-runner-remote.sh'), 'utf8')
@@ -46,8 +46,18 @@ try {
     })
   for (let i = 0; i < 2; i += 1) {
     await pool.query(sql)
+    // This rehearsal owns a fresh synthetic org; keep the shared soak seed unchanged.
+    await pool.query(`INSERT INTO attendance_rules (id, org_id, name, timezone, is_default)
+      SELECT $1, $2, 'Synthetic self-service default', $3, true
+      WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)`,
+    [randomUUID(), orgId, vars.tz])
     counts.seedPasses += 1
   }
+  const defaults = (await pool.query(
+    'SELECT timezone FROM attendance_rules WHERE org_id = $1 AND is_default = true', [orgId],
+  )).rows
+  counts.defaultRules = defaults.length
+  if (defaults.length !== 1 || defaults[0].timezone !== vars.tz) throw new Error('FIXTURE_DEFAULT_RULE_NOT_IDEMPOTENT')
   const users = (await pool.query('SELECT id FROM users WHERE username LIKE $1 ORDER BY username', [`${prefix}%`])).rows
   if (users.length !== 2) throw new Error('FIXTURE_USERS_NOT_IDEMPOTENT')
   const assignments = (await pool.query(`SELECT id, user_id FROM attendance_shift_assignments

@@ -19,6 +19,11 @@ import {
   up,
 } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
 
+import {
+  up as memberSourcesUp,
+  down as memberSourcesDown,
+} from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
+
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
@@ -562,6 +567,49 @@ describeIfDatabase('W4C-3a durable legacy execution-plan migration (real Postgre
       adminAsyncErrors,
       removeAdminErrorListener: () => { adminPool?.off('error', captureAdminAsyncError) },
     })
+  })
+
+  it('accepts both closed member variants, rejects malformed source ordinals, and guards provenance downgrade', async () => {
+    // Separate scratch DB: no new schema state leaks into predecessor migration gates.
+    const name = `ms2_w4c3a_sources_${run}`
+    const scratch = await createScratch(adminPool, name)
+    try {
+      await w4c0Up(scratch.db)
+      await up(scratch.db)
+      await memberSourcesUp(scratch.db)
+      const legacy = {
+        kind: 'ensure_member', memberId: newId(), groupRef: newId(),
+        userId: 'user-a', membershipExistedAtPrepare: false,
+      }
+      const valid = { ...legacy, sourceOrdinals: [0, 2] }
+      for (const effect of [legacy, valid]) {
+        const result = await scratch.pool.query('SELECT attendance_w4c3a_group_effect_valid($1::jsonb) AS valid', [JSON.stringify(effect)])
+        expect(result.rows).toEqual([{ valid: true }])
+      }
+      for (const sourceOrdinals of [[], [0, 0], [2, 0], [-1], [0.5], [2147483648], null]) {
+        const result = await scratch.pool.query('SELECT attendance_w4c3a_group_effect_valid($1::jsonb) AS valid', [JSON.stringify({ ...legacy, sourceOrdinals })])
+        expect(result.rows).toEqual([{ valid: false }])
+      }
+      const extra = await scratch.pool.query('SELECT attendance_w4c3a_group_effect_valid($1::jsonb) AS valid', [JSON.stringify({ ...valid, extra: true })])
+      expect(extra.rows).toEqual([{ valid: false }])
+      await scratch.db.transaction().execute((trx) => memberSourcesDown(trx))
+      const restored = await scratch.pool.query('SELECT attendance_w4c3a_group_effect_valid($1::jsonb) AS legacy, attendance_w4c3a_group_effect_valid($2::jsonb) AS current', [JSON.stringify(legacy), JSON.stringify(valid)])
+      expect(restored.rows).toEqual([{ legacy: true, current: false }])
+      await memberSourcesUp(scratch.db)
+      const seeded = await seedNoTargetPlan(scratch.pool, `sources-down-${run}`)
+      const writer = await scratch.pool.connect()
+      try {
+        // Model retained newer history solely for the guarded-down check.
+        await writer.query('SET session_replication_role = replica')
+        await writer.query(`UPDATE attendance_import_legacy_execution_plan_chunks
+          SET chunk = jsonb_set(chunk, '{groupEffects}', $2::jsonb) WHERE job_id=$1`, [seeded.jobId, JSON.stringify([{ ...legacy, sourceOrdinals: [0] }])])
+      } finally {
+        await writer.query('SET session_replication_role = origin')
+        writer.release()
+      }
+      await expect(scratch.db.transaction().execute((trx) => memberSourcesDown(trx))).rejects.toThrow('W4C3A_MEMBER_SOURCE_HISTORY_DOWN_DENIED')
+
+    } finally { await destroyScratch(adminPool, name, scratch) }
   })
 
   it('creates the four job columns, six history/revision tables, named deferred validator, and ten truncate guards', async () => {

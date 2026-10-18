@@ -8,11 +8,24 @@ import {
 } from './w4c3a-legacy-execution-plan'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
+import { throwAttendanceRosterOrgMembershipError } from './w4c3a-legacy-plan-group-effects'
 import { assertParentNotOperatorRetiredV1 } from './w4c3c-ops-retirement'
 
 type QueryRow = Record<string, unknown>
 
 class AttendanceLegacyRecordPreconditionRowError extends Error {}
+
+const ACTIVE_ORG_MEMBER_SQL = `
+  SELECT 1
+    FROM user_orgs uo
+    JOIN users u ON u.id = uo.user_id
+   WHERE uo.org_id = $1
+     AND uo.user_id = $2
+     AND uo.is_active = true
+     AND u.is_active = true
+   LIMIT 1
+   FOR SHARE OF uo, u
+`
 
 function compareUtf8(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
@@ -241,6 +254,7 @@ export async function lockAndRecheckAttendanceLegacyGroupPreconditionsV1(
   trx: AttendanceW4TransactionClientV1,
   plan: VerifiedAttendanceLegacyPlanV1,
 ): Promise<boolean> {
+  const rejectedMemberUserIds: string[] = []
   if (plan.groupEffects.length === 0) {
     return plan.manifest.groupRevision === null &&
       plan.manifest.groupStateFingerprint === null
@@ -382,6 +396,17 @@ export async function lockAndRecheckAttendanceLegacyGroupPreconditionsV1(
       ).rows
       if (rows.length !== 0) return false
     }
+    const activeMember = (
+      await trx.query(ACTIVE_ORG_MEMBER_SQL, [orgId, effect.userId])
+    ).rows
+    // An org-membership miss is USER_NOT_IN_ORG, same details as the write
+    // adapter. Structural misses above still return false
+    // (PRECONDITION_CHANGED). Collected misses are thrown once, after this
+    // loop, so every rejected ensure_member contributes indexes.
+    if (activeMember.length !== 1) {
+      rejectedMemberUserIds.push(String(effect.userId))
+      continue
+    }
     // Effective existing group referenced only by membership (no ensure_group).
     if (
       !seenGroupIds.has(effect.groupRef) &&
@@ -432,6 +457,10 @@ export async function lockAndRecheckAttendanceLegacyGroupPreconditionsV1(
       userId: effect.userId,
       exists: effect.membershipExistedAtPrepare,
     }))
+
+  if (rejectedMemberUserIds.length > 0) {
+    throwAttendanceRosterOrgMembershipError(plan, rejectedMemberUserIds)
+  }
 
   try {
     return (

@@ -99,20 +99,70 @@
               {{ codeMessage(membershipError, t) }}
             </p>
 
-            <button
-              v-if="detailResult.task.status === 'open' && detailResult.task.canComplete"
-              type="button"
-              data-testid="tasks-detail-complete-button"
-              :disabled="detailActionPending"
-              @click="onDetailComplete"
-            >{{ t.complete }}</button>
-            <button
-              v-if="detailResult.task.status === 'done' && detailResult.task.canReopen"
-              type="button"
-              data-testid="tasks-detail-reopen-button"
-              :disabled="detailActionPending"
-              @click="onDetailReopen"
-            >{{ t.reopen }}</button>
+            <!-- In "all" mode a complete / reopen that would change nothing (the server answers 200
+                 and keeps the task as it is) is turned off, with the reason next to it
+                 (`tasks/tasksCompletion.ts`). Decided only once the viewer's id is known. A done
+                 "all" mode task with another assignee also offers reopening every assignee's part
+                 (scope `all`), to every viewer the detail's `canReopen` permits, as the server
+                 does; the first button keeps reopening the viewer's own part (scope `self`). -->
+            <template v-if="detailResult.task.status === 'open' && detailResult.task.canComplete">
+              <button
+                type="button"
+                data-testid="tasks-detail-complete-button"
+                :disabled="detailActionPending || detailCompleteNoop !== null"
+                :aria-describedby="detailCompleteNoop !== null ? 'tasks-detail-complete-reason' : undefined"
+                @click="onDetailComplete"
+              >{{ t.complete }}</button>
+              <p
+                v-if="detailCompleteNoop !== null"
+                id="tasks-detail-complete-reason"
+                class="tasks-view__note"
+                data-testid="tasks-detail-complete-reason"
+              >{{ detailCompleteNoop === 'not_assignee' ? t.completeNoopNotAssignee : t.completeNoopOwnPartDone }}</p>
+            </template>
+            <template v-if="detailResult.task.status === 'done' && detailResult.task.canReopen">
+              <button
+                type="button"
+                data-testid="tasks-detail-reopen-button"
+                :disabled="detailActionPending || detailReopenSelfNoop"
+                :aria-describedby="detailReopenSelfNoop ? 'tasks-detail-reopen-reason' : undefined"
+                @click="onDetailReopen('self')"
+              >{{ t.reopen }}</button>
+              <!-- Reopening for everyone reopens other assignees' finished parts too, so it asks
+                   first: an inline two-step confirmation (no window.confirm), as the delete and
+                   the remove-from-list controls do. Cancelling it sends nothing. -->
+              <span v-if="detailOffersReopenAll" ref="reopenAllRef">
+                <button
+                  v-if="!reopenAllConfirmVisible"
+                  type="button"
+                  data-testid="tasks-detail-reopen-all-button"
+                  :disabled="detailActionPending"
+                  @click="openReopenAllConfirm"
+                >{{ t.reopenAll }}</button>
+                <span v-else data-testid="tasks-detail-reopen-all-confirm">
+                  <span id="tasks-detail-reopen-all-prompt" data-testid="tasks-detail-reopen-all-prompt">{{ t.reopenAllConfirmPrompt }}</span>
+                  <button
+                    type="button"
+                    data-testid="tasks-detail-reopen-all-confirm-yes"
+                    aria-describedby="tasks-detail-reopen-all-prompt"
+                    :disabled="detailActionPending"
+                    @click="onDetailReopen('all')"
+                  >{{ t.reopenAllConfirm }}</button>
+                  <button
+                    type="button"
+                    data-testid="tasks-detail-reopen-all-confirm-cancel"
+                    :disabled="detailActionPending"
+                    @click="cancelReopenAllConfirm"
+                  >{{ t.cancel }}</button>
+                </span>
+              </span>
+              <p
+                v-if="detailReopenSelfNoop"
+                id="tasks-detail-reopen-reason"
+                class="tasks-view__note"
+                data-testid="tasks-detail-reopen-reason"
+              >{{ t.reopenSelfNoop }}</p>
+            </template>
 
             <!-- M4 (design §2.4, §4.3): the editor and the lists section, both stateless — their state
                  is held below, because this whole block is re-created on every `loadDetail`. The
@@ -397,6 +447,22 @@
                 @click="switchView(viewOption.value)"
               >{{ t[viewOption.labelKey] }}</button>
             </nav>
+            <!-- G2-core: the status switch, orthogonal to the view switcher above. Default 未完成;
+                 the choice is remembered per browser (tasks/tasksStatusFilter.ts). The current
+                 option stays enabled (only `aria-pressed` marks it), so keyboard focus stays on it
+                 after activation and screen-reader focus mode can reach it; `switchStatus` makes
+                 pressing it again a no-op. -->
+            <nav ref="statusSwitcherRef" class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
+              <button
+                v-for="statusOption in STATUS_FILTERS"
+                :key="statusOption.value"
+                type="button"
+                class="tasks-view__switch-button"
+                :data-testid="`tasks-status-switch-${statusOption.value}`"
+                :aria-pressed="currentStatus === statusOption.value"
+                @click="switchStatus(statusOption.value)"
+              >{{ t[statusOption.labelKey] }}</button>
+            </nav>
 
             <form class="tasks-view__create" data-testid="tasks-create-form" @submit.prevent="onCreate">
               <input
@@ -410,15 +476,75 @@
                 <option value="all">{{ t.modeAll }}</option>
                 <option value="any">{{ t.modeAny }}</option>
               </select>
+              <!-- The optional due date: with one, the create request carries the date (and the time
+                   when set) with the browser's zone, the same zone the detail editor fills in, and
+                   no reminder key, so the server sets the default reminder on create. A later
+                   PATCH never derives one. -->
+              <label class="tasks-view__create-due">
+                {{ t.createDueDateLabel }}
+                <input
+                  v-model="newDueDate"
+                  type="date"
+                  data-testid="tasks-create-due-date"
+                  :aria-describedby="newDueDate !== '' ? 'tasks-create-due-note' : undefined"
+                />
+              </label>
+              <label class="tasks-view__create-due">
+                {{ t.createDueTimeLabel }}
+                <input
+                  v-model="newDueTime"
+                  type="time"
+                  step="60"
+                  data-testid="tasks-create-due-time"
+                  :disabled="newDueDate === ''"
+                />
+              </label>
               <button
                 type="submit"
                 data-testid="tasks-create-submit"
                 :disabled="creating || newTitle.trim().length === 0"
               >{{ t.create }}</button>
             </form>
+            <p v-if="newDueDate !== ''" id="tasks-create-due-note" class="tasks-view__note" data-testid="tasks-create-due-note">
+              {{ t.createDueRemindNote }}
+            </p>
+            <p v-if="createDueError" class="tasks-view__message" data-testid="tasks-create-due-error" role="alert">
+              {{ createDueError === 'ZONE_UNAVAILABLE' ? t.createDueZoneUnavailable : codeMessage(createDueError, t) }}
+            </p>
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
+            <!-- A create the server took while 已完成 is on: the new task is not completed, so the
+                 reloaded list leaves it out. Say so inline, without switching the filter for the
+                 viewer (it is their remembered choice). The new task's page is always offered.
+                 The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
+                 我委派的 the view leaves it out under any status, so the copy does not put it down
+                 to the filter alone. Cleared by the next create, a status or view switch, and a
+                 route change.
+                 The role="status" region is always mounted and only its content comes and goes: a
+                 polite live region that enters the page together with its text is not reliably
+                 announced, while a change inside an existing one is. Empty, it takes no space. -->
+            <div data-testid="tasks-create-hidden-live" role="status">
+              <div
+                v-if="createdHidden !== null"
+                class="tasks-view__created-hidden"
+                data-testid="tasks-create-hidden-notice"
+              >
+                <span data-testid="tasks-create-hidden-text">{{
+                  createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                }}</span>
+                <button
+                  v-if="createdHidden.viewLists"
+                  type="button"
+                  data-testid="tasks-create-hidden-show-open"
+                  @click="onShowOpenFromNotice"
+                >{{ t.createdHiddenShowOpen }}</button>
+                <router-link
+                  :to="`/tasks/${encodeURIComponent(createdHidden.id)}`"
+                  data-testid="tasks-create-hidden-open-task"
+                >{{ t.createdHiddenOpenTask }}</router-link>
+              </div>
+            </div>
             <!-- Complete/reopen results other than ok/org_missing (forbidden / not_found / error) used
                  to be silently dropped — the click just did nothing, with no way to tell "it worked" from
                  "it failed". This surfaces the failure WITHOUT clearing the list, so the row the action
@@ -432,10 +558,14 @@
                  the group reads are out or failed, the board's root keeping `tasks-list` ([fe-16]).
                  The row content below is the same markup as the plain list's rows further down
                  (tasks-groups.spec.ts pins the two equal); the row actions stay this view's
-                 ([fe-33]). -->
+                 ([fe-33]). A row of an "all" mode task offers its complete / reopen on the task
+                 detail instead: a list row carries no assignee state, and in that mode a click
+                 can succeed and change nothing (the detail turns such a click off and says why). -->
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
+              :rows-filtered="currentStatus !== 'all'"
+              :rows-truncated="listResult.truncated"
               :reload-items="reloadListQuietly"
               @org-missing="onListsOrgMissing"
             >
@@ -447,8 +577,13 @@
                 >{{ task.title }}</router-link>
                 <span class="tasks-view__item-status">{{ task.status === 'done' ? t.statusDone : t.statusOpen }}</span>
                 <span v-if="task.due_at" class="tasks-view__item-due" data-testid="tasks-list-item-due">{{ formatViewerInstant(task.due_at, undefined, viewerLocale) }}</span>
+                <router-link
+                  v-if="task.completion_mode === 'all'"
+                  :to="`/tasks/${encodeURIComponent(task.id)}`"
+                  data-testid="tasks-row-detail-action"
+                >{{ task.status === 'open' ? t.rowCompleteInDetail : t.rowReopenInDetail }}</router-link>
                 <button
-                  v-if="task.status === 'open'"
+                  v-else-if="task.status === 'open'"
                   type="button"
                   data-testid="tasks-complete-button"
                   @click="onComplete(task.id)"
@@ -470,8 +605,13 @@
                 >{{ task.title }}</router-link>
                 <span class="tasks-view__item-status">{{ task.status === 'done' ? t.statusDone : t.statusOpen }}</span>
                 <span v-if="task.due_at" class="tasks-view__item-due" data-testid="tasks-list-item-due">{{ formatViewerInstant(task.due_at, undefined, viewerLocale) }}</span>
+                <router-link
+                  v-if="task.completion_mode === 'all'"
+                  :to="`/tasks/${encodeURIComponent(task.id)}`"
+                  data-testid="tasks-row-detail-action"
+                >{{ task.status === 'open' ? t.rowCompleteInDetail : t.rowReopenInDetail }}</router-link>
                 <button
-                  v-if="task.status === 'open'"
+                  v-else-if="task.status === 'open'"
                   type="button"
                   data-testid="tasks-complete-button"
                   @click="onComplete(task.id)"
@@ -485,7 +625,7 @@
               </li>
             </ul>
             <p v-else-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
-              {{ t.listEmpty }}
+              {{ currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
             </p>
             <p v-else-if="listResult.kind === 'error'" class="tasks-view__message" data-testid="tasks-list-error" role="alert">
               {{ t.listLoadFailed }}
@@ -556,16 +696,27 @@ import {
   setParent,
   type Comment,
   type CompletionMode,
+  type ReopenScope,
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
+import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
 import {
+  readTaskStatusFilter,
+  statusFilterHidesNewTask,
+  viewListsNewTask,
+  writeTaskStatusFilter,
+} from '../../tasks/tasksStatusFilter'
+import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
+import {
+  buildCreateDue,
   buildTaskPatch,
   checkRemindAt,
   checkTaskDates,
@@ -574,6 +725,8 @@ import {
   createEditorState,
   initDraft,
   rebaseDraft,
+  usableViewerTimeZone,
+  type CreateDueCode,
   type EditorErrorSlot,
   type EditorState,
   type TaskDraft,
@@ -615,9 +768,22 @@ const VIEWS: Array<{ value: TaskView; labelKey: keyof TasksText }> = [
 
 const currentView = ref<TaskView>('assigned')
 
+// G2-core: the status filter (lock §2 item 1: 未完成 by default, switchable to 已完成 / 全部),
+// orthogonal to the view. Read once at setup from this browser's storage; every list read sends it.
+const STATUS_FILTERS: Array<{ value: TaskStatusFilter; labelKey: keyof TasksText }> = [
+  { value: 'open', labelKey: 'statusFilterOpen' },
+  { value: 'done', labelKey: 'statusFilterDone' },
+  { value: 'all', labelKey: 'statusFilterAll' },
+]
+
+const currentStatus = ref<TaskStatusFilter>(readTaskStatusFilter())
+
 type ListRenderState =
   | { kind: 'loading' }
-  | { kind: 'ok'; items: TaskListItem[] }
+  // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
+  // board, which under a status filter can no longer tell a row cut off by the page from a row the
+  // filter leaves out).
+  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean }
   | { kind: 'empty' }
   | { kind: 'error' }
 
@@ -636,6 +802,19 @@ const orgMissingFromAction = ref(false)
 
 const newTitle = ref('')
 const newCompletionMode = ref<CompletionMode>('all')
+// The create form's due date and time, as their controls report them (`''` when empty). Clearing
+// the date clears the time too: the time control is off without a date.
+const newDueDate = ref('')
+const newDueTime = ref('')
+watch(newDueDate, (date) => {
+  if (date === '') newDueTime.value = ''
+})
+// The pre-check result of the due fields (`buildCreateDue`); nothing is sent while it is set.
+// Any edit of the date or the time drops it, so it never outlives the values it was about.
+const createDueError = ref<CreateDueCode | null>(null)
+watch([newDueDate, newDueTime], () => {
+  createDueError.value = null
+})
 const creating = ref(false)
 const createErrorVisible = ref(false)
 const createErrorInvalidTitle = ref(false)
@@ -643,8 +822,16 @@ const createErrorInvalidTitle = ref(false)
 // through `codeMessage` like every inline code here.
 // RULED(2026-10-07): [R17] [N2] — an assignee who is not an active member of the org is 422
 // `INACTIVE_ORG_MEMBER`. The form sends no `assignees` (the creator alone, whom the server never
-// looks up), so today no form input reaches these codes.
+// looks up), so no form input reaches that code; the date codes can come back for a due date the
+// pre-check let through.
 const createErrorCode = ref<string | null>(null)
+// The task the last create made when the status filter it was made under leaves it out of the
+// list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
+// whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
+// only then does switching the status filter reach it.
+const createdHidden = ref<{ id: string; viewLists: boolean } | null>(null)
+// The status switch's nav, for moving focus after the notice's action removes the notice.
+const statusSwitcherRef = ref<HTMLElement | null>(null)
 
 // ---------------------------------------------------------------------------------------------
 // M3 (backend contract §3.1, §3.3-§3.7): subtasks, membership, followers, comments, delete.
@@ -753,6 +940,40 @@ async function ensureCurrentUser(): Promise<void> {
   currentUserStatus.value = id ? 'known' : 'unavailable'
 }
 
+// The viewer's id for the complete / reopen no-op rules: only once it is known; until then (and
+// when it cannot be resolved) the buttons stay as the detail's `canComplete` / `canReopen` say.
+const completionViewerId = computed(() => (currentUserStatus.value === 'known' ? currentUserId.value : null))
+const detailCompleteNoop = computed<CompleteNoopReason | null>(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' ? completeNoopReason(state.task, completionViewerId.value) : null
+})
+const detailReopenSelfNoop = computed(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && reopenSelfIsNoop(state.task, completionViewerId.value)
+})
+const detailOffersReopenAll = computed(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && offersReopenAll(state.task, completionViewerId.value)
+})
+
+// The open "reopen for everyone" confirmation. Held here, not in the detail block (re-created on
+// every `loadDetail`); closed when the offer goes away, so a later offer starts from the button.
+const reopenAllConfirmVisible = ref(false)
+const reopenAllRef = ref<HTMLElement | null>(null)
+watch(detailOffersReopenAll, (offered) => {
+  if (!offered) reopenAllConfirmVisible.value = false
+})
+
+function openReopenAllConfirm(): void {
+  reopenAllConfirmVisible.value = true
+  void focusAfterSwap(() => reopenAllRef.value, 'tasks-detail-reopen-all-confirm-yes')
+}
+
+function cancelReopenAllConfirm(): void {
+  reopenAllConfirmVisible.value = false
+  void focusAfterSwap(() => reopenAllRef.value, 'tasks-detail-reopen-all-button')
+}
+
 function canEditOwnComment(comment: Comment): boolean {
   if (comment.deleted) return false
   if (!canCommentTask.value) return false
@@ -796,11 +1017,14 @@ async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
   listResult.value = { kind: 'loading' }
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
 
   if (result.kind === 'ok') {
-    listResult.value = result.items.length === 0 ? { kind: 'empty' } : { kind: 'ok', items: result.items }
+    listResult.value =
+      result.items.length === 0
+        ? { kind: 'empty' }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
     return
   }
   if (result.kind === 'org_missing') {
@@ -820,10 +1044,13 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
   if (result.kind === 'ok') {
-    listResult.value = result.items.length === 0 ? { kind: 'empty' } : { kind: 'ok', items: result.items }
+    listResult.value =
+      result.items.length === 0
+        ? { kind: 'empty' }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
     return
   }
   if (result.kind === 'org_missing') {
@@ -879,20 +1106,55 @@ async function enterDetail(id: string): Promise<void> {
 function switchView(view: TaskView): void {
   if (view === currentView.value) return
   listPageToken += 1
+  createdHidden.value = null
   currentView.value = view
   void loadList()
+}
+
+/** G2-core: same page-moved-on discipline as `switchView` — a row action or create started under
+ *  the previous status must not act on this one's rows. */
+function switchStatus(status: TaskStatusFilter): void {
+  if (status === currentStatus.value) return
+  listPageToken += 1
+  createdHidden.value = null
+  currentStatus.value = status
+  writeTaskStatusFilter(status)
+  void loadList()
+}
+
+/** The hidden-by-filter notice's action: the same switch as pressing 未完成. The notice (and the
+ *  button that was pressed) goes away, so focus moves to the 未完成 button it pressed for the
+ *  viewer instead of falling back to the page body. */
+function onShowOpenFromNotice(): void {
+  switchStatus('open')
+  void focusAfterSwap(() => statusSwitcherRef.value, 'tasks-status-switch-open')
+}
+
+/** After a create the server took: the title and the due fields are emptied (the mode stays). */
+function clearCreateForm(): void {
+  newTitle.value = ''
+  newDueDate.value = ''
+  newDueTime.value = ''
 }
 
 async function onCreate(): Promise<void> {
   const title = newTitle.value.trim()
   if (!title || creating.value) return
-  creating.value = true
+  createdHidden.value = null
   createErrorVisible.value = false
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
+  createDueError.value = null
+  // The zone is read only when a date is set: no date, no zone key and no zone read.
+  const due = buildCreateDue(newDueDate.value, newDueTime.value, newDueDate.value === '' ? '' : usableViewerTimeZone())
+  if (!due.ok) {
+    createDueError.value = due.code
+    return
+  }
+  creating.value = true
   const page = listPageToken
   try {
-    const result = await createTask({ title, completionMode: newCompletionMode.value })
+    const result = await createTask({ title, completionMode: newCompletionMode.value, ...due.keys })
     // Same page-moved-on guard as `onComplete`/`onReopen` below — a late org_missing here would
     // otherwise flip `orgMissingFromAction`, which the detail-page template checks FIRST (before
     // its own states), painting the guidance block over whatever the viewer navigated to. A late
@@ -901,14 +1163,18 @@ async function onCreate(): Promise<void> {
     // notifies the badge bus; it just has no current list to reload.
     if (page !== listPageToken) {
       if (result.kind === 'ok') {
-        newTitle.value = ''
+        clearCreateForm()
         notifyTasksChanged()
       }
       return
     }
     if (result.kind === 'ok') {
-      newTitle.value = ''
+      clearCreateForm()
       notifyTasksChanged()
+      // Decided from the filter alone (a new task is never completed), not from the reloaded rows.
+      if (statusFilterHidesNewTask(currentStatus.value)) {
+        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value) }
+      }
       await loadList()
     } else if (result.kind === 'org_missing') {
       orgMissingFromAction.value = true
@@ -985,7 +1251,7 @@ let detailActionToken = 0
 
 async function onDetailComplete(): Promise<void> {
   const id = taskId.value
-  if (!id || detailActionPending.value) return
+  if (!id || detailActionPending.value || detailCompleteNoop.value !== null) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
@@ -1009,19 +1275,26 @@ async function onDetailComplete(): Promise<void> {
   }
 }
 
-async function onDetailReopen(): Promise<void> {
+/** `'self'` reopens the viewer's own part (in any mode the server reopens the whole task either
+ *  way); `'all'` every assignee's part of a done "all" mode task, offered by `detailOffersReopenAll`
+ *  and sent only from its open confirmation. */
+async function onDetailReopen(scope: ReopenScope): Promise<void> {
   const id = taskId.value
   if (!id || detailActionPending.value) return
+  if (scope === 'self' ? detailReopenSelfNoop.value : !detailOffersReopenAll.value || !reopenAllConfirmVisible.value) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
   try {
-    const result = await reopenTask(id, 'self')
+    const result = await reopenTask(id, scope)
     if (taskId.value !== id) {
       if (result.kind === 'ok') notifyTasksChanged()
       return
     }
-    if (applyActionOutcome(result.kind) === 'ok') await loadDetail(id)
+    if (applyActionOutcome(result.kind) === 'ok') {
+      reopenAllConfirmVisible.value = false
+      await loadDetail(id)
+    }
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
@@ -1775,6 +2048,7 @@ watch(taskId, (id) => {
   // what's showing, so a list action still in flight from before this navigation must be treated
   // as stale too.
   listPageToken += 1
+  createdHidden.value = null
   // A list READ still in flight from before this navigation is stale too: bump the generation so
   // its late result (including a late org_missing) cannot paint over the page now showing.
   listGeneration += 1
@@ -1803,6 +2077,7 @@ watch(taskId, (id) => {
   commentsTruncated.value = false
   deleteConfirmVisible.value = false
   deleteError.value = null
+  reopenAllConfirmVisible.value = false
   // M4: the editor's draft, phase and errors, the "my lists" read and the lists section's inline
   // error belong to the task that was showing (design §7.3: a route edge returns to idle).
   editorState.value = createDetailEditorState()
@@ -1838,6 +2113,27 @@ onMounted(async () => {
 
 .tasks-view__message {
   color: var(--el-text-color-secondary, #666);
+}
+
+.tasks-view__note {
+  margin: 4px 0;
+  font-size: 0.9em;
+  color: var(--el-text-color-secondary, #666);
+}
+
+/* A confirmation, not a helper line: normal text size and colour, unlike .tasks-view__note. */
+.tasks-view__created-hidden {
+  margin: 4px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tasks-view__create-due {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .tasks-view__detail {

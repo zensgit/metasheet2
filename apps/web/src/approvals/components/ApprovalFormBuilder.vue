@@ -291,11 +291,12 @@ import {
   type ApprovalFormDragPayload,
   type ApprovalFormDragSession,
 } from '../approvalFormDragPayload'
-import type {
-  AuthorableFieldType,
-  DetailColumnDraft,
-  FieldAuthoringDraft,
-  TemplateAuthoringDraft,
+import {
+  conditionValueFieldFromDraft,
+  type AuthorableFieldType,
+  type DetailColumnDraft,
+  type FieldAuthoringDraft,
+  type TemplateAuthoringDraft,
 } from '../templateAuthoring'
 import type { RecordLinkAuthoringCatalog } from '../recordLinkField'
 import {
@@ -420,6 +421,8 @@ const visibilityOptions = computed(() => {
     .map((field) => ({
       id: field.id.trim(),
       label: field.label.trim() || typeLabels[field.type],
+      // R-43 (B): the inspector's value control follows the dependency's type / options.
+      ...conditionValueFieldFromDraft(field),
     }))
 })
 

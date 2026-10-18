@@ -55,4 +55,18 @@ describe('cancel-round entry — round summary on an unrecognised outcome', () =
     // It stops at the round row: no projection / audit / withdraw reads on an unknown state.
     expect(query.calls).toBe(1)
   })
+  it.each([
+    ['business_trip','business_trip_cancelled'],
+    ['leave','leave_cancelled'],
+    [undefined,'leave_cancelled'],
+  ])('applied %s uses its own document status without changing legacy leave',async(documentRequestType,status)=>{
+    const query=stubQuery([{round_id:'round',engine_instance_id:null,outcome:'applied',
+      document_request_type:documentRequestType,started_at:new Date('2026-09-29T00:00:00Z'),
+      ended_at:new Date('2026-09-29T01:00:00Z'),engine_status:'approved',
+      engine_current_node_key:null,engine_requester_id:'viewer-1',allow_revoke:null,revoke_before_node_keys:null}])
+    const summary=await readCancelRoundSummaryForDocumentV1(query,'doc-1','viewer-1')
+    expect(summary.round?.status).toBe(status)
+    expect(summary.round?.outcome).toBe('applied')
+  })
+
 })

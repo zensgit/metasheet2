@@ -308,6 +308,58 @@ describe('MetaApiTokenManager', () => {
     expect(tokenValue?.textContent).toBe('mst_rotated_secret_456')
   })
 
+  describe('copy new token on a plain-HTTP (non-secure-context) deployment — no Clipboard API', () => {
+    let originalClipboard: PropertyDescriptor | undefined
+    let originalExecCommand: PropertyDescriptor | undefined
+    beforeEach(() => {
+      originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+      originalExecCommand = Object.getOwnPropertyDescriptor(document, 'execCommand')
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+    })
+    afterEach(() => {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+      if (originalExecCommand) Object.defineProperty(document, 'execCommand', originalExecCommand)
+      else Reflect.deleteProperty(document, 'execCommand')
+    })
+
+    async function rotateAndClickCopy(): Promise<HTMLButtonElement> {
+      const { client } = mockClient([fakeToken()])
+      mount({ visible: true, client })
+      await flushPromises()
+      ;(document.querySelector('[data-token-rotate]') as HTMLButtonElement).click()
+      await flushPromises()
+      const copyBtn = document.querySelector('[data-copy-new-token]') as HTMLButtonElement
+      expect(copyBtn.textContent?.trim()).toBe('Copy')
+      copyBtn.click()
+      await flushPromises()
+      return copyBtn
+    }
+
+    it('copies the plaintext through the execCommand fallback and only then says "Copied!"', async () => {
+      const copied: string[] = []
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        writable: true,
+        value: vi.fn((command: string) => {
+          copied.push(`${command}:${document.querySelector('textarea')?.value ?? ''}`)
+          return true
+        }),
+      })
+      const copyBtn = await rotateAndClickCopy()
+      expect(copied).toEqual(['copy:mst_rotated_secret_456'])
+      expect(document.querySelector('textarea')).toBeNull()
+      expect(copyBtn.textContent?.trim()).toBe('Copied!')
+    })
+
+    it('with no copy mechanism at all it does not throw and does not claim "Copied!"', async () => {
+      Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: undefined })
+      const copyBtn = await rotateAndClickCopy()
+      expect(copyBtn.textContent?.trim()).toBe('Copy failed: select it manually')
+      expect(document.querySelector('[data-new-token-value]')?.textContent).toBe('mst_rotated_secret_456')
+    })
+  })
+
   // ---- Webhook tests ----
 
   it('switches to webhooks tab', async () => {

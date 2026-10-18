@@ -1,25 +1,10 @@
+import { copyText } from '../../utils/clipboard'
+
+// Thin PLM-facing wrappers over the shared `copyText` (apps/web/src/utils/clipboard.ts), which owns the
+// Clipboard API + execCommand fallback. Kept as a module because stock-prep and PLM views import it.
 export async function copyTextToClipboard(value: string): Promise<boolean> {
   if (!value) return false
-
-  try {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value)
-      return true
-    }
-  } catch {
-    // fallback below
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = value
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'absolute'
-  textarea.style.left = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const ok = document.execCommand('copy')
-  document.body.removeChild(textarea)
-  return ok
+  return copyText(value)
 }
 
 export async function copyListToClipboard(values: string[], separator = '\n'): Promise<boolean> {

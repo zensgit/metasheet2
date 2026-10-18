@@ -107,6 +107,12 @@ interface TaskDetailFixture {
   assignees: { userId: string; completedAt: string | null }[]
   canComplete: boolean
   canReopen: boolean
+  // Editor fields: present only where a cell needs the detail editor on screen.
+  version?: number
+  description?: string | null
+  startDate?: string | null
+  startTime?: string | null
+  remindAt?: string | null
 }
 
 function taskDetail(over: Partial<TaskDetailFixture> = {}): TaskDetailFixture {
@@ -845,5 +851,449 @@ describe('TasksView list — row links to /tasks/:id (real router)', () => {
 
     expect(h_.getTask).toHaveBeenCalledWith('a/b')
     expect(shown(el, 'tasks-detail')).toBeTruthy()
+  })
+})
+
+// A list row carries the task's completion mode but not the viewer's own assignee state, so on an
+// "all" mode row an inline complete / reopen could succeed and change nothing. Such a row links to
+// the task detail instead (where the buttons are gated); an "any" mode row keeps its buttons. The
+// assigned view renders its rows on the grouping board, the other views as the flat list.
+describe('TasksView list — an "all" mode row offers complete / reopen on the task detail', () => {
+  const ROWS = [
+    { id: 't1', title: 'All Open', status: 'open', completion_mode: 'all', created_by: 'u1', due_at: null },
+    { id: 't2', title: 'All Done', status: 'done', completion_mode: 'all', created_by: 'u1', due_at: null },
+    { id: 't3', title: 'Any Open', status: 'open', completion_mode: 'any', created_by: 'u1', due_at: null },
+    { id: 't4', title: 'Any Done', status: 'done', completion_mode: 'any', created_by: 'u1', due_at: null },
+  ]
+
+  /** Per row, in order: the row's complete / reopen control as [test id, text, href]. */
+  function rowActions(el: HTMLElement): Array<[string, string, string | null]> {
+    return Array.from(el.querySelectorAll('[data-testid="tasks-list-item"]')).map((row) => {
+      const action = row.querySelector<HTMLElement>(
+        '[data-testid="tasks-row-detail-action"], [data-testid="tasks-complete-button"], [data-testid="tasks-reopen-button"]',
+      ) as HTMLElement
+      return [action.getAttribute('data-testid') ?? '', action.textContent?.trim() ?? '', action.getAttribute('href')]
+    })
+  }
+
+  const EXPECTED: Array<[string, string, string | null]> = [
+    ['tasks-row-detail-action', '在任务详情中完成', '/tasks/t1'],
+    ['tasks-row-detail-action', '在任务详情中重启', '/tasks/t2'],
+    ['tasks-complete-button', '完成', null],
+    ['tasks-reopen-button', '重启', null],
+  ]
+
+  it('on the assigned view\'s board and on the flat list of another view alike', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    const el = await mountAt('/tasks')
+    expect(el.querySelector('[data-testid="tasks-list"][data-scope]')).toBeTruthy()
+    expect(rowActions(el)).toEqual(EXPECTED)
+
+    ;(shown(el, 'tasks-view-switch-following') as HTMLButtonElement).click()
+    await flush()
+    expect(el.querySelector('[data-testid="tasks-list"]')?.tagName).toBe('UL')
+    expect(rowActions(el)).toEqual(EXPECTED)
+  })
+
+  it('following the row action opens that task\'s detail and sends nothing', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ id: 't1', title: 'All Open' }) })
+    const el = await mountAt('/tasks')
+    const link = shown(el, 'tasks-row-detail-action') as HTMLAnchorElement
+    expect(link.tagName).toBe('A')
+
+    // `router.push` on the link's own target, as the row-link cells above do (see there).
+    await router!.push(link.getAttribute('href') as string)
+    await flush()
+    expect(h_.getTask).toHaveBeenCalledWith('t1')
+    expect(shown(el, 'tasks-detail')).toBeTruthy()
+    expect(h_.completeTask).not.toHaveBeenCalled()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('the inline buttons of an "any" mode row still complete and reopen in place', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
+    h_.reopenTask.mockResolvedValue({ kind: 'ok' })
+    const el = await mountAt('/tasks')
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.completeTask).toHaveBeenCalledWith('t3')
+    ;(shown(el, 'tasks-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).toHaveBeenCalledWith('t4', 'self')
+    expect(h_.getTask).not.toHaveBeenCalled()
+  })
+})
+
+// In "all assignees complete" mode the server answers 200 to a complete or a reopen (scope self)
+// that changes nothing: a complete stamps only the caller's own assignee row, a self reopen clears
+// only it. The detail page turns such a button off and says why, once the viewer's id is known;
+// any mode, a task with no assignees, and an unknown viewer id keep the button as before. Each
+// cell below sets an off case beside an on case, so each fails if the rule is taken out.
+describe('TasksView detail — complete / reopen that would change nothing', () => {
+  const OPEN_ALL_OTHERS = taskDetail({
+    status: 'open',
+    completionMode: 'all',
+    createdBy: 'u1',
+    assignees: [{ userId: 'u2', completedAt: null }],
+    canComplete: true,
+  })
+
+  async function mountAsViewer(task: TaskDetailFixture, viewer: string | null): Promise<HTMLElement> {
+    h_.getTask.mockResolvedValue({ kind: 'ok', task })
+    h_.getCurrentUserId.mockResolvedValue(viewer)
+    return mountAt('/tasks/t1')
+  }
+
+  function button(el: HTMLElement, testid: string): HTMLButtonElement {
+    const found = shown(el, testid)
+    expect(found, testid).toBeTruthy()
+    return found as HTMLButtonElement
+  }
+
+  it('complete is off for a creator who is not an assignee, with the reason; on for an open assignee', async () => {
+    const el = await mountAsViewer(OPEN_ALL_OTHERS, 'u1')
+    const complete = button(el, 'tasks-detail-complete-button')
+    expect(complete.disabled).toBe(true)
+    expect(shown(el, 'tasks-detail-complete-reason')?.textContent).toBe('你不是此任务的负责人：「全部负责人完成」模式下由各负责人完成自己的部分')
+    expect(complete.getAttribute('aria-describedby')).toBe('tasks-detail-complete-reason')
+    complete.click()
+    await flush()
+    expect(h_.completeTask).not.toHaveBeenCalled()
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(OPEN_ALL_OTHERS, 'u2')
+    const complete2 = button(el2, 'tasks-detail-complete-button')
+    expect(complete2.disabled).toBe(false)
+    expect(complete2.hasAttribute('aria-describedby')).toBe(false)
+    expect(shown(el2, 'tasks-detail-complete-reason')).toBeNull()
+  })
+
+  it('complete is off for an assignee whose own part is done while others are open; on once it is not', async () => {
+    const partDone = taskDetail({
+      status: 'open',
+      completionMode: 'all',
+      assignees: [
+        { userId: 'u1', completedAt: '2026-10-01T09:00:00Z' },
+        { userId: 'u2', completedAt: null },
+      ],
+      canComplete: true,
+    })
+    const el = await mountAsViewer(partDone, 'u1')
+    expect(button(el, 'tasks-detail-complete-button').disabled).toBe(true)
+    expect(shown(el, 'tasks-detail-complete-reason')?.textContent).toBe('你已完成自己的部分，正在等待其他负责人完成')
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(partDone, 'u2')
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(false)
+    expect(shown(el2, 'tasks-detail-complete-reason')).toBeNull()
+  })
+
+  it('complete stays on in any mode and for a task with no assignees; off for the same viewer in all mode', async () => {
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
+    const el = await mountAsViewer(taskDetail({ ...OPEN_ALL_OTHERS, completionMode: 'any' }), 'u1')
+    expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
+    expect(shown(el, 'tasks-detail-complete-reason')).toBeNull()
+    button(el, 'tasks-detail-complete-button').click()
+    await flush()
+    expect(h_.completeTask).toHaveBeenCalledWith('t1')
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(taskDetail({ ...OPEN_ALL_OTHERS, assignees: [] }), 'u1')
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(false)
+
+    app?.unmount()
+    container?.remove()
+    const el3 = await mountAsViewer(OPEN_ALL_OTHERS, 'u1')
+    expect(button(el3, 'tasks-detail-complete-button').disabled).toBe(true)
+  })
+
+  it('complete stays on for a non-assignee when every assignee row is already done (the task is then marked done); off while one is open', async () => {
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
+    const allRowsDone = taskDetail({
+      ...OPEN_ALL_OTHERS,
+      assignees: [
+        { userId: 'u2', completedAt: '2026-10-01T09:00:00Z' },
+        { userId: 'u3', completedAt: '2026-10-01T10:00:00Z' },
+      ],
+    })
+    const el = await mountAsViewer(allRowsDone, 'u1')
+    expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
+    expect(shown(el, 'tasks-detail-complete-reason')).toBeNull()
+    button(el, 'tasks-detail-complete-button').click()
+    await flush()
+    expect(h_.completeTask).toHaveBeenCalledWith('t1')
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(
+      taskDetail({ ...allRowsDone, assignees: [{ userId: 'u2', completedAt: '2026-10-01T09:00:00Z' }, { userId: 'u3', completedAt: null }] }),
+      'u1',
+    )
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(true)
+  })
+
+  it('an unknown viewer id (unresolved, or still resolving) keeps complete on; a known one turns it off', async () => {
+    const el = await mountAsViewer(OPEN_ALL_OTHERS, null)
+    expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
+    expect(shown(el, 'tasks-detail-complete-reason')).toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    const viewer = deferred<string | null>()
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: OPEN_ALL_OTHERS })
+    h_.getCurrentUserId.mockReturnValue(viewer.promise)
+    const el2 = await mountAt('/tasks/t1')
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(false)
+    viewer.resolve('u1')
+    await flush()
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(true)
+    expect(shown(el2, 'tasks-detail-complete-reason')).toBeTruthy()
+  })
+
+  it('reopen (self) is off for a non-assignee when every assignee is done, with the reason; on for a done assignee', async () => {
+    const doneAll = taskDetail({
+      status: 'done',
+      completionMode: 'all',
+      createdBy: 'u1',
+      assignees: [
+        { userId: 'u2', completedAt: '2026-10-01T09:00:00Z' },
+        { userId: 'u3', completedAt: '2026-10-01T10:00:00Z' },
+      ],
+      canReopen: true,
+    })
+    const el = await mountAsViewer(doneAll, 'u1')
+    const reopen = button(el, 'tasks-detail-reopen-button')
+    expect(reopen.disabled).toBe(true)
+    expect(shown(el, 'tasks-detail-reopen-reason')?.textContent).toBe('你没有已完成的部分可以重启')
+    expect(reopen.getAttribute('aria-describedby')).toBe('tasks-detail-reopen-reason')
+    reopen.click()
+    await flush()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+
+    app?.unmount()
+    container?.remove()
+    h_.reopenTask.mockResolvedValue({ kind: 'ok' })
+    const el2 = await mountAsViewer(doneAll, 'u2')
+    const reopen2 = button(el2, 'tasks-detail-reopen-button')
+    expect(reopen2.disabled).toBe(false)
+    expect(shown(el2, 'tasks-detail-reopen-reason')).toBeNull()
+    reopen2.click()
+    await flush()
+    expect(h_.reopenTask).toHaveBeenCalledWith('t1', 'self')
+  })
+
+  it('reopen (self) stays on for a non-assignee when a done task still has an open row (it does reopen), off when none', async () => {
+    const carried = taskDetail({
+      status: 'done',
+      completionMode: 'all',
+      assignees: [
+        { userId: 'u2', completedAt: '2026-10-01T09:00:00Z' },
+        { userId: 'u3', completedAt: null },
+      ],
+      canReopen: true,
+    })
+    const el = await mountAsViewer(carried, 'u1')
+    expect(button(el, 'tasks-detail-reopen-button').disabled).toBe(false)
+    expect(shown(el, 'tasks-detail-reopen-reason')).toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(
+      taskDetail({ ...carried, assignees: [{ userId: 'u2', completedAt: '2026-10-01T09:00:00Z' }] }),
+      'u1',
+    )
+    expect(button(el2, 'tasks-detail-reopen-button').disabled).toBe(true)
+  })
+
+  it('reopen stays on in any mode for a non-assignee; off for the same viewer in all mode', async () => {
+    const doneAny = taskDetail({
+      status: 'done',
+      completionMode: 'any',
+      assignees: [{ userId: 'u2', completedAt: '2026-10-01T09:00:00Z' }],
+      canReopen: true,
+    })
+    const el = await mountAsViewer(doneAny, 'u1')
+    expect(button(el, 'tasks-detail-reopen-button').disabled).toBe(false)
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(taskDetail({ ...doneAny, completionMode: 'all' }), 'u1')
+    expect(button(el2, 'tasks-detail-reopen-button').disabled).toBe(true)
+  })
+})
+
+// A done "all" mode task: the server reopens every assignee's part on scope `all`, for every
+// caller it lets reopen (the detail's `canReopen`), while the plain reopen button sends scope
+// `self`. The page offers the second action when there is an assignee other than the viewer.
+describe('TasksView detail — reopen for every assignee (scope all)', () => {
+  const DONE_ALL = taskDetail({
+    status: 'done',
+    completionMode: 'all',
+    createdBy: 'u1',
+    assignees: [
+      { userId: 'u2', completedAt: '2026-10-01T09:00:00Z' },
+      { userId: 'u3', completedAt: '2026-10-01T10:00:00Z' },
+    ],
+    canReopen: true,
+  })
+
+  async function mountAsViewer(task: TaskDetailFixture, viewer: string | null): Promise<HTMLElement> {
+    h_.getTask.mockResolvedValue({ kind: 'ok', task })
+    h_.getCurrentUserId.mockResolvedValue(viewer)
+    return mountAt('/tasks/t1')
+  }
+
+  async function remount(task: TaskDetailFixture, viewer: string | null): Promise<HTMLElement> {
+    app?.unmount()
+    container?.remove()
+    return mountAsViewer(task, viewer)
+  }
+
+  /** 重启全部 asks first: opens its confirmation, then confirms. */
+  async function reopenAllConfirmed(el: HTMLElement): Promise<void> {
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).click()
+    await flush()
+  }
+
+  it('a creator who is not an assignee can reopen the task for everyone: scope all, then the detail reloads', async () => {
+    h_.reopenTask.mockResolvedValue({ kind: 'ok' })
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    expect((shown(el, 'tasks-detail-reopen-button') as HTMLButtonElement).disabled).toBe(true)
+    const all = shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement
+    expect(all.textContent).toBe('重启全部')
+    expect(all.disabled).toBe(false)
+
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ ...DONE_ALL, status: 'open' }) })
+    await reopenAllConfirmed(el)
+    expect(h_.reopenTask).toHaveBeenCalledTimes(1)
+    expect(h_.reopenTask).toHaveBeenCalledWith('t1', 'all')
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-detail-status')?.textContent).toBe('进行中')
+  })
+
+  it('an assignee the server lets reopen is offered it too, and the plain reopen still sends scope self', async () => {
+    h_.reopenTask.mockResolvedValue({ kind: 'ok' })
+    const el = await mountAsViewer(DONE_ALL, 'u2')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    ;(shown(el, 'tasks-detail-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).toHaveBeenLastCalledWith('t1', 'self')
+  })
+
+  it('not offered without canReopen, in any mode, on an open task, with no assignees, or when the viewer is the only assignee', async () => {
+    const offered = await mountAsViewer(DONE_ALL, 'u1')
+    expect(shown(offered, 'tasks-detail-reopen-all-button')).toBeTruthy()
+
+    let el = await remount(taskDetail({ ...DONE_ALL, canReopen: false }), 'u1')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    el = await remount(taskDetail({ ...DONE_ALL, completionMode: 'any' }), 'u1')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    el = await remount(taskDetail({ ...DONE_ALL, status: 'open', canComplete: true }), 'u1')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    el = await remount(taskDetail({ ...DONE_ALL, assignees: [] }), 'u1')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    el = await remount(taskDetail({ ...DONE_ALL, assignees: [{ userId: 'u1', completedAt: '2026-10-01T09:00:00Z' }] }), 'u1')
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+  })
+
+  it('with the viewer id unknown it is offered for any assignee, and the plain reopen stays on', async () => {
+    const el = await mountAsViewer(DONE_ALL, null)
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    expect((shown(el, 'tasks-detail-reopen-button') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('one detail action at a time: both reopen buttons are off while one is in flight', async () => {
+    const pending = deferred<unknown>()
+    h_.reopenTask.mockReturnValue(pending.promise)
+    const el = await mountAsViewer(DONE_ALL, 'u2')
+    await reopenAllConfirmed(el)
+    expect((shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).disabled).toBe(true)
+    expect((shown(el, 'tasks-detail-reopen-all-confirm-cancel') as HTMLButtonElement).disabled).toBe(true)
+    expect((shown(el, 'tasks-detail-reopen-button') as HTMLButtonElement).disabled).toBe(true)
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).toHaveBeenCalledTimes(1)
+    pending.resolve({ kind: 'ok' })
+    await flush()
+  })
+
+  it('a failed reopen for everyone shows the action banner, does not reload and leaves the confirmation open', async () => {
+    h_.reopenTask.mockResolvedValue({ kind: 'forbidden' })
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    await reopenAllConfirmed(el)
+    expect(shown(el, 'tasks-action-error')?.textContent).toBe('您没有权限修改此任务')
+    expect(h_.getTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
+  })
+
+  it('重启全部 asks first: the click alone sends nothing, and cancelling sends nothing and brings the button back', async () => {
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-prompt')?.textContent).toBe('确认重启全部负责人的部分？已完成的负责人需要重新完成。')
+    const yes = shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement
+    expect(yes.textContent).toBe('确认重启全部')
+    expect(yes.getAttribute('aria-describedby')).toBe('tasks-detail-reopen-all-prompt')
+    expect(document.activeElement).toBe(yes)
+
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-cancel') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(document.activeElement).toBe(shown(el, 'tasks-detail-reopen-all-button'))
+    expect(h_.getTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('an open confirmation does not outlive its task: another task\'s detail starts from the button', async () => {
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
+
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ ...DONE_ALL, id: 't2' }) })
+    await router!.push('/tasks/t2')
+    await flush()
+    expect(h_.getTask).toHaveBeenLastCalledWith('t2')
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('a reload of the same task closes an open confirmation: an editor save brings the button back and sends no reopen', async () => {
+    const editable = taskDetail({
+      ...DONE_ALL,
+      version: 3,
+      description: null,
+      startDate: null,
+      startTime: null,
+      remindAt: null,
+    })
+    h_.patchTask.mockResolvedValue({ kind: 'ok', id: 't1', version: 4 })
+    const el = await mountAsViewer(editable, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
+
+    const title = shown(el, 'tasks-detail-editor-title') as HTMLInputElement
+    title.value = 'Task One renamed'
+    title.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-detail-editor-submit') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.patchTask).toHaveBeenCalledTimes(1)
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
   })
 })

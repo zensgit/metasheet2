@@ -33,7 +33,7 @@ const ElCheckbox = defineComponent({
 })
 const ElInput = defineComponent({
   name: 'ElInput', props: { modelValue: [String, Number], disabled: Boolean }, emits: ['update:modelValue'],
-  render() { return h('input', { value: this.modelValue ?? '', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value) }) },
+  render() { return h('input', { value: this.modelValue ?? '', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onInput: (e: Event) => { const text = (e.target as HTMLInputElement).value; if (text !== String(this.modelValue ?? '')) this.$emit('update:modelValue', text) } /* EP 2.11.8 fidelity: no update when unchanged */ }) },
 })
 const ElInputNumber = defineComponent({
   name: 'ElInputNumber', props: { modelValue: Number, disabled: Boolean, min: Number, max: Number, step: Number }, emits: ['update:modelValue'],

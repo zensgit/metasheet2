@@ -42,10 +42,9 @@ REQUIRED_PATHS=(
   "packages/core-backend/scripts/smoke-sqlserver.ts"
   "packages/mssql-readonly-utils"
   "packages/openapi/dist-sdk"
-  # The packaged migration runner loads SQL migrations from
-  # packages/core-backend/migrations via migration-provider.ts. Keep this
-  # source directory in the package so Windows/on-prem installs apply
-  # post-build SQL schema changes such as users.must_change_password.
+  # The compiled runner also loads live SQL from src/db/migrations. Preserve
+  # those names for existing Kysely migration histories, not only fresh installs.
+  "packages/core-backend/src/db/migrations"
   "packages/core-backend/migrations"
   "plugins/plugin-attendance"
   "plugins/plugin-integration-core"
@@ -54,6 +53,8 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
   "scripts/ops/attendance-onprem-env-check.sh"
   "scripts/ops/attendance-onprem-update.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.ps1"
   "scripts/ops/attendance-onprem-deploy-easy.sh"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"

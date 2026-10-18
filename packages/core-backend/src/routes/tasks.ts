@@ -110,12 +110,21 @@ export function tasksRouter(): Router | null {
       // ([own-19]). The service keeps its array return; the total is a separate count.
       const page = parseTaskPage({ limit: req.query.limit, offset: req.query.offset })
       const view = typeof req.query.view === 'string' ? req.query.view : 'assigned'
-      const items = await listTasks({ orgId: org, actorId: actorId(req), view, page })
-      const total = await countTasks({ orgId: org, actorId: actorId(req), view })
+      // RULED(2026-10-09): G2-core `status` = open | done | all, orthogonal to the view; list and
+      // total get the same value. ASSUMPTION(task-g2): absent = `all` (the service default); a
+      // repeated or nested `status` is not a string; it is passed on as '' (outside the closed set)
+      // and answered like an unknown value, not defaulted as `view` is, so a client that sends two
+      // values never gets every row.
+      const status = req.query.status === undefined
+        ? undefined
+        : typeof req.query.status === 'string' ? req.query.status : ''
+      const items = await listTasks({ orgId: org, actorId: actorId(req), view, status, page })
+      const total = await countTasks({ orgId: org, actorId: actorId(req), view, status })
       res.json({ items, total })
     } catch (err) {
       const code = typeof err === 'object' && err && 'code' in err ? String((err as { code: string }).code) : ''
-      if (code === 'INVALID_VIEW' || (err instanceof TypeError)) {
+      // G2-core: an unknown status is answered exactly like an unknown view.
+      if (code === 'INVALID_VIEW' || code === 'INVALID_STATUS' || (err instanceof TypeError)) {
         res.json({ items: [], degraded: true, reason: 'predicate_error' })
         return
       }

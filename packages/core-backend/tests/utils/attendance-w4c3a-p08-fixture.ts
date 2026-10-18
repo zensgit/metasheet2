@@ -1,3 +1,5 @@
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 /**
  * Test-only shared fixture for W4C-3a P08 candidate A/B.
  * Imported by the parent suite and by child processes (enqueue / execute).
@@ -195,6 +197,10 @@ export async function migrateP08Schema(connectionString: string): Promise<void> 
   try {
     await w4c0Up(db)
     await w4c3aUp(db)
+    await db.schema.createTable('attendance_rules')
+      .addColumn('id','uuid',column => column.primaryKey())
+      .addColumn('timezone','text',column => column.notNull().defaultTo('UTC')).execute()
+    await timezonePolicyUp(db)
   } finally {
     // db.destroy() ends the underlying pool; do not call kyselyPool.end() again.
     await db.destroy()
@@ -233,6 +239,16 @@ export async function seedP08ActorsAndConfig(
       [orgId, JSON.stringify({ profile: 'original' })],
     )
   }
+  // The frozen plan's ensure_member is rechecked against active user_orgs ∩ users
+  // at write time. The target must already be an active member of the plan org.
+  await pool.query(
+    `INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`,
+    [ids.targetUserId],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [ids.targetUserId, ids.orgId],
+  )
 }
 
 export async function loadP08Org(
@@ -621,6 +637,8 @@ export async function processP08JobId(
   connectionString: string,
   jobId: string,
 ): Promise<{ kind: string }> {
+  // Test-only legacy-plan fixture: its runtime/calendar semantics are outside this lane.
+  registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
   const pool = new Pool({ connectionString })
   try {
     const processor = createAttendanceLegacyPlanProcessorV1({
@@ -632,6 +650,7 @@ export async function processP08JobId(
     const result = await processor.processLegacyImportPlanV1(jobId)
     return { kind: result.kind }
   } finally {
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
     await pool.end()
   }
 }
