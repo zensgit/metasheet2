@@ -180,6 +180,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import { randomUuid } from '../../../utils/uuid'
 import { onAuthPrincipalChange, onAuthSessionSwitch, readAuthSessionSignature, readStoredToken, TOKEN_KEYS } from '../../../composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../../../utils/explicitSessionOrg'
 import { useLocale } from '../../../composables/useLocale'
@@ -610,7 +611,7 @@ async function activateFamily(family: ActivationFamily) {
   const recordTriggerType = family === 'record' ? selectedRecordTriggerType.value : null
   if (family === 'record' && recordTriggerType === null) return
   let activationKey: string
-  try { activationKey = crypto.randomUUID() } catch { fail(undefined); return }
+  try { activationKey = randomUuid() } catch { fail(undefined); return }
   const input: Omit<AutomationReadScheduleActivationInput, 'expectedRuleRevision' | 'expectedDateField'> = Object.freeze({
     activationKey, selector: Object.freeze({ ...selectedOption.value.selector }), projectNo: props.projectNo,
     budget: Object.freeze(Object.fromEntries(budgetFields.map(({ key }) => [key, Number(budgetValues[key])])) as AutomationReadBudget),
@@ -661,7 +662,7 @@ async function submit() {
     return
   }
   let invocationId: string
-  try { invocationId = crypto.randomUUID() } catch { fail(undefined); return }
+  try { invocationId = randomUuid() } catch { fail(undefined); return }
   await submitInput({ grantId: currentGrant.value.grantId, invocationId, projectNo: props.projectNo })
 }
 async function recover() {
@@ -701,7 +702,7 @@ async function retryRequest() {
   let command: RetryCommand
   try {
     command = Object.freeze({ parentRequestId: retryContext.value.request.requestId,
-      input: checkedAutomationReadRetryInput({ retryKey: crypto.randomUUID(), acknowledgeNewRead: true,
+      input: checkedAutomationReadRetryInput({ retryKey: randomUuid(), acknowledgeNewRead: true,
         budget: Object.fromEntries(budgetFields.map(({ key }) => [key, Number(retryBudgetValues[key])])),
         expiresAt: new Date(Date.now() + Number(retryTtlMinutes.value) * 60_000).toISOString() }) })
   } catch { fail(undefined); return }

@@ -1654,8 +1654,8 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
-  builtinCatalogPresentation \
   automationRead \
+  builtinCatalogPresentation \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \

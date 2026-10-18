@@ -1,5 +1,148 @@
 # 既有 #6337 收口验证
 
+## 2026-10-18 本轮授权已收到，进入普通追加发布与正式验证
+
+Owner明确允许将本轮已验证修复更新至既有四PR并运行既有合成CI。下文三回合等待授权是历史状态，当前授权前置已解除；保留全部原失败，不标目标完成。发布前重新核对四head/base/draft和main均未变化，本地八项已知改动保留。按原依赖普通追加，不强推、不新增切片、不合并、不部署、不读客户数据、不真实发送。父支完整树和新子head正式71项、停止清理仍以本次后续CI为准；默认完整前端脚本两次失败不因本地资源对照通过而删除。
+
+## 2026-10-18 发布授权前置第3回合：目标受阻，不是完成或主动暂停
+
+第三个连续回合仍只有自动goal续推进，没有owner对本轮新补丁发布的明确批准。只读GitHub回读四PR均OPEN、head/base/draft仍为已记录状态，尚无远端新补丁或可继续验证的新head CI；本地八个已知跟踪改动保留，diff-check通过。上一回合属于授权前置的无进展复核，不将重复哈希/文档更新包装为持续开发。本轮已知安全独立修复、三原入口、后验和本次CI跟踪均取得终态；不重复发起测试或扩新切片绕过授权。
+
+按三回合阻塞审计，将原完整目标标记blocked，原因仅为等待“普通更新现有#6315/#6323/#6324/#6337并运行既有合成CI”的新一轮授权。未标complete/paused，未缩小六批目标，未合并/部署/客户读取/真实发送。恢复时先重核远端head/main及本地原字节，再依据明确授权推进；此前本地通过及默认批次失败范围、父树完整CI未证、子head正式71与停止证据缺口全部保留。
+
+## 2026-10-18 新一轮发布授权前置复核（连续第2回合）
+
+自动goal续推进不是human发布批准。上一回合完成当前三原入口与后验后请求新补丁更新四PR/既有CI授权，本回合仍未收到。重新逐字节核对六源码在Windows/Linux均匹配已通过的协调回执，三入口均实际终结成功，两个父支候选树对象仍存在、默认index未stage、diff-check通过。当前已知本轮安全独立修复/验收已结束，不将旧终结CI或进程冒称活等待，不重复重跑求绿或新开切片。目标仍不标complete；继续的最小前置仍是owner明确允许这轮既有四PR普通更新及既有合成CI，缺批准则不执行。保留默认批次失败和父树完整CI未证范围。
+
+## 2026-10-18 当前本地六文件修复链路已终结，尚未授权发布新补丁
+
+36345已自然exit0，三原入口均exit0/signal=null；最终协调回执位于本次新建/home/runner/metasheet-stack-acceptance-SQpgQU，SHA **7d5ba3cf64706d5009ba27b857fc2b1f00a5dc3022d8df008edea2cefc12d637**，schema=local-stack-full-acceptance/v2，baseHead5de0484+精确六overlay、sourceOverlayUnchanged=true、固定官方浏览器SHA43624de7…均实际通过。该目录是本次外层执行直接创建并写wx/0600，不是从旧候选拿来的回执；先前相同公共stdout哈希本身不证明来源，以本次实际spawn/终态/源码前后校验和协调回执绑定为据。
+
+当前宜搭自产stdout重新按闭合YIDA_BROWSER_CI_RESULT解析，**passed=true/tests71/business66/sentinels5**；其原字节SHA **77f33b48143d6b1249b9534ae1e88907a582b22ee4b733234fa3ba24541a9336** 与协调记录一致，stderr空。原reportOuterResult已在本次报告成功前验证owner/source哈希、71项passed及cleanup=stopped-owned-pg-removed；此处未读取私有CI产物，也不编造没有公开的额外PG路径/账号内容。最初PowerShell把Properties.Count枚举为六个1，只是投影问题；随后将属性名物化为数组，实际overlayFiles=6，不改原回执或业务执行。
+
+本地当前候选证据汇总：UUID及三面板四整文件470/470；三core整文件98/98；保持最终526 token/原单例预算的2-worker最终大批次599文件/13857测试全通过；manual/interval各9阶段及6736项源码后验、ABORTED0、actual-stop-resolved与production-stop-verified各1/失败0/自有PG移除；当前宜搭71通过并由原CLI校验清理；sealed provenance原整文件exit0。两次默认31候选上限的完整前端批次失败仍保留，2-worker结果仅为完整最终批次的资源对照，不替代原默认整脚本或正式CI。未宣称旧250ms租约/WSL回拨/SQL/版本失败的唯一根因均已解决。
+
+另已把#6315的UUID修复准备为准确69a55ce7父树上的两文件本地候选 **472de4272dc90608b5686860972a02ad3edc17b1**（35新增/2删除）；tmp/pr6315-uuid-local-fix.patch SHA **bd38c6d7511a1fbace7783157c21ab4f55d1e995f0c947ded361e276b41058c3**。只应用本次两条新回归，不把子支已有25行流式上限测试混带到父支。初次提取因Git CRLF警告在diff前而被工具fail-closed拒绝，未落候选；随后仅对该条diff命令禁用autocrlf输出干扰，不改Git全局设置，验证两个文件scope后以私有index cached apply --check/apply建树。#6324九行fixture候选树d67ba001…不变。默认index无stage，无提交/分支refs/强推或远端写。
+
+main再次只读确认仍d671019f2。此轮新补丁尚未获准更新四个远端head/启动新CI，不把此前“发布已验证对齐结果”的单轮授权自动扩为后续补丁权限；本地安全独立复验已完成，可请求最窄新授权：只普通追加更新既有四PR及既有合成CI，保留所有失败，不合并/部署/客户读取/真实发送。完整六批目标不标complete，父支准确树完整CI及新子head正式71/停止证据仍有待取得。
+
+## 2026-10-18 当前补丁interval已通过，宜搭71仍在跑
+
+同一36345进程的interval已自然exit0、signal=null；原receipt SHA **416efc651c2059edc91d4b85add0573b235ead789022e197e01bd0611553afce**，stdout SHA **4cad7586fdd0dee63654396053b85b20314b015c1211ebed56097aada794b9c9**，stderr空。对准确该回执重复原六组生产验证、9阶段exit0/无超时、6736项源码原字节后验，全部通过。132个diagnostic帧ABORT/ABORTED/signalAborted0，独立actual-stop-resolved=1、production-stop-verified=1，两类停止失败0，自有PG移除成功。
+
+interval没有manual的automationRequests POST202，故三个bodyLegs针对该特定POST202筛选各0，不误报为“interval丢body”；interval自然调度/读取/浏览器观察以原validateAutomationEvidence(interval)的完整合同通过为据，不把manual三条BODY_DONE强加到不同场景。当前原YiDa browser CI入口已STARTED，71项/清理尚未终结。另在隔离原环境执行sealed-export-package-provenance.test.cjs整文件exit0/OK，没有重算或修改任何pin。
+
+## 2026-10-18 当前补丁manual：POST202完整body与实际停止已后验（仅本地）
+
+限定选择原receipt SHA09624d6a…，不遍历后把旧候选回执冒充新候选；对该回执6736个sourceInputs逐项重算当前原字节长度/SHA，均匹配，无.env路径或越界读取。实际9阶段均exit0/timedOut=false，customerIO/externalSend=false。再次调用原validateProductionStopEvidence、K3、YiDa、OwnerOff、Initialization及manual Automation验证函数，全部通过。
+
+204个闭合browser-transport-diagnostic中ABORT/ABORTED或signalAborted事件0；针对automationRequests POST202，SDK BODY_DONE+complete、PROXY UPSTREAM_COMPLETE+complete、PLAYWRIGHT BODY_DONE+complete各**1**。不是拿REQUEST_FINISHED/status0当body证明；本地后验对manual另断言三条完整body各1，未修改原生产判定。独立actual-stop-resolved=1、actual-stop-failed=0、production-stop-verified=1、production-stop-failed=0，cleanup=stopped-and-owned-database-removed。此为当前六文件overlay的真实原CLI与原回执证据，不签远端69140b head的skipped，也不据此将旧ABORTED唯一归因为某浏览器版本。
+
+同一36345进程的interval仍待终态，之后才是原宜搭71；没有重新启动manual或新Chrome交互。#6324父fixture的本地候选树和尚未推送的UUID/排序修复继续保留，未新增切片或外部动作。
+
+## 2026-10-18 四run全部终结：父支70项，不是子支71项；仅停用本次CI监视
+
+全分页准确head复核终态：#6315 Plugin run39109296702 success（但同head另web-tests仍failure，不是该PR全绿）；#6323 run39109370449 success；#6324 run39109374898 failure；#6337 run39109378982 failure。前两支的checkpoint/默认Chromium/锁协议/宜搭步骤/后置SQL/晚期attendance均success。后二者前置core失败后所有目标后续为skipped；#6337的固定候选/PLM manual/interval/71/实际host.stop证明本轮均未执行。未以其它泳道或父支结果消除子支发布阻断。
+
+已限定读取前两支公开完成job日志，仅投影owner YiDa步骤的最终结果帧：两支各1帧passed=true/**tests70/business65/sentinels5**，并非71漏跑或71通过。准确父head的原CLI源码本来就强制receipt.tests=70，且在报告passed前验证owner/source哈希、terminal与cleanup=stopped-owned-pg-removed；没有读取私有CI产物，清理结论属于公开帧加冻结生产报告合同支持的证明，不冒称直接看了private receipt或PLM stop帧。#6315公开job日志SHA **f39f566b907a46743b6c24c46762c678b661a666bee8f95e153b7f29ad42a74a**；#6323 SHA **7c3bb227a40d0c16e61fee670bb49aea84fe85e225697258443d315b33212e36**。收集器内部YIDA_71只是统一步骤标签，不是数量事实，数量以实际帧/准确源码为准；此前只签步骤success、待核计数的记录不追改为71。
+
+按该监视原授权“所有run终结、报告并停用”，通过应用automation_update更新既有6337-ci为PAUSED，保留完整prompt/name/目标chat/10分钟rrule；工具返回status=PAUSED并由本机配置回读确认。只是本次已终结CI提醒停用，未调用goal pause/complete，也未停止本地验收。使用OpenAI Docs核对[Scheduled tasks管理入口](https://learn.chatgpt.com/docs/automations?surface=app)；页面未提供heartbeat更新schema，不把它当本机API字段证据，具体更新以工具/配置回读为准。没有新监视或重复发起Chrome试用。
+
+当前六文件本地候选的三原入口复验36345继续：manual已自然exit0、原result=passed、9阶段报告合同下sourceFiles6736、cleanup=stopped-and-owned-database-removed，原receipt SHA **09624d6afc7171f7238a8c515ab4d2675bad4cefd2a2133ef8f15a7ae9224f0f**、stdout SHA **b81666127169d2fd972f3a809a945833e4a232d6961d0b2875774205beef3955**，stderr空。wrapper通用frame.passed=false是PLM不用该字段的投影（PLM用result字符串），不能误报失败；result/exit0/cleanup如实保留。interval已STARTED，宜搭71尚未启动，具体ABORTED计数和独立stop帧待原receipt后验，不移用旧候选。无新推送/CI重跑/合并/部署/客户读取/真实发送。
+
+## 2026-10-18 当前六文件补丁：全量最终批次资源对照完成，三原入口复验已启动
+
+2-worker诊断50716已自然exit0、signal=null、timedOut=false，原JSON实证**599文件全部通过、13857测试全部通过，failed/pending0**；七个原失败文件全部在本批次，亦包含K3面板138、Automation面板297、宜搭面板27及UUID8。526个原最终invocation token未删减，JSON numTotalTestSuites不用于文件计数。原JSON `tmp/web-final-batch-two-workers-20261018.json` SHA **0a85741a0e3741683fe8e13c4b62e1dd7e6d87edd2aa61166cf50b7023d476eb**；stdout SHA **bd1ecfd5b23d98730aaaeb31dbc17deef3e8e97447c1d332fe87d3a05d5f1bcf**，stderr空。过程观察器未发现完整argv marker时未误判停止；随后原执行句柄实际exit0与报告终态互相印证。
+
+该成功支持本机执行条件/并发资源敏感，不等于唯一CPU根因：缓存和执行时序也可能变化，且两个token交换只是集合等价排序修复。两次默认完整脚本失败继续保留；没有把前19批和本次最终批次拼成“原默认完整脚本已通过”，未改仓库并发/原测试超时/业务代码来遮掩。无第三次原样完整脚本或新的CI重跑。
+
+为不给修复后的运行时代码借旧5de证明，已启动原公开PLM full-app manual→interval→owner YiDa browser CI三入口逐段复验（观察句柄36345，当前plm-manual STARTED，后两段尚未执行）。Linux实际基底仍5de0484，跟踪差异精确六文件：三面板、宜搭spec、web脚本及tokens。Windows/Linux六项原字节SHA逐项相等；新增两项脚本SHA分别 **7993fe95aaba7592de3dc2f3590c45ea95a4806b23cdbbe95323d1b515654093**、**1a27a472b3cb2e2f1db9a5e4d9da8be6203eafdbecd45179a48e3aaef1864fd3**，其余四项见下节。AuthService fixture已finally恢复，未混入额外修改。
+
+本地外层wrapper只记录baseHead+六份overlayHashes，不把未提交补丁冒称5de原树；执行前后/每段前后均验证固定基底、空暂存index、恰好六个跟踪差异及原字节哈希。复用已存在官方候选时仍验证固定SHA43624de7…，绝不覆盖或开放任意executable；原公共CLI/参数/判定/停止/.env与出网守卫不变。只使用新自产PG与合成材料，环境白名单和真实发送OFF不变。当前仅签“已实际启动”，尚未签manual/interval/71或停止清理通过；当前六文件新候选正式CI仍待另行授权，不自动提交/推送。
+
+## 2026-10-18 08:34Z 当前收尾状态（仅本地，不替代历史失败）
+
+#6324父支fixture已准备为真正基于其准确7cd868b树的本地候选，而非只有回补计划：独立临时GIT_INDEX_FILE执行read-tree、cached apply --check/apply、write-tree，候选树 **d67ba001f3031b70a3c32ccc2366d19502f2e944** 相对父支恰好1文件9新增行。patch仅tmp/pr6324-existing-legacy-fixture-backport.patch，SHA **659719026304dca898d7a6c4486236daf304d8ade7ef0432f1b5d48635363f64**；该AuthService测试blob与现有#6337中已测版本完全相同。finally恢复原GIT_INDEX_FILE，默认index无stage，未修改branch refs、生成提交或推送。仍未把“cached patch可应用/测试blob一致”称为父支完整宿主已测通过；原fixture去除/恢复因果证据及后续准确父树复验要求不变。
+
+四PR准确head再次匹配。#6315的checkpoint、默认Chromium、锁协议和owner YiDa正式步骤已success，正执行后置multitable SQL；此处只有步骤状态，待公开日志闭合71计数及清理，不预签全部run。#6323的checkpoint/默认Chromium/锁协议已success，owner YiDa步骤in_progress。#6324/#6337已失败，后续PLM/宜搭及停止证明为skipped，不能借前两支的绿灯替代。#6315的web UUID失败仍是远端阻断；本地补丁未推送。
+
+前端第二轮六个超时帧通过已有七文件JSON中的测试元数据重建标题，再逐一SHA精确比对，6/6匹配到源码：approval-center:545、approval-detail-record-table:447、multitable-automation-manager:2769/2825、multitable-automation-rule-editor:1057/1337。初版未忽略Vitest空ancestor而0匹配；修正后只是证据映射成功，未重新执行业务。没有把固定微任务/20ms等待直接判为根因；其中各例涵盖真实组件挂载/选择器/模拟客户端，而不是全为静态文本扫描。
+
+本机Linux实际Node20.20.2，logicalCpus=availableParallelism=32、内存约30GiB；亲读已安装Vitest1.6.1的默认非watch threadsCount=numCpus-1，说明未限流时的候选上限为31，不冒称已测到每时每刻31个活worker。原vite测试配置不指定池或worker上限。已从该版本依赖代码确认VITEST_MAX/MIN_THREADS及MAX/MIN_FORKS受支持。
+
+基于此新证据，只针对原失败最终批次启动资源对照（观察句柄50716，尚未终态）：通过原parser提取全部526个token，原脚本最终同一匹配集合不删项，清空环境、user/net隔离、同源码/原配置/原单例超时不变，仅本次进程设置两类pool max=2/min=1，原JSON reporter记录到tmp/web-final-batch-two-workers-20261018.json；不改仓库或全局默认，不创建产品开关，不把这次诊断当原默认完整脚本通过。此前19批两次均通过但不拼接为这次完整脚本的新通过证据。若对照变绿，只说明资源参数/执行条件相关，不能凭一次绿灯解释或抹除两次默认批次失败。暂不再原样第三次完整脚本，不改审批/多维表业务；新候选完整PLM/YiDa和新head正式CI仍未签完成。
+
+## 2026-10-18 本轮正式CI失败定位与最小本地收敛
+
+准确新head的#6324 run39109374898、#6337 run39109378982均已failure；#6315 job117621755664随后实际进入owner YiDa JWT HTTP/browser步骤，#6323 job117621978915进入external-system delete/pointer-write锁协议真实库步骤，后二者尚未终态。#6324/#6337的checkpoint、锁协议、PLM、宜搭71及后置SQL均skipped，本轮没有ABORTED或实际host.stop新证明。#6315另web-tests失败仍保留。
+
+只读公开失败日志：#6324 SHA **2518862210158b5037045cb43b60e4fd6f120acd6b6572924cd8122f33d8878e**，1失败文件/1168通过/172 skipped，4失败测试/21606通过/1755 skipped，实际失败均AuthService.test.ts（公开日志有重试重复帧，不按12个FAIL帧算12项）。#6337日志SHA **2d50e64956576bbee3b9b1f65dc44b89b42859f4bc1c969da68b39bf363763d6**，2失败文件/1204通过/172 skipped，3失败测试/23804通过/1755 skipped，定位required-web-lane-registration-shape与required-web-lane-token-manifest-guard两整文件。collector全日志负例词不作为cleanup根因。
+
+#6337局部真实复现：三原core整文件（含AuthService）95/98，三失败与正式CI类别相同，JSON SHA **6a31e448342a41ff0bb980a42feff7553195d9ddaca19fc9c9526af06f1f7641**。根因是exec块与tokens manifest均把automationRead放到builtinCatalogPresentation之后；真实ASCII大小写无关排序的首断点分别141/189。生成器默认check只比集合，故它629=629的成功不能证明顺序守卫通过；没有token丢失。待完整前端92891终结后，才在两源码副本各调整脚本一对相邻行，并运行原manifest --write（格式生成命令）；没有在活验收中改源码。diff仅两文件各交换同一对行，629项/20 invocation与原flags不变。修后原三整文件**98/98**、failed/pending0，JSON SHA **9da3f70b1e7ae025ff6f38af3b89d4a43e87dbd2067db8ed9f531e01cf2545c7**，未削弱守卫/变异自证。
+
+#6324的AuthService四红并非#6337已绿即可自动覆盖：Git差异证明子支已有9行显式legacy fixture的stockPreparationReadPlanStore接线，父支没有。只在隔离Linux测试副本移除该fixture作变异，原35项AuthService变成31通过/4失败，JSON SHA **27fc3c1ee130fce37acd51bdafa9c190beb67a884c7e05784543a129b8916dac**；finally恢复后原文件exit0。fixture仍精确断言tenant/workspace/action/system且只返回null，不放宽缺runtime时fail-closed，不造已激活读计划。此为当前宿主上的fixture因果对照，不冒称冻结父支全树验收；后续授权更新父链时须将这份已存在的fixture前移到#6324并在其准确树重验，不能只修子支。
+
+另通过#6337准确job元数据确认Start Postgres和Create isolated attendance timezone database均skipped，而always的Remove isolated attendance timezone database为failure。它是前序失败后仍执行的考勤库清理步骤，不是PLM host.stop失败；未读取私有产物或用全日志的预期DB负例猜具体报错，未额外改workflow来遮掩失败。上述所有本地补丁未提交/推送，不自动重跑CI，无合并/部署/真实IO。
+
+本地完整前端第二轮92891也自然exit1、无超时保护触发：前19批报告仍通过，最终595文件通过/4失败，13851测试通过/6失败；六个实际FAIL诊断均Test timed out，来自approval-center、approval-detail-record-table、multitable-automation-manager及multitable-automation-rule-editor。stdout SHA **9966d526ae719e03b3d73c639a5ecffb112c19105e576e189dc10a0e98543450**，stderr SHA **025ca4f111c3a29b17dd3948392acb1f00c8e615a801e39df2f0dc656902d7a3**。仅证明本轮这六处为原测试预算超时，不把第一轮11失败一概归因为此，也不把七文件单独410/410当全量通过。部分用例有固定微任务/20ms等待，只列为待证假设；不修改审批/多维表业务或延长预算，完整前端阻断保留。
+
+## 2026-10-18 08:10Z UUID最小本地修复及真实组件回归
+
+原完整web gate26322现已自然exit1，signal=null、timedOut=false；不是外层600秒超时。前19个分批报告均通过，最后大批次7文件失败/592通过、11测试失败/13846通过；各批次可能重复覆盖，不合计为独立测试数。stdout SHA **cc5d04b9fa9f952891b9a3b97c9f3dac4f6b9739db3c257b858fa06402a4e928**，stderr SHA **e94914e92f572fe5deabb5cb3cd3a7a8af3457d10fec684c2813a74329340dea**。原collector因FAIL行样式未匹配而返回failures=[]，这不等于没有失败；原始stdout仅在内存处理，未保存正文，不能事后声称已读到原具体错误。
+
+七原整文件诊断19688已自然exit0，signal=null、timedOut=false，原JSON逐项证明7文件/410测试全部passed，failed/pending0；JSON numTotalTestSuites=33是describe层级数，不冒称33文件。stdout SHA **07d88648d23ec9d5a00b13b50162e4dfd5bda6c08537657c9d5bb6ee6c7dacd3**、stderr为空；原JSON `tmp/uuid-seven-file-diagnostic-20261018.json` SHA **de00dd3034e90d04d4516e670e5372b30e9e215d656fd2e73f505ded511da8b1**。与全量相同原源码/配置/隔离和环境，仅定位为七文件单独运行未复现；不等于全量已绿、基线无关、根因确定或可豁免。完整批次失败仍阻断，不修改这七个审批/多维表业务模块。
+
+下一步保持原完整脚本再次作批次诊断（句柄92891，尚在运行），不重跑远端CI、不改变源码/测试/筛选/预算，不以再绿删除上轮失败。诊断collector新增同时解析stderr和stdout（此前仅解析stdout），并兼容caret ANSI；只投影固定错误类别、源码位置及哈希。原失败正文已不在内存，不能追认其具体错误必然在哪个流。此次目的为取得完整批次失败上下文，与七文件单独410/410作对照，不将单独绿灯自动判为资源或批次污染根因。
+
+随后在启动任何新测试前读取该次Vitest results.json缓存，精确failed=true七项为approval-detail-record-table、approval-center、multitable-automation-rule-editor、multitable-automation-manager、multitable-workbench-history-field-scope-wiring、multitable-workbench-permission-wiring、multitable-workbench-1672-1673（均apps/web/tests下整文件）。这是缓存提供的失败文件证据，不是原断言堆栈。保持完整失败及其哈希，单独启动这七个原整文件作诊断，原配置/断言/源码不改，无it名称过滤；输出由原Vitest JSON reporter写本次tmp诊断文件，只读取固定错误分类、源码位置与计数，不输出响应/凭据/业务值。当前观察句柄19688尚未终结，不能预判“无关基线”或“只是批次偶发”，也不扩大到修改审批/多维表业务。四文件470/470仍仅是定向证据，完整web gate阻断保留。
+
+后续已启动原always-on前端完整脚本`bash apps/web/scripts/run-required-web-tests.sh`，不是仅四文件或手工缩短token清单。沿同一Linux验收副本运行，独立user/net namespace、清空继承环境，仅保留PATH/CI与npm offline/ignore-scripts；脚本原npx均用本地依赖，不下载包、不连客户系统。当前进程观察句柄26322已多次实际轮询存活，尚无完整终态，**未宣称完整web gate通过**。helper外层上限600秒只作本地进程保护，不改测试原配置或单例预算；输出在内存仅投影逐批计数、固定失败路径和日志哈希。原脚本实际路径来自workflow；初次只读误查scripts/ci路径不存在，不是产品测试失败。远端四Plugin run随后重查仍core-backend tests，无新增失败step，UUID远端原失败保留。
+
+沿既有修复收尾范围，修改三面板六调用复用randomUuid，并在原宜搭UI spec增两项非安全上下文/无安全随机源回归；非新切片，无提交/推送/CI重跑。先在原Linux冻结源码5de0484跑四个原整文件：467通过/1失败（总468），恰是全树tripwire检出六处原生调用；三个组件原功能测试全绿，解释为何之前定向组件绿灯不能证明内网HTTP兼容。
+
+补丁及两新增回归在独立Linux验收副本执行：Automation297、K3面板138、宜搭27、UUID8，四整文件**470/470**，exit0，无skip或放宽断言。恢复变异后完整四文件重验仍470/470。仅宜搭原生两调用恢复的变异导致UI非安全上下文回归+全树tripwire两项失败（33通过/2失败）；只恢复submission原生调用亦使同两项失败，证明用例不是仅依赖approval前段。第二变异先以缺少第4次模拟HTTP触发TypeError致红，随后补明确第4次调用计数断言后重验470/470；不把该诊断改进冒称又执行了一轮变异。两个变异均finally恢复。没有Math.random后备，无安全随机源时无授权POST，原默认OFF/单次确认/结果未知不重发均保留。
+
+最终Windows与实际Linux测试四文件原字节SHA一致（非哈希前换行归一化）：K3面板`28ffb1c4964917ca0cafe6f1bb7ebdb4e11505c6f3c0ceb3ef7f22dda3e90bca`；Automation面板`35818f35761b912d2cf00625d570e307f3ae74134d64ff674c4786ab9208def8`；宜搭面板`99cea90d0a49806011deb39a9c3753e577d0452df925b078e9b85cfb59b43ab2`；宜搭spec`8becc94e6853ed8be985c924feeaa4772ac4a1a4b3d8eb9d34e9fc4de2620c01`。git diff --check通过，仅core.autocrlf未来转换警告，未改Git全局配置。测试为合成fetch组件检查，不冒称客户HTTP实机、真实JWT或新浏览器/71项验收。没有新增独立审查代理或借用旧候选审查结论。
+
+本轮一次CI只读采集临时返回CI_READ_FAILED（stderr仅哈希），不认定run终止或产品失败；随后重查同run成功，四Plugin run实际均in_progress且已到core-backend tests，无失败step。#6315另web-tests真实失败保留，其余新head正式锁协议/PLM/宜搭71/停止清理仍pending，不能用本地470/470回填。本轮曾有一次PowerShell哈希投影空管道语法错误，未执行哈希检查；修正collector后四文件逐个取得上述匹配结果，非产品故障。
+
+## 2026-10-18 08:06Z 新阻断：#6315 web UUID守卫失败（只读定位）
+
+后续goal续推进属于verified wait：再次实际轮询同四run及精确head，均仍in_progress；#6315/#6324已进core-backend tests，#6323/#6337进入type checking，无新增失败step。#6337关键业务及停止步骤依然pending。只读固定Git对象进一步确认原生UUID调用随层累计为#6315两处、#6323三处、#6324三处、#6337六处；其中只有#6315已由实际web gate证明失败，不能宣称其余已跑红。当前跟踪树仅本MD修改，无产品补丁。继续既有只读监视，不因等待启动重复试用或额外CI。
+
+四PR head仍精确匹配发布表；Plugin System Tests四run均in_progress且无失败step。#6337 job117622005436仍处attendance inventory前置，锁协议/固定Chromium/PLM/宜搭71/后置SQL均pending，不得签ABORTED或stop通过。其同head全分页check-runs本次97 success/1 pending/2 cancelled/0 failure。
+
+#6315另一个同head run39109296520的web-tests job117621754772已failure，具体失败step为Run the always-on web spec gate。公开日志末尾实际FAIL定位`apps/web/tests/uuid-no-bare-randomuuid.spec.ts`，1文件失败/584通过，1测试失败/12193通过；日志SHA **f793841527a6dc390b4efd861f2500073f9aea837f8b933e4a7f91df2a2f080d**。中间大量预期负例含Error/FAIL不算独立新增失败；初次脱敏投影过宽导致工具输出截断，不使用截断部分推算其它失败或原始文本。
+
+在冻结#6315 head69a55ce7上git grep直接证实`StockPreparationYidaOwnerSendPanel.vue:161/182`仍调用原生UUID；main已带入的全树tripwire要求除`utils/uuid.ts`外不得出现该API名，测试第2条直接扫描实际src，不是假DB或随机网络问题。实际helper以安全上下文原生路径/非安全上下文getRandomValues后备/无安全随机源抛错三分支实现。当前#6337冻结树另有K3一处及Automation三处同类调用；它们尚未由本轮web job执行证明失败，不把静态预判写成CI事实。
+
+最窄修复方向是六个调用统一接既有randomUuid，不豁免扫描、不使用Math.random、不改TTL/安全随机性或授权；需沿四支既有依赖链普通前进并重新验收，不可只修根支冒称子支覆盖。当前用户仅要求监视定位，本轮未改产品/测试、未推送或重跑。已报告新失败，既有四run监视继续，未因单个其它泳道失败停止观察后续正式71项及清理。
+
+## 2026-10-18 08:03Z 四PR本轮CI只读核对（仅本地续记）
+
+逐支重查PR head、准确Plugin System Tests run/attempt1、全分页jobs及commit check-runs；四head均与上节发布表匹配。四个Plugin run均in_progress，各自DingTalk P4、after-sales及K3 WISE三个辅助job已success，test (20.x)仍执行且无失败step。全分页检查结果：#6315共62项（58 success/3 pending/1 skipped）；#6323共32项（29 success/1 pending/2 cancelled）；#6324共92项（89 success/1 pending/2 cancelled）；#6337共100项（95 success/3 pending/2 cancelled）。失败项均0；此计数含同head多个事件的检查记录，不冒称独立必需门数量，cancelled/skipped不算通过。
+
+#6337精确job117622005436当前处于前置operator-tooling单元测试；checkpoint、锁协议真实库、默认及固定Chromium安装、PLM manual/interval、宜搭71项、后置multitable SQL与attendance family-4均pending。因此当前head尚不能签ABORTED=0、实际host.stop/清理成功或71/71；没有把本地5de或旧35a结果回填。暂无具体CI失败可归因，保留既有10分钟只读跟踪，实际失败出现后才读取公开脱敏诊断，不自动重跑或修改。没有重复启动已完成并清理的Chrome试用，无新推送、合并、部署、客户读取或真实发送。
+
+## 2026-10-18 四PR普通快进已推送，既有新head CI已启动（本节仅本地续记）
+
+Owner本轮明确授权后，重新核实main仍d671019f2、四个远端旧head与base完全匹配，再以一次`git push --atomic`普通快进更新四refs；命令exit0，未使用force/force-with-lease、未改PR base/draft、未新建PR。GitHub随后逐支回读均OPEN/mergeable=true：
+
+| PR | 新head | 原base | Plugin System Tests |
+| --- | --- | --- | --- |
+| #6315 | 69a55ce7fa6872a7c2419f98cf1b42b8f9e409c4 | main | [run39109296702](https://github.com/zensgit/metasheet2/actions/runs/39109296702)，原pull_request自动触发 |
+| #6323 | 276c9ccf897d90b5bbf223becf2b8972907b8da3 | 原YiDa分支 | [run39109370449](https://github.com/zensgit/metasheet2/actions/runs/39109370449)，既有workflow_dispatch |
+| #6324 | 7cd868b45d1a59d1d01728d3f762e87fe4829dc1 | 原K3分支 | [run39109374898](https://github.com/zensgit/metasheet2/actions/runs/39109374898)，既有workflow_dispatch |
+| #6337 | 69140b86619e8fa9c1bf6da9bca5af731c8f5000 | 原PLM分支 | [run39109378982](https://github.com/zensgit/metasheet2/actions/runs/39109378982)，既有workflow_dispatch |
+
+首支原非草稿状态不变，其余三支仍DRAFT。前三树与本地已验快照完全相同；#6337在同树保留历史提交6ea5d1e9f之后，只追加两份既有MD，共160新增行，实际diff仅这两份docs，所有runtime/tests/workflow/package/lock/pin与已验5de0484相同。没有stage独立GOV-08文档、临时工具、截图、日志或私有交接材料。受验快照5de0484另用本地refs/codex/integration-stack-verified-20261018保留，未改原用户分支。
+
+对root原自动run已存在不再dispatch。针对三个非main base先通过准确head的workflow runs API确认Plugin System Tests结果数0，再逐支重查PR head后仅dispatch一次；不是重跑失败job。API逐个回读上述四run的head、attempt1和event均匹配，初始均queued。#6337精确test (20.x) job为117622005436，原四执行job当前queued/失败步骤空；pending不是通过。自动Integration Guard已挂同head，存在base/head事件带来的重复或被替代取消项，取消不是通过或新产品失败，未自动取消/重跑任何CI。
+
+本轮仅恢复既有heartbeat6337-ci，不新增跟踪任务，仍每10分钟；改为准确四run/head、优先6337正式71项/ABORTED/实际停止及后置SQL，仅有意义变化通知、未变安静。只读检查及当前本地MD脱敏续记，不自动重跑/改代码/再推送。先前Chrome试用已完成清理，监视不再重复启动环境。四run全部终结或head覆盖失效后按约定报告并停用；自动化工具已确认ACTIVE。通过OpenAI Docs技能核对调度入口，实际配置以本机既有任务及工具回读为准，不手改toml或改全局设置。
+
+既有源公开日志初次按4个head各列100条返回过长而被工具截断；未把截断输出作为全CI计数/完整哈希。随即改用精确workflow/head与已知run ID投影确认目标，不基于截断猜测不存在或通过。本节仅本地记录，不为更新监视再制造提交触发CI。仍无合并、部署、客户读取或真实发送；新head业务与清理必须正式通过后再判交付。
+
 ## 2026-10-18 已获准更新现有四PR与既有合成CI
 
 Owner明确批准将已验证对齐结果更新至现有#6315/#6323/#6324/#6337，并运行既有合成CI；禁止强推、新PR/切片、合并、部署、客户读取与真实发送。下方等待授权/blocked为此前阶段记录，不再代表当前权限状态。推送前重新只读确认main仍d671019f2，四个远端旧head及依赖base均精确匹配本地保留历史链；采用普通fast-forward，不改base或draft状态。

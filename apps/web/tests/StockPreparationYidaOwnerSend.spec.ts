@@ -131,6 +131,38 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(storageSetSpy).not.toHaveBeenCalled()
   })
 
+  it('uses secure fallback keys in a non-secure context and still requires separate explicit commands', async () => {
+    const getRandomValues = crypto.getRandomValues.bind(crypto)
+    uuidSpy.mockRestore()
+    vi.stubGlobal('crypto', { getRandomValues })
+    const insecureRandom = vi.spyOn(Math, 'random')
+    await approve()
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    const confirmationId = body(2).confirmationId
+    expect(confirmationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(q<HTMLButtonElement>('submit').disabled).toBe(false)
+    fetchSpy.mockResolvedValueOnce(json(submitted()))
+    await click('submit')
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    const submissionId = body(3).submissionId
+    expect(submissionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(submissionId).not.toBe(confirmationId)
+    await click('submit')
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    expect(insecureRandom).not.toHaveBeenCalled()
+  })
+
+  it('does not request authorization when no secure random source is available', async () => {
+    await preview(); await acknowledge()
+    uuidSpy.mockRestore()
+    vi.stubGlobal('crypto', {})
+    const insecureRandom = vi.spyOn(Math, 'random')
+    await click('approve')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(absent('grant')).toBe(true)
+    expect(insecureRandom).not.toHaveBeenCalled()
+  })
+
   it('rejects a server preview for a different member before rendering or confirming it', async () => {
     await save(); await selectRow()
     fetchSpy.mockResolvedValueOnce(json(serverPreview(ids.rowB)))
