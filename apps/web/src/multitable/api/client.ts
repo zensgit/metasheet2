@@ -97,11 +97,14 @@ import type {
   MetaApprovalTemplateDetail,
   MetaApprovalFormField,
   MetaApprovalFormOption,
+  MetaApprovalFormVisibilityOperator,
+  MetaApprovalFormVisibilityRule,
   MetaRecordApprovalListPage,
   MetaRecordApprovalSubmission,
   MetaRecordApprovalDrift,
 } from '../types'
 import { apiFetch } from '../../utils/api'
+import { notifyMultitableBeforeSend } from './beforeSend'
 import { apiCodeOwnedErrorMessage, apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
 import type { ConditionalRuleDTO } from '../utils/conditional-rule-ops'
 // S3a (comments shared FE kit extraction): the comment normalizer family moved verbatim to
@@ -642,8 +645,43 @@ function normalizeApprovalFormOptions(value: unknown): MetaApprovalFormOption[] 
   return options.length > 0 ? options : undefined
 }
 
+// The same five operators the server's stored-schema read accepts (ApprovalProductService
+// isVisibilityOperator / types/approval-product.ts FormFieldVisibilityOperator).
+const APPROVAL_VISIBILITY_OPERATORS: ReadonlySet<string> = new Set(['eq', 'neq', 'in', 'isEmpty', 'notEmpty'])
+
+// Carried VERBATIM: `value`/`values` are NOT coerced (a legacy string '5' on a number field stays the
+// string '5') — the dialog must evaluate exactly what the server evaluates. A shape the server would
+// never serve (its stored-schema read validates every rule) is dropped, which degrades to the
+// pre-existing "always shown" behaviour rather than inventing a rule.
+function normalizeApprovalFormVisibilityRule(value: unknown): MetaApprovalFormVisibilityRule | undefined {
+  if (!isPlainObject(value)) return undefined
+  const fieldId = typeof value.fieldId === 'string' ? value.fieldId.trim() : ''
+  const operator = typeof value.operator === 'string' ? value.operator : ''
+  if (!fieldId || !APPROVAL_VISIBILITY_OPERATORS.has(operator)) return undefined
+  return {
+    fieldId,
+    operator: operator as MetaApprovalFormVisibilityOperator,
+    ...(value.value !== undefined ? { value: value.value } : {}),
+    ...(Array.isArray(value.values) ? { values: [...value.values] } : {}),
+  }
+}
+
+// Mirror of the server's collectRuntimeGraphRequesterChoiceSources (ApprovalProductService): only
+// `approval` and `handler` nodes, only `config.assigneeSources[].kind === 'requester_choice'`. Boolean
+// only — the graph itself is not carried.
+function approvalGraphRequiresRequesterChoice(graph: unknown): boolean {
+  if (!isPlainObject(graph) || !Array.isArray(graph.nodes)) return false
+  return graph.nodes.some((node: unknown) => {
+    if (!isPlainObject(node) || (node.type !== 'approval' && node.type !== 'handler')) return false
+    const config = isPlainObject(node.config) ? node.config : undefined
+    const sources = config && Array.isArray(config.assigneeSources) ? config.assigneeSources : []
+    return sources.some((source: unknown) => isPlainObject(source) && source.kind === 'requester_choice')
+  })
+}
+
 // VALUES-FREE on purpose: `defaultValue` is deliberately NOT carried over — the submit dialog starts
-// empty and the actor types what they mean to submit.
+// empty and the actor types what they mean to submit. `visibilityRule` IS carried: it is schema
+// (template-authored constants), and the dialog needs it to hide exactly what the server prunes.
 function normalizeApprovalFormField(value: unknown): MetaApprovalFormField | null {
   if (!isPlainObject(value)) return null
   const id = optionalStringValue(value.id) ?? optionalStringValue(value.fieldId)
@@ -652,6 +690,7 @@ function normalizeApprovalFormField(value: unknown): MetaApprovalFormField | nul
   const label = optionalStringValue(value.label) ?? optionalStringValue(value.name) ?? id
   const placeholder = optionalStringValue(value.placeholder)
   const options = normalizeApprovalFormOptions(value.options)
+  const visibilityRule = normalizeApprovalFormVisibilityRule(value.visibilityRule)
   return {
     id,
     type,
@@ -659,6 +698,7 @@ function normalizeApprovalFormField(value: unknown): MetaApprovalFormField | nul
     ...(value.required === true ? { required: true } : {}),
     ...(placeholder ? { placeholder } : {}),
     ...(options ? { options } : {}),
+    ...(visibilityRule ? { visibilityRule } : {}),
   }
 }
 
@@ -689,6 +729,11 @@ function normalizeApprovalTemplateDetail(body: unknown, fallbackId: string): Met
   // unfixable 400. Fixing the read itself is a backend change, out of this surface's reach.
   const activeVersionId = optionalStringValue(record.activeVersionId) ?? optionalStringValue(record.active_version_id)
   const latestVersionId = optionalStringValue(record.latestVersionId) ?? optionalStringValue(record.latest_version_id)
+  const graph = isPlainObject(record.approvalGraph)
+    ? record.approvalGraph
+    : activeVersion && isPlainObject(activeVersion.approvalGraph)
+      ? activeVersion.approvalGraph
+      : undefined
   return {
     id: optionalStringValue(record.id) ?? fallbackId,
     ...(name ? { name } : {}),
@@ -698,6 +743,7 @@ function normalizeApprovalTemplateDetail(body: unknown, fallbackId: string): Met
     formFields: rawFields
       .map((entry: unknown) => normalizeApprovalFormField(entry))
       .filter((entry): entry is MetaApprovalFormField => entry !== null),
+    ...(approvalGraphRequiresRequesterChoice(graph) ? { servedGraphRequiresRequesterChoice: true as const } : {}),
   }
 }
 
@@ -2184,7 +2230,11 @@ function configRestoreConfirmForPreview(preview: ConfigRestorePreview): ConfigRe
 // removeReaction below already have this exact shape — `implements` only adds a compile-time
 // check, no runtime change).
 export class MultitableApiClient implements CommentsApiClient {
+  /** Every request goes through here: it tells the before-send listeners (api/beforeSend.ts), then
+   *  calls `rawFetch`. */
   private fetch: FetchFn
+  /** The transport itself (`apiFetch`, or a test's stub). Called only by `fetch` and `fetchPublic`. */
+  private readonly rawFetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
   private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
   // Catalog caches: the bases/templates lists are small and change rarely, but
@@ -2210,8 +2260,19 @@ export class MultitableApiClient implements CommentsApiClient {
   private readonly installTemplateInflight = new Map<string, Promise<InstallTemplateResult>>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
-    this.fetch = opts?.fetchFn ?? defaultFetchFn()
+    this.rawFetch = opts?.fetchFn ?? defaultFetchFn()
+    // Arguments are passed on exactly as given (a call with no init stays a call with no init).
+    this.fetch = (...args: Parameters<FetchFn>) => {
+      notifyMultitableBeforeSend()
+      return this.rawFetch(...args)
+    }
     this.isZhOption = opts?.isZh
+  }
+
+  /** The public-form path: `apiFetch` without the sign-in redirect, told to the listeners as well. */
+  private fetchPublic(path: string, init: RequestInit = {}): Promise<Response> {
+    notifyMultitableBeforeSend()
+    return apiFetch(path, { ...init, suppressUnauthorizedRedirect: true })
   }
 
   private resolveIsZh(): boolean {
@@ -2377,10 +2438,11 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   /**
-   * 记录级送审 (design 5.2): ONE approval template plus its active version's form fields, for the
-   * generic record-drawer submit form. Same route the approval centre's own `getTemplate` uses
-   * (`approvals:read` guarded) — but normalized HERE, values-free, rather than importing anything from
-   * `src/approvals/**` (separate window; the multitable surface must not depend on its DTO churn).
+   * 记录级送审 (design 5.2): ONE approval template plus the served (latest) version's form fields,
+   * their 显示条件, and a values-free requester-choice flag, for the generic record-drawer submit form.
+   * Same route the approval centre's own `getTemplate` uses (`approvals:read` guarded) — but normalized
+   * HERE, values-free (the approval centre's DTO is not reused; the multitable surface must not depend
+   * on its DTO churn).
    * A template with no readable form schema normalizes to an EMPTY field list (the dialog then has
    * nothing required to enforce and submits `{}`), never a throw.
    */
@@ -3264,8 +3326,8 @@ export class MultitableApiClient implements CommentsApiClient {
   // --- Form context ---
   async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
     const path = `/api/multitable/form-context${qs(params)}`
-    const res = params.publicToken && this.fetch === apiFetch
-      ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
+    const res = params.publicToken && this.rawFetch === apiFetch
+      ? await this.fetchPublic(path)
       : await this.fetch(path)
     const context = await this.parseJson<MetaFormContext>(res)
     // The (public) form never loads /context — it learns the business timezone here.
@@ -3749,8 +3811,8 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     }
-    const res = input.publicToken && this.fetch === apiFetch
-      ? await apiFetch(path, { ...requestInit, suppressUnauthorizedRedirect: true })
+    const res = input.publicToken && this.rawFetch === apiFetch
+      ? await this.fetchPublic(path, requestInit)
       : await this.fetch(path, requestInit)
     return this.parseJson(res)
   }

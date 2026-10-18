@@ -72,6 +72,7 @@ import StockPreparationOperatorHome from '../src/components/integration/stockPre
 import StockPreparationProjectWorkspaceView from '../src/components/integration/stockPreparation/StockPreparationProjectWorkspaceView.vue'
 import {
   STOCK_PREP_PROJECT_TARGET_ERROR_CODES,
+  STOCK_PREP_PROJECT_TARGET_PULL_OUTCOMES,
   StockPreparationProjectTargetCallError,
   clampStockPrepProjectTargetState,
   createStockPreparationProjectTargetApi,
@@ -291,6 +292,18 @@ describe('PT-CLIENT — the three project-sheet routes', () => {
     expect(isStockPrepProjectSheetsDisabled(malformed)).toBe(false)
     expect(clampStockPrepProjectTargetState({ status: 'deleted', may: { create: true, archive: true, restore: true } })).toBeNull()
     expect(clampStockPrepProjectTargetState({ status: 'active', may: { create: 'yes', archive: true, restore: true } })).toBeNull()
+  })
+
+  it('G1 field defect (R67): the last-pull outcome clamp admits `failed` (an apply whose target refused rows) and still drops an unknown word', () => {
+    expect([...STOCK_PREP_PROJECT_TARGET_PULL_OUTCOMES]).toEqual(['applied', 'previewed', 'refused', 'failed'])
+    const state = (lastPullOutcome: unknown) => clampStockPrepProjectTargetState({
+      status: 'active', sheetId: 'sheet_g1', lastPulledAt: '2026-10-14T00:00:00.000Z', lastPullOutcome,
+      may: { create: false, archive: true, restore: false },
+    })
+    expect(state('failed')?.lastPullOutcome).toBe('failed')
+    expect(state('applied')?.lastPullOutcome).toBe('applied')
+    expect(state('succeeded')?.lastPullOutcome).toBeNull()
+    expect(state('FAILED')?.lastPullOutcome).toBeNull()
   })
 })
 

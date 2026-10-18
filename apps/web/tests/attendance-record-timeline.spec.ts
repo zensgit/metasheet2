@@ -77,6 +77,8 @@ function installAttendanceMock(options?: {
   timelineItems?: Array<Record<string, unknown>>
   recordTimezone?: string | null
   recordUserId?: string
+  targetOrgId?: string
+  targetStatus?: number
 }): string[] {
   const timelineCalls: string[] = []
   const timelineStatus = options?.timelineStatus ?? 200
@@ -102,6 +104,16 @@ function installAttendanceMock(options?: {
   ]
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = String(input)
+    if (url.startsWith('/api/attendance/timezone-context/me?')) {
+      const workDate = new URL(url, 'http://localhost').searchParams.get('workDate')!
+      const timezone = options?.recordTimezone ?? 'Asia/Shanghai'
+      return jsonResponse(options?.targetStatus ?? 200, { ok: true, data: {
+        orgId: options?.targetOrgId ?? authMockState.sessionOrgId, userId: 'user-1', workDate,
+        timezone, contextFingerprint: 'c'.repeat(64), frozen: true, referenceId: 'context-1', provenance: null,
+        window: { startAt: workDate + 'T00:00:00.000Z', endAt: workDate + 'T23:00:00.000Z' },
+        rule: { workStartTime: '09:00', workEndTime: '18:00' }, isWorkingDay: true,
+      } })
+    }
     if (url.includes('/api/attendance/summary?')) {
       return jsonResponse(200, { ok: true, data: null })
     }
@@ -181,7 +193,7 @@ describe('Attendance record timeline', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    authMockState.sessionOrgId = ''
+    authMockState.sessionOrgId = 'session-org-a'
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
     window.localStorage.setItem('auth_token', `header.${btoa(JSON.stringify({ sub: 'user-1' }))}.signature`)
@@ -208,7 +220,7 @@ describe('Attendance record timeline', () => {
     await flushUi()
 
     expect(timelineCalls).toEqual([
-      '/api/attendance/punch/events?from=2026-03-28&to=2026-03-28',
+      '/api/attendance/punch/events?from=2026-03-28&to=2026-03-28&orgId=session-org-a',
     ])
 
     const rows = Array.from(container!.querySelectorAll('.attendance__timeline-item')).map(
@@ -343,9 +355,9 @@ describe('Attendance record timeline', () => {
   })
 
   it.each([
-    { principalKey: 'sub:another-user', orgId: '' },
+    { principalKey: 'sub:another-user', orgId: 'session-org-a' },
     { principalKey: 'sub:user-1', orgId: 'another-org' },
-    { principalKey: 'sub:user-1', orgId: '', requestType: 'invalid' },
+    { principalKey: 'sub:user-1', orgId: 'session-org-a', requestType: 'invalid' },
   ])('clears and rejects a mismatched or malformed route draft %#', async overrides => {
     installAttendanceMock()
     await mountReports()
@@ -353,7 +365,7 @@ describe('Attendance record timeline', () => {
       path: '/attendance',
       query: { section: 'attendance-overview-anomalies' },
       state: { [ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]: {
-        principalKey: 'sub:user-1', orgId: '', workDate: '2026-03-28', requestType: 'time_correction',
+        principalKey: 'sub:user-1', orgId: 'session-org-a', workDate: '2026-03-28', requestType: 'time_correction',
         requestedInAt: '2026-03-28T09:01:00+08:00', requestedOutAt: '2026-03-28T18:05:00+08:00',
         inTimeZone: 'Asia/Shanghai', outTimeZone: 'Asia/Shanghai', ...overrides,
       } },
@@ -494,21 +506,21 @@ describe('Attendance record timeline', () => {
     const input = container!.querySelector<HTMLInputElement>('#attendance-request-in')!
     expect(input.value).toBe('2026-03-28T09:00:37.123')
     expect(Array.from(container!.querySelectorAll('[data-record-request-timezone]')).map(item => item.textContent?.trim())).toEqual(['Asia/Shanghai', 'Asia/Shanghai'])
-    expect(container!.querySelector('[data-record-request-time-policy]')?.textContent).toContain('Edited repeated times use the earlier occurrence')
+    expect(container!.querySelector('[data-record-request-time-policy]')?.textContent).toContain('edited repeated times require an offset choice')
     const bodies = () => vi.mocked(apiFetch).mock.calls
       .filter(([url, init]) => String(url) === '/api/attendance/requests' && init?.method === 'POST')
       .map(([, init]) => JSON.parse(String(init?.body)))
 
     findButton(container!, 'Submit request').click()
     await flushUi(16)
-    expect(bodies()).toEqual([{ workDate: '2026-03-28', requestType: 'time_correction', requestedInAt: firstIn, requestedOutAt: lastOut }])
+    expect(bodies()).toEqual([{ workDate: '2026-03-28', requestType: 'time_correction', orgId: 'session-org-a', expectedTimezoneContextFingerprint: 'c'.repeat(64), requestedInAt: '2026-03-28T01:00:37.123Z', requestedOutAt: '2026-03-28T10:05:38.456Z' }])
 
     input.value = '2026-03-28T09:02:39.789'
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     findButton(container!, 'Submit request').click()
     await flushUi(16)
-    expect(bodies()[1]).toEqual({ workDate: '2026-03-28', requestType: 'time_correction', requestedInAt: '2026-03-28T01:02:39.789Z', requestedOutAt: lastOut })
+    expect(bodies()[1]).toEqual({ workDate: '2026-03-28', requestType: 'time_correction', orgId: 'session-org-a', expectedTimezoneContextFingerprint: 'c'.repeat(64), requestedInAt: '2026-03-28T01:02:39.789Z', requestedOutAt: '2026-03-28T10:05:38.456Z' })
 
     const date = container!.querySelector<HTMLInputElement>('#attendance-request-work-date')!
     date.value = '2026-03-29'
@@ -517,6 +529,22 @@ describe('Attendance record timeline', () => {
     expect(input.value).toBe('')
     expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
     expect(container!.querySelector('[data-record-request-time-policy]')).toBeNull()
+  })
+
+  it.each([{ targetOrgId: 'another-org' }, { targetStatus: 403 }])('refuses untrusted target context before prefill or writes %#', async options => {
+    installAttendanceMock(options)
+    await mountReports()
+    findButton(container!, 'Details').click()
+    await flushUi()
+    findButton(container!, 'Use as Time correction').click()
+    await flushUi(24)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
+    expect(container!.textContent).toContain('Target shift timezone could not be confirmed.')
+    findButton(container!, 'Submit request').click()
+    await flushUi(16)
+    expect(vi.mocked(apiFetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+    expect(router.options.history.state[ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]).toBeNull()
   })
 
   it('rejects a spring-forward gap before any request write', async () => {
@@ -530,12 +558,15 @@ describe('Attendance record timeline', () => {
     findButton(container!, 'Use as Time correction').click()
     await flushUi(24)
     const input = container!.querySelector<HTMLInputElement>('#attendance-request-in')!
+    expect(input.value).toBe('2026-03-08T01:30')
+    expect(container!.querySelector('[data-request-timezone]')?.textContent).toContain('America/New_York')
     input.value = '2026-03-08T02:30'
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     findButton(container!, 'Submit request').click()
     await flushUi(16)
-    expect(container!.textContent).toContain('skipped daylight-saving times are unavailable')
+    expect(container!.textContent).toContain('Confirm the target shift timezone and any repeated time offset; skipped local times are unavailable.')
+    expect(container!.querySelector('[data-request-timezone]')?.textContent).toContain('This local time does not exist.')
     expect(vi.mocked(apiFetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
   })
 

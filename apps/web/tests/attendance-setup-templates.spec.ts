@@ -778,11 +778,11 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     }))
     return {
       groupName: groupNameInput().value,
-      groupTimezone: container!.querySelector<HTMLSelectElement>('#attendance-group-timezone')!.value,
+      groupTimezone: container!.querySelector<HTMLElement>('#attendance-group-timezone')!.getAttribute('data-attendance-timezone-value'),
       groupType: container!.querySelector<HTMLSelectElement>('#attendance-group-type')!.value,
       shiftName: shiftNameInput().value,
       shiftSegments,
-      shiftTimezone: container!.querySelector<HTMLSelectElement>('#attendance-shift-timezone')!.value,
+      shiftTimezone: container!.querySelector<HTMLElement>('#attendance-shift-timezone')!.getAttribute('data-attendance-timezone-value'),
       shiftLateGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-late-grace')!.value,
       shiftEarlyGrace: container!.querySelector<HTMLInputElement>('#attendance-shift-early-grace')!.value,
       shiftRounding: container!.querySelector<HTMLInputElement>('#attendance-shift-rounding')!.value,
@@ -904,8 +904,10 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi()
     let confirm = dialog()!
     expect(confirm.querySelector('[data-setup-template-timezone-org]')?.textContent).toContain('Asia/Shanghai')
-    const select = confirm.querySelector<HTMLSelectElement>('[data-setup-template-timezone-select]')!
-    expect(select.value).toBe('Asia/Shanghai')
+    const select = confirm.querySelector<HTMLInputElement>('[data-setup-template-timezone-select]')!
+    expect(select.getAttribute('data-attendance-timezone-value')).toBe('Asia/Shanghai')
+    expect(select.value).toContain('Asia/Shanghai')
+    expect(select.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(confirm.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!.disabled).toBe(false)
     confirm.querySelector<HTMLButtonElement>('[data-setup-template-cancel]')!.click()
     await flushUi()
@@ -921,7 +923,8 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     confirm = dialog()!
     expect(confirm.querySelector('[data-setup-template-timezone-org]')).toBeNull()
     expect(confirm.querySelector('[data-setup-template-timezone-required]')).toBeTruthy()
-    const emptySelect = confirm.querySelector<HTMLSelectElement>('[data-setup-template-timezone-select]')!
+    const emptySelect = confirm.querySelector<HTMLInputElement>('[data-setup-template-timezone-select]')!
+    expect(emptySelect.getAttribute('data-attendance-timezone-value') || '').toBe('')
     expect(emptySelect.value).toBe('')
     const apply = confirm.querySelector<HTMLButtonElement>('[data-setup-template-apply]')!
     expect(apply.disabled).toBe(true)
@@ -1090,7 +1093,7 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     //   reload readiness.
     openTemplate('factory-multi-shift')
     await flushUi()
-    const tzSelect = dialog()!.querySelector<HTMLSelectElement>('[data-setup-template-timezone-select]')!
+    const tzSelect = dialog()!.querySelector<HTMLInputElement>('[data-setup-template-timezone-select]')!
     tzSelect.value = 'America/New_York'
     tzSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
@@ -1117,12 +1120,11 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi(8)
     expect(dialog()).toBeNull()
 
-    // Re-enter the wizard (task home → setup) — pending prefill keeps the checklist item alive.
-    const returnHome = Array.from(container!.querySelectorAll('button')).find((b) => (b.textContent || '').includes('Management home'))
-    expect(returnHome).toBeTruthy()
-    returnHome!.click()
-    await flushUi(8)
-    container!.querySelector<HTMLButtonElement>('[data-admin-task-action="setup-readiness"]')!.click()
+    // Re-enter the wizard from the rail — pending prefill keeps the checklist item alive.
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor-group="workspace"] button')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-setup"]')!.click()
     await flushUi(16)
     const checklistItem = container!.querySelector('[data-setup-checklist-item="template-prefill"]')
     expect(checklistItem).toBeTruthy()

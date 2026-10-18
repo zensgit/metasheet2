@@ -72,10 +72,11 @@ const APPROVAL_INSTANCE_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
 const CANCEL_ROUND_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
   cancellation_pending_approval: { tone: 'warning', zh: '撤销申请审批中', en: 'Cancellation pending approval' },
   leave_cancelled: { tone: 'success', zh: '请假已取消', en: 'Leave cancelled' },
+  business_trip_cancelled: { tone: 'success', zh: '出差已取消', en: 'Business trip cancelled' },
   cancellation_rejected: { tone: 'danger', zh: '撤销申请被驳回', en: 'Cancellation rejected' },
   cancellation_withdrawn: { tone: 'info', zh: '撤销申请已撤回', en: 'Cancellation withdrawn' },
   cancellation_window_closed: { tone: 'neutral', zh: '撤销窗口已过,申请自动关闭', en: 'Cancellation window closed' },
-  cancellation_blocked: { tone: 'neutral', zh: '该请假已无法撤销(业务原因)', en: 'Cancellation blocked' },
+  cancellation_blocked: { tone: 'neutral', zh: '该申请已无法撤销(业务原因)', en: 'Cancellation blocked' },
   action_incomplete_retry: { tone: 'warning', zh: '本次操作未完成,请稍后重试', en: 'Action failed, still pending' },
   system_busy_retry: { tone: 'warning', zh: '系统繁忙,请稍后重试', en: 'System busy' },
   status_resolving: { tone: 'neutral', zh: '撤销结果读取中', en: 'Loading cancellation result' },

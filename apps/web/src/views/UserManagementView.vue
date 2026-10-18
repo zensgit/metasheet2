@@ -440,7 +440,7 @@
         <template v-if="access">
           <div class="user-admin__detail-head">
             <div>
-              <h2>{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
+              <h2 data-testid="selected-user-heading">{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
               <p>{{ formatManagedUserIdentifier(access.user) }}</p>
               <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
               <p v-if="profileSummaryLine" class="user-admin__hint">{{ profileSummaryLine }}</p>
@@ -556,6 +556,70 @@
                 {{ memberAdmission.businessRoleIds.length > 0 ? `业务系统角色 ${memberAdmission.businessRoleIds.length}` : '未分配业务系统角色' }}
               </span>
             </div>
+            <!-- Slice B (owner ruling on #6079): read-only view of the user's active organizations, the same
+                 rows the login tenant claim reads. Nothing here writes; an older backend without the field
+                 renders nothing, and a disabled account is already explained by its chip above. -->
+            <div v-if="memberAdmissionOrganizations" class="user-admin__org-context" data-testid="member-admission-organizations">
+              <div class="user-admin__chips">
+                <strong class="user-admin__org-label">所属组织</strong>
+                <span
+                  v-for="org in memberAdmissionOrganizations.active"
+                  :key="org.orgId"
+                  class="user-admin__chip"
+                  :class="{ 'user-admin__chip--success': memberAdmissionOrganizations.hasTenantContext }"
+                  data-testid="member-admission-org-chip"
+                >
+                  {{ org.orgId }}
+                </span>
+              </div>
+              <template v-if="memberAdmissionOrganizations.active.length === 0">
+                <p class="user-admin__warning" data-testid="member-admission-org-none">
+                  未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
+                </p>
+                <!-- Slice C: one-click 加入默认组织 via the local-directory-account route. Shown only when the
+                     backend positively says the user has no membership row at all and no applied deprovision
+                     (an older backend without those two booleans keeps it hidden) and the admission on screen
+                     belongs to the selected user; a disabled account never reaches this block (see
+                     memberAdmissionOrganizations). -->
+                <div v-if="canJoinDefaultOrg" class="user-admin__chips">
+                  <button
+                    class="user-admin__button"
+                    type="button"
+                    data-testid="join-default-org-button"
+                    :disabled="joiningDefaultOrg"
+                    @click="openJoinDefaultOrgConfirm"
+                  >
+                    {{ joiningDefaultOrg ? '加入中...' : '加入默认组织' }}
+                  </button>
+                </div>
+                <div
+                  v-if="canJoinDefaultOrg && joinDefaultOrgConfirmUserId !== null && joinDefaultOrgConfirmUserId === memberAdmission?.userId"
+                  class="user-admin__confirm"
+                  role="dialog"
+                  aria-label="确认加入默认组织"
+                  data-testid="join-default-org-confirm"
+                >
+                  <strong>确认将该账号加入默认组织？</strong>
+                  <ol>
+                    <li>会为该账号创建一条本地目录账号与链接（目录管理里可见）；</li>
+                    <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；</li>
+                    <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
+                  </ol>
+                  <p data-testid="join-default-org-confirm-undo">此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。</p>
+                  <div class="user-admin__chips">
+                    <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
+                      确认加入
+                    </button>
+                    <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="join-default-org-confirm-cancel" @click="closeJoinDefaultOrgConfirm">
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </template>
+              <p v-else-if="memberAdmissionOrganizations.active.length >= 2" class="user-admin__warning" data-testid="member-admission-org-multiple">
+                属于多个组织：登录后需在页面顶部选择组织
+              </p>
+            </div>
             <div v-if="memberAdmission?.directoryMemberships.length" class="user-admin__role-list">
               <article v-for="membership in memberAdmission.directoryMemberships" :key="membership.directoryAccountId" class="user-admin__role-card">
                 <strong>{{ membership.integrationName }} · {{ membership.name }}</strong>
@@ -624,24 +688,56 @@
               </div>
             </div>
             <div class="user-admin__chips">
-              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }">
+              <span
+                class="user-admin__chip"
+                data-testid="platform-admin-chip"
+                :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }"
+              >
                 {{ hasPlatformAdminAccess ? '已开通平台管理员' : '未开通平台管理员' }}
               </span>
-              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }">
+              <span
+                class="user-admin__chip"
+                data-testid="attendance-admin-chip"
+                :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }"
+              >
                 {{ hasAttendanceAdminAccess ? '已开通考勤管理员' : '未开通考勤管理员' }}
               </span>
             </div>
             <div class="user-admin__role-actions">
-              <button class="user-admin__button" type="button" :disabled="busy || hasPlatformAdminAccess" @click="void updateNamedRole('admin', true)">
+              <button
+                class="user-admin__button"
+                type="button"
+                data-testid="promote-platform-admin-button"
+                :disabled="busy || !roleSnapshotReady || hasPlatformAdminAccess"
+                @click="void updateNamedRole('admin', true)"
+              >
                 提升为平台管理员
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasPlatformAdminAccess" @click="void updateNamedRole('admin', false)">
+              <button
+                class="user-admin__button user-admin__button--secondary"
+                type="button"
+                data-testid="revoke-platform-admin-button"
+                :disabled="busy || !roleSnapshotReady || !hasPlatformAdminAccess"
+                @click="void updateNamedRole('admin', false)"
+              >
                 取消平台管理员
               </button>
-              <button class="user-admin__button" type="button" :disabled="busy || hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', true)">
+              <button
+                class="user-admin__button"
+                type="button"
+                data-testid="enable-attendance-admin-button"
+                :disabled="busy || !roleSnapshotReady || hasAttendanceAdminAccess"
+                @click="void updateNamedRole('attendance_admin', true)"
+              >
                 开通考勤管理员
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', false)">
+              <button
+                class="user-admin__button user-admin__button--secondary"
+                type="button"
+                data-testid="disable-attendance-admin-button"
+                :disabled="busy || !roleSnapshotReady || !hasAttendanceAdminAccess"
+                @click="void updateNamedRole('attendance_admin', false)"
+              >
                 关闭考勤管理员
               </button>
             </div>
@@ -756,6 +852,10 @@
                 class="user-admin__search"
                 type="text"
                 placeholder="可选：设置临时密码"
+                data-testid="admin-temporary-password"
+                aria-label="临时密码"
+                :aria-invalid="passwordResetInlineError ? 'true' : 'false'"
+                :aria-describedby="passwordResetInlineError ? 'admin-temporary-password-rule admin-temporary-password-error' : 'admin-temporary-password-rule'"
               />
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy" @click="void resetPassword()">
                 重置密码
@@ -764,8 +864,20 @@
                 全部下线
               </button>
             </div>
+            <p id="admin-temporary-password-rule" data-testid="admin-temporary-password-rule" class="user-admin__hint">
+              {{ adminTemporaryPasswordRuleHint }}
+            </p>
+            <p
+              v-if="passwordResetInlineError"
+              id="admin-temporary-password-error"
+              data-testid="admin-temporary-password-error"
+              class="user-admin__status user-admin__status--error"
+              role="alert"
+            >
+              {{ passwordResetInlineError }}
+            </p>
             <p class="user-admin__hint">重置密码或停用账号会让该用户的现有会话失效。</p>
-            <p v-if="temporaryPassword" class="user-admin__status">
+            <p v-if="temporaryPassword" class="user-admin__status" data-testid="admin-reset-temporary-password">
               临时密码：{{ temporaryPassword }}
             </p>
           </div>
@@ -806,19 +918,29 @@
           <div class="user-admin__section">
             <h3>角色操作</h3>
             <div class="user-admin__role-actions">
-              <select v-model="selectedRoleId" class="user-admin__select">
+              <select v-model="selectedRoleId" class="user-admin__select" data-testid="user-role-select" aria-label="选择要分配或撤销的角色">
                 <option value="">请选择角色</option>
                 <option v-for="role in roleCatalog" :key="role.id" :value="role.id">
                   {{ role.name }} ({{ role.id }})
                 </option>
               </select>
-              <button class="user-admin__button" type="button" :disabled="busy || !selectedRoleId" @click="void assignRole()">
+              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
                 分配角色
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !selectedRoleId" @click="void unassignRole()">
+              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
                 撤销角色
               </button>
             </div>
+            <p data-testid="selected-role-membership" class="user-admin__hint">{{ selectedRoleMembership.text }}</p>
+            <p
+              v-if="roleActionFeedback"
+              data-testid="role-action-feedback"
+              class="user-admin__status"
+              :class="{ 'user-admin__status--error': roleActionFeedback.tone === 'error' }"
+              aria-live="polite"
+            >
+              {{ roleActionFeedback.message }}
+            </p>
           </div>
 
           <div class="user-admin__section">
@@ -834,6 +956,9 @@
           </div>
         </template>
 
+        <div v-else-if="selectedUserId" class="user-admin__empty" data-testid="user-access-unread">
+          该用户的访问快照未读，不能把上一名用户的角色或空列表当作当前状态。
+        </div>
         <div v-else class="user-admin__empty">
           请选择一个用户查看访问详情
         </div>
@@ -843,11 +968,28 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
+import {
+  accessReadStillCurrent,
+  describeRoleMembershipWrite,
+  nextAccessReadGeneration,
+  roleWriteOutcomeFromPayload,
+  selectedRoleMembershipHint,
+  userAccessSnapshotMatches,
+  type RoleMembershipSnapshot,
+  type RoleMembershipWriteOutcome,
+} from './adminUserRoleAction'
+import {
+  ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
+  ADMIN_TEMPORARY_PASSWORD_TOO_SHORT,
+  classifyManualTemporaryPassword,
+  describeAdminResetPasswordInlineError,
+} from './adminTemporaryPasswordFeedback'
 
 type ManagedUser = {
   id: string
@@ -984,6 +1126,25 @@ type MemberAdmission = {
   directoryMemberships: MemberDirectoryMembership[]
   dingtalk: DingTalkAccess
   namespaceAdmissions: NamespaceAdmission[]
+  /**
+   * null = render nothing: the field is absent (older backend), the server sent null (its
+   * user_orgs read failed, "unknown"), or the payload is malformed.
+   */
+  organizations: MemberOrganizations | null
+}
+
+type MemberOrganizations = {
+  active: Array<{ orgId: string }>
+  /** Mirrors the no-hint login rule (exactly one active row); a login carrying a stored tenant hint takes another branch. */
+  hasTenantContext: boolean
+  /**
+   * Slice C: whether the user has ANY user_orgs row (active or not) / any applied deprovision event.
+   * null = unknown (an older backend without the field, the server sent null because that read failed
+   * (#6389), or a non-boolean value); unknown never shows
+   * the 加入默认组织 button.
+   */
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
 }
 
 type NamespaceAdmission = {
@@ -1147,8 +1308,12 @@ const attendanceOrgOptionsFailed = ref(false)
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedNamespace = ref('')
 const selectedUserId = ref('')
+const userAccessReadGeneration = ref(0)
 const selectedRoleId = ref('')
+const roleActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 const manualPassword = ref('')
+const passwordResetInlineError = ref('')
+const adminTemporaryPasswordRuleHint = ADMIN_TEMPORARY_PASSWORD_RULE_HINT
 const temporaryPassword = ref('')
 const createdTemporaryPassword = ref('')
 const createdInviteMessage = ref('')
@@ -1157,8 +1322,35 @@ const createdAttendanceOnboardingTarget = ref<AttendanceOnboardingTarget | null>
 const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
+const selectedRoleMembership = computed(() => selectedRoleMembershipHint(selectedRoleId.value, access.value?.roles || []))
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+// Hidden for a disabled account: the server reads memberships with the login predicate
+// (u.is_active = true), so a disabled account always reads as "no organization", which would
+// send the admin to add memberships it may already have.
+const memberAdmissionOrganizations = computed<MemberOrganizations | null>(() => {
+  const admission = memberAdmission.value
+  if (!admission || !admission.accountEnabled) return null
+  return admission.organizations ?? null
+})
+// Slice C: every condition must be positively known; the server re-checks them (409) anyway. "No active
+// organization" is enforced by the template: the button lives only inside the active.length === 0 branch.
+const canJoinDefaultOrg = computed<boolean>(() => {
+  const organizations = memberAdmissionOrganizations.value
+  if (!organizations) return false
+  // The admission on screen must be the selected user's (the header and the POST both follow the selection).
+  if (memberAdmission.value?.userId !== selectedUserId.value) return false
+  return organizations.hasAnyRow === false
+    && organizations.deprovisionApplied === false
+})
+// Users whose join request is in flight; only the one on screen shows 加入中....
+const joiningDefaultOrgUserIds = ref<string[]>([])
+const joiningDefaultOrg = computed<boolean>(() => {
+  const userId = memberAdmission.value?.userId
+  return typeof userId === 'string' && joiningDefaultOrgUserIds.value.includes(userId)
+})
+// The user the confirm panel was opened for; the panel only renders while that user's admission is shown.
+const joinDefaultOrgConfirmUserId = ref<string | null>(null)
 // #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
 // sentence and (when the server sent one) the request's correlation id — never in the top banner and
 // never with the server's error text.
@@ -1311,6 +1503,7 @@ const userFilterOptions = [
   { value: 'dingtalk-openid-missing', label: '缺 OpenID' },
   { value: 'platform-admin', label: '平台管理员' },
 ] as const
+const roleSnapshotReady = computed(() => userAccessSnapshotMatches(access.value, selectedUserId.value))
 const hasPlatformAdminAccess = computed(() => {
   if (!access.value) return false
   return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
@@ -1956,6 +2149,27 @@ function buildDirectoryManagementLocation(userId: string, membership: Pick<Membe
   return `/admin/directory?${params.toString()}`
 }
 
+// Any shape problem makes the whole field "unknown" (null, render nothing) rather than dropping the
+// bad items: dropping them could turn a list of unreadable ids into an empty list, and the empty
+// list tells the admin 「未归属任何组织」, which would be a claim the payload does not support.
+function normalizeMemberOrganizations(value: unknown): MemberOrganizations | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.active) || typeof record.hasTenantContext !== 'boolean') return null
+  const active: Array<{ orgId: string }> = []
+  for (const item of record.active) {
+    const orgId = item && typeof item === 'object' ? (item as Record<string, unknown>).orgId : null
+    if (typeof orgId !== 'string' || !orgId.trim()) return null
+    active.push({ orgId: orgId.trim() })
+  }
+  return {
+    active,
+    hasTenantContext: record.hasTenantContext,
+    hasAnyRow: typeof record.hasAnyRow === 'boolean' ? record.hasAnyRow : null,
+    deprovisionApplied: typeof record.deprovisionApplied === 'boolean' ? record.deprovisionApplied : null,
+  }
+}
+
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
   if (!Array.isArray(value)) return []
   return value
@@ -2224,6 +2438,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+    if (userId && userId !== selectedUserId.value) return
     inviteRecords.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -2243,6 +2458,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
+    if (userId && userId !== selectedUserId.value) return
     setStatus(error instanceof Error ? error.message : '加载邀请记录失败', 'error')
   } finally {
     loadingInvites.value = false
@@ -2264,6 +2480,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
+    if (userId !== selectedUserId.value) return
     userSessions.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -2279,6 +2496,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
+    if (userId !== selectedUserId.value) return
     setStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
   } finally {
     loadingSessions.value = false
@@ -2295,17 +2513,28 @@ async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
 }
 
 async function selectUser(userId: string): Promise<void> {
+  const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
+  userAccessReadGeneration.value = generation
   selectedUserId.value = userId
   selectedRoleId.value = ''
+  roleActionFeedback.value = null
   manualPassword.value = ''
+  passwordResetInlineError.value = ''
   temporaryPassword.value = ''
   createdTemporaryPassword.value = ''
   dingtalkAccess.value = null
   memberAdmission.value = null
   dingtalkAccessLoadFailure.value = null
   memberAdmissionLoadFailure.value = null
+  access.value = null
   try {
-    access.value = await fetchUserAccessOrThrow(userId)
+    const snapshot = await fetchUserAccessOrThrow(userId)
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    if (!userAccessSnapshotMatches(snapshot, userId)) {
+      setStatus('用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
+      return
+    }
+    access.value = snapshot
     syncProfileDraftFromAccess()
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
@@ -2314,8 +2543,11 @@ async function selectUser(userId: string): Promise<void> {
       }
       appliedUserNavigationKey.value = navigationKey
     }
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    access.value = null
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
 }
@@ -2355,6 +2587,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
     const payload = await readJson(response)
+    if (userId !== selectedUserId.value) return
     if (!response.ok || payload.ok !== true) {
       dingtalkAccess.value = null
       dingtalkAccessLoadFailure.value = readSidePanelLoadFailure(payload)
@@ -2364,6 +2597,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
     dingtalkAccess.value = payload.data as DingTalkAccess
     dingtalkAccessLoadFailure.value = null
   } catch {
+    if (userId !== selectedUserId.value) return
     dingtalkAccess.value = null
     dingtalkAccessLoadFailure.value = { correlationId: null }
   } finally {
@@ -2382,6 +2616,8 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
     const payload = await readJson(response)
+    // A late answer for a user who is no longer selected must not overwrite the selected user's panel.
+    if (userId !== selectedUserId.value) return
     if (!response.ok || payload.ok !== true) {
       memberAdmission.value = null
       memberAdmissionLoadFailure.value = readSidePanelLoadFailure(payload)
@@ -2392,13 +2628,94 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     memberAdmission.value = {
       ...(data as MemberAdmission),
       namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
+      organizations: normalizeMemberOrganizations(data?.organizations),
     }
     memberAdmissionLoadFailure.value = null
   } catch {
+    if (userId !== selectedUserId.value) return
     memberAdmission.value = null
     memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
     loadingAdmission.value = false
+  }
+}
+
+// Slice C: the 409 codes POST /api/admin/directory/local/accounts can answer with, in this page's words.
+// The server's message text is never shown (values-free UI); any other failure gets the generic sentence.
+const JOIN_DEFAULT_ORG_FAILURE = '加入默认组织失败，请稍后重试'
+const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
+  // createLocalAccount: an account already exists for this user in this org, or the user is inactive.
+  DIRECTORY_LOCAL_CONFLICT: '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看',
+  // Guard added by #6389: any user_orgs row (active or not, any org) or an applied deprovision event.
+  DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。',
+}
+
+// The route answers 404 DIRECTORY_LOCAL_NOT_FOUND when the platform user no longer exists.
+const JOIN_DEFAULT_ORG_USER_GONE = '该账号已不存在，请刷新列表'
+
+type JoinDefaultOrgResult = { ok: true } | { ok: false; status: number; code: string | null }
+
+async function postJoinDefaultOrg(userId: string): Promise<JoinDefaultOrgResult> {
+  const response = await apiFetch('/api/admin/directory/local/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ localUserId: userId }),
+  })
+  const payload = await readJson(response)
+  if (response.ok && payload.ok === true) {
+    const data = payload.data
+    const account = data && typeof data === 'object' ? (data as Record<string, unknown>).account : null
+    if (account && typeof account === 'object' && typeof (account as Record<string, unknown>).id === 'string') {
+      return { ok: true }
+    }
+    return { ok: false, status: response.status, code: null }
+  }
+  const error = payload.error
+  const code = error && typeof error === 'object' ? (error as Record<string, unknown>).code : undefined
+  return { ok: false, status: response.status, code: typeof code === 'string' ? code : null }
+}
+
+function describeJoinDefaultOrgFailure(result: { status: number; code: string | null }): string {
+  if (result.status === 409 && result.code && Object.prototype.hasOwnProperty.call(JOIN_DEFAULT_ORG_CONFLICT_MESSAGES, result.code)) {
+    return JOIN_DEFAULT_ORG_CONFLICT_MESSAGES[result.code]
+  }
+  if (result.status === 404 && result.code === 'DIRECTORY_LOCAL_NOT_FOUND') return JOIN_DEFAULT_ORG_USER_GONE
+  return JOIN_DEFAULT_ORG_FAILURE
+}
+
+function openJoinDefaultOrgConfirm(): void {
+  const userId = memberAdmission.value?.userId
+  if (!userId) return
+  joinDefaultOrgConfirmUserId.value = userId
+}
+
+function closeJoinDefaultOrgConfirm(): void {
+  joinDefaultOrgConfirmUserId.value = null
+}
+
+async function confirmJoinDefaultOrg(): Promise<void> {
+  const confirmedUserId = joinDefaultOrgConfirmUserId.value
+  closeJoinDefaultOrgConfirm()
+  const userId = selectedUserId.value
+  // Only the selected user, and only when the confirmed panel and the admission on screen are that user's.
+  if (!userId || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    return
+  }
+  joiningDefaultOrgUserIds.value = [...joiningDefaultOrgUserIds.value, userId]
+  try {
+    const result = await postJoinDefaultOrg(userId)
+    if (!result.ok) {
+      setStatus(describeJoinDefaultOrgFailure(result), 'error')
+      return
+    }
+    // The admin moved on to another user: that user's panel is not reloaded or told 已加入.
+    if (selectedUserId.value !== userId) return
+    await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
+    setStatus('已加入默认组织')
+  } catch {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+  } finally {
+    joiningDefaultOrgUserIds.value = joiningDefaultOrgUserIds.value.filter((id) => id !== userId)
   }
 }
 
@@ -2712,11 +3029,10 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
 
 async function copyInviteMessage(): Promise<void> {
   if (!createdInviteMessage.value) return
-  try {
-    await navigator.clipboard.writeText(createdInviteMessage.value)
+  if (await copyText(createdInviteMessage.value)) {
     setStatus('邀请文案已复制')
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '复制邀请文案失败', 'error')
+  } else {
+    setStatus('复制邀请文案失败', 'error')
   }
 }
 
@@ -2780,23 +3096,39 @@ async function toggleUserStatus(): Promise<void> {
 
 async function resetPassword(): Promise<void> {
   if (!access.value) return
+  const requestedUserId = access.value.user.id
+  const intent = classifyManualTemporaryPassword(manualPassword.value)
+  if (intent.kind === 'too-short') {
+    passwordResetInlineError.value = ADMIN_TEMPORARY_PASSWORD_TOO_SHORT
+    return
+  }
+  passwordResetInlineError.value = ''
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/reset-password`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({
-        password: manualPassword.value || undefined,
+        password: intent.kind === 'submit' ? intent.password : undefined,
       }),
     })
     const payload = await readJson(response)
+    if (selectedUserId.value !== requestedUserId) return
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '重置密码失败'))
+      const errorPayload = payload.error as { code?: unknown; message?: unknown } | undefined
+      const inlineError = describeAdminResetPasswordInlineError(errorPayload)
+      if (inlineError) {
+        passwordResetInlineError.value = inlineError
+        return
+      }
+      throw new Error(String(errorPayload?.message || '重置密码失败'))
     }
 
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
+    passwordResetInlineError.value = ''
     setStatus('密码已重置')
   } catch (error) {
+    if (selectedUserId.value !== requestedUserId) return
     setStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
   } finally {
     busy.value = false
@@ -2846,52 +3178,129 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
   }
 }
 
+function finishRoleWrite(
+  generation: number,
+  requestedUserId: string,
+  outcome: RoleMembershipWriteOutcome,
+  snapshot: RoleMembershipSnapshot | null,
+): boolean {
+  const stillCurrent = accessReadStillCurrent(
+    generation,
+    userAccessReadGeneration.value,
+    requestedUserId,
+    selectedUserId.value,
+  )
+  if (!stillCurrent) {
+    if (selectedUserId.value !== requestedUserId) {
+      roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+      setStatus(outcome.message, outcome.tone)
+    }
+    return false
+  }
+
+  roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
+  setStatus(outcome.message, outcome.tone)
+  if (!outcome.applySnapshot || !snapshot || snapshot.user.id !== requestedUserId) {
+    access.value = null
+    return false
+  }
+
+  access.value = {
+    user: snapshot.user as UserAccess['user'],
+    roles: snapshot.roles,
+    permissions: snapshot.permissions,
+    isAdmin: snapshot.isAdmin,
+  }
+  syncProfileDraftFromAccess()
+  return true
+}
+
 async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
-  if (!selectedUserId.value || !selectedRoleId.value) return
+  if (!selectedUserId.value || !selectedRoleId.value || !roleSnapshotReady.value) return
+  const requestedUserId = selectedUserId.value
+  const requestedRoleId = selectedRoleId.value
+  const generation = userAccessReadGeneration.value
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${action}`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId: selectedRoleId.value }),
+      body: JSON.stringify({ roleId: requestedRoleId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    const result = roleWriteOutcomeFromPayload(payload.data, {
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+    })
+    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
+    await loadRoles()
     await loadUsers()
-    await loadMemberAdmission(selectedUserId.value)
-    setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
+    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      await loadMemberAdmission(requestedUserId)
+    }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+    const message = error instanceof Error ? error.message : '保存角色失败'
+    const outcome = describeRoleMembershipWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+      persistedRoleIds: [],
+      ok: false,
+      errorMessage: message,
+    })
+    finishRoleWrite(generation, requestedUserId, outcome, null)
   } finally {
     busy.value = false
   }
 }
 
 async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> {
-  if (!selectedUserId.value) return
+  if (!selectedUserId.value || !roleSnapshotReady.value) return
+  const requestedUserId = selectedUserId.value
+  const requestedRoleId = roleId
+  const action: 'assign' | 'unassign' = enabled ? 'assign' : 'unassign'
+  const generation = userAccessReadGeneration.value
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${enabled ? 'assign' : 'unassign'}`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId }),
+      body: JSON.stringify({ roleId: requestedRoleId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员角色失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    const result = roleWriteOutcomeFromPayload(payload.data, {
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+    })
+    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
+    await loadRoles()
     await loadUsers()
-    await loadMemberAdmission(selectedUserId.value)
-    const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
-    setStatus(enabled ? `已开通${label}` : `已关闭${label}`)
+    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
+      await loadMemberAdmission(requestedUserId)
+    }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存管理员角色失败', 'error')
+    const message = error instanceof Error ? error.message : '保存管理员角色失败'
+    const outcome = describeRoleMembershipWrite({
+      action,
+      requestedUserId,
+      selectedUserId: selectedUserId.value,
+      roleId: requestedRoleId,
+      persistedRoleIds: [],
+      ok: false,
+      errorMessage: message,
+    })
+    finishRoleWrite(generation, requestedUserId, outcome, null)
   } finally {
     busy.value = false
   }
@@ -3073,6 +3482,32 @@ onUnmounted(() => {
 .user-admin__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.user-admin__org-context {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.user-admin__org-label {
+  align-self: center;
+  font-size: 13px;
+}
+
+.user-admin__confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.user-admin__confirm ol {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .user-admin__block-error {

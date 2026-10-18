@@ -26,6 +26,7 @@
         {{ tr('Cancel', '取消') }}
       </button>
     </header>
+    <slot name="timezone" />
 
     <label class="makeup-card__field" for="attendance-makeup-card-anomaly">
       <span>{{ tr('Anomaly', '异常') }}</span>
@@ -106,7 +107,7 @@
         class="makeup-card__btn makeup-card__btn--primary"
         type="button"
         data-makeup-card-submit
-        :disabled="submitting"
+        :disabled="submitting || canSubmit === false"
         @click="emit('submit')"
       >
         {{ submitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
@@ -143,6 +144,7 @@ const props = defineProps<{
   anomalies: MakeupAnomalyPrefillItem[]
   todayWorkDate: string
   submitting: boolean
+  canSubmit?: boolean
 }>()
 
 const emit = defineEmits<{

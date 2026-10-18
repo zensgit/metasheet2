@@ -127,6 +127,7 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -150,6 +151,16 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   async function insertLegacyRolloutRow(orgId: string): Promise<void> {
@@ -197,6 +208,7 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
   }, 120000)
 
   afterAll(async () => {
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
   }, 60000)
@@ -297,7 +309,11 @@ describeDb('W4C-2 #4612 P2 remediation — genuine live-punch race + admin_run a
 
         const res = await punchPromise
         expect(res.status, res.raw).toBe(409)
-        expect(res.body?.error?.code).toBe('W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION')
+        // The strict timezone frame detects this concurrent ambiguity before the legacy adapter.
+        expect(res.body).toEqual({ ok: false, error: {
+          code: 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS',
+          message: 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS',
+        } })
         // Zero source/result DML: the throw happens BEFORE the
         // attendance_events INSERT inside applyLivePunchProjectionLegacyV1,
         // and this is the legacy_projection_only path (no operation/outbox

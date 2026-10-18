@@ -207,19 +207,49 @@ function pageClause(condParams: unknown[], page: TaskPageParams): { sql: string;
   }
 }
 
-function taskViewCondition(input: { orgId: string; actorId: string; view: string }) {
+/**
+ * G2-core: the closed set of `GET /api/tasks?status=`. The filter reads the task's own
+ * `tasks.status`, never the viewer's assignee row, so an all-mode task the viewer alone has
+ * completed is still `open` (lock §12 gate 4: visible is not pending).
+ */
+export const TASK_STATUS_FILTERS = ['open', 'done', 'all'] as const
+export type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number]
+
+// RULED(2026-10-09): G2-core — the status filter is orthogonal to the five views, and the list and
+// its total share one condition. ASSUMPTION(task-g2): an absent status is `all` (the rows before
+// G2-core; gate 19 and gate 4 row sets unchanged); whether the server default becomes `open` is an
+// owner question (design task-g2-core-design-20261011.md §5). Each clause is a fixed string chosen
+// by the closed-set value after validation: no request text reaches the SQL, the bind slots stay
+// `$1`/`$2` and `pageClause` numbers on.
+// The clause is added here, after the view condition, and not in `buildTaskScopeCondition`: that
+// builder is the org single-emission point and `/pending` derives from it.
+const TASK_STATUS_CLAUSE: Readonly<Record<TaskStatusFilter, string>> = {
+  open: " AND tasks.status = 'open'",
+  done: " AND tasks.status = 'done'",
+  all: '',
+}
+
+function taskStatusClause(status: string | undefined): string {
+  const value = status === undefined ? 'all' : status
+  if (!TASK_STATUS_FILTERS.includes(value as TaskStatusFilter)) fail(422, 'INVALID_STATUS')
+  return TASK_STATUS_CLAUSE[value as TaskStatusFilter]
+}
+
+function taskViewCondition(input: { orgId: string; actorId: string; view: string; status?: string }) {
   if (!TASK_VIEWS.includes(input.view as TaskView)) fail(422, 'INVALID_VIEW')
-  return buildTaskScopeCondition({
+  const statusClause = taskStatusClause(input.status)
+  const cond = buildTaskScopeCondition({
     view: input.view as TaskView,
     actorParam: input.actorId,
     orgParam: input.orgId,
   })
+  return { sql: `${cond.sql}${statusClause}`, params: cond.params }
 }
 
 // ASSUMPTION(task-m4): [own-10] the list functions keep their array return; the routes pair each
 // with the matching count function to build `{ items, total }`. RULED(2026-10-07): [R04] list
 // identity never enters these view arms.
-export async function listTasks(input: { orgId: string; actorId: string; view: string; page?: TaskPageParams }): Promise<Row[]> {
+export async function listTasks(input: { orgId: string; actorId: string; view: string; status?: string; page?: TaskPageParams }): Promise<Row[]> {
   const cond = taskViewCondition(input)
   const paged = pageClause(cond.params, pageOrDefault(input.page))
   const result = await query<Row>(
@@ -229,8 +259,8 @@ export async function listTasks(input: { orgId: string; actorId: string; view: s
   return result.rows
 }
 
-/** Unpaged row count under the same view condition as `listTasks`. */
-export async function countTasks(input: { orgId: string; actorId: string; view: string }): Promise<number> {
+/** Unpaged row count under the same view and status condition as `listTasks`. */
+export async function countTasks(input: { orgId: string; actorId: string; view: string; status?: string }): Promise<number> {
   const cond = taskViewCondition(input)
   const result = await query<{ n: string }>(
     `SELECT count(*)::text AS n FROM tasks WHERE ${cond.sql}`,

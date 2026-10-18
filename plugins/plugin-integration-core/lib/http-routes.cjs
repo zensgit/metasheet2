@@ -547,6 +547,8 @@ const {
   resolveProjectSheetGrantRoleIds,
   resolveProjectTargetForAction,
   provisionProjectSheet,
+  // G1 field defect (R67): the contract option sets onto ONE registered project sheet (the repair leg).
+  syncProjectSheetContractOptions,
   grantProjectSheetRoles,
   projectSheetViewHandles,
   buildProjectTargetBinding,
@@ -1916,6 +1918,12 @@ const STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION = 'project_target_gran
 // S4 (ADR §6, register R-38): the archive / restore body is ONE key — the typed confirmation — and
 // the two lifecycle actions migration 088 already declared for this slice (no new vocabulary).
 const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set(['confirmProjectNo'])
+// G1 field defect (R67): the options-sync REPAIR leg's body is ONE key — the project number. No option
+// set, no tenant, no projectId, no objectId: the sheet comes from the registry row, the sets from the
+// server. Its audit row reuses 088's `project_target_create` (it is the part of creating the sheet that
+// makes it usable — the S2 pack-install precedent) with this closed mode; no new vocabulary migration.
+const VALID_STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_KEYS = new Set(['projectNo'])
+const STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE = 'contract_options_synced'
 const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
 const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
 const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH'
@@ -4640,6 +4648,29 @@ function requireStockPreparationAudit() {
       }
     }
   }
+  /**
+   * G1 field defect (R67): WHAT A FINISHED APPLY STAMPS. An apply that ran but whose target refused rows
+   * (`apply.counts.failed > 0`, or `apply.status === 'failed'`) used to be stamped `applied` — the overview's
+   * 「最近拉取」 then said success over 652 `select_option_not_found` rows. It is now `failed` with the
+   * DOMINANT row error code (the most frequent in the writer's values-free `errorSummaries`, ties to the
+   * first in their code order), upper-cased into the registry's closed code shape (`select_option_not_found`
+   * → `SELECT_OPTION_NOT_FOUND`); a partial failure is `failed` too. Held-only rows (an accepted
+   * manual-confirm hold) are not failures and still stamp `applied`. Pure; values-free.
+   */
+  function projectPullOutcomeForApply(result) {
+    const apply = isPlainObject(result) && isPlainObject(result.apply) ? result.apply : null
+    const counts = apply && isPlainObject(apply.counts) ? apply.counts : {}
+    const failedRows = Number.isInteger(counts.failed) && counts.failed > 0 ? counts.failed : 0
+    if (failedRows === 0 && !(apply && apply.status === 'failed')) return { outcome: 'applied', code: null }
+    let dominant = null
+    for (const summary of (apply && Array.isArray(apply.errorSummaries) ? apply.errorSummaries : [])) {
+      if (!isPlainObject(summary) || typeof summary.code !== 'string' || !Number.isInteger(summary.count)) continue
+      if (!dominant || summary.count > dominant.count) dominant = summary
+    }
+    const fallback = apply && Array.isArray(apply.errorCodes) && typeof apply.errorCodes[0] === 'string' ? apply.errorCodes[0] : null
+    const raw = dominant ? dominant.code : fallback
+    return { outcome: 'failed', code: raw ? raw.trim().toUpperCase() : 'APPLY_FAILED' }
+  }
   /** The run's DISTINCT missing-component count, off the result's values-free evidence (the board's number). */
   function distinctMissingComponentCount(result) {
     if (!isPlainObject(result)) return undefined
@@ -4872,6 +4903,80 @@ function requireStockPreparationAudit() {
     if (!stockPreparationProjectSheetsEnabled(process.env)) {
       throw new HttpRouteError(404, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', `per-project stock-preparation sheets are disabled on this deployment (${STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV} is not 'true')`)
     }
+  }
+
+  /**
+   * G1 FIELD DEFECT (R67) — THE REPAIR LEG of `POST …/options/sync`, chosen by `projectNo` in the body.
+   *
+   * Every project sheet created before the fix carries NO options on its contract select column, so every
+   * apply to it fails `select_option_not_found`. The field team calls this once per such sheet. It writes the
+   * SAME contract sets the create path now writes (`syncProjectSheetContractOptions`), onto the sheet the
+   * REGISTRY names for (verified tenant, projectNo) — never an objectId, a projectId or an option set from
+   * the request.
+   *
+   * THE GUARD CHAIN is the stricter of this route's and the project-target create route's, in the create's
+   * order: the route's own `admin` gate (already passed by the caller of this function — every principal it
+   * admits is a platform admin, which the create's PULL gate admits too, so it is the stricter one) → the
+   * project-sheets switch (404 DISABLED, before any IO) → the audit store → the closed ONE-key body → the
+   * project-number shape → the host-vouched operator scope (the create's tenant derivation, never
+   * `user.tenantId`) → the registry → the 088 vocabulary probe → the registry row (ABSENT → 404; another
+   * tenant's project is ABSENT here, the registry is keyed by the verified tenant) → the row re-read ACTIVE
+   * under the per-tenant lock archive / restore take (archived → 409, the create replay's rule) → the patch →
+   * ONE audit row (`project_target_create` / `contract_options_synced`, the sheet as subject, the objectId and
+   * counts in the detail).
+   */
+  async function repairProjectSheetContractOptions(req, res) {
+    const user = getUser(req)
+    requireProjectSheetsEnabled()
+    const audit = requireStockPreparationAudit()
+    const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_KEYS, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID')
+    const projectNo = firstString(body.projectNo)
+    if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+    }
+    const scope = await resolveOperatorValueScope({
+      user,
+      authenticatedTenantId: req.authenticatedTenantId,
+      explicitTenantIds: collectExplicitTenantIds(req, {}),
+      tenantPrincipalDirectory,
+    })
+    const tenantId = scope.tenantId
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.withActiveRowLocked !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+    }
+    await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION, '088', tenantId)
+    const registered = await store.get({ tenantId, projectNo })
+    if (!registered) {
+      throw new HttpRouteError(404, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+    }
+    // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+    const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    const repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
+      row: locked,
+      options: await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+    }))
+    await audit.append({
+      tenantId,
+      projectId: projectNo,
+      action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+      subjectId: repaired.row.sheetId,
+      mode: STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE,
+      actor: user.id || user.email,
+      detail: {
+        objectId: repaired.row.objectId,
+        syncedFieldCount: repaired.options.synced,
+        skippedFieldCount: repaired.options.skipped,
+        optionCount: repaired.options.optionCount,
+      },
+    })
+    return sendOk(res, {
+      ok: true,
+      projectNo,
+      target: { sheetId: repaired.row.sheetId, objectId: repaired.row.objectId, fieldCount: repaired.options.synced },
+      evidence: repaired.options.evidence,
+    })
   }
 
   /**
@@ -7607,7 +7712,10 @@ function requireStockPreparationAudit() {
         if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo)
         throw error
       }
-      await stampProjectPullOutcome(action, applyTenantId, { outcome: 'applied', missingComponentsCount: distinctMissingComponentCount(applyResult) })
+      // G1 field defect (R67): `applied` only when no row failed; otherwise `failed` + the dominant row code.
+      // Either way the overview row is RECOUNTED, so its 「物料行数」 is what actually landed on the sheet.
+      const applyOutcome = projectPullOutcomeForApply(applyResult)
+      await stampProjectPullOutcome(action, applyTenantId, { outcome: applyOutcome.outcome, code: applyOutcome.code, missingComponentsCount: distinctMissingComponentCount(applyResult) })
       if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, { recount: true })
       return sendOk(res, applyResult)
     },
@@ -8529,6 +8637,20 @@ function requireStockPreparationAudit() {
 
     async stockPreparationOptionsSync(req, res) {
       requireAccess(req, 'admin')
+      // G1 field defect (R67), review LOW-1: the repair leg is chosen by the JSON BODY only. A `projectNo` in
+      // the QUERY STRING (any spelling of its case) is refused before any IO, whatever the body says —
+      // otherwise `?projectNo=…` with an empty body answered 200 after syncing the DEPLOYMENT object, so a
+      // mistyped repair call looked like success while the project sheet stayed broken. A request without
+      // `projectNo` anywhere is unaffected.
+      if (Object.keys(requestQuery(req)).some((key) => key.toLowerCase() === 'projectno')) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', 'projectNo must be sent in the JSON body, not in the query string', { field: 'projectNo' })
+      }
+      // G1 field defect (R67): a body that NAMES `projectNo` is the project-sheet repair leg (see
+      // `repairProjectSheetContractOptions`). Without the key nothing below changed — the same normalizer,
+      // the same deployment-target sync, the same answer.
+      if (Object.prototype.hasOwnProperty.call(requestBody(req), 'projectNo')) {
+        return repairProjectSheetContractOptions(req, res)
+      }
       const input = stockPreparationOptionSyncInput(req, requestBody(req))
       const result = await syncStockPreparationOptions({
         context,
@@ -9949,6 +10071,8 @@ function requireStockPreparationAudit() {
           notInCatalog: packs ? packs.notInCatalogPackCount : 0,
         },
         ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
+        // G1 field defect (R67): the contract option sets the create leg wrote onto the sheet (counts only).
+        ...(provisioned ? { options: { synced: provisioned.options.synced, skipped: provisioned.options.skipped } } : {}),
         // S3 fix round 1 (R6): what the overview leg did, values-free (`code` is a closed error code).
         overview: { ensured: overviewOutcome.ensured, created: overviewOutcome.created, code: overviewOutcome.code },
       }, created ? 201 : 200)

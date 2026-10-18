@@ -1,6 +1,9 @@
 scripts/ops/stock-preparation-prep-line-extended-smoke.mjs text eol=lf
 scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs text eol=lf
 scripts/ops/stock-preparation-rca-window-pm2-sample.mjs text eol=lf
+scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs text eol=lf
+scripts/ops/multitable-onprem-backend-log-rotate.ps1 text eol=lf
+scripts/ops/__tests__/multitable-onprem-backend-log-rotate.tests.ps1 text eol=lf
 
 # ---------------------------------------------------------------------------
 # content-digest-pinned by sealed-export-package-provenance

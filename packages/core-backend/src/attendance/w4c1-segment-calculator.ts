@@ -513,6 +513,11 @@ function parseWindow(value: unknown): IntervalMs | null {
   return { s, e }
 }
 
+/** Trusted historical continuation accepts only the original closed resolved V2. */
+export function isSupportedFrozenAttributionSnapshotV1(attribution: unknown): boolean {
+  return checkAttribution(attribution).kind === 'resolved'
+}
+
 function checkAttribution(attribution: unknown): AttributionCheck {
   if (!isPlainObject(attribution)) return { kind: 'invalid' }
   const posture = (attribution as { posture?: unknown }).posture

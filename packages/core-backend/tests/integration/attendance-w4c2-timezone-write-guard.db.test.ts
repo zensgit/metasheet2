@@ -30,7 +30,7 @@ import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { Pool } from 'pg'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
@@ -67,6 +67,7 @@ const describeDb = dbUrl ? describe : describe.skip
 
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
 const ORG = `w4c2tz_${RUN}`
+const ADMIN_ID = `w4c2tz-admin-${RUN}`
 
 describeDb('W4C-2 strict IANA timezone write guard (#4607 P3-4, real DB, route level)', () => {
   let server: MetaSheetServer | undefined
@@ -106,8 +107,24 @@ describeDb('W4C-2 strict IANA timezone write guard (#4607 P3-4, real DB, route l
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    // Manage reads users + user_orgs + attendance:admin. The token claim is not that grant.
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'w4c2 timezone fixture', 'disabled', 'user', '[]'::jsonb, true, false)`,
+      [ADMIN_ID, `${ADMIN_ID}@w4c2-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [ADMIN_ID, ['attendance:read', 'attendance:write', 'attendance:admin']],
+    )
+    await pool.query(
+      'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)',
+      [ADMIN_ID, ORG],
+    )
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=w4c2tz-admin-${RUN}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(ADMIN_ID)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin')}`,
     )
     adminToken = (res.body as { token?: string } | undefined)?.token ?? ''
     if (!adminToken) throw new Error('failed to mint dev token')
@@ -118,6 +135,9 @@ describeDb('W4C-2 strict IANA timezone write guard (#4607 P3-4, real DB, route l
       await pool.query('DELETE FROM attendance_shift_segments WHERE org_id = $1', [ORG]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_shifts WHERE org_id = $1', [ORG]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [ORG]).catch(() => undefined)
+      await pool.query('DELETE FROM user_permissions WHERE user_id = $1', [ADMIN_ID]).catch(() => undefined)
+      await pool.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [ADMIN_ID, ORG]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = $1', [ADMIN_ID]).catch(() => undefined)
     }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) {
       await (server as unknown as { stop: () => Promise<void> }).stop()
@@ -154,8 +174,13 @@ describeDb('W4C-2 strict IANA timezone write guard (#4607 P3-4, real DB, route l
   })
 
   it('a timezone-less default-rule write is untouched by the guard (no new rejection surface)', async () => {
-    const res = await putDefaultRule({ name: `w4c2tz-rule2-${RUN}` })
-    expect(res.status).toBe(200)
+    // This validates timezone syntax, outside an already-started shift.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-11T20:00:00.000Z'))
+    try {
+      const res = await putDefaultRule({ name: `w4c2tz-rule2-${RUN}` })
+      expect(res.status).toBe(200)
+    } finally { vi.useRealTimers() }
   })
 
   it('shift create with an offset-form timezone is 400 with zero shift rows written', async () => {

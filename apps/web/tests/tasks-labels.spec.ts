@@ -228,7 +228,7 @@ function renderedTextAndAttributes(root: HTMLElement): string {
 // Fixtures — ASCII-only so a CJK hit in the sweep can only come from the view's own copy.
 // ---------------------------------------------------------------------------------------------
 
-function listItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; due_at: string | null }> = {}) {
+function listItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; completion_mode: 'all' | 'any'; due_at: string | null }> = {}) {
   return {
     id: 't1',
     title: 'Task One',
@@ -520,6 +520,7 @@ const FMT_ARGS: Record<keyof typeof TASKS_FMT_ZH, unknown[]> = {
   groupsRenameNamed: ['Group A'],
   groupsDeleteNamed: ['Group A'],
   groupsDeletePrompt: ['Group A'],
+  groupsHiddenByFilter: [2],
 }
 
 describe('labels — every value is in its own language', () => {
@@ -691,7 +692,7 @@ describe('EN locale — TasksView list page renders no CJK', () => {
   it('empty state', async () => {
     h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountViewAt('/tasks')
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No tasks yet')
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No incomplete tasks')
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
@@ -739,7 +740,70 @@ describe('EN locale — TasksView list page renders no CJK', () => {
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
+  it('create form due date — its labels, the reminder note and the browser-zone message', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h_.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountViewAt('/tasks')
+
+    expect(must(el, 'tasks-create-due-date').closest('label')?.textContent?.trim()).toBe('Due date (optional)')
+    expect(must(el, 'tasks-create-due-time').closest('label')?.textContent?.trim()).toBe('Due time (optional)')
+    typeInto(el, 'tasks-create-title', 'New one')
+    typeInto(el, 'tasks-create-due-date', '2031-03-04')
+    await flush()
+    expect(must(el, 'tasks-create-due-note').textContent?.trim()).toBe('A reminder is set from "Default reminder for new tasks" in the task settings')
+    await submitForm(el, 'tasks-create-form')
+    expect(must(el, 'tasks-create-due-error').textContent?.trim()).toBe(
+      'The browser time zone could not be read: create the task without a due date, then set it on the task page',
+    )
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('a create while "Completed" is on — the notice that the new task is not shown, with both actions in a listing view and the link-only form in 关注中', async () => {
+    // The status switch remembers its choice in this browser's storage: start and end clean so no
+    // other cell in this file starts under "Completed".
+    const KEY = 'metasheet.tasks.statusFilter'
+    try {
+      window.localStorage.removeItem(KEY)
+      h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+      const el = await mountViewAt('/tasks')
+      await click(el, 'tasks-status-switch-done')
+      typeInto(el, 'tasks-create-title', 'New one')
+      await submitForm(el, 'tasks-create-form')
+      expect(must(el, 'tasks-create-hidden-text').textContent?.trim()).toBe(
+        'Task created. It is not completed yet, so the current "Completed" filter does not show it.',
+      )
+      expect(must(el, 'tasks-create-hidden-show-open').textContent?.trim()).toBe('Show tasks not completed')
+      expect(must(el, 'tasks-create-hidden-open-task').textContent?.trim()).toBe('Open the new task')
+      expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+
+      // In a view that leaves the new task out under any status: the other copy, no switch action.
+      await click(el, 'tasks-view-switch-following')
+      typeInto(el, 'tasks-create-title', 'Another one')
+      await submitForm(el, 'tasks-create-form')
+      expect(must(el, 'tasks-create-hidden-text').textContent?.trim()).toBe(
+        'Task created. The current view and filter do not show it.',
+      )
+      expect(el.querySelector('[data-testid="tasks-create-hidden-show-open"]')).toBeNull()
+      expect(must(el, 'tasks-create-hidden-open-task').textContent?.trim()).toBe('Open the new task')
+      expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    } finally {
+      window.localStorage.removeItem(KEY)
+    }
+  })
+
+  it('an "all" mode row: complete and reopen on the task page', async () => {
+    h_.listTasks.mockResolvedValue({
+      kind: 'ok',
+      items: [listItem({ id: 't1' }), listItem({ id: 't2', status: 'done' })],
+    })
+    const el = await mountViewAt('/tasks')
+    const actions = Array.from(el.querySelectorAll('[data-testid="tasks-row-detail-action"]')).map((link) => link.textContent?.trim())
+    expect(actions).toEqual(['Complete on the task page', 'Reopen on the task page'])
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
   it('action banner — forbidden and the generic failure', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [listItem({ completion_mode: 'any' })] })
     h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountViewAt('/tasks')
 
@@ -866,6 +930,17 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     h_.deleteTask.mockResolvedValue({ kind: 'conflict', code: 'HAS_CHILDREN' })
     h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
     h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1', authorId: 'u1' })], total: 1 })
+    // The viewer (u1) is also an open assignee here, so "complete" would change their own part and
+    // stays on; the default fixture's viewer is not an assignee, for whom it is off.
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({
+        assignees: [
+          { userId: 'u1', completedAt: null },
+          { userId: 'u2', completedAt: '2026-09-20T10:00:00Z' },
+        ],
+      }),
+    })
     const el = await mountViewAt('/tasks/t1')
 
     typeInto(el, 'tasks-detail-set-parent-input', 'p2')
@@ -898,6 +973,61 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     await click(el, 'tasks-detail-complete-button')
     expect(must(el, 'tasks-action-error').textContent?.trim()).toBe('You do not have permission to change this task')
 
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('complete / reopen that would change nothing — the three reasons', async () => {
+    // The default fixture: the viewer (u1) created the all-mode task and is not an assignee.
+    let el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-complete-reason').textContent?.trim()).toBe(
+      'You are not an assignee: in "All assignees complete" mode each assignee completes their own part',
+    )
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    app?.unmount()
+    container?.remove()
+
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ assignees: [{ userId: 'u1', completedAt: '2026-09-20T10:00:00Z' }, { userId: 'u2', completedAt: null }] }),
+    })
+    el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-complete-reason').textContent?.trim()).toBe('Your part is done; waiting for the other assignees')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    app?.unmount()
+    container?.remove()
+
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ status: 'done', assignees: [{ userId: 'u2', completedAt: '2026-09-20T10:00:00Z' }] }),
+    })
+    el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-reopen-reason').textContent?.trim()).toBe('You have no completed part to reopen')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('a done all-mode task with other assignees offers reopening for everyone', async () => {
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ status: 'done', assignees: [{ userId: 'u2', completedAt: '2026-09-20T10:00:00Z' }] }),
+    })
+    const el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-reopen-all-button').textContent?.trim()).toBe('Reopen for everyone')
+    expect(must(el, 'tasks-detail-reopen-button').textContent?.trim()).toBe('Reopen')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('the reopen-for-everyone confirmation', async () => {
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ status: 'done', assignees: [{ userId: 'u2', completedAt: '2026-09-20T10:00:00Z' }] }),
+    })
+    const el = await mountViewAt('/tasks/t1')
+    await click(el, 'tasks-detail-reopen-all-button')
+    expect(must(el, 'tasks-detail-reopen-all-prompt').textContent?.trim()).toBe(
+      "Reopen every assignee's part? Assignees who are done will need to complete again.",
+    )
+    expect(must(el, 'tasks-detail-reopen-all-confirm-yes').textContent?.trim()).toBe('Confirm reopen for everyone')
+    expect(must(el, 'tasks-detail-reopen-all-confirm-cancel').textContent?.trim()).toBe('Cancel')
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
@@ -1127,13 +1257,14 @@ describe('locale flip after mount — TasksView', () => {
   it('list: the view buttons, the empty state and the action banner re-render', async () => {
     h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountViewAt('/tasks')
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('暂无任务')
+    // G2-core: the default status is 未完成, and the empty line names it.
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('暂无未完成任务')
     expect(must(el, 'tasks-view-switch-following').textContent).toBe('关注中')
     expect(must(el, 'tasks-create-submit').textContent).toBe('创建')
 
     setLocale('en')
     await flush()
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No tasks yet')
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No incomplete tasks')
     expect(must(el, 'tasks-view-switch-following').textContent).toBe('Following')
     expect(must(el, 'tasks-create-submit').textContent).toBe('Create')
     expect(must(el, 'tasks-create-title').getAttribute('placeholder')).toBe('New task title')

@@ -27,7 +27,7 @@ const h_ = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   notifyTasksChanged: vi.fn(),
   getCurrentUserId: vi.fn(),
-  /** `GET /api/tasks?view=…` (the view). */
+  /** `GET /api/tasks?view=…` (the view, then the G2-core `status` or null). */
   tasksReply: vi.fn(),
   /** `POST /api/tasks/:id/complete` (task id). */
   completeReply: vi.fn(),
@@ -103,6 +103,7 @@ import {
   planMove,
   planStep,
   planToGroup,
+  shownIds,
 } from '../src/tasks/tasksGroupBoard'
 import type { TaskGroup, TaskListItem, TaskPlacement } from '../src/tasks/tasksApi'
 
@@ -281,7 +282,10 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const method = init?.method ?? 'GET'
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
-  if (method === 'GET' && pathname === '/api/tasks') return h_.tasksReply(new URLSearchParams(query).get('view'))
+  if (method === 'GET' && pathname === '/api/tasks') {
+    const params = new URLSearchParams(query)
+    return h_.tasksReply(params.get('view'), params.get('status'))
+  }
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) return jsonResponse(200, detailBody(decodeURIComponent(match[1])))
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
   if (method === 'POST' && (match = /^\/api\/tasks\/([^/]+)\/complete$/.exec(pathname))) return h_.completeReply(decodeURIComponent(match[1]))
@@ -344,7 +348,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 // Request helpers
 // ---------------------------------------------------------------------------------------------
 
-const ASSIGNED = '/api/tasks?view=assigned'
+// G2-core: the list page always sends its status filter; with nothing remembered it is `open`.
+const ASSIGNED = '/api/tasks?view=assigned&status=open'
 const USER_GROUPS = '/api/task-groups?limit=100&offset=0'
 const USER_PLACEMENTS = '/api/task-groups/items?limit=100&offset=0'
 
@@ -820,6 +825,59 @@ describe('board rules — moves (tasksGroupBoard.ts)', () => {
     const front = applyMove(model(), planMove(model(), 'X', DEFAULT_GROUP_KEY, 0)!)
     expect(front.ordered[DEFAULT_GROUP_KEY]).toEqual(['X', 'A', 'B', 'C'])
     expect(front.ordered.tg_x).toEqual([])
+  })
+})
+
+// G2-core (design task-g2-core-design-20261011.md §4.1): the host filtered the rows by status, so a
+// placement whose task is not a row is a hidden entry: kept in the index space, never shown.
+describe('board rules — rows filtered by status (tasksGroupBoard.ts, G2-core)', () => {
+  // Default: A, h (hidden), B placed, T unsorted. Group X: h2 (hidden), X placed.
+  const items = ['A', 'B', 'T', 'X'].map((id) => row(id))
+  const groups = [listGroup('tg_d', 'D', 0, true), listGroup('tg_x', 'X', 1)]
+  const placements = [at('tg_d', 'A', 0), at('tg_d', 'h', 1), at('tg_d', 'B', 2), at('tg_x', 'h2', 0), at('tg_x', 'X', 1)]
+  const model = () => buildBoardModel(groups, placements, items, { rowsFiltered: true })!
+
+  it('g2core|rules|a placement of a task that is not a row stays in its group\'s order as a hidden entry; the board is consistent', () => {
+    expect(model().ordered).toEqual({ [DEFAULT_GROUP_KEY]: ['A', 'h', 'B'], tg_x: ['h2', 'X'] })
+    expect(model().hidden).toEqual(['h', 'h2'])
+    expect(model().tail).toEqual(['T'])
+    expect(model().consistent).toBe(true)
+    expect(shownIds(model(), DEFAULT_GROUP_KEY)).toEqual(['A', 'B'])
+    expect(shownIds(model(), 'tg_x')).toEqual(['X'])
+  })
+
+  it('g2core|rules|without the filter the same reads keep the [fe-35] rule: not shown, not consistent, nothing hidden', () => {
+    const plain = buildBoardModel(groups, placements, items)!
+    expect(plain.ordered).toEqual({ [DEFAULT_GROUP_KEY]: ['A', 'B'], tg_x: ['X'] })
+    expect(plain.hidden).toEqual([])
+    expect(plain.consistent).toBe(false)
+  })
+
+  it('g2core|rules|a hidden entry in a group the board does not have still makes the board inconsistent', () => {
+    const odd = buildBoardModel(groups, [...placements, at('tg_gone', 'h3', 0)], items, { rowsFiltered: true })!
+    expect(odd.consistent).toBe(false)
+  })
+
+  it('g2core|rules|a step passes over hidden entries to the next shown row, and its position counts them', () => {
+    expect(planStep(model(), 'B', -1)).toEqual({ taskId: 'B', key: DEFAULT_GROUP_KEY, groupId: null, position: 0 })
+    expect(planStep(model(), 'A', 1)).toEqual({ taskId: 'A', key: DEFAULT_GROUP_KEY, groupId: null, position: 2 })
+    // Only hidden entries above X: no step up; none below B.
+    expect(planStep(model(), 'X', -1)).toBeNull()
+    expect(planStep(model(), 'B', 1)).toBeNull()
+  })
+
+  it('g2core|rules|joins, group moves and drops count the hidden entries (the server\'s index space)', () => {
+    expect(planJoinOrder(model(), 'T')).toEqual({ taskId: 'T', key: DEFAULT_GROUP_KEY, groupId: null, position: 3 })
+    expect(planToGroup(model(), 'A', 'tg_x')).toEqual({ taskId: 'A', key: 'tg_x', groupId: 'tg_x', position: 2 })
+    expect(planDrop(model(), 'A', DEFAULT_GROUP_KEY, 'B', true)).toEqual({ taskId: 'A', key: DEFAULT_GROUP_KEY, groupId: null, position: 2 })
+    expect(planDrop(model(), 'X', DEFAULT_GROUP_KEY, 'B', false)).toEqual({ taskId: 'X', key: DEFAULT_GROUP_KEY, groupId: null, position: 2 })
+  })
+
+  it('g2core|rules|applying a move keeps the hidden entries hidden', () => {
+    const moved = applyMove(model(), planStep(model(), 'B', -1)!)
+    expect(moved.ordered[DEFAULT_GROUP_KEY]).toEqual(['B', 'A', 'h'])
+    expect(moved.hidden).toEqual(['h', 'h2'])
+    expect(shownIds(moved, DEFAULT_GROUP_KEY)).toEqual(['B', 'A'])
   })
 })
 
@@ -1804,6 +1862,8 @@ describe('/tasks — a refresh whose row read reports no org', () => {
 describe('/tasks — the row actions stay the page\'s', () => {
   it('complete on a board row: the page\'s complete, then the list and its groups are read again', async () => {
     seedGrouped()
+    // An "any" mode row: an "all" mode row offers its complete on the task detail instead.
+    assigned = assigned.map((item) => (item.id === 't2' ? { ...item, completion_mode: 'any' } : item))
     const el = await mountAt('/tasks')
     await clickIn(el, 't2', 'tasks-complete-button')
     expect(writes()).toEqual(['POST /api/tasks/t2/complete'])
@@ -1811,6 +1871,22 @@ describe('/tasks — the row actions stay the page\'s', () => {
     expect(reads(ASSIGNED)).toBe(2)
     expect(reads(USER_GROUPS)).toBe(2)
     expect(layout(el)).toEqual(GROUPED_LAYOUT)
+  })
+
+  it('an "all" mode board row has no complete or reopen of its own: it links to the task detail, and nothing is written', async () => {
+    seedGrouped()
+    assigned = assigned.map((item) => (item.id === 't3' ? { ...item, status: 'done' } : item))
+    const el = await mountAt('/tasks')
+    const toComplete = inRow(el, 't2', 'tasks-row-detail-action')
+    expect(toComplete.tagName).toBe('A')
+    expect(toComplete.getAttribute('href')).toBe('/tasks/t2')
+    expect(toComplete.textContent).toBe('在任务详情中完成')
+    const toReopen = inRow(el, 't3', 'tasks-row-detail-action')
+    expect(toReopen.getAttribute('href')).toBe('/tasks/t3')
+    expect(toReopen.textContent).toBe('在任务详情中重启')
+    expect(shownAll(el, 'tasks-complete-button')).toEqual([])
+    expect(shownAll(el, 'tasks-reopen-button')).toEqual([])
+    expect(writes()).toEqual([])
   })
 })
 
@@ -2314,5 +2390,184 @@ describe('/task-lists/:id — answers that land after the page moved on', () => 
     oldPlacements.resolve(page([at('tg_l2', 't7', 0)], 'offset=0'))
     await flush()
     expect(layout(el)).toEqual([['tg_l2', [], ['t7']]])
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// G2-core (design task-g2-core-design-20261011.md §4.1): the status filter and the assigned
+// view's board. The placements read is not filtered by status (its visible set is the assigned
+// view, open and done, numbered densely), so under 未完成 a placed completed task names a task that
+// is not a row. The board keeps it as a hidden entry: counted in every move's position, never
+// shown, named by a status line, and moves stay on. Without a filter (全部), or when the row read
+// was cut short by its page, the existing [fe-35] rule still holds moves off. The fake backend here
+// honours `status` the way the server does; the cells above keep the fake that ignores it.
+// ---------------------------------------------------------------------------------------------
+
+describe('/tasks — the status filter and the board (G2-core)', () => {
+  function clearStorage(): void {
+    try {
+      window.localStorage.clear()
+    } catch {
+      // Nothing to clear.
+    }
+  }
+
+  function byStatus(_view: string | null, status: string | null): Response {
+    const items = status === 'open' || status === 'done' ? assigned.filter((item) => item.status === status) : assigned
+    return jsonResponse(200, { items, total: items.length })
+  }
+
+  /** seedGrouped with t2 (placed in the default group, between t5 and t6) completed. */
+  function seedWithPlacedDone(): void {
+    seedGrouped()
+    assigned = assigned.map((item) => (item.id === 't2' ? { ...item, status: 'done' as const } : item))
+    h_.tasksReply.mockImplementation(byStatus)
+  }
+
+  beforeEach(clearStorage)
+  afterEach(clearStorage)
+
+  it('g2core|board|under the default 未完成 a placed completed task is a hidden entry: moves stay on, a status line names it', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    expect(reads('/api/tasks?view=assigned&status=open')).toBe(1)
+    expect(layout(el)).toEqual([
+      ['tg_def', ['t5', 't6'], ['t3']],
+      ['tg_a', ['t4', 't1'], []],
+      ['tg_b', [], []],
+    ])
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(text(el, 'tasks-groups-hidden-by-filter')).toBe('另有 1 项已分组任务不在当前状态筛选中，未显示')
+    expect(moveState(el, 't5')).toEqual({ up: false, down: true, join: null, select: true })
+    expect(moveState(el, 't6')).toEqual({ up: true, down: false, join: null, select: true })
+    expect(moveState(el, 't1')).toEqual({ up: true, down: false, join: null, select: true })
+    expect(handles(el).every((value) => value === 'true')).toBe(true)
+    expect(text(section(el, 'tg_def'), 'tasks-group-count')).toBe('3 项')
+  })
+
+  it('g2core|board|under 未完成 a step up past the hidden task sends the server\'s position (it counts the hidden task)', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    await clickIn(el, 't6', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t6 {"groupId":null,"position":0}'])
+    expect(layout(el)[0]).toEqual(['tg_def', ['t6', 't5'], ['t3']])
+    expect(text(el, 'tasks-groups-live')).toBe('已移到第 1 位')
+    // The server's order: t6, t5, t2 — the hidden task keeps its place in the index space.
+    expect(userPlacements.filter((p) => p.groupId === 'tg_def').sort((a, b) => a.position - b.position).map((p) => p.taskId)).toEqual(['t6', 't5', 't2'])
+  })
+
+  it('g2core|board|under 未完成 a step down past the hidden task lands after the next shown row; the live region names the shown place', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    await clickIn(el, 't5', 'tasks-group-move-down')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t5 {"groupId":null,"position":2}'])
+    expect(layout(el)[0]).toEqual(['tg_def', ['t6', 't5'], ['t3']])
+    expect(text(el, 'tasks-groups-live')).toBe('已移到第 2 位')
+  })
+
+  it('g2core|board|under 未完成 the other groups keep their moves, and a move to the default group counts the hidden task', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    await clickIn(el, 't1', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t1 {"groupId":"tg_a","position":0}'])
+    await pick(el, 't4', '')
+    expect(writes()[1]).toBe('PUT /api/task-groups/items/t4 {"groupId":null,"position":3}')
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't6', 't4'], ['t3']])
+  })
+
+  it('g2core|board|under 未完成 a drag before a shown row counts the hidden task', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    await drag(el, 't4', { row: 't6' })
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t4 {"groupId":null,"position":2}'])
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't4', 't6'], ['t3']])
+  })
+
+  it('g2core|board|while the PUT is out the moved order shows without the hidden task (no row for it is rendered)', async () => {
+    seedWithPlacedDone()
+    const answer = deferred<Response>()
+    h_.userPlaceReply.mockImplementationOnce(() => answer.promise)
+    const el = await mountAt('/tasks')
+    await clickIn(el, 't6', 'tasks-group-move-up')
+    expect(text(el, 'tasks-groups-live')).toBe('正在保存顺序')
+    expect(layout(el)[0]).toEqual(['tg_def', ['t6', 't5'], ['t3']])
+    expect(el.querySelector('[data-task-id="t2"]')).toBeNull()
+    answer.resolve(applyPlace(userGroups, userPlacements, assigned, 't6', '{"groupId":null,"position":0}'))
+    await flush()
+    expect(layout(el)[0]).toEqual(['tg_def', ['t6', 't5'], ['t3']])
+  })
+
+  it('g2core|board|under 已完成 the open placed tasks are hidden entries and the completed one can still move', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    ;(must(el, 'tasks-status-switch-done') as HTMLButtonElement).click()
+    await flush()
+    expect(reads('/api/tasks?view=assigned&status=done')).toBe(1)
+    expect(layout(el)).toEqual([
+      ['tg_def', ['t2'], []],
+      ['tg_a', [], []],
+      ['tg_b', [], []],
+    ])
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(text(el, 'tasks-groups-hidden-by-filter')).toBe('另有 4 项已分组任务不在当前状态筛选中，未显示')
+    expect(moveState(el, 't2')).toEqual({ up: false, down: false, join: null, select: true })
+    await pick(el, 't2', 'tg_a')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t2 {"groupId":"tg_a","position":2}'])
+  })
+
+  it('g2core|board|全部 shows the completed task again: no hidden entries, and the PUT counts it as a row', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    must(el, 'tasks-groups-hidden-by-filter')
+    ;(must(el, 'tasks-status-switch-all') as HTMLButtonElement).click()
+    await flush()
+    expect(reads('/api/tasks?view=assigned&status=all')).toBe(1)
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(shown(el, 'tasks-groups-hidden-by-filter')).toBeNull()
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't2', 't6'], ['t3']])
+    await clickIn(el, 't6', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t6 {"groupId":null,"position":1}'])
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't6', 't2'], ['t3']])
+  })
+
+  it('g2core|board|under 全部 a placement whose task is not a row still holds moves off ([fe-35] unchanged without a filter)', async () => {
+    seedGrouped()
+    h_.tasksReply.mockImplementation(() => {
+      const items = assigned.filter((item) => item.id !== 't2')
+      return jsonResponse(200, { items, total: items.length })
+    })
+    try {
+      window.localStorage.setItem('metasheet.tasks.statusFilter', 'all')
+    } catch {
+      // jsdom always has it.
+    }
+    const el = await mountAt('/tasks')
+    expect(reads('/api/tasks?view=assigned&status=all')).toBe(1)
+    expect(text(el, 'tasks-groups-reorder-off')).toBe('部分任务未显示，排序已停用')
+    expect(shown(el, 'tasks-groups-hidden-by-filter')).toBeNull()
+    expect(moveState(el, 't6')).toEqual({ up: false, down: false, join: null, select: false })
+  })
+
+  it('g2core|board|under 未完成 a row read cut short by its page still holds moves off: a missing row is not taken for a filtered one', async () => {
+    seedWithPlacedDone()
+    h_.tasksReply.mockImplementation((_view: string | null, status: string | null) => {
+      const items = assigned.filter((item) => item.status === status && item.id !== 't1')
+      return jsonResponse(200, { items, total: items.length + 1 })
+    })
+    const el = await mountAt('/tasks')
+    expect(text(el, 'tasks-groups-reorder-off')).toBe('部分任务未显示，排序已停用')
+    expect(shown(el, 'tasks-groups-hidden-by-filter')).toBeNull()
+    expect(moveState(el, 't6')).toEqual({ up: false, down: false, join: null, select: false })
+  })
+
+  it('g2core|board|with no completed task placed, the default 未完成 board keeps its moves', async () => {
+    seedGrouped()
+    h_.tasksReply.mockImplementation(byStatus)
+    const el = await mountAt('/tasks')
+    expect(reads('/api/tasks?view=assigned&status=open')).toBe(1)
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(layout(el)).toEqual(GROUPED_LAYOUT)
+    await clickIn(el, 't2', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t2 {"groupId":null,"position":0}'])
   })
 })

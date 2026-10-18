@@ -12,6 +12,9 @@
     <p v-if="reorderOffNotice" class="tasks-group-board__message" data-testid="tasks-groups-reorder-off" role="status">
       {{ t.groupsReorderOff }}
     </p>
+    <p v-if="hiddenCount > 0 && !truncated" class="tasks-group-board__message" data-testid="tasks-groups-hidden-by-filter" role="status">
+      {{ fmt.groupsHiddenByFilter(hiddenCount) }}
+    </p>
     <div class="tasks-group-board__toolbar">
       <button type="button" data-testid="tasks-groups-refresh" :disabled="pending" @click="onRefresh">{{ t.groupsRefresh }}</button>
     </div>
@@ -265,6 +268,9 @@
  * re-read the groups and the placements, a 404 re-reads the rows as well. Moves are offered to a
  * manager only, and only while nothing was cut short and every placement names a shown row and a
  * known group; otherwise the order still shows, the move controls are disabled and a notice says so.
+ * G2-core: when the host filtered the rows by status (`rowsFiltered`), a placement whose task is not
+ * a row is a hidden entry instead — counted in the move's position, not shown, and named by a
+ * status line — so the filter alone never turns moves off.
  * After a keyboard move, focus returns to the same control of the same task, or to the task's group
  * select when that control is disabled or gone.
  *
@@ -310,6 +316,7 @@ import {
   planJoinOrder,
   planStep,
   planToGroup,
+  shownIds,
   type BoardModel,
   type PlannedMove,
 } from '../../tasks/tasksGroupBoard'
@@ -327,6 +334,9 @@ const props = defineProps<{
   unavailable: boolean
   /** The rows, the groups or the placements stopped short of their `total`. */
   truncated: boolean
+  /** G2-core: the host filtered the rows by status, so a placement whose task is not a row is a
+   *  hidden entry of the server's index space (design task-g2-core-design-20261011.md §4.1). */
+  rowsFiltered?: boolean
   /** Group writes and moves are offered. */
   canManage: boolean
   /** Shared with the host through `v-model:pending`. */
@@ -374,7 +384,9 @@ let writeToken = 0
 let writing = false
 
 const baseModel = computed<BoardModel | null>(() =>
-  props.groups !== null && props.placements !== null ? buildBoardModel(props.groups, props.placements, props.items) : null,
+  props.groups !== null && props.placements !== null
+    ? buildBoardModel(props.groups, props.placements, props.items, { rowsFiltered: props.rowsFiltered === true })
+    : null,
 )
 const model = computed<BoardModel | null>(() => override.value ?? baseModel.value)
 const boardGroups = computed<TaskGroup[]>(() => model.value?.groups ?? [])
@@ -395,15 +407,20 @@ function titleOf(taskId: string): string {
   return rowsById.value.get(taskId)?.title ?? taskId
 }
 
+/** The group's placed rows as shown: its order without the hidden entries. */
 function orderedIds(group: TaskGroup): string[] {
-  return model.value?.ordered[groupKey(group)] ?? []
+  return model.value === null ? [] : shownIds(model.value, groupKey(group))
 }
+
+/** Placements kept in the index space but not shown, because the rows are status-filtered. */
+const hiddenCount = computed(() => model.value?.hidden.length ?? 0)
 
 function countOf(group: TaskGroup): number {
   return orderedIds(group).length + (group.isDefault ? tailIds.value.length : 0)
 }
 
-// [fe-35] the board's index space must be the server's for a move to count right.
+// [fe-35] the board's index space must be the server's for a move to count right. Under a status
+// filter the hidden entries keep it so (`tasks/tasksGroupBoard.ts`, G2-core design §4.1).
 const movesAllowed = computed(
   () => props.canManage && model.value !== null && model.value.consistent && !props.truncated,
 )
@@ -494,7 +511,11 @@ async function runMove(move: PlannedMove | null, control: MoveControl | null): P
   const from = locateTask(board, move.taskId)
   const token = beginWrite()
   if (token === null) return
-  override.value = applyMove(board, move)
+  const applied = applyMove(board, move)
+  // The place the user sees: the shown index, which the PUT position exceeds by the hidden entries
+  // before it.
+  const shownPlace = shownIds(applied, move.key).indexOf(move.taskId) + 1
+  override.value = applied
   liveMessage.value = t.value.groupsSaving
   let moved = false
   try {
@@ -510,8 +531,8 @@ async function runMove(move: PlannedMove | null, control: MoveControl | null): P
       override.value = null
       liveMessage.value =
         from !== null && from.key === move.key
-          ? fmt.value.groupsMovedTo(move.position + 1)
-          : fmt.value.groupsMovedToGroup(groupNameOf(board, move.key), move.position + 1)
+          ? fmt.value.groupsMovedTo(shownPlace)
+          : fmt.value.groupsMovedToGroup(groupNameOf(board, move.key), shownPlace)
       moved = true
       return
     }

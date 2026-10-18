@@ -610,6 +610,7 @@
 //     pattern so a secret/host/connection-string-shaped string typed into a name field is dropped
 //     (counted, never echoed) rather than rendered (lock §3: applied only by a controlled backend or
 //     ops script, never this page).
+import { copyText } from '../../utils/clipboard'
 import { computed, reactive, ref, watch } from 'vue'
 import { CircleCheck, CircleClose, Clock, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
@@ -1145,16 +1146,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 
 async function copySuggestionText(): Promise<void> {
   copyState.value = 'idle'
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      await navigator.clipboard.writeText(suggestionResult.value.text)
-      copyState.value = 'copied'
-      return
-    }
-  } catch {
-    // fall through to the failed state below
-  }
-  copyState.value = 'failed'
+  copyState.value = (await copyText(suggestionResult.value.text)) ? 'copied' : 'failed'
 }
 
 watch(suggestionDrafts, () => {
@@ -1191,16 +1183,7 @@ const checklistCopyState = ref<'idle' | 'copied' | 'failed'>('idle')
 
 async function copyChecklistText(): Promise<void> {
   checklistCopyState.value = 'idle'
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      await navigator.clipboard.writeText(checklistText.value)
-      checklistCopyState.value = 'copied'
-      return
-    }
-  } catch {
-    // fall through to the failed state below
-  }
-  checklistCopyState.value = 'failed'
+  checklistCopyState.value = (await copyText(checklistText.value)) ? 'copied' : 'failed'
 }
 
 // Values-free by construction: the downloaded file's own content is `checklistText` (object names/

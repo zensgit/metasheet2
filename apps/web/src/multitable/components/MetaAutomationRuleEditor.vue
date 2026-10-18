@@ -1768,6 +1768,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
@@ -4741,14 +4742,15 @@ function ruleHasDingTalkActions(rule: AutomationRule | undefined): boolean {
 
 function copyPreviewText(key: string, text: string) {
   const trimmed = text.trim()
-  if (!trimmed || !navigator.clipboard?.writeText) return
-  void navigator.clipboard.writeText(trimmed).then(() => {
+  if (!trimmed) return
+  void copyText(trimmed).then((ok) => {
+    if (!ok) return
     copiedPreviewKey.value = key
     if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
     copiedPreviewResetTimer = window.setTimeout(() => {
       if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
     }, 1500)
-  }).catch(() => {})
+  })
 }
 
 function personRecipientSummary(action: DraftAction) {

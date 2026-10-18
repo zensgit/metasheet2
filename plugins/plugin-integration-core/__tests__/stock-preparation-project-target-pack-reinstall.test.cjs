@@ -151,7 +151,12 @@ const dryRun = (h) => call(h.routes, 'POST', DRY_RUN_PATH, { user: PULLER, param
 
 const WRITE_CALLS = new Set(['ensureObject', 'ensureMissingObjectFields', 'patchObjectFieldProperty', 'ensureView', 'ensureObjectDefaultView'])
 const hostWrites = (h) => h.provisioning.calls.filter((c) => WRITE_CALLS.has(c[0]))
-const installerWrites = (h) => h.provisioning.calls.filter((c) => ['ensureMissingObjectFields', 'patchObjectFieldProperty'].includes(c[0]))
+// G1 field defect (R67): provisioning itself now patches the contract decision column (the server-held option set,
+// stock-preparation-project-targets.cjs `provisionProjectSheet`) — that write is the create path's, not the
+// installer's, so it is not counted as an install write here.
+const CONTRACT_OPTION_FIELD_IDS = new Set(['lastPlmRefreshDecision'])
+const installerWrites = (h) => h.provisioning.calls.filter((c) => c[0] === 'ensureMissingObjectFields'
+  || (c[0] === 'patchObjectFieldProperty' && !CONTRACT_OPTION_FIELD_IDS.has(c[2])))
 const provisionedProjectObjects = (h) => [...h.provisioning.objects.keys()].filter((key) => key.includes('plm_stock_preparation_sandbox_p_'))
 
 /**

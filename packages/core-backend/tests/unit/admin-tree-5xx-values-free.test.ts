@@ -2128,3 +2128,33 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     expect(calls.length * rawShapes.length).toBe(184)
   })
 })
+
+const ADMIN_ROLE_MEMBERS = 'admin-role-members.ts'
+
+function roleMembersOffenders(source: string) {
+  return scanResponseErrorEcho(ADMIN_ROLE_MEMBERS, source).offenders
+}
+
+describe('structural guard: routes/admin-role-members.ts (mounted at the root, outside the /api/admin tree)', () => {
+  it('admin-role-members.ts is scanned on its own and its 5xx bodies carry no caught-error text', () => {
+    expect(routerTree().files).not.toContain(ADMIN_ROLE_MEMBERS)
+    expect(roleMembersOffenders(readRoute(ADMIN_ROLE_MEMBERS))).toEqual([])
+  })
+
+  it('flags a caught-error echo injected into the role-members 503', () => {
+    const source = readRoute(ADMIN_ROLE_MEMBERS)
+    const injected = source.replace(
+      '} catch {\n      sendUnavailable(res)\n    }',
+      '} catch (error) {\n      jsonError(res, 503, \'ROLE_MEMBERS_UNAVAILABLE\', (error as Error).message)\n    }',
+    )
+    expect(injected).not.toBe(source)
+    expect(roleMembersOffenders(injected)).toEqual([
+      expect.objectContaining({
+        file: ADMIN_ROLE_MEMBERS,
+        kind: 'jsonError',
+        status: 503,
+        reason: 'reads .message',
+      }),
+    ])
+  })
+})

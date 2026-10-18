@@ -4,15 +4,29 @@ import {
   buildApprovalGraph,
   draftFromTemplate,
   validateTemplateDraft,
+  visibilityStoredValuePreview,
   type ConditionEdits,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import {
+  CONDITION_RULE_OPERATORS,
   applyConditionEditsToGraph,
   conditionDefaultEdgeKeyText,
   conditionEditsFromGraph,
   validateConditionEdits,
 } from '../src/approvals/conditionEdit'
+import {
+  conditionOperatorsFor,
+  conditionOperatorsForField,
+  conditionRuleValueIssues,
+  conditionValueIssueText,
+  conditionValueIssueMessage,
+  CONDITION_VALUE_COPY_EN,
+  CONDITION_VALUE_COPY_ZH,
+  conditionStoredValueNoteShown,
+  conditionStoredValuePreview,
+  conditionValueShowsBlank,
+} from '../src/approvals/conditionValueTyping'
 
 // G-2 — condition branch editing. PURE-LOGIC tests (no .vue / no Element Plus) so they run under
 // the approval-web-guard CI gate. The GATE is topology-preservation: editing a condition node's
@@ -587,5 +601,248 @@ describe('T5a / verify X1 — a non-string defaultEdgeKey in the edit model mean
       expect(() => validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).not.toThrow()
       expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
     }
+  })
+})
+
+// R-43 (B) — branch condition values by field type. The editor stores typed values; the graph
+// pass-through and the validation preview are unchanged (marking is display-only, never a blocker).
+describe('R-43 (B) typed branch condition values', () => {
+  const single = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }, { label: '乙', value: 'opt_b' }] }
+  const multi = { type: 'multi-select' as const, options: single.options }
+  const number = { type: 'number' as const, options: [] }
+  const text = { type: 'text' as const, options: [] }
+
+  it('multi select offers only in / isEmpty; single select drops gt/gte/lt/lte (owner Q2); number / text keep the full set in order', () => {
+    expect(conditionOperatorsFor('option-multi')).toEqual(['in', 'isEmpty'])
+    // R-43 follow-up (b), intended change: single select no longer offers the ordering operators
+    expect(conditionOperatorsFor('option-single')).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+    for (const kind of ['number', 'text'] as const) {
+      expect(conditionOperatorsFor(kind)).toEqual([...CONDITION_RULE_OPERATORS])
+    }
+  })
+
+  it('follow-up (b): per-field operators — a multi-person picker gets only in / isEmpty, a single person the full set', () => {
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    const person = { type: 'user' as const, options: [] }
+    expect(conditionOperatorsForField(multiPerson)).toEqual(['in', 'isEmpty'])
+    expect(conditionOperatorsForField(person)).toEqual([...CONDITION_RULE_OPERATORS])
+    expect(conditionOperatorsForField(single)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+    expect(conditionOperatorsForField(multi)).toEqual(['in', 'isEmpty'])
+    expect(conditionOperatorsForField(number)).toEqual([...CONDITION_RULE_OPERATORS])
+    expect(conditionOperatorsForField(null)).toEqual([...CONDITION_RULE_OPERATORS])
+  })
+
+  it('follow-up (b): stored rules using a removed operator are MARKED (new categories), the rest is unchanged', () => {
+    for (const operator of ['gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, single)).toEqual(['operator-option-order'])
+    }
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, single)).toEqual([])
+    }
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['opt_a'] }, single)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, single)).toEqual([])
+
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    for (const operator of ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'u1' }, multiPerson)).toEqual(['operator-multi-person'])
+    }
+    // gate r3 F3-2 does not regress: a scalar `in` still works against a list value
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'u1' }, multiPerson)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['u1', 'u2'] }, multiPerson)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, multiPerson)).toEqual([])
+    // a single person keeps every operator
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'u1' }, { type: 'user' as const, options: [] })).toEqual([])
+    // a multi-select keeps its original category
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'opt_a' }, multi)).toEqual(['operator-not-effective'])
+  })
+
+  it('follow-up (b): the single-select mark is advisory (it may still work for numeric codes); the multi-person mark is not', () => {
+    expect(conditionValueIssueText(['operator-option-order'], true)).toBe(
+      `${CONDITION_VALUE_COPY_ZH.issueTitleAdvisory}${CONDITION_VALUE_COPY_ZH.issueOperatorOptionOrder}`,
+    )
+    expect(conditionValueIssueText(['operator-option-order'], false)).toBe(
+      `${CONDITION_VALUE_COPY_EN.issueTitleAdvisory}${CONDITION_VALUE_COPY_EN.issueOperatorOptionOrder}`,
+    )
+    expect(conditionValueIssueText(['operator-option-order'], true).startsWith('条件可能无法按预期生效：')).toBe(true)
+    expect(conditionValueIssueText(['operator-option-order'], false).startsWith('Condition may not work as intended: ')).toBe(true)
+    expect(conditionValueIssueText(['operator-multi-person'], true)).toBe(
+      `${CONDITION_VALUE_COPY_ZH.issueTitle}${conditionValueIssueMessage('operator-multi-person', true)}`,
+    )
+    expect(conditionValueIssueText(['operator-multi-person'], false)).toBe(
+      `${CONDITION_VALUE_COPY_EN.issueTitle}${conditionValueIssueMessage('operator-multi-person', false)}`,
+    )
+    // a mix with any non-advisory issue keeps the "not in effect" title
+    expect(conditionValueIssueText(['operator-option-order', 'value-not-option'], true).startsWith(CONDITION_VALUE_COPY_ZH.issueTitle)).toBe(true)
+  })
+
+  it('conditionRuleValueIssues mirrors the backend executor', () => {
+    for (const operator of ['eq', 'neq', 'gt'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, multi)).toEqual(['operator-not-effective'])
+    }
+    // the backend `includes`s a scalar rule value into a multi-select's array form value
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'opt_a' }, multi)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'opt_a' }, single)).toEqual(['in-not-list'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'a' }, text)).toEqual(['in-not-list'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['a', 'b'] }, text)).toEqual([])
+    // gt/gte/lt/lte normalise a numeric string (works today); eq/neq/in compare strictly
+    expect(conditionRuleValueIssues({ operator: 'gt', value: '5000' }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'gt', value: 'abc' }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: '5000' }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 5000 }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: [1, 2] }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['1'] }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'opt_gone' }, single)).toEqual(['value-not-option'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['opt_a', 'opt_gone'] }, single)).toEqual(['value-not-option'])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, single)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: undefined }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'x' }, null)).toEqual([])
+    // Gate r1 F1: a LIST under a single-value operator is marked (alone — no stacked option/number note).
+    for (const operator of ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: [1, 2] }, number)).toEqual(['list-not-scalar'])
+      expect(conditionRuleValueIssues({ operator, value: ['a'] }, text)).toEqual(['list-not-scalar'])
+    }
+    expect(conditionRuleValueIssues({ operator: 'eq', value: ['opt_gone'] }, single)).toEqual(['list-not-scalar'])
+    // Gate r2 P3-b: an EMPTY list under a single-value operator is marked too (`neq []` always matches);
+    // an empty `in` list is just not filled in yet.
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: [] }, single)).toEqual(['list-not-scalar'])
+      expect(conditionRuleValueIssues({ operator, value: [] }, text)).toEqual(['list-not-scalar'])
+    }
+    expect(conditionRuleValueIssues({ operator: 'in', value: [] }, text)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty', value: ['a'] }, text)).toEqual([])
+  })
+
+  it('gate r2 F2-1: a non-string value under eq/neq/in on a TEXT-type field is marked (never under gt/gte/lt/lte)', () => {
+    const date = { type: 'date' as const, options: [] }
+    // e.g. a number left behind when the field was retyped number → text: `'5' === 5` never matches
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 5 }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'neq', value: 5 }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: [1, 2] }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['a', 2] }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 20260101 }, date)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: true }, text)).toEqual(['not-text'])
+    // gt/gte/lt/lte normalise both sides in the executor: on a TEXT field a number still compares
+    // (`'5'` → 5). On a DATE field it does not (gate r3 F3-3): the date becomes a timestamp, so a
+    // number is compared against that timestamp — always true (gt) / false (lt) — and is marked
+    // `not-date` (below), never `not-text`.
+    for (const operator of ['gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 20260101 }, date)).toEqual(['not-date'])
+      expect(conditionRuleValueIssues({ operator, value: 5 }, text)).toEqual([])
+    }
+    // strings stay fine; blank stays "not filled in"
+    expect(conditionRuleValueIssues({ operator: 'eq', value: '5' }, text)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['1', '2'] }, text)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: null }, text)).toEqual([])
+    // a scalar `in` on text: both marks
+    expect(conditionRuleValueIssues({ operator: 'in', value: 5 }, text)).toEqual(['in-not-list', 'not-text'])
+  })
+
+  function editsWith(rules: Array<{ fieldId: string; operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'isEmpty'; value: unknown }>): ConditionEdits {
+    return {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules, formulaExpression: '' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+  }
+
+  it('typed values pass through the graph unchanged (number, number list, option-value list)', () => {
+    const graph = applyConditionEditsToGraph(CONDITION_GRAPH, editsWith([
+      { fieldId: 'amount', operator: 'eq', value: 5000 },
+      { fieldId: 'amount', operator: 'in', value: [1, 2] },
+      { fieldId: 'kind', operator: 'in', value: ['a'] },
+    ]))
+    const node = graph.nodes.find((candidate) => candidate.key === 'cond_1')!
+    const rules = (node.config as { branches: Array<{ rules: Array<{ value?: unknown }> }> }).branches[0].rules
+    expect(rules.map((rule) => rule.value)).toStrictEqual([5000, [1, 2], ['a']])
+    expect(typeof rules[0].value).toBe('number')
+  })
+
+  it('rules that can never take effect are NOT turned into validation errors (marking only, no new blocker)', () => {
+    const formSchema = buildTemplate(CONDITION_GRAPH).formSchema
+    const errors = validateConditionEdits(editsWith([
+      { fieldId: 'kind', operator: 'eq', value: 'gone' },
+      { fieldId: 'kind', operator: 'in', value: 'a' },
+      { fieldId: 'amount', operator: 'eq', value: '5000' },
+    ]), formSchema, CONDITION_GRAPH)
+    expect(errors).toEqual([])
+  })
+
+  it('gate r3 F3-2: a scalar `in` on a multi-person field takes effect (the form value is a list) — only a single-person one is marked', () => {
+    const multiUser = { type: 'user' as const, options: [], listValued: true }
+    const singleUser = { type: 'user' as const, options: [] }
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'u1' }, multiUser)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['u1'] }, multiUser)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'u1' }, singleUser)).toEqual(['in-not-list'])
+    // the exemption is only for the list shape — a non-string value is still marked
+    expect(conditionRuleValueIssues({ operator: 'in', value: 5 }, multiUser)).toEqual(['not-text'])
+  })
+
+  it('gate r3 F3-3: gt/gte/lt/lte on a date / datetime field must compare against a date string', () => {
+    const date = { type: 'date' as const, options: [] }
+    const datetime = { type: 'datetime' as const, options: [] }
+    for (const field of [date, datetime]) {
+      for (const operator of ['gt', 'gte', 'lt', 'lte'] as const) {
+        // the executor turns each into a timestamp — these order correctly
+        expect(conditionRuleValueIssues({ operator, value: '2026-01-01' }, field)).toEqual([])
+        expect(conditionRuleValueIssues({ operator, value: '2026-01-01T08:30:00Z' }, field)).toEqual([])
+        expect(conditionRuleValueIssues({ operator, value: '2026-01-01 08:30' }, field)).toEqual([])
+        // compared as-is against a timestamp: the outcome never depends on the date entered
+        expect(conditionRuleValueIssues({ operator, value: 3 }, field)).toEqual(['not-date'])
+        expect(conditionRuleValueIssues({ operator, value: '3' }, field)).toEqual(['not-date'])
+        expect(conditionRuleValueIssues({ operator, value: '20260101' }, field)).toEqual(['not-date'])
+        expect(conditionRuleValueIssues({ operator, value: '2026/01/01' }, field)).toEqual(['not-date'])
+        expect(conditionRuleValueIssues({ operator, value: '2026-13-45' }, field)).toEqual(['not-date'])
+        expect(conditionRuleValueIssues({ operator, value: true }, field)).toEqual(['not-date'])
+        // a list stays `list-not-scalar` alone; blank stays "not filled in"
+        expect(conditionRuleValueIssues({ operator, value: ['2026-01-01'] }, field)).toEqual(['list-not-scalar'])
+        expect(conditionRuleValueIssues({ operator, value: '' }, field)).toEqual([])
+      }
+      // eq/neq/in keep the strict string check (not `not-date`)
+      expect(conditionRuleValueIssues({ operator: 'eq', value: '2026-01-01' }, field)).toEqual([])
+      expect(conditionRuleValueIssues({ operator: 'eq', value: 'soon' }, field)).toEqual([])
+    }
+  })
+
+  it('gate r3 F3-1: the issues whose value a free-text box shows EMPTY, and the read-only preview of it', () => {
+    expect(conditionValueShowsBlank(['not-text'])).toBe(true)
+    expect(conditionValueShowsBlank(['in-not-list'])).toBe(true)
+    expect(conditionValueShowsBlank(['list-not-scalar'])).toBe(true)
+    expect(conditionValueShowsBlank(['in-not-list', 'not-text'])).toBe(true)
+    for (const issue of ['not-number', 'not-date', 'value-not-option', 'operator-not-effective', 'operator-option-order', 'operator-multi-person'] as const) {
+      expect(conditionValueShowsBlank([issue])).toBe(false)
+    }
+    expect(conditionValueShowsBlank([])).toBe(false)
+
+    // gate r4 NIT-f: the read-only note also covers a number box left empty by a non-number
+    for (const issue of ['not-text', 'in-not-list', 'list-not-scalar', 'not-number'] as const) {
+      expect(conditionStoredValueNoteShown([issue])).toBe(true)
+    }
+    for (const issue of ['not-date', 'value-not-option', 'operator-not-effective', 'operator-option-order', 'operator-multi-person'] as const) {
+      expect(conditionStoredValueNoteShown([issue])).toBe(false)
+    }
+    expect(conditionStoredValueNoteShown([])).toBe(false)
+
+    // gate r5 P3-j: for a number `in` list the note follows the textarea's displayed text — none
+    // while it shows the lines (a non-number one included), the saved value while it is empty
+    const amount = { type: 'number' as const, options: [] }
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\nabc', values: [1, 'abc'] }, amount)).toBeNull()
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2' }, amount)).toBe('["1","2"]')
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2', values: [1, 2] }, amount)).toBeNull()
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'eq', valueText: '5000' }, amount)).toBe('5000')
+
+    // strings verbatim; anything else as JSON so [1,2] / '1,2' stay distinguishable (5 / '5' both read 5)
+    expect(conditionStoredValuePreview('a')).toBe('a')
+    expect(conditionStoredValuePreview(5)).toBe('5')
+    expect(conditionStoredValuePreview([1, 2])).toBe('[1,2]')
+    expect(conditionStoredValuePreview(['a'])).toBe('["a"]')
+    expect(conditionStoredValuePreview(true)).toBe('true')
+    // line breaks flattened; long text cut with an ellipsis (by characters, not UTF-16 units)
+    expect(conditionStoredValuePreview('line1\nline2')).toBe('line1 ⏎ line2')
+    expect(conditionStoredValuePreview('x'.repeat(80))).toBe(`${'x'.repeat(60)}…`)
+    expect(conditionStoredValuePreview('事'.repeat(61), 60)).toBe(`${'事'.repeat(60)}…`)
+    // markup is plain text here (the editors interpolate it, never v-html)
+    expect(conditionStoredValuePreview('<b>x</b>')).toBe('<b>x</b>')
   })
 })

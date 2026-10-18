@@ -10,6 +10,32 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // Reviewed operator archive repair uses the complete original row for readonly
+  // planning and apply FOR UPDATE/CAS; it never updates or lists parent records.
+  entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'runRepair', 1, 'reviewed_legacy_repair_row_cas'),
+  // The scanner attributes both active-parent and pending-related joins to the
+  // local keyset helper `scan`. Both are org-scoped readonly preflight counts.
+  entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'scan', 2, 'values_free_upgrade_preflight'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readEligibleLegacyRepair', 1, 'legacy_repair_live_continuation_precondition'),
+  // Nearest-declaration attribution is `query` inside the authorized default-PUT
+  // helper; the read checks active open parents for original frozen authority.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-default-recovery.cjs', 'query', 1, 'missing_default_recovery_open_freeze_precondition'),
+  // Exact internal frozen-context and source-change preconditions; no public record listing.
+  // Scheduled generation checks physical parent existence before current-policy resolution.
+  // Match generateAbsenceRecords' base-table NOT EXISTS, including retired/review placeholders;
+  // the authoritative parent resolver separately enforces retirement before any write or skip.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'prepareScheduledContext', 1, 'scheduled_existing_parent_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDates', 1, 'batch_frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'readTargetTimezoneContexts', 1, 'batch_original_freeze_migration_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 1, 'original_frozen_v2_continuation_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs', 'readStoredContexts', 1, 'stored_timezone_identity_active_parent_join'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readEligibleOpen', 1, 'frozen_checkout_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDate', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'assertTarget', 1, 'frozen_binding_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'bindFirst', 1, 'frozen_binding_write_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs', 'readFrozenTimezoneWindows', 1, 'frozen_source_change_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'target', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-business-trip.cjs', 'dateKey', 1, 'trip_work_date_conflict_precondition'),
   // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),

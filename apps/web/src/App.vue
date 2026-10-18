@@ -146,6 +146,7 @@ import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
 import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
+import { canSeeTasksEntry } from './tasks/tasksAccess'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
@@ -200,9 +201,10 @@ const canUseApprovals = computed(() => {
 // caller must hold tasks:read. Without the feature check an administrator saw 任务 with a "!" badge
 // on a server where /api/tasks is not mounted, and every page load issued a 404 pending-count read.
 // The feature is checked first so that, while it is off, nothing about tasks renders or polls.
+// The rule lives in tasks/tasksAccess.ts so the record drawer's 派发任务 entry reads the same one.
 const canUseTasks = computed(() => {
   void route.fullPath
-  return hasFeature('tasks') && hasPermission('tasks:read')
+  return canSeeTasksEntry({ hasFeature, hasPermission })
 })
 const isLoggedIn = computed(() => {
   void route.fullPath

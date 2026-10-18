@@ -156,7 +156,11 @@ import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 // W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
-import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { validateAttendanceIanaTimezoneV1, resolveAttendanceLocalWallTimeV1 } from './attendance/w4c1-strict-time'
+import { acquireAttendanceTimezoneRuntimeLocksV1 } from './attendance/attendance-timezone-runtime-locks'
+import { isSupportedFrozenAttendanceContextV1, isSupportedFrozenAttributionSnapshotV1 } from './attendance/w4c1-segment-calculator'
+import { registerAttendanceCalculationGroupTimezoneSourceGuard } from './services/AttendanceCalculationGroupMembership'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from './attendance/attendance-business-trip-locks'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import {
   refreshAttendanceReportProjectionAnchor,
@@ -209,6 +213,7 @@ import {
 } from './attendance/w4c2-scheduled-run-ops-worker'
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from './attendance/w4c3a-legacy-plan-commit-connection'
 import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
 import {
   buildAttendanceImportAttributionFreezeV1,
@@ -398,6 +403,7 @@ import {
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
+import { adminRoleMembersRouter } from './routes/admin-role-members'
 import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
@@ -2214,6 +2220,7 @@ export class MetaSheetServer {
       }),
     }))
     this.app.use(adminUsersRouter())
+    this.app.use(adminRoleMembersRouter())
     // Transfer MVP T1 — mounted BEFORE the broader /api/admin/directory router so the more
     // specific path wins outright; same `ensurePlatformAdmin` RBAC gate.
     this.app.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
@@ -3035,6 +3042,28 @@ export class MetaSheetServer {
           manifest.name === 'plugin-attendance'
             ? {
                 validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                resolveLocalWallTime: resolveAttendanceLocalWallTimeV1,
+                validateFrozenTimezoneContext:isSupportedFrozenAttendanceContextV1,
+                validateFrozenTimezoneAttribution:isSupportedFrozenAttributionSnapshotV1,
+                registerTimezoneSourceGuard: (
+                  guard: ((trx: Pick<import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,'query'>,
+                    input:{orgId:string;userIds:string[]|null}) => Promise<() => Promise<void>>) | null,
+                ) => {
+                  registerAttendanceCalculationGroupTimezoneSourceGuard(guard && (async (query,input) => {
+                    const trx = {query:async (text:string,values?:unknown[]) => (await query(text,values)).rows}
+                    return guard(trx,input)
+                  }))
+                  registerAttendanceRequestTimezoneSourceGuardV1(guard && (async (client,input) => {
+                    const trx = {query:async (text:string,values?:unknown[]) => (await client.query(text,values)).rows}
+                    return guard(trx,input)
+                  }))
+                },
+                acquireTimezoneRuntimeLocks: (
+                  trx: import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,
+                  input: Parameters<typeof acquireAttendanceTimezoneRuntimeLocksV1>[1],
+                ) => acquireAttendanceTimezoneRuntimeLocksV1({
+                  query: async (text, values) => ({ rows: await trx.query(text, values) }),
+                }, input),
                 // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
                 // decision. The plugin's canonical live adapter consumes this
                 // instead of the removed second mutable post-upsert pass — the
@@ -3108,6 +3137,31 @@ export class MetaSheetServer {
                 }),
                 appendApprovedLeaveCancellationCalculation: (input) =>
                   appendApprovedLeaveCancellationCalculationV1(input),
+                // Timezone source guards also receive query-only, same-transaction
+                // adapters. Do not claim the wider canonical transaction identity.
+                resolveTimezoneSegmentReferencePosture: async (
+                  trx: Pick<import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
+                  orgId: string,
+                ) => {
+                  const client: AttendanceW4TransactionClientV1 = {
+                    query: async (text, values) => ({ rows: await trx.query(text, [...(values ?? [])]) }),
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(client, orgKey)
+                  return { referenceSegments: posture.referenceSegments }
+                },
                 resolveOrgSegmentCalculationPosture: async (
                   trx: import('./types/plugin').DatabaseTransaction,
                   orgId: string,
@@ -3363,7 +3417,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
                     },
                   })
                   return processor.processLegacyImportPlanV1(jobId)
@@ -3375,7 +3429,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
                     },
                   })
                   return host.reserveLegacyImportPlanV1(input)

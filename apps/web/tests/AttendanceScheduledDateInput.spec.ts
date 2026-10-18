@@ -73,7 +73,7 @@ describe('AttendanceScheduledDateInput', () => {
     await nextTick()
 
     const input = container.querySelector('input') as HTMLInputElement | null
-    expect(input?.type).toBe('date')
+    expect(input?.type).toBe('text')
     input?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))
     await nextTick()
 

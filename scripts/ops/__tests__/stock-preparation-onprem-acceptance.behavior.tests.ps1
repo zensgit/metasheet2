@@ -398,10 +398,10 @@ node "%~dp0pm2-fixture.mjs" %*
 '@ -NoNewline
   } else {
     $fakePm2 = Join-Path $fakePm2Dir 'pm2'
-    Set-Content -Path $fakePm2 -Value @'
-#!/bin/sh
-exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
-'@ -NoNewline
+    # Explicit LF: a here-string inherits the test file's own line endings, and a CRLF checkout would
+    # turn the shebang into "/bin/sh" plus a CR (kernel exec fails with ENOENT).
+    $stubText = (('#!/bin/sh'), ('exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"')) -join "`n"
+    [System.IO.File]::WriteAllText($fakePm2, $stubText + "`n", [System.Text.UTF8Encoding]::new($false))
     & chmod +x $fakePm2
   }
   $oldPath = $env:PATH

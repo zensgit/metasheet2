@@ -5,6 +5,7 @@ import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
 import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from '../src/views/attendance/rulesMeContract'
+import { formatAttendanceDateKey } from '../src/views/attendance/attendanceDateTimePresentation'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({ plugins: ref([{ name: 'plugin-attendance', status: 'active' }]),
@@ -38,7 +39,13 @@ describe('AttendanceView server clock and aligned rules', () => {
   let rulesReply: (url: URL) => Promise<Response>
   const requests: URL[] = []
   function rules(url: URL, extra: Record<string, unknown> = {}) {
-    return { resolvedAt: new Date(serverEpoch + mono).toISOString(),
+    const resolvedAt = new Date(serverEpoch + mono).toISOString()
+    return { resolvedAt,
+      attendanceTimeContext: {
+        resolvedForInstant: resolvedAt, effectiveTimezone: zone, timezoneSource: 'system_default',
+        mode: 'default_only', policyVersion: 0, referenceId: 'default-rule', version: 1,
+        currentLocalDate: formatAttendanceDateKey(new Date(resolvedAt), zone), nextEffectiveBoundary: null,
+      },
       resolvedForDate: url.searchParams.get('asOf') ?? new Date(serverEpoch + mono).toISOString().slice(0, 10),
       runtimeRule: { timezone: zone, workStartTime: '09:00', workEndTime: '18:00' },
       assignment: { attendanceGroups: [{ name: 'aligned-group', timezone: 'America/New_York' }], scheduleGroups: [] },
@@ -111,7 +118,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     vi.setSystemTime(new Date(device))
     await mount()
     expect(time()).toBe('10:00:00')
-    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · System default')
     expect(container.textContent).toContain('2026-04-15')
     expect(calendarTodayDates()).toEqual(['2026-04-15'])
     const today = requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')
@@ -121,6 +128,37 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(time()).toBe('10:00:01')
     expect(calendarTodayDates()).toEqual(['2026-04-15'])
     expect(requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')).toHaveLength(1)
+  })
+  it('explains calendar failure without exposing the server message and clears it on refresh', async () => {
+    const original = vi.mocked(apiFetch).getMockImplementation()!
+    let failed = true
+    vi.mocked(apiFetch).mockImplementation(async (...args) => {
+      if (String(args[0]).startsWith('/api/attendance/effective-calendar?') && failed) {
+        return response({ ok: false, error: { code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', message: 'PRIVATE_SENTINEL' } }, 422)
+      }
+      return original(...args)
+    })
+    await mount()
+    expect(container.querySelector('[data-calendar-timezone-error]')?.textContent)
+      .toContain('The organization has no default attendance rule.')
+    expect(container.textContent).not.toContain('PRIVATE_SENTINEL')
+    failed = false
+    button('Refresh').click(); await flush()
+    expect(container.querySelector('[data-calendar-timezone-error]')).toBeNull()
+  })
+  it('shows an actionable configuration error instead of promising punch availability, then recovers', async () => {
+    rulesReply = async () => response({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED', message: 'PRIVATE_SENTINEL',
+    } }, 422)
+    await mount()
+    expect(container.textContent).toContain('The organization has no default attendance rule.')
+    expect(container.textContent).not.toContain('PRIVATE_SENTINEL')
+    expect(container.textContent).not.toContain('You can still punch')
+    expect(time()).toBe('Server time unavailable')
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click(); await flush()
+    expect(container.textContent).not.toContain('The organization has no default attendance rule.')
+    expect(time()).toBe('10:00:00')
   })
   it.each([undefined, 'invalid'])('missing/malformed server sample %s stays unavailable, ordinary punch still submits without timezone/time', async sample => {
     rulesReply = async url => response({ ok: true, data: rules(url, { resolvedAt: sample }) })
@@ -145,7 +183,7 @@ describe('AttendanceView server clock and aligned rules', () => {
   })
   it('calendar Today refuses an invalid rule timezone and recovers only after valid server rules', async () => {
     rulesReply = async url => response({ ok: true, data: rules(url, {
-      runtimeRule: { timezone: 'Invalid/Timezone' },
+      attendanceTimeContext: { ...rules(url).attendanceTimeContext, effectiveTimezone: 'Invalid/Timezone' },
     }) })
     await mount()
     expect(timezone()).toBe('Attendance timezone unavailable')
@@ -166,11 +204,98 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(container.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('aligned-group')
     expect(container.textContent).not.toContain('Attendance timezone: America/New_York')
   })
+  it('uses the current instant context even when the asOf runtime rule has a different timezone', async () => {
+    rulesReply = async url => response({ ok: true, data: rules(url, {
+      runtimeRule: { timezone: 'America/New_York', workStartTime: '09:00', workEndTime: '18:00' },
+      attendanceTimeContext: { ...rules(url).attendanceTimeContext, timezoneSource: 'trip', mode: 'multi_timezone' },
+    }) })
+    await mount()
+    expect(time()).toBe('10:00:00')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · Approved business trip')
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
+  })
+
+  it('expires the old timezone at a governed boundary and refreshes before publishing the destination', async () => {
+    const boundary = new Date(serverEpoch + mono + 1_000).toISOString()
+    rulesReply = async url => response({ ok: true, data: rules(url, {
+      attendanceTimeContext: { ...rules(url).attendanceTimeContext, timezoneSource: 'employee_override',
+        mode: 'multi_timezone', nextEffectiveBoundary: boundary },
+    }) })
+    await mount()
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · Employee configuration · Refresh at 4/15/2026, 10:00:01 AM')
+    const pending = deferred<Response>()
+    rulesReply = () => pending.promise
+    await tick(1_000)
+    expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(requests.filter(url => url.pathname === '/api/attendance/rules/me')).toHaveLength(2)
+    zone = 'Asia/Tokyo'
+    pending.resolve(response({ ok: true, data: rules(new URL('http://fixture.invalid'), {
+      attendanceTimeContext: { ...rules(new URL('http://fixture.invalid')).attendanceTimeContext,
+        timezoneSource: 'trip', mode: 'multi_timezone' },
+    }) }))
+    await flush()
+    expect(time()).toBe('11:00:01')
+    expect(timezone()).toBe('Attendance timezone: Asia/Tokyo · Approved business trip')
+  })
+
+  it('does not fall back to the runtime timezone when current context is missing', async () => {
+    rulesReply = async url => response({ ok: true, data: rules(url, { attendanceTimeContext: undefined }) })
+    await mount()
+    expect(time()).toBe('Server time unavailable')
+    expect(timezone()).toBe('Attendance timezone unavailable')
+  })
+
+  it('shows each plain calendar day timezone even when the month contains multiple zones', async () => {
+    const base = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance/effective-calendar?')) return response({ ok: true, data: {
+        mode: 'userId', timezone: null, timezoneMode: 'per_day',
+        items: ['2026-04-15', '2026-04-16'].map((date, index) => ({
+          date, base: { isWorkingDay: true, source: 'rule' },
+          effective: { isWorkingDay: true, source: 'rule' }, layers: [], overlays: [],
+          attendanceTimeContext: { targetWorkDate: date, effectiveTimezone: index ? 'Asia/Singapore' : 'Asia/Tokyo',
+            timezoneSource: index ? 'trip' : 'employee_override', mode: 'multi_timezone',
+            policyVersion: 2, contextFingerprint: 'a'.repeat(64), frozen: false },
+        })),
+      } })
+      return base(input, init)
+    })
+    await mount()
+    const titles = [...container.querySelectorAll('.attendance__calendar-cell')].map(cell => cell.getAttribute('title') ?? '')
+    expect(titles.find(title => title.startsWith('2026-04-15'))).toContain('Attendance timezone: Asia/Tokyo · Employee configuration')
+    expect(titles.find(title => title.startsWith('2026-04-16'))).toContain('Attendance timezone: Asia/Singapore · Approved business trip')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · System default')
+  })
+
+  it('rejects a calendar context attached to the wrong date without a month timezone fallback', async () => {
+    const base = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance/effective-calendar?')) return response({ ok: true, data: {
+        mode: 'userId', timezone: 'Asia/Tokyo', timezoneMode: 'single', items: [{
+          date: '2026-04-15', base: { isWorkingDay: true, source: 'stored_record' },
+          effective: { isWorkingDay: true, source: 'stored_record' }, layers: [], overlays: [],
+          attendanceTimeContext: { targetWorkDate: '2026-04-16', effectiveTimezone: 'Asia/Tokyo',
+            timezoneSource: 'legacy_record', mode: null, policyVersion: null, contextFingerprint: null, frozen: true },
+        }],
+      } })
+      return base(input, init)
+    })
+    await mount()
+    const title = [...container.querySelectorAll('.attendance__calendar-cell')]
+      .map(cell => cell.getAttribute('title') ?? '').find(value => value.startsWith('2026-04-15'))
+    expect(title).toContain('Attendance timezone unavailable')
+    expect(title).not.toContain('Asia/Tokyo')
+  })
+
   it('bounds timezone oscillation to two legs and never publishes an unaligned explicit punch timezone', async () => {
     serverEpoch = Date.parse('2026-04-14T16:30:00Z') - mono
     let count = 0
     rulesReply = async url => response({ ok: true, data: rules(url, {
-      runtimeRule: { timezone: ++count === 1 ? 'Asia/Tokyo' : 'America/Los_Angeles' },
+      attendanceTimeContext: {
+        ...rules(url).attendanceTimeContext,
+        effectiveTimezone: ++count === 1 ? 'Asia/Tokyo' : 'America/Los_Angeles',
+        currentLocalDate: count === 1 ? '2026-04-15' : '2026-04-14',
+      },
     }) })
     await mount()
     expect(count).toBe(2)
@@ -193,7 +318,11 @@ describe('AttendanceView server clock and aligned rules', () => {
       : response({ ok: true, data: rules(url) })
     await mount()
     mono += 2_000
-    body.resolve({ ok: true, data: { resolvedAt: '2026-04-15T15:59:59.000Z', resolvedForDate: '2026-04-15', runtimeRule: { timezone: zone } } })
+    body.resolve({ ok: true, data: rules(new URL('http://fixture.invalid'), {
+      resolvedAt: '2026-04-15T15:59:59.000Z', resolvedForDate: '2026-04-15',
+      attendanceTimeContext: { ...rules(new URL('http://fixture.invalid')).attendanceTimeContext,
+        resolvedForInstant: '2026-04-15T15:59:59.000Z', currentLocalDate: '2026-04-15' },
+    }) })
     await flush()
     expect(requests.filter(url => url.pathname === '/api/attendance/rules/me').map(url => url.searchParams.get('asOf'))).toEqual([null, '2026-04-16'])
     expect(time()).toBe('00:00:01')
@@ -205,7 +334,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     }
     await mount()
     expect(time()).toBe(accepted ? '10:00:05' : 'Server time unavailable')
-    expect(timezone()).toBe(accepted ? 'Attendance timezone: Asia/Shanghai' : 'Attendance timezone unavailable')
+    expect(timezone()).toBe(accepted ? 'Attendance timezone: Asia/Shanghai · System default' : 'Attendance timezone unavailable')
   })
   it('a corrective response arriving after BFCache recovery cannot publish its old timezone', async () => {
     serverEpoch = Date.parse('2026-04-14T16:30:00Z') - mono
@@ -220,7 +349,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(time()).toBe('10:00:00')
     corrective.resolve(response({ ok: true, data: { resolvedAt: '2026-04-14T16:30:00.000Z', resolvedForDate: '2026-04-15', runtimeRule: { timezone: 'Asia/Tokyo' } } }))
     await flush()
-    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · System default')
     expect(time()).toBe('10:00:00')
   })
   it('refreshes new-day rules and today query at calibrated midnight', async () => {
@@ -247,7 +376,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     await tick(1_000)
     expect(requests.filter(url => url.pathname === '/api/attendance/rules/me')).toHaveLength(2)
     expect(time()).toBe('10:01:00')
-    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · System default')
     expect(calendarTodayDates()).toEqual(['2026-04-15'])
     await tick(240_000)
     expect(time()).toBe('Server time unavailable')
@@ -271,7 +400,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     old.resolve(response({ ok: true, data: { resolvedAt: '2026-04-01T00:00:00.000Z', resolvedForDate: '2026-04-01', runtimeRule: { timezone: 'UTC' } } }))
     await flush()
     expect(time()).toBe('10:01:00')
-    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
+    expect(timezone()).toBe('Attendance timezone: Asia/Shanghai · System default')
   })
   it('a punch between display ticks never sends an already expired explicit timezone', async () => {
     await mount()

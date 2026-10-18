@@ -168,6 +168,21 @@ function projectOverviewPosture(input = {}) {
   return POSTURE_NOT_PULLED
 }
 
+// ── 「最近拉取结果」 ────────────────────────────────────────────────────────────────────────────────
+//
+// The registry's closed outcome as the overview cell shows it. `applied` / `previewed` / `refused` stay
+// the enum word they have always been (byte-identical cells, so no existing row is rewritten by this).
+// G1 field defect (R67): `failed` — an apply whose target refused rows — carries its closed error code,
+// because 「失败」 alone does not tell the puller what to fix: zh 「拉取失败:<CODE>」, en
+// `failed: <CODE>` (the en cell still starts with the enum word). Values-free: the code is the
+// registry's closed `last_pull_code` (error-code shape, never a message); absent → the bare word.
+function projectOverviewPullOutcomeText(outcome, code, zh) {
+  if (outcome !== 'failed') return outcome || null
+  const closedCode = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : null
+  if (zh) return closedCode ? `拉取失败:${closedCode}` : '拉取失败'
+  return closedCode ? `failed: ${closedCode}` : 'failed'
+}
+
 // ── O1: THE DEEP LINK ──────────────────────────────────────────────────────────────────────────────
 //
 // The SAME path shape the workbench shell pushes for 「打开」 (StockPreparationWorkspace.vue
@@ -539,7 +554,7 @@ function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount,
     pendingDecisionCount: pending,
     missingComponentsCount: missing,
     lastPullAt: target.lastPullAt || null,
-    lastPullOutcome: target.lastPullOutcome || null,
+    lastPullOutcome: projectOverviewPullOutcomeText(target.lastPullOutcome, target.lastPullCode, zh),
     countsAt: measured ? measuredAt : (target.countsAt || null),
   }
 }
@@ -1195,6 +1210,7 @@ module.exports = {
   // S3 follow-ups 2, fix round 1: the refresh route's answer to a click while this process's refresh is still running.
   projectOverviewBusyError: overviewBusyError,
   projectOverviewPosture,
+  projectOverviewPullOutcomeText,
   buildProjectOverviewDeepLink,
   buildProjectOverviewDescriptor,
   buildProjectOverviewViewDescriptor,

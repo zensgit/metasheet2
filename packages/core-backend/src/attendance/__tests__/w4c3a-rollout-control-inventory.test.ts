@@ -46,6 +46,9 @@ const ALLOWED_RELATIVE_FILES = new Set([
   'packages/core-backend/src/attendance/w4c3a-rollout-control.ts',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts',
   'packages/core-backend/src/attendance/__tests__/w4c3a-rollout-control-inventory.test.ts',
+  // Shared fixture registered only by attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts.
+  // Seeds synthetic legacy/shadow posture; no production caller or writer is admitted.
+  'packages/core-backend/tests/utils/attendance-canonical-http-contract-cases.ts',
 ])
 
 // Real-DB integration specs are allowed to directly seed/assert the rollout tables as FIXTURE

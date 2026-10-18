@@ -82,7 +82,7 @@ const labels = {
   reports: bilingualName('Reports', '报表'),
   refresh: bilingualName('Refresh', '刷新'),
   records: bilingualName('Records', '记录'),
-  reload: bilingualName('Reload', '刷新'),
+  reload: bilingualName('Reload', '重载'),
   noRecords: bilingualName('No records.', '暂无记录。', { exact: false }),
   anomalies: bilingualName('Anomalies', '异常', { exact: false }),
   adminCenter: bilingualName('Admin Center', '管理中心'),

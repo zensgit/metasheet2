@@ -1760,8 +1760,10 @@ export interface FieldValidationRule {
 // --- 记录级送审 / Record-level approval submit (多维表 × 审批 阶段二, design
 //     docs/development/takeover-beiliao-20260821/multitable-approval-phase2-record-submit-design-20260915.md §5) ---
 // These mirror the phase-2b BACKEND contract (design §4.1) rather than the approval centre's own DTOs:
-// the multitable surface must not import from `src/approvals/**` (separate window, separate lifecycle),
-// so the wire shapes it needs are declared — deliberately narrow and VALUES-FREE — here instead.
+// the wire shapes the record dialog needs are declared — deliberately narrow and VALUES-FREE — here
+// rather than reusing the approval centre's DTOs (separate window, separate lifecycle). The dialog DOES
+// reuse the approval centre's visibility EVALUATOR (`src/approvals/fieldVisibility.ts`), so both
+// surfaces hide exactly the same fields.
 
 /** A published approval template as the multitable template picker sees it (id + display name only). */
 export interface MetaApprovalTemplateSummary {
@@ -1777,9 +1779,27 @@ export interface MetaApprovalFormOption {
   value: string
 }
 
+/** The five operators the approval product's visibility evaluator understands (server + types/approval.ts). */
+export type MetaApprovalFormVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
+
 /**
- * One form field of a template's ACTIVE version, normalized down to what the generic submit dialog
- * can render. `type` is kept as the RAW server string (normalization to a render kind happens in the
+ * A field's 显示条件 exactly as the template authored it — carried VERBATIM (no coercion of `value` /
+ * `values`), because the dialog evaluates it with the approval centre's own evaluator and the server
+ * evaluates the same rule with `===` / `includes`: coercing here would make the dialog disagree with
+ * the server. `value` / `values` are template-authored constants (option values, thresholds), never a
+ * record value or something a user typed.
+ */
+export interface MetaApprovalFormVisibilityRule {
+  fieldId: string
+  operator: MetaApprovalFormVisibilityOperator
+  value?: unknown
+  values?: unknown[]
+}
+
+/**
+ * One form field of the version the template read serves (the LATEST one — see
+ * activeVersionId/latestVersionId below), normalized down to what the generic submit dialog can
+ * render. `type` is kept as the RAW server string (normalization to a render kind happens in the
  * dialog) so an unknown type is visible as itself rather than silently coerced into a text box.
  * No `defaultValue` on purpose: the picker is values-free until the user types.
  */
@@ -1790,9 +1810,11 @@ export interface MetaApprovalFormField {
   required?: boolean
   placeholder?: string
   options?: MetaApprovalFormOption[]
+  /** The field's 显示条件 — present only when the template authored one. */
+  visibilityRule?: MetaApprovalFormVisibilityRule
 }
 
-/** A template + its active version's form fields (GET /api/approval-templates/:id). */
+/** A template + its served (latest) version's form fields (GET /api/approval-templates/:id). */
 export interface MetaApprovalTemplateDetail {
   id: string
   name?: string
@@ -1806,6 +1828,14 @@ export interface MetaApprovalTemplateDetail {
   activeVersionId?: string
   latestVersionId?: string
   formFields: MetaApprovalFormField[]
+  /**
+   * True when the SERVED version's approval graph has an approval or handler node whose assignee
+   * sources include `requester_choice` (the same scan as the server's
+   * collectRuntimeGraphRequesterChoiceSources). A boolean only — never the graph, node keys or scopes.
+   * Only meaningful for the ACTIVE version when activeVersionId === latestVersionId; the dialog applies
+   * that gate, not the normalizer. Absent ⇒ false / unknown.
+   */
+  servedGraphRequiresRequesterChoice?: true
 }
 
 /**
