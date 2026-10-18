@@ -29,6 +29,8 @@ const preload = path.join(lib, 'stock-preparation-yida-browser-ci-preload.cjs')
 const backend = path.join(root, 'packages/core-backend')
 const requireBackend = createRequire(path.join(backend, 'package.json'))
 const native = createRequire(import.meta.url)(nativePath)
+const candidatePath = path.join(lib, 'stock-preparation-yida-browser-candidate.cjs')
+const { ID: candidateId, pinnedBrowserForRoot } = createRequire(import.meta.url)(candidatePath)
 // Only errors created here carry a public reason. Never inspect thrown values:
 // even message/code getters or a forged Error can contain customer values.
 const failureReasons = new WeakMap()
@@ -167,10 +169,11 @@ export function cleanEnvironment(input = {}) {
 }
 
 export function parsePublicArguments(args) {
-  if (args.length !== 2 || args[0] !== '--pg-bin' || !path.isAbsolute(args[1]) || args[1].includes('\0')) {
+  if (![2, 4].includes(args.length) || args[0] !== '--pg-bin' || !path.isAbsolute(args[1]) || args[1].includes('\0')
+    || args.length === 4 && (args[2] !== '--browser-candidate' || args[3] !== candidateId)) {
     throw fail('ARGUMENTS_INVALID')
   }
-  return { pgBin: path.resolve(args[1]) }
+  return { pgBin: path.resolve(args[1]), ...(args.length === 4 ? { browserCandidate: candidateId } : {}) }
 }
 
 export function assertNoEnvironmentFiles(directories) {
@@ -202,8 +205,9 @@ export function fileHash(file) {
   finally { fs.closeSync(descriptor) }
   return result.digest('hex')
 }
-function sourcePaths(node, cli) {
-  return [runner, nativePath, pgPath, helper, preload, node, cli, path.join(backend, CONFIG),
+function sourcePaths(node, cli, browserCandidate) {
+  return [runner, nativePath, pgPath, helper, preload, candidatePath, node, cli, path.join(backend, CONFIG),
+    ...(browserCandidate ? [browserCandidate.executablePath] : []),
     ...TEST_FILES.map(file => path.join(backend, file)),
     ...['stock-preparation-yida-owner-browser-fixture.ts', 'stock-preparation-yida-owner-http-fixture.ts',
       'yida-native-module-import.cjs'].map(file => path.join(backend, 'tests/utils', file))]
@@ -228,7 +232,9 @@ function readOwner(ownerPath, sha) {
   assert.equal(owner.node, process.execPath); assert.equal(owner.uid, process.getuid()); assert.equal(owner.gid, process.getgid())
   assert.equal(owner.cli, requireBackend.resolve('vitest/vitest.mjs'))
   assert.equal(owner.collector, path.join(path.dirname(ownerPath), 'collector.mjs'))
-  assert.deepEqual(Object.keys(owner.hashes).sort(), [...sourcePaths(owner.node, owner.cli), owner.collector].sort())
+  const browserCandidate = pinnedBrowserForRoot(root, owner.browserCandidate?.id)
+  assert.deepEqual(owner.browserCandidate, browserCandidate)
+  assert.deepEqual(Object.keys(owner.hashes).sort(), [...sourcePaths(owner.node, owner.cli, browserCandidate), owner.collector].sort())
   assert.equal(owner.hashes[owner.collector], hash(COLLECTOR))
   verifyHashes(owner)
   assert.notEqual(fs.readlinkSync('/proc/self/ns/net'), owner.parentNetworkNamespace)
@@ -481,7 +487,7 @@ export function reportOuterResult(owner, ownerSha, terminal, evidence, write = c
 
 async function outer(args, setStage) {
   setStage('ARGUMENTS')
-  const { pgBin } = parsePublicArguments(args)
+  const { pgBin, browserCandidate: selector } = parsePublicArguments(args)
   setStage('RUNTIME')
   assertRuntime()
   setStage('ENVIRONMENT_FILES')
@@ -504,10 +510,12 @@ async function outer(args, setStage) {
   const collector = path.join(evidence, 'collector.mjs')
   privateWrite(collector, COLLECTOR)
   setStage('SOURCE_INTEGRITY')
+  const browserCandidate = pinnedBrowserForRoot(root, selector)
   const owner = { protocol: 'YIDA_BROWSER_CI_NATIVE_V1', root, runner, helper, preload, native: nativePath,
     node, cli, collector, pgBin, uid: process.getuid(), gid: process.getgid(),
+    ...(browserCandidate ? { browserCandidate } : {}),
     parentNetworkNamespace: fs.readlinkSync('/proc/self/ns/net'),
-    hashes: Object.fromEntries([...sourcePaths(node, cli), collector].map(file => [file, fileHash(file)])) }
+    hashes: Object.fromEntries([...sourcePaths(node, cli, browserCandidate), collector].map(file => [file, fileHash(file)])) }
   verifyHashes(owner)
   setStage('OWNER')
   const ownerPath = path.join(evidence, 'owner.json'), raw = JSON.stringify(owner), ownerSha = hash(raw)
