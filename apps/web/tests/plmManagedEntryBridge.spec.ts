@@ -38,11 +38,28 @@ const snapshot = (userId: string, tenantId: string, sessionId: string, plm = tru
   },
 })
 
+function installQueueLock(): void {
+  let tail = Promise.resolve()
+  const request = (_name: string, optionsOrCallback: unknown, maybeCallback?: unknown) => {
+    const callback = (typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback) as () => unknown
+    const run = tail.then(() => callback())
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } })
+}
+
+function removeQueueLock(): void {
+  Reflect.deleteProperty(navigator, 'locks')
+}
+
 describe('managed entry bridge', () => {
   beforeEach(() => {
-    useAuth().clearToken()
+    removeQueueLock()
     clearManagedProbeMarker()
     clearManagedDescriptor()
+    localStorage.removeItem('metasheet_managed_complete_pending')
+    useAuth().clearToken()
     sessionStorage.clear()
     window.history.replaceState(null, '', '/')
   })
@@ -50,9 +67,11 @@ describe('managed entry bridge', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     delete process.env.VITE_API_URL
-    useAuth().clearToken()
+    removeQueueLock()
     clearManagedProbeMarker()
     clearManagedDescriptor()
+    localStorage.removeItem('metasheet_managed_complete_pending')
+    useAuth().clearToken()
   })
 
   it('keys a cookie principal by person, tenant, and session, and ignores a forged marker', () => {
@@ -100,10 +119,17 @@ describe('managed entry bridge', () => {
     const pendingFetch = new Promise<Response>((resolve) => {
       release = resolve
     })
-    vi.stubGlobal('fetch', vi.fn(() => pendingFetch))
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (String(url).includes('/api/plm/managed-login/logout')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
+      }
+      return pendingFetch
+    }))
     const pending = useAuth().bootstrapSession()
     const tokenB = `header.${btoa(JSON.stringify({ userId: 'person-b', tenantId: 'tenant-b' }))}.signature`
-    useAuth().setToken(tokenB)
+    await useAuth().commitOrdinaryAuthTransition(() => {
+      useAuth().setToken(tokenB)
+    })
     release(new Response(JSON.stringify(snapshot('person-a', 'tenant-a', 'session-a')), { status: 200 }))
     const result = await pending
     expect(result.ok).toBe(false)
@@ -212,6 +238,7 @@ describe('managed entry bridge', () => {
   })
 
   it('posts the exact hint selector and keeps correlation as hashes', async () => {
+    installQueueLock()
     const query = '?issuer=http://127.0.0.1:9/installation&tenant_id=default&org_id=fixture-org&client_id=managed-fixture&root_part_id=part&native_subject_hint=42'
     expect(managedEntryBody(query)).toEqual({
       issuer: 'http://127.0.0.1:9/installation',
@@ -235,22 +262,57 @@ describe('managed entry bridge', () => {
     const stored = [...Array(sessionStorage.length)].map((_, index) => sessionStorage.getItem(sessionStorage.key(index) ?? '') ?? '')
     expect(stored.join('')).not.toContain('state-one')
     expect(stored.join('')).not.toContain('yur_')
-    useAuth().setToken('header.person.signature')
+    localStorage.setItem('auth_token', 'header.person.signature')
+    localStorage.setItem('jwt', 'header.person.signature')
     expect(await bridgeCorrelationMatches('state-one')).toBe(false)
   })
 
-  it('does not adopt a complete result after the tab principal changes', async () => {
+  it('keeps a complete result when a cooperating writer cannot land during the exchange', async () => {
+    installQueueLock()
     await rememberBridgeCorrelation('state-one')
     let release: (response: Response) => void = () => undefined
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => {
-      release = resolve
-    })))
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes('/api/plm/managed-login/logout')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
+      }
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
     const pending = completeManagedBrowserBridge('one-use-code', 'state-one')
-    useAuth().setToken('header.other-person.signature')
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(() => useAuth().setToken('header.other-person.signature')).toThrow('AUTH_IDENTITY_LOCK_REQUIRED')
+    expect(useAuth().getToken()).toBeNull()
+    release(new Response(JSON.stringify({ ok: true, destination: '/plm/bom-review?managed=ready' }), { status: 200 }))
+    await expect(pending).resolves.toEqual({ destination: '/plm/bom-review?managed=ready', stale: false })
+    expect(localStorage.getItem('metasheet_managed_probe')).toBe('1')
+    expect(localStorage.getItem('metasheet_managed_complete_pending')).toBeNull()
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/logout'))).toBe(false)
+  })
+
+  it('does not adopt a complete result after a non-cooperating storage change', async () => {
+    installQueueLock()
+    await rememberBridgeCorrelation('state-one')
+    let release: (response: Response) => void = () => undefined
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes('/api/plm/managed-login/logout')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
+      }
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const pending = completeManagedBrowserBridge('one-use-code', 'state-one')
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    localStorage.setItem('auth_token', 'header.other-person.signature')
+    localStorage.setItem('jwt', 'header.other-person.signature')
     release(new Response(JSON.stringify({ ok: true, destination: '/plm/bom-review?managed=ready' }), { status: 200 }))
     await expect(pending).resolves.toEqual({ destination: '', stale: true })
-    expect(useAuth().getToken()).toBe('header.other-person.signature')
-    expect(localStorage.getItem('devToken')).toBeNull()
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/logout'))).toBe(true)
+    expect(localStorage.getItem('auth_token')).toBe('header.other-person.signature')
+    expect(localStorage.getItem('metasheet_managed_complete_pending')).toBeNull()
   })
 
   it('accepts public credential-like text and rejects credential keys and unexpected fields', async () => {
@@ -280,16 +342,20 @@ describe('managed entry bridge', () => {
         ok: true,
         destination: 'https://foreign.example.test/plm/bom-review?partId=part&managed=ready',
       }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         ok: true,
         destination: '/plm/bom-review?code_verifier=abc&managed=ready',
       }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         ok: true,
         destination: '/plm/bom-review-extra?partId=part&managed=ready',
       }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, navigationUrl: ownerNavigation }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
+    installQueueLock()
     await expect(startManagedBrowserBridge(entry(publicId))).resolves.toEqual({ navigationUrl, state: 'state-text' })
     await expect(completeManagedBrowserBridge('one-use-code', 'state-text')).resolves.toEqual({ destination, stale: false })
     await expect(startManagedBrowserBridge(entry('part'))).rejects.toThrow('托管登录未能开始')
@@ -309,6 +375,7 @@ describe('managed entry bridge', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, navigationUrl }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, destination }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
+    installQueueLock()
     await expect(startManagedBrowserBridge(query)).resolves.toEqual({ navigationUrl, state: 'state-public' })
     await expect(completeManagedBrowserBridge('one-use-code', 'state-public')).resolves.toEqual({ destination, stale: false })
   })
@@ -319,6 +386,7 @@ describe('managed entry bridge', () => {
     installManagedDescriptor(descriptor('person-a', 'tenant-a', 'session-a'))
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, revoked: true }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
+    installQueueLock()
     await logoutManagedBrowserBridge()
     expect(localStorage.getItem('metasheet_managed_probe')).toBeNull()
     expect(readManagedDescriptor()).toBeNull()

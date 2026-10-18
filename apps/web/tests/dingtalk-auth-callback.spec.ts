@@ -5,6 +5,15 @@ import DingTalkAuthCallbackView from '../src/views/DingTalkAuthCallbackView.vue'
 const apiFetchMock = vi.fn()
 const setTokenMock = vi.fn()
 const primeSessionMock = vi.fn()
+let insideAuthTransition = false
+const commitOrdinaryAuthTransitionMock = vi.fn(async (mutate: () => unknown) => {
+  insideAuthTransition = true
+  try {
+    return await mutate()
+  } finally {
+    insideAuthTransition = false
+  }
+})
 const getTokenMock = vi.fn()
 const bootstrapSessionMock = vi.fn()
 const loadProductFeaturesMock = vi.fn()
@@ -28,8 +37,15 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: getTokenMock,
     bootstrapSession: bootstrapSessionMock,
-    setToken: setTokenMock,
-    primeSession: primeSessionMock,
+    setToken: (...args: unknown[]) => {
+      if (!insideAuthTransition) throw new Error('setToken outside auth transition')
+      return setTokenMock(...args)
+    },
+    primeSession: (...args: unknown[]) => {
+      if (!insideAuthTransition) throw new Error('primeSession outside auth transition')
+      return primeSessionMock(...args)
+    },
+    commitOrdinaryAuthTransition: commitOrdinaryAuthTransitionMock,
   }),
 }))
 
@@ -68,6 +84,8 @@ describe('DingTalkAuthCallbackView', () => {
     bootstrapSessionMock.mockReset()
     setTokenMock.mockReset()
     primeSessionMock.mockReset()
+    commitOrdinaryAuthTransitionMock.mockClear()
+    insideAuthTransition = false
     loadProductFeaturesMock.mockReset()
     resolveHomePathMock.mockReset()
     resolveHomePathMock.mockReturnValue('/attendance')
@@ -129,6 +147,7 @@ describe('DingTalkAuthCallbackView', () => {
         suppressUnauthorizedRedirect: true,
       }),
     )
+    expect(commitOrdinaryAuthTransitionMock).toHaveBeenCalledTimes(1)
     expect(setTokenMock).toHaveBeenCalledWith('jwt-dingtalk-token')
     expect(primeSessionMock).toHaveBeenCalled()
     expect(replaceMock).toHaveBeenCalledWith('/workflows')

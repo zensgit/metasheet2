@@ -175,8 +175,18 @@ jobs:
             tests/plmManagedCompanion.spec.ts \
             tests/PlmManagedCompanionView.spec.ts \
             tests/PlmBomReviewWorkspaceView.spec.ts \
-            tests/plmManagedEntryBridge.spec.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 26
+            tests/plmManagedEntryBridge.spec.ts \
+            tests/authIdentityLock.spec.ts \
+            tests/ForcePasswordChangeView.spec.ts \
+            tests/LoginView.spec.ts \
+            tests/useAuth.spec.ts \
+            tests/useSessionOrg.spec.ts \
+            tests/utils/api.test.ts \
+            tests/api.spec.ts \
+            tests/sessionCenterView.spec.ts \
+            tests/App.spec.ts \
+            tests/dingtalk-auth-callback.spec.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 187
 
       - name: Backend types
         run: pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false --incremental false

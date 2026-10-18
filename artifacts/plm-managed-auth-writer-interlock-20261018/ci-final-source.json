@@ -1,0 +1,110 @@
+{
+  "source_sha": "5e3c68a7151d0ca6af9046d0d1fd9dd5362ab4ea",
+  "product_commit": "97229163e0",
+  "pr": "https://github.com/zensgit/metasheet2/pull/6442",
+  "draft": true,
+  "checked_at_utc": "2026-10-18T05:13:02.913531+00:00",
+  "all_reported_checks": {
+    "success": 16,
+    "failure": 0,
+    "pending": 0
+  },
+  "checks": [
+    {
+      "name": "Approval browser verify (chromium)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701692/job/117590348816"
+    },
+    {
+      "name": "s1-evidence replay gate contract (static census — no DB, no secrets)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701711/job/117590348765"
+    },
+    {
+      "name": "approval-web-guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701596/job/117590348292"
+    },
+    {
+      "name": "attendance-web-guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701830/job/117590349153"
+    },
+    {
+      "name": "guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701600/job/117590348308"
+    },
+    {
+      "name": "integration-guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701649/job/117590348491"
+    },
+    {
+      "name": "observation-kit contract (read-only SQL census + runbook gating)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701589/job/117590348248"
+    },
+    {
+      "name": "recovery-schema-drift",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701587/job/117590348253"
+    },
+    {
+      "name": "visual-consumer",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701651/job/117590348644"
+    },
+    {
+      "name": "managed-companion-consumer",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701588/job/117590348328"
+    },
+    {
+      "name": "postgres",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701628/job/117590348476"
+    },
+    {
+      "name": "pr-validate",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701610/job/117590348479"
+    },
+    {
+      "name": "ssh host-key pin contract (fail-closed known_hosts)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701724/job/117590348764"
+    },
+    {
+      "name": "Stock-prep browser verify (chromium)",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701633/job/117590348679"
+    },
+    {
+      "name": "tasks-web-guard",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701759/job/117590348981"
+    },
+    {
+      "name": "tasks-realdb",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/zensgit/metasheet2/actions/runs/39098701582/job/117590348382"
+    }
+  ],
+  "managed_gate": {
+    "run": 39098701588,
+    "job": 117590348328,
+    "url": "https://github.com/zensgit/metasheet2/actions/runs/39098701588/job/117590348328",
+    "unit_passed": 22,
+    "postgresql16_passed": 34,
+    "web_passed": 187,
+    "strict_report_skips_allowed": 0,
+    "owned_socket_selfcheck": "success",
+    "owned_postgres_cleanup": "success",
+    "backend_types": "success",
+    "web_application_types": "success",
+    "raw_log_sha256": "ceaad338e063f30031a571b56fff62664e8cf82437eb0193c3aa67f851df020b"
+  },
+  "history": "Initial a098 ownership guard failure retained; exact2transitiveclassifierpaths repaired by5e3, unchangedguard7/7main. No passedjobreruns or gateweakening.",
+  "limits": "Whole master goal, native provider349 capacityblocked CI and installed lifecycle acceptance still incomplete. One following docs/evidence commit requires actual head checks; no CI SHA loop."
+}

@@ -66,7 +66,7 @@ export function useSessionOrg() {
       const memberships = orgs.value
       if (!response.ok || payload?.success !== true || data?.currentOrgId !== chosen
         || typeof data?.token !== 'string'
-        || !auth.setExplicitSessionOrg(data.token, chosen, token)) {
+        || !(await auth.commitExplicitSessionOrg(data.token, chosen, token))) {
         throw new Error('SESSION_ORG_SWITCH_REFUSED')
       }
       orgs.value = memberships

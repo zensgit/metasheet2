@@ -1,0 +1,104 @@
+{
+  "recorded_at": "2026-10-18T04:47:50.517395+00:00",
+  "base": "aec9458c8137a883bcc9fd1a13b96c58bf950d6f",
+  "native_source": "991d8a62849df9576af164e935785bcdd15774c0",
+  "owner": "Codex independent review and actual reruns after Grok final completion",
+  "web_tests": {
+    "numPassedTests": 187,
+    "numFailedTests": 0,
+    "numPendingTests": 0,
+    "numTotalTests": 187,
+    "success": true
+  },
+  "product_module_browser": {
+    "ok": true,
+    "scenarios": [
+      "same-tab",
+      "two-tab",
+      "login-logout-current",
+      "unsupported-locks",
+      "storage-fail",
+      "revoke-outage",
+      "cancel-crash-pending",
+      "org-rollback",
+      "dev-refresh",
+      "api-401-revoke-outage",
+      "api-401-clears",
+      "late-features",
+      "late-features-stable-adopts"
+    ],
+    "kind": "actual production web modules with controlled cookie-header/body timing; not product server"
+  },
+  "browser_cleanup": {
+    "browserClosed": true,
+    "serverClosed": true,
+    "viteClosed": true,
+    "ok": true,
+    "elapsedMs": 1494
+  },
+  "real_full_spa": {
+    "nonce": "z9917322",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 0,
+      "write_subjects": [],
+      "write_lines": []
+    },
+    "meta": {
+      "ok": true,
+      "bom_line": "line",
+      "open_sessions": 1,
+      "dev_token_requests": 0,
+      "embed_requests": 0,
+      "ordinary_owner_start": true,
+      "meta_user": "meta-owner",
+      "native_subject_hint": "42",
+      "native_workspace_launch": true,
+      "root_part_id": "yur_public-part"
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "application_types_exit": 0,
+  "actionlint_exit": 0,
+  "source_stable": true,
+  "source_sha256": {
+    ".github/workflows/plm-managed-companion-consumer.yml": "e39679cd8fea4d20e0d6f9657eab678f029410f821d5409ca9afc90c98b9ffc2",
+    "apps/web/src/App.vue": "25e697539178c9207ca4a92f3646f3323a4a75b72625da29c03aba37de9e03f8",
+    "apps/web/src/composables/authPrincipal.ts": "e005efb35eccd3534a41be1811f938673921bafa84912245c80e73f25415488a",
+    "apps/web/src/composables/useAuth.ts": "2af427905ab936453056d9ee3d8a2d2cc173426f684e9b27afae01728e257f7d",
+    "apps/web/src/composables/useSessionOrg.ts": "acb5fe51297b46f291981e09ff1fe571e1b9bbc1fcec05c9a8dca9340a2bc6b7",
+    "apps/web/src/services/plm/plmManagedCompanion.ts": "aa39110d39767095b0a8011fa11c8fb2af8cf2898a366fd45448550bb35b49c8",
+    "apps/web/src/utils/api.ts": "1593aabf50b63b5d5e2e3787f71f5ecca7575f58a0d9b6b8bba9cfb604cb1e54",
+    "apps/web/src/views/AcceptInviteView.vue": "4a46eca6fe38be74657ae4cc176fbeff7858754c708bb897f11c753ab45dc3dd",
+    "apps/web/src/views/DingTalkAuthCallbackView.vue": "af3e15bf66f19067e34d2ed89226ed268b42f16bd0912f2d1efbf5f5ba50325e",
+    "apps/web/src/views/ForcePasswordChangeView.vue": "6a212c099868688d9b5cca812e579230b5b62adc82ae4aa3e6b408cdd3ae4594",
+    "apps/web/src/views/LoginView.vue": "0beb7256dfc2323ea4f7ee74180fdb6b57bc4db3dab4c31a50f18121f5e3050e",
+    "apps/web/src/views/PlmManagedEntryView.vue": "555c063273a236aa74a6694500af31534a14d2c809c6ce755852203c32ed2699",
+    "apps/web/src/views/SessionCenterView.vue": "b42f6d7def0518563b33518c2c05c7518c9d04eee0473b0e5422748b97519f35",
+    "apps/web/tests/App.spec.ts": "84fb441db0b1219eacd0dc3be7f309d4c4232b476aea78fb7b41cbf225a706a3",
+    "apps/web/tests/ForcePasswordChangeView.spec.ts": "d52b6a00c53ee298fef93beec4931c859a6afaff03a77986ec60d6da3945c341",
+    "apps/web/tests/LoginView.spec.ts": "e51d302e50944fec5f676346203973249acb0881b9fd034455d208f7acc51d5b",
+    "apps/web/tests/dingtalk-auth-callback.spec.ts": "37beea244b28c04081d88eb35a0ec1f301bea71deae224ae20299d04d0b1cbe5",
+    "apps/web/tests/plmManagedEntryBridge.spec.ts": "8e4b7d26680bc59346cc65279ee319d52922abaaa9c271d7568449c9dc262937",
+    "apps/web/src/composables/authIdentityLock.ts": "8909ecf795a7ce24761496c7553fdff69f72d22f5ad446aa9faa3a2ede5de475",
+    "apps/web/tests/authIdentityLock.spec.ts": "2e061cec65026ee0ada7eec8eec7e9cd8a6cd9c1b9579eb8ea8ca114a3469c74",
+    "scripts/verification/plm-managed-companion-paired/auth-writer-interlock.mjs": "f547125e808e47acce13f977d32a84458bd69a52e69d8f87c231324b5fe850c9"
+  },
+  "limits": [
+    "Cooperating normal app writers in one browser profile implementing Web Locks; not XSS isolation.",
+    "Browser stores Set-Cookie before script reads body; coordination/recovery prevents normal writer overlap and orphan fallback, not transactional cookie rollback.",
+    "Full installed upgrade/backup/restore/license/stop acceptance and master goal still pending.",
+    "No backend/native policy/schema changes in this slice."
+  ]
+}

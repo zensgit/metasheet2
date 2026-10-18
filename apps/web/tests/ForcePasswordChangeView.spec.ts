@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
+import { withAuthIdentityLock } from '../src/composables/authIdentityLock'
+import { useAuth } from '../src/composables/useAuth'
 
 const mocks = vi.hoisted(() => ({
   routerReplace: vi.fn().mockResolvedValue(undefined),
@@ -59,6 +61,42 @@ function createMemoryStorage(): Storage {
 function installMemoryStorage(storage: Storage): void {
   Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true })
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
+}
+
+function installQueueLock(): { held: () => number; waiting: () => number } {
+  let tail = Promise.resolve()
+  let held = 0
+  let waiting = 0
+  const request = (_name: string, optionsOrCallback: unknown, maybeCallback?: unknown) => {
+    const callback = (typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback) as () => unknown
+    waiting += 1
+    const run = tail.then(async () => {
+      waiting -= 1
+      held += 1
+      try {
+        return await callback()
+      } finally {
+        held -= 1
+      }
+    })
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } })
+  return { held: () => held, waiting: () => waiting }
+}
+
+function holdQueue(): { release: () => void; done: Promise<unknown> } {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const done = withAuthIdentityLock(() => gate, { failClosed: true })
+  return { release, done }
+}
+
+function removeQueueLock(): void {
+  Reflect.deleteProperty(navigator, 'locks')
 }
 
 function resetAuthStorage(): void {
@@ -144,6 +182,7 @@ describe('ForcePasswordChangeView', () => {
     if (container) container.remove()
     app = null
     container = null
+    removeQueueLock()
     globalThis.fetch = originalFetch
     installMemoryStorage(originalLocalStorage)
   })
@@ -223,5 +262,135 @@ describe('ForcePasswordChangeView', () => {
     expect(window.localStorage.getItem('auth_token')).toBeNull()
     expect(mocks.clearStoredAuthState).toHaveBeenCalled()
     expect(mocks.routerReplace).toHaveBeenCalledWith('/login')
+  })
+
+  it('sends the pre-clear ordinary bearer on the logout request', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    const actual = await vi.importActual<typeof import('../src/utils/api')>('../src/utils/api')
+    const logoutCalls: Array<{ authorization: string | null; storedToken: string | null }> = []
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/auth/logout')) {
+        logoutCalls.push({
+          authorization: new Headers(init?.headers).get('authorization'),
+          storedToken: window.localStorage.getItem('auth_token'),
+        })
+        return new Response(JSON.stringify({ success: true }), { status: 200 })
+      }
+      return previousFetch(input, init)
+    }) as typeof fetch
+    mocks.apiFetch.mockImplementation((path: string, options?: Parameters<typeof actual.apiFetch>[1]) => {
+      if (path === '/api/auth/logout') return actual.apiFetch(path, options)
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) })
+    })
+
+    const logoutButton = container.querySelector('.force-password-logout') as HTMLButtonElement | null
+    logoutButton?.click()
+    await vi.waitFor(() => expect(logoutCalls).toHaveLength(1))
+
+    expect(logoutCalls).toEqual([
+      { authorization: 'Bearer forced-token', storedToken: null },
+    ])
+  })
+
+  it('does not send ordinary logout when managed revoke fails', async () => {
+    window.localStorage.setItem('metasheet_managed_probe', '1')
+    const calls: string[] = []
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.includes('/api/auth/me')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            user: {
+              id: 'user-1',
+              email: 'forced@example.com',
+              role: 'user',
+              permissions: [],
+              must_change_password: true,
+            },
+          },
+        }), { status: 200 })
+      }
+      if (url.includes('/api/plm/managed-login/logout')) {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'DOWN' } }), { status: 503 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as typeof fetch
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    const logoutButton = container.querySelector('.force-password-logout') as HTMLButtonElement | null
+    logoutButton?.click()
+    await flushUi(8)
+
+    expect(calls.filter((url) => url.includes('/api/auth/logout'))).toEqual([])
+    expect(window.localStorage.getItem('auth_token')).toBe('forced-token')
+    expect(mocks.routerReplace).not.toHaveBeenCalledWith('/login')
+  })
+
+  it('still signs out a bootstrap 401 that is still the current session', async () => {
+    window.localStorage.setItem('auth_token', 'person-a')
+    window.localStorage.setItem('jwt', 'person-a')
+    const urls: string[] = []
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      urls.push(url)
+      if (url.includes('/api/auth/dev-token')) return new Response('{}', { status: 404 })
+      if (url.includes('/api/auth/me')) return new Response(JSON.stringify({ success: false }), { status: 401 })
+      return new Response('{}', { status: 404 })
+    }) as typeof fetch
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await vi.waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith('/login'))
+
+    expect(urls.some((url) => url.includes('/api/auth/me'))).toBe(true)
+    expect(window.localStorage.getItem('auth_token')).toBeNull()
+  })
+
+  it('does not let a stale failed bootstrap clear a newer ordinary session', async () => {
+    const locks = installQueueLock()
+    window.localStorage.setItem('auth_token', 'person-a')
+    window.localStorage.setItem('jwt', 'person-a')
+    const held = holdQueue()
+    await vi.waitFor(() => expect(locks.held()).toBe(1))
+    const publishB = useAuth().commitOrdinaryAuthTransition(() => {
+      useAuth().setToken('person-b')
+    })
+    await vi.waitFor(() => expect(locks.waiting()).toBe(1))
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/auth/dev-token')) return new Response('{}', { status: 404 })
+      if (url.includes('/api/auth/me')) return new Response(JSON.stringify({ success: false }), { status: 401 })
+      return new Response('{}', { status: 404 })
+    }) as typeof fetch
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await vi.waitFor(() => expect(locks.waiting()).toBe(2))
+    held.release()
+    await held.done
+    await publishB
+    await flushUi(12)
+
+    expect(window.localStorage.getItem('auth_token')).toBe('person-b')
+    expect(window.localStorage.getItem('jwt')).toBe('person-b')
+    expect(mocks.routerReplace).not.toHaveBeenCalledWith('/login')
   })
 })

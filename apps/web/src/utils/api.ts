@@ -3,7 +3,8 @@
  */
 
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
-import { explicitSessionOrg, isManagedEntryActive } from '../composables/authPrincipal'
+import { assertOrdinarySyncWriterAllowed } from '../composables/authIdentityLock'
+import { explicitSessionOrg, isManagedEntryActive, readAuthRequestStamp, type AuthRequestStamp } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
 import { sendDelete } from './delete-fallback'
@@ -147,6 +148,7 @@ function getLocationTenantHint(): string {
 }
 
 export function clearStoredAuthState(): void {
+  assertOrdinarySyncWriterAllowed()
   if (typeof localStorage === 'undefined') return
   for (const key of TOKEN_STORAGE_KEYS) {
     localStorage.removeItem(key)
@@ -196,15 +198,22 @@ function buildLoginRedirectUrl(): string {
   return `/login?redirect=${encodeURIComponent(redirect)}`
 }
 
-function handleUnauthorized(path: string): void {
+async function handleUnauthorized(path: string, issued: AuthRequestStamp): Promise<void> {
   if (typeof window === 'undefined' || authRedirecting || isAuthRoute(path)) {
+    return
+  }
+  try {
+    const { useAuth } = await import('../composables/useAuth')
+    const auth = useAuth()
+    const cleared = await auth.commitClearedOrdinaryAuth(issued)
+    if (!cleared) return
+  } catch {
     return
   }
   authRedirecting = true
   window.setTimeout(() => {
     authRedirecting = false
   }, 3000)
-  clearStoredAuthState()
   const loginUrl = buildLoginRedirectUrl()
   if (typeof window.location?.replace === 'function') {
     window.location.replace(loginUrl)
@@ -349,6 +358,7 @@ export async function apiFetch(
   path: string,
   options: ApiFetchOptions = {},
 ): Promise<Response> {
+  const issued = readAuthRequestStamp()
   const base = getApiBase()
   if (isManagedEntryActive() && typeof window !== 'undefined') {
     const page = window.location.origin
@@ -390,7 +400,7 @@ export async function apiFetch(
   }, bypassDeleteFallback)
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {
-    handleUnauthorized(path)
+    await handleUnauthorized(path, issued)
   }
 
   if (response.status === 403 && !suppressUnauthorizedRedirect) {

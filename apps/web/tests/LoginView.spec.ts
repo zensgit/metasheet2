@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
+import { withAuthIdentityLock } from '../src/composables/authIdentityLock'
+import { useAuth } from '../src/composables/useAuth'
+import { useLocale } from '../src/composables/useLocale'
 
 const mocks = vi.hoisted(() => ({
   loadProductFeatures: vi.fn().mockResolvedValue(undefined),
@@ -91,6 +94,42 @@ vi.mock('../src/utils/api', () => ({
   clearStoredAuthState: vi.fn(),
 }))
 
+function installQueueLock(): { held: () => number; waiting: () => number } {
+  let tail = Promise.resolve()
+  let held = 0
+  let waiting = 0
+  const request = (_name: string, optionsOrCallback: unknown, maybeCallback?: unknown) => {
+    const callback = (typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback) as () => unknown
+    waiting += 1
+    const run = tail.then(async () => {
+      waiting -= 1
+      held += 1
+      try {
+        return await callback()
+      } finally {
+        held -= 1
+      }
+    })
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } })
+  return { held: () => held, waiting: () => waiting }
+}
+
+function holdQueue(): { release: () => void; done: Promise<unknown> } {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const done = withAuthIdentityLock(() => gate, { failClosed: true })
+  return { release, done }
+}
+
+function removeQueueLock(): void {
+  Reflect.deleteProperty(navigator, 'locks')
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -115,6 +154,7 @@ describe('LoginView', () => {
     if (container) container.remove()
     app = null
     container = null
+    removeQueueLock()
   })
 
   it('renders a visible locale switcher and updates locale changes', async () => {
@@ -446,5 +486,92 @@ describe('LoginView', () => {
       // otherwise a plain browser would inject the CDN script and stall ~5s.
       expect(document.querySelector('script[data-dingtalk-jsapi]'), 'no jsapi script in a plain browser').toBeNull()
     })
+  })
+
+  async function submitPasswordLogin(): Promise<void> {
+    useLocale().setLocale('en')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+
+    const identifierInput = container.querySelector('input[autocomplete="username"]') as HTMLInputElement | null
+    const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null
+    const submitButton = container.querySelector('button[type="submit"]') as HTMLButtonElement | null
+    if (identifierInput) {
+      identifierInput.value = 'admin@example.com'
+      identifierInput.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    if (passwordInput) {
+      passwordInput.value = 'secret'
+      passwordInput.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    submitButton?.click()
+  }
+
+  it('still clears the session published by a login whose later step fails', async () => {
+    mocks.loadProductFeatures.mockRejectedValueOnce(new Error('features down'))
+    await submitPasswordLogin()
+    await flushUi(8)
+
+    expect(window.localStorage.getItem('auth_token')).toBeNull()
+    expect(container?.textContent).toContain('Sign-in failed. Please try again.')
+  })
+
+  it('still clears the ordinary session owned by a failed login', async () => {
+    window.localStorage.setItem('auth_token', 'person-a')
+    window.localStorage.setItem('jwt', 'person-a')
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/dingtalk/launch?probe=1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: { available: false } }),
+        }
+      }
+      if (path === '/api/auth/login') throw new Error('login transport down')
+      throw new Error(`Unexpected fetch path: ${path}`)
+    })
+
+    await submitPasswordLogin()
+    await flushUi(8)
+
+    expect(window.localStorage.getItem('auth_token')).toBeNull()
+    expect(container?.textContent).toContain('Sign-in failed. Please try again.')
+  })
+
+  it('does not let a stale failed login clear a newer ordinary session', async () => {
+    const locks = installQueueLock()
+    window.localStorage.setItem('auth_token', 'person-a')
+    window.localStorage.setItem('jwt', 'person-a')
+    const held = holdQueue()
+    await vi.waitFor(() => expect(locks.held()).toBe(1))
+    const publishB = useAuth().commitOrdinaryAuthTransition(() => {
+      useAuth().setToken('person-b')
+    })
+    await vi.waitFor(() => expect(locks.waiting()).toBe(1))
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/dingtalk/launch?probe=1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: { available: false } }),
+        }
+      }
+      if (path === '/api/auth/login') throw new Error('login transport down')
+      throw new Error(`Unexpected fetch path: ${path}`)
+    })
+
+    await submitPasswordLogin()
+    await vi.waitFor(() => expect(locks.waiting()).toBe(2))
+    held.release()
+    await held.done
+    await publishB
+    await flushUi(12)
+
+    expect(window.localStorage.getItem('auth_token')).toBe('person-b')
+    expect(window.localStorage.getItem('jwt')).toBe('person-b')
+    expect(container?.textContent).toContain('Sign-in failed. Please try again.')
   })
 })

@@ -120,7 +120,7 @@ type InvitePreview = {
 const route = useRoute()
 const router = useRouter()
 const flags = useFeatureFlags()
-const { setToken, primeSession } = useAuth()
+const { commitOrdinaryAuthTransition, primeSession, setToken } = useAuth()
 
 const loadingPreview = ref(true)
 const submitting = ref(false)
@@ -230,13 +230,15 @@ async function submit(): Promise<void> {
       throw new Error(`${message}${nestedDetails || details}`)
     }
 
-    setToken(acceptedToken)
-    primeSession({
-      success: true,
-      data: {
-        user: data.user,
-        features: data.features,
-      },
+    await commitOrdinaryAuthTransition(() => {
+      setToken(acceptedToken)
+      primeSession({
+        success: true,
+        data: {
+          user: data.user,
+          features: data.features,
+        },
+      })
     })
     await flags.loadProductFeatures(true)
 

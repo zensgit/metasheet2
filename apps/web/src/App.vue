@@ -151,13 +151,13 @@ import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { canReachStockPrepWorkbench } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
-import { clearStoredAuthState, getApiBase } from './utils/api'
+import { getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures, resolveHomePath } = useFeatureFlags()
-const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
+const { commitClearedOrdinaryAuth, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
 
@@ -310,11 +310,10 @@ const accountEmailDisplay = computed(() => truncateAccountIdentity(accountEmail.
 
 async function logout(): Promise<void> {
   const token = getToken()
-  clearToken()
   try {
-    clearStoredAuthState()
+    await commitClearedOrdinaryAuth()
   } catch {
-    // Ignore local session cleanup failures; logout should still leave the view.
+    return
   }
   if (token) {
     try {

@@ -1,4 +1,12 @@
 import {
+  AuthIdentityLockError,
+  clearManagedCompletePending,
+  managedResidueRemains,
+  markManagedCompletePending,
+  withAuthIdentityLock,
+  writeManagedProbeMarkerOrThrow,
+} from '../../composables/authIdentityLock'
+import {
   clearManagedDescriptor,
   clearManagedProbeMarker,
   readAuthSessionSignature,
@@ -164,7 +172,7 @@ function assertPageOrigin(): void {
   if (!page || apiOrigin !== page) throw new PlmManagedCompanionError('托管接口源不匹配')
 }
 
-async function bridgePost(path: string, action: 'browser-start' | 'complete' | 'logout', body: Record<string, string>): Promise<Record<string, unknown>> {
+async function bridgeFetch(path: string, action: 'browser-start' | 'complete' | 'logout', body: Record<string, string>): Promise<Response> {
   assertPageOrigin()
   readStoredToken()
   const headers: Record<string, string> = {
@@ -174,35 +182,39 @@ async function bridgePost(path: string, action: 'browser-start' | 'complete' | '
   }
   const token = readStoredToken()
   if (token) headers.authorization = `Bearer ${token}`
-  const response = await fetch(new URL(path, window.location.origin).toString(), {
+  return await fetch(new URL(path, window.location.origin).toString(), {
     method: 'POST',
     credentials: 'include',
     headers,
     body: JSON.stringify(body),
     referrerPolicy: 'no-referrer',
   })
-  const record = await readRecord(response)
-  if (!response.ok || record.ok !== true) {
-    const allowed = action === 'complete' ? ['ok', 'error', 'destination'] : ['ok', 'error']
-    const keys = Object.keys(record)
-    if (!keys.includes('ok') || !keys.includes('error') || keys.some((key) => !allowed.includes(key))) {
-      throw new PlmManagedCompanionError('托管登录响应被拒绝')
-    }
-    if (action === 'complete' && Object.prototype.hasOwnProperty.call(record, 'destination')) {
-      assertDestination(record.destination)
-    }
-    const error = record.error
-    if (!error || typeof error !== 'object' || Array.isArray(error)) {
-      throw new PlmManagedCompanionError('托管登录被拒绝')
-    }
-    const errorRecord = error as Record<string, unknown>
-    const errorKeys = Object.keys(errorRecord)
-    if (errorKeys.some((key) => key !== 'code' && key !== 'message')) {
-      throw new PlmManagedCompanionError('托管登录响应被拒绝')
-    }
-    const code = errorRecord.code
-    throw new PlmManagedCompanionError(typeof code === 'string' && code ? code : '托管登录被拒绝')
+}
+
+function rejectBridgeRecord(action: 'browser-start' | 'complete' | 'logout', record: Record<string, unknown>): never {
+  const allowed = action === 'complete' ? ['ok', 'error', 'destination'] : ['ok', 'error']
+  const keys = Object.keys(record)
+  if (!keys.includes('ok') || !keys.includes('error') || keys.some((key) => !allowed.includes(key))) {
+    throw new PlmManagedCompanionError('托管登录响应被拒绝')
   }
+  if (action === 'complete' && Object.prototype.hasOwnProperty.call(record, 'destination')) {
+    assertDestination(record.destination)
+  }
+  const error = record.error
+  if (!error || typeof error !== 'object' || Array.isArray(error)) {
+    throw new PlmManagedCompanionError('托管登录被拒绝')
+  }
+  const errorRecord = error as Record<string, unknown>
+  const errorKeys = Object.keys(errorRecord)
+  if (errorKeys.some((key) => key !== 'code' && key !== 'message')) {
+    throw new PlmManagedCompanionError('托管登录响应被拒绝')
+  }
+  const code = errorRecord.code
+  throw new PlmManagedCompanionError(typeof code === 'string' && code ? code : '托管登录被拒绝')
+}
+
+function acceptBridgeRecord(action: 'browser-start' | 'complete' | 'logout', response: Response, record: Record<string, unknown>): Record<string, unknown> {
+  if (!response.ok || record.ok !== true) rejectBridgeRecord(action, record)
   const fields = action === 'browser-start'
     ? ['ok', 'navigationUrl']
     : action === 'complete'
@@ -210,6 +222,17 @@ async function bridgePost(path: string, action: 'browser-start' | 'complete' | '
       : ['ok', 'revoked']
   exactFields(record, fields)
   return record
+}
+
+async function bridgePost(path: string, action: 'browser-start' | 'complete' | 'logout', body: Record<string, string>): Promise<Record<string, unknown>> {
+  const response = await bridgeFetch(path, action, body)
+  const record = await readRecord(response)
+  return acceptBridgeRecord(action, response, record)
+}
+
+async function compensateInstalledCookie(): Promise<void> {
+  await postManagedLogoutUnlocked()
+  if (managedResidueRemains()) throw new AuthIdentityLockError('AUTH_IDENTITY_REVOKE_FAILED')
 }
 
 export function managedEntryBody(search: string): Record<string, string> {
@@ -251,26 +274,80 @@ export async function bridgeCorrelationMatches(state: string): Promise<boolean> 
 
 export async function startManagedBrowserBridge(search: string): Promise<{ navigationUrl: string; state: string }> {
   const body = managedEntryBody(search)
-  const record = await bridgePost('/api/plm/managed-login/browser-start', 'browser-start', body)
-  const navigationUrl = assertNavigationUrl(record.navigationUrl)
-  const state = new URL(navigationUrl).searchParams.get('state') ?? ''
-  if (!state) throw new PlmManagedCompanionError('托管登录未能开始')
-  await rememberBridgeCorrelation(state)
-  return { navigationUrl, state }
+  return await withAuthIdentityLock(async () => {
+    writeManagedProbeMarkerOrThrow()
+    const record = await bridgePost('/api/plm/managed-login/browser-start', 'browser-start', body)
+    const navigationUrl = assertNavigationUrl(record.navigationUrl)
+    const state = new URL(navigationUrl).searchParams.get('state') ?? ''
+    if (!state) throw new PlmManagedCompanionError('托管登录未能开始')
+    await rememberBridgeCorrelation(state)
+    return { navigationUrl, state }
+  }, { failClosed: true })
 }
 
 export async function completeManagedBrowserBridge(code: string, state: string): Promise<{ destination: string; stale: boolean }> {
-  const startedEpoch = readManagedEpoch()
-  const startedSignature = readAuthSessionSignature()
-  const record = await bridgePost('/api/plm/managed-login/complete', 'complete', { code, state })
-  if (readManagedEpoch() !== startedEpoch || readAuthSessionSignature() !== startedSignature) {
-    return { destination: '', stale: true }
-  }
-  return { destination: assertDestination(record.destination), stale: false }
+  return await withAuthIdentityLock(async () => {
+    markManagedCompletePending()
+    const startedEpoch = readManagedEpoch()
+    const startedSignature = readAuthSessionSignature()
+    let response: Response
+    try {
+      response = await bridgeFetch('/api/plm/managed-login/complete', 'complete', { code, state })
+    } catch (error) {
+      throw error
+    }
+    let record: Record<string, unknown>
+    try {
+      record = await readRecord(response)
+    } catch (error) {
+      if (response.ok) {
+        await compensateInstalledCookie()
+        return { destination: '', stale: true }
+      }
+      throw error
+    }
+    if (!response.ok || record.ok !== true) {
+      try {
+        rejectBridgeRecord('complete', record)
+      } catch (error) {
+        clearManagedCompletePending()
+        throw error
+      }
+    }
+    let destination = ''
+    try {
+      acceptBridgeRecord('complete', response, record)
+      if (readManagedEpoch() !== startedEpoch || readAuthSessionSignature() !== startedSignature) {
+        await compensateInstalledCookie()
+        return { destination: '', stale: true }
+      }
+      destination = assertDestination(record.destination)
+    } catch (error) {
+      if (error instanceof AuthIdentityLockError) throw error
+      await compensateInstalledCookie()
+      throw error
+    }
+    try {
+      writeManagedProbeMarkerOrThrow()
+      clearManagedCompletePending()
+    } catch {
+      await compensateInstalledCookie()
+      return { destination: '', stale: true }
+    }
+    return { destination, stale: false }
+  }, { failClosed: true })
 }
 
-export async function logoutManagedBrowserBridge(): Promise<void> {
+/** Logout POST for a caller that already holds the identity lock. Does not request the lock again. */
+export async function postManagedLogoutUnlocked(): Promise<void> {
   await bridgePost('/api/plm/managed-login/logout', 'logout', {})
   clearManagedDescriptor()
   clearManagedProbeMarker()
+  clearManagedCompletePending()
+}
+
+export async function logoutManagedBrowserBridge(): Promise<void> {
+  await withAuthIdentityLock(async () => {
+    await postManagedLogoutUnlocked()
+  }, { failClosed: true })
 }

@@ -209,7 +209,7 @@ describe('App guest bootstrap', () => {
     expect(signOutButton).toBeTruthy()
 
     signOutButton?.click()
-    await flushUi()
+    await flushUi(12)
 
     expect(globalThis.fetch).toHaveBeenCalledWith('https://api.example.com/api/auth/logout', {
       method: 'POST',
