@@ -36,6 +36,7 @@ import {
   AttendanceCoordinationConnectionUncertainError,
   invalidateSettlementCoordinationCredentialsV1,
   planSettlementCoordinationV1,
+  rollbackSettlementCoordinationTransactionV1,
   runSettlementCoordinationHandoverV1,
   runSettlementCoordinationS1V1,
   type SettlementCoordinationCredentialV1,
@@ -134,6 +135,39 @@ export class SettlementCoordinationAbortedError extends Error {
   }
 }
 
+/**
+ * The post-lock recheck kept disagreeing with the candidate (§3.2 step 6.5): the entry's registered
+ * conflict code (M07: `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED`; fallback below).
+ */
+export class SettlementCoordinationScopeChangedError extends Error {
+  readonly code: string
+
+  constructor(code: string) {
+    super(code)
+    this.name = 'SettlementCoordinationScopeChangedError'
+    this.code = code
+  }
+}
+
+export const SETTLEMENT_COORDINATION_SCOPE_CHANGED = 'ATTENDANCE_COORDINATION_SCOPE_CHANGED'
+/** `W4_TRANSACTION_MAX_RETRIES`: each inner counter allows two restarts. */
+export const SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT = 2
+
+export interface SettlementCoordinationRestartV1 {
+  /** `serialization`: 40001 / 40P01; `recheck`: the post-lock recheck disagreed with the candidate. */
+  readonly reason: 'serialization' | 'recheck'
+  /**
+   * `live`: the handed-over transaction is still open (its credential is live) and is rolled back.
+   * `ended`: it already ended at COMMIT (retryable 40001 / 40P01): the server rolled it back, so no
+   * ROLLBACK is sent and the rollback primitive is not called.
+   */
+  readonly transaction: 'live' | 'ended'
+  /** The original error; rethrown unchanged when the serialization counter is used up. */
+  readonly error: unknown
+  /** The entry's registered conflict code for a used-up recheck counter. */
+  readonly conflictCode?: string
+}
+
 export const SETTLEMENT_COORDINATION_CONNECTION_UNAVAILABLE = 'ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE'
 export const SETTLEMENT_COORDINATION_CAPACITY_BUSY = 'ATTENDANCE_COORDINATION_CAPACITY_BUSY'
 
@@ -181,7 +215,10 @@ export class SettlementCoordinationUnitV1 {
   #attempt = 0
   #retry = 0
   #active: ActiveAttempt | null = null
+  #activeHandle: SettlementCoordinationHandleV1 | null = null
   #closed = false
+  #serializationRestarts = 0
+  #recheckRestarts = 0
 
   constructor(deps: SettlementCoordinatorDepsV1, request: SettlementCoordinationUnitRequestV1) {
     this.#deps = deps
@@ -261,7 +298,8 @@ export class SettlementCoordinationUnitV1 {
             owned = false
             this.#active = { client, lease, plan, credential: handover.credential }
             this.#emit(record, 'handed-over', null)
-            return this.#handle(this.#active, this.#attempt)
+            this.#activeHandle = this.#handle(this.#active, this.#attempt)
+            return this.#activeHandle
           }
 
           // Contended: give everything back before anyone backs off.
@@ -309,6 +347,53 @@ export class SettlementCoordinationUnitV1 {
     }
   }
 
+  /** Inner restart counters (40001 / 40P01; recheck mismatch); each outer attempt starts them at zero. */
+  get innerRestarts(): Readonly<{ serialization: number; recheck: number }> {
+    return { serialization: this.#serializationRestarts, recheck: this.#recheckRestarts }
+  }
+
+  /** An outer retry (§3.2 step 8(c)) is a new acquisition of the same unit: both inner counters restart. */
+  beginOuterAttempt(): void {
+    this.#assertIdle()
+    this.#serializationRestarts = 0
+    this.#recheckRestarts = 0
+  }
+
+  /**
+   * Coordination restart (§3.2 step 8): ends the transaction of `handle` as `input.transaction`
+   * says, gives the connection back (destroyed when ROLLBACK failed), returns global then org quota,
+   * and counts the restart. Only the budget and the two inner counters survive into the next
+   * acquisition. When a counter goes past its limit the restart still converts the resources first,
+   * then a serialization restart rethrows `input.error` unchanged and a recheck restart throws the
+   * registered conflict code.
+   */
+  async restart(handle: SettlementCoordinationHandleV1, input: SettlementCoordinationRestartV1): Promise<void> {
+    if (this.#activeHandle !== handle || !this.#active) throw new Error('settlement coordination restart for an attempt this unit does not hold')
+    let destroyWith: unknown
+    let refused: unknown
+    if (input.transaction === 'live') {
+      try {
+        const rolled = await rollbackSettlementCoordinationTransactionV1(handle.client, handle.credential)
+        if (rolled.kind === 'uncertain') destroyWith = new AttendanceCoordinationConnectionUncertainError(rolled.reason)
+      } catch (error) {
+        // The credential did not match: the transaction state is unknown, so the connection goes.
+        refused = error
+        destroyWith = error
+      }
+    }
+    handle.end(destroyWith)
+    if (refused !== undefined) throw refused
+    if (input.reason === 'serialization') {
+      this.#serializationRestarts += 1
+      if (this.#serializationRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) throw input.error
+    } else {
+      this.#recheckRestarts += 1
+      if (this.#recheckRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) {
+        throw new SettlementCoordinationScopeChangedError(input.conflictCode ?? SETTLEMENT_COORDINATION_SCOPE_CHANGED)
+      }
+    }
+  }
+
   /** Leaves the coordinator. A unit that still holds an attempt is a programming error: it is destroyed. */
   close(): void {
     if (this.#closed) return
@@ -317,6 +402,7 @@ export class SettlementCoordinationUnitV1 {
     const active = this.#active
     if (active) {
       this.#active = null
+      this.#activeHandle = null
       invalidateSettlementCoordinationCredentialsV1(active.client)
       active.client.release(new Error('settlement coordination unit closed while holding an attempt'))
       this.#deps.ledger.dropClient(this.#id)
@@ -503,7 +589,10 @@ export class SettlementCoordinationUnitV1 {
       end: (error?: unknown) => {
         if (ended) throw new Error('settlement coordination attempt ended twice')
         ended = true
-        if (this.#active === active) this.#active = null
+        if (this.#active === active) {
+          this.#active = null
+          this.#activeHandle = null
+        }
         invalidateSettlementCoordinationCredentialsV1(active.client)
         active.client.release(error)
         this.#deps.ledger.dropClient(this.#id)

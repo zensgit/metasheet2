@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import { deriveSettlementCoordinationCapacityV1 } from '../coordination/settlement-coordination-capacity'
-import { AttendanceCoordinationConnectionUncertainError } from '../coordination/settlement-coordination-handover'
+import {
+  AttendanceCoordinationConnectionUncertainError,
+  commitSettlementCoordinationTransactionV1,
+} from '../coordination/settlement-coordination-handover'
 import {
   SettlementCoordinationAbortedError,
   SettlementCoordinationAcquireError,
+  SettlementCoordinationScopeChangedError,
   createSettlementCoordinatorV1,
   shouldLogSettlementCoordinationAttemptV1,
   type SettlementCoordinationAttemptRecordV1,
@@ -42,12 +46,19 @@ class FakeLockWorld {
 class FakeClient implements SettlementCoordinationClientV1 {
   readonly calls: string[] = []
   readonly released: unknown[] = []
+  /** Statements (exact text) that fail once with the given error. */
+  readonly failOnce = new Map<string, Error>()
   onRelease: (() => void) | null = null
 
   constructor(private readonly world: FakeLockWorld) {}
 
   async query(sql: string): Promise<{ rows: Array<Record<string, unknown>>; command: string }> {
     this.calls.push(sql)
+    const failure = this.failOnce.get(sql)
+    if (failure) {
+      this.failOnce.delete(sql)
+      throw failure
+    }
     if (sql.startsWith('SELECT idle')) {
       const row = this.world.nextS1(sql.includes('::bigint'))
       if (row instanceof Error) throw row
@@ -447,3 +458,129 @@ describe('settlement coordinator: ledger self-check', () => {
     expect(ledger.snapshot().inFlight.short).toBe(0)
   })
 })
+
+describe('settlement coordinator: coordination restart (§3.2 step 8, A07)', () => {
+  const serializationError = (label: string) => Object.assign(new Error(`could not serialize access (${label})`), { code: '40001' })
+
+  it('a live transaction is rolled back, connection and quotas return, and the next attempt borrows anew', async () => {
+    const { pool, coordinator, quota, ledger, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const startedAt = unit.budget.startedAt
+    const first = await unit.acquire(ORG)
+    await unit.restart(first, { reason: 'serialization', transaction: 'live', error: serializationError('1') })
+    expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
+    expect(pool.clients[0].released).toEqual([null])
+    expect(quota.snapshot().global.short.held).toBe(0)
+    expect(ledger.snapshot().holding).toEqual([])
+    const second = await unit.acquire(ORG)
+    expect(second.client).toBe(pool.clients[1])
+    expect(second.attempt).toBe(2)
+    expect(unit.budget.startedAt).toBe(startedAt)
+    expect(unit.innerRestarts).toEqual({ serialization: 1, recheck: 0 })
+    second.end()
+    unit.close()
+    baseline()
+  })
+
+  it('a failed ROLLBACK destroys the old connection, and the next attempt never reuses it', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const first = await unit.acquire(ORG)
+    pool.clients[0].failOnce.set('ROLLBACK', Object.assign(new Error('test: rollback lost'), { code: '08006' }))
+    await unit.restart(first, { reason: 'serialization', transaction: 'live', error: serializationError('1') })
+    expect(pool.clients[0].released[0]).toBeInstanceOf(AttendanceCoordinationConnectionUncertainError)
+    const second = await unit.acquire(ORG)
+    expect(second.client).toBe(pool.clients[1])
+    second.end()
+    unit.close()
+    baseline()
+  })
+
+  it('a transaction that already ended at COMMIT is not rolled back again', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const first = await unit.acquire(ORG)
+    const error = serializationError('at commit')
+    pool.clients[0].failOnce.set('COMMIT', error)
+    expect(await commitSettlementCoordinationTransactionV1(first.client, first.credential)).toEqual({ kind: 'retryable', error })
+    await unit.restart(first, { reason: 'serialization', transaction: 'ended', error })
+    expect(pool.clients[0].calls.filter((sql) => sql === 'ROLLBACK')).toEqual([])
+    expect(pool.clients[0].released).toEqual([null])
+    unit.close()
+    baseline()
+  })
+
+  it('calling an ended transaction live is refused and destroys the connection', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const first = await unit.acquire(ORG)
+    const error = serializationError('at commit')
+    pool.clients[0].failOnce.set('COMMIT', error)
+    await commitSettlementCoordinationTransactionV1(first.client, first.credential)
+    await expect(unit.restart(first, { reason: 'serialization', transaction: 'live', error })).rejects.toMatchObject({
+      code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH',
+    })
+    expect(pool.clients[0].released[0]).toMatchObject({ code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH' })
+    unit.close()
+    baseline()
+  })
+
+  it('the serialization counter allows two restarts; the third rethrows the original error object after converting', async () => {
+    const { coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    for (const label of ['1', '2']) {
+      const handle = await unit.acquire(ORG)
+      await unit.restart(handle, { reason: 'serialization', transaction: 'live', error: serializationError(label) })
+    }
+    const last = serializationError('3')
+    const handle = await unit.acquire(ORG)
+    await expect(unit.restart(handle, { reason: 'serialization', transaction: 'live', error: last })).rejects.toBe(last)
+    unit.close()
+    baseline()
+  })
+
+  it('the recheck counter is separate and ends with the registered conflict code; an outer attempt restarts both', async () => {
+    const { coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    for (const reason of ['serialization', 'serialization', 'recheck', 'recheck'] as const) {
+      const handle = await unit.acquire(ORG)
+      await unit.restart(handle, { reason, transaction: 'live', error: serializationError(reason) })
+    }
+    expect(unit.innerRestarts).toEqual({ serialization: 2, recheck: 2 })
+    const handle = await unit.acquire(ORG)
+    const conflict = unit.restart(handle, { reason: 'recheck', transaction: 'live', error: null, conflictCode: 'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED' })
+    await expect(conflict).rejects.toBeInstanceOf(SettlementCoordinationScopeChangedError)
+    await expect(conflict).rejects.toMatchObject({ code: 'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED' })
+    unit.beginOuterAttempt()
+    expect(unit.innerRestarts).toEqual({ serialization: 0, recheck: 0 })
+    const again = await unit.acquire(ORG)
+    await unit.restart(again, { reason: 'serialization', transaction: 'live', error: serializationError('after outer') })
+    unit.close()
+    baseline()
+  })
+
+  it('a scope change re-acquires under the new org; the old org\'s quota is back before the new one is taken', async () => {
+    const { pool, coordinator, quota, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const first = await unit.acquire(ORG)
+    await unit.restart(first, { reason: 'recheck', transaction: 'live', error: null })
+    const seen: unknown[] = []
+    pool.onConnect = () => seen.push(quota.snapshot().orgs.map((entry) => entry.org))
+    const second = await unit.acquire('legacy-org-new-scope')
+    expect(seen).toEqual([['legacy-org-new-scope']])
+    expect(second.plan.key.org.lexical).toBe('legacy-org-new-scope')
+    second.end()
+    unit.close()
+    baseline()
+  })
+
+  it('restarting an attempt the unit does not hold is refused', async () => {
+    const { coordinator } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const handle = await unit.acquire(ORG)
+    handle.end()
+    await expect(unit.restart(handle, { reason: 'serialization', transaction: 'live', error: null })).rejects.toThrow(/does not hold/)
+    unit.close()
+  })
+})
+
