@@ -262,7 +262,10 @@ describe('settlement coordination budget (§3.2 step 9)', () => {
     expect(budget.exhausted()).toBe(true)
     expect(budget.remaining()).toBe(0)
     expect(budget.exhaustionCode()).toBe('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY')
+    // dedicated now holds 3800 ms: an equal class-00 wait loses the tie, a longer one wins.
     budget.record('class-00', 3800)
+    expect(budget.exhaustionCode()).toBe('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY')
+    budget.record('class-00', 1)
     expect(budget.exhaustionCode()).toBe('ATTENDANCE_CALCULATION_ROLLOUT_BUSY')
   })
 
