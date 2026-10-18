@@ -47,6 +47,7 @@ REQUIRED_PATHS=(
   # source directory in the package so Windows/on-prem installs apply
   # post-build SQL schema changes such as users.must_change_password.
   "packages/core-backend/migrations"
+  "packages/core-backend/src/db/migrations"
   "plugins/plugin-attendance"
   "plugins/plugin-integration-core"
   "plugins/plugin-elearning"
