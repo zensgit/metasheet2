@@ -1,5 +1,163 @@
 # 既有 #6337 收口验证
 
+## 2026-10-18 本轮追加发布已获授权，冻结受验源码后普通前进
+
+owner明确同意两处已验证修复、叠层及MD普通追加至原四PR并运行既有合成CI；因此此前发布授权blocked已解除，不将自动heartbeat视为授权。原四run全部终结及#6337准确29ad9246正式71/停止证据仍保留；不取消、重试或覆盖旧失败。
+
+发布输入限定为本报告已验根六文件（70整套、69合同及provenance）、PLM单文件真实PG11（前后三红→11/11）、两父层各69合同/provenance、四层实际Git合流与两处caller冲突原样保留child。Automation代码树必须与29ad9246相同，唯一新内容为两份本MD；这是按既定树/源码证明携带证据，不宣称新head已经正式CI成功。当前仅准备新普通提交，后续push/CI结果按真实回读记录。仍不强推、新增切片、合并、部署、客户读取或真实发送。
+
+## 2026-10-18 本轮四run终结；#6337正式71/三腿/实际停止证据闭合
+
+heartbeat最终只读回读四当前PR head与预期一致，四Plugin run均attempt1且completed；全分页同head checks无pending。#6315 run39119125908仍failure（宜搭EXIT），checks60success/1failure/2skipped；#6323 run39119171391 success，checks30success/2cancelled/1skipped；#6324 run39119183942仍failure（reseal三失败），checks89success/1failure/2cancelled/1skipped；#6337 run39119194593 **success**，checks98success/2cancelled/1skipped。不把skipped/cancelled计成功，也不把两个成功run写成四PR全绿。root实际Web gate成功及此前失败证据均保留。
+
+准确#6337 head **29ad9246b0ad4708b9b5b270cf380becefa0cd9c**、test(20.x) job **117651117301**：core/types/lint/checkpoint、固定候选官方Chromium、锁协议、PLM manual/interval、owner宜搭、后置multitable SQL和晚期attendance均实际success。完成job公开原日志SHA **869cdf60ac791bec549accd22609631591c87aded437d528e6aa1a8cc43b79b1**，闭合帧malformed=0；未读取私有CI产物/receipt/.env或凭据。
+
+- manual：192条闭合transport诊断，ABORTED=0；SDK POST202 BODY_DONE、PROXY UPSTREAM_COMPLETE、PLAYWRIGHT BODY_DONE各完整1次；actual-stop-resolved=1、actual-stop-failed=0、production-stop-failed=0；RESULT passed且ownedDatabaseRemoved=true，回执SHA **36dba952d29d91853658990de5eb56f0898216d9b145002234644d9a4b42b901**。
+- interval：132条闭合诊断，ABORTED=0；actual-stop-resolved=1、actual-stop-failed=0、production-stop-failed=0；RESULT passed且ownedDatabaseRemoved=true，回执SHA **de9782f1bf57f3c4af2221b23c1878826bf74509910811e58694c64010fe05ce**。该模式不是manual的POST202入口，不伪造其三腿次数；三腿证明属于上项manual。
+- 宜搭：唯一闭合RESULT **passed=true/tests71/business66/sentinels5**，正式71门闭合；不借父70或本地71补签。其原成功launcher仍强制实际worker清理合同。
+- family4：同job attendance公开通过帧确认为原整文件 **10项**，true FAIL=0；冻结workflow确实登记该文件，冻结源码新行version=4、两consumer/payload/回滚断言保留。首个辅助投影只剥ESC ANSI、遗漏literal ^[[ 而未命中通过帧，不能视为测试未运行；按原既定剥两种ANSI顺序修正只读内存投影后得到1个文件通过帧/10项，不改源码或日志。
+
+本轮同head的固定候选Chromium/正式宜搭71/实际停止证据门现已取得，不扩大为默认浏览器历史根因已修、真实客户兼容、允许生产发送或整条四PR可合并。旧250ms lease、WSL回拨、ABORTED、SQL57014、版本旧断言及本轮两个父层红灯仍保留。Chrome本地合成初始化和两行预览此前已完成且清理，本次按授权不重复启动。
+
+已用官方automation_update停用这次已完成的6337-ci监视，工具返回PAUSED，本地配置回读PAUSED；name/prompt/10分钟cadence/目标thread保持原值，未取消CI、重跑、改代码、推送、合并、部署或真实读取/发送。OpenAI Docs技能用于核对调度管理后再通过实际工具更新，没有手工改automation.toml。开发goal仍为等待下一轮追加发布授权的blocked，不因本轮CI成功自行恢复或宣布完整目标完成；已验本地两项修复/叠层/MD尚未再发布。
+
+## 2026-10-18 下一轮追加发布授权前置（goal blocked，CI监视保留）
+
+上一轮四支普通追加及既有CI已按原授权执行；其后发现的根固定候选接线与PLM reseal fixture回补，尚未获得新一轮发布授权。明确请求后，连续超过三个自动goal turn仍只有自动继续消息、没有human同意；不能将它们当推送/dispatch授权。当前允许独立完成的两项本地修复、根70、真实PG11、两父层69合同/provenance、完整叠层/冲突解法及既有MD均已收口；不以再跑相同本地测试制造进展。
+
+开发目标保留原SA01–06完整范围，不标完成；当前进入发布授权阻塞。该结论不把活CI判作失败或以CI慢为由停止监视：准确#6337 run39119194593/attempt1/head29ad9246/job117651117301仍在attendance阶段、0本轮failed step；已有6337-ci heartbeat本地持久配置仍ACTIVE/FREQ=MINUTELY;INTERVAL=10，未停用或改动。它继续获准的只读观察和必要脱敏续记，正式71/独立实际停止仍待终态核验。不自行推送、重跑、合并、部署、客户读取或真实发送。收到owner明确追加发布授权后，再核当前head/base/main、原失败留存和当前CI终态，按授权范围恢复。
+
+## 2026-10-18 两父层正式公开宜搭70项证明（不替代子71或整轮门）
+
+逐一核当前PR head、run head/attempt1、run内精确test(20.x) job及真实宜搭step success，再只读公开完整job日志、按精确step剥列/时间戳/ANSI，只接受唯一闭合RESULT帧，读后再次核PR head。#6323准确840b9b97/run39119171391/job117651049872和#6324准确ad43d623/run39119183942/job117651084798均有 **passed=true/tests70/business65/sentinels5**，malformed=0。对应冻结launcher源SHA同为 **519bf0cca83dec7a350d3e43739540bad02db300b94e4a97ee893667c23199f4**，确实是70合同，不是71。
+
+#6323完整公开job日志SHA **092e847e604c7e29fa61179a341f8f202d4a5ca1b9d1c525f1cde393dc6ed7ca**；#6324为 **c01077411d253f5b9ea457eb42d52878ea2e5ddeafd1be6be6059d4e42c88c98**。它们不是先前仅失败步骤日志的字节摘要；不把不同投影的SHA差异当日志改动。冻结launcher在发出passed前强制receipt.cleanup=stopped-owned-pg-removed；这里只主张生产launcher成功门带有清理要求，不捏造独立实际host.stop公开帧，也未读CI私有receipt/产物。工具tmp/read-parent-yida-public-proof-20261018.cjs仅输出白名单计数/布尔/哈希。
+
+#6323 run/job整体success；#6324 run/job整体failure（reseal三失败）保持不变，单宜搭step success不抵消SQL红灯。#6315根支EXIT红灯也不借两个父层70绿撤销；#6337正式71、三腿body完成与独立实际停止仍待其活job终结。不重跑、改生产代码或再次推送。
+
+## 2026-10-18 #6337已进入晚期考勤验收（正式run仍活跃）
+
+准确run39119194593/attempt1/head29ad9246/job117651117301再次回读：前置、PLM manual/interval、宜搭与后置SQL均success，approval已越过，实际active step为Run attendance integration tests；目标ATTENDANCE_FAMILY4为in_progress，无本轮failed step。checks仍97success/1pending/2cancelled，后者不抵成功。公开闭合browser/actual-stop/71证据仍因job活跃不可取得，不先按步骤绿签数量或清理。确认是同一活job的verified wait，不重启或因观察慢判其终止；本轮不新增代码/推送/重跑。
+
+## 2026-10-18 本地四层传递验证与正式SQL新进展（未推送）
+
+将已验根六文件树包装为普通单父本地提交75f046cd，K3合流2d920b25/tree51693f80无冲突，PLM合流f14cf98a/tree5e415647无冲突并仅前移已验reseal fixture。Automation合流只有workflow与caller合同两冲突：保留其准确原三selector/71项源码后，整个最终tree仍为 **4642d4b71dec3abc6111591cef96538955679031**，与远端29ad9246整树相同；本地两父提交e7e03302同时保留原head与新父链祖先。不把新的commit ID称作已有正式CI通过；未改branch refs、默认index、八个工作区修改或远端。局部receipt在tmp/local-parent-fix-stack-resolved-20261018.json。
+
+父层合同补验首轮误省略依赖安装，6323合成合同56通过/13失败/0skip，stdout SHA **e1b40f4a96c57f7cec84be3bad0e5ea66dbd364250eada686e73bd75e5c93ec5**。实际原fileHash强制独立resolve Vitest CLI（其hardlink例外的保证点），13条均因缺module拒绝；不能删这一真实依赖或assertion。修本地driver为offline/frozen/ignore-scripts/ignore-pnpmfile安装原锁依赖，在同一准确源恢复验证，保留首轮日志。准确K3候选2d920b25现已69/69、0fail/cancelled/skipped/todo，合同stdout SHA **6128b0e359cb0057bf075cf624cb86bf54729f3a97088b7223892790521105f1**；完整provenance exit0、stdout SHA **f100c276587a34f70f4ea13506812da8b9ad5788bdb3ca0c655dc4f92f088a04**，source/index前后干净。PLM候选f14cf98a的同类验证仍执行中；这组不运行K3/PLM完整业务浏览器，不能据69合同扩大成每棵树70业务验收。
+
+随后准确PLM候选f14cf98a的合同也已69/69、0fail/cancelled/skipped/todo，stdout SHA **9599a79883b0d6b8960d3f0177532531a91648bed58b0450927156de844f5571**；完整provenance成功，stdout SHA同K3的f100c276…，source/index干净。两父层driver自然exit0，总receipt SHA **19b43a0bc4978e228117e4f6a24f6b7d9d778acdf50d0d27739f80df8853b9fb**。首轮缺Vitest的13失败保留；恢复只是修依赖前置，无产品/测试断言变化。根70全套、PLM单文件真实PG11全套、两父层各69合同及完整provenance分别按准确候选登记，不混称每层完整业务CI已通过。
+
+正式#6337准确29ad9246的run39119194593现已通过后置multitable realDB SQL，进入approval实库步骤；晚期attendance仍pending。同head PLM/宜搭步骤success仍有效，但独立actual-stop与71闭合公开日志待job完成后读取；不借本地根70或别的泳道解除正式证据门。#6323正式本轮已成功，#6315与#6324原失败保留，没有重跑/再次推送。远端main回读仍为d671019f2baf925b1651b8c9ade6131b22ec28ae，未出现新main对齐输入。
+
+## 2026-10-18 根六文件候选完整70项及清理已终态成功（仍未发布）
+
+原session80967已自然exit0/signal=null，准确7b29f8eeb3c3d982102b7d76c1f33f760e258900的新native源完整原public CLI终结：**70/70（65业务+5哨兵），0失败/0pending**。Vitest JSON SHA **409e4f8194e05acf66a92c371ea0b176432954825f6b18590a3c17140b981481**，stdout SHA **5876921fd1a1e56f3c63dd32b96f3a2384abf1fdb9e7072b12ba094cb3dd8431**、stderr SHA **f7d79b28fe7cab8eabf992ebbbb62066d9b6cdbeee4f21b767fd6073239a02ea**。原worker receipt SHA **0f7ecdf4d9c78fab6477597142ef003f60f674de60622785ae90c203be357db5**：passed=true、failureStage=null、cleanup=stopped-owned-pg-removed；独立只读本次scratch下pg-*数0。CLI外层exit0、源码和index前后干净；实际停止不以日志snapshot代替进程终态。合同69/69和完整provenance成功均绑定同一候选，不是拼接旧三文件候选的绿灯。
+
+它仍是本地受限浏览器候选，未在GitHub跑新根head；不宣布默认浏览器根因已修、生产稳定或全六批交付。旧默认浏览器69/70、远端EXIT、PLM夹具三红和三轮验证器失败均保留。#6323准确840b9b97的run39119171391现已完整success、全部目标步骤success；33条checks中30success/2cancelled/1coverage skipped，后两类不算成功。#6337准确29ad9246的run39119194593仍活跃于后置SQL，公开71/ABORTED/实际停止日志尚待取得。
+
+## 2026-10-18 #6324真实PG前后三红→11/11；根CI接线合同69/69（仅本地）
+
+第四轮reseal对照使用同一真实PG整文件和原30秒/15秒预算，单独工具仅把Supertest默认listen(0)显式绑定127.0.0.1，并只在该同步绑定调用内对同一个数字literal同步回调、finally恢复lookup；无DNS访问，原网络guard仍验证listener/socket，namespace/caps0不变。未编辑候选测试或生产代码，不跳过route用例。前准确ad43d623为8通过/3失败（与正式CI同三条），后准确单文件候选6c49dfa为**11/11、0失败/0pending**；自然终态driver exit0，原测试报告success=true才签通过，PG移除/源码不变均true。前JSON SHA **23f05222789ce27c068fe213fcbf1c948681c0701de11e5e2dc7c09df858674f**，后SHA **d775dda8f920df10e93fcbd0b53aedf165dd154776a3b277fc1d13bb42b0ea21**，pair SHA **7a7be537abb2306690b360dffcffbe7eb2cdaa8d62fed605476fecbb41cbbf49**。前几轮工具失败均保留，不重新分类为成功；本文件的route本来mock namespace/RBAC，不把这次PG事务证明扩为真实JWT授权证明。
+
+根本地六文件候选7b29f8ee原Node两整文件合同已自然exit0：**69/69、0fail/cancelled/skipped/todo**，stdout SHA **3545a92060bb3c5c80741ce921e723f933d07c57e26c9a1e903f7e37cc561d24**。包括实际提取的installer bash正反控、archive/binary摘要各自移除探针、clean-env caller、缺失/错误selector，以及candidate负例；其中download只用合成ZIP桩，不冒称实际Google下载已跑。原默认installer保留，父workflow只有一个宜搭selector，原70/65+5计数不改。新独立native源正在执行完整原70，尚未取得终态/清理，不将合同69当业务70。
+
+先前实际provenance模块当前导出的relativePath库存与六改动路径交集0，当时仅静态输入比对。随后在准确7b29f8ee的LF native树实际运行完整sealed-export-package-provenance.test.cjs，exit0/signal=null、精确OK帧、stderr空、源码/index未变；stdout SHA **f100c276587a34f70f4ea13506812da8b9ad5788bdb3ca0c655dc4f92f088a04**。没有重打或归一化任何pin，不把它扩大为整条插件链通过。两项候选均未推送；四远端head仍保持本轮原值。#6337后置SQL仍in_progress，正式71/ABORTED/实际停止的公开闭合日志未取得。
+
+## 2026-10-18 本轮远端两处红灯与限定本地对照（未再发布）
+
+四支已按授权普通追加推送，head保持本报告下表值；本节为发布后的本地续记，不在远端提交中。#6337 run39119194593准确29ad9246的PLM manual/interval、固定官方Chromium、owner YiDa步骤均已实际success，现执行后置multitable SQL；晚期attendance仍pending。尚待完整公开日志核对71项及ABORTED/body完成/独立实际停止，不先凭步骤绿签全链。#6323晚期attendance仍执行中。
+
+#6315 run39119125908维持宜搭EXIT失败。其原默认浏览器本地准确树69/70失败保留；三文件限定候选85fcca1fa10ac5c4fa3860d57f891b5a804c47c5的完整原70项现已自然exit0，70通过/0失败/0pending，PG已移除、源码/index未变。Vitest JSON SHA **87baea290732ffec9854b44ffb333a095e5ed0d6af7d8739aebbf161e4d69dc6**，worker receipt SHA **abf2e13848bfc8e9579650abe99f34615dc8ab70e04787c2fea36474820f61ad**，outer receipt SHA **e792f339b84aac033fe6a73ed2e45afb61aa75af9444d813af963552bbba4ea2**。默认浏览器、计数、超时、隔离和发送OFF断言未改。这是本地缓解证据，不是本轮根支CI修复，亦不倒推远端唯一根因；候选未推送。
+
+#6324 run39119183942准确ad43d623后置SQL失败：1文件/3测试失败，其余264文件/3069测试通过、2skip；公开失败日志SHA **aacab6d0515788e8e38254c08118119d7f9fcae291b3bc0f0af78ea444965f26**。三处reseal持久化窗口均为validation_revision缺列/42703，不是57014。生产DataSourceManager与#6337逐字相同，父fixture漏装实际revision迁移；#6337已有19行真实迁移与严格revision旋转断言修正。只将这一既有测试修正准备为本地候选6c49dfa6073f41884041b10f31f2817a0c8c0f77，未改生产守卫或推送。
+
+真实PG前后对照第一轮因验证器引用父支不存在的guard而未启动测试，保留工具失败且PG已清理，不算业务红绿。第二轮复用核SHA的既有guard：原fixture7/11通过、候选10/11通过；共同剩余route用例是Supertest隐式监听被PLM_FULL_APP_FORBIDDEN_LISTENER拒绝。两边PG已移除、源未变，出网/环境读取计数0；不能称候选11/11通过。候选Vitest JSON SHA **3a27bfc4f12f1387a5bd32c47da912925940e61a5b278989ae8a2f820d433990**。下一轮仅在本地验证器将Supertest精确默认listen(0)显式绑定loopback，仍经过原guard、独立net namespace及全零capabilities，不改任何产品源码/路由用例/断言/预算。第三轮尚在执行，等待真实报告及清理终态。
+
+第三轮随后自然终结exit1：前7/11、后10/11，未通过整文件。共同route用例在显式loopback监听后仍因地址尚未就绪而失败，失败message SHA **30a3ca6b0f0b1a2a32500c677aaaf9ccec82accfa315b28f5922bb7ae2670c07**；未放开guard、未跳过该用例。前后PG均移除、源未变、计数0出网/0环境文件读取。pair receipt SHA **f0efc345f6099ea73a16f35c24a03e3d15ff9e4c28ce171e05db6012221814ca**，after JSON SHA **9843147f0cb32e6c69177e9e45db056d3f1aaec5c65c8d7a048a7228e9555dc5**。外层namespace进程退出0不替代嵌套test exit1及报告success=false，最终driver正确返回1；工具监听就绪问题仍需修，不能发布该候选为已完整验证。
+
+没有重跑、取消远端CI或追加推送；原失败均保留。当前不能报四PR全绿、稳定试用交付或生产发送就绪。
+
+## 2026-10-18 根支固定候选对照已启动（仅本地、未修签CI）
+
+随后远端准确29ad9246/#6337 run39119194593：HOST_LOCK_REALDB现completed/success，已实际进入PLM_MANUAL_INTERVAL；原workflow这一步共33整文件（锁协议+读取计划+Automation/YiDa真实库），不能仅凭旧名字和耗时断言一个锁用例挂住。原PLM step的20分钟预算未改，当前in_progress不算通过；71/后置SQL/晚期family4仍pending。#6323的后置SQL已success、#6324仍in_progress；根支既有宜搭红灯不被抵消。本地候选99466仍活跃，snapshot仅见正在使用的自有PG，非清理失败结论。
+
+以独立Git index/对象准备根支7ce47a2c上的三文件候选commit **85fcca1fa10ac5c4fa3860d57f891b5a804c47c5**、tree **a0cd95ba3b1312b12b374e23f3f8f46ab7edd9d7**：原#6337 candidate模块、原browser fixture的显式选择与版本校验、runner的对应owner/source哈希接线。只对移入runner恢复父原70/65+5的五个精确计数上下文；没有减少父测试、改预算或变为>=断言。生产/权限/凭据/隔离preload/namespace无变化，默认参数仍走原浏览器，仅显式固定ID可选。未修改原八个跟踪改动、默认index或branch refs、未推送。
+
+第一轮辅助器向父树新增module时忘带update-index --add，被Git128拒绝；仅私有index部分变化，未改工作文件/远端。修正后重建read-tree、逐文件scope和diff-check、默认工作区前后一致断言均通过。该工具错误不记为功能验证结果。
+
+新隔离/home/runner/metasheet-parent-yida-candidate-pUtNW7/source准确checkout85fcca1f，LF/无.env/无hooks、offline frozen ignore-scripts安装成功且源码/index干净；只复制已存在的原受验浏览器树，复制前后原binary SHA43624de7…均匹配，非下载或任意executable覆盖。父原两套Node合同自然exit0，stdout SHA **58046b600b1f0429bcf180aa1b5529510b31f923f7fedcc76a0613c5c17423c3**。同一原public CLI增加受限--browser-candidate upstream-1719529，原70整套已实际STARTED，句柄99466仍活跃，尚无通过/清理终态。不将它叫真实发送或新正式CI；默认失败副本FUF26G保留未改。
+
+## 2026-10-18 根支准确本地复现：69/70，ACK后的GET回读浏览器取消
+
+原句柄28568已自然exit1/signal=null/spawnFailed=false；准确7ce47a2c根支的原公开入口/默认浏览器，源码与索引首尾均干净，外层回执SHA **933309239b7e32eb1680a96a401dc498a9fa895c1833ef11d0c839cadec7dacc**。本机自产Vitest JSON SHA **e2759ad6d64cd9d20b477d29522c351d2a5149a8911f18e1a1201c56a0916769**：70项/69通过/1失败/0pending；失败是owner-browser真实parent DOM grant用例，title SHA **b2a0f05e4e50424b7543a1ea37e5619de631ccaf7cc4a981d1fabff29f162f7a**。只读本次新建根目录内、核uid/非symlink/nlink/大小后投影；没读CI私有产物/.env/真实凭据。
+
+原testFailed=true的CAPTURE_DIAGNOSTIC显示：draft201、preview200、approval201、submission200均resolved，upstreamComplete/downstreamFinished/hasResponse/requestFinished均true；随后observation GET200 upstreamComplete/downstreamFinished/hasResponse=true、downstreamCloseBeforeFinish=false，但browserFailure=aborted、requestFinished=false、settlement=failed，immediate与settled相同。页面已acknowledged/frozen，DB计数[1,0,1,2,1,3]；不输出业务身份、body或URL。源文件stdout SHA **9d31742c12be9cf69544597080bb19b5bef6a16769ed455382559d139b536d4a**、stderr SHA **a0802fb9a35766854226147daff63fde19572d461d64e7a19640192b76ce615f**。不是把REQUEST_FINISHED/status0当完成，也不是把模拟提交ACK抹成没发生。
+
+本地原worker receipt SHA **ea83474efcfa2c35dead550f03b15a0f561d3145c24b7b9b00b61b6e628811e6**：failureStage=EXIT、cleanup=stopped-owned-pg-removed，独立本次scratch目录pg-*数0。它是本地子测试失败、非PG清理失败；不回填远端未知的用例/清理或认定两次唯一根因相同。inspector snapshot本身仍非进程终态证据，以真实exec close为准。
+
+已实读root→#6337差异：已验证候选选择机制位于原YiDa runner、browser fixture及56行candidate模块三文件；preload/namespace无差异。runner还混有70→71测试计数变化，不能整文件机械覆盖父支。下一步如做限定本地对照，需仅前移既有显式/哈希/版本候选接线、保持父原70断言/全部业务与隔离守卫，不扩产品功能、不修改全局浏览器默认、不推送或重跑远端；当前尚未应用或验收该对照，不称已修复CI。
+
+## 2026-10-18 #6315正式宜搭失败：仅能定位EXIT，不猜浏览器或停止根因
+
+安全替代取证已启动：只读artifact元数据仅1个无关DingTalk产物，原workflow也不上传tmp/yida-browser-ci私有Vitest日志，因此不能假装已有可下载的宜搭错误明细。没有下载该产物或请求扩大读取。新建/home/runner/metasheet-parent-yida-repro-FUF26G/source，准确checkout根支7ce47a2c…、LF、共享本地Git对象、不检出任何.env、无pnpm hooks，offline/frozen/ignore-scripts/ignore-pnpmfile安装成功、原索引/源码干净；执行原根支公开YiDa CLI（默认浏览器、不用子支固定候选），进程句柄28568仍活跃。只合成PG与假材料、原隔离守卫/发送OFF；不改源代码或旧六overlay副本、不动WSL时钟、不重跑远端CI。工具tmp/local-parent-yida-reproduce-20261018.mjs；本地WSL结果不替代GitHub或倒推历史根因，终态/清理尚待取得。
+
+随后只读CI回读：#6323/#6324的锁协议及宜搭正式步骤已success，均进入后置multitable SQL；数量与清理帧尚待job完成后公开日志核对，不先签71。#6337仍锁协议in_progress，固定候选安装success，PLM/71 pending。根支失败不能借两个父/子绿色步骤抵消，亦不能据同家族一红两绿猜定时或浏览器唯一根因。
+
+准确#6315 head7ce47a2c21c5c11b07f86f0a458bcf277624a391的Plugin run39119125908 attempt1已failure；test(20.x) job117650921417仅宜搭JWT HTTP/browser实库步骤101失败。core/types/lint/checkpoint/默认Chromium/真实库锁协议均success，后置SQL与晚期attendance skipped；另Web Tests成功仍有效，不能拿它抵掉本次宜搭红灯。
+
+只读公开失败job日志SHA **0ffd359aec90c5f08c5fdc877061fb8adfd88b948428b0c08a244555bc8b498d**，按精确宜搭step剥列/时间戳后闭合帧：CHILD_FAILED stage=EXIT/reason=WORKER_REJECTED、diagnosticSource=RECEIPT/diagnosticOutcome=FRAME_ACCEPTED、childExit=1；signaled/timedOut/interrupted/outputExceeded/error均false。RESULT passed=false/tests=0/business=0/sentinels=0。公开日志没有原Vitest FAIL帧或测试计数（它们保存在私有合成日志），这不是0失败；也不能仅从EXIT推断ABORTED、唯一失败用例、业务／清理根因或PG已清理。未读私有CI产物/.env/凭据、未重跑。
+
+tmp/read-current-yida-failure-20261018.cjs以固定四head/run/job映射、准确当前PR头与attempt校验后才读取公开日志，仅输出白名单枚举/布尔/计数/哈希；没有把原异常字段直接转发。旧read-core-ci-failures工具新增显式PR/run/job参数，仅用于本轮准确目标，历史默认目标仍保留。其余三支run仍活跃；#6337固定官方Chromium已安装success、锁协议in_progress，PLM/71/停止尚pending。继续只读观察，不因一支失败重启其它run或降低围栏。
+
+## 2026-10-18 四支checkpoint通过，根支已进入宜搭实库浏览器证明
+
+四个准确本轮head的CHECKPOINT现均completed/success，没有本轮250ms lease失败；历史该失败仍保留，单轮成功不当时序风险已根治。#6315 HOST_LOCK_REALDB与默认Chromium安装亦success，正在实际owner YiDa JWT HTTP/browser证明（父合同70，不是子71）。#6323安装Chromium中，#6324/#6337仍执行原其它认证canaries；子#6337固定候选、PLM manual/interval、实际停止及宜搭71仍pending。无新增失败、无重跑或新推送，不据父支启动预签子证据。
+
+## 2026-10-18 四支core前置现已通过，均进入checkpoint
+
+再次按准确四head/run的test(20.x)确认：CORE_TESTS/TYPES/LINT全部completed/success；#6337 run39119194593/job117651117301已越过上轮两顺序守卫三失败的正式core阶段，原失败仍保留。四支checkpoint均in_progress，无失败结论；锁协议、Chromium、PLM/宜搭及后置SQL尚pending，不将前置绿当全链完成。本次读取较慢但同一读取进程自然exit0，未因观察耗时重跑或中止远端run。此时尚未取得四job完整公开日志的逐文件计数，阶段成功不扩大为所有历史风险已修。
+
+## 2026-10-18 前三支正式core前置通过，Automation仍待结果
+
+准确本轮run/head/job只读核对：#6315、#6323、#6324的Run core-backend tests均completed/success，四支TYPES/LINT也success。#6324的九行严格legacy fixture回补已越过此前失败的正式core阶段；原四失败日志和本地去除fixture四红证据保留，未提前声称从尚未完成job日志逐一签到了测试计数。#6337同一步仍in_progress，新顺序守卫的正式收口尚待取得。
+
+#6315实际checkpoint仍in_progress，#6323/#6324在随后原canaries；四run均活跃，无failed step/check。#6337的checkpoint/锁协议/固定Chromium/PLM manual/interval/宜搭71/后置SQL仍pending，不能用前三支阶段成功或本地71补签。没有自动重跑、改代码或再推送。
+
+## 2026-10-18 #6315新head正式前端门成功，UUID原阻断闭合
+
+准确head7ce47a2c21c5c11b07f86f0a458bcf277624a391的Web Tests run39119126085 attempt1/job117650921786已completed/success，当前PR head匹配。通过run的jobs列表确认Run the always-on web spec gate实际success，并按精确step只读公开日志：原20次invocation都有passed计数，无真正FAIL、failed/skipped/todo计数；最终大批次**585文件/12196测试通过**。各invocation存在重叠，不把其合计当unique测试数。全树UUID tripwire及StockPreparationYidaOwnerSend整文件各有实际通过帧，上一轮根支UUID失败现已在准确新head正式闭合。
+
+公开整job原字节SHA **122e3b27ef2051d341869df061c6f5b16bdc7d33bd7ccdec3579077145131ad9**；仅投影计数/受限文件名/哈希，不输出原日志或私有材料。单独job API首读steps=[]，随后以同run完整jobs列表确认原步骤实际执行，不把空列表冒充执行证据。工具tmp/read-root-web-result-20261018.cjs核准确PR/run头、attempt、job/step成功及公开用例帧后才报告。
+
+该绿属于父#6315完整原前端入口，不替代子#6337新增测试/最终599文件批次的正式证据；本地两次默认整脚本超时仍保留，不据此倒推唯一宿主资源根因。四Plugin run的core-backend测试均in_progress；#6337的PLM/停止/71仍pending，不能凭本节签整个四PR或完整六批目标完成。没有重跑、再次推送、合并、部署或真实IO。
+
+## 2026-10-18 本轮四层已普通追加推送，正式CI已启动（本地续记）
+
+公开证据读取准备：本地tmp/read-current-public-browser-proof-20261018.cjs绑定准确#6337新head/run39119194593/attempt1/job117651117301，取日志前重核PR/run头和job归属；只读公开完成job日志，按精确step分列去时间戳/ANSI，闭合JSON投影为计数/布尔/哈希，不读private receipt。manual/interval按冻结workflow两条原CLI的顺序分别收口；必须两份passed/PG removed、独立actual-stop-resolved各1/两类失败0/ABORTED0，manual三条POST202真实body complete各1。原始production-stop-verified未公开，停止完整合同由准确原CLI成功结果支持，不捏造看到了私有帧。正式结论另须job/step成功，解析器不是CI替代品。
+
+该只读解析器10条本地自测通过：正控、71正控、不泄露额外字段、REQUEST_FINISHED不能替代BODY_DONE、缺停止、实际停止失败、ABORTED、70不能替代71、坏JSON和未闭合结果。只是工具oracle自测，不计入71项业务或新原链执行。随后真实API确认job仍in_progress/evidenceAvailable=false，未因日志暂不可取触发重跑或读取私有产物。此工具未提交或接入workflow，不是新增功能切片。
+
+后续准确#6337 head公开checks中两条cancelled已定位为pr-validate（117650924773）和Stock-prep browser verify (chromium)（117650924510），不是两个FAILURE，也不算通过。尚未核其取消原因/必须门策略，不推断已被其它泳道等价覆盖或擅自重跑。Plugin test(20.x)仍活跃，已到linting，目标PLM/71/停止步骤pending；等待真实执行，不能提前解除阻断。
+
+再核这两条取消均为当前29ad9246 head的pull_request attempt1，job无执行steps；同head各另有自动run success：Phase5 run39119127661/job117650927607、Stock-prep browser run39119127660/job117650927397。保留cancelled历史，不修改计数；不把并发策略与两个run的时间关系冒称已拿到取消者/唯一原因。Phase5仅metrics探测执行，实际external metrics验证和Gate on PASS均skipped，不能说外部指标已验。Stock-prep成功轮确实安装Chromium、类型检查并运行真实Vite workbench浏览器验证，unrelated-success分支skipped；该Vite浏览器覆盖不等于Plugin的PLM生产host/宜搭71/停止证据。均为原自动run，只读核对，没有人为重跑。
+
+随后goal续推进只读实核：上一轮是实际发布进展，本轮是准确活run的verified wait，而非授权阻塞。四run/current PR head仍精确匹配；#6315的after-sales、K3 offline及DingTalk三个执行job已success，test(20.x)仍in_progress前置flag合同，web-tests单独核对仍in_progress。另三支test(20.x)已从queued进入in_progress：#6323 Node setup、#6324 flag合同、#6337 job setup；run总状态仍可能queued，不能覆盖具体job的实际启动事实。四支全check未见failure，仍有pending及两条cancelled，不能报全绿或验收完成。单独回读#6337 check-runs total_count=100/returned=100，未把100截断默认为全量；原读器仍全分页。未重跑、推送或改产品。本轮重新核原目标§5/6/9及既有补验范围，六批目标保持未完成：受控只读/本地合成证据不替代自动宜搭发送合同、客户兼容或获准环境验收，不扩大现有四PR切片。依活CI继续观察，不能因仍在排队将目标标blocked。
+
+发布前再次核对main=d671019f2baf925b1651b8c9ade6131b22ec28ae及四PR原head/base/draft均未变化。以独立index建树，真实merge-tree逐层无冲突；保留每层旧head祖先和新父支祖先，最终tree=4642d4b71dec3abc6111591cef96538955679031与已验六源码overlay及两既有MD完全一致。Git原子普通push四refs成功，远端逐一回读一致；无force、无新PR、无合并/部署/真实IO。
+
+| PR | 新head | Plugin System Tests attempt1 | 触发 |
+| --- | --- | --- | --- |
+| #6315 | 7ce47a2c21c5c11b07f86f0a458bcf277624a391 | 39119125908 | 原pull_request自动 |
+| #6323 | 840b9b97307b3c6ba6ae79ce6733924533c06aaa | 39119171391 | 原workflow_dispatch一次 |
+| #6324 | ad43d6232587efd6e9b842c703be1c6b7d2dc07d | 39119183942 | 原workflow_dispatch一次 |
+| #6337 | 29ad9246b0ad4708b9b5b270cf380becefa0cd9c | 39119194593 | 原workflow_dispatch一次 |
+
+三个叠层仅在准确新head查不到原Plugin run时各dispatch一次；根支已有自动run不重复触发。首次只读核对四PR和四run头均匹配，#6315 test(20.x)运行前置flag合同，其余test(20.x)排队。尚无failed check，但存在pending/cancelled/skipped，绝非全绿；新head正式ABORTED/停止/71证据尚未到达。#6337 test(20.x) job117651117301，父支合同仍70，子71不得借父绿或本地通过签收。
+
+原6337-ci监视经工具恢复ACTIVE，仍10分钟、同chat，配置回读确认。仅核本轮准确head、全分页checks及公开脱敏日志，状态不变安静，失败报告后继续观察其它run，四run及checks终结后停用；不自动重跑/改代码/推送，也不重复已完成Chrome合成试用。按OpenAI Docs技能核对[Scheduled tasks](https://learn.chatgpt.com/docs/automations?surface=app)的既有chat任务管理；具体heartbeat字段以实际工具及配置回读为据。此节为push后本地续记，不为补流水账另造新head打断已启动CI。
+
+建树helper首轮曾用尚未初始化的私有index读取status，末尾保护断言拒绝；实际默认index/工作文件未改，未推任何refs。修正为独立读取默认index状态后重建，最终树一致断言、四commit diff-check、默认index未stage及工作区保留全部通过。失败仅属于本地发布辅助器证据比较，不记为业务测试通过或掩盖。
+
 ## 2026-10-18 本轮授权已收到，进入普通追加发布与正式验证
 
 Owner明确允许将本轮已验证修复更新至既有四PR并运行既有合成CI。下文三回合等待授权是历史状态，当前授权前置已解除；保留全部原失败，不标目标完成。发布前重新核对四head/base/draft和main均未变化，本地八项已知改动保留。按原依赖普通追加，不强推、不新增切片、不合并、不部署、不读客户数据、不真实发送。父支完整树和新子head正式71项、停止清理仍以本次后续CI为准；默认完整前端脚本两次失败不因本地资源对照通过而删除。
