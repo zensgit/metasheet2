@@ -49,6 +49,17 @@ function require_cmd() {
   command -v "$name" >/dev/null 2>&1 || die "Missing required command: ${name}"
 }
 
+function wait_for_api() {
+  local attempt code
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if code="$(curl -sS --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}' "${api_base}/health")" && [[ "$code" == "200" ]]; then
+      return
+    fi
+    sleep 1
+  done
+  die "API did not become ready after service startup; admin bootstrap was not attempted"
+}
+
 function to_web_base() {
   local input="${1%/}"
   if [[ "$input" == */api ]]; then
@@ -81,6 +92,7 @@ run env \
   "${ROOT_DIR}/scripts/ops/attendance-onprem-bootstrap.sh"
 
 verify_prebuilt_dist
+wait_for_api
 
 run env \
   ENV_FILE="$ENV_FILE" \
