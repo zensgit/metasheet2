@@ -288,6 +288,11 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     const other = await pool.connect()
     try {
       await withClient(async (client, pid) => {
+        const sessionSettings = (
+          await client.query(
+            "SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt, current_setting('application_name') AS an",
+          )
+        ).rows[0]
         expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
         const handover = await runSettlementCoordinationHandoverV1(client, plan, {
           isolation: 'SERIALIZABLE',
@@ -311,6 +316,13 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
         expect(settings.rows[0]).toEqual({ st: '3min', lt: '5s', an: 'ms2-coord:test.handover' })
         expect(await commitSettlementCoordinationTransactionV1(client, handover.credential)).toEqual({ kind: 'committed' })
         await expectNoAdvisory(pid)
+        // The S2 settings were transaction-local: after COMMIT the session is back to what it had, so
+        // a pooled connection cannot carry the coordinator's timeouts or label to its next borrower.
+        const afterCommit = await client.query(
+          "SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt, current_setting('application_name') AS an",
+        )
+        expect(afterCommit.rows[0]).toEqual(sessionSettings)
+        expect(sessionSettings.an).not.toBe('ms2-coord:test.handover')
         const free = await other.query(`SELECT pg_try_advisory_lock(${K1}, ${plan.key.key2}) AS ok`)
         expect(free.rows[0].ok).toBe(true)
         await other.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)

@@ -73,6 +73,24 @@ function failing(client: PoolClient, fail: (sql: string) => Error | null): Atten
   }
 }
 
+/**
+ * Makes matching statements on `client` itself fail before they reach the server. The object stays
+ * the same, so a handover credential bound to it still identifies it (COMMIT / ROLLBACK refuse any
+ * other connection). Returns the undo.
+ */
+function failOn(client: PoolClient, fail: (sql: string) => Error | null): () => void {
+  const real = client.query.bind(client) as (sql: string, params?: unknown[]) => Promise<unknown>
+  const patched = async (sql: string, params?: unknown[]) => {
+    const error = typeof sql === 'string' ? fail(sql) : null
+    if (error) throw error
+    return params === undefined ? real(sql) : real(sql, params)
+  }
+  Object.defineProperty(client, 'query', { value: patched, configurable: true, writable: true })
+  return () => {
+    delete (client as unknown as { query?: unknown }).query
+  }
+}
+
 describeIfDatabase('attendance settlement coordination — cleanup and unknown results (real database)', () => {
   let pool: Pool
   let observer: Pool
@@ -224,10 +242,9 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
       expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
       const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
       if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
-      const outcome = await rollbackSettlementCoordinationTransactionV1(
-        failing(client, (sql) => (sql === 'ROLLBACK' ? new Error('test: rollback lost') : null)),
-        handover.credential,
-      )
+      const undo = failOn(client, (sql) => (sql === 'ROLLBACK' ? new Error('test: rollback lost') : null))
+      const outcome = await rollbackSettlementCoordinationTransactionV1(client, handover.credential)
+      undo()
       expect(outcome.kind === 'uncertain' && outcome.reason).toBe('rollback-failed')
       // Invalidated before ROLLBACK was sent, so a failed ROLLBACK cannot leave it live.
       expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: true })).toBe(false)
@@ -241,13 +258,31 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
       const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
       if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
       const ambiguous = Object.assign(new Error('test: commit outcome unknown'), { code: '08006' })
-      const outcome = await commitSettlementCoordinationTransactionV1(
-        failing(client, (sql) => (sql === 'COMMIT' ? ambiguous : null)),
-        handover.credential,
-      )
+      const undo = failOn(client, (sql) => (sql === 'COMMIT' ? ambiguous : null))
+      const outcome = await commitSettlementCoordinationTransactionV1(client, handover.credential)
+      undo()
       expect(outcome).toEqual({ kind: 'uncertain', reason: 'commit-failed', error: ambiguous })
       // Invalidated before COMMIT was sent, so an unknown COMMIT outcome cannot leave it live.
       expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: true })).toBe(false)
+    })
+  })
+
+  it('COMMIT of a transaction that already failed is uncertain: PostgreSQL answers ROLLBACK, not an error', async () => {
+    const plan = canonicalPlan()
+    await withDestroyedClient(async (client, pid) => {
+      expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+      const handover = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+      if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+      // The body swallows an error inside the transaction and carries on to COMMIT.
+      await expect(client.query('SELECT 1 / 0')).rejects.toMatchObject({ code: '22012' })
+      const outcome = await commitSettlementCoordinationTransactionV1(client, handover.credential)
+      expect(outcome).toMatchObject({ kind: 'uncertain', reason: 'commit-not-committed' })
+      expect((outcome as { error?: { command?: unknown } }).error?.command).toBe('ROLLBACK')
+      expect(verifySettlementCoordinationCredentialV1(client, handover.credential, plan.key.org.lexical, { needsClassZero: true })).toBe(false)
+      // The server did roll back: idle, nothing held. The contract still destroys the connection.
+      const state = await client.query('SELECT now() = statement_timestamp() AS idle')
+      expect(state.rows[0].idle).toBe(true)
+      expect(await advisoryLocksOf(observer, pid)).toEqual([])
     })
   })
 

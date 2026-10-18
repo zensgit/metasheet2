@@ -174,6 +174,38 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
     }
   })
 
+  it('a transaction cannot be ended through a connection other than the one its credential is bound to', async () => {
+    const org = crypto.randomUUID()
+    const plan = planSettlementCoordinationV1(org, { needsClassZero: true })
+    const owner = await pool.connect()
+    const stranger = await pool.connect()
+    try {
+      const ownerPid = await backendPid(owner)
+      expect(await runSettlementCoordinationS1V1(owner, plan)).toEqual({ kind: 'acquired' })
+      const handover = await runSettlementCoordinationHandoverV1(owner, plan, HANDOVER)
+      if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+      await expect(commitSettlementCoordinationTransactionV1(stranger, handover.credential)).rejects.toMatchObject({
+        code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH',
+      })
+      await expect(rollbackSettlementCoordinationTransactionV1(stranger, handover.credential)).rejects.toMatchObject({
+        code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH',
+      })
+      // Nothing reached either connection: the owner is still inside its transaction, still holding
+      // both families at transaction level, and its credential is still live.
+      const inTransaction = await owner.query('SELECT now() <> statement_timestamp() AS open')
+      expect(inTransaction.rows[0].open).toBe(true)
+      const held = await advisoryLocksOf(pool, ownerPid)
+      expect(held.some((row) => isDedicatedLock(row, plan.key.key2) && row.granted)).toBe(true)
+      expect(held.some((row) => isBigintLock(row, plan.classZeroKey as bigint) && row.granted)).toBe(true)
+      expect(verifySettlementCoordinationCredentialV1(owner, handover.credential, org, { needsClassZero: true })).toBe(true)
+      expect(await rollbackSettlementCoordinationTransactionV1(owner, handover.credential)).toEqual({ kind: 'rolled-back' })
+      expect(await advisoryLocksOf(pool, ownerPid)).toEqual([])
+    } finally {
+      owner.release(DESTROY)
+      stranger.release(DESTROY)
+    }
+  })
+
   it('a release-path invalidation drops the live credential', async () => {
     const org = `legacy-${crypto.randomUUID()}`
     const plan = planSettlementCoordinationV1(org, { needsClassZero: true })

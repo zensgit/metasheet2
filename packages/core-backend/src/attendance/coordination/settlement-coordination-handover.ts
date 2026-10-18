@@ -6,15 +6,18 @@
  * connection decision to the caller (the coordinator), which owns the connection:
  *   - `contended`: the try lost; give the connection back normally, then back off;
  *   - `uncertain`: the protocol state of the connection is unknown (idle proof failed, a statement
- *     errored or its result was lost, a re-grant or an unlock returned false, ROLLBACK failed, or
- *     COMMIT failed with anything but 40001 / 40P01). The caller must destroy the connection with
+ *     errored or its result was lost, a re-grant or an unlock returned false, ROLLBACK failed,
+ *     COMMIT failed with anything but 40001 / 40P01, or COMMIT was not acknowledged with the COMMIT
+ *     tag — PostgreSQL answers COMMIT in an already failed transaction with ROLLBACK and no error).
+ *     The caller must destroy the connection with
  *     `release(err)`; destroying the backend is also what drops any session-level advisory lock it
  *     may still hold. Nothing here ever calls `pg_advisory_unlock_all`.
  *
  * The credential proves that THIS transaction on THIS connection was handed over for THIS org. It
  * is bound to the transaction, not to the connection object: pooled connections are reused, so the
  * credential is invalidated before COMMIT or ROLLBACK is sent, and a credential from an earlier
- * transaction never verifies on a later one.
+ * transaction never verifies on a later one. COMMIT and ROLLBACK refuse, before sending anything, a
+ * connection that is not the one the live credential is bound to.
  */
 import {
   buildAttendanceCalculationRolloutAdvisoryKey,
@@ -65,6 +68,7 @@ export type SettlementCoordinationUncertainReasonV1 =
   | 'unlock-returned-false'
   | 'rollback-failed'
   | 'commit-failed'
+  | 'commit-not-committed'
 
 export type SettlementCoordinationUncertainV1 = Readonly<{
   kind: 'uncertain'
@@ -81,6 +85,19 @@ export class AttendanceCoordinationConnectionUncertainError extends Error {
     super(`ATTENDANCE_COORDINATION_CONNECTION_UNCERTAIN:${reason}`)
     this.name = 'AttendanceCoordinationConnectionUncertainError'
     this.reason = reason
+  }
+}
+
+/** COMMIT returned without error but without the COMMIT tag (PostgreSQL rolled the transaction back). */
+export class AttendanceCoordinationCommitNotCommittedError extends Error {
+  readonly code = 'ATTENDANCE_COORDINATION_COMMIT_NOT_COMMITTED'
+  readonly command: string | null
+
+  constructor(command: unknown) {
+    const observed = typeof command === 'string' ? command : null
+    super(`ATTENDANCE_COORDINATION_COMMIT_NOT_COMMITTED:${observed ?? 'no-command-tag'}`)
+    this.name = 'AttendanceCoordinationCommitNotCommittedError'
+    this.command = observed
   }
 }
 
@@ -151,16 +168,21 @@ export class SettlementCoordinationCredentialV1 {
     Object.freeze(this)
   }
 
+  /** True only for a genuine credential (brand check, not `instanceof`) that is live on `connection`. */
+  static isLiveOn(credential: unknown, connection: object): credential is SettlementCoordinationCredentialV1 {
+    if (typeof credential !== 'object' || credential === null || !(#active in credential)) return false
+    if (!credential.#active) return false
+    if (credential.#connection !== connection) return false
+    return activeCredentials.get(connection) === credential
+  }
+
   static matches(
     credential: unknown,
     connection: object,
     orgLexical: string,
     needsClassZero: boolean,
   ): boolean {
-    if (!(credential instanceof SettlementCoordinationCredentialV1)) return false
-    if (!credential.#active) return false
-    if (credential.#connection !== connection) return false
-    if (activeCredentials.get(connection) !== credential) return false
+    if (!SettlementCoordinationCredentialV1.isLiveOn(credential, connection)) return false
     if (credential.#orgLexical !== orgLexical) return false
     if (needsClassZero && !credential.#classZeroHeld) return false
     return true
@@ -292,17 +314,34 @@ function isRetryableCommitError(error: unknown): boolean {
   return code === '40001' || code === '40P01'
 }
 
+/**
+ * Refuses, before anything is invalidated or sent, to end a transaction through a connection that is
+ * not the one the live credential is bound to. The owning transaction stays open with its credential,
+ * so its owner can still end it.
+ */
+function assertCredentialHeldBy(connection: object, credential: unknown): asserts credential is SettlementCoordinationCredentialV1 {
+  if (!SettlementCoordinationCredentialV1.isLiveOn(credential, connection)) {
+    throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH')
+  }
+}
+
 export async function commitSettlementCoordinationTransactionV1(
   client: AttendanceW4TransactionClientV1,
   credential: SettlementCoordinationCredentialV1,
 ): Promise<SettlementCoordinationCommitOutcomeV1> {
+  assertCredentialHeldBy(client, credential)
   SettlementCoordinationCredentialV1.invalidate(credential)
+  let result: unknown
   try {
-    await client.query('COMMIT')
+    result = await client.query('COMMIT')
   } catch (error) {
     if (isRetryableCommitError(error)) return Object.freeze({ kind: 'retryable' as const, error })
     return uncertain('commit-failed', error)
   }
+  // Only the exact COMMIT tag proves the commit: a transaction that already failed answers COMMIT
+  // with ROLLBACK and no error, and a client that reports no tag proves nothing.
+  const command = (result as { command?: unknown } | null)?.command
+  if (command !== 'COMMIT') return uncertain('commit-not-committed', new AttendanceCoordinationCommitNotCommittedError(command))
   return Object.freeze({ kind: 'committed' as const })
 }
 
@@ -310,6 +349,7 @@ export async function rollbackSettlementCoordinationTransactionV1(
   client: AttendanceW4TransactionClientV1,
   credential: SettlementCoordinationCredentialV1,
 ): Promise<SettlementCoordinationRollbackOutcomeV1> {
+  assertCredentialHeldBy(client, credential)
   SettlementCoordinationCredentialV1.invalidate(credential)
   try {
     await client.query('ROLLBACK')

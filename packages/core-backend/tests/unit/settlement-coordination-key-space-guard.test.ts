@@ -21,6 +21,7 @@ import {
 } from '../../src/attendance/coordination/settlement-coordination-key'
 import {
   ADVISORY_TWO_INT4_CENSUS_V1,
+  censusHaystack,
   scanTwoInt4AdvisorySites,
   type AdvisoryTwoInt4CensusEntryV1,
 } from '../helpers/settlement-coordination-advisory-census'
@@ -29,7 +30,10 @@ const REPO_ROOT = path.resolve(__dirname, '../../../..')
 const ROOTS = ['packages', 'plugins', 'scripts', 'apps']
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', '.git', '.turbo', '.vite', '.next', 'out'])
 const EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.cjs', '.mjs', '.vue', '.sql'])
-const RESERVED = /1297297987|0x4d533243/i
+// Decimal, hexadecimal, octal and binary spellings of 0x4D533243. Digit separators (`1_297_297_987`)
+// are removed before matching, so a separated spelling cannot slip past.
+const RESERVED = /1297297987|0x4d533243|0o11524631103|0b1001101010100110011001001000011/i
+const withoutDigitSeparators = (text: string): string => text.replace(/(?<=[0-9a-fA-F])_(?=[0-9a-fA-F])/g, '')
 
 const DEFINING_MODULE = 'packages/core-backend/src/attendance/coordination/settlement-coordination-key.ts'
 const ALLOWED_FILES = new Set([
@@ -67,16 +71,19 @@ describe('settlement coordination key space — guard ①', () => {
     for (const root of ROOTS) walk(path.join(REPO_ROOT, root), files)
     const relative = files.map((file) => path.relative(REPO_ROOT, file).split(path.sep).join('/'))
 
-    // The walk must cover the real tree: it has to reach the defining module and a known sibling.
+    // The walk must cover the real tree: every root, the defining module and a known sibling.
     expect(relative).toContain(DEFINING_MODULE)
     expect(relative).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
+    expect(relative).toContain('plugins/plugin-attendance/index.cjs')
+    expect(relative).toContain('scripts/ops/attendance-w4c2-ci-wiring.test.mjs')
+    expect(relative).toContain('apps/web/src/main.ts')
     expect(relative.length).toBeGreaterThan(1000)
 
     const offenders: string[] = []
     let definingModuleMatched = false
     for (let i = 0; i < files.length; i += 1) {
       const rel = relative[i]
-      const text = fs.readFileSync(files[i], 'utf8')
+      const text = withoutDigitSeparators(fs.readFileSync(files[i], 'utf8'))
       if (!RESERVED.test(text)) continue
       if (rel === DEFINING_MODULE) definingModuleMatched = true
       const allowed = ALLOWED_FILES.has(rel) || ALLOWED_PREFIXES.some((prefix) => rel.startsWith(prefix))
@@ -140,16 +147,18 @@ describe('settlement coordination key space — guard ④ population (closed wor
   it('every two-int4 advisory call in production source matches exactly one census entry', () => {
     // The scan must cover the real tree and find the known population.
     expect(scan.files).toBeGreaterThan(1000)
-    expect(scan.unbalanced).toEqual([])
+    // Every advisory call must be readable: both argument readings agree on 1 or 2 arguments.
+    expect(scan.anomalies).toEqual([])
+    expect(scan.calls).toBeGreaterThanOrEqual(160)
     expect(scan.sites.filter((site) => site.file === 'packages/core-backend/src/audit/AuditRepository.ts')).toHaveLength(3)
     expect(scan.sites.length).toBeGreaterThanOrEqual(45)
 
     const matchesOf = (entry: AdvisoryTwoInt4CensusEntryV1) =>
-      scan.sites.filter((site) => site.file === entry.file && site.key1 === entry.key1 && site.window.includes(entry.window))
+      scan.sites.filter((site) => site.file === entry.file && site.key1 === entry.key1 && censusHaystack(entry, site).includes(entry.window))
     const unclassified: string[] = []
     for (const site of scan.sites) {
       const owners = ADVISORY_TWO_INT4_CENSUS_V1.filter(
-        (entry) => entry.file === site.file && entry.key1 === site.key1 && site.window.includes(entry.window),
+        (entry) => entry.file === site.file && entry.key1 === site.key1 && censusHaystack(entry, site).includes(entry.window),
       )
       if (owners.length !== 1) unclassified.push(`${site.file}:${site.line} key1=${site.key1} matches ${owners.length} census entries`)
     }
@@ -171,8 +180,13 @@ describe('settlement coordination key space — guard ④ population (closed wor
       if (!entry.registry || entry.registry.length === 0) problems.push(`${entry.file}: ${entry.kind} entry names no registry entry`)
       for (const name of entry.registry ?? []) if (!REGISTRY_BY_NAME.has(name)) problems.push(`${entry.file}: unknown registry entry ${name}`)
       const text = readSource(entry.file)
+      // A bound literal must sit in the code (comments removed) of every site the entry matches; a
+      // helper's literals are checked at its call sites below instead.
+      const sites = scan.sites.filter((site) => site.file === entry.file && site.key1 === entry.key1 && censusHaystack(entry, site).includes(entry.window))
       for (const literal of entry.boundLiterals ?? []) {
-        if (!text.includes(`'${literal}'`)) problems.push(`${entry.file}: bound literal '${literal}' no longer in the file`)
+        if (!entry.helper && !sites.every((site) => site.code.includes(`'${literal}'`))) {
+          problems.push(`${entry.file}: bound literal '${literal}' is not in the code of every matched site`)
+        }
         if (registryValue(literal) !== literal) problems.push(`${entry.file}: registry entry ${literal} does not hash '${literal}'`)
       }
       for (const bound of entry.boundConstants ?? []) {

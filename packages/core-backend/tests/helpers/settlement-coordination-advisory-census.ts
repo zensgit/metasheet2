@@ -16,7 +16,13 @@
  *     closed, and they name the namespace they document.
  * A site is identified by its file, its key1 expression and a `window` substring that must occur in
  * the text from the call up to the next advisory call (at most 16 lines), which is where the bound
- * values are written.
+ * values are written. Executable sites are matched on that text with comments removed, so a
+ * commented-out binding cannot stand in for the real one.
+ *
+ * Arguments are read twice: once counting every top-level comma, once skipping quoted text and SQL
+ * comments. A call the two readings disagree on, that does not close, or whose argument count is not
+ * 1 or 2 is an anomaly and fails the guard: in a closed world, "cannot read" must not pass as "not a
+ * two-int4 call".
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -27,7 +33,10 @@ export interface AdvisoryTwoInt4SiteV1 {
   readonly fn: string
   readonly key1: string
   readonly key2: string
+  /** Text from the call to the next advisory mention (at most 16 lines). */
   readonly window: string
+  /** `window` with `/* … *\/` blocks and `//` line comments removed. */
+  readonly code: string
 }
 
 const ROOTS = ['packages', 'plugins', 'scripts']
@@ -61,13 +70,57 @@ export function listProductionSourceFiles(repoRoot: string): string[] {
   return files
 }
 
-/** Splits the argument list that starts right after `(` at top-level commas; null when unbalanced. */
-function topLevelArguments(text: string, start: number): string[] | null {
+const SCAN_LIMIT = 2000
+
+/** Number of top-level arguments counting every comma, quoted or not; null when the call does not close. */
+function naiveArity(text: string, start: number): number | null {
+  let depth = 1
+  let arity = 1
+  for (let i = start; i < text.length && i < start + SCAN_LIMIT; i += 1) {
+    const ch = text[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') {
+      depth -= 1
+      if (depth === 0) return arity
+    } else if (ch === ',' && depth === 1) arity += 1
+  }
+  return null
+}
+
+/**
+ * Top-level arguments with quoted text ('…', "…") kept intact and SQL comments (`/* … *\/`, `-- …`)
+ * dropped; null when the call does not close.
+ */
+function awareArguments(text: string, start: number): string[] | null {
   const args: string[] = []
   let depth = 1
   let current = ''
-  for (let i = start; i < text.length && i < start + 2000; i += 1) {
+  let quote: string | null = null
+  for (let i = start; i < text.length && i < start + SCAN_LIMIT; i += 1) {
     const ch = text[i]
+    const next = text[i + 1]
+    if (quote) {
+      current += ch
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2)
+      if (end < 0) return null
+      i = end + 1
+      continue
+    }
+    if (ch === '-' && next === '-') {
+      const end = text.indexOf('\n', i + 2)
+      if (end < 0) return null
+      i = end
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      current += ch
+      continue
+    }
     if (ch === '(') {
       depth += 1
       current += ch
@@ -88,21 +141,34 @@ function topLevelArguments(text: string, start: number): string[] | null {
   return null
 }
 
+/** Removes `/* … *\/` blocks and `//` line comments (a `//` preceded by `:` — a URL — is kept). */
+export function stripCodeComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\\])\/\/[^\n]*/g, '$1')
+}
+
 const normalize = (value: string): string => value.replace(/\s+/g, ' ').trim()
 
-export function scanTwoInt4AdvisorySites(repoRoot: string): { files: number; sites: AdvisoryTwoInt4SiteV1[]; unbalanced: string[] } {
+export function scanTwoInt4AdvisorySites(repoRoot: string): {
+  files: number
+  calls: number
+  sites: AdvisoryTwoInt4SiteV1[]
+  anomalies: string[]
+} {
   const files = listProductionSourceFiles(repoRoot)
   const sites: AdvisoryTwoInt4SiteV1[] = []
-  const unbalanced: string[] = []
+  const anomalies: string[] = []
+  let calls = 0
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8')
     const relative = path.relative(repoRoot, file).split(path.sep).join('/')
     for (const match of text.matchAll(ADVISORY_CALL)) {
+      calls += 1
       const start = (match.index ?? 0) + match[0].length
-      const args = topLevelArguments(text, start)
+      const naive = naiveArity(text, start)
+      const args = awareArguments(text, start)
       const line = text.slice(0, match.index).split('\n').length
-      if (args === null) {
-        unbalanced.push(`${relative}:${line}`)
+      if (naive === null || args === null || naive !== args.length || (args.length !== 1 && args.length !== 2)) {
+        anomalies.push(`${relative}:${line} (counting every comma: ${String(naive)}, skipping quotes and comments: ${String(args?.length ?? null)})`)
         continue
       }
       if (args.length !== 2) continue
@@ -117,17 +183,24 @@ export function scanTwoInt4AdvisorySites(repoRoot: string): { files: number; sit
         }
       }
       if (next && next.index < end) end = next.index
+      const window = text.slice(match.index, end)
       sites.push({
         file: relative,
         line,
         fn: match[0].replace(/\s*\($/, '').toLowerCase(),
         key1: normalize(args[0]),
         key2: normalize(args[1]),
-        window: text.slice(match.index, end),
+        window,
+        code: stripCodeComments(window),
       })
     }
   }
-  return { files: files.length, sites, unbalanced }
+  return { files: files.length, calls, sites, anomalies }
+}
+
+/** The text a census entry is matched against: comments removed, except for calls that live in comments. */
+export function censusHaystack(entry: Pick<AdvisoryTwoInt4CensusEntryV1, 'kind'>, site: AdvisoryTwoInt4SiteV1): string {
+  return entry.kind === 'doc-comment' ? site.window : site.code
 }
 
 export type AdvisoryTwoInt4CensusEntryV1 = Readonly<{

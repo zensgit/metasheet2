@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  SettlementCoordinationCredentialV1,
   commitSettlementCoordinationTransactionV1,
   planSettlementCoordinationV1,
   releaseSettlementCoordinationSessionLocksV1,
@@ -20,11 +21,12 @@ import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 const ORG = '0e4b1f8a-3c2d-4e5f-9a6b-7c8d9e0f1a2b'
 const HANDOVER = { isolation: 'SERIALIZABLE' as const, timeouts: { kind: 'none' as const }, entryLabel: 'unit.test' }
 
-type Reply = Array<Record<string, unknown>> | Error
+type Reply = Array<Record<string, unknown>> | Error | Readonly<{ rows: Array<Record<string, unknown>>; command: string | null }>
 
 /**
  * Records every query (text and whether values were passed) and answers from a script, so the
- * outcome mapping can be checked row by row without a database.
+ * outcome mapping can be checked row by row without a database. Like node-postgres, a reply carries
+ * the command tag; by default it is the statement's first keyword (`COMMIT` for COMMIT).
  */
 class ScriptedClient implements AttendanceW4TransactionClientV1 {
   readonly calls: Array<{ text: string; hasParams: boolean }> = []
@@ -32,13 +34,14 @@ class ScriptedClient implements AttendanceW4TransactionClientV1 {
 
   constructor(private readonly replies: Reply[]) {}
 
-  async query(sqlText: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> {
+  async query(sqlText: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; command: string | null }> {
     this.calls.push({ text: sqlText, hasParams: params !== undefined })
     this.onQuery?.(sqlText)
     const reply = this.replies.shift()
     if (reply === undefined) throw new Error(`unscripted query: ${sqlText}`)
     if (reply instanceof Error) throw reply
-    return { rows: reply }
+    if (Array.isArray(reply)) return { rows: reply, command: sqlText.trim().split(/\s+/)[0].toUpperCase() }
+    return { rows: [...reply.rows], command: reply.command }
   }
 }
 
@@ -228,5 +231,64 @@ describe('settlement coordination session-lock cleanup mapping', () => {
       reason: 'unlock-statement-failed',
       error,
     })
+  })
+})
+
+describe('settlement coordination transaction end — what COMMIT proves and who may end the transaction', () => {
+  const plan = planSettlementCoordinationV1(ORG, { needsClassZero: true })
+  const okRow = { x_k: true, x_c: true, u_k: true, u_c: true, an: 'ms2-coord:unit.test' }
+
+  async function handedOver(client: ScriptedClient): Promise<SettlementCoordinationCredentialV1> {
+    const outcome = await runSettlementCoordinationHandoverV1(client, plan, HANDOVER)
+    if (outcome.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(outcome)}`)
+    return outcome.credential
+  }
+
+  it.each([
+    ['ROLLBACK (the transaction had already failed)', 'ROLLBACK'],
+    ['no tag', null],
+    ['an unexpected tag', 'SELECT'],
+  ])('COMMIT answered with %s is uncertain, never committed', async (_label, command) => {
+    const client = new ScriptedClient([[], [okRow], { rows: [], command }])
+    const credential = await handedOver(client)
+    const outcome = await commitSettlementCoordinationTransactionV1(client, credential)
+    expect(outcome).toMatchObject({ kind: 'uncertain', reason: 'commit-not-committed' })
+    const error = (outcome as { error?: { code?: unknown; command?: unknown } }).error
+    expect(error?.code).toBe('ATTENDANCE_COORDINATION_COMMIT_NOT_COMMITTED')
+    expect(error?.command).toBe(command)
+    expect(verifySettlementCoordinationCredentialV1(client, credential, ORG, { needsClassZero: true })).toBe(false)
+  })
+
+  it.each([
+    ['COMMIT', commitSettlementCoordinationTransactionV1],
+    ['ROLLBACK', rollbackSettlementCoordinationTransactionV1],
+  ] as const)('%s through a connection other than the credential\'s throws and sends nothing', async (_label, end) => {
+    const owner = new ScriptedClient([[], [okRow]])
+    const stranger = new ScriptedClient([])
+    const credential = await handedOver(owner)
+    await expect(end(stranger, credential)).rejects.toMatchObject({ code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH' })
+    expect(stranger.calls).toEqual([])
+    // The owning transaction keeps its live credential, so its owner can still end it.
+    expect(verifySettlementCoordinationCredentialV1(owner, credential, ORG, { needsClassZero: true })).toBe(true)
+  })
+
+  it('a credential that already ended its transaction cannot end another', async () => {
+    const client = new ScriptedClient([[], [okRow], []])
+    const credential = await handedOver(client)
+    expect(await commitSettlementCoordinationTransactionV1(client, credential)).toEqual({ kind: 'committed' })
+    await expect(rollbackSettlementCoordinationTransactionV1(client, credential)).rejects.toMatchObject({
+      code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH',
+    })
+    expect(client.calls.map((call) => call.text).filter((text) => text === 'ROLLBACK')).toEqual([])
+  })
+
+  it('a forged object with the credential prototype is refused, not a TypeError', async () => {
+    const client = new ScriptedClient([])
+    const forged = Object.create(SettlementCoordinationCredentialV1.prototype) as SettlementCoordinationCredentialV1
+    expect(verifySettlementCoordinationCredentialV1(client, forged, ORG, { needsClassZero: false })).toBe(false)
+    await expect(commitSettlementCoordinationTransactionV1(client, forged)).rejects.toMatchObject({
+      code: 'ATTENDANCE_COORDINATION_CREDENTIAL_MISMATCH',
+    })
+    expect(client.calls).toEqual([])
   })
 })

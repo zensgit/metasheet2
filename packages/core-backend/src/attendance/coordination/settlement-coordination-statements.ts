@@ -14,8 +14,10 @@
  * every volatile call runs at most once and in data-dependency order. Neither statement reads
  * `pg_locks`.
  *
- * Integer literals are wrapped in parentheses and cast (`(k2)::int4`, `(c00)::bigint`) so that
- * the extreme values still type-check: a bare `-2147483648` parses as unary minus on a bigint.
+ * Integer literals are wrapped in parentheses and cast (`(k2)::int4`, `(c00)::bigint`). The cast is
+ * defensive: it pins the argument types that select the two-int4 or the single-bigint advisory
+ * function independently of how the parser types a bare literal (PostgreSQL itself folds a bare
+ * `-2147483648` back to int4).
  */
 import {
   W4_TRANSACTION_LOCK_TIMEOUT_MS,

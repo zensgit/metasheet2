@@ -61,7 +61,8 @@ describe('settlement coordination key', () => {
     expect(canonicalizeSettlementCoordinationOrgV1('legacy-org-42')).toEqual({ lexical: 'legacy-org-42', kind: 'legacy' })
     expect(canonicalizeSettlementCoordinationOrgV1('Default')).toEqual({ lexical: 'Default', kind: 'legacy' })
     expect(canonicalizeSettlementCoordinationOrgV1('部门-甲')).toEqual({ lexical: '部门-甲', kind: 'legacy' })
-    expect(canonicalizeSettlementCoordinationOrgV1('x'.repeat(256)).kind).toBe('legacy')
+    // No length cap: the org column is unbounded text.
+    expect(canonicalizeSettlementCoordinationOrgV1('x'.repeat(4096)).kind).toBe('legacy')
     const rejected: unknown[] = [
       '',
       ' legacy-org-42',
@@ -69,7 +70,6 @@ describe('settlement coordination key', () => {
       '\tlegacy',
       'legacy\n',
       'a\u0000b',
-      'x'.repeat(257),
       ` ${UUID_LOWER}`,
       null,
       undefined,

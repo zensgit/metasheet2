@@ -14,10 +14,11 @@
  *   - canonical orgs (RFC 4122 UUID syntax, or the exact sentinel `default`) go through the
  *     class-00 lexical parser, so an uppercase UUID yields the same key as its lowercase form and
  *     the dedicated key and the class-00 key always agree on which org they mean;
- *   - any other org is a legacy org and is used as-is, but only if it is non-empty, carries no
- *     NUL, has no leading or trailing whitespace, and is at most 256 characters. The request-row
+ *   - any other org is a legacy org and is used as-is (no case folding, as §2 specifies), but only
+ *     if it is non-empty, carries no NUL and has no leading or trailing whitespace. The request-row
  *     classifier already returns trimmed org values, so its output passes; a caller that hands in
- *     an untrimmed raw value fails loudly instead of deriving a second key for the same org.
+ *     an untrimmed raw value fails loudly instead of deriving a second key for the same org. There is
+ *     no length cap: `attendance_requests.org_id` is unbounded `text`.
  *
  * Nothing here talks to the database.
  */
@@ -28,7 +29,6 @@ import { parseCanonicalAttendanceRolloutOrgKeyV1 } from '../w4c0-identity'
 /** `0x4D533243` ("MS2C"). Reserved: no other caller may use this value as a two-int4 key1. */
 export const SETTLEMENT_COORDINATION_KEY1 = 0x4d533243
 export const SETTLEMENT_COORDINATION_KEY2_PREFIX = 'metasheet2:attendance:settlement-coordination:v1'
-export const SETTLEMENT_COORDINATION_LEGACY_ORG_MAX_LENGTH = 256
 
 export class AttendanceCoordinationKeyError extends Error {
   readonly code: string
@@ -66,12 +66,7 @@ export function canonicalizeSettlementCoordinationOrgV1(input: unknown): Settlem
   if (typeof input !== 'string') throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_ORG_INVALID')
   const canonical = isCanonicalOrgLexical(input)
   if (canonical !== null) return Object.freeze({ lexical: canonical, kind: 'canonical' as const })
-  if (
-    input.length < 1 ||
-    input.length > SETTLEMENT_COORDINATION_LEGACY_ORG_MAX_LENGTH ||
-    input.includes('\u0000') ||
-    input.trim() !== input
-  ) {
+  if (input.length < 1 || input.includes('\u0000') || input.trim() !== input) {
     throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_ORG_INVALID')
   }
   return Object.freeze({ lexical: input, kind: 'legacy' as const })
