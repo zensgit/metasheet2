@@ -309,6 +309,40 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     }
   })
 
+  it('an exclusive request queued before the handover cannot slip in between re-grant and session unlock', async () => {
+    const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: true })
+    const waiter = await pool.connect()
+    const waiterPid = await backendPid(waiter)
+    let waiting: Promise<unknown> | null = null
+    try {
+      await withClient(async (client) => {
+        expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+        // Queued behind our session-level shared hold.
+        waiting = waiter.query(`SELECT pg_advisory_lock(${K1}, ${plan.key.key2})`)
+        expect(await waitForQueuedAdvisory(observer, waiterPid)).toBe(true)
+        // S2 re-grants at transaction level first (a local re-grant, granted despite the queue) and
+        // only then drops the session hold, so the waiter must still be queued afterwards. Were the
+        // unlock first, the waiter would be granted in between and the re-grant would fail.
+        const handover = await runSettlementCoordinationHandoverV1(client, plan, {
+          isolation: 'SERIALIZABLE',
+          timeouts: { kind: 'none' },
+          entryLabel: 'test.queued',
+        })
+        if (handover.kind !== 'handed-over') throw new Error(`handover failed: ${JSON.stringify(handover)}`)
+        const queued = await advisoryLocksOf(observer, waiterPid)
+        expect(queued.some((row) => isDedicatedLock(row, plan.key.key2) && !row.granted)).toBe(true)
+        expect(await commitSettlementCoordinationTransactionV1(client, handover.credential)).toEqual({ kind: 'committed' })
+      })
+      await waiting
+      const granted = await advisoryLocksOf(observer, waiterPid)
+      expect(granted.some((row) => isDedicatedLock(row, plan.key.key2) && row.granted && row.mode === 'ExclusiveLock')).toBe(true)
+    } finally {
+      if (waiting) await (waiting as Promise<unknown>).catch(() => undefined)
+      await waiter.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`).catch(() => undefined)
+      waiter.release()
+    }
+  })
+
   it('the idle proof depends on the simple protocol: over the extended protocol it does not hold', async () => {
     const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: false })
     const sql = buildSettlementCoordinationS1Sql({ key2: plan.key.key2, classZeroKey: null })
