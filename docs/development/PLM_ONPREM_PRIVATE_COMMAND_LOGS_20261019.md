@@ -1,0 +1,13 @@
+# Private on-prem command logging
+
+Status: source and focused shell behavior verified; document-head CI and updated installed delivery integration remain pending. Draft only, no merge/deploy/production/customer actions.
+
+The actual PM2 installation exercise exposed `ADMIN_PASSWORD` and `AUTH_TOKEN` in the deployment helper's command echo. Source `02b2151aa19559996dfbc9f9bf53f5c47e489173` changes only that echo: log the executable, not its argument vector. The original `"$@"` call remains unchanged, preserving literal credential values and the command's status. Existing child-step labels still identify the running phase. This avoids an expanding secret-key filter or another logging abstraction.
+
+Three independent cases execute the actual deployment shell with real curl/owned HTTP responses and controlled companion scripts: successful deployment, admin-command exit13, and health-command exit9. Each uses fresh synthetic password/token sentinels, captures stdout plus stderr, checks neither appears in output, and independently verifies exact values reached the intended child. The failed-admin case additionally proves no health command ran. Child statuses and command observability remain required. The unchanged parent script fails all three privacy cases; no actual credential values are included in evidence.
+
+Commands: Node20 `node --test scripts/ops/multitable-onprem-private-command-logs.test.mjs`, then the same command with `scripts/ops/multitable-onprem-startup-readiness.test.mjs` included. **Before:0/3 passed. After:8/8 passed, zero skips**, 7070.883542ms including all five unchanged readiness cases. Shellcheck, actionlint and diff checks passed. The existing relevant-path CI workflow now runs both files with read-only permissions; no deployment or additional environment flag is introduced.
+
+Script SHA-256: `2cd32b9bf2d9dfc609e98d891fb62db4ba43e83b243ea77b3d245adfdc6c37fe`. Compact proof: `artifacts/plm-onprem-private-command-logs-20261019/verification.json`. Raw fixture traces remain local/private. Earlier actual installed PM2/browser69 acceptance used the72f readiness provider and is not silently relabeled as this source. A new qualified delivery must incorporate the reviewed provider update and check its actual installer output. The original Meta519 archive, source-dependent verifiers, frozen ledger and Meta#6443 HOLD remain preserved.
+
+Coverage is this helper's command echo and its existing three invocation paths. Arbitrary child logs, OS process arguments and other operator entry points are not certified by these cases. Existing authentication, manager/product checks and PLM authority remain unchanged. The full window objective remains open.

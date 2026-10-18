@@ -1,0 +1,42 @@
+{
+  "status": "source-and-controlled-shell-verified-exact-ci-pending",
+  "source_commit": "02b2151aa19559996dfbc9f9bf53f5c47e489173",
+  "base": "76c52a90f3c9dd963fee6e9b187e83adafe8e166",
+  "script_sha256": "2cd32b9bf2d9dfc609e98d891fb62db4ba43e83b243ea77b3d245adfdc6c37fe",
+  "change": "run helper logs executable only; original argument vector and child exit status unchanged",
+  "counterexamples": {
+    "tests": 3,
+    "pass": 0,
+    "fail": 3,
+    "skip": 0,
+    "duration_ms": 2711.866958,
+    "scope": "actual previous deployment shell, real owned HTTP token response, synthetic random credentials; stderr and stdout checked together"
+  },
+  "validation": {
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skip": 0,
+    "duration_ms": 7070.883542,
+    "private_cases": [
+      "success",
+      "admin-exit13",
+      "health-exit9"
+    ],
+    "readiness_regression_cases": 5,
+    "exact_password_reached_admin": true,
+    "exact_token_reached_health": true,
+    "combined_operator_output_contains_neither": true,
+    "child_status_preserved": true,
+    "command_execution_still_observable": true,
+    "shellcheck": "passed",
+    "actionlint": "passed",
+    "diff_check": "passed"
+  },
+  "ci": "existing relevant-path readiness workflow extended with the three private-log cases; no new credentials, write permissions or deployment",
+  "limits": [
+    "Only this helper command-echo output is covered; arbitrary child logs/process argv/other entry points are not certified",
+    "Actual installed PM2/browser69 proof uses earlier72f readiness script, not this new logging source; new delivery integration remains necessary",
+    "No archive/frozen-ledger/HOLD/migration/production/customer changes"
+  ]
+}
