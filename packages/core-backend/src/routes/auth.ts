@@ -34,6 +34,8 @@ import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
+import { isManagedCompanionToken, revokePresentedManagedSession } from '../auth/plm-managed-session'
+import { isManagedCompanionPurpose } from '../services/plm-managed-companion'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { isElearningEnabled } from '../elearning/feature-flags'
@@ -1055,6 +1057,15 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
     const authenticated = await requireAuthenticatedUser(req, res)
     if (!authenticated) return
 
+    const presented = authService.readTokenPayload(authenticated.token)
+    if (isManagedCompanionPurpose(presented?.purpose)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Managed sessions cannot be reissued',
+        code: 'MANAGED_SESSION_REISSUE_REJECTED',
+      })
+    }
+
     if (!requiresPasswordChange(authenticated.user)) {
       return res.status(403).json({
         success: false,
@@ -1178,6 +1189,22 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
       })
     }
 
+    if (isManagedCompanionToken(token)) {
+      const revoked = await revokePresentedManagedSession(token)
+      if (!revoked) {
+        return res.status(401).json({ success: false, error: 'Invalid token' })
+      }
+      return res.json({
+        success: true,
+        data: {
+          userId: revoked.userId,
+          sessionId: revoked.sessionId,
+          revokedAfter: revoked.revokedAt,
+          scope: 'current-managed-session',
+        },
+      })
+    }
+
     const user = await authService.verifyToken(token)
     if (!user) {
       return res.status(401).json({
@@ -1240,6 +1267,14 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     const authResult = await requireAuthenticatedUser(req, res)
     if (!authResult) return
     const { token, user } = authResult
+    const presented = authService.readTokenPayload(token)
+    if (isManagedCompanionPurpose(presented?.purpose)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Managed sessions cannot be reissued',
+        code: 'MANAGED_SESSION_REISSUE_REJECTED',
+      })
+    }
     const body = req.body
     if (!body || typeof body !== 'object' || Array.isArray(body)
       || Object.keys(body).length !== 1 || typeof body.orgId !== 'string' || !body.orgId.trim()) {

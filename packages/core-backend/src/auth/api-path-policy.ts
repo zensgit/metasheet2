@@ -154,6 +154,13 @@ export const GLOBAL_GATE_EXCEPTIONS: readonly GateException[] = [
       'router owns the whole subtree and no individual path under it is separately reachable.',
   },
   {
+    path: '/api/plm/managed-login/callback',
+    kind: 'exact',
+    reason:
+      'Native managed-login browser return. Authenticated by the one-use HttpOnly intent cookie and PKCE, ' +
+      'not the SPA session JWT. Exact: start, unlink, and retry stay behind the session gate. POST is not a route.',
+  },
+  {
     path: '/api/plm-embed',
     kind: 'prefix',
     reason:

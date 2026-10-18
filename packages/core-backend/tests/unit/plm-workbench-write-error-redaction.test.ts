@@ -40,9 +40,10 @@ const dsMocks = vi.hoisted(() => ({
   assertAccess: vi.fn(),
 }))
 const dispatchMocks = vi.hoisted(() => ({ dispatchOperation: vi.fn() }))
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../../src/db/db', () => ({ db: {} }))
-vi.mock('../../src/db/pg', () => ({ pool: {}, query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     req.user = { id: 'owner-1', tenantId: 'header-tenant-not-authority', role: 'admin' } as never
@@ -88,6 +89,11 @@ vi.mock('../../src/routes/data-sources', () => ({
   }),
 }))
 
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
 import plmWorkbenchRouter, {
   PLM_BOM_WRITEBACK_FAILED_CODE,
   PLM_BOM_WRITEBACK_FAILED_MESSAGE,
@@ -146,6 +152,7 @@ function expectLoggedOriginalError(errorLog: ReturnType<typeof vi.spyOn>): void 
 }
 
 const pinned = usePinnedServer()
+const classificationCalls: DurableUnboundCall[] = []
 
 describe('plm-workbench write routes redact the provider error text (values-free)', () => {
   const app = express()
@@ -165,9 +172,11 @@ describe('plm-workbench write routes redact the provider error text (values-free
     pinned.setApp(app)
     // Record (and silence) server-side error logs: the original error must still land HERE.
     errorLog = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
   })
 
   afterEach(() => {
+    finishDurableUnboundClassification(classificationCalls, 'ds-1')
     vi.restoreAllMocks()
   })
 

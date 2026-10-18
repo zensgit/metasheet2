@@ -16,6 +16,19 @@
       <p class="plm-bom-workspace__source" data-testid="plm-bom-review-workspace-source">
         数据源 {{ readySource }}
       </p>
+      <p
+        v-if="managedHint"
+        class="plm-bom-workspace__hint"
+        data-testid="plm-managed-ready"
+      >
+        {{ managedHint }}
+      </p>
+      <div class="plm-bom-workspace__managed" data-testid="plm-managed-companion">
+        <button type="button" data-testid="plm-managed-start" @click="startManaged">用元图账号读取</button>
+        <button type="button" data-testid="plm-managed-status-button" @click="loadManagedStatus">托管状态</button>
+        <button type="button" data-testid="plm-managed-unlink" @click="unlinkManaged">解除托管</button>
+        <p v-if="managedMessage" data-testid="plm-managed-status">{{ managedMessage }}</p>
+      </div>
       <PlmBomReviewPanel
         :key="panelKey"
         :data-source-id="readySource"
@@ -28,7 +41,14 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, type LocationQueryValue } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryValue } from 'vue-router'
+import {
+  PlmManagedCompanionError,
+  readManagedStatus,
+  followManagedNavigation,
+  startManagedLogin,
+  unlinkManagedSource,
+} from '../services/plm/plmManagedCompanion'
 import { onAuthSessionSwitch, readAuthSessionSignature } from '../composables/authPrincipal'
 import {
   getPlmDataSourceCapabilities,
@@ -51,7 +71,9 @@ const HINTS: Record<string, string> = {
 }
 
 const route = useRoute()
+const router = useRouter()
 const ecoIntentEnabled = ref(false)
+const managedMessage = ref('')
 let ticket = 0
 let sessionSignature = readAuthSessionSignature()
 
@@ -88,6 +110,66 @@ const blockReason = computed(() => {
 })
 const blockMessage = computed(() => HINTS[blockReason.value] ?? '')
 const panelKey = computed(() => JSON.stringify([readySource.value, readyPart.value ?? null]))
+const managedHint = computed(() => {
+  const value = route.query.managed
+  if (value === 'ready') return '元图读取会话已建立。授权仍只属于当前数据源负责人。'
+  if (value === 'refused') return '元图读取会话没有建立。'
+  return ''
+})
+
+function stripCallbackQuery(): void {
+  const query = route.query
+  if (typeof query.code === 'undefined' && typeof query.state === 'undefined') return
+  const next: Record<string, LocationQueryValue | LocationQueryValue[]> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (key === 'code' || key === 'state' || typeof value === 'undefined') continue
+    next[key] = value
+  }
+  void router.replace({ path: route.path, query: next })
+}
+
+watch(() => [route.query.code, route.query.state] as const, stripCallbackQuery, { immediate: true })
+onMounted(stripCallbackQuery)
+
+async function startManaged(): Promise<void> {
+  managedMessage.value = ''
+  if (!readySource.value || !readyPart.value) {
+    managedMessage.value = '需要先确定数据源和 Part。'
+    return
+  }
+  try {
+    const result = await startManagedLogin(readySource.value, readyPart.value)
+    followManagedNavigation(result.navigationUrl)
+  } catch (error) {
+    managedMessage.value = error instanceof PlmManagedCompanionError ? error.message : '托管登录未能开始'
+  }
+}
+
+async function loadManagedStatus(): Promise<void> {
+  managedMessage.value = ''
+  if (!readySource.value) return
+  try {
+    const status = await readManagedStatus(readySource.value)
+    managedMessage.value = status.pendingRevoke
+      ? '解除托管仍在等待元图确认。'
+      : status.linked
+        ? `托管关系第 ${status.generation ?? ''} 代有效。`
+        : '当前没有有效托管关系。'
+  } catch (error) {
+    managedMessage.value = error instanceof PlmManagedCompanionError ? error.message : '托管状态无法读取'
+  }
+}
+
+async function unlinkManaged(): Promise<void> {
+  managedMessage.value = ''
+  if (!readySource.value) return
+  try {
+    const result = await unlinkManagedSource(readySource.value)
+    managedMessage.value = result.state === 'acked' ? '托管关系已解除。' : '解除托管已在本地生效，仍在等待元图确认。'
+  } catch (error) {
+    managedMessage.value = error instanceof PlmManagedCompanionError ? error.message : '解除托管尚未完成'
+  }
+}
 
 function stillCurrent(source: string, ownTicket: number, ownSession: string): boolean {
   return ownTicket === ticket && readySource.value === source && ownSession === readAuthSessionSignature()

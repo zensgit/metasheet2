@@ -23,7 +23,13 @@ import { Optional } from '@wendellhu/redi'
 import { createHash } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
-import type { QueryResult, DataSourceConfig } from './BaseAdapter'
+import type { ColumnInfo, DataSourceConfig, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import {
+  bindingFingerprintMatches,
+  classifyManagedSource,
+  ManagedCompanionRefusal,
+  noteSharedTransportCall,
+} from '../services/plm-managed-companion'
 
 /**
  * #5648 F01 (adjacent): scrub URL userinfo (`scheme://user:pass@host`) before a base URL reaches a
@@ -930,7 +936,7 @@ function isBomMultitableLine(value: unknown): value is BomMultitableLine {
   );
 }
 
-function isBomMultitableContext(value: unknown): value is BomMultitableContext {
+export function isBomMultitableContext(value: unknown): value is BomMultitableContext {
   const c = value as Record<string, unknown> | null;
   if (!c || typeof c !== 'object') return false;
   if (!isBomMultitablePart(c.part)) return false;
@@ -1142,7 +1148,87 @@ export class PLMAdapter extends HTTPAdapter {
     return new Set(values).size === 1 ? values[0] as string : undefined
   }
 
+  private async admitLegacySharedTransport(path: string): Promise<'legacy' | 'managed-static'> {
+    const sourceId = this.config?.id
+    if (!sourceId) {
+      noteSharedTransportCall(path)
+      return 'legacy'
+    }
+    const classified = await classifyManagedSource(sourceId)
+    if (classified.kind === 'unbound') {
+      noteSharedTransportCall(path)
+      return 'legacy'
+    }
+    if (path === 'PLMAdapter.getIntegrationCapabilities' && classified.kind === 'bound' && bindingFingerprintMatches(classified.row)) {
+      return 'managed-static'
+    }
+    const code = classified.kind === 'schema-missing'
+      ? 'PLM_MANAGED_SCHEMA_MISSING'
+      : classified.kind === 'unavailable'
+        ? 'PLM_MANAGED_BINDING_UNAVAILABLE'
+        : 'PLM_MANAGED_SHARED_TRANSPORT_REFUSED'
+    throw new ManagedCompanionRefusal(403, code)
+  }
+
+  async select<T = unknown>(endpoint: string, options?: Parameters<HTTPAdapter['select']>[1]): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.select')
+    return super.select<T>(endpoint, options)
+  }
+
+  async insert<T = unknown>(
+    endpoint: string,
+    data: Record<string, unknown> | Record<string, unknown>[],
+  ): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.insert')
+    return super.insert<T>(endpoint, data)
+  }
+
+  async update<T = unknown>(
+    endpoint: string,
+    data: Record<string, unknown>,
+    where: Record<string, unknown>,
+  ): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.update')
+    return super.update<T>(endpoint, data, where)
+  }
+
+  async delete<T = unknown>(endpoint: string, where: Record<string, unknown>): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.delete')
+    return super.delete<T>(endpoint, where)
+  }
+
+  async download(endpoint: string, params?: Record<string, unknown>): Promise<Buffer> {
+    await this.admitLegacySharedTransport('PLMAdapter.download')
+    return super.download(endpoint, params)
+  }
+
+  async tableExists(table: string, schema?: string): Promise<boolean> {
+    await this.admitLegacySharedTransport('PLMAdapter.tableExists')
+    return super.tableExists(table, schema)
+  }
+
+  async testConnection(): Promise<boolean> {
+    await this.admitLegacySharedTransport('PLMAdapter.testConnection')
+    return super.testConnection()
+  }
+
+  async getSchema(schema?: string): Promise<SchemaInfo> {
+    await this.admitLegacySharedTransport('PLMAdapter.getSchema')
+    return super.getSchema(schema)
+  }
+
+  async getTableInfo(table: string, schema?: string): Promise<TableInfo> {
+    await this.admitLegacySharedTransport('PLMAdapter.getTableInfo')
+    return super.getTableInfo(table, schema)
+  }
+
+  async getColumns(table: string, schema?: string): Promise<ColumnInfo[]> {
+    await this.admitLegacySharedTransport('PLMAdapter.getColumns')
+    return super.getColumns(table, schema)
+  }
+
   async connect(): Promise<void> {
+    await this.admitLegacySharedTransport('PLMAdapter.connect')
     const envBaseUrl = process.env.PLM_BASE_URL || process.env.PLM_URL
     const envToken = process.env.PLM_API_TOKEN || process.env.PLM_AUTH_TOKEN || process.env.PLM_TOKEN
     const envApiKey = process.env.PLM_API_KEY || process.env.PLM_KEY
@@ -1495,6 +1581,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async healthCheck(): Promise<boolean> {
+    await this.admitLegacySharedTransport('PLMAdapter.healthCheck')
     if (this.mockMode) return true;
     try {
       if (this.apiMode === 'yuantus') {
@@ -1515,7 +1602,8 @@ export class PLMAdapter extends HTTPAdapter {
         return status === 'ok' || status === 'healthy' || status === 'UP'
       }
       return false
-    } catch (_err) {
+    } catch (err) {
+      if (err instanceof ManagedCompanionRefusal) throw err
       return this.testConnection()
     }
   }
@@ -1534,7 +1622,32 @@ export class PLMAdapter extends HTTPAdapter {
    * legacy/non-yuantus PLM -> `unsupported-mode`; a PLM without the endpoint (404/error)
    * -> `unavailable`. The consumer's safe default for both is to HIDE the entries.
    */
+  async query<T = unknown>(endpoint: string, params?: unknown[]): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.query')
+    return super.query(endpoint, params)
+  }
+
   async getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult> {
+    const admission = await this.admitLegacySharedTransport('PLMAdapter.getIntegrationCapabilities')
+    if (admission === 'managed-static') {
+      return {
+        available: true,
+        manifest: {
+          schema_version: 'v1',
+          provider: 'yuantus-plm',
+          advisory: true,
+          features: {
+            bom_multitable: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['bom_review'],
+            },
+          },
+        },
+      }
+    }
     if (this.cachedIntegrationCapabilities) {
       return this.cachedIntegrationCapabilities;
     }
@@ -1628,6 +1741,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getProducts(options?: PLMQueryOptions): Promise<QueryResult<PLMProduct>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getProducts')
     if (this.mockMode) {
       return this.getMockProducts(options);
     }
@@ -2217,6 +2331,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getProductById(id: string, options?: { itemType?: string }): Promise<PLMProduct | null> {
+    await this.admitLegacySharedTransport('PLMAdapter.getProductById')
     if (this.mockMode) {
       const products = this.getMockProducts().data;
       return products.find(p => p.id === id) || null;
@@ -2278,6 +2393,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getItemMetadata(itemType: string): Promise<QueryResult<PLMItemMetadata>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getItemMetadata')
     if (this.mockMode) {
       return {
         data: [{
@@ -2332,6 +2448,7 @@ export class PLMAdapter extends HTTPAdapter {
     productId: string,
     options?: DocumentQueryOptions
   ): Promise<QueryResult<PLMDocument>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getProductDocuments')
     if (this.mockMode) {
       const mockDocs: PLMDocument[] = [
         {
@@ -2425,6 +2542,7 @@ export class PLMAdapter extends HTTPAdapter {
     itemId: string,
     options?: ReleaseReadinessQueryOptions
   ): Promise<QueryResult<ReleaseReadinessResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getReleaseReadiness')
     if (this.mockMode) {
       const rulesetId = options?.rulesetId || 'readiness'
       return {
@@ -2639,6 +2757,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   private async requestBomSource(partId: string, suffix: string, sourceConfig: DataSourceConfig): Promise<unknown> {
+    await this.admitLegacySharedTransport('PLMAdapter.requestBomSource')
     const fail = (status = 502): Error => Object.assign(new Error('BOM share source unavailable'), { response: { status } })
     try {
       const connection = sourceConfig.connection, credentials = sourceConfig.credentials
@@ -2678,6 +2797,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getProductBOM(productId: string, options?: { depth?: number; effectiveAt?: string }): Promise<QueryResult<BOMItem>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getProductBOM')
     if (this.mockMode) {
       return {
         data: [
@@ -2715,6 +2835,7 @@ export class PLMAdapter extends HTTPAdapter {
    * Read-only: no write-back. A legacy / non-yuantus PLM has no such surface -> unentitled.
    */
   async getBomMultitableContext(partId: string): Promise<BomMultitableContextResult> {
+    await this.admitLegacySharedTransport('PLMAdapter.getBomMultitableContext')
     if (this.mockMode) {
       const now = new Date().toISOString()
       return {
@@ -2801,6 +2922,7 @@ export class PLMAdapter extends HTTPAdapter {
     target: DiscussionTarget,
     options?: DiscussionListOptions
   ): Promise<QueryResult<DiscussionThreadListResult>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getDiscussions')
     if (this.mockMode) {
       return {
         data: [{ threads: [], next_cursor: null }],
@@ -2833,6 +2955,7 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     options?: DiscussionThreadOptions
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getDiscussionThread')
     if (this.mockMode) {
       return {
         data: [{
@@ -2870,13 +2993,14 @@ export class PLMAdapter extends HTTPAdapter {
    * unconditionally overwrites `Authorization` with the adapter's own service token, which
    * would silently replace the caller-supplied discussion-session bearer token with the wrong
    * credential. `headers.Authorization`, when present, is therefore set by the CALLER on each
-   * invocation -- never cached on `this`. Never throws: network failures and non-2xx responses
-   * alike come back as `QueryResult.error`, mirroring the envelope the read methods return.
+   * invocation -- never cached on `this`. Network failures and non-2xx responses come back as
+   * `QueryResult.error`. A managed binding refuses before this fetch runs.
    */
   private async yuantusDiscussionFetch<T>(
     path: string,
     init: { method: string; headers?: Record<string, string>; body?: unknown },
   ): Promise<QueryResult<T>> {
+    await this.admitLegacySharedTransport('PLMAdapter.yuantusDiscussionFetch')
     const baseUrl = this.config.connection.baseURL || this.config.connection.url
     if (!baseUrl) {
       return { data: [], error: new Error('PLM base URL is not configured') }
@@ -2942,6 +3066,7 @@ export class PLMAdapter extends HTTPAdapter {
    * MUST be passed explicitly to every write method below; this adapter never stores it.
    */
   async exchangeDiscussionSession(embedToken: string): Promise<QueryResult<DiscussionSessionCredential>> {
+    await this.admitLegacySharedTransport('PLMAdapter.exchangeDiscussionSession')
     if (this.mockMode) {
       return {
         data: [{ access_token: 'mock-discussion-session-token', token_type: 'bearer', expires_in: 300, aud: 'discussion' }],
@@ -2969,6 +3094,7 @@ export class PLMAdapter extends HTTPAdapter {
    * below (the provider rejects it on any write route). This adapter never stores it.
    */
   async exchangeDiscussionReadSession(embedToken: string): Promise<QueryResult<DiscussionSessionCredential>> {
+    await this.admitLegacySharedTransport('PLMAdapter.exchangeDiscussionReadSession')
     if (this.mockMode) {
       return {
         data: [{ access_token: 'mock-discussion-read-session-token', token_type: 'bearer', expires_in: 300, aud: 'discussion' }],
@@ -3020,6 +3146,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   private async visualPreviewJson(body: Record<string, unknown>): Promise<QueryResult<Record<string, unknown>>> {
+    await this.admitLegacySharedTransport('PLMAdapter.visualPreviewJson')
     const baseUrl = this.config.connection.baseURL || this.config.connection.url
     if (!baseUrl) return { data: [], error: new Error('Visual preview unavailable') }
     try {
@@ -3040,6 +3167,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async listVisualPreviewFiles(embedToken: string): Promise<QueryResult<VisualPreviewFileList>> {
+    await this.admitLegacySharedTransport('PLMAdapter.listVisualPreviewFiles')
     try { this.verifyVisualEmbed(embedToken) } catch { return { data: [], error: new Error('Visual preview unavailable') } }
     const result = await this.visualPreviewJson({ embed_token: embedToken, action: 'list' })
     if (result.error) return { data: [], error: result.error }
@@ -3047,6 +3175,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getVisualPreviewImage(embedToken: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage> {
+    await this.admitLegacySharedTransport('PLMAdapter.getVisualPreviewImage')
     try {
       const embed = this.verifyVisualEmbed(embedToken)
       if (embed.embed_origin !== origin) return { render: 'unavailable' }
@@ -3106,6 +3235,7 @@ export class PLMAdapter extends HTTPAdapter {
     readToken: string,
     target: { targetType: string; targetId: string },
   ): Promise<QueryResult<DiscussionThreadListResult>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getDiscussionsWithReadToken')
     if (this.mockMode) {
       return {
         data: [{ threads: [], next_cursor: null }],
@@ -3139,6 +3269,7 @@ export class PLMAdapter extends HTTPAdapter {
     readToken: string,
     threadId: string,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getDiscussionThreadWithReadToken')
     if (this.mockMode) {
       return {
         data: [{
@@ -3179,6 +3310,7 @@ export class PLMAdapter extends HTTPAdapter {
     sessionToken: string,
     req: CreateThreadRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.createDiscussionThread')
     if (hasVisualMarkupInput(req as unknown as Record<string, unknown>)
       && (!this.isVisualReviewEnabled() || !validVisualMarkupBody(req as unknown as Record<string, unknown>, true))) {
       return { data: [], error: Object.assign(new Error('Invalid visual markup'), { response: { status: 422 } }) }
@@ -3223,6 +3355,7 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     req: AddCommentRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.addDiscussionComment')
     if (hasVisualMarkupInput(req as unknown as Record<string, unknown>)
       && (!this.isVisualReviewEnabled() || !validVisualMarkupBody(req as unknown as Record<string, unknown>, false))) {
       return { data: [], error: Object.assign(new Error('Invalid visual markup'), { response: { status: 422 } }) }
@@ -3279,6 +3412,7 @@ export class PLMAdapter extends HTTPAdapter {
     commentId: string,
     req: EditCommentRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.editDiscussionComment')
     if (this.mockMode) {
       return {
         data: [{
@@ -3331,6 +3465,7 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     commentId: string,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.deleteDiscussionComment')
     if (this.mockMode) {
       return {
         data: [{
@@ -3382,6 +3517,7 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     req?: ThreadTransitionRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.resolveDiscussionThread')
     if (this.mockMode) {
       return {
         data: [{
@@ -3422,6 +3558,7 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     req?: ThreadTransitionRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    await this.admitLegacySharedTransport('PLMAdapter.reopenDiscussionThread')
     if (this.mockMode) {
       return {
         data: [{
@@ -3454,6 +3591,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getApprovals')
     if (this.mockMode) {
       return {
         data: [],
@@ -3517,6 +3655,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getApprovalById')
     if (this.mockMode) {
       return {
         data: [],
@@ -3555,6 +3694,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getApprovalHistory')
     if (this.mockMode) {
       return {
         data: [
@@ -3590,6 +3730,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async approveApproval(approvalId: string, version: number, comment?: string): Promise<QueryResult<Record<string, unknown>>> {
+    await this.admitLegacySharedTransport('PLMAdapter.approveApproval')
     if (this.mockMode) {
       return {
         data: [{
@@ -3612,6 +3753,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async rejectApproval(approvalId: string, version: number, comment: string): Promise<QueryResult<Record<string, unknown>>> {
+    await this.admitLegacySharedTransport('PLMAdapter.rejectApproval')
     if (this.mockMode) {
       return {
         data: [{
@@ -3636,6 +3778,7 @@ export class PLMAdapter extends HTTPAdapter {
     itemId: string,
     options?: { recursive?: boolean; maxLevels?: number }
   ): Promise<QueryResult<WhereUsedResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getWhereUsed')
     if (this.mockMode) {
       return {
         data: [{
@@ -3662,6 +3805,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getBomCompare(params: BOMCompareParams): Promise<QueryResult<BOMCompareResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getBomCompare')
     if (this.mockMode) {
       return {
         data: [{
@@ -3708,6 +3852,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getBomCompareSchema(): Promise<QueryResult<BOMCompareSchemaResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getBomCompareSchema')
     if (this.mockMode) {
       return {
         data: [{
@@ -3760,6 +3905,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getBomSubstitutes(bomLineId: string): Promise<QueryResult<BOMSubstitutesResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getBomSubstitutes')
     if (this.mockMode) {
       return {
         data: [{
@@ -3782,6 +3928,7 @@ export class PLMAdapter extends HTTPAdapter {
     substituteItemId: string,
     properties?: Record<string, unknown>
   ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.addBomSubstitute')
     if (this.mockMode) {
       return {
         data: [{
@@ -3809,6 +3956,7 @@ export class PLMAdapter extends HTTPAdapter {
     bomLineId: string,
     substituteId: string
   ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.removeBomSubstitute')
     if (this.mockMode) {
       return {
         data: [{
@@ -3827,6 +3975,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadProperties(fileId: string): Promise<QueryResult<CadPropertiesResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadProperties')
     if (this.mockMode) {
       return {
         data: [{
@@ -3850,6 +3999,7 @@ export class PLMAdapter extends HTTPAdapter {
     fileId: string,
     payload: Record<string, unknown>
   ): Promise<QueryResult<CadPropertiesResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.updateCadProperties')
     if (this.mockMode) {
       const properties = (payload.properties && typeof payload.properties === 'object')
         ? payload.properties as Record<string, unknown>
@@ -3876,6 +4026,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadViewState(fileId: string): Promise<QueryResult<CadViewStateResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadViewState')
     if (this.mockMode) {
       return {
         data: [{
@@ -3900,6 +4051,7 @@ export class PLMAdapter extends HTTPAdapter {
     fileId: string,
     payload: Record<string, unknown>
   ): Promise<QueryResult<CadViewStateResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.updateCadViewState')
     if (this.mockMode) {
       const hidden = Array.isArray(payload.hidden_entity_ids) ? payload.hidden_entity_ids as number[] : []
       const notes = Array.isArray(payload.notes) ? payload.notes as CadEntityNote[] : []
@@ -3926,6 +4078,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadReview(fileId: string): Promise<QueryResult<CadReviewResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadReview')
     if (this.mockMode) {
       return {
         data: [{
@@ -3949,6 +4102,7 @@ export class PLMAdapter extends HTTPAdapter {
     fileId: string,
     payload: Record<string, unknown>
   ): Promise<QueryResult<CadReviewResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.updateCadReview')
     if (this.mockMode) {
       return {
         data: [{
@@ -3969,6 +4123,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadHistory(fileId: string): Promise<QueryResult<CadChangeLogResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadHistory')
     if (this.mockMode) {
       return {
         data: [{
@@ -3988,6 +4143,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadDiff(fileId: string, otherFileId: string): Promise<QueryResult<CadDiffResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadDiff')
     if (this.mockMode) {
       return {
         data: [{
@@ -4011,6 +4167,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getCadMeshStats(fileId: string): Promise<QueryResult<CadMeshStatsResponse>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getCadMeshStats')
     if (this.mockMode) {
       return {
         data: [{
@@ -4092,6 +4249,7 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   async getMyPendingApprovals(userId: string, options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {
+    await this.admitLegacySharedTransport('PLMAdapter.getMyPendingApprovals')
     const status = options?.status ?? 'pending'
     if (this.mockMode) {
       return {

@@ -419,6 +419,7 @@ import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedVisualPreviewRouter from './routes/plm-embed-visual-preview'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
+import plmManagedCompanionRouter from './routes/plm-managed-companion'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { invalidateSheetDisplayNameCaches, univerMetaRouter } from './routes/univer-meta'
@@ -2030,6 +2031,7 @@ export class MetaSheetServer {
     if (plmRecordIngressRouter) this.app.use('/api/multitable', plmRecordIngressRouter)
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
+      this.app.use('/api/plm/managed-login', plmManagedCompanionRouter)
       this.app.use(plmWorkbenchRouter)
       if (process.env.PLM_BOM_REVIEW_ENABLED === 'true') {
         this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({

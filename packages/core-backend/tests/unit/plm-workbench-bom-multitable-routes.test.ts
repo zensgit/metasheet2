@@ -1,7 +1,7 @@
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PlmPersonalBomWriteError } from '../../src/services/plm-personal-bom-write-wire'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -19,9 +19,10 @@ const dsMocks = vi.hoisted(() => ({
 const dispatchMocks = vi.hoisted(() => ({
   dispatchOperation: vi.fn(),
 }))
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../../src/db/db', () => ({ db: {} }))
-vi.mock('../../src/db/pg', () => ({ pool: {}, query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     req.user = { id: 'owner-1', tenantId: 'header-tenant-not-authority', role: 'admin' } as never
@@ -68,6 +69,21 @@ vi.mock('../../src/routes/data-sources', () => ({
 }))
 
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
+
+beforeEach(() => {
+  beginDurableUnboundClassification(pgMocks.query, classificationCalls)
+})
+
+afterEach(() => {
+  finishDurableUnboundClassification(classificationCalls, 'ds-1')
+})
 
 const CONTEXT = {
   part: { part_id: 'P1', item_number: 'P-001', name: 'Assembly', state: 'Released', generation: 3 },

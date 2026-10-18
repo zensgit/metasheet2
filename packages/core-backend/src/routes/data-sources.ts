@@ -35,6 +35,7 @@ import {
   K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+import { assertLegacySharedTransportAllowed, noteSharedTransportCall } from '../services/plm-managed-companion'
 
 const logger = new Logger('DataSourcesRouter')
 
@@ -1489,6 +1490,8 @@ export function dataSourcesRouter(): Router {
       // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
+      await assertLegacySharedTransportAllowed(req.params.id)
+      noteSharedTransportCall('data-sources.schema')
 
       if (!adapter.isConnected()) {
         await manager.connectDataSource(req.params.id)
@@ -1543,6 +1546,8 @@ export function dataSourcesRouter(): Router {
       // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
+      await assertLegacySharedTransportAllowed(req.params.id)
+      noteSharedTransportCall('data-sources.tables')
 
       if (!adapter.isConnected()) {
         await manager.connectDataSource(req.params.id)

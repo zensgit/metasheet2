@@ -8,11 +8,24 @@ import request from 'supertest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+
+vi.hoisted(() => {
+  const visual = process.env.PLM_VISUAL_SOURCE_TEST_DATABASE_URL?.trim()
+  const current = process.env.DATABASE_URL?.trim()
+  if (visual && current && visual !== current) {
+    throw new Error('Visual source fixture requires DATABASE_URL to match PLM_VISUAL_SOURCE_TEST_DATABASE_URL')
+  }
+  if (visual && !current) process.env.DATABASE_URL = visual
+})
+
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import { up as sourceTable } from '../../src/db/migrations/20251206000001_create_data_sources_table'
 import { up as sourceScope } from '../../src/db/migrations/zzzz20260902120000_add_integration_connection_binding'
+import { up as managedCompanionUp } from '../../src/db/migrations/zzzz20261018010000_create_plm_managed_companion'
+import { query as productQuery } from '../../src/db/pg'
+import { poolManager } from '../../src/integration/db/connection-pool'
 
 const routeRegistry = vi.hoisted(() => ({ manager: null as unknown, consume: vi.fn() }))
 vi.mock('../../src/routes/data-sources', () => ({ getDataSourceManager: () => routeRegistry.manager }))
@@ -70,11 +83,19 @@ describe.skipIf(!dsn)('Visual source durable authority on PostgreSQL', () => {
     await sourceScope(db)
     // Installed empty reference catalog; this lane exercises the source guard.
     await pool.query('CREATE TABLE integration_external_systems(connection_id text, config jsonb)')
+    // Classifier reads public through DATABASE_URL, not this lane's isolated schema.
+    await admin.query('CREATE TABLE IF NOT EXISTS users (id text PRIMARY KEY)')
+    const publicDb = new Kysely({ dialect: new PostgresDialect({ pool: admin }) })
+    await sourceTable(publicDb)
+    await sourceScope(publicDb)
+    const managedSchema = await admin.query("SELECT to_regclass('public.plm_managed_source_bindings') AS rel")
+    if (managedSchema.rows[0]?.rel == null) await managedCompanionUp(publicDb)
   })
   afterAll(async () => {
     await db?.destroy()
     await admin?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
     await admin?.end()
+    await poolManager.close()
   })
 
   it.each([true, false])('stale owner update cannot overwrite admin Visual=%s decision', async initial => {
@@ -101,6 +122,15 @@ describe.skipIf(!dsn)('Visual source durable authority on PostgreSQL', () => {
     const id = 'real-adapter-runtime'
     const a = await m.addDataSource(config(id, true), scope)
     const before = await row(id)
+    const emptyBinding = await productQuery(
+      `SELECT b.data_source_id
+         FROM plm_managed_source_bindings b
+         JOIN plm_managed_identity_links l ON l.id = b.link_id
+         LEFT JOIN data_sources d ON d.id = b.data_source_id
+         WHERE b.data_source_id = $1`,
+      [id],
+    )
+    expect(emptyBinding.rows).toEqual([])
     await a.connect()
     expect(a.getConfig().connection.headers).toMatchObject({ 'x-tenant-id': 'tenant' })
     expect(await m.isVisualReviewSourceCurrent(id, 'tenant', a)).toBe(true)
