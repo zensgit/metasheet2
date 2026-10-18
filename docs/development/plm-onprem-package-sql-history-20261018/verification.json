@@ -1,0 +1,61 @@
+{
+  "source": "65511bce62fc4a64ede86141110ab98837cb300c",
+  "baseline": "519184d6414c0eededb9fde1b55fe211d7ce8e54",
+  "migration_asset_files_identical_to_actual_green_run": 1807,
+  "red": {
+    "source_exit": 0,
+    "package_exit": 1,
+    "missing_history_refused": true,
+    "postgres_stopped": true,
+    "owned_removed": true
+  },
+  "green": {
+    "source_exit": 0,
+    "upgrade_exit": 0,
+    "schema_unchanged_on_upgrade": true,
+    "history_unchanged_on_upgrade": true,
+    "fresh_exit": 0,
+    "fresh_history_equals_source": true,
+    "fresh_schema_equals_source": true,
+    "migration_count": 459,
+    "history_sha256": "17b4e8326f62bda3aa25f83365fa7d2b28483b9be713962cf027674eafe5022b",
+    "source_schema_sha256": "998c17fc4f688a63cddcb1db3866c626be18924bf7a5984a8a2e3db2c1596135",
+    "postgres_stopped": true,
+    "owned_removed": true
+  },
+  "actual_green_archive_source": "9fab63e4bded8407cc6f62944d8d19faeba6c71c",
+  "current_archive_runtime_assets_bit_identical": true,
+  "tests": {
+    "passed": 15,
+    "failed": 0,
+    "skipped": 0
+  },
+  "frozen_audit": {
+    "repository_frozen_verifier_refused": true,
+    "changed": [
+      {
+        "group": "evidenceFiles",
+        "key": "multitableOnpremPackageBuild",
+        "expected": "f464702e0fc5e94d92507afa34f3cfd1d45b1625d828ef15c5255a8b4f7a08a2",
+        "actual": "b0873a8d85cce198575376d42b32a1c921a3e5ffa58f64fb5195bf458ade861f"
+      }
+    ]
+  },
+  "frozen_manifest_changed": false,
+  "current_archive_verification": {
+    "tgz": "passed unmodified frozen verifier",
+    "zip": "passed unmodified frozen verifier / actual macOS PowerShell ZipFile; not Windows acceptance"
+  },
+  "archives": [
+    {
+      "name": "metasheet-plm-onprem-v2.5.0-sql-history-candidate.zip",
+      "bytes": 16116930,
+      "sha256": "e3abbe9a56100c94a9da5e315e498ef8ce1cf6aa54c852fa080fb46227dce5cd"
+    },
+    {
+      "name": "metasheet-plm-onprem-v2.5.0-sql-history-candidate.tgz",
+      "bytes": 14368068,
+      "sha256": "f7d3975a8f605b8edac8f79d88e6b91febb524dd57c1fdc47b54e76df4329447"
+    }
+  ]
+}
