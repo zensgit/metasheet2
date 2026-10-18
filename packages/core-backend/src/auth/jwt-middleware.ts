@@ -4,6 +4,13 @@ import { metrics } from '../metrics/metrics'
 import { apiPathEquals, isGateException } from './api-path-policy'
 import { authService } from './AuthService'
 import { takeVerifiedTenantClaim } from './verified-tenant-claim'
+import { verifyManagedCompanionToken } from './plm-managed-session'
+import { managedRequestContext } from '../services/plm-managed-request-context'
+import {
+  isManagedCompanionPurpose,
+  MANAGED_SESSION_COOKIE,
+  readRequestCookie,
+} from '../services/plm-managed-companion'
 
 const PASSWORD_CHANGE_WHITELIST = [
   '/api/auth/me',
@@ -153,10 +160,52 @@ export async function optionalJwtAuthMiddleware(req: Request, res: Response, nex
   return next()
 }
 
+function managedSessionIdOf(user: Express.Request['user']): string | null {
+  const value = (user as { managedSessionId?: unknown } | undefined)?.managedSessionId
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function continueWithManagedContext(
+  req: Request,
+  next: NextFunction,
+  input: { userId: string | null; sessionId: string | null; conflict: boolean },
+): void {
+  managedRequestContext.run(input, () => {
+    next()
+  })
+}
+
 export async function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
   const token = resolveBearerToken(req)
+  const managedCookie = readRequestCookie(req.headers.cookie, MANAGED_SESSION_COOKIE)
 
   if (!token) {
+    if (managedCookie) {
+      const managed = await verifyManagedCompanionToken(managedCookie)
+      if (managed) {
+        if (
+          managed.must_change_password === true
+          && !isPasswordChangeWhitelisted(req.path || req.originalUrl || '')
+          && !isPublicFormAuthBypass(req)
+        ) {
+          return res.status(403).json({
+            ok: false,
+            error: { code: 'PASSWORD_CHANGE_REQUIRED', message: 'Password change required' },
+          })
+        }
+        const verifiedTenantClaim = takeVerifiedTenantClaim(managed)
+        if (verifiedTenantClaim) req.verifiedTenantClaim = verifiedTenantClaim
+        if (typeof managed.tenantId === 'string' && managed.tenantId.trim()) {
+          req.authenticatedTenantId = managed.tenantId.trim()
+        }
+        req.user = managed as Express.Request['user']
+        return continueWithManagedContext(req, next, {
+          userId: managed.id,
+          sessionId: managedSessionIdOf(managed),
+          conflict: false,
+        })
+      }
+    }
     metrics.jwtAuthFail.inc({ reason: 'missing_token' })
     metrics.authFailures.inc()
     return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } })
@@ -170,5 +219,22 @@ export async function jwtAuthMiddleware(req: Request, res: Response, next: NextF
     }
     return res.status(result.statusCode).json(result.body)
   }
-  return next()
+  const user = req.user
+  let sessionId: string | null = null
+  let conflict = false
+  if (user && isManagedCompanionPurpose((user as { managedPurpose?: unknown }).managedPurpose)) {
+    sessionId = managedSessionIdOf(user)
+  } else if (managedCookie) {
+    const managed = await verifyManagedCompanionToken(managedCookie)
+    const bearerTenant = typeof user?.tenantId === 'string' ? user.tenantId.trim() : ''
+    const managedTenant = typeof managed?.tenantId === 'string' ? managed.tenantId.trim() : ''
+    const tenantConflict = bearerTenant.length > 0 && managedTenant.length > 0 && bearerTenant !== managedTenant
+    if (managed && user && (managed.id !== user.id || tenantConflict)) conflict = true
+    else if (managed) sessionId = managedSessionIdOf(managed)
+  }
+  return continueWithManagedContext(req, next, {
+    userId: typeof user?.id === 'string' ? user.id : null,
+    sessionId: conflict ? null : sessionId,
+    conflict,
+  })
 }

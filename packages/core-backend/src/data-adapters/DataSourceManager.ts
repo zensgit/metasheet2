@@ -17,6 +17,7 @@ import {
 } from '../security/encrypted-secrets'
 import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
 import { assertSqlWriteAllowed, assertSqlSourceProvisionableAtRuntime, pinSqlSourceConnection } from './sql-write-arm-binding'
+import { assertLegacySharedTransportAllowed, noteSharedTransportCall } from '../services/plm-managed-companion'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -1752,8 +1753,14 @@ export class DataSourceManager extends EventEmitter {
     return adapter
   }
 
+  private async admitLegacySharedTransport(id: string, path: string): Promise<void> {
+    await assertLegacySharedTransportAllowed(id)
+    noteSharedTransportCall(path)
+  }
+
   async connectDataSource(id: string): Promise<void> {
     const adapter = this.getDataSource(id)
+    await this.admitLegacySharedTransport(id, 'DataSourceManager.connectDataSource')
 
     // Reuse existing connection promise if connecting
     let connectionPromise = this.connectionPool.get(id)
@@ -1791,6 +1798,7 @@ export class DataSourceManager extends EventEmitter {
   // redacted cause in `connectionError` (via onError) which we aggregate here.
   async testConnection(id: string): Promise<{ success: boolean; error?: string }> {
     const adapter = this.getDataSource(id)
+    await this.admitLegacySharedTransport(id, 'DataSourceManager.testConnection')
     try {
       if (!adapter.isConnected()) {
         await adapter.connect() // throws on failure; onError has recorded the redacted cause
@@ -1906,6 +1914,7 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    await this.admitLegacySharedTransport(dataSourceId, 'DataSourceManager.query')
     // The C6 write-gated marker refuses the RAW query path outright and predates this gate; it keeps
     // precedence because it is the more specific diagnosis for that source (and it refuses reads too,
     // which the capability gate deliberately does not).
@@ -1936,6 +1945,7 @@ export class DataSourceManager extends EventEmitter {
     options?: QueryOptions
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    await this.admitLegacySharedTransport(dataSourceId, 'DataSourceManager.select')
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -1950,6 +1960,7 @@ export class DataSourceManager extends EventEmitter {
     data: Record<string, DbValue> | Record<string, DbValue>[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    await this.admitLegacySharedTransport(dataSourceId, 'DataSourceManager.insert')
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
     // G-4 DESTINATION FENCE (insert). Refuse a K3 destination — declared (marker) or betrayed by a
     // K3 business-table target — before connecting or touching the driver. This is the chokepoint the
@@ -1970,6 +1981,7 @@ export class DataSourceManager extends EventEmitter {
     where: WhereClause
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    await this.admitLegacySharedTransport(dataSourceId, 'DataSourceManager.update')
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
     // G-4 DESTINATION FENCE (update). Same refusal as insert — a K3 destination is a K3 destination
     // whichever mutation verb reaches it.
@@ -1988,6 +2000,7 @@ export class DataSourceManager extends EventEmitter {
     where: WhereClause
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    await this.admitLegacySharedTransport(dataSourceId, 'DataSourceManager.delete')
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
     // G-4 DESTINATION FENCE (delete). A delete against a K3 destination is an external write-back too.
     assertNotK3Destination(adapter.getConfig())
@@ -2028,6 +2041,8 @@ export class DataSourceManager extends EventEmitter {
     if (isGenericQueryDisabledConfig(targetAdapter.getConfig())) {
       throw new Error(c6WriteTargetCopyUnsupportedMessage(targetId))
     }
+    await this.admitLegacySharedTransport(sourceId, 'DataSourceManager.copyData.source')
+    await this.admitLegacySharedTransport(targetId, 'DataSourceManager.copyData.target')
 
     if (!sourceAdapter.isConnected()) {
       await this.connectDataSource(sourceId)

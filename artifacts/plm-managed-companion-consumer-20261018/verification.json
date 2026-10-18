@@ -1,0 +1,174 @@
+{
+  "slice": "B2 existing Meta owner personal native managed-read consumer; not full Yuantus-only SSO entry",
+  "parent": "9c5fb4c56b9b41df585748db3dd85cbf3f89f0ed",
+  "native_protocol_source": "aff4197b3fb8440a9a7b81d13712c4c7b52552a3",
+  "native_tree_head": "a7ee408f532b13410563ff9429b2cdafb4408250",
+  "independent_backend": {
+    "exit": 0,
+    "files": 25,
+    "seconds": 7.66,
+    "source_stable": true,
+    "counts": {
+      "numPassedTests": 415,
+      "numFailedTests": 0,
+      "numPendingTests": 0,
+      "numTotalTests": 415,
+      "success": true
+    }
+  },
+  "independent_pg": {
+    "tests": 27,
+    "failed": 0,
+    "pending": 0,
+    "source_stable": true,
+    "runner_selfcheck": {
+      "ok": true,
+      "command": "self-check",
+      "nonce": "c582e3058315ba35",
+      "root": "/tmp/plm-managed-consumer-pg-c582e3058315ba35",
+      "data": "/tmp/plm-managed-consumer-pg-c582e3058315ba35/data",
+      "socket": "/tmp/plm-managed-consumer-pg-c582e3058315ba35/s",
+      "postgresStopped": true,
+      "postgresRunning": false,
+      "directoryRemoved": true,
+      "locale": "C",
+      "markerMatched": true,
+      "pgBin": "/opt/homebrew/opt/postgresql@15/bin",
+      "wrongNonceRefused": true,
+      "decoyPreserved": true,
+      "decoyRemovedAfterProof": true,
+      "selectAfterRestart": true,
+      "status3ProvesStopped": true,
+      "unexpectedStatusRetained": true
+    },
+    "cleanup": {
+      "ok": true,
+      "command": "cleanup",
+      "nonce": "28066caee12e9c96",
+      "root": "/tmp/plm-managed-consumer-pg-28066caee12e9c96",
+      "data": "/tmp/plm-managed-consumer-pg-28066caee12e9c96/data",
+      "socket": "/tmp/plm-managed-consumer-pg-28066caee12e9c96/s",
+      "postgresStopped": true,
+      "postgresRunning": false,
+      "directoryRemoved": true,
+      "locale": "C",
+      "markerMatched": true,
+      "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+    },
+    "local_pg": "15",
+    "remote_pg16": "PENDING"
+  },
+  "independent_paired": {
+    "owned": "/tmp/plm-managed-paired-wlnc6fww",
+    "nonce": "wlnc6fww",
+    "ok": true,
+    "meta": {
+      "ok": true,
+      "handshakes": 2,
+      "bom_line": "line",
+      "write_patch": 200,
+      "meta_audit_rows": 2,
+      "native_logout": 204,
+      "transfer": "acked",
+      "rebind_generation": 2,
+      "revoke_outage": "pending-then-acked",
+      "late_callback_open_sessions": 0,
+      "callback_urls_observed": 3
+    },
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 1,
+      "write_subjects": [
+        42
+      ],
+      "write_lines": [
+        "line"
+      ]
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "legacy_web": {
+    "files": 12,
+    "passed": 156,
+    "failed": 0,
+    "pending": 0,
+    "report": "/tmp/managed-consumer-main-legacy-web.json",
+    "unchanged_since_test": true
+  },
+  "focused_web": {
+    "passed": 13,
+    "failed": 0,
+    "pending": 0,
+    "report": "/tmp/managed-consumer-main-web.log",
+    "overlaps_legacy_customer_view": true
+  },
+  "types": {
+    "backend_final": "exit0 /tmp/managed-consumer-main-final-backend-types.log",
+    "web_app": "prior exit0 /tmp/managed-consumer-main-web-typecheck.log; relevant web sources unchanged",
+    "approval": "prior exit0 /tmp/managed-consumer-main-approval-typecheck.log; relevant sources unchanged",
+    "stock_prep": "prior exit0 /tmp/managed-consumer-main-stock-typecheck.log; relevant sources unchanged",
+    "full_web_build": "NOT GREEN: preexisting Vite5/7 config clash; do not substitute for CI app.json"
+  },
+  "workflow_lint": "actionlint exit0",
+  "source_hashes": {
+    ".github/workflows/plm-managed-companion-consumer.yml": "eabac726ac6cf6b3a2c71f282f1f9e01fd16379d8dcaf3e7e3d36dbd19a1a0b1",
+    "apps/web/src/services/plm/plmManagedCompanion.ts": "bf76f06e36fe547720de7324411e5f30b7e0817112b80f465a0b72b8fa3e1c7b",
+    "apps/web/tests/PlmManagedCompanionView.spec.ts": "8fac31be1a356f15e6750b7346d7c188bcced3a218ee879c703236ad652c4f54",
+    "apps/web/tests/plmManagedCompanion.spec.ts": "0d6cb9c5f6ff782d1214946b3c194af3b422e6cb8b1605d3d073511102cd1dc0",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "6182c8cf829e46d8ec260548ae34367e26c8b445a3384cfdf0d49245671c402a",
+    "packages/core-backend/src/db/migrations/zzzz20261018010000_create_plm_managed_companion.ts": "e0b195d0e5639e7789fa0b5adda30bc9c272677a79823ac97133b20b7fd298bb",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "32b044c9c24822b310d6eff6fe6e8a68afb78518ce3061b6af4d9bcb6823d8ee",
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": "4847573576de6171b9309c8518aebeb4a1956b19bbd3966624b9b8102d1ab9bf",
+    "packages/core-backend/src/services/plm-managed-companion.ts": "df359c48d050fa4b599353a89a70e49b416640516fcf3afdac3c8be6a6aa62ec",
+    "packages/core-backend/src/services/plm-managed-native-http.ts": "9eba14009ffba74b8931e0fa12e4ba0d484b179c72ed6863e26c379927dcdc0b",
+    "packages/core-backend/src/services/plm-managed-request-context.ts": "48b81e659bc5477a26f3ac8a9ca91bba9ab1901bad9bd200ff3a6859853eb530",
+    "packages/core-backend/tests/integration/plm-managed-companion-pg.realdb.ts": "f8ab7eee25f034caf3285a835f0a101cad729e3aa7d4dc4091e9239a5c75aba9",
+    "packages/core-backend/tests/unit/plm-managed-adapter-refute.test.ts": "c7e5d51e7ae062f8344cce602bd11e2f1e249fd102e42876b466864d7238ed4a",
+    "packages/core-backend/tests/unit/plm-managed-companion-refute.test.ts": "adbd648bb4dbfc0d9fe50ca4ea3c81cbab31c9547ae8ddee1ef36acc3d1e8752",
+    "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "c31b8a54b056f69b3b2973ddfe664f9ef0bc2bb74069c11e14905dcc3fdcd8ba",
+    "packages/core-backend/tests/utils/plm-managed-unbound-classification.ts": "b5a4b11a833cf3666656d05baf02bcc75b5e470daad44e73405460f7e3e1e976",
+    "packages/core-backend/vitest.plm-managed-companion.config.ts": "02de033b88497374b8e95825c5d9a8243e1b721ca44ac78505be92843b1076c5",
+    "scripts/verification/plm-managed-companion-ci/assert-report.mjs": "3505550552550978b8fc63ffe48f8a96729a06322e625b9069d6c109ef0cfac9",
+    "scripts/verification/plm-managed-companion-paired/__pycache__/verify.cpython-311.pyc": "7fdb48db98c5091d57f11fe8828c5236f4e7e33732934db55a182da369b02284",
+    "scripts/verification/plm-managed-companion-paired/native_server.py": "05b7af68e5a1c409d85c9820ba285dc760cab498399802053b8ab42e631d67cd",
+    "scripts/verification/plm-managed-companion-paired/run.mts": "7ca2cf6e4c4f29842c45e03b79d4e77b8e0804278343c1066b5f8de98e569ac1",
+    "scripts/verification/plm-managed-companion-paired/verify.py": "fe8f92e70130b005ef41e35842255bd7731574f7b5d75c0ef0e72124e01cdbdb",
+    "scripts/verification/plm-managed-companion-pg/owned-socket.mjs": "cfb1a26724103f291407affba6d918c86dd896c8a57cd4ea38c7c117ad5a1d6f",
+    "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "49e79b11db8c718b1534d847646cde95c78ba2205c6e69cbb27878e28dea92b8",
+    "packages/core-backend/src/auth/AuthService.ts": "75d46ca34a170a9378fdb98852deeafce74194f18f7dc4b8f93d0954ab65572c",
+    "packages/core-backend/src/auth/api-path-policy.ts": "20e932dc96daad80831e3887d24a9dd06239c523bd129e320f2ec7c6d7b22b77",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "4245fae2143ab0b5b6228095e2022d1ec6b04dc5e346f499243afc8056b339f7",
+    "packages/core-backend/src/data-adapters/DataSourceManager.ts": "3621d5929c99741d544cfe1ea5fed4b6853fc56498c5e0766835f4f6ad62e630",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "d993a8d127fca2083fc26530313f1a5d30776d6cf05ae39817ed3812a14fccba",
+    "packages/core-backend/src/data-adapters/data-source-plugin-facade.ts": "c9efdc242ba7bb6d005c8efdbd90c21143c67eec255185aa4fe919d345f20c42",
+    "packages/core-backend/src/index.ts": "66c52f4a56e4a102164192c881cfceeb69a7da75bbdf7552d154226853671e80",
+    "packages/core-backend/src/routes/auth.ts": "92f5c10197c2702356042e719eecf7f9c0c042119b4e68c2436ae5522da8b3cc",
+    "packages/core-backend/src/routes/data-sources.ts": "2e12a83a8609ff53568ada8cc07864a631f51176fa363050065db4d113e12c06",
+    "packages/core-backend/src/routes/plm-embed.ts": "8b4e5926cabd82800f4c1fbdb649f55cb605a2b2a1beae709877c8c27346fceb",
+    "packages/core-backend/src/routes/plm-workbench.ts": "f5384a59cd12eddfbb28d3280aea0b147d4b147da17cf45ed90e8a46ce060004",
+    "packages/core-backend/tests/unit/plm-adapter-bom-multitable.test.ts": "6d3b2c3d07b601c538eefa90b9cca6dfc1ad23fcff77cf15379c2a09cc8180e4",
+    "packages/core-backend/tests/unit/plm-personal-bom-write-routes.test.ts": "ccc78ac90181b3a3a80dab47522d0296bd2bf2a468bf7b5f34b4d56845ede22f",
+    "packages/core-backend/tests/unit/plm-workbench-bom-multitable-routes.test.ts": "1be310d0157a6e0ba8a57d06cb03faf5b1e5a6ad80fefbd9fa73930df80b7eae",
+    "packages/core-backend/tests/unit/plm-workbench-datasource-ownership.test.ts": "65a7ea70f9500f9009508f1a93d786b52b5e7312f8d9ff402ff12791fa77c9d4",
+    "packages/core-backend/tests/unit/plm-workbench-write-error-redaction.test.ts": "61b150088f1f91a80c8ab6a5222e1bca02732e61c7a32d8a8f9023622900a10a",
+    "packages/core-backend/tests/unit/plm-workbench-writeback-audit.test.ts": "01750a1a162ffa9070508a74a7f76248d8126fd22ebca819eb7a0b88de9fdc19",
+    "scripts/ops/global-history-flag-manifest.mjs": "5971e1800e57c7a317a91e562b78743a33df00f998aac410b64934d1db54332e",
+    "scripts/ops/global-history-flag-manifest.test.mjs": "389e67d8062fc3856d6ffbb175d57c54603e911973dc355e2ebbd18efc1f54ef"
+  },
+  "limits": [
+    "Dedicated workflow has not run remotely; exact source head CI required.",
+    "Paired proof uses existing ordinary Meta owner bootstrap JWT and exported C1 customer route, not full main.ts or no-Meta-login SSO.",
+    "Unresolved consumed native exchange remains pending until exact observed delegation revoke ACK; no false elapsed-time cleanup. Operational cancellation/reconciliation is later provider work.",
+    "No deployed/customer topology/production or real device acceptance."
+  ]
+}

@@ -95,6 +95,16 @@ import plmWorkbenchRouter, {
   PLM_ECO_INTENT_FAILED_MESSAGE,
 } from '../../src/routes/plm-workbench'
 import { createPlmPersonalBomWriteBindingsRouter } from '../../src/routes/plm-personal-bom-write-bindings'
+import {
+  beginDurableUnboundClassification,
+  expectOnlyDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  rejectOther,
+  succeedOnceThenReject,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
 
 const ENTITLED = { supported: true, api_version: 'v1', entitled: true }
 const pinned = usePinnedServer()
@@ -196,8 +206,7 @@ describe('personal BOM write routes and owner binding management', () => {
     authRef.authorization = undefined
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
-    pgMocks.query.mockReset()
-    pgMocks.query.mockResolvedValue({ rows: [], rowCount: 1 })
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
     dispatchOperation.mockReset()
     dispatchOperation.mockResolvedValue({ native: LINE_NATIVE })
     bindPlmPersonalBomWriteService({ dispatchOperation } as never)
@@ -213,6 +222,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   afterEach(() => {
+    finishDurableUnboundClassification(classificationCalls, 'ds-1')
     if (priorFlag === undefined) delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
     else process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = priorFlag
     bindPlmPersonalBomWriteService(undefined)
@@ -338,7 +348,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('attempt audit failure dispatches zero times', async () => {
-    pgMocks.query.mockRejectedValue(new Error('audit down'))
+    rejectOther(pgMocks.query, classificationCalls, new Error('audit down'))
     writeSource()
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').send({ quantity: 5 })
     expect(res.status).toBe(503)
@@ -347,7 +357,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('outcome audit failure keeps the committed native success', async () => {
-    pgMocks.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockRejectedValueOnce(new Error('audit lost'))
+    succeedOnceThenReject(pgMocks.query, classificationCalls, new Error('audit lost'))
     writeSource()
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').send({ quantity: 5 })
     expect(res.status).toBe(200)
@@ -419,7 +429,7 @@ describe('personal BOM write routes and owner binding management', () => {
     expect(write.status).toBe(403)
     expect(write.body.code).toBe('PLM_BOM_WRITE_FORBIDDEN')
     expect(dispatchOperation).not.toHaveBeenCalled()
-    expect(pgMocks.query).not.toHaveBeenCalled()
+    expectOnlyDurableUnboundClassification(pgMocks.query.mock.calls, classificationCalls, 'ds-1')
     const listed = await request(pinned.url()).get('/api/me/plm-bom-write-bindings')
     expect(listed.status).toBe(403)
     expect(holder.service!.list).not.toHaveBeenCalled()

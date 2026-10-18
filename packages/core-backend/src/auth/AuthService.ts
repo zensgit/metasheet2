@@ -30,6 +30,8 @@ import { assignUserRoles } from '../rbac/role-assignment'
 import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { attachVerifiedTenantClaim, classifyVerifiedTenantClaim, type VerifiedTenantClaim } from './verified-tenant-claim'
+import { isManagedCompanionPurpose } from '../services/plm-managed-companion'
+import { verifyManagedCompanionToken } from './plm-managed-session'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
 export interface User {
@@ -65,6 +67,7 @@ export interface TokenPayload {
   role: string
   tenantId?: string
   sid?: string
+  purpose?: string
   iat: number
   exp: number
 }
@@ -262,6 +265,9 @@ export class AuthService {
     try {
       // 验证token格式和签名
       const payload = jwt.verify(token, this.config.jwtSecret) as TokenPayload & { id?: string; sub?: string }
+      if (isManagedCompanionPurpose(payload.purpose)) {
+        return verifyManagedCompanionToken(token)
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token verification failed: missing user identity claim')
@@ -966,6 +972,9 @@ export class AuthService {
     try {
       // 验证旧token（忽略过期）
       const payload = jwt.verify(oldToken, this.config.jwtSecret, { ignoreExpiration: true }) as TokenPayload & { id?: string; sub?: string }
+      if (isManagedCompanionPurpose(payload.purpose)) {
+        return null
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token refresh failed: missing user identity claim')

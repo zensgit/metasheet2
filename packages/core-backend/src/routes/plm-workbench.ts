@@ -39,6 +39,8 @@ import type {
 // visibility judgment (entry.available when the provider sends it, else the pre-#4020
 // supported+entitled derivation), so these routes never re-derive it locally.
 import { isFeatureAvailable } from '../data-adapters/PLMAdapter'
+import { classifyManagedSource } from '../services/plm-managed-companion'
+import { relayManagedBomContext } from '../services/plm-managed-companion-flow'
 import {
   personalBomWriteActor,
   personalBomWriteFailureBody,
@@ -1040,6 +1042,26 @@ router.get(
     if (!isPlmBomReviewAdapter(adapter)) {
       return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported-mode' })
     }
+    const managedRead = await relayManagedBomContext({
+      userId: typeof req.user?.id === 'string' ? req.user.id : undefined,
+      dataSourceId,
+      partId,
+    })
+    if (managedRead.kind === 'refusal') {
+      return res.status(managedRead.status).json({
+        error: 'Managed BOM read refused',
+        code: managedRead.code,
+        data_source_id: dataSourceId,
+      })
+    }
+    if (managedRead.kind === 'ok') {
+      return res.json({
+        data_source_id: dataSourceId,
+        available: true,
+        entitled: managedRead.entitled,
+        context: managedRead.entitled ? managedRead.context : null,
+      })
+    }
     // 1) advisory capability pre-check (never 500)
     let capabilities: IntegrationCapabilitiesResult
     try {
@@ -1108,6 +1130,15 @@ router.patch(
       })
     }
 
+    const managedWriteClass = await classifyManagedSource(dataSourceId)
+    if (managedWriteClass.kind === 'schema-missing' || managedWriteClass.kind === 'unavailable') {
+      return res.status(403).json({
+        error: 'Managed source unavailable',
+        code: managedWriteClass.kind === 'schema-missing' ? 'PLM_MANAGED_SCHEMA_MISSING' : 'PLM_MANAGED_BINDING_UNAVAILABLE',
+        data_source_id: dataSourceId,
+      })
+    }
+    if (managedWriteClass.kind !== 'bound') {
     let capabilities: IntegrationCapabilitiesResult
     try {
       capabilities = await adapter.getIntegrationCapabilities()
@@ -1133,6 +1164,7 @@ router.patch(
         data_source_id: dataSourceId,
         reason: 'not-entitled',
       })
+    }
     }
 
     const idempotencyKey = (req.header('Idempotency-Key') || '').trim()
@@ -1250,6 +1282,15 @@ router.post(
       })
     }
 
+    const managedEcoClass = await classifyManagedSource(dataSourceId)
+    if (managedEcoClass.kind === 'schema-missing' || managedEcoClass.kind === 'unavailable') {
+      return res.status(403).json({
+        error: 'Managed source unavailable',
+        code: managedEcoClass.kind === 'schema-missing' ? 'PLM_MANAGED_SCHEMA_MISSING' : 'PLM_MANAGED_BINDING_UNAVAILABLE',
+        data_source_id: dataSourceId,
+      })
+    }
+    if (managedEcoClass.kind !== 'bound') {
     let capabilities: IntegrationCapabilitiesResult
     try {
       capabilities = await adapter.getIntegrationCapabilities()
@@ -1285,6 +1326,7 @@ router.post(
         data_source_id: dataSourceId,
         reason: 'unsupported',
       })
+    }
     }
 
     const idempotencyKey = (req.header('Idempotency-Key') || '').trim()

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PlmPersonalBomWriteError } from '../../src/services/plm-personal-bom-write-wire'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -56,6 +56,15 @@ vi.mock('../../src/routes/data-sources', () => ({
 }))
 
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  rejectOther,
+  succeedOnceThenReject,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
 
 const WRITE_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/lines/R1'
 const INTENT_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/eco-intent'
@@ -118,11 +127,14 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
-    pgMocks.query.mockReset()
-    pgMocks.query.mockResolvedValue({ rows: [], rowCount: 1 })
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
     dispatchMocks.dispatchOperation.mockReset()
     dispatchMocks.dispatchOperation.mockResolvedValue({ native: LINE_NATIVE })
     pinned.setApp(app)
+  })
+
+  afterEach(() => {
+    finishDurableUnboundClassification(classificationCalls, 'ds-1')
   })
 
   it('line write-back commits an attempt row before dispatch and an accepted outcome after it', async () => {
@@ -154,7 +166,7 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
   })
 
   it('fails closed when the attempt cannot be audited: 503 and dispatch is never called', async () => {
-    pgMocks.query.mockRejectedValue(new Error('audit store unavailable'))
+    rejectOther(pgMocks.query, classificationCalls, new Error('audit store unavailable'))
     const updateBomMultitableLine = vi.fn()
     dsMocks.getDataSource.mockReturnValue(writeAdapter(updateBomMultitableLine))
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').send({ quantity: 5 })
@@ -189,7 +201,7 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
   })
 
   it('an outcome audit failure never masks a committed native success', async () => {
-    pgMocks.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockRejectedValueOnce(new Error('audit store lost'))
+    succeedOnceThenReject(pgMocks.query, classificationCalls, new Error('audit store lost'))
     const updateBomMultitableLine = vi.fn()
     dsMocks.getDataSource.mockReturnValue(writeAdapter(updateBomMultitableLine))
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-4').send({ quantity: 2 })
@@ -233,7 +245,7 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
   })
 
   it('ECO revision intent fails closed when the attempt cannot be audited', async () => {
-    pgMocks.query.mockRejectedValue(new Error('audit store unavailable'))
+    rejectOther(pgMocks.query, classificationCalls, new Error('audit store unavailable'))
     const requestBomEcoRevisionIntent = vi.fn()
     dsMocks.getDataSource.mockReturnValue(intentAdapter(requestBomEcoRevisionIntent))
     const res = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'eco-submit-1')

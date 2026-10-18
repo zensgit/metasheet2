@@ -1,0 +1,184 @@
+# Dedicated managed-companion consumer gate.
+# pull_request has no base-branch filter, matching the personal-approval realdb
+# workflows, so a stacked draft whose base is
+# codex/plm-customer-bom-entry-20261017 still runs this job. A path filter must
+# not skip it. The personal-approval PostgreSQL job plus web-tests do not run
+# these files. Missing PostgreSQL binaries, a missing socket DSN, zero tests,
+# skips, or a feature-flag skip fail this job. It does not use a TCP postgres
+# service. cancel-in-progress is false so a second dispatch waits instead of
+# killing a running proof.
+name: PLM managed companion consumer
+
+on:
+  merge_group:
+    types: [checks_requested]
+  pull_request:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  managed-companion-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LC_ALL: C
+      LANG: C
+      PG_BIN: /usr/lib/postgresql/16/bin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install PostgreSQL 16 binaries
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          test -x /usr/lib/postgresql/16/bin/pg_ctl
+          test -x /usr/lib/postgresql/16/bin/initdb
+          test -x /usr/lib/postgresql/16/bin/createdb
+          test -x /usr/lib/postgresql/16/bin/psql
+
+      - name: Owned socket runner self-check
+        run: node scripts/verification/plm-managed-companion-pg/owned-socket.mjs self-check
+
+      - name: Managed companion unit and refute tests
+        run: |
+          set -euo pipefail
+          unset DATABASE_URL
+          unset PLM_MANAGED_COMPANION_TEST_PG_URL
+          unset PLM_MANAGED_COMPANION_ENABLED
+          pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
+            --reporter=json --outputFile=/tmp/plm-managed-unit.json \
+            tests/unit/plm-managed-companion-refute.test.ts \
+            tests/unit/plm-managed-adapter-refute.test.ts \
+            tests/unit/plm-managed-companion.test.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 21
+
+      - name: Start owned socket PostgreSQL 16
+        run: |
+          set -euo pipefail
+          set +e
+          proof=$(node scripts/verification/plm-managed-companion-pg/owned-socket.mjs start)
+          status=$?
+          set -e
+          printf '%s\n' "$proof" > /tmp/plm-managed-pg-start.json
+          if [ "$status" -ne 0 ]; then
+            echo "owned postgres start failed"
+            exit "$status"
+          fi
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs"
+            const proof = JSON.parse(readFileSync("/tmp/plm-managed-pg-start.json", "utf8"))
+            if (!proof.ok || !proof.dsn || !proof.root || !proof.nonce || proof.postgresRunning !== true || proof.postgresStopped !== false || proof.locale !== "C" || proof.markerMatched !== true || proof.directoryRemoved !== false) {
+              console.error(JSON.stringify(proof))
+              process.exit(1)
+            }
+            const put = (name, value) => appendFileSync(process.env.GITHUB_ENV, name + "<<PLM_MANAGED_ENV\n" + value + "\nPLM_MANAGED_ENV\n")
+            put("DATABASE_URL", proof.dsn)
+            put("PLM_MANAGED_COMPANION_TEST_PG_URL", proof.dsn)
+            put("PLM_MANAGED_PG_ROOT", proof.root)
+            put("PLM_MANAGED_PG_NONCE", proof.nonce)
+          '
+
+      - name: Managed companion PostgreSQL suite
+        run: |
+          set -euo pipefail
+          test -n "${DATABASE_URL}"
+          test -n "${PLM_MANAGED_COMPANION_TEST_PG_URL}"
+          test "${DATABASE_URL}" = "${PLM_MANAGED_COMPANION_TEST_PG_URL}"
+          case "${DATABASE_URL}" in
+            *"/tmp/plm-managed-consumer-pg-"*) ;;
+            *) echo "managed companion DSN is not an owned socket"; exit 1 ;;
+          esac
+          pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
+            --config vitest.plm-managed-companion.config.ts \
+            --reporter=json --outputFile=/tmp/plm-managed-pg.json
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 27
+
+      - name: Remove owned socket PostgreSQL
+        if: always()
+        run: |
+          set -euo pipefail
+          root="${PLM_MANAGED_PG_ROOT:-}"
+          nonce="${PLM_MANAGED_PG_NONCE:-}"
+          published="${PLM_MANAGED_PG_ROOT:-}"
+          if [ -z "$root" ] && [ -f /tmp/plm-managed-pg-start.json ]; then
+            root=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const proof = JSON.parse(readFileSync("/tmp/plm-managed-pg-start.json","utf8")); process.stdout.write(proof.root || "")')
+            nonce=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const proof = JSON.parse(readFileSync("/tmp/plm-managed-pg-start.json","utf8")); process.stdout.write(proof.nonce || "")')
+          fi
+          if [ -z "$root" ]; then
+            echo "owned postgres was not started"
+            exit 0
+          fi
+          if [ ! -d "$root" ]; then
+            if [ -n "$published" ]; then
+              echo "owned postgres directory disappeared before cleanup proof"
+              exit 1
+            fi
+            echo "failed start left no directory"
+            exit 0
+          fi
+          node scripts/verification/plm-managed-companion-pg/owned-socket.mjs cleanup --root "$root" --nonce "$nonce" > /tmp/plm-managed-pg-cleanup.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs"
+            const proof = JSON.parse(readFileSync("/tmp/plm-managed-pg-cleanup.json", "utf8"))
+            if (!proof.ok || proof.directoryRemoved !== true || proof.postgresStopped !== true || proof.postgresRunning !== false || proof.markerMatched !== true) {
+              console.error(JSON.stringify(proof))
+              process.exit(1)
+            }
+          '
+
+      - name: Managed companion web specs
+        run: |
+          set -euo pipefail
+          pnpm --filter @metasheet/web exec vitest run --watch=false \
+            --reporter=json --outputFile=/tmp/plm-managed-web.json \
+            tests/plmManagedCompanion.spec.ts \
+            tests/PlmManagedCompanionView.spec.ts \
+            tests/PlmBomReviewWorkspaceView.spec.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 13
+
+      - name: Backend types
+        run: pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false --incremental false
+
+      - name: Web application types
+        run: pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.app.json

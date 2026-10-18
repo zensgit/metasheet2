@@ -20,7 +20,7 @@ import { EventEmitter } from 'node:events'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const LOGIN = `Bearer ${jwt.sign({ userId: 'alice', email: 'a@x', role: 'user' }, 'synthetic-route-key')}`
@@ -31,9 +31,10 @@ const managerRef = vi.hoisted(() => ({ current: null as unknown }))
 // The authenticated caller, swapped per test (owner / non-owner / anonymous).
 const authRef = vi.hoisted(() => ({ user: undefined as unknown }))
 const dispatchMocks = vi.hoisted(() => ({ dispatchOperation: vi.fn() }))
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../../src/db/db', () => ({ db: {} }))
-vi.mock('../../src/db/pg', () => ({ pool: {}, query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     const user = authRef.user as { id?: string; userId?: string; sub?: string } | undefined
@@ -83,6 +84,13 @@ vi.mock('../../src/routes/data-sources', () => ({
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
 
 const OWNER = 'alice'
 const INTRUDER = 'bob'
@@ -214,6 +222,11 @@ describe('plm-workbench data-source routes enforce per-user ownership', () => {
       }
       return { native: { ok: true, bom_line_id: 'R1' } }
     })
+    beginDurableUnboundClassification(pgMocks.query, classificationCalls)
+  })
+
+  afterEach(() => {
+    finishDurableUnboundClassification(classificationCalls, 'ds-probe')
   })
 
   for (const route of ROUTES) {

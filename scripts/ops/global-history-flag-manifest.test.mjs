@@ -391,7 +391,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|PLM_APPROVAL_CARD_ENABLED|PLM_PERSONAL_BOM_WRITE_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED|PLM_EMBED_VISUAL_PREVIEW_ENABLED')
+  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|PLM_APPROVAL_CARD_ENABLED|PLM_PERSONAL_BOM_WRITE_ENABLED|PLM_MANAGED_COMPANION_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED|PLM_EMBED_VISUAL_PREVIEW_ENABLED')
   return [...new Set([...plmBom, ...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 

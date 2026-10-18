@@ -7,6 +7,7 @@ import {
 import type { DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
 import { parseSqlServerEndpoint } from '@metasheet/mssql-readonly-utils'
 import { SCHEMA_DETAIL_BUDGET_DISABLED } from './schema-detail-budget'
+import { assertLegacySharedTransportAllowed, noteSharedTransportCall } from '../services/plm-managed-companion'
 
 /**
  * Narrow, READ-ONLY data-source surface handed to the integration plugin so the Data
@@ -640,6 +641,8 @@ export function createDataSourcePluginFacade(
   }
 
   async function authorize(dataSourceId: string, principal: string | undefined, strict = false) {
+    await assertLegacySharedTransportAllowed(dataSourceId)
+    noteSharedTransportCall('plugin-facade.read.authorize')
     const owner = requirePrincipal(principal)
     const manager = getManager()
     // A dangling / not-visible binding (deleted row OR owner mismatch) is a CONFIG error, not a
@@ -691,6 +694,8 @@ export function createDataSourcePluginFacade(
 
   return {
     async resolveConnectionRegistration(dataSourceId, options) {
+      await assertLegacySharedTransportAllowed(dataSourceId)
+      noteSharedTransportCall('plugin-facade.read.registration')
       const { adapter, scope } = await resolveRegistration(dataSourceId, options)
       return {
         id: dataSourceId,
@@ -700,6 +705,8 @@ export function createDataSourcePluginFacade(
       }
     },
     async describe(dataSourceId, principal) {
+      await assertLegacySharedTransportAllowed(dataSourceId)
+      noteSharedTransportCall('plugin-facade.read.describe')
       // OWNER-ONLY (see the interface doc): `owner` is a bare principal string, so #5401's
       // normalizeActor treats this as the data-plane shape — no platform-admin bypass. A non-owner
       // gets the uniform not-found and the hub renders 已配置(他人管理); describe is never a side
@@ -728,6 +735,8 @@ export function createDataSourcePluginFacade(
       }
     },
     async assertReferenceable(dataSourceId, principal) {
+      await assertLegacySharedTransportAllowed(dataSourceId)
+      noteSharedTransportCall('plugin-facade.read.reference')
       // Existence + ownership ONLY — the same two throws authorize() wraps, with the same uniform
       // message. No read-only requirement (write-gated target bindings use writable sources), no
       // connect (binding metadata must not dial the customer system).
@@ -917,6 +926,8 @@ export function createDataSourceSealedSnapshotConnectionFacade(
       // sealed-only refusals below add no lookup of their own: every refusal decided after the
       // manager was consulted has done exactly one.
       const registration = await registrationFacade.resolveConnectionRegistration(dataSourceId, options)
+      await assertLegacySharedTransportAllowed(dataSourceId)
+      noteSharedTransportCall('plugin-facade.sealed.registration')
       if (typeof registration.type !== 'string' || registration.type.toLowerCase() !== 'sqlserver') {
         sealedSnapshotConnectionInvalid('type', 'sealed_type_unsupported')
       }
@@ -952,6 +963,8 @@ export function createDataSourceWritePluginFacade(
   getManager: () => DataSourceManager
 ): DataSourceWriteFacade {
   async function authorize(dataSourceId: string, principal: string | undefined) {
+    await assertLegacySharedTransportAllowed(dataSourceId)
+    noteSharedTransportCall('plugin-facade.write.authorize')
     const owner = requirePrincipal(principal)
     const manager = getManager()
     let adapter

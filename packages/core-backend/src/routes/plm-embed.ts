@@ -19,6 +19,7 @@
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
+import { classifyManagedSource } from '../services/plm-managed-companion'
 import { embedAllowedOrigins, embedDataSourceId, frameAncestorsValue, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { BomMultitableContextResult } from '../data-adapters/PLMAdapter'
@@ -75,6 +76,18 @@ export default function plmEmbedRouter(): Router {
       const dataSourceId = embedDataSourceId()
       if (!dataSourceId) {
         return res.status(503).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE', message: 'embed data source not configured' } })
+      }
+      const managedClass = await classifyManagedSource(dataSourceId)
+      if (managedClass.kind !== 'unbound') {
+        const code = managedClass.kind === 'schema-missing'
+          ? 'PLM_MANAGED_SCHEMA_MISSING'
+          : managedClass.kind === 'unavailable'
+            ? 'PLM_MANAGED_BINDING_UNAVAILABLE'
+            : 'PLM_MANAGED_SHARED_TRANSPORT_REFUSED'
+        return res.status(403).json({
+          ok: false,
+          error: { code, message: 'Managed source cannot use the shared embed transport' },
+        })
       }
 
       let adapter: unknown

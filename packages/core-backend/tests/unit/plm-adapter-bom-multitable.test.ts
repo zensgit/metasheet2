@@ -1,5 +1,24 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const pgMocks = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: {}, query: pgMocks.query }))
+
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
+import {
+  beginDurableUnboundClassification,
+  finishDurableUnboundClassification,
+  type DurableUnboundCall,
+} from '../utils/plm-managed-unbound-classification'
+
+const classificationCalls: DurableUnboundCall[] = []
+
+beforeEach(() => {
+  beginDurableUnboundClassification(pgMocks.query, classificationCalls)
+})
+
+afterEach(() => {
+  finishDurableUnboundClassification(classificationCalls, 'plm')
+})
 
 const createAdapter = (mode: 'yuantus' | 'legacy' | 'mock') => {
   const configService = { get: vi.fn().mockResolvedValue(undefined) }
