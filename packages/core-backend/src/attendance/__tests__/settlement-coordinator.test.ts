@@ -467,11 +467,13 @@ describe('settlement coordinator: coordination restart (§3.2 step 8, A07)', () 
   const serializationError = (label: string) => Object.assign(new Error(`could not serialize access (${label})`), { code: '40001' })
 
   it('a live transaction is rolled back, connection and quotas return, and the next attempt borrows anew', async () => {
-    const { pool, coordinator, quota, ledger, baseline } = setup()
+    const { clock, pool, coordinator, quota, ledger, baseline } = setup()
     const unit = coordinator.openUnit(REQUEST)
     const startedAt = unit.budget.startedAt
     const first = await unit.acquire(ORG)
     await unit.restart(first, { reason: 'serialization', transaction: 'live', error: serializationError('1') })
+    // The budget carries over: time spent before the restart is not given back.
+    await clock.advance(1500)
     expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
     expect(pool.clients[0].released).toEqual([null])
     expect(quota.snapshot().global.short.held).toBe(0)
@@ -480,6 +482,7 @@ describe('settlement coordinator: coordination restart (§3.2 step 8, A07)', () 
     expect(second.client).toBe(pool.clients[1])
     expect(second.attempt).toBe(2)
     expect(unit.budget.startedAt).toBe(startedAt)
+    expect(unit.budget.remaining()).toBe(5000 - 1500)
     expect(unit.innerRestarts).toEqual({ serialization: 1, recheck: 0 })
     second.end()
     unit.close()
