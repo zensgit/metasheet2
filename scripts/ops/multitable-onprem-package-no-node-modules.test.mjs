@@ -1019,3 +1019,26 @@ test('both packaging lanes carry the same front-end base-path guards, byte for b
     'a workflow that feeds Vite a base path can ship a white-screen package. Exactly two exist and this test holds both to the same guards. If this list changed, guard the new lane the same way (GUARD 1 + GUARD 2 + GUARD 3, run bodies copied verbatim) and add it to the lanes list above -- deliberately, not by editing this inventory until the red goes away',
   )
 })
+
+test('actual package verifier refuses either missing legacy SQL history input', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms-package-history-'))
+  const folder = path.join(root, 'packages/core-backend/src/db/migrations')
+  const names = ['20250925_create_view_tables', '20250926_create_audit_tables']
+  fs.mkdirSync(folder, { recursive: true })
+  const run = () => spawnSync('bash', ['-c', 'source "$VERIFY"; verify_legacy_sql_history "$PACKAGE_ROOT"'], {
+    env: { ...process.env, VERIFY: verifyScriptPath, PACKAGE_ROOT: root }, encoding: 'utf8',
+  })
+  try {
+    for (const name of names) fs.writeFileSync(path.join(folder, `${name}.sql`), 'SELECT 1;\n')
+    assert.equal(run().status, 0)
+    for (const name of names) {
+      fs.unlinkSync(path.join(folder, `${name}.sql`))
+      const refused = run()
+      assert.notEqual(refused.status, 0)
+      assert.ok(refused.stderr.includes(`Missing legacy SQL migration history input: ${name}.sql`))
+      fs.writeFileSync(path.join(folder, `${name}.sql`), 'SELECT 1;\n')
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
