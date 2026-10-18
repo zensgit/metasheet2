@@ -48,6 +48,11 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have a database URL (a DB-expected r
   expect(dbUrl).toBeTruthy()
 })
 
+// Every test destroys the connections it borrowed instead of handing them back: a failed
+// assertion can leave session-level locks on a backend, and a reused backend would turn one red
+// test into a chain of unrelated ones.
+const DESTROY = new Error('test: never hand a test connection to the next test')
+
 const HANDOVER = { isolation: 'READ COMMITTED' as const, timeouts: { kind: 'none' as const }, entryLabel: 'test.credential' }
 const REPO_ROOT = path.resolve(__dirname, '../../../..')
 
@@ -100,7 +105,7 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
                   pg_advisory_unlock_shared(${expectedClassZero.toString()}::bigint)`,
         )
       } finally {
-        client.release()
+        client.release(DESTROY)
       }
     }
   })
@@ -118,7 +123,7 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
       expect(held[0].objid).not.toBe(String(plan.key.key2))
       await client.query(`SELECT pg_advisory_unlock_shared(${SETTLEMENT_COORDINATION_KEY1}, ${plan.key.key2})`)
     } finally {
-      client.release()
+      client.release(DESTROY)
     }
   })
 
@@ -150,8 +155,8 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
       expect(verifySettlementCoordinationCredentialV1(client, credential, org, { needsClassZero: true })).toBe(false)
       await client.query('ROLLBACK')
     } finally {
-      client.release()
-      otherClient.release()
+      client.release(DESTROY)
+      otherClient.release(DESTROY)
     }
   })
 
@@ -168,7 +173,7 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
       expect(await rollbackSettlementCoordinationTransactionV1(client, handover.credential)).toEqual({ kind: 'rolled-back' })
       expect(verifySettlementCoordinationCredentialV1(client, handover.credential, org, { needsClassZero: false })).toBe(false)
     } finally {
-      client.release()
+      client.release(DESTROY)
     }
   })
 
@@ -184,7 +189,7 @@ describeIfDatabase('attendance settlement coordination — key and credential (r
       expect(verifySettlementCoordinationCredentialV1(client, handover.credential, org, { needsClassZero: false })).toBe(false)
       await client.query('ROLLBACK')
     } finally {
-      client.release()
+      client.release(DESTROY)
     }
   })
 

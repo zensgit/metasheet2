@@ -43,6 +43,9 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have a database URL (a DB-expected r
 
 const K1 = SETTLEMENT_COORDINATION_KEY1
 const HANDOVER = { isolation: 'SERIALIZABLE' as const, timeouts: { kind: 'none' as const }, entryLabel: 'test.cleanup' }
+// Connections that end a test are destroyed rather than handed back (the control leg below is the
+// one deliberate exception), so a failed assertion cannot leak session-level locks into a later test.
+const DESTROY = new Error('test: never hand a test connection to the next test')
 
 function canonicalPlan(): SettlementCoordinationPlanV1 {
   return planSettlementCoordinationV1(crypto.randomUUID(), { needsClassZero: true })
@@ -109,7 +112,7 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
       expect(await releaseSettlementCoordinationSessionLocksV1(client, plan)).toEqual({ kind: 'released' })
       expect(await advisoryLocksOf(observer, pid)).toEqual([])
     } finally {
-      client.release()
+      client.release(DESTROY)
     }
   })
 
@@ -150,7 +153,7 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
       })
     } finally {
       await intruder.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)
-      intruder.release()
+      intruder.release(DESTROY)
     }
   })
 
@@ -278,8 +281,8 @@ describeIfDatabase('attendance settlement coordination — cleanup and unknown r
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       await rival.query('ROLLBACK').catch(() => undefined)
-      client.release()
-      rival.release()
+      client.release(DESTROY)
+      rival.release(DESTROY)
       await observer.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
     }
   })

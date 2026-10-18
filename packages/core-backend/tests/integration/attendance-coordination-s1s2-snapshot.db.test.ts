@@ -10,7 +10,9 @@
  *    snapshot formed before the release would not. The transaction-level lock is held before the
  *    session-level lock is released, so an exclusive request queued before the handover stays
  *    queued through it; a handover on a connection other than the S1 connection is uncertain.
- *  - S1 depends on the simple protocol: over the extended protocol the idle proof must not hold.
+ *  - S1 depends on the simple protocol: over the extended protocol the idle proof never holds,
+ *    whether the connection is idle, in an open transaction, or in an aborted one (25P02). S2 has
+ *    no idle proof and gives the same result over either protocol.
  *
  * Every observation is made from a separate connection.
  */
@@ -26,7 +28,10 @@ import {
   runSettlementCoordinationS1V1,
   type SettlementCoordinationPlanV1,
 } from '../../src/attendance/coordination/settlement-coordination-handover'
-import { buildSettlementCoordinationS1Sql } from '../../src/attendance/coordination/settlement-coordination-statements'
+import {
+  buildSettlementCoordinationS1Sql,
+  buildSettlementCoordinationS2Sql,
+} from '../../src/attendance/coordination/settlement-coordination-statements'
 import { SETTLEMENT_COORDINATION_KEY1 } from '../../src/attendance/coordination/settlement-coordination-key'
 import {
   advisoryLocksOf,
@@ -48,6 +53,11 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have a database URL (a DB-expected r
 const RUN = crypto.randomUUID().slice(0, 8)
 const SCHEMA = `p11_coord_snap_${RUN}`
 const K1 = SETTLEMENT_COORDINATION_KEY1
+
+// Every test destroys the connections it borrowed instead of handing them back: a failed
+// assertion can leave session-level locks on a backend, and a reused backend would turn one red
+// test into a chain of unrelated ones.
+const DESTROY = new Error('test: never hand a test connection to the next test')
 
 function canonicalOrg(): string {
   return crypto.randomUUID()
@@ -79,7 +89,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     try {
       return await fn(client, await backendPid(client))
     } finally {
-      client.release()
+      client.release(DESTROY)
     }
   }
 
@@ -159,7 +169,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       })
     } finally {
       await holder.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)
-      holder.release()
+      holder.release(DESTROY)
     }
   })
 
@@ -175,7 +185,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       })
     } finally {
       await holder.query(`SELECT pg_advisory_unlock(${c00}::bigint)`)
-      holder.release()
+      holder.release(DESTROY)
     }
   })
 
@@ -196,8 +206,8 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       await sharedHolder.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
       await waiting
       await exclusiveWaiter.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)
-      sharedHolder.release()
-      exclusiveWaiter.release()
+      sharedHolder.release(DESTROY)
+      exclusiveWaiter.release(DESTROY)
     }
   })
 
@@ -227,7 +237,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
         expect(await commitSettlementCoordinationTransactionV1(client, handover.credential)).toEqual({ kind: 'committed' })
       })
     } finally {
-      blocker.release()
+      blocker.release(DESTROY)
     }
   })
 
@@ -250,8 +260,8 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       expect(after.rows[0].n).toBe(0)
       await client.query('ROLLBACK')
     } finally {
-      blocker.release()
-      client.release()
+      blocker.release(DESTROY)
+      client.release(DESTROY)
     }
   })
 
@@ -306,7 +316,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
         await other.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`)
       })
     } finally {
-      other.release()
+      other.release(DESTROY)
     }
   })
 
@@ -340,7 +350,7 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
     } finally {
       if (waiting) await (waiting as Promise<unknown>).catch(() => undefined)
       await waiter.query(`SELECT pg_advisory_unlock(${K1}, ${plan.key.key2})`).catch(() => undefined)
-      waiter.release()
+      waiter.release(DESTROY)
     }
   })
 
@@ -375,23 +385,78 @@ describeIfDatabase('attendance settlement coordination — S1 / S2 handover (rea
       expect(await releaseSettlementCoordinationSessionLocksV1(holder, plan)).toEqual({ kind: 'released' })
       await expectNoAdvisory(holderPid)
     } finally {
-      holder.release()
+      holder.release(DESTROY)
     }
   })
 
-  it('the idle proof depends on the simple protocol: over the extended protocol it does not hold', async () => {
+  it('S1 over the extended protocol never proves idleness, in any connection state', async () => {
     const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: false })
     const sql = buildSettlementCoordinationS1Sql({ key2: plan.key.key2, classZeroKey: null })
-    const results: Array<boolean | null> = []
-    await withClient(async (client, pid) => {
+    let seq = 0
+    // A named statement forces Parse / Bind / Execute even without values.
+    const named = () => ({ name: `p11-s1-ext-${RUN}-${(seq += 1)}`, text: sql })
+    const client = await pool.connect()
+    const pid = await backendPid(client)
+    try {
+      // Idle: the implicit transaction starts at Parse, the statement timestamp moves on at Bind /
+      // Execute, so the proof fails even though the connection really is idle.
+      const idle: Array<boolean | null> = []
       for (let i = 0; i < 20; i += 1) {
-        // A named statement forces Parse / Bind / Execute even without values.
-        const { rows } = await client.query({ name: `p11-s1-extended-${RUN}-${i}`, text: sql })
-        results.push(rows[0].idle as boolean | null)
+        const { rows } = await client.query(named())
+        idle.push(rows[0].idle as boolean | null)
         if (rows[0].k_ok === true) await client.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
       }
+      expect(idle).toEqual(Array(20).fill(false))
+      // Open transaction block: not idle, nothing taken.
+      await client.query('BEGIN')
+      await client.query('SELECT 1')
+      const open = await client.query(named())
+      expect(open.rows[0]).toMatchObject({ idle: false, k_ok: null })
+      await client.query('ROLLBACK')
+      // Aborted transaction block: the statement errors with 25P02.
+      await client.query('BEGIN')
+      await expect(client.query('SELECT 1 / 0')).rejects.toBeTruthy()
+      await expect(client.query(named())).rejects.toMatchObject({ code: '25P02' })
+      await client.query('ROLLBACK')
       await expectNoAdvisory(pid)
-    })
-    expect(results).toEqual(Array(20).fill(false))
+    } finally {
+      client.release(new Error('test: drop the connection that carries named statements'))
+    }
+  })
+
+  it('S2 gives the same result over either protocol: only the session hold decides it', async () => {
+    for (const extended of [false, true]) {
+      const plan = planSettlementCoordinationV1(canonicalOrg(), { needsClassZero: true })
+      const s2 = buildSettlementCoordinationS2Sql({
+        key2: plan.key.key2,
+        classZeroKey: plan.classZeroKey,
+        timeouts: { kind: 'none' },
+        entryLabel: 'test.protocol',
+      })
+      let seq = 0
+      const runS2 = (client: PoolClient) =>
+        extended ? client.query({ name: `p11-s2-ext-${RUN}-${(seq += 1)}`, text: s2 }) : client.query(s2)
+      const client = await pool.connect()
+      const pid = await backendPid(client)
+      try {
+        // Hold present: both re-grants and both session unlocks succeed.
+        expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        const held = await runS2(client)
+        expect(held.rows[0]).toMatchObject({ x_k: true, x_c: true, u_k: true, u_c: true, an: 'ms2-coord:test.protocol' })
+        await client.query('COMMIT')
+        await expectNoAdvisory(pid)
+        // Dedicated hold lost before S2: the re-grant takes it afresh, the session unlock finds nothing.
+        expect(await runSettlementCoordinationS1V1(client, plan)).toEqual({ kind: 'acquired' })
+        await client.query(`SELECT pg_advisory_unlock_shared(${K1}, ${plan.key.key2})`)
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        const lost = await runS2(client)
+        expect(lost.rows[0]).toMatchObject({ x_k: true, x_c: true, u_k: false, u_c: true })
+        await client.query('ROLLBACK')
+        await expectNoAdvisory(pid)
+      } finally {
+        client.release(new Error('test: drop the connection that carries named statements'))
+      }
+    }
   })
 })
