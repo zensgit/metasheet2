@@ -1,0 +1,19 @@
+{
+  "merge_source": "44adf4bebc0a8811e019f40e2f3a83d57f063fd6",
+  "parents": [
+    "37034f604b8133199abcbc46b114af7e4e463e6a",
+    "69a6d4ebd0b67409eed11d2e1c8c8058e89856c5"
+  ],
+  "runtime_source": "430effa1e9aef4b36be7b7da1ad191fbb2128990",
+  "apps_web_backend_source_ops_equal": true,
+  "successful_parent": "69a6d4ebd0b67409eed11d2e1c8c8058e89856c5",
+  "parent_checks": 23,
+  "backend_census_inputs_equal_parent": true,
+  "changed_paths_from_runtime_source": [
+    "artifacts/plm-managed-snapshot-share-20261019/fence-census-repair.json",
+    "docs/development/PLM_MANAGED_SNAPSHOT_SHARE_20261019.md",
+    "docs/development/PLM_SNAPSHOT_FOCUSED_RUNTIME_20261019.md",
+    "packages/core-backend/tests/unit/multitable-field-schema-fence-recheck.guard.test.ts"
+  ],
+  "history_replaced": false
+}
