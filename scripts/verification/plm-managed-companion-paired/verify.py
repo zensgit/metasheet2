@@ -325,6 +325,7 @@ parser.add_argument('--browser-cache', required=True)
 parser.add_argument('--browser-module')
 parser.add_argument('--package-renderer')
 parser.add_argument('--package-config-retention', action='store_true')
+parser.add_argument('--package-personal-write', action='store_true')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
@@ -334,8 +335,12 @@ parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
 if args.package_config_retention and not args.package_renderer:
     parser.error('--package-config-retention requires --package-renderer')
-if args.package_renderer and not args.snapshot_restore:
-    parser.error('--package-renderer requires --snapshot-restore')
+if args.package_personal_write and (not args.package_renderer or args.browser_script != 'run.mts' or args.snapshot_share):
+    parser.error('--package-personal-write requires --package-renderer, run.mts and no snapshot mode')
+if args.package_config_retention and not args.snapshot_restore:
+    parser.error('--package-config-retention requires --snapshot-restore')
+if args.package_renderer and not (args.snapshot_restore or args.package_personal_write):
+    parser.error('--package-renderer requires snapshot restore or personal write mode')
 if args.snapshot_restore and not args.snapshot_share:
     parser.error('--snapshot-restore requires --snapshot-share')
 if args.snapshot_pre_review and not args.snapshot_share:
@@ -491,6 +496,7 @@ try:
         'secret': secret,
         'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
         'snapshot_share': args.snapshot_share,
+        'package_personal_write': args.package_personal_write,
     }
     package_meta_env = None
     if args.package_renderer:
@@ -503,11 +509,13 @@ try:
         subprocess.run(['git', '-C', str(native), 'merge-base', '--is-ancestor', inputs['native_sha'], native_head], check=True)
         subprocess.run(['git', '-C', str(native), 'diff', '--exit-code', inputs['native_sha'], '--', 'src'], check=True, stdout=subprocess.DEVNULL)
         assert inputs['meta_sha'] == subprocess.check_output(['git', '-C', str(meta), 'rev-parse', 'HEAD'], text=True).strip()
-        inputs.update(snapshot_share_enabled=True, clients=[{
+        inputs.update(snapshot_share_enabled=args.snapshot_share, clients=[{
             'client_id': 'managed-fixture', 'tenant_id': 'default', 'org_id': 'fixture-org',
             'origin': origin, 'callback': config['callback'], 'issuer': config['issuer'],
             'native_base_url': native_origin,
         }])
+        if args.package_personal_write:
+            inputs.update(personal_bom_write_enabled=True, personal_connection_id='personal-fixture')
         inputs['images'] = {name: f'example.invalid/{name}@sha256:{index:064x}'
                             for index, name in enumerate(('postgres', 'redis', 'backend', 'web'), 1)}
         input_path = owned / 'package-inputs.json'
@@ -685,6 +693,19 @@ try:
         assert proof['meta']['late_callback_open_sessions'] == 0
         assert native_report['write_audits'] >= 1
         assert native_report['write_subjects'] == [42]
+        if args.package_personal_write:
+            assert proof['meta']['eco_intent']['accepted'] == 200
+            assert proof['meta']['eco_intent']['duplicate_idempotent'] is True
+            assert native_report['personal_package_eco']['count'] == 1
+            assert native_report['personal_package_eco']['rbac_creators'] == [900]
+            assert native_report['personal_package_eco']['target_versions'] == 1
+            assert native_report['personal_package_eco']['source_versions'] == 1
+            assert native_report['personal_package_eco']['distinct_product_versions'] is True
+            assert native_report['personal_package_eco']['target_creators'] == [900]
+            assert native_report['personal_grants_revoked'] == 1
+            assert native_report['personal_revoke_audits'] == 1
+            assert proof['meta']['eco_intent']['retry_with_meta_flag_off'] is True
+            assert proof['meta']['eco_intent']['duplicate_retry'] is True
     else:
         proof['meta'] = one_line('ENTRY_BOOTSTRAP_PROOF ')
         assert proof['meta']['ok'] is True

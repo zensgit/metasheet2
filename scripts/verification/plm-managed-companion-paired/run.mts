@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import { writeSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
@@ -35,6 +36,12 @@ Object.assign(process.env, {
     nativeBaseUrl: input.nativeOrigin,
   }]),
 })
+
+if (input.packageMetaEnv) {
+  Object.assign(process.env, input.packageMetaEnv)
+  assert.equal(process.env.PLM_PERSONAL_BOM_WRITE_ENABLED, 'true')
+  assert.equal(process.env.PLM_APPROVAL_CARD_ENABLED, 'false')
+}
 
 const express = require('express')
 const jwt = require('jsonwebtoken')
@@ -90,6 +97,10 @@ await pool.query(
   [JSON.stringify(sourceConfig)],
 )
 
+if (input.packageMetaEnv) {
+  await pool.query(`INSERT INTO data_sources (id,name,owner_id,workspace_id,tenant_id,scope_kind,type,config,is_active,auto_connect)
+    VALUES ('source-eco','Owned ECO PLM','meta-owner','workspace-1','meta-org','private','plm',$1::jsonb,true,false)`, [JSON.stringify(sourceConfig)])
+}
 const { provisionManagedLink } = await import(root + '/src/services/plm-managed-companion-flow.ts')
 const link = await provisionManagedLink({ id: 'meta-owner', role: 'user', authenticatedTenantId: 'meta-org' }, {
   issuer: input.issuer,
@@ -104,6 +115,13 @@ const link = await provisionManagedLink({ id: 'meta-owner', role: 'user', authen
   ownerOptIn: true,
 })
 assert.equal(link.generation, 1)
+if (input.packageMetaEnv) {
+  await provisionManagedLink({ id: 'meta-owner', role: 'user', authenticatedTenantId: 'meta-org' }, {
+    issuer: input.issuer, nativeAuthUserId: '42', nativeTenantId: 'default', nativeOrgId: 'fixture-org',
+    metaUserId: 'meta-owner', metaTenantId: 'meta-org', metaOrgId: 'meta-org', dataSourceId: 'source-eco',
+    rootPartId: 'eco-part', ownerOptIn: true,
+  })
+}
 
 const ds = await import(root + '/src/routes/data-sources.ts')
 await ds.initializeDataSourceManager(db)
@@ -154,7 +172,7 @@ const loginJwt = jwt.sign({
 
 const { createServer } = await import(webRequire.resolve('vite'))
 const { default: vue } = await import(webRequire.resolve('@vitejs/plugin-vue'))
-const { chromium } = webRequire('@playwright/test')
+const { chromium } = input.browserModule ? require(input.browserModule) : webRequire('@playwright/test')
 const entryHtml = '<div id="app"></div><script type="module">import {createApp,h} from "vue";import {createRouter,createWebHistory,RouterView} from "vue-router";import {appRoutes} from "/src/router/appRoutes.ts";const route=appRoutes.find(r=>r.path==="/plm/bom-review");if(!route)throw new Error("customer BOM route missing");const router=createRouter({history:createWebHistory(),routes:[route]});const app=createApp({render:()=>h(RouterView)});app.use(router);await router.isReady();app.mount("#app")</script>'
 const vite = await createServer({
   configFile: false,
@@ -184,7 +202,7 @@ const vite = await createServer({
   },
 })
 await vite.listen()
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(input.browserModule ? { channel: 'chromium' } : {}) })
 const context = await browser.newContext({ ignoreHTTPSErrors: true })
 await context.addInitScript((token: string) => localStorage.setItem('auth_token', token), loginJwt)
 const page = await context.newPage()
@@ -256,6 +274,9 @@ async function meta(path: string, method = 'GET', body?: unknown): Promise<{ sta
 }
 
 let proved = false
+let ecoProof: Record<string, unknown> | undefined
+let personalBindingId: string | undefined
+let frozenRetired: unknown
 try {
   await handshake('first')
   await page.goto(input.nativeOrigin + '/personal-approval-grants#bom-write')
@@ -288,6 +309,25 @@ try {
   assert.equal(lineResult.status(), 200, await lineResult.text())
   const audits = await pool.query(`SELECT action, status_code FROM operation_audit_logs`)
   assert(audits.rows.length > 0)
+
+  if (input.packageMetaEnv) {
+    const boundEco = await meta('/api/me/plm-bom-write-bindings', 'POST', {
+      dataSourceId: 'source-eco', connectionId: 'personal-fixture', grant,
+    })
+    assert.equal(boundEco.status, 201, JSON.stringify(boundEco.body))
+    personalBindingId = boundEco.body.data.id
+    const ecoRequest = () => fetch(metaBase + '/api/plm-workbench/data-sources/source-eco/bom-multitable/eco-part/eco-intent', {
+      method: 'POST', headers: { authorization: 'Bearer ' + loginJwt, 'Idempotency-Key': 'owned-package-eco-intent' },
+    })
+    const firstEco = await ecoRequest()
+    const eco = await firstEco.json() as { eco_id: string; attached: boolean }
+    assert.equal(firstEco.status, 200, JSON.stringify(eco))
+    assert.equal(typeof eco.eco_id, 'string')
+    const duplicateEco = await ecoRequest()
+    assert.equal(duplicateEco.status, 200)
+    assert.deepEqual(await duplicateEco.json(), eco)
+    ecoProof = { accepted: 200, duplicate_idempotent: true, authority: 'native personal bom_write grant' }
+  }
 
   const nativeLogout = await page.request.post(input.nativeOrigin + '/api/v1/auth/logout', {
     data: '{}',
@@ -325,6 +365,15 @@ try {
   await handshake('rebind')
   const lateTarget = page.url()
   process.kill(input.nativePid, 'SIGSTOP')
+  if (personalBindingId) {
+    const unbound = await meta('/api/me/plm-bom-write-bindings/' + personalBindingId, 'DELETE')
+    assert.equal(unbound.status, 200, JSON.stringify(unbound.body))
+    const retired = await pool.query(`SELECT owner_id,connection_id,yuantus_tenant_id,yuantus_org_id,target_origin,grant_id,binding_generation,successor_grant_id,slot
+      FROM plm_personal_bom_write_retired_grants WHERE binding_id=$1`, [personalBindingId])
+    assert.equal(retired.rows.length, 1)
+    frozenRetired = retired.rows[0]
+    assert(['pending','unknown'].includes((await pool.query('SELECT state FROM plm_personal_bom_write_retired_grants WHERE binding_id=$1', [personalBindingId])).rows[0].state))
+  }
   await page.getByTestId('plm-managed-unlink').click()
   await page.getByTestId('plm-managed-status').waitFor()
   assert((await page.getByTestId('plm-managed-status').textContent())?.includes('等待元图确认'))
@@ -337,6 +386,21 @@ try {
   assert.equal(retried.body.ok, true)
   assert.equal(retried.body.state, 'acked')
   assert.deepEqual(Object.keys(retried.body).sort(), ['ok', 'state'])
+  if (personalBindingId) {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'false'
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const retry = await meta('/api/me/plm-bom-write-bindings/retired-revocations/retry', 'POST', {})
+      assert.equal(retry.status, 200, JSON.stringify(retry.body))
+    }
+    const retired = (await pool.query(`SELECT owner_id,connection_id,yuantus_tenant_id,yuantus_org_id,target_origin,grant_id,binding_generation,successor_grant_id,slot
+      FROM plm_personal_bom_write_retired_grants WHERE binding_id=$1`, [personalBindingId])).rows[0]
+    assert.deepEqual(retired, frozenRetired)
+    const settled = (await pool.query('SELECT state,encrypted_grant FROM plm_personal_bom_write_retired_grants WHERE binding_id=$1', [personalBindingId])).rows[0]
+    assert.equal(settled.state, 'revoked')
+    assert.equal(settled.encrypted_grant, null)
+    ecoProof = { ...ecoProof, personal_unbind_outage: 'pending-then-revoked', retry_with_meta_flag_off: true,
+      duplicate_retry: true, frozen_identity_sha256: createHash('sha256').update(JSON.stringify(retired)).digest('hex') }
+  }
   assert(!JSON.stringify(retried.body).includes('yur_'))
   await page.goto(callbackUrls.length ? input.origin + '/api/plm/managed-login/callback?code=late&state=late' : lateTarget)
   const revived = await pool.query(`SELECT count(*)::int AS n FROM plm_managed_sessions WHERE revoked_at IS NULL`)
@@ -348,6 +412,7 @@ try {
     handshakes: 2,
     bom_line: 'line',
     write_patch: 200,
+    ...(ecoProof ? { eco_intent: ecoProof } : {}),
     meta_audit_rows: audits.rows.length,
     native_logout: 204,
     transfer: 'acked',

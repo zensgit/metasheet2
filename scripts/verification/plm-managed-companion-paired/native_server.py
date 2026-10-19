@@ -52,7 +52,7 @@ for key, value in {
 if cfg.get('package_native_env') is not None:
     package_env = cfg['package_native_env']
     assert all(key.startswith('YUANTUS_') for key in package_env)
-    assert package_env['YUANTUS_PLM_BOM_WRITE_GRANT_ENABLED'] == 'false'
+    assert package_env['YUANTUS_PLM_BOM_WRITE_GRANT_ENABLED'] == ('true' if cfg.get('package_personal_write') else 'false')
     assert package_env['YUANTUS_PLM_APPROVAL_CARD_ENABLED'] == 'false'
     os.environ.update(package_env)
     if cfg.get('restore_existing') is True:
@@ -119,8 +119,23 @@ else:
             Item(id='child', item_type_id='Part', config_id='child', generation=1, is_current=True, state='Draft', properties={'item_number': 'C-001', 'name': 'Fixture child'}),
         ])
         db.commit()
+        if cfg.get('package_personal_write'):
+            from yuantus.meta_engine.lifecycle.models import LifecycleMap, LifecycleState
+            db.add(LifecycleMap(id='fixture-lifecycle', name='Fixture lifecycle'))
+            db.flush()
+            db.add_all([
+                LifecycleState(id='fixture-draft', lifecycle_map_id='fixture-lifecycle', name='Draft', is_start_state=True, version_lock=False),
+                LifecycleState(id='fixture-released', lifecycle_map_id='fixture-lifecycle', name='Released', is_released=True, version_lock=True),
+            ])
+            db.get(ItemType, 'Part').lifecycle_map_id = 'fixture-lifecycle'
+            db.add(Item(id='eco-part', item_type_id='Part', config_id='eco-part', generation=1,
+                is_current=True, state='Released', current_state='fixture-released',
+                properties={'item_number': 'ECO-P-001', 'name': 'Owned locked ECO assembly'}))
+            db.flush()
         db.add(Item(id='line', item_type_id='Part BOM', config_id='line', generation=1, is_current=True, source_id=root_part_id, related_id='child', properties={'quantity': 1}))
         db.add(AppLicense(id='read-lic', app_name='plm.bom_multitable', license_key='fixture-read', status='Active', tenant_id='default', org_id='fixture-org'))
+        if cfg.get('package_personal_write'):
+            db.add(AppLicense(id='eco-lic', app_name='plm.bom_eco_revision', license_key='fixture-eco', status='Active', tenant_id='default', org_id='fixture-org'))
         db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
         db.commit()
 
@@ -156,6 +171,33 @@ for line in sys.stdin:
                 'write_lines': sorted({row.bom_line_id for row in audits}),
                 **({'snapshot_source_unchanged': item_snapshot(db) == initial_items} if initial_items is not None else {}),
             }
+        if cfg.get('package_personal_write'):
+            from yuantus.meta_engine.models.eco import ECO
+            from yuantus.meta_engine.version.models import ItemVersion
+            with tenant() as db:
+                ecos = db.query(ECO).filter_by(product_id='eco-part').all()
+                targets = [db.get(ItemVersion, eco.target_version_id) for eco in ecos if eco.target_version_id]
+                sources = [db.get(ItemVersion, eco.source_version_id) for eco in ecos if eco.source_version_id]
+                report['personal_package_eco'] = {'count': len(ecos),
+                    'rbac_creators': sorted({eco.created_by_id for eco in ecos}),
+                    'target_versions': sum(target is not None for target in targets),
+                    'source_versions': sum(source is not None for source in sources),
+                    'distinct_product_versions': all(
+                        source is not None and target is not None
+                        and source.id != target.id
+                        and source.item_id == target.item_id == eco.product_id
+                        for eco, source, target in zip(ecos, sources, targets)
+                    ) and len(sources) == len(targets) == len(ecos),
+                    'target_generations': [target.generation for target in targets if target is not None],
+                    'target_creators': sorted({target.created_by_id for target in targets if target is not None}),
+                    'line_quantity': (db.get(Item, 'line').properties or {}).get('quantity')}
+            from yuantus.security.auth.plm_approval_grant_models import PlmApprovalGrant
+            from yuantus.models.audit import AuditLog
+            with identity() as identity_db_session:
+                report['personal_grants_revoked'] = identity_db_session.query(PlmApprovalGrant).filter(
+                    PlmApprovalGrant.purpose == 'bom_write', PlmApprovalGrant.revoked_at.isnot(None)).count()
+                report['personal_revoke_audits'] = identity_db_session.query(AuditLog).filter_by(
+                    path='/api/v1/plm-bom-write-grant/grant', method='DELETE').count()
         print(json.dumps(report), flush=True)
     elif command == 'stop':
         server.should_exit = True
