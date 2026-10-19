@@ -42,6 +42,7 @@ import {
 import { sanitizeFieldProperty, serializeFieldRow } from '../../src/multitable/field-codecs'
 import { remapFieldProperty, type FieldRemapContext } from '../../src/multitable/copy-sheet-remap'
 import { RecordFieldForbiddenError, RecordWriteService } from '../../src/multitable/record-write-service'
+import { applyConfigRevert, computeRevertPreview, fieldRevertPropertyKeepingLock } from '../../src/multitable/config-restore'
 
 const LOCK = { humanWriteLock: 'plm_system' }
 const SRC = path.join(__dirname, '..', '..', 'src')
@@ -190,6 +191,43 @@ describe('L7 RecordWriteService.validateChanges refuses a locked column with the
       changesByRecord: new Map([['rec_1', [{ fieldId: 'human', value: 'ok' }]]]),
       fieldById: new Map([['human', guard({})]]),
     })).resolves.toBeUndefined()
+  })
+})
+
+describe('L9 a field-property config revert keeps the STORED lock (preview target and write)', () => {
+  const rev = (before: Record<string, unknown>, after: Record<string, unknown>) => ({
+    id: 'rev_1', sheet_id: 'sheet_x', entity_type: 'field' as const, entity_id: 'fld_plm', action: 'update' as const,
+    before, after, changed_keys: ['type', 'property'],
+  })
+  it('helper: stored lock wins; an unlocked field on both sides is returned untouched (same reference)', () => {
+    expect(fieldRevertPropertyKeepingLock({ ...LOCK }, { decimals: 2 })).toEqual({ decimals: 2, humanWriteLock: 'plm_system' })
+    expect(fieldRevertPropertyKeepingLock({ ...LOCK }, null)).toEqual({ humanWriteLock: 'plm_system' })
+    expect(fieldRevertPropertyKeepingLock({}, { humanWriteLock: 'plm_system', a: 1 })).toEqual({ a: 1 })
+    const plain = { a: 1 }
+    expect(fieldRevertPropertyKeepingLock({ b: 2 }, plain)).toBe(plain)
+  })
+  it('computeRevertPreview discloses the carried lock in target.property', () => {
+    const preview = computeRevertPreview(rev({ type: 'number', property: {} }, { type: 'string', property: { ...LOCK } }), { type: 'string', property: { ...LOCK } })
+    expect(preview.target.property).toEqual({ humanWriteLock: 'plm_system' })
+    expect(preview.driftConflict).toBe(false)
+  })
+  it('applyConfigRevert writes the carried lock (reads the stored property first)', async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = []
+    const query = async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params })
+      if (sql.startsWith('SELECT property FROM meta_fields')) return { rows: [{ property: { ...LOCK } }] }
+      return { rows: [] }
+    }
+    await applyConfigRevert(query, rev({ type: 'number', property: {} }, { type: 'string', property: { ...LOCK } }))
+    const update = calls.find((c) => c.sql.startsWith('UPDATE meta_fields'))!
+    expect(update.sql).toContain('property = $2::jsonb')
+    expect(JSON.parse(String(update.params[1]))).toEqual({ humanWriteLock: 'plm_system' })
+  })
+  it('applyConfigRevert on a revert that does not touch property does not read or carry anything', async () => {
+    const calls: string[] = []
+    await applyConfigRevert(async (sql: string) => { calls.push(sql); return { rows: [] } }, { ...rev({ name: 'a' }, { name: 'b' }), changed_keys: ['name'] })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatch(/^UPDATE meta_fields SET name = \$1 WHERE id = \$2$/)
   })
 })
 

@@ -148,6 +148,33 @@ export function listHumanWriteLockedFieldIds(
   return out
 }
 
+/**
+ * The automation / approval-writeback refusal (a failed step's `error`, and the values-free log line): the fixed
+ * code first, then a fixed sentence — never a field id, value, sheet or rule name.
+ */
+export const HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL =
+  `${FIELD_READONLY_PLM_SYSTEM_CODE}: this step writes a column the PLM pull owns; automations cannot write it` as const
+
+type LockLookupQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+
+/**
+ * Which of `fieldIds` on `sheetId` are human-write-locked — the bare-SQL writers' check (automation
+ * `update_record` / `create_record`, the approval `resultWriteback` sink). Those writers act on behalf of a rule a
+ * PERSON authored (`canManageAutomation`), never as the plugin, so they are person writes. No ids → no statement.
+ */
+export async function findHumanWriteLockedFieldIds(
+  query: LockLookupQueryFn,
+  sheetId: string,
+  fieldIds: Iterable<string>,
+): Promise<string[]> {
+  const ids = [...new Set([...fieldIds].filter((id) => typeof id === 'string' && id.length > 0))]
+  if (!sheetId || ids.length === 0) return []
+  const res = await query('SELECT id, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, ids])
+  return (res.rows as Array<{ id?: unknown; property?: unknown }>)
+    .filter((row) => typeof row.id === 'string' && humanWriteLockKindOfProperty(row.property) !== null)
+    .map((row) => row.id as string)
+}
+
 /** The 403 body every person route answers a locked write with. */
 export function humanWriteLockRefusalBody(fieldIds: string[]): {
   ok: false
