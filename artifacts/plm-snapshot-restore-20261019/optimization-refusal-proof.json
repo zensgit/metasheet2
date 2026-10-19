@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "cli_cases_previously_passed": 8,
+  "cli_programs": [
+    "verify.py --self-check",
+    "native_server.py",
+    "verify_snapshot_restore_failure.py",
+    "verify_native_restore.py"
+  ],
+  "modes": [
+    "-O",
+    "PYTHONOPTIMIZE=1"
+  ],
+  "corrected_callable_cases": [
+    "restore callable flag",
+    "restore callable env"
+  ],
+  "harness_correction": "Initial callable probe passed14arguments instead of13, producing a pre-call TypeError. Corrected only the two failed probes; no product failure or guard bypass attributed."
+}

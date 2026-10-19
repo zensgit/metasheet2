@@ -3,6 +3,9 @@ import argparse, http.client, json, os, re, secrets, select, shutil, signal, soc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+if not __debug__:
+    raise RuntimeError("Verification requires assertions enabled")
+
 class PgCtlStatusUnproved(RuntimeError):
     pass
 
@@ -319,16 +322,38 @@ parser.add_argument('--python', required=True)
 parser.add_argument('--node', required=True)
 parser.add_argument('--pg-bin', required=True)
 parser.add_argument('--browser-cache', required=True)
+parser.add_argument('--browser-module')
+parser.add_argument('--package-renderer')
+parser.add_argument('--package-config-retention', action='store_true')
+parser.add_argument('--package-personal-write', action='store_true')
+parser.add_argument('--package-personal-approval', action='store_true')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
 parser.add_argument('--snapshot-share', action='store_true')
 parser.add_argument('--snapshot-pre-review', action='store_true')
+parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
+if args.package_config_retention and not args.package_renderer:
+    parser.error('--package-config-retention requires --package-renderer')
+if args.package_personal_approval and not args.package_personal_write:
+    parser.error('--package-personal-approval requires the generated personal write profile')
+if args.package_personal_write and (not args.package_renderer or args.browser_script != 'run.mts' or args.snapshot_share):
+    parser.error('--package-personal-write requires --package-renderer, run.mts and no snapshot mode')
+if args.package_config_retention and not args.snapshot_restore:
+    parser.error('--package-config-retention requires --snapshot-restore')
+if args.package_renderer and not (args.snapshot_restore or args.package_personal_write):
+    parser.error('--package-renderer requires snapshot restore or personal write mode')
+if args.snapshot_restore and not args.snapshot_share:
+    parser.error('--snapshot-restore requires --snapshot-share')
 if args.snapshot_pre_review and not args.snapshot_share:
     parser.error('--snapshot-pre-review requires --snapshot-share')
 if args.snapshot_share and args.browser_script != 'entry-run.mts':
     parser.error('--snapshot-share requires --browser-script entry-run.mts')
+if args.browser_module:
+    module = Path(args.browser_module).resolve(strict=True)
+    metadata = json.loads((module / 'package.json').read_text())
+    assert metadata['name'] == 'playwright' and metadata['version'] == '1.57.0', 'Pinned Playwright module required'
 meta = Path(args.meta_checkout).resolve()
 native = Path(args.native_checkout).resolve()
 pg = Path(args.pg_bin)
@@ -356,6 +381,7 @@ proof = {'owned': str(owned), 'nonce': nonce, 'ok': False}
 started = False
 child = None
 proxy_server = None
+native_sock = None
 node = None
 tests_ok = False
 failure = None
@@ -391,6 +417,7 @@ def run_pg(tool, args, timeout):
 
 def redact(text):
     text = re.sub(r'yur_[A-Za-z0-9._~-]+', '[read credential]', text)
+    text = re.sub(r'yua_[A-Za-z0-9._~-]+', '[approval grant]', text)
     text = re.sub(r'yuw_[A-Za-z0-9._~-]+', '[write grant]', text)
     text = re.sub(r'yus_[A-Za-z0-9._~-]+', '[snapshot grant]', text)
     text = re.sub(r'code=[^&\s]+', 'code=[redacted]', text)
@@ -448,6 +475,15 @@ try:
                 upstream.request(self.command, self.path, body=body, headers=headers)
                 response = upstream.getresponse()
                 payload = response.read()
+                if response.status >= 400:
+                    try:
+                        error_body = json.loads(payload)
+                        detail = error_body.get('detail', error_body.get('error', {}))
+                        selected = {key: detail[key] for key in ('code', 'reason', 'message') if key in detail} if isinstance(detail, dict) else redact(str(detail))[:300]
+                        proof.setdefault('native_refusals', []).append({'status': response.status,
+                            'path': self.path.split('?', 1)[0], 'detail': selected})
+                    except (ValueError, TypeError):
+                        pass
                 self.send_response(response.status)
                 for key, value in response.getheaders():
                     if key.lower() not in ('transfer-encoding', 'connection', 'content-length'):
@@ -473,7 +509,54 @@ try:
         'secret': secret,
         'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
         'snapshot_share': args.snapshot_share,
+        'package_personal_write': args.package_personal_write,
+        'package_personal_approval': args.package_personal_approval,
     }
+    package_meta_env = None
+    if args.package_renderer:
+        import importlib.util
+        import hashlib
+        renderer = Path(args.package_renderer).resolve(strict=True)
+        assert renderer.name == 'render_runtime_env.py'
+        inputs = json.loads(renderer.with_name('package-inputs.example').read_text())
+        native_head = subprocess.check_output(['git', '-C', str(native), 'rev-parse', 'HEAD'], text=True).strip()
+        subprocess.run(['git', '-C', str(native), 'merge-base', '--is-ancestor', inputs['native_sha'], native_head], check=True)
+        subprocess.run(['git', '-C', str(native), 'diff', '--exit-code', inputs['native_sha'], '--', 'src'], check=True, stdout=subprocess.DEVNULL)
+        assert inputs['meta_sha'] == subprocess.check_output(['git', '-C', str(meta), 'rev-parse', 'HEAD'], text=True).strip()
+        inputs.update(snapshot_share_enabled=args.snapshot_share, clients=[{
+            'client_id': 'managed-fixture', 'tenant_id': 'default', 'org_id': 'fixture-org',
+            'origin': origin, 'callback': config['callback'], 'issuer': config['issuer'],
+            'native_base_url': native_origin,
+        }])
+        if args.package_personal_write:
+            inputs.update(personal_bom_write_enabled=True, personal_connection_id='personal-fixture', personal_approval_enabled=args.package_personal_approval)
+        inputs['images'] = {name: f'example.invalid/{name}@sha256:{index:064x}'
+                            for index, name in enumerate(('postgres', 'redis', 'backend', 'web'), 1)}
+        input_path = owned / 'package-inputs.json'
+        input_path.write_text(json.dumps(inputs))
+        rendered = owned / 'rendered-package'
+        result = subprocess.run([args.python, str(renderer), '--inputs', str(input_path), '--out', str(rendered)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, 'Package configuration rendering failed'
+        spec = importlib.util.spec_from_file_location('paired_package_loader', renderer.with_name('check_compose_config.py'))
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        manifest, _compose = loader._load_retained(rendered)
+        hashes = manifest['file_sha256']
+        config['package_native_env'] = loader._env_map(rendered / 'native.env', hashes['native_env'])
+        package_meta_env = loader._env_map(rendered / 'meta.env', hashes['meta_env'])
+        secret = json.loads(package_meta_env['PLM_MANAGED_COMPANION_CLIENTS_JSON'])[0]['clientSecret']
+        config['secret'] = secret
+        # Source fixture owns its transport/storage; consume all capability and identity values unchanged.
+        excluded = ('NODE_ENV', 'HOST', 'PORT', 'STORAGE_PATH', 'DATABASE_URL',
+                    'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD', 'REDIS_URL')
+        package_meta_env = {key: value for key, value in package_meta_env.items() if key not in excluded}
+        proof['rendered_package'] = {'ok': True, 'file_sha256': hashes,
+            'renderer_sha256': hashlib.sha256(renderer.read_bytes()).hexdigest(),
+            'native_source_pin': inputs['native_sha'], 'native_checkout': native_head, 'native_src_matches_pin': True,
+            'meta_fixture_topology_exclusions': list(excluded),
+            'native_config_keys': sorted(config['package_native_env']), 'meta_config_keys': sorted(package_meta_env),
+            'images_launched': False}
     env = os.environ.copy()
     env['PYTHONPATH'] = str(native / 'src')
     env['PAIRED_MANAGED_CONFIG'] = json.dumps(config)
@@ -485,7 +568,8 @@ try:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True, env=env,
         pass_fds=(native_sock.fileno(),), cwd=owned,
     )
-    native_sock.close()
+    if not args.snapshot_restore:
+        native_sock.close()
     deadline = time.monotonic() + 60
     ready = ''
     while time.monotonic() < deadline:
@@ -497,6 +581,13 @@ try:
             if ready.strip().startswith('{'):
                 break
     assert json.loads(ready).get('ready') is True
+    initial_native_report = None
+    if args.snapshot_restore:
+        child.stdin.write('report\n')
+        child.stdin.flush()
+        assert select.select([child.stdout], [], [], 15)[0]
+        initial_native_report = json.loads(child.stdout.readline())
+        assert initial_native_report['snapshot_source_unchanged'] is True
     node_env = os.environ.copy()
     node_env.pop('NODE_TLS_REJECT_UNAUTHORIZED', None)
     node_env['NODE_EXTRA_CA_CERTS'] = str(owned / 'cert.pem')
@@ -515,7 +606,11 @@ try:
         'workspaceEntry': args.workspace_entry,
         'snapshotShare': args.snapshot_share,
         'snapshotPreReview': args.snapshot_pre_review,
+        'snapshotRestore': args.snapshot_restore,
+        'browserModule': str(module) if args.browser_module else None,
         'rootPartId': config['root_part_id'],
+        'packageMetaEnv': package_meta_env,
+        'packagePersonalApproval': args.package_personal_approval,
     }
     node_log = (owned / 'node.log').open('w')
     script = Path(__file__).with_name(args.browser_script)
@@ -556,9 +651,44 @@ try:
     if proof['node_cleanup'].get('ok') is not True:
         Path(args.output + '.failure.log').write_text(redact(result_text)[-20000:])
         raise SystemExit('paired node cleanup incomplete')
-    child.stdin.write('report\n')
-    child.stdin.flush()
-    native_report = json.loads(child.stdout.readline())
+    if args.package_config_retention:
+        # The original processes have persisted an encrypted intent and are now quiesced.
+        # Exercise the real upgrade renderer before the fresh restored processes consume it.
+        key_file = owned / 'existing-native-key.env'
+        key_file.write_text('YUANTUS_JWT_SECRET_KEY=' + config['package_native_env']['YUANTUS_JWT_SECRET_KEY'] + '\n')
+        key_file.chmod(0o600)
+        inputs.update(native_install='existing', meta_install='existing', existing_native_jwt_file=str(key_file),
+                      existing_meta_package_dir=str(rendered), snapshot_share_enabled=False)
+        input_path.write_text(json.dumps(inputs))
+        upgraded = owned / 'upgraded-package'
+        result = subprocess.run([args.python, str(renderer), '--inputs', str(input_path), '--out', str(upgraded)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, 'Existing package configuration upgrade failed'
+        upgraded_manifest, _compose = loader._load_retained(upgraded)
+        old_values = loader._env_map(rendered / 'meta.env', hashes['meta_env'])
+        new_values = loader._env_map(upgraded / 'meta.env', upgraded_manifest['file_sha256']['meta_env'])
+        for key in ('JWT_SECRET', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT', 'DATABASE_URL', 'REDIS_PASSWORD', 'REDIS_URL', 'PLM_MANAGED_COMPANION_CLIENTS_JSON'):
+            assert old_values[key] == new_values[key], 'Upgrade changed ' + key
+        assert new_values['PLM_MANAGED_SNAPSHOT_SHARE_ENABLED'] == 'false'
+        payload['packageMetaEnv'] = {key: value for key, value in new_values.items() if key not in excluded}
+        config['package_native_env'] = loader._env_map(upgraded / 'native.env', upgraded_manifest['file_sha256']['native_env'])
+        proof['configuration_upgrade'] = dict(ok=True, encrypted_intent_persisted_before_upgrade=True,
+            identity_material_unchanged=True, snapshot_sharing_disabled=True,
+            source_manifest_sha256=upgraded_manifest['meta_material']['source_manifest_sha256'])
+    if args.snapshot_restore:
+        proof['snapshot_cancel_pending'] = one_line('SNAPSHOT_CANCEL_PENDING_PROOF ')
+        assert proof['snapshot_cancel_pending']['ok'] is True
+        from snapshot_restore import restore_snapshot_pair
+        proof['snapshot_restore'] = restore_snapshot_pair(
+            child, config, payload, owned, native_root, native_sock, env, node_env,
+            args.python, args.node, tsx, run_pg,
+            lambda port: globals().__setitem__('native_port', port))
+        native_report = proof['snapshot_restore'].pop('native_report')
+        assert native_report['snapshot_items_hash'] == initial_native_report['snapshot_items_hash']
+    else:
+        child.stdin.write('report\n')
+        child.stdin.flush()
+        native_report = json.loads(child.stdout.readline())
     proof['native'] = native_report
     if args.snapshot_share:
         assert native_report['snapshot_source_unchanged'] is True
@@ -578,6 +708,23 @@ try:
         assert proof['meta']['late_callback_open_sessions'] == 0
         assert native_report['write_audits'] >= 1
         assert native_report['write_subjects'] == [42]
+        if args.package_personal_write:
+            assert proof['meta']['eco_intent']['accepted'] == 200
+            assert proof['meta']['eco_intent']['duplicate_idempotent'] is True
+            assert native_report['personal_package_eco']['count'] == 1
+            assert native_report['personal_package_eco']['rbac_creators'] == [900]
+            assert native_report['personal_package_eco']['target_versions'] == 1
+            assert native_report['personal_package_eco']['source_versions'] == 1
+            assert native_report['personal_package_eco']['distinct_product_versions'] is True
+            assert native_report['personal_package_eco']['target_creators'] == [900]
+            assert native_report['personal_grants_revoked'] == 1
+            assert native_report['personal_revoke_audits'] == 1
+            assert proof['meta']['eco_intent']['retry_with_meta_flag_off'] is True
+            assert proof['meta']['eco_intent']['duplicate_retry'] is True
+        if args.package_personal_approval:
+            assert proof['meta']['personal_approval']['approved'] is True
+            assert proof['meta']['personal_approval']['purpose_isolation'] is True
+            assert native_report['personal_package_approval'] == {'commands': 1, 'subjects': [42], 'rbac_actors': [900], 'votes': ['approved']}
     else:
         proof['meta'] = one_line('ENTRY_BOOTSTRAP_PROOF ')
         assert proof['meta']['ok'] is True
@@ -688,6 +835,8 @@ finally:
         except Exception as exc:
             cleanup['failures'].append('proxy: ' + str(exc))
             cleanup['proxyClosed'] = False
+    if native_sock is not None:
+        native_sock.close()
     cleanup['nativeChildStopped'] = reap(child, 'native', stop_stdin=True)
     node_stopped = reap(node, 'node', stop_stdin=False)
     if not node_stopped:
