@@ -219,6 +219,7 @@ function expectBaseline(coordinator: SettlementCoordinatorV1): void {
   const { quota, ledger } = coordinator.deps
   expect(quota.snapshot()).toEqual({ global: { short: { held: 0, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [] })
   expect(ledger.snapshot().holding).toEqual([])
+  expect(ledger.snapshot().inFlight).toEqual({ short: 0, long: 0 })
   expect(ledger.selfCheck(quota.snapshot())).toEqual([])
 }
 

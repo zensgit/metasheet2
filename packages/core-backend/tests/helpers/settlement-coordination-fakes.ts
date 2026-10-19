@@ -36,6 +36,8 @@ export function setupFakeCoordination(options: { connectTimeoutMs?: number; take
     expect(quota.snapshot()).toEqual({ global: { short: { held: 0, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [] })
     expect(ledger.snapshot().holding).toEqual([])
     expect(ledger.snapshot().abandoned).toEqual({ short: 0, long: 0 })
+    // Every unit has left (Opus S3 P3-10): a port that never closed its own unit would leave one in flight.
+    expect(ledger.snapshot().inFlight).toEqual({ short: 0, long: 0 })
     expect(ledger.selfCheck(quota.snapshot())).toEqual([])
   }
   return { clock, world, pool, coordinator, records, quota, ledger, prober, baseline }
