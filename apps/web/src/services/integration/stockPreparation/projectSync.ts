@@ -90,6 +90,11 @@ export type StockPreparationProjectSyncReason =
   | 'PLAN_PROJECT_SHEET_ARCHIVED'
   | 'PLAN_TARGET_NOT_OURS'
   | 'PLAN_TARGET_SCHEMA_INCOMPLETE'
+  // R67 ④ — the background dry-run lane's own two outcomes. Each has a next step 「稍后再试」 alone
+  // would get wrong: someone else's trial of this project is still reading PLM (wait, do not start a
+  // second one), or the server restarted under a running trial (just press again).
+  | 'PLAN_DRY_RUN_BUSY'
+  | 'PLAN_DRY_RUN_INTERRUPTED'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -561,6 +566,8 @@ export function classifyPlanReadFailureReason(
     return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE) return 'PLAN_DRY_RUN_BUSY'
+  if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE) return 'PLAN_DRY_RUN_INTERRUPTED'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
   if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
   if (status === 401) return 'PLAN_READ_UNAUTHENTICATED'
@@ -696,8 +703,69 @@ export interface StockPreparationProjectSyncArchiveResult {
   created?: Record<string, number>
 }
 
+// ---------------------------------------------------------------------------
+// R67 ④ — 试算 through the background job lane
+// ---------------------------------------------------------------------------
+//
+// WHY. A dry run for one project is ~1,400 serial PLM reads; on a slow customer PLM the synchronous
+// request outlives nginx's 60 s proxy timeout, the browser gets a 504 while the server finishes the
+// work anyway, the result is lost, and the operator's retry doubles the PLM load. So the default
+// client ENQUEUES (`POST …/dry-run-jobs`, 202) and POLLS the caller's job for the project
+// (`GET …/dry-run-jobs?projectNo=`) at the large-BOM lane's interval. What `dryRun` resolves to is
+// unchanged: the server stores the synchronous route's exact payload (dry-run token included), and a
+// failed job carries the synchronous route's exact status + code — so `classifyPlanStep`, the
+// rendering and the apply handoff below do not know which lane answered.
+//
+// LEAVING DOES NOT CANCEL. `signal` only stops THIS page polling; the job runs to completion on the
+// server. A press while this caller's own trial of the project is still running ATTACHES to it (the
+// enqueue answers 409 `ownJob: true`) instead of starting a second PLM read.
+
+/** The large-BOM lane's poll interval (largeBomPull.ts). */
+export const STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS = 2000
+/** 30 minutes of polls — the server keeps a finished job exactly as long as its dry-run token lives. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLLS = 900
+/** Consecutive transport failures a poll tolerates before the run reports a read failure. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLL_ERRORS = 3
+export const STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS'
+export const STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED'
+/** The one answer on which the client falls back to the synchronous route: no durable job store. */
+export const STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE = 'STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE'
+export const STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE = 'STOCK_PREPARATION_DRY_RUN_POLL_STOPPED'
+export const STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED_CODE = 'STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED'
+
+/** Values-free progress, fired once per poll while the job runs. */
+export interface StockPreparationDryRunProgress {
+  /** Server-measured time since the job started. */
+  elapsedMs: number
+  /** True when this call picked up a job that was already running for the project. */
+  attached: boolean
+}
+
+export interface StockPreparationDryRunOptions {
+  onProgress?: (progress: StockPreparationDryRunProgress) => void
+  /** Stops polling (the job keeps running server-side). */
+  signal?: AbortSignal
+  /** Real `setTimeout` in production; an instant resolver in tests. */
+  wait?: (ms: number) => Promise<void>
+  pollIntervalMs?: number
+  maxPolls?: number
+}
+
+/** The caller's background dry run for one project, as a re-attach probe sees it. */
+export interface StockPreparationDryRunJobSnapshot {
+  status: 'running' | 'succeeded' | 'failed'
+  elapsedMs: number
+}
+
 export interface StockPreparationProjectSyncApi {
-  dryRun(projectNo: string): Promise<StockPreparationProjectSyncPlan>
+  /** Options are R67 ④'s progress / stop-polling seam; a double may ignore them. */
+  dryRun(projectNo: string, options?: StockPreparationDryRunOptions): Promise<StockPreparationProjectSyncPlan>
+  /**
+   * R67 ④: the caller's background dry run for this project, or null when there is none — what a
+   * remounted page uses to show that a trial it started earlier is still reading PLM. Optional, so an
+   * injected double need not implement it (and a mount with one makes no extra request).
+   */
+  dryRunJobStatus?(projectNo: string): Promise<StockPreparationDryRunJobSnapshot | null>
   reconcile(projectNo: string): Promise<{ counts?: Record<string, number> }>
   apply(projectNo: string, dryRunToken: string): Promise<StockPreparationProjectSyncApplyResult>
   archive(projectNo: string): Promise<StockPreparationProjectSyncArchiveResult>
@@ -779,6 +847,8 @@ export interface StockPreparationProjectSyncHooks {
    * project-sheet wording; see `STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS`.
    */
   projectSheet?: boolean
+  /** R67 ④: forwarded to `api.dryRun` — progress and the stop-polling signal. Absent = the old call. */
+  dryRun?: StockPreparationDryRunOptions
 }
 
 /**
@@ -823,7 +893,7 @@ export async function runStockPreparationProjectSync(
   let plan: StockPreparationProjectSyncPlan | null = null
   let planStep: StockPreparationProjectSyncStepResult
   try {
-    plan = await api.dryRun(projectNo)
+    plan = await (hooks.dryRun ? api.dryRun(projectNo, hooks.dryRun) : api.dryRun(projectNo))
     planned = plannedCountsOf(plan?.counts)
     pendingConfirmCount = planned.manualConfirm
     // Read straight off the plan, NOT off `classifyPlanStep`'s result — see the type's doc comment.
@@ -1021,6 +1091,19 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
   return (envelope.data ?? {}) as T
 }
 
+/** What `GET …/dry-run-jobs` answers — untyped at the boundary, read field by field. */
+interface StockPreparationDryRunJobRecord {
+  jobId?: string
+  status?: string
+  elapsedMs?: number
+  result?: unknown
+  error?: { httpStatus?: unknown; code?: unknown }
+}
+
+function defaultDryRunWait(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
 export function createStockPreparationProjectSyncApi(
   scope: IntegrationScope,
   actionId: string = STOCK_PREPARATION_PULL_BOM_ACTION_ID,
@@ -1029,37 +1112,172 @@ export function createStockPreparationProjectSyncApi(
   const suffix = query ? `?${query}` : ''
   const base = `/api/integration/table-actions/${encodeURIComponent(actionId)}`
   const json = { 'Content-Type': 'application/json' }
+  const jobsRoute = `${base}/dry-run-jobs`
+
+  /** The synchronous dry run — kept for the one deployment shape that has no durable job store. */
+  async function syncDryRun(projectNo: string): Promise<StockPreparationProjectSyncPlan> {
+    const route = `${base}/dry-run`
+    // `includeMissingComponents` is a REQUEST FLAG, not an action parameter — it sits alongside
+    // `parameters` rather than inside it (W3a §4.1/§4.2: the server's own opt-in gate reads it
+    // off the body root and, only when it is `true`, does the extra operator-scope check that
+    // lets the response's `missingComponents` key carry real part numbers).
+    try {
+      const response = await apiFetch(`${route}${suffix}`, {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
+      })
+      return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+    } catch (error) {
+      // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
+      // of writing) must not 400 every dry run on main: if the flagged request was refused for
+      // exactly one of the two reasons that mean "the flag itself is the problem" (not "the plan
+      // failed"), retry ONCE, plainly, without it. A genuine dry-run failure (bad project number,
+      // transport error, …) is NOT one of those two reasons and re-throws unchanged below.
+      const reason = missingComponentsFallbackReason(error)
+      if (!reason) throw error
+      const response = await apiFetch(`${route}${suffix}`, {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ parameters: { projectNo } }),
+      })
+      const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+      return { ...plan, missingComponentsUnavailableReason: reason }
+    }
+  }
+
+  function jobQuery(projectNo: string, includeMissingComponents: boolean): string {
+    const query = buildQueryString({
+      tenantId: scope.tenantId,
+      workspaceId: scope.workspaceId,
+      projectNo,
+      includeMissingComponents: includeMissingComponents ? 'true' : 'false',
+    })
+    return `${jobsRoute}?${query}`
+  }
+
+  async function readJob(projectNo: string, includeMissingComponents: boolean): Promise<StockPreparationDryRunJobRecord> {
+    const response = await apiFetch(jobQuery(projectNo, includeMissingComponents))
+    return readEnvelope<StockPreparationDryRunJobRecord>(response, jobsRoute)
+  }
+
+  /** POST the job. Resolves `attach` on this caller's OWN 409 (its earlier trial is still running). */
+  async function enqueue(projectNo: string, includeMissingComponents: boolean): Promise<'started' | 'attach'> {
+    const response = await apiFetch(`${jobsRoute}${suffix}`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify(includeMissingComponents
+        ? { parameters: { projectNo }, includeMissingComponents: true }
+        : { parameters: { projectNo } }),
+    })
+    if (response?.status === 409) {
+      let payload: unknown = null
+      try { payload = await response.clone().json() } catch { payload = null }
+      const error = (payload && typeof payload === 'object') ? (payload as { error?: { code?: unknown; details?: { ownJob?: unknown } } }).error : undefined
+      if (error?.code === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE && error.details?.ownJob === true) return 'attach'
+    }
+    await readEnvelope<StockPreparationDryRunJobRecord>(response, jobsRoute)
+    return 'started'
+  }
+
+  /** Poll the caller's job for the project until it ends; the plan, or the synchronous route's error. */
+  async function pollJob(
+    projectNo: string,
+    includeMissingComponents: boolean,
+    attached: boolean,
+    options: StockPreparationDryRunOptions,
+  ): Promise<StockPreparationProjectSyncPlan> {
+    const wait = options.wait ?? defaultDryRunWait
+    const intervalMs = options.pollIntervalMs ?? STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS
+    const maxPolls = options.maxPolls ?? STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLLS
+    let transportErrors = 0
+    for (let poll = 0; poll < maxPolls; poll += 1) {
+      if (options.signal?.aborted) {
+        throw new StockPreparationProjectSyncCallError(0, jobsRoute, { code: STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE })
+      }
+      let job: StockPreparationDryRunJobRecord
+      try {
+        job = await readJob(projectNo, includeMissingComponents)
+        transportErrors = 0
+      } catch (error) {
+        // A dropped poll is not a failed dry run — the job is still running server-side. Tolerate a
+        // few in a row (a gateway blip); anything with an envelope code is a real answer.
+        const transient = error instanceof StockPreparationProjectSyncCallError
+          && error.code === null && !error.malformed && (error.status === 0 || error.status >= 502)
+        transportErrors += 1
+        if (!transient || transportErrors >= STOCK_PREPARATION_DRY_RUN_JOB_MAX_POLL_ERRORS) throw error
+        await wait(intervalMs)
+        continue
+      }
+      if (job.status === 'succeeded') return (job.result ?? {}) as StockPreparationProjectSyncPlan
+      if (job.status === 'failed') {
+        const status = typeof job.error?.httpStatus === 'number' ? job.error.httpStatus : 0
+        throw new StockPreparationProjectSyncCallError(status, jobsRoute, { code: clampErrorCode(job.error?.code) })
+      }
+      if (job.status !== 'running') throw new StockPreparationProjectSyncCallError(200, jobsRoute, { malformed: true })
+      if (options.onProgress) options.onProgress({ elapsedMs: intOf(job.elapsedMs), attached })
+      await wait(intervalMs)
+    }
+    throw new StockPreparationProjectSyncCallError(0, jobsRoute, { code: STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED_CODE })
+  }
+
+  /** One flag value: enqueue (or attach) and poll. */
+  async function jobDryRun(projectNo: string, includeMissingComponents: boolean, options: StockPreparationDryRunOptions): Promise<StockPreparationProjectSyncPlan> {
+    const outcome = await enqueue(projectNo, includeMissingComponents)
+    if (outcome === 'started') return pollJob(projectNo, includeMissingComponents, false, options)
+    // ATTACH. The running job may have been enqueued with the other flag value (they share the
+    // project's one slot but are separate records); the flagged record first, as this client sends.
+    try {
+      return await pollJob(projectNo, true, true, options)
+    } catch (error) {
+      if (error instanceof StockPreparationProjectSyncCallError && (error.status === 404 || missingComponentsFallbackReason(error))) {
+        return pollJob(projectNo, false, true, options)
+      }
+      throw error
+    }
+  }
 
   return {
-    async dryRun(projectNo: string) {
-      const route = `${base}/dry-run`
+    async dryRun(projectNo: string, options: StockPreparationDryRunOptions = {}) {
       // `includeMissingComponents` is a REQUEST FLAG, not an action parameter — it sits alongside
-      // `parameters` rather than inside it (W3a §4.1/§4.2: the server's own opt-in gate reads it
-      // off the body root and, only when it is `true`, does the extra operator-scope check that
-      // lets the response's `missingComponents` key carry real part numbers).
+      // `parameters` rather than inside it (W3a §4.1/§4.2). B1's single, automatic fallback is kept
+      // exactly as on the synchronous route: a flagged ENQUEUE refused for one of the two "the flag
+      // itself is the problem" reasons is retried ONCE without it; anything else surfaces.
       try {
-        const response = await apiFetch(`${route}${suffix}`, {
-          method: 'POST',
-          headers: json,
-          body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
-        })
-        return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+        try {
+          return await jobDryRun(projectNo, true, options)
+        } catch (error) {
+          const reason = missingComponentsFallbackReason(error)
+          if (!reason) throw error
+          const plan = await jobDryRun(projectNo, false, options)
+          return { ...plan, missingComponentsUnavailableReason: reason }
+        }
       } catch (error) {
-        // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
-        // of writing) must not 400 every dry run on main: if the flagged request was refused for
-        // exactly one of the two reasons that mean "the flag itself is the problem" (not "the plan
-        // failed"), retry ONCE, plainly, without it. A genuine dry-run failure (bad project number,
-        // transport error, …) is NOT one of those two reasons and re-throws unchanged below.
-        const reason = missingComponentsFallbackReason(error)
-        if (!reason) throw error
-        const response = await apiFetch(`${route}${suffix}`, {
-          method: 'POST',
-          headers: json,
-          body: JSON.stringify({ parameters: { projectNo } }),
-        })
-        const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
-        return { ...plan, missingComponentsUnavailableReason: reason }
+        // No durable job store on this deployment: the synchronous route, which needs none.
+        if (error instanceof StockPreparationProjectSyncCallError && error.code === STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE) {
+          return syncDryRun(projectNo)
+        }
+        throw error
       }
+    },
+
+    async dryRunJobStatus(projectNo: string) {
+      for (const includeMissingComponents of [true, false]) {
+        try {
+          const job = await readJob(projectNo, includeMissingComponents)
+          if (job.status === 'running' || job.status === 'succeeded' || job.status === 'failed') {
+            return { status: job.status, elapsedMs: intOf(job.elapsedMs) }
+          }
+          return null
+        } catch (error) {
+          // Nothing under this flag (404), or the flagged read is not this caller's to make: try the
+          // values-free record. Anything else — and both misses — means "nothing to re-attach to".
+          const next = error instanceof StockPreparationProjectSyncCallError
+            && (error.status === 404 || missingComponentsFallbackReason(error) !== null)
+          if (!next) return null
+        }
+      }
+      return null
     },
 
     async reconcile(projectNo: string) {
