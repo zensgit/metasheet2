@@ -34,6 +34,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     setSettlementCoordinationNestingModeV1('throw')
     const seen: Array<Record<string, unknown>> = []
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -66,6 +67,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     const { pool, coordinator, quota, baseline } = setup()
     const order: string[] = []
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -88,6 +90,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     let ran = false
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -110,6 +113,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     const business = new Error('test: business')
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -131,6 +135,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     const ran: string[] = []
     const failure = new Error('test: callback failed')
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -157,6 +162,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
     const lost = Object.assign(new Error('test: connection lost at COMMIT'), { code: '08006' })
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -186,7 +192,7 @@ describe('coordinated transaction port: lifecycle (P11-A10)', () => {
       return client as never
     }
     await expect(
-      coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => 'never' }),
+      coordinatedTransactionV1({ transactionDepth: () => 0, coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => 'never' }),
     ).rejects.toBeInstanceOf(AttendanceCoordinationCommitNotCommittedError)
     expect(pool.clients[0].released[0]).toBeInstanceOf(Error)
     baseline()
@@ -200,6 +206,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     let runs = 0
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -223,6 +230,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const { pool, coordinator, baseline } = setup()
     let runs = 0
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -242,7 +250,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const { pool, coordinator, baseline } = setup()
     const error = serializationError('plain')
     await expect(
-      coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => Promise.reject(error) }),
+      coordinatedTransactionV1({ transactionDepth: () => 0, coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => Promise.reject(error) }),
     ).rejects.toBe(error)
     expect(pool.clients).toHaveLength(1)
     baseline()
@@ -252,6 +260,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const { pool, coordinator, baseline } = setup()
     let runs = 0
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -267,6 +276,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const commitError = serializationError('commit, mapped')
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -288,6 +298,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const { pool, coordinator, baseline } = setup()
     const orgs: string[] = []
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -302,6 +313,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const moving = ['legacy-org-a', 'legacy-org-b', 'legacy-org-c', 'legacy-org-d']
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -320,6 +332,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     const unit = coordinator.openUnit(REQUEST)
     world.dedicatedBusy = true
     const first = coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       unit,
@@ -341,7 +354,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
     expect(spent).toBe(25)
     unit.beginOuterAttempt()
     expect(unit.innerRestarts).toEqual({ serialization: 0, recheck: 0 })
-    const second = await coordinatedTransactionV1({ coordinator, request: REQUEST, unit, candidate: { org: ORG }, body: async () => 'outer 2' })
+    const second = await coordinatedTransactionV1({ transactionDepth: () => 0, coordinator, request: REQUEST, unit, candidate: { org: ORG }, body: async () => 'outer 2' })
     expect(second).toBe('outer 2')
     expect(unit.budget.spentMs).toBe(spent)
     unit.close()
@@ -351,6 +364,7 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
   it('the candidate short read finds the org before the acquisition', async () => {
     const { pool, coordinator, baseline } = setup()
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: {
@@ -493,6 +507,7 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     noteSettlementCoordinationMainPoolAccessV1('test.outside')
     const before = settlementCoordinationNestedMainPoolAccessesV1()
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -505,6 +520,7 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     setSettlementCoordinationNestingModeV1('throw')
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -521,6 +537,7 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     const { coordinator, baseline } = setup()
     let later: Promise<unknown> | null = null
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -537,6 +554,7 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     const { coordinator, baseline } = setup()
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -554,6 +572,7 @@ describe('coordinated transaction port: recheck detail and abandon notices', () 
     const { coordinator, baseline } = setup()
     const seen: unknown[] = []
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -572,6 +591,7 @@ describe('coordinated transaction port: recheck detail and abandon notices', () 
     const notices: string[] = []
     let runs = 0
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -586,6 +606,7 @@ describe('coordinated transaction port: recheck detail and abandon notices', () 
     expect(notices).toEqual(['abandoned 1', 'abandoned 2'])
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -605,6 +626,7 @@ describe('coordinated transaction port: a method suspended at its own COMMIT', (
     const { pool, coordinator, quota, baseline } = setup()
     const order: string[] = []
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -628,6 +650,7 @@ describe('coordinated transaction port: a method suspended at its own COMMIT', (
     const business = new Error('test: 409 before commit')
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -643,6 +666,7 @@ describe('coordinated transaction port: a method suspended at its own COMMIT', (
     const woken: unknown[] = []
     let runs = 0
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -669,6 +693,7 @@ describe('coordinated transaction port: a method suspended at its own COMMIT', (
     const { pool, coordinator, baseline } = setup()
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -687,6 +712,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     const { pool, coordinator, baseline } = setup()
     let ran = false
     const failure = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -723,6 +749,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     const error = lost()
     let abandoned = 0
     const failure = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -752,6 +779,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     const { pool, coordinator, baseline } = setup()
     const first = lost()
     const failure = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -778,6 +806,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     let ran = false
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -797,6 +826,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
   it('an error during the candidate short read destroys that connection and fails the read', async () => {
     const { pool, coordinator, baseline } = setup()
     const failure = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: {
@@ -821,6 +851,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
   it('a connection that reported an error during a candidate read that still returned is destroyed, not returned to the pool', async () => {
     const { pool, coordinator, baseline } = setup()
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: {
@@ -844,6 +875,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     const { pool, coordinator, baseline } = setup()
     const other = (): void => undefined
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -855,7 +887,7 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     })
     expect(pool.clients[0].released).toEqual([null])
     expect(pool.clients[0].listeners('error')).toEqual([other])
-    await coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => 'second' })
+    await coordinatedTransactionV1({ transactionDepth: () => 0, coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => 'second' })
     expect(pool.clients[1].listenerCount('error')).toBe(0)
     baseline()
   })
@@ -867,6 +899,7 @@ describe('coordinated transaction port: a failing error reporter (Codex S3-CX-05
     const ran: string[] = []
     let resumed = false
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -905,6 +938,7 @@ describe('coordinated transaction port: review round 1, Opus findings', () => {
     const seen: Record<string, string[]> = { [ORG]: [], [OTHER]: [] }
     const run = (org: string) =>
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org },
@@ -935,6 +969,7 @@ describe('coordinated transaction port: review round 1, Opus findings', () => {
       entered = resolve
     })
     const other = coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: OTHER },
@@ -946,6 +981,7 @@ describe('coordinated transaction port: review round 1, Opus findings', () => {
     })
     await otherEntered
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -967,6 +1003,7 @@ describe('coordinated transaction port: review round 1, Opus findings', () => {
     const after = new Error('test: post-commit work failed')
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -986,6 +1023,7 @@ describe('coordinated transaction port: review round 1, Opus findings', () => {
     const { pool, coordinator, baseline } = setup()
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },

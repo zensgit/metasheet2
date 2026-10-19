@@ -31,6 +31,7 @@ describe('W4 runner, handed-over mode (r6.1 §8 W-7)', () => {
     const sent: string[] = []
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -44,6 +45,7 @@ describe('W4 runner, handed-over mode (r6.1 §8 W-7)', () => {
   it('runs the body on the handed-over connection and sends nothing of its own (no Gate E, BEGIN, settings, COMMIT or ROLLBACK)', async () => {
     const { pool, coordinator, baseline } = setup()
     const result = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -63,6 +65,7 @@ describe('W4 runner, handed-over mode (r6.1 §8 W-7)', () => {
       const { pool, coordinator, baseline } = setup()
       let runs = 0
       const result = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -85,6 +88,7 @@ describe('W4 runner, handed-over mode (r6.1 §8 W-7)', () => {
     const { coordinator, baseline } = setup()
     const thrown: unknown[] = []
     const outcome = await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -108,6 +112,7 @@ describe('W4 runner, handed-over mode (r6.1 §8 W-7)', () => {
     const business = Object.assign(new Error('test: business'), { code: 'ATTENDANCE_TEST_BUSINESS' })
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -125,6 +130,7 @@ describe('class-00 helper inside a coordinated transaction (r6.1 §3.5)', () => 
   it('is a re-entrant no-op with no round trip when the credential covers the org with class-00', async () => {
     const { pool, coordinator, baseline } = setup()
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -149,6 +155,7 @@ describe('class-00 helper inside a coordinated transaction (r6.1 §3.5)', () => 
       }
     }
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: { ...REQUEST, needsClassZero: false },
       candidate: { org: ORG },
@@ -158,6 +165,7 @@ describe('class-00 helper inside a coordinated transaction (r6.1 §3.5)', () => 
       },
     })
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },

@@ -25,6 +25,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
     const slept: number[] = []
     const refused: Array<{ attempt: number; code: string; sleepMs: number }> = []
     const result = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -59,6 +60,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
     const business = new Error('test: business')
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -78,6 +80,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
     world.dedicatedBusy = true
     const slept: number[] = []
     const failure = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -101,6 +104,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
     const slept: number[] = []
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: { ...REQUEST, signal: controller.signal },
         candidate: { org: ORG },
@@ -123,6 +127,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
       world.dedicatedBusy = true
       const slept: number[] = []
       await coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -136,7 +141,7 @@ describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', 
   it('refuses a non-positive attempts setting and a jitter outside 0 … 1 before touching anything', async () => {
     const { coordinator, records } = setup()
     for (const retry of [{ attempts: 0 }, { attempts: 1.5 }, { jitter: 2 }, { jitter: -0.1 }]) {
-      await expect(coordinatedTransactionCliV1({ coordinator, request: REQUEST, candidate: { org: ORG }, retry, body: async () => 'never' })).rejects.toBeInstanceOf(TypeError)
+      await expect(coordinatedTransactionCliV1({ transactionDepth: () => 0, coordinator, request: REQUEST, candidate: { org: ORG }, retry, body: async () => 'never' })).rejects.toBeInstanceOf(TypeError)
     }
     expect(records).toEqual([])
     expect(SETTLEMENT_COORDINATION_CLI_DEFAULT_BACKOFF_MS.length).toBeGreaterThan(0)
@@ -180,6 +185,7 @@ describe('CLI coordinator over a private pool', () => {
     const pool = new FakePool(world)
     const coordinator = createSettlementCoordinationCliCoordinatorV1({ pool, poolMax: 4, clock, random: () => 0.5 })
     const result = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -204,6 +210,7 @@ describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-0
     let bodies = 0
     const slept: number[] = []
     const failure = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -214,6 +221,7 @@ describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-0
         return settlementCoordinationResultAfterCommitV1(async () => {
           world.dedicatedBusy = true
           return coordinatedTransactionV1({
+            transactionDepth: () => 0,
             coordinator,
             request: { ...REQUEST, oneShot: true },
             candidate: { org: OTHER_ORG },
@@ -240,6 +248,7 @@ describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-0
     const thrown = new SettlementCoordinationAcquireError('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY', { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 })
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -261,6 +270,7 @@ describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-0
     const thrown = new SettlementCoordinationAcquireError('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY', { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 })
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -285,6 +295,7 @@ describe('CLI variant: what reaches the caller the first time (Opus P3-4)', () =
     const slept: number[] = []
     const thrown: unknown[] = []
     const failure = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -309,6 +320,7 @@ describe('CLI variant: what reaches the caller the first time (Opus P3-4)', () =
     const slept: number[] = []
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -328,6 +340,7 @@ describe('CLI variant: what reaches the caller the first time (Opus P3-4)', () =
     const commitFailure = new Error('test: connection reset during COMMIT')
     await expect(
       coordinatedTransactionCliV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },
@@ -353,6 +366,7 @@ describe('CLI variant: between attempts (Opus S3 closure NIT-c1, NIT-c3)', () =>
     world.dedicatedBusy = true
     const duringSleep: unknown[] = []
     const result = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -386,6 +400,7 @@ describe('CLI variant: between attempts (Opus S3 closure NIT-c1, NIT-c3)', () =>
     let reads = 0
     let bodies = 0
     const result = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: {

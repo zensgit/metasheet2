@@ -209,6 +209,7 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
     const business = Object.assign(new Error('test: handed-over business'), { code: 'ATTENDANCE_TEST_BUSINESS' })
     await expect(
       coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator,
         request: REQUEST,
         candidate: { org: ORG },

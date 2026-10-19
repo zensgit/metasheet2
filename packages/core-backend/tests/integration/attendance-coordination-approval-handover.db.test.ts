@@ -434,6 +434,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const mainQueries = vi.spyOn(mainPool as unknown as { query: (...args: unknown[]) => unknown }, 'query')
     try {
       const dto = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -463,6 +464,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -489,6 +491,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const dto = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -517,6 +520,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const dto = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -545,6 +549,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -655,7 +660,8 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     let classZeroHeld: boolean | null = null
     try {
-      const result = await coordinatedTransactionV1({
+      const result = await coordinatedTransactionV1<unknown>({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: m07(),
         candidate: { org: seeded.requestOrg },
@@ -692,6 +698,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: m07(),
         candidate: { org: seeded.requestOrg },
@@ -725,6 +732,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     try {
       const failure = await holdingRowLock(seeded.roundInstanceId, () =>
         coordinatedTransactionV1({
+          transactionDepth: () => 0,
           coordinator: w.coordinator,
           request: m07(300),
           candidate: { org: seeded.requestOrg },
@@ -749,6 +757,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     try {
       const failure = await holdingRowLock(seeded.roundInstanceId, () =>
         coordinatedTransactionV1({
+          transactionDepth: () => 0,
           coordinator: w.coordinator,
           request: {
             needsClassZero: false,
@@ -780,6 +789,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     try {
       const failure = await holdingRowLock(seeded.roundInstanceId, () =>
         coordinatedTransactionV1({
+          transactionDepth: () => 0,
           coordinator: w.coordinator,
           request: m07(300),
           candidate: { org: legacyOrg },
@@ -822,6 +832,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: m07(),
         candidate: { org: (staleCanonical as { orgId: string }).orgId },
@@ -857,6 +868,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: m07(),
         candidate: { org: (staleLegacy as { orgId: string }).orgId },
@@ -888,6 +900,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const w = world()
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -919,6 +932,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const contended = Object.assign(new Error('test: entry mapping'), { statusCode: 503, code: 'CANCEL_ROUND_DISPATCH_CONTENDED' })
     try {
       const failure = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: w.coordinator,
         request: m07(),
         candidate: { org: crypto.randomUUID() },
@@ -992,6 +1006,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     const approving = world()
     try {
       const commented = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: commenting.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
@@ -1019,6 +1034,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
       expectBaseline(commenting.coordinator)
 
       const approved = await coordinatedTransactionV1({
+        transactionDepth: () => 0,
         coordinator: approving.coordinator,
         request: m07(),
         candidate: { org: crypto.randomUUID() },
@@ -1065,6 +1081,7 @@ describeIfDatabase('attendance settlement coordination — the approval service 
       const w = world()
       try {
         const failure = await coordinatedTransactionV1({
+          transactionDepth: () => 0,
           coordinator: w.coordinator,
           request: READ_COMMITTED,
           candidate: { org: crypto.randomUUID() },

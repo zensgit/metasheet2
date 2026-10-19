@@ -9,7 +9,6 @@ import {
   runSettlementCoordinationHandoverV1,
   runSettlementCoordinationS1V1,
   verifySettlementCoordinationCredentialV1,
-  type SettlementCoordinationCredentialV1,
 } from '../coordination/settlement-coordination-handover'
 import {
   buildSettlementCoordinationS1Sql,
