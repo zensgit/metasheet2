@@ -1,0 +1,58 @@
+{
+  "base": "b88ee9aa40eecd1967246572b2cc6490c1a3429e",
+  "original_pin": "430effa1e9aef4b36be7b7da1ad191fbb2128990",
+  "red": {
+    "new_failures": 7,
+    "log_sha256": "023c9a28dcedf7692eed4295afe5989915c8de4155f70ce6e1f18a06cf780831"
+  },
+  "legacy_fixture_counterexample": {
+    "exact_original_adapter_sha256": "d993a8d127fca2083fc26530313f1a5d30776d6cf05ae39817ed3812a14fccba",
+    "baseline_failures": 9,
+    "baseline_log_sha256": "3940955e7a9a7d6d872efc2ebb9f09748932ef4996bbbb4730799260f703c40e",
+    "fix": "explicit positive unbound classification in legacy unit fixture only; no production gate changed"
+  },
+  "current_unit": {
+    "name": "vitest tests",
+    "tests": "278",
+    "failures": "0",
+    "errors": "0",
+    "time": "8.636",
+    "skipped": 0
+  },
+  "junit_sha256": "5f29555dab2352691eef56c3e39fbf27b0ee07fa8167bf7d4a6da76e386c7382",
+  "typecheck": {
+    "passed": true,
+    "node": "20.20.2",
+    "command": "tsc -p packages/core-backend/tsconfig.json --noEmit"
+  },
+  "parent_census_passed": 49,
+  "parent_reconciliation": {
+    "parent": "b88ee9aa40eecd1967246572b2cc6490c1a3429e",
+    "original_base": "430effa1e9aef4b36be7b7da1ad191fbb2128990",
+    "patch_sha256": "cd70c4a34ab28d057ed6c4c84854a3daf2ddb245beff0eebfd36c1f2313b7a1e",
+    "files": {
+      "packages/core-backend/src/data-adapters/PLMAdapter.ts": "d4d0bbc87db10030544e667abaaf0bf5c58c78a532bb19654408d2f93df70fad",
+      "packages/core-backend/src/routes/plm-workbench.ts": "e2940bb86db409a2a57497922d9d6c3b1811d9067946d6dbdbab614d76128ab8",
+      "packages/core-backend/src/services/plm-managed-native-http.ts": "28aeb797cbe32d8998fe043b5817557856811a203007117a3258493e9ab60702",
+      "packages/core-backend/tests/unit/plm-adapter-capabilities.test.ts": "be021ee6e83f908c4154ed58466b44935fc0574344962c18511bbe644088d7fd",
+      "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "5e6c484e99704649b5ece18b00e7e41cb78cd4768564d693a5c879b78f931032",
+      "packages/core-backend/tests/unit/plm-workbench-capabilities-routes.test.ts": "0830a30b75ec0344fc7e09e6e51bf19c16554259c5e8d327bc67ffd940b494e7"
+    }
+  },
+  "source_files_sha256": {
+    "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "2e9c94bb159fa83d6907dd697955d0fe1de9f6a4f5b31eb501b330257d9fe133",
+    "packages/core-backend/src/routes/plm-workbench.ts": "e2940bb86db409a2a57497922d9d6c3b1811d9067946d6dbdbab614d76128ab8",
+    "packages/core-backend/src/services/plm-managed-native-http.ts": "28aeb797cbe32d8998fe043b5817557856811a203007117a3258493e9ab60702",
+    "packages/core-backend/src/services/plm-managed-request-context.ts": "13257bd888f2150c4e9e764b4d4ea4299eabbf84d9255259280a0fb70cc3facc",
+    "packages/core-backend/tests/unit/jwt-middleware.test.ts": "b089977039ac9535148526cd50c45bd428fb695bba96b820ca8bb73e17b6941f",
+    "packages/core-backend/tests/unit/plm-adapter-capabilities.test.ts": "be021ee6e83f908c4154ed58466b44935fc0574344962c18511bbe644088d7fd",
+    "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "2d947651562cd7336041ca2e8a4f9cc5a28908985244a7750a4b219467d8feb6",
+    "packages/core-backend/tests/unit/plm-workbench-capabilities-routes.test.ts": "0830a30b75ec0344fc7e09e6e51bf19c16554259c5e8d327bc67ffd940b494e7"
+  },
+  "fixed_source_images_qualified": false,
+  "actual_eco_dom_qualified": false,
+  "postgres_concurrency_qualified": false,
+  "whole_goal_qualified": false,
+  "production_qualified": false
+}

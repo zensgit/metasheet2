@@ -804,6 +804,8 @@ router.get(
   param('id').isString(),
   validate,
   async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store')
+    res.vary('Authorization, Cookie, X-Tenant-ID, X-Org-ID')
     const dataSourceId = req.params.id
     let adapter: unknown
     try {

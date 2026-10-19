@@ -27,9 +27,14 @@ import type { ColumnInfo, DataSourceConfig, QueryResult, SchemaInfo, TableInfo }
 import {
   bindingFingerprintMatches,
   classifyManagedSource,
+  isPlmManagedCompanionEnabled,
+  registrationFor,
   ManagedCompanionRefusal,
   noteSharedTransportCall,
+  type ManagedBindingRow,
 } from '../services/plm-managed-companion'
+import { nativePublicCapabilities } from '../services/plm-managed-native-http'
+import { currentManagedRequest } from '../services/plm-managed-request-context'
 
 /**
  * #5648 F01 (adjacent): scrub URL userinfo (`scheme://user:pass@host`) before a base URL reaches a
@@ -1148,7 +1153,7 @@ export class PLMAdapter extends HTTPAdapter {
     return new Set(values).size === 1 ? values[0] as string : undefined
   }
 
-  private async admitLegacySharedTransport(path: string): Promise<'legacy' | 'managed-static'> {
+  private async admitLegacySharedTransport(path: string): Promise<'legacy' | 'managed-advisory'> {
     const sourceId = this.config?.id
     if (!sourceId) {
       noteSharedTransportCall(path)
@@ -1160,7 +1165,7 @@ export class PLMAdapter extends HTTPAdapter {
       return 'legacy'
     }
     if (path === 'PLMAdapter.getIntegrationCapabilities' && classified.kind === 'bound' && bindingFingerprintMatches(classified.row)) {
-      return 'managed-static'
+      return 'managed-advisory'
     }
     const code = classified.kind === 'schema-missing'
       ? 'PLM_MANAGED_SCHEMA_MISSING'
@@ -1611,6 +1616,39 @@ export class PLMAdapter extends HTTPAdapter {
   // PLM-COLLAB Phase 2.5 (Integration Handshake) consumer: advisory capability manifest.
   private cachedIntegrationCapabilities: IntegrationCapabilitiesResult | null = null;
 
+  private managedCapabilityIdentity(row: ManagedBindingRow) {
+    if (!isPlmManagedCompanionEnabled() || row.data_source_id !== this.config.id || !bindingFingerprintMatches(row)
+      || (row.tenant_id !== null && row.tenant_id !== row.meta_tenant_id)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BINDING_UNAVAILABLE')
+    }
+    const actor = currentManagedRequest()
+    if (actor && (actor.conflict || !actor.userId || actor.userId !== row.meta_user_id
+      || !actor.metaTenantId || actor.metaTenantId !== row.meta_tenant_id)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_BINDING_UNAVAILABLE')
+    }
+    const registration = registrationFor({ issuer: row.installation_issuer,
+      nativeTenantId: row.native_tenant_id, nativeOrgId: row.native_org_id })
+    if (new URL(registration.nativeBaseUrl).origin !== row.frozen_origin || registration.origin !== row.client_origin) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+    }
+    const identity = JSON.stringify([row.data_source_id, row.link_id, row.generation, row.link_generation,
+      row.source_fingerprint, row.installation_issuer, row.native_auth_user_id, row.native_tenant_id,
+      row.native_org_id, row.meta_user_id, row.meta_tenant_id, row.meta_org_id, row.client_origin,
+      registration.issuer, registration.clientId, registration.callback, registration.origin,
+      registration.nativeTenantId, registration.nativeOrgId, registration.nativeBaseUrl])
+    return { registration, identity }
+  }
+
+  private capabilityResult(value: unknown): IntegrationCapabilitiesResult {
+    const manifest = value as IntegrationCapabilityManifest | null
+    if (!manifest || manifest.provider !== 'yuantus-plm' || manifest.advisory !== true
+      || typeof manifest.schema_version !== 'string' || !manifest.schema_version.length
+      || !manifest.features || typeof manifest.features !== 'object') {
+      return { available: false, reason: 'unavailable' }
+    }
+    return { available: true, manifest }
+  }
+
   /**
    * Fetch the PLM integration capability manifest so the UI can degrade gracefully
    * (show/hide automation entries by supported/entitled). ADVISORY ONLY -- it never
@@ -1629,23 +1667,20 @@ export class PLMAdapter extends HTTPAdapter {
 
   async getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult> {
     const admission = await this.admitLegacySharedTransport('PLMAdapter.getIntegrationCapabilities')
-    if (admission === 'managed-static') {
-      return {
-        available: true,
-        manifest: {
-          schema_version: 'v1',
-          provider: 'yuantus-plm',
-          advisory: true,
-          features: {
-            bom_multitable: {
-              supported: true,
-              api_version: 'v1',
-              entitled: true,
-              cache_scope: { supported: 'global', entitled: 'tenant' },
-              scenarios: ['bom_review'],
-            },
-          },
-        },
+    if (admission === 'managed-advisory') {
+      try {
+        const before = await classifyManagedSource(this.config.id)
+        if (before.kind !== 'bound') return { available: false, reason: 'unavailable' }
+        const frozen = this.managedCapabilityIdentity(before.row)
+        const manifest = await nativePublicCapabilities(frozen.registration)
+        const after = await classifyManagedSource(this.config.id)
+        if (after.kind !== 'bound' || this.managedCapabilityIdentity(after.row).identity !== frozen.identity) {
+          return { available: false, reason: 'unavailable' }
+        }
+        // Entitlement is live tenant metadata. Never reuse the legacy cached result.
+        return this.capabilityResult(manifest)
+      } catch {
+        return { available: false, reason: 'unavailable' }
       }
     }
     if (this.cachedIntegrationCapabilities) {
@@ -1710,19 +1745,8 @@ export class PLMAdapter extends HTTPAdapter {
       // required to be PRESENT (not exactly "v1"): the provider commits to additive-only
       // schema evolution, so a v1 consumer must still accept a forward-compatible future
       // version rather than degrade on it.
-      if (
-        !manifest ||
-        manifest.provider !== 'yuantus-plm' ||
-        manifest.advisory !== true ||
-        typeof manifest.schema_version !== 'string' ||
-        manifest.schema_version.length === 0 ||
-        !manifest.features ||
-        typeof manifest.features !== 'object'
-      ) {
-        return { available: false, reason: 'unavailable' };
-      }
-      const resolved: IntegrationCapabilitiesResult = { available: true, manifest };
-      this.cachedIntegrationCapabilities = resolved;
+      const resolved = this.capabilityResult(manifest);
+      if (resolved.available) this.cachedIntegrationCapabilities = resolved;
       return resolved;
     } catch (_err) {
       // F1: older PLM / no endpoint / transient error -> advertise unavailable, do not

@@ -170,7 +170,10 @@ function continueWithManagedContext(
   next: NextFunction,
   input: { userId: string | null; sessionId: string | null; conflict: boolean },
 ): void {
-  managedRequestContext.run(input, () => {
+  const claim = req.verifiedTenantClaim
+  const metaTenantId = claim?.kind === 'present' && req.authenticatedTenantId === claim.value
+    ? claim.value : null
+  managedRequestContext.run({ ...input, metaTenantId }, () => {
     next()
   })
 }
