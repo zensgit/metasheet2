@@ -21,6 +21,7 @@ import { Pool, type PoolClient } from 'pg'
 
 import { deriveSettlementCoordinationCapacityV1 } from '../../src/attendance/coordination/settlement-coordination-capacity'
 import { currentSettlementCoordinationContextV1 } from '../../src/attendance/coordination/settlement-coordination-context'
+import { planSettlementCoordinationV1 } from '../../src/attendance/coordination/settlement-coordination-handover'
 import { coordinatedTransactionV1 } from '../../src/attendance/coordination/settlement-coordination-port'
 import {
   createSettlementCoordinatorV1,
@@ -130,6 +131,57 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
       resume()
       expect(await probe).toBeNull()
       expectBaseline(coordinator)
+    } finally {
+      await pool.end()
+    }
+  })
+
+  // ── S5 G2 (A12-P3, A12-M3 / A12-M4): the resources one coordinated transaction holds, at its peak and after ──
+
+  it('resources (A12-P3): inside the body the unit holds exactly one org permit, one global permit and one connection; afterwards nothing', async () => {
+    await reset([])
+    // Room for a second connection: a double borrow shows up as a second pool client instead of a hang.
+    const pool = new Pool({ connectionString: dbUrl, max: 3 })
+    const coordinator = coordinatorOn(pool)
+    const org = crypto.randomUUID()
+    const lexical = planSettlementCoordinationV1(org, { needsClassZero: REQUEST.needsClassZero }).key.org.lexical
+    const sample = () => ({
+      quota: coordinator.deps.quota.snapshot(),
+      ledger: coordinator.deps.ledger.snapshot(),
+      pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount },
+    })
+    const idle = (total: number) => ({
+      quota: { global: { short: { held: 0, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [] },
+      ledger: { inFlight: { short: 0, long: 0 }, abandoned: { short: 0, long: 0 }, holding: [] },
+      pool: { total, idle: total, waiting: 0 },
+    })
+    const samples: Array<ReturnType<typeof sample>> = []
+    try {
+      expect(sample()).toEqual(idle(0))
+      const result = await coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org },
+        transactionDepth: () => 0,
+        body: async (context) => {
+          samples.push(sample())
+          await context.client.query(`INSERT INTO ${schema}.t VALUES (1, 1)`)
+          samples.push(sample())
+          return context.orgLexical
+        },
+      })
+      expect(result).toBe(lexical)
+      // The layout the request asked for (one short unit of one org), and nothing else, at every sample.
+      const peak = {
+        quota: { global: { short: { held: 1, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [{ org: lexical, quotaClass: 'short', held: 1, waiting: 0 }] },
+        ledger: { inFlight: { short: 1, long: 0 }, abandoned: { short: 0, long: 0 }, holding: [{ quotaClass: 'short', lease: true, client: true }] },
+        pool: { total: 1, idle: 0, waiting: 0 },
+      }
+      expect(samples).toEqual([peak, peak])
+      // Back to zero: no permit, no unit, the one connection idle in the pool.
+      expect(sample()).toEqual(idle(1))
+      expect(coordinator.deps.ledger.selfCheck(coordinator.deps.quota.snapshot())).toEqual([])
+      expect(await valueOf(1)).toBe(1)
     } finally {
       await pool.end()
     }

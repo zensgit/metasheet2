@@ -30,6 +30,8 @@ import {
   planSettlementCoordinationV1,
 } from '../../src/attendance/coordination/settlement-coordination-handover'
 import { SETTLEMENT_COORDINATION_KEY1, buildSettlementCoordinationKeyV1 } from '../../src/attendance/coordination/settlement-coordination-key'
+import { coordinatedTransactionV1 } from '../../src/attendance/coordination/settlement-coordination-port'
+import { buildSettlementCoordinationS1Sql, buildSettlementCoordinationS2Sql } from '../../src/attendance/coordination/settlement-coordination-statements'
 import {
   SettlementCoordinationAcquireError,
   createSettlementCoordinatorV1,
@@ -59,6 +61,59 @@ const REQUEST: SettlementCoordinationUnitRequestV1 = {
 
 function asCoordinationPool(pool: Pool): SettlementCoordinationPoolV1 {
   return { connect: () => pool.connect() }
+}
+
+interface RecordedBorrow {
+  /** Every statement the borrowed connection received, with its bind-value count (never the values). */
+  readonly statements: Array<{ text: string; values: number }>
+  /** One entry per return to the pool: whether pg was asked to destroy the connection. */
+  readonly releases: boolean[]
+}
+
+/**
+ * Records, per checkout from `pool`, what the connection is sent and how it goes back. The recording
+ * `query` is an own property installed at the checkout and removed at the return, so a wrapper never
+ * outlives a borrow or stacks on a reused connection (the handover suite's replace-not-stack rule).
+ * pg-pool sets the client's `release` after it emits 'acquire', so returns are read from the pool's
+ * own 'release' event.
+ */
+function recordBorrows(pool: Pool): { borrows: RecordedBorrow[]; stop(): void } {
+  const borrows: RecordedBorrow[] = []
+  const current = new Map<object, RecordedBorrow>()
+  const onAcquire = (client: PoolClient): void => {
+    const borrow: RecordedBorrow = { statements: [], releases: [] }
+    borrows.push(borrow)
+    current.set(client, borrow)
+    const prototypeQuery = (Object.getPrototypeOf(client) as { query: (...args: unknown[]) => unknown }).query
+    Object.defineProperty(client, 'query', {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]) => {
+        const first = args[0]
+        const text = typeof first === 'string' ? first : String((first as { text?: unknown } | null)?.text ?? first)
+        const configValues = typeof first === 'object' && first !== null ? (first as { values?: unknown }).values : undefined
+        const values = Array.isArray(configValues) ? configValues.length : Array.isArray(args[1]) ? args[1].length : 0
+        borrow.statements.push({ text, values })
+        return prototypeQuery.apply(client, args)
+      },
+    })
+  }
+  const onRelease = (error: unknown, client: PoolClient): void => {
+    const borrow = current.get(client)
+    if (!borrow) return
+    current.delete(client)
+    borrow.releases.push(Boolean(error))
+    delete (client as { query?: unknown }).query
+  }
+  pool.on('acquire', onAcquire)
+  pool.on('release', onRelease)
+  return {
+    borrows,
+    stop: () => {
+      pool.removeListener('acquire', onAcquire)
+      pool.removeListener('release', onRelease)
+    },
+  }
 }
 
 describeIfDatabase('attendance settlement coordination — coordinator on a real pool (real database)', () => {
@@ -466,6 +521,113 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
       expect(shouldLogSettlementCoordinationAttemptV1(records[0])).toBe(false)
       expectBaseline(coordinator)
     } finally {
+      await pool.end()
+    }
+  })
+
+  // ── S5 G2 (A12-P1, A12-M1 / A12-M2): what an uncontended and a contended coordinated transaction send ──
+
+  it('hot path (A12-P1): an uncontended coordinated transaction sends exactly S1, BEGIN, S2, the body and COMMIT over one borrow, returns it once, with one attempt and no restart', async () => {
+    const pool = new Pool({ connectionString: dbUrl, max: 2 })
+    const records: SettlementCoordinationAttemptRecordV1[] = []
+    const coordinator = coordinatorOn(pool, records)
+    const recorder = recordBorrows(pool)
+    const org = crypto.randomUUID()
+    const plan = planSettlementCoordinationV1(org, { needsClassZero: REQUEST.needsClassZero })
+    const keys = { key2: plan.key.key2, classZeroKey: plan.classZeroKey }
+    const attempts: number[] = []
+    try {
+      // A canonical org with an entry that needs class-00: both families, the full S1 / S2.
+      expect(plan.classZeroKey).not.toBeNull()
+      const result = await coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org },
+        transactionDepth: () => 0,
+        body: async (context) => {
+          attempts.push(context.attempt)
+          await context.client.query('SELECT 1 AS body')
+          return 'committed'
+        },
+      })
+      expect(result).toBe('committed')
+      // S1 and S2 go over the simple protocol: no bind values on either (appendix E; SNAP pins why).
+      expect(recorder.borrows).toEqual([
+        {
+          statements: [
+            { text: buildSettlementCoordinationS1Sql(keys), values: 0 },
+            { text: 'BEGIN ISOLATION LEVEL SERIALIZABLE', values: 0 },
+            {
+              text: buildSettlementCoordinationS2Sql({ ...keys, timeouts: REQUEST.handover.timeouts, entryLabel: REQUEST.handover.entryLabel }),
+              values: 0,
+            },
+            { text: 'SELECT 1 AS body', values: 0 },
+            { text: 'COMMIT', values: 0 },
+          ],
+          releases: [false],
+        },
+      ])
+      expect(attempts).toEqual([1])
+      expect(
+        records.map((record) => ({
+          attempt: record.attempt,
+          outcome: record.outcome,
+          code: record.code,
+          tries: record.events.filter((event) => event.kind === 's1').map((event) => event.detail?.kind),
+        })),
+      ).toEqual([{ attempt: 1, outcome: 'handed-over', code: null, tries: ['acquired'] }])
+      expect(coordinator.deps.stats).toEqual({ attemptObserverFailures: 0, scopeChangedFallbacks: 0 })
+      expectBaseline(coordinator)
+      expect({ total: pool.totalCount, idle: pool.idleCount }).toEqual({ total: 1, idle: 1 })
+    } finally {
+      recorder.stop()
+      await pool.end()
+    }
+  })
+
+  it('hot path (A12-M2): a try that loses to a holder is retried without repeating the candidate read', async () => {
+    const pool = new Pool({ connectionString: dbUrl, max: 3 })
+    const records: SettlementCoordinationAttemptRecordV1[] = []
+    const coordinator = coordinatorOn(pool, records)
+    const holder = await observer.connect()
+    const org = crypto.randomUUID()
+    const key2 = buildSettlementCoordinationKeyV1(org).key2
+    let candidateReads = 0
+    try {
+      await holder.query(`SELECT pg_advisory_lock(${K1}, ${key2})`)
+      const running = coordinatedTransactionV1({
+        coordinator,
+        request: { ...REQUEST, handover: { ...REQUEST.handover, entryLabel: 'test.candidate-once' }, budgetMs: 4000 },
+        candidate: {
+          read: async (client) => {
+            candidateReads += 1
+            await client.query('SELECT 1 AS candidate')
+            return org
+          },
+        },
+        transactionDepth: () => 0,
+        body: async (context) => {
+          await context.client.query('SELECT 1 AS body')
+          return context.attempt
+        },
+      })
+      // The first try has lost to the holder once the unit is the org's prober.
+      for (let i = 0; i < 200 && coordinator.deps.prober.snapshot().length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(coordinator.deps.prober.snapshot()).toEqual([{ org, family: 'dedicated', epoch: 1, waiting: 0 }])
+      // Long enough for at least one more backoff try (25 ms first step) while the holder still holds.
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      await holder.query(`SELECT pg_advisory_unlock(${K1}, ${key2})`)
+      expect(await running).toBe(1)
+      expect(candidateReads).toBe(1)
+      const tries = records.flatMap((record) => record.events.filter((event) => event.kind === 's1').map((event) => String(event.detail?.kind)))
+      expect(records).toHaveLength(1)
+      expect(tries.length).toBeGreaterThanOrEqual(2)
+      expect(tries[0]).toBe('contended')
+      expect(tries.at(-1)).toBe('acquired')
+      expectBaseline(coordinator)
+      expect(coordinator.deps.prober.snapshot()).toEqual([])
+    } finally {
+      holder.release(DESTROY)
       await pool.end()
     }
   })
