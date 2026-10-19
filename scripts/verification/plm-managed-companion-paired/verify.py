@@ -319,6 +319,7 @@ parser.add_argument('--python', required=True)
 parser.add_argument('--node', required=True)
 parser.add_argument('--pg-bin', required=True)
 parser.add_argument('--browser-cache', required=True)
+parser.add_argument('--browser-module')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
@@ -332,6 +333,10 @@ if args.snapshot_pre_review and not args.snapshot_share:
     parser.error('--snapshot-pre-review requires --snapshot-share')
 if args.snapshot_share and args.browser_script != 'entry-run.mts':
     parser.error('--snapshot-share requires --browser-script entry-run.mts')
+if args.browser_module:
+    module = Path(args.browser_module).resolve(strict=True)
+    metadata = json.loads((module / 'package.json').read_text())
+    assert metadata['name'] == 'playwright' and metadata['version'] == '1.57.0', 'Pinned Playwright module required'
 meta = Path(args.meta_checkout).resolve()
 native = Path(args.native_checkout).resolve()
 pg = Path(args.pg_bin)
@@ -528,6 +533,7 @@ try:
         'snapshotShare': args.snapshot_share,
         'snapshotPreReview': args.snapshot_pre_review,
         'snapshotRestore': args.snapshot_restore,
+        'browserModule': str(module) if args.browser_module else None,
         'rootPartId': config['root_part_id'],
     }
     node_log = (owned / 'node.log').open('w')

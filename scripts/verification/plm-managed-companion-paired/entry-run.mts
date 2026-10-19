@@ -218,7 +218,7 @@ const loginJwt = jwt.sign({
 
 const { createServer } = await import(webRequire.resolve('vite'))
 const { default: vue } = await import(webRequire.resolve('@vitejs/plugin-vue'))
-const { chromium } = webRequire('@playwright/test')
+const { chromium } = input.browserModule ? require(input.browserModule) : webRequire('@playwright/test')
 const vite = await createServer({
   appType: 'spa',
   configFile: false,
