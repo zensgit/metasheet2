@@ -1,0 +1,5 @@
+{
+  "owned_child_stopped": true,
+  "controlled_failure_propagated": true,
+  "owned_listener_closed_on_failure": true
+}

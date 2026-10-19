@@ -1,0 +1,76 @@
+{
+  "passed": true,
+  "functional_verifier_source": "98bed2cca03700c7d776adab4b0baf7ef00938fd",
+  "guarded_ci_verifier_source": "2a43a64016b1f2af4ea501cf34188c7f4f8b80e5",
+  "native_source": "4f5d2f4964b6b781ab059fe1696597912e0e36de",
+  "meta_product_source": "16381a8d39659e8f59b244d8b1051c2e80401b3b",
+  "native": {
+    "write_audits": 0,
+    "snapshot_sharing_enabled": false,
+    "snapshot_items_hash": "ac518df073154aa20863fd7415bdcc46143260228550831d49b12329d8fd890d",
+    "write_subjects": [],
+    "write_lines": [],
+    "snapshot_source_unchanged": true
+  },
+  "snapshot_cancel_pending": {
+    "ok": true,
+    "actual_native_outage": true,
+    "durable_pending_cancellation": true,
+    "unconfirmed_intents": 1
+  },
+  "snapshot_restore": {
+    "ok": true,
+    "native_stopped": true,
+    "fresh_meta_process": true,
+    "pending_native_intent_id": "ad086499-9c6e-4333-8cb1-cf347210d330",
+    "retained_target_export": true,
+    "outsider_forbidden": true,
+    "new_share_refused": true,
+    "flags_disabled": true,
+    "changed_registration_refused": true,
+    "frozen_identity_sha256": "c83a9ddfd9b2c6fa9794e22e249f3280340af5b231049397f5a2bb9b88ca7d3f",
+    "original_cancellation_acked": true,
+    "duplicate_idempotent": true,
+    "managed_revoke_acked": true,
+    "published_records_unchanged": true,
+    "meta_table_count": 86,
+    "all_restored_meta_rows_equal_before_start": true,
+    "native_store_count": 3,
+    "native_rows_equal_before_start": true,
+    "original_native_path_unavailable": true,
+    "original_meta_database_unavailable": true,
+    "native_business_unchanged": true,
+    "native_write_audits": 0,
+    "scope": "Actual source-process PostgreSQL/native SQLite restore and real HTTP; not installed image/volume/host acceptance"
+  },
+  "snapshot_pre_review": {
+    "ok": true,
+    "imported_record": true,
+    "missing_submit_permission_forbidden": true,
+    "real_approval_engine": true,
+    "separate_meta_reviewer": true,
+    "actual_durable_event_replayed_twice": true,
+    "one_completion_notification": true,
+    "submission_audit_persisted": true,
+    "snapshot_record_unchanged": true
+  },
+  "cleanup": {
+    "postgresStopped": true,
+    "directoryRemoved": true,
+    "markerMatched": true,
+    "nativeChildStopped": true,
+    "proxyClosed": true,
+    "failures": []
+  },
+  "functional_script_blobs_verified": {
+    "scripts/verification/plm-managed-companion-paired/verify.py": "d57946b4d07166219b89ac76066a81491012036907d2915efd0014a8f6060a50",
+    "scripts/verification/plm-managed-companion-paired/native_server.py": "f34f5e3a26e85e5cf698ba9253bf7adf676ef81451f55f37b5bf92a37c99061d",
+    "scripts/verification/plm-managed-companion-paired/entry-run.mts": "7ba3242845b8f02bee86f95326b9ebd885cbc1e5af9f12400ea4be764236b517",
+    "scripts/verification/plm-managed-companion-paired/snapshot_restore.py": "2270146a9198f5d6028998a73f2e732f782cfbb064225263c889678ac4e767d1",
+    "scripts/verification/plm-managed-companion-paired/snapshot-restored-run.mts": "c8b02c81563b1901087ebe7187fec7a89f35c40368f64a584f834c88b4260983",
+    "scripts/verification/plm-managed-companion-paired/verify_native_restore.py": "4777eb4876631310a2c7e1e05b24fa2a552e00fdddb9015c68eadbb4f650bb00",
+    "scripts/verification/plm-managed-companion-paired/verify_snapshot_restore_failure.py": "c104498925ebe3e9edc074f312897b02695d7d811d27533426f878992ea0299c"
+  },
+  "raw_report_sha256": "c77f6577f59e6a7b2d03ba4d48c5e16c185e82f9285f89ad3e6e18a6c82086af",
+  "browser": "Explicit Playwright1.57.0 module and full Chromium channel; actual source process, not installed image"
+}
