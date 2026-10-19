@@ -63,6 +63,7 @@ export interface NotifyRecordSubscribersInput {
  * is handed.
  */
 export interface InsertRecordSubscriptionNotificationsInput {
+  sourceEventId?: string
   userIds: string[]
   sheetId: string
   recordId?: string | null
@@ -83,6 +84,7 @@ export async function insertRecordSubscriptionNotifications(
   if (userIds.length === 0) return { inserted: 0 }
 
   const recordId = input.recordId ?? ''
+  if (input.sourceEventId !== undefined && !input.sourceEventId.trim()) throw new RangeError('sourceEventId must not be blank')
   const values = userIds.map((userId) => ({
     id: randomUUID(),
     sheet_id: input.sheetId,
@@ -93,9 +95,10 @@ export async function insertRecordSubscriptionNotifications(
     revision_id: input.revisionId ?? null,
     comment_id: input.commentId ?? null,
     message: input.message ?? null,
+    ...(input.sourceEventId === undefined ? {} : { source_event_id: input.sourceEventId }),
   }))
 
-  await query(
+  const result = await query(
     `INSERT INTO meta_record_subscription_notifications (
        id,
        sheet_id,
@@ -105,7 +108,7 @@ export async function insertRecordSubscriptionNotifications(
        actor_id,
        revision_id,
        comment_id,
-       message
+       message${input.sourceEventId === undefined ? '' : ', source_event_id'}
      )
      SELECT
        item.id::uuid,
@@ -116,7 +119,7 @@ export async function insertRecordSubscriptionNotifications(
        item.actor_id,
        item.revision_id::uuid,
        item.comment_id,
-       item.message
+       item.message${input.sourceEventId === undefined ? '' : ', item.source_event_id'}
      FROM jsonb_to_recordset($1::jsonb) AS item(
        id text,
        sheet_id text,
@@ -126,12 +129,12 @@ export async function insertRecordSubscriptionNotifications(
        actor_id text,
        revision_id text,
        comment_id text,
-       message text
-     )`,
+       message text${input.sourceEventId === undefined ? '' : ', source_event_id text'}
+     )${input.sourceEventId === undefined ? '' : ' ON CONFLICT(source_event_id,user_id) WHERE source_event_id IS NOT NULL DO NOTHING RETURNING id'}`,
     [JSON.stringify(values)],
   )
 
-  return { inserted: userIds.length }
+  return { inserted: input.sourceEventId === undefined ? userIds.length : result.rows.length }
 }
 
 export async function subscribeRecord(

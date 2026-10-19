@@ -207,6 +207,7 @@ export class RedisIdempotencyStore implements IdempotencyStore {
 
 const memoryStore = new MemoryIdempotencyStore();
 let activeStore: IdempotencyStore = memoryStore;
+let ownedRedisClient: Redis | null = null;
 const rateLimitStore = new Map<string, RateLimitEntry>();
 
 let idempotencyConfig = DEFAULT_IDEMPOTENCY_CONFIG;
@@ -226,6 +227,8 @@ export function initIdempotency(
   config: Partial<IdempotencyConfig> = {},
   redisClient?: Redis
 ): void {
+  ownedRedisClient?.disconnect();
+  ownedRedisClient = null;
   idempotencyConfig = { ...DEFAULT_IDEMPOTENCY_CONFIG, ...config };
 
   // Determine store backend
@@ -233,6 +236,7 @@ export function initIdempotency(
 
   if (storeType === 'redis') {
     const redis = redisClient ?? (process.env.REDIS_URL ? new Redis(process.env.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: 1 }) : null);
+    if (redis && !redisClient) ownedRedisClient = redis;
     if (redis) {
       activeStore = new RedisIdempotencyStore(redis, memoryStore);
       logger.info('Idempotency store: Redis (with memory fallback)', {
@@ -533,14 +537,26 @@ export async function clearIdempotencyStore(): Promise<void> {
   });
 }
 
-/**
- * Destroy the service
- */
-export async function destroyIdempotency(): Promise<void> {
+/** Stop process-local maintenance without deleting shared replay credentials. */
+export function stopIdempotencyCleanup(): void {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
   }
+}
+
+/** Release process-owned resources after requests drain; retain replay entries. */
+export function shutdownIdempotency(): void {
+  stopIdempotencyCleanup();
+  ownedRedisClient?.disconnect();
+  ownedRedisClient = null;
+}
+
+/**
+ * Destroy the service
+ */
+export async function destroyIdempotency(): Promise<void> {
+  shutdownIdempotency();
   await activeStore.clear();
   rateLimitStore.clear();
   activeStore = memoryStore;

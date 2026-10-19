@@ -48,6 +48,18 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'AUTOMATION_DURABLE_DELIVERY_ENABLED', type: 'boolean', activationValue: 'true', caseInsensitive: true,
+    dependsOn: [], conflictsWith: [], danger: 'high',
+    purpose: 'Existing default-off transactional automation outbox replaces legacy emit; requires migrated schema and durable consumers. Runtime trims and lowercases the flag.',
+    source: 'packages/core-backend/src/multitable/automation-durable-delivery.ts#isDurableDeliveryEnabled',
+  },  {
+    key: 'PLM_BOM_REVIEW_ENABLED', type: 'boolean', activationValue: 'true',
+    dependsOn: ['AUTOMATION_DURABLE_DELIVERY_ENABLED', 'MULTITABLE_ENABLE_WRITER_FENCE'], conflictsWith: [], danger: 'high',
+    purpose: 'Default-off explicit BOM snapshot sharing into native collaboration tables. Exact true only. Requires current datasource owner and target manager authority, migrated source-field protection, canonical writer fence and durable local record events. Disabling sync does not remove source-field protection or retract previously shared snapshots.',
+    source: 'packages/core-backend/src/multitable/plm-bom-review-wire.ts#requireBomReview',
+    rules: [{ kind: 'requires', id: 'plm-bom-review-without-durable-writer-fence', description: 'BOM collaboration requires canonical writer fences and durable local record events.' }],
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

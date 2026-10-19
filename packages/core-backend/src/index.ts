@@ -1,3 +1,5 @@
+import { shutdownSafetyGuard } from './guards/SafetyGuard'
+import { shutdownIdempotency } from './guards/idempotency'
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
@@ -72,7 +74,7 @@ import { createStockPrepMembersHostPort } from './services/stock-preparation-mem
 // and no new dependency. GROUP-ONLY: see the note on sendStockPreparationHandoffNotification below.
 import { sendStockPreparationHandoffNotificationToDestinations } from './multitable/stock-preparation-handoff-notifier'
 import { eventBus } from './integration/events/event-bus'
-import { initializeEventBusService } from './integration/events/event-bus-service'
+import { initializeEventBusService, shutdownEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
 import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
@@ -411,6 +413,7 @@ import { createCanaryInterceptor } from './canary/CanaryInterceptor'
 import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
 import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
 import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
+import { createPlmBomReviewsRouter } from './routes/plm-bom-reviews'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
@@ -639,6 +642,8 @@ export class MetaSheetServer {
     import('./multitable/approval-record-projection-service').ApprovalRecordProjectionService | null = null
   private approvalProjectionSweepScheduler:
     import('./services/ApprovalProjectionSweepScheduler').ApprovalProjectionSweepScheduler | null = null
+  private plmBomNotificationWorker:
+    import('./multitable/plm-bom-notification-worker').PlmBomNotificationWorker | null = null
   /**
    * DingTalk approval-todo ONE-WAY mirror sink (eventBus leg + durable consumer_key
    * `dingtalk-todo-mirror` share this object). Built unconditionally — the sink itself is a no-op
@@ -1998,6 +2003,12 @@ export class MetaSheetServer {
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
+      if (process.env.PLM_BOM_REVIEW_ENABLED === 'true') {
+        this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
+          pool: poolManager.get(),
+          dataSourceManager: getDataSourceManager(),
+        }))
+      }
       this.app.use(plmEmbedRouter())
       this.app.use(plmEmbedDiscussionWriteRouter())
       this.app.use(plmEmbedDiscussionReadRouter())
@@ -3732,6 +3743,9 @@ export class MetaSheetServer {
     if (this.approvalProjectionSweepScheduler) {
       approvalProducerDrains.push(this.observeShutdownTask(this.approvalProjectionSweepScheduler.stop()))
     }
+    if (this.plmBomNotificationWorker) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.plmBomNotificationWorker.stop()))
+    }
     if (this.durableDeliveryLoop) {
       approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
     }
@@ -4022,6 +4036,11 @@ export class MetaSheetServer {
       throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
     }
 
+    await shutdownEventBusService()
+    await messageBus.shutdown()
+    shutdownSafetyGuard()
+    shutdownIdempotency()
+
     // Custody outlives accepted HTTP work as well as worker chunks. Never revoke on a failed drain.
     try {
       this.recoveryArchiveApplication.releaseCustody()
@@ -4311,6 +4330,22 @@ export class MetaSheetServer {
           // a throwing logger must not turn into an unhandled rejection
         }
       })
+
+    try {
+      const { PlmBomNotificationWorker,isBomNotificationWorkerEnabled } = await import('./multitable/plm-bom-notification-worker')
+      if (isBomNotificationWorkerEnabled()) {
+        const { PlmBomReviewService } = await import('./multitable/plm-bom-review-service')
+        const pool = poolManager.get()
+        this.plmBomNotificationWorker = new PlmBomNotificationWorker(pool,
+          new PlmBomReviewService({ pool,dataSourceManager: getDataSourceManager() }),
+          () => this.logger.warn('PLM BOM notification worker operation failed; pending work retained'))
+        await this.plmBomNotificationWorker.start()
+      }
+    } catch {
+      await this.plmBomNotificationWorker?.stop().catch(() => undefined)
+      this.plmBomNotificationWorker = null
+      this.logger.error('PLM BOM notification worker initialization failed')
+    }
 
     try {
       await startDirectorySyncScheduler()

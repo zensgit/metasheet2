@@ -98,6 +98,10 @@ const ALLOWLIST: Record<
     disposition: 'CHOKEPOINT',
     reason: 'HTTP form-submit / import-xlsx / record routes validate longText via validateLongTextValue',
   },
+  'multitable/plm-bom-review-service.ts': {
+    disposition: 'SAFE',
+    reason: 'Owner-authorized snapshot sync writes only SOURCE_FIELDS created as string; the database field guard forbids retyping/deleting them. Local rich-text fields are never in the patch.',
+  },
   'multitable/auto-number-service.ts': {
     disposition: 'SAFE',
     reason: 'writes ONLY auto-number columns (numeric sequence values) — never a user-supplied longText carrier',

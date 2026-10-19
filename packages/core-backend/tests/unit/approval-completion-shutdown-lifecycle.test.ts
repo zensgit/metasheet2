@@ -37,6 +37,7 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
       recordApprovalCompletionSubscription: { detach(): void; drain(): Promise<void> } | null
       dingtalkTodoMirrorSubscription: { detach(): void; drain(): Promise<void> } | null
       stopDingTalkTodoMirrorWorker: (() => Promise<void>) | undefined
+      plmPersonalApprovalWorker: { stop(): Promise<void> } | undefined
       dingtalkInteractiveCardStreamWorker: { shutdown(): Promise<{ state: 'disabled'; reason: 'env_disabled' }> }
     }
     lifecycle.durableDeliveryLoop = {
@@ -68,6 +69,9 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
       drain: vi.fn(async () => { order.push('todo:drain') }),
     }
     lifecycle.stopDingTalkTodoMirrorWorker = vi.fn(async () => { order.push('todo:worker:drain') })
+    lifecycle.plmPersonalApprovalWorker = {
+      stop: vi.fn(() => producerPending.then(() => { order.push('personal:drain') })),
+    }
     lifecycle.dingtalkInteractiveCardStreamWorker = {
       shutdown: vi.fn(async () => ({ state: 'disabled', reason: 'env_disabled' })),
     }
@@ -83,6 +87,8 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
     releaseSink()
     await stop
     expect(order.indexOf('sink:done')).toBeLessThan(order.indexOf('pool'))
+    expect(order.indexOf('personal:drain')).toBeLessThan(order.indexOf('pool'))
+    expect(order.indexOf('personal:drain')).toBeLessThan(order.indexOf('record:detach'))
     expect(order.indexOf('todo:worker:drain')).toBeLessThan(order.indexOf('todo:detach'))
     expect(order.indexOf('todo:detach')).toBeLessThan(order.indexOf('todo:drain'))
     expect(order.indexOf('todo:drain')).toBeLessThan(order.indexOf('pool'))
