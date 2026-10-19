@@ -190,6 +190,12 @@ export class P11StatementRecorder {
   readonly #options: P11RecorderOptions
   #original: QueryFn | null = null
   readonly #observed: Array<{ pool: Pool; onAcquire: (client: PoolClient) => void; onRelease: (error: unknown, client: PoolClient) => void }> = []
+  /**
+   * The entry that checked each client out. A release is booked to it by client identity, not by the
+   * async scope active at release time: `pool.query` releases inside pg's own query callback, which runs
+   * in the socket's async context, where no entry scope is active.
+   */
+  readonly #checkedOut = new Map<object, EntryStore>()
 
   constructor(options: P11RecorderOptions) {
     this.#options = options
@@ -228,12 +234,14 @@ export class P11StatementRecorder {
       const label = `b${store.nextBorrow}`
       store.nextBorrow += 1
       store.borrowOf.set(client, label)
+      this.#checkedOut.set(client, store)
       store.steps.push(this.#stamp({ k: 'acquire', b: label }))
       store.lastActivity = Date.now()
     }
     const onRelease = (error: unknown, client: PoolClient): void => {
-      const store = this.#als.getStore()
+      const store = this.#checkedOut.get(client) ?? this.#als.getStore()
       if (!store) return
+      this.#checkedOut.delete(client)
       const label = store.borrowOf.get(client) ?? this.#otherLabel(store, client)
       store.borrowOf.delete(client)
       store.steps.push(this.#stamp({ k: 'release', b: label, destroy: Boolean(error) }))
