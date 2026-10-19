@@ -534,6 +534,70 @@ async function ensureGrant(localUserId: string): Promise<void> {
   })
 }
 
+type BackfillTransactionClient = {
+  query: (sql: string, params?: unknown[]) => Promise<unknown>
+}
+
+const DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT = 'dingtalk_directory_open_id_backfill'
+
+/**
+ * Copy the openId this login just proved into the directory member row(s) of the SAME person
+ * (same corp, same unionId) that still lack one. 通讯录 user/get never returns openId, so
+ * without this the directory page kept showing "缺 openId" (and its "refresh this member" hint
+ * could never succeed) even after the member had scanned in.
+ *
+ * Best effort, never able to fail a login on its own:
+ *  - runs inside the caller's transaction (commits together with the identity write) behind a
+ *    SAVEPOINT, so a failing UPDATE is rolled back to the savepoint and only logged. Only a
+ *    failure of the SAVEPOINT / ROLLBACK TO SAVEPOINT statements themselves propagates — the
+ *    transaction is unusable then, and hiding it would silently roll back the identity write;
+ *  - `FOR UPDATE SKIP LOCKED` never waits: a member row held by a running directory sync is
+ *    skipped (that sync now keeps a known openId, and both the grant check and the directory
+ *    page's grantOpenIdAvailable read the identity's openId directly), so a login can neither
+ *    block on nor deadlock with a sync;
+ *  - only rows whose open_id is empty are touched — an openId already on file is never replaced.
+ */
+async function backfillDirectoryAccountOpenIdInTransaction(
+  client: BackfillTransactionClient,
+  dtUser: DingTalkUserInfo,
+  corpId: string | null | undefined,
+): Promise<void> {
+  const openId = String(dtUser.openId ?? '').trim()
+  const unionId = String(dtUser.unionId ?? '').trim()
+  const normalizedCorpId = String(corpId ?? '').trim()
+  if (!openId || !unionId || !normalizedCorpId) return
+
+  // Not caught: a failing SAVEPOINT leaves the transaction aborted, and swallowing it would turn
+  // the caller's COMMIT into a silent ROLLBACK of the identity write.
+  await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  try {
+    await client.query(
+      `UPDATE directory_accounts AS account
+       SET open_id = $4, updated_at = NOW()
+       WHERE account.id IN (
+         SELECT candidate.id
+         FROM directory_accounts candidate
+         WHERE candidate.provider = $1
+           AND candidate.corp_id = $2
+           AND candidate.union_id = $3
+           AND COALESCE(candidate.open_id, '') = ''
+         FOR UPDATE SKIP LOCKED
+       )`,
+      // The candidate filter is the ONLY "never replace a known openId" guard: under READ COMMITTED
+      // a row locked by FOR UPDATE is re-checked against it on its latest version, so a row that
+      // gained an openId meanwhile is dropped. (A duplicate outer re-check would mask its removal.)
+      [PROVIDER, normalizedCorpId, unionId, openId],
+    )
+    await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  } catch (error) {
+    logger.warn('DingTalk directory openId backfill failed; login continues', error instanceof Error ? error : undefined)
+    // If the rollback itself fails the transaction stays aborted, and PostgreSQL answers the
+    // caller's COMMIT with a silent ROLLBACK — the identity write would vanish while the login
+    // "succeeded". Let that failure surface instead (the login transaction fails visibly).
+    await client.query(`ROLLBACK TO SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  }
+}
+
 async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
   const config = readDingTalkOauthConfig()
   const externalKey = buildExternalKey(dtUser)
@@ -634,6 +698,8 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
         reason: 'DingTalk OAuth identity binding changed',
       })
     }
+
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
   })
 }
 
@@ -684,6 +750,10 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
          AND COALESCE(provider_open_id, '') = ''`,
       [PROVIDER, localUserId, externalKey, dtUser.unionId || null, openId, config.corpId || null, profile],
     )
+
+    // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
+    // what the directory page needs before an admin can turn the grant on.
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
   })
 }
 
