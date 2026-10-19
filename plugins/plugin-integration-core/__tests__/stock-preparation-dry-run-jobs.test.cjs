@@ -47,6 +47,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const harness = require(path.join(__dirname, 'support', 'stock-preparation-project-sheet-harness.cjs'))
+const { withoutReadPhaseClock } = require(path.join(__dirname, 'support', 'dry-run-read-phase-clock.cjs'))
 const dryRunJobs = require(path.join(LIB, 'stock-preparation-dry-run-jobs.cjs'))
 const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
@@ -216,7 +217,10 @@ test('J-01 202 while the PLM read is still blocked; the poll says running; the f
     assert.ok(typeof done.body.data.finishedAt === 'string')
     assert.ok(Number.isInteger(done.body.data.elapsedMs) && done.body.data.elapsedMs >= 0)
     const jobResult = done.body.data.result
-    assert.deepEqual(withoutToken(jobResult), withoutToken(syncResult), 'the job result IS the synchronous dry-run payload')
+    // R67 ③ (#6449) added `plmReadPhase.wallMs`, a clock reading, to the dry-run payload; the job result and
+    // the synchronous result are the same payload minus the token and minus that one reading.
+    assert.deepEqual(withoutReadPhaseClock(withoutToken(jobResult)), withoutReadPhaseClock(withoutToken(syncResult)), 'the job result IS the synchronous dry-run payload')
+    assert.ok(Number.isInteger(jobResult.plmReadPhase?.wallMs) && jobResult.plmReadPhase.wallMs >= 0, 'the job result carries the read-phase clock reading')
     assert.equal(typeof jobResult.dryRunToken, 'string')
     assert.ok(jobResult.dryRunToken.length > 0, 'the job hands over a dry-run token')
     assert.equal(typeof syncResult.dryRunToken, 'string')
