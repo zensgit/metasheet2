@@ -34,6 +34,7 @@ import {
   type SettlementCoordinationStageV1,
 } from './settlement-coordination-budget'
 import type { SettlementCoordinationCapacityV1 } from './settlement-coordination-capacity'
+import { assertNoSettlementCoordinationContextV1 } from './settlement-coordination-context'
 import {
   CoordinationWaitEndedError,
   createSystemCoordinationClockV1,
@@ -302,6 +303,7 @@ export class SettlementCoordinationUnitV1 {
    * like any borrow; `read` runs its (at most two) autocommit reads and the connection goes back.
    */
   async readCandidate<T>(read: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
+    assertNoSettlementCoordinationContextV1('quota')
     this.#assertIdle()
     this.#busy = true
     try {
@@ -331,6 +333,8 @@ export class SettlementCoordinationUnitV1 {
   }
 
   async acquire(org: unknown): Promise<SettlementCoordinationHandleV1> {
+    // No quota of any kind inside a coordinated transaction (§3.2 step 1 "禁止嵌套"), in production as in tests.
+    assertNoSettlementCoordinationContextV1('quota')
     this.#assertIdle()
     this.#busy = true
     let record: AttemptRecorder | null = null
@@ -839,6 +843,7 @@ export class SettlementCoordinatorV1 {
   }
 
   openUnit(request: SettlementCoordinationUnitRequestV1): SettlementCoordinationUnitV1 {
+    assertNoSettlementCoordinationContextV1('quota')
     return new SettlementCoordinationUnitV1(this.deps, request)
   }
 }
