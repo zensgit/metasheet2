@@ -38,12 +38,14 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
   ...LARGE_BOM_BOUNDED_ERROR_TYPES,
   READ_CURSOR_BROKEN_ERROR_TYPE,
 ])
-// A READ THAT ANSWERED SOMETHING ELSE (R67 ③ fix round). Every read this module issues is an equality
-// read, and a source that applied — or did not say it skipped — its filter must not return a row the
-// filter excludes. Such a row is a transport cross-wire (one read handed another read's answer), not
-// data, and believing it is how a swapped part answer turned into a quiet `missing_component` hold
-// with an apply token. So it is a FAILED READ with its own closed code: global error, status
-// `failed`, `canApply: false`, at every read width including 1 and on the pre-R67 path too.
+// A READ THAT ANSWERED SOMETHING ELSE (R67 ③ fix rounds 1–2). Every read this module issues is an
+// equality read, and a source that applied — or did not say it skipped — its filter must not return a
+// row the filter excludes. Such a row is a transport cross-wire (one read handed another read's
+// answer), not data, and believing it is how a swapped part answer turned into a quiet
+// `missing_component` hold with an apply token. So it is a FAILED READ with its own closed code:
+// global error, status `failed`, `canApply: false`, at every read width including 1 and on the
+// pre-R67 path too. A source that DECLARES it did not filter (`filtersApplied: false`) is not refused:
+// its answer is filtered locally by the same comparison instead (see `readPages`).
 //
 // Deliberately NOT a member of `INCOMPLETE_READ_ERROR_TYPES`: that list is the B2a seam's roster of
 // classified bounds (b2a-trial-registry.cjs), and an armed read that hits this already refuses there
@@ -78,12 +80,13 @@ const STRUCTURED_READ_ERROR_TYPES = Object.freeze([
 //      projects' BOM heads under this project's authorization. `visited` and `maxSubtreeDepth` do
 //      not help there: the breach happens on the first read, at depth 1, on nodes seen once each.
 //
-//      NOT re-filtered, and stated plainly rather than glossed: the two reads `expandChildren`
-//      issues per row (bomHead by part+version, bomDetail by bom id). Those are the ORDER path's
-//      own reads — both root segments call the same function — so their exposure to a lying source
-//      is pre-existing and shared, not something root discovery introduces. Closing it is a change
-//      to the order path with its own regressions, deferred to W4; the test file's "WHAT IS NOT
-//      PINNED" note says the same thing at the same altitude.
+//      The two reads `expandChildren` issues per row (bomHead by part+version, bomDetail by bom id)
+//      are the ORDER path's own reads — both root segments call the same function. They used to be
+//      believed as returned; since R67 ③ (fix round 2) EVERY read's rows are held to that read's own
+//      equality filter in the page loop (`readPages`): a source that DECLARED it did not filter has
+//      its answer filtered locally, any other source must match or the read fails
+//      (`read_row_mismatch`). So an unfiltered source can no longer hand those two reads another
+//      part's heads either; the project-subtree suite's G-04 now pins the whole expansion.
 //   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
 //      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
 //      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
@@ -634,25 +637,46 @@ function isReadLimitError(error) {
   )
 }
 
-// One returned value against one filter value. `toKey` (trimmed string — SQL Server ignores trailing
-// blanks in `=`), compared CASE-INSENSITIVELY: SQL Server's default collations are, so an id stored
-// upper-case in one table and lower-case in another is one id to the source and must not be called a
-// mismatch here. A cross-wire hands back a DIFFERENT id, which no collation folds.
+// A numeric-looking string in canonical form ('0010' -> '10', '10.0' -> '10', '+3' -> '3', '-0' ->
+// '0'), or null. Exact — a string rewrite, not `Number()` — so two long numeric ids that differ past
+// 2^53 still differ.
+const NUMERIC_TEXT = /^([+-]?)(\d+)(?:\.(\d+))?$/
+function canonicalNumericText(text) {
+  const match = NUMERIC_TEXT.exec(text)
+  if (!match) return null
+  const integer = match[2].replace(/^0+(?=\d)/, '')
+  const fraction = (match[3] || '').replace(/0+$/, '')
+  const negative = match[1] === '-' && !(integer === '0' && fraction === '')
+  return `${negative ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`
+}
+
+// One returned value against one filter value — "would SQL Server's `=` have matched these?", erring
+// toward YES, because a false mismatch fails a legal pull while a false match only lets through what
+// the serial walk always believed:
+//   * `toKey` on both sides — trimmed strings (SQL Server ignores trailing blanks in `=`);
+//   * CASE-INSENSITIVE — SQL Server's default collations are, so one id stored upper-case in one table
+//     and lower-case in another is one id;
+//   * NUMERIC when both sides look numeric — SQL Server converts a char column to the int it is
+//     compared with, so an int `bom_id` 10 and a char `bom_pid` '0010' are one key.
+// Deliberately NOT folded: full-width / half-width forms and any other Unicode normalisation — an
+// accent- or width-insensitive collation can match what this calls a mismatch (the read then fails
+// closed as `read_row_mismatch` rather than expanding on a guess). A cross-wire hands back a DIFFERENT
+// id, which none of the above folds.
 function sameFilterValue(rowValue, filterValue) {
   const left = toKey(rowValue)
   const right = toKey(filterValue)
-  return left !== null && right !== null && left.toLowerCase() === right.toLowerCase()
+  if (left === null || right === null) return false
+  if (left.toLowerCase() === right.toLowerCase()) return true
+  const leftNumber = canonicalNumericText(left)
+  return leftNumber !== null && leftNumber === canonicalNumericText(right)
 }
 
-// The first filter column some returned row does not satisfy, or `undefined`. The columns are the
-// read's own (normalized) filter keys — i.e. the read plan's configured, dictionary-resolved names,
-// never a literal — read through `readField` like every other column.
-function firstFilterFieldARowViolates(records, normalizedFilters) {
-  for (const record of records) {
-    if (!isPlainObject(record)) continue
-    for (const [field, value] of Object.entries(normalizedFilters)) {
-      if (!sameFilterValue(readField(record, field), value)) return field
-    }
+// The first of the read's filter columns `record` does not satisfy, or `undefined`. The columns are
+// the read's own (normalized) filter keys — i.e. the read plan's configured, dictionary-resolved
+// names, never a literal — read through `readField` like every other column.
+function filterFieldViolatedBy(record, normalizedFilters) {
+  for (const [field, value] of Object.entries(normalizedFilters)) {
+    if (!sameFilterValue(readField(record, field), value)) return field
   }
   return undefined
 }
@@ -735,17 +759,20 @@ async function readPages(adapter, object, normalizedFilters, options, stats, bef
     }
     const records = isPlainObject(result) && Array.isArray(result.records) ? result.records : []
     stat.count = records.length
+    // ROW SELF-VALIDATION (see READ_ROW_MISMATCH_ERROR_TYPE), for EVERY read kind, by `sameFilterValue`:
+    //   * the source DECLARED it did not apply the filter (`filtersApplied === false` — a legal
+    //     whole-table answer; `bridge:legacy-sql-readonly` is the only adapter that says so): its
+    //     answer is FILTERED LOCALLY. A whole-table answer stays legal, and a cross-wired answer no
+    //     longer expands silently — what survives is exactly what a filtering source would have sent;
+    //   * otherwise (`true`, or not stated — the shipped SQL adapter states nothing because its WHERE
+    //     always applies) every row must satisfy the filter, or the read fails.
+    // `stat.count` stays what the source returned, so the diagnostics still show the source's answer.
     for (const record of records) {
-      if (isPlainObject(record)) rows.push(record)
-    }
-    // ROW SELF-VALIDATION (see READ_ROW_MISMATCH_ERROR_TYPE). Exempt ONLY when the source DECLARED it did
-    // not apply the filter (`filtersApplied === false` — a legal whole-table answer from
-    // `bridge:legacy-sql-readonly`, pinned by the project-subtree suite); those reads keep exactly the
-    // treatment they had (the walk re-filters the ones it always re-filtered). `true` or not stated —
-    // the shipped SQL adapter states nothing because its WHERE always applies — is held to the filter.
-    if (stat.filtersApplied !== false) {
-      const field = firstFilterFieldARowViolates(records, normalizedFilters)
-      if (field !== undefined) {
+      if (!isPlainObject(record)) continue
+      const field = filterFieldViolatedBy(record, normalizedFilters)
+      if (field === undefined) {
+        rows.push(record)
+      } else if (stat.filtersApplied !== false) {
         throw new StockPreparationBomExpansionError('PLM read answered a row its own filter excludes', {
           code: READ_ROW_MISMATCH_ERROR_TYPE,
           object,
@@ -2642,7 +2669,8 @@ async function walkPlmProjectBom(input, run) {
    *   hop would adopt every folder node in the catalog as this project's child and then read other
    *   projects' BOM heads under this project's authorization, with `dataScopeRef` still naming the
    *   one project the request asked for. The reads `expandChildren` makes for each discovered root
-   *   are NOT re-filtered — see the banner: they are the order path's reads, shared verbatim.
+   *   are the order path's reads, shared verbatim; the page loop holds their rows to their own
+   *   filter (see the banner and `readPages`).
    *
    *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
    *   and they get two different answers:
@@ -3227,6 +3255,8 @@ module.exports = {
     createPlmReadAheadEngine,
     comparePositions,
     READ_AHEAD_LEAD_PER_SLOT,
+    // R67 ③ fix round 2 — the one row/filter comparison, so its rule can be pinned case by case.
+    sameFilterValue,
     readField,
     toKey,
     nonNegativeInteger,

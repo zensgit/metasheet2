@@ -20,8 +20,9 @@
 //   plus the engine's own guards (claim key check, the lead cap that bounds what an early stop can
 //   waste, close-without-drain on a failed run) and the dry-run response's `plmReadPhase` stanza;
 //   and, from the fix round, ROW SELF-VALIDATION: a read answered with rows its own filter excludes
-//   (a transport cross-wire) fails the run as `read_row_mismatch` at every width, while a source that
-//   DECLARES it did not filter (`filtersApplied: false`) and a case-insensitive source do not.
+//   (a transport cross-wire) fails the run as `read_row_mismatch` at every width, while a
+//   case-insensitive or implicitly-converting (int 10 = char '0010') source does not, and a source
+//   that DECLARES it did not filter (`filtersApplied: false`) has its answer filtered locally.
 //
 // Everything here is synthetic (SYN-/R. ids) and runs on in-memory fake PLM sources — no database,
 // no real PLM.
@@ -41,7 +42,7 @@ const {
   normalizeStockPreparationBomReadPlan,
   expandPlmProjectBom,
   summarizeBomExpansionForEvidence,
-  __internals: { createPlmReadAheadEngine, READ_AHEAD_LEAD_PER_SLOT },
+  __internals: { createPlmReadAheadEngine, READ_AHEAD_LEAD_PER_SLOT, sameFilterValue },
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -231,6 +232,30 @@ function deepLast() {
 
 function failing(predicate, code = 'SYN_SOURCE_FAILED') {
   return { failWhen: predicate, failCode: code }
+}
+
+// Integer part ids and BOM ids, referenced from the other tables as ZERO-PADDED CHAR (int `bom_id` 10,
+// char `bom_pid` '0010'): a legal schema SQL Server joins by implicit conversion. `padded: false` is the
+// same tree with every reference in its plain form — the expansion both must produce.
+function numericTree({ padded }) {
+  const tables = emptyTables()
+  const ref = (n) => (padded ? String(n).padStart(6, '0') : n)
+  let next = 10
+  const grow = (id, level) => {
+    tables.DN_PDM_PartLibraryInfo.push({ OBJ_ID: id, IdentityNo: `N-${id}`, IdentityName: `Part ${id}`, Material: 'Q235', SysVer: 'V1' })
+    if (level >= 2) return
+    const bomId = 1000 + id
+    tables.DN_PDM_BomHeadInfo.push({ part_id: ref(id), bom_id: bomId, SysVer: 'V1', bom_able: true })
+    for (let index = 0; index < 3; index += 1) {
+      next += 1
+      const child = next
+      tables.DN_PDM_BomDetailsInfo.push({ bom_pid: ref(bomId), part_id: child, Bom_ExAttr1: '1', sort_id: index + 1 })
+      grow(child, level + 1)
+    }
+  }
+  grow(10, 0)
+  tables.DN_PDM_OrderDetailInfo.push({ order_id: 'ORDER-1', part_id: 10, quantity: '2', sort_id: 1 })
+  return tables
 }
 
 // A MIS-ANSWER: the source answers a different read than the one it was asked (what a transport
@@ -518,11 +543,19 @@ function answer(tables, input, behaviour = {}) {
   const { rows, fold } = lookupRows(tables, asked.object)
   // `unfilteredObjects`: the whole table, and SAYS so (`filtersApplied: false`) — legal for the bridge.
   const unfiltered = Array.isArray(behaviour.unfilteredObjects) && behaviour.unfilteredObjects.includes(asked.object)
+  // `declareUnfilteredObjects`: answers as asked, but SAYS `filtersApplied: false` (a cross-wired
+  // answer from a source that does not filter looks like this).
+  const declaresUnfiltered = unfiltered
+    || (Array.isArray(behaviour.declareUnfilteredObjects) && behaviour.declareUnfilteredObjects.includes(asked.object))
   // `caseInsensitiveObjects`: equality the way a SQL Server default collation does it.
   const folding = Array.isArray(behaviour.caseInsensitiveObjects) && behaviour.caseInsensitiveObjects.includes(asked.object)
-  const same = (left, right) => (folding && typeof left === 'string' && typeof right === 'string'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right)
+  // `convertNumbers`: SQL Server's implicit conversion — a char column compared with an int.
+  const numericKey = (value) => (/^\s*[+-]?\d+(\.\d+)?\s*$/.test(String(value)) ? Number(value) : null)
+  const same = (left, right) => {
+    if (folding && typeof left === 'string' && typeof right === 'string') return left.toLowerCase() === right.toLowerCase()
+    if (behaviour.convertNumbers && left !== null && right !== null && numericKey(left) !== null) return numericKey(left) === numericKey(right)
+    return left === right
+  }
   const matches = unfiltered
     ? rows
     : rows.filter((row) => Object.entries(asked.filters).every(([field, expected]) => same(row[fold ? field.toLowerCase() : field], expected)))
@@ -538,7 +571,7 @@ function answer(tables, input, behaviour = {}) {
     records,
     nextCursor: done ? null : String(consumed),
     done,
-    metadata: { source: 'data-source:sql-readonly', filtersApplied: !unfiltered, filterFields: Object.keys(input.filters).sort() },
+    metadata: { source: 'data-source:sql-readonly', filtersApplied: !declaresUnfiltered, filterFields: Object.keys(input.filters).sort() },
   }
 }
 
@@ -1233,6 +1266,72 @@ async function testAnEarlyStopWastesAtMostTheLeadCap() {
   console.log('  engine: an early stop wastes at most READ_AHEAD_LEAD_PER_SLOT x readConcurrency queries')
 }
 
+// FIX ROUND 2 — the comparison follows SQL Server's `=` where it would have matched, and nowhere else.
+async function testTheCompareRuleFollowsSqlServerEquality() {
+  const cases = [
+    ['0010', 10, true], [10, '0010', true], ['10.0', 10, true], [' 10 ', '10', true], ['+7', 7, true], ['-0', 0, true],
+    ['abc', 'ABC', true], ['BOM-1 ', 'bom-1', true],
+    ['12345678901234567890', '12345678901234567891', false], ['10', 11, false], ['0010', '0011', false],
+    ['1e1', 10, false], ['１０', '10', false], ['ＡＢＣ', 'ABC', false], ['é', 'e', false], [null, 'x', false], ['', '', false],
+  ]
+  for (const [left, right, expected] of cases) {
+    assert.equal(sameFilterValue(left, right), expected, `sameFilterValue(${JSON.stringify(left)}, ${JSON.stringify(right)})`)
+  }
+  // End to end: int ids referenced as zero-padded char — every head and detail read is answered by
+  // implicit conversion. Not a mismatch, at x1 and x4, and the same rows as the plain-id tree.
+  for (const readConcurrency of [1, 4]) {
+    const plain = await expandPlmProjectBom({ sourceAdapter: instantSource(numericTree({ padded: false }), { convertNumbers: true }).adapter, projectNo: PROJECT, readConcurrency })
+    const padded = await expandPlmProjectBom({ sourceAdapter: instantSource(numericTree({ padded: true }), { convertNumbers: true }).adapter, projectNo: PROJECT, readConcurrency })
+    assert.deepEqual(plain.errors, [])
+    assert.deepEqual(padded.errors, [], `@${readConcurrency}: int 10 = char '0010' is not a mismatch`)
+    assert.equal(padded.rows.length, 13)
+    assert.deepEqual(padded.rows, plain.rows)
+    // A genuinely different id still fails: part 11's heads answered with its sibling 15's (both are
+    // assemblies; ids are numbered depth-first, so 12-14 are 11's own leaves).
+    const crossed = await expandPlmProjectBom({
+      sourceAdapter: instantSource(numericTree({ padded: true }), { convertNumbers: true, ...misanswer('DN_PDM_BomHeadInfo', 'part_id', '11', '15') }).adapter,
+      projectNo: PROJECT,
+      readConcurrency,
+    })
+    assert.deepEqual(crossed.errors.map((error) => [error.type, error.field]), [['read_row_mismatch', 'part_id']], `@${readConcurrency}: '000015' is not '11'`)
+  }
+  console.log('  fix 2b: trimmed, case-insensitive, numeric-aware compare (int 10 = char \'0010\'); no width / Unicode folding')
+}
+
+// FIX ROUND 2 — a DECLARED whole-table answer is filtered locally for every read kind: it stays legal,
+// and a cross-wired answer from such a source yields what filtering yields, never a silent expansion.
+async function testADeclaredUnfilteredAnswerIsFilteredLocally() {
+  const unfilteredReads = ['DN_PDM_BomHeadInfo', 'DN_PDM_BomDetailsInfo', 'DN_PDM_PartLibraryInfo']
+  for (const readConcurrency of [1, 4]) {
+    const honest = await expandPlmProjectBom({ sourceAdapter: instantSource(wideTree()).adapter, projectNo: PROJECT, readConcurrency })
+    const whole = await expandPlmProjectBom({ sourceAdapter: instantSource(wideTree(), { unfilteredObjects: unfilteredReads }).adapter, projectNo: PROJECT, readConcurrency })
+    assert.deepEqual(whole.errors, [], `@${readConcurrency}: whole-table head / detail / part answers are legal`)
+    assert.deepEqual(whole.rows, honest.rows, `@${readConcurrency}: and expand exactly like the honest source`)
+    assert.deepEqual(whole.rowErrors, honest.rowErrors)
+
+    // BOM-R.2's detail read answered with BOM-R.3's rows by a source that declares it did not filter:
+    // nothing survives the local filter, so R.2 has an active head and no details — exactly what a
+    // filtering source with no rows for BOM-R.2 yields (`missing_child_bom`, which blocks apply).
+    const crossed = await expandPlmProjectBom({
+      sourceAdapter: instantSource(wideTree(), {
+        declareUnfilteredObjects: ['DN_PDM_BomDetailsInfo'],
+        ...misanswer('DN_PDM_BomDetailsInfo', 'bom_pid', 'BOM-R.2', 'BOM-R.3'),
+      }).adapter,
+      projectNo: PROJECT,
+      readConcurrency,
+    })
+    const withoutR2Details = wideTree()
+    withoutR2Details.DN_PDM_BomDetailsInfo = withoutR2Details.DN_PDM_BomDetailsInfo.filter((detail) => detail.bom_pid !== 'BOM-R.2')
+    const filtered = await expandPlmProjectBom({ sourceAdapter: instantSource(withoutR2Details).adapter, projectNo: PROJECT, readConcurrency })
+    assert.deepEqual(crossed.rows, filtered.rows, `@${readConcurrency}: the cross-wired answer yields what filtering yields`)
+    assert.deepEqual(crossed.rowErrors, filtered.rowErrors)
+    assert.deepEqual(crossed.errors, filtered.errors)
+    assert.ok(crossed.rowErrors.some((error) => error.type === 'missing_child_bom'), 'and it is held (missing_child_bom), not expanded')
+    assert.equal(crossed.rows.some((row) => row.parentSourceId === 'R.2' && row.componentSourceId.startsWith('R.3')), false, 'no R.3 part under R.2')
+  }
+  console.log('  fix 2c: declared whole-table answers are filtered locally; a cross-wired one yields what filtering yields')
+}
+
 async function main() {
   await testTheKnobIsClamped()
   await testByteIdenticalAtEveryConcurrencyAndSchedule()
@@ -1248,6 +1347,8 @@ async function main() {
   await testAMisansweredReadFailsClosedAtEveryWidth()
   await testATransportCrossWireFailsClosed()
   await testDeclaredUnfilteredAndCaseInsensitiveSourcesAreNotMismatches()
+  await testTheCompareRuleFollowsSqlServerEquality()
+  await testADeclaredUnfilteredAnswerIsFilteredLocally()
   console.log('stock-preparation-bom-read-concurrency.test.cjs OK')
 }
 
