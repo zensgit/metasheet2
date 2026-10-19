@@ -1432,6 +1432,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           METASHEET_REAL_DB_TEST_STEP: '1' # marks the real-DB allowlist step so a fail-not-skip sentinel can scope its throw here only
+          EXPECT_DB: '1' # a DB-expected run: EXPECT_DB-gated sentinels fail instead of skipping
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -1647,6 +1648,9 @@ jobs:
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
             tests/integration/multitable-webhook-durable-dedup.test.ts \
+            tests/integration/multitable-webhook-floor-realdb.test.ts \
+            tests/integration/multitable-webhook-switch-on-realdb.test.ts \
+            tests/integration/multitable-webhook-scoping-realdb.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
             tests/integration/multitable-ai-bulk-commit.test.ts \
