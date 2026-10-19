@@ -37,7 +37,7 @@
     }
   },
   "source_files_sha256": {
-    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "1cb03b90ecae5c15fca68cd2d3c10a409d2b47dd9aa14aef90d912c3a1dcbdbe",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "5386c09f649c5c1ba5b500b59984e629d2e9d916aca3d25c095500e92b2c7ab7",
     "packages/core-backend/src/services/plm-managed-companion-flow.ts": "ad32228c99cf0030e3558e83ca682f582852b0bdf5dff3177d500312bb305093",
     "packages/core-backend/src/services/plm-managed-native-http.ts": "65d59fb9c62f517ef906c8670d47cdca02ffb14e4de08d325d40b5058bf046e1"
   },
@@ -123,5 +123,51 @@
   "postgres_scope": "Managed capability source invalidation/live advisory; not installed ECO or personal-write pending recovery",
   "cross_process_scope": "One owner transfer case uses a separate Node process and distinct PostgreSQL backend; final exact-head CI still required",
   "native_auth_allowlist_changed": false,
-  "canonical_snapshot_hash_changed": false
+  "canonical_snapshot_hash_changed": false,
+  "startup_repair": {
+    "base": "447fdce82517bb502d0e506ba64744d3becc349d",
+    "ci": {
+      "success": 18,
+      "failed": 1,
+      "run": 39302063432,
+      "job": 118229525970,
+      "log": "/tmp/plm-meta6459-447-listener-failed-20261020.log"
+    },
+    "reason": "Eager managed-flow import initialized AuthService before explicit JWT configuration; original independent signature check caught it",
+    "fix": "Defer optional flow import to admitted managed capability path; no AuthService/JWT/fixture override",
+    "actual_assertions": {
+      "red_startup": {
+        "path": "/tmp/plm-managed-adapter-startup-red-20261020.json",
+        "sha256": "bcb93d2f1eee543465980456d0da8527f8d68f2081319314cf5b402807b61a48",
+        "statuses": {
+          "failed": 1
+        }
+      },
+      "fixed_adapter": {
+        "path": "/tmp/plm-managed-adapter-startup-fixed-20261020.json",
+        "sha256": "913e402266f794dca77bda05dfd8121644b5a04e12f3f3c1bca90829a67dc335",
+        "statuses": {
+          "passed": 37
+        }
+      },
+      "real_auth": {
+        "path": "/tmp/plm-managed-listener-auth-fixed-20261020.json",
+        "sha256": "741cacd415fd8e5e063540d613b6b54fdb6b31a227e52728715eb56a2c255910",
+        "statuses": {
+          "skipped": 122,
+          "passed": 10
+        }
+      }
+    },
+    "typecheck": {
+      "exit": 0,
+      "empty_log": "/tmp/plm-managed-lazy-auth-final-tsc-20261020.log"
+    },
+    "exact_ci_census": {
+      "unit": 142,
+      "postgres": 38,
+      "web": 198,
+      "listener": 132
+    }
+  }
 }

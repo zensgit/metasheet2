@@ -33,7 +33,6 @@ import {
   noteSharedTransportCall,
   type ManagedBindingRow,
 } from '../services/plm-managed-companion'
-import { relayManagedBomSnapshot } from '../services/plm-managed-companion-flow'
 import { currentManagedRequest } from '../services/plm-managed-request-context'
 
 /**
@@ -1672,6 +1671,8 @@ export class PLMAdapter extends HTTPAdapter {
         const before = await classifyManagedSource(this.config.id)
         if (before.kind !== 'bound') return { available: false, reason: 'unavailable' }
         const frozenIdentity = this.managedCapabilityIdentity(before.row)
+        // Ordinary adapters must not initialize managed authentication at module load.
+        const { relayManagedBomSnapshot } = await import('../services/plm-managed-companion-flow')
         const read = await relayManagedBomSnapshot({
           userId: currentManagedRequest()?.userId ?? undefined, dataSourceId: this.config.id,
           partId: before.row.frozen_root_part_id,
