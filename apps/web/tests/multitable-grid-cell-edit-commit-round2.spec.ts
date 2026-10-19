@@ -930,6 +930,7 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       await flushUi()
 
       cellAt(root, 0, 0).click()
+      gridEl(root).focus() // a real click on a cell focuses the grid root
       await flushUi()
 
       // The Ctrl+V keydown itself is NOT preventDefault-ed (the browser must still fire its paste

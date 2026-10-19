@@ -908,6 +908,7 @@ describe('business timezone — UI surfaces (TZ-independent)', () => {
     await flushUi()
     const cell = view.container.querySelector('tbody tr.meta-grid__row .meta-grid__cell') as HTMLElement
     cell.click() // focus without opening the editor
+    ;(view.container.querySelector('.meta-grid') as HTMLElement).focus() // a real click focuses the grid root
     await flushUi()
     const paste = (text: string) => {
       const event = new Event('paste', { bubbles: true, cancelable: true })

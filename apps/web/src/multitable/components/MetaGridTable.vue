@@ -458,7 +458,7 @@ import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaGridRangeToolbar from './MetaGridRangeToolbar.vue'
 import { useGridRangeSelection } from '../composables/useGridRangeSelection'
 import { isGridRangeFillEnabled } from '../utils/grid-range-fill-flags'
-import type { RangeChange } from '../utils/grid-range-fill'
+import { parseClipboardMatrix, type RangeChange } from '../utils/grid-range-fill'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
   handleCommentAffordanceKeydown,
@@ -1681,6 +1681,18 @@ function copyFocusedCell() {
   void copyText(text)
 }
 
+// The single cell's text, read with the same grammar as the range paste: a spreadsheet copies one cell as
+// "abc\r\n" (and quotes cells holding tabs / line breaks), so the trailing line break goes and quoting is
+// undone; a multi-cell copy contributes its top-left cell. Text that grammar rejects (e.g. a stray quote
+// inside the value) is kept as typed, minus one trailing line break.
+function singleCellClipboardText(text: string): string {
+  try {
+    return parseClipboardMatrix(text)[0]?.[0] ?? ''
+  } catch {
+    return text.replace(/\r?\n$/, '')
+  }
+}
+
 // `text` comes from the native paste event (onGridPaste) — never from a programmatic clipboard read, which
 // does not exist on a plain-HTTP deployment.
 function pasteFocusedCell(text: string) {
@@ -1695,13 +1707,15 @@ function pasteFocusedCell(text: string) {
   // text would be rejected by record-write-service's field validation (400).
   if (field.type === 'person' || field.type === 'multiSelect') return
   try {
-    let value: unknown = field.type === 'number' && text !== '' ? Number(text) : text
+    const cellText = singleCellClipboardText(text)
+    // A number cell pasted empty (e.g. a copied empty spreadsheet cell, "\n") is cleared, never 0.
+    let value: unknown = field.type === 'number' ? (cellText.trim() === '' ? null : Number(cellText)) : cellText
     // 客户反馈 2026-09-24 #4c (S1): pasted date-time text is a BUSINESS wall clock (zone rule: explicit
     // non-UTC field zone, else the business zone), converted here to the UTC instant — never read in the
     // browser's zone. Text the parser rejects is sent as-is: the server applies the same grammar and
     // answers 400, which the grid surfaces as an error toast — not a silent drop.
-    if (field.type === 'dateTime' && typeof text === 'string' && text.trim() !== '') {
-      const ms = parseDateTimeTextToUtcMs(text, resolveDateTimeTimezone(field.property))
+    if (field.type === 'dateTime' && cellText.trim() !== '') {
+      const ms = parseDateTimeTextToUtcMs(cellText, resolveDateTimeTimezone(field.property))
       if (ms !== null) value = new Date(ms).toISOString()
     }
     emit('patch-cell', row.id, field.id, value, row.version)
@@ -1758,19 +1772,35 @@ function isGridComposingEvent(e: KeyboardEvent): boolean {
 // switch (Arrow/Tab/Enter/Escape) below — see that call site. Renamed from
 // `isValidTypeToEditTarget` since it now guards more than just D1 seeding.
 function isValidGridKeydownTarget(e: Event): boolean {
-  const target = e.target as HTMLElement | null
-  if (!target) return false
-  if (target === gridRoot.value) return true
-  if (target.getAttribute('role') !== 'gridcell') return false
-  return Number(target.dataset.ri) === focusRow.value && Number(target.dataset.ci) === focusCol.value
+  return isGridOwnFocusElement(e.target as HTMLElement | null)
+}
+function isGridOwnFocusElement(el: HTMLElement | null): boolean {
+  if (!el) return false
+  if (el === gridRoot.value) return true
+  if (el.getAttribute('role') !== 'gridcell') return false
+  return Number(el.dataset.ri) === focusRow.value && Number(el.dataset.ci) === focusCol.value
 }
 
 // Grid paste (Ctrl/Cmd+V, Shift+Insert, the browser's Paste command) — the ONE read path for keyboard
 // paste. `paste` is a user gesture, so `event.clipboardData` is readable even in a non-secure context
-// (plain-HTTP deployment by IP), where the async Clipboard API does not exist. The cell editor
-// (editCell) and every descendant control keep their native paste: same target gate as onKeydown.
+// (plain-HTTP deployment by IP), where the async Clipboard API does not exist.
+//
+// The gate is by FOCUS, not by event target. A keydown is dispatched at the focused element, but a
+// paste is dispatched at the element holding the caret: after a click on a cell's text, real Chrome
+// fires it at the text span inside that cell while DOM focus is on the grid root (verified with
+// Playwright, verification/cell-text-keyboard-paste.spec.ts). So: the focused element must be the grid
+// root (or the focused gridcell itself), exactly what onKeydown's gate accepts; a focused descendant
+// control (checkbox, button, the cell editor's input) keeps its native paste. Two more rules: never
+// while a cell editor is open, and never when the caret sits inside an editable element.
+const PASTE_NATIVE_EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+function isGridPasteEvent(e: ClipboardEvent): boolean {
+  if (typeof document === 'undefined') return false
+  if (!isGridOwnFocusElement(document.activeElement as HTMLElement | null)) return false
+  const target = e.target
+  return !(target instanceof Element && target !== gridRoot.value && target.closest(PASTE_NATIVE_EDITABLE))
+}
 function onGridPaste(e: ClipboardEvent) {
-  if (editCell.value || !isValidGridKeydownTarget(e)) return
+  if (editCell.value || !isGridPasteEvent(e)) return
   const text = pasteEventText(e)
   if (text === null) return
   e.preventDefault()

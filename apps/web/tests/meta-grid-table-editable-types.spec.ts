@@ -280,6 +280,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     // Single click focuses the person cell WITHOUT opening the editor (pasteFocusedCell's target is
     // the focused, non-editing cell — same precondition as the existing D2 paste tests).
     cellAt(root, 0, 0).click()
+    gridEl(root).focus() // a real click on a cell focuses the grid root
     await flushUi()
     expect(root.querySelector('[data-test="person-picker-open"]')).toBeNull()
 
@@ -295,6 +296,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     await flushUi()
 
     cellAt(root, 0, 1).click()
+    gridEl(root).focus() // a real click on a cell focuses the grid root
     await flushUi()
 
     gridEl(root).dispatchEvent(pasteEventWithText('pasted text'))

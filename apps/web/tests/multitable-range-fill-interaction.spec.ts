@@ -406,8 +406,13 @@ describe('MetaGridTable range interaction with real planner', () => {
     const checkbox = grid.get('.meta-grid__check-col input')
     const event = await key(checkbox, 'v', { ctrlKey: true })
     expect(event.defaultPrevented).toBe(false)
+    // A real click focuses these controls; the paste then targets them and they keep it.
+    checkbox.focus()
     expect((await nativePaste(checkbox, 'hijacked')).defaultPrevented).toBe(false)
+    button.focus()
     expect((await nativePaste(button, 'hijacked')).defaultPrevented).toBe(false)
+    // Gate is by focus: a focused control keeps the paste even if the event is aimed at the grid root.
+    expect((await nativePaste(grid.get('.meta-grid'), 'hijacked')).defaultPrevented).toBe(false)
     await key(button, 'ArrowRight', { shiftKey: true })
     expect(grid.selected()).toEqual(['0:0'])
     expect(readText).not.toHaveBeenCalled()
@@ -526,6 +531,7 @@ describe('MetaGridTable range interaction with real planner', () => {
     const cell = grid.get('.meta-grid__cell')
     await mouse(cell, 'click')
     await mouse(cell, 'mousedown')
+    grid.get('.meta-grid').focus() // a real click on a cell focuses the grid root (nearest focusable ancestor)
     expect(grid.root.querySelector('[data-test="grid-range-toolbar"]')).toBeNull()
     expect(grid.root.querySelector('[data-test="range-fill-handle"]')).toBeNull()
     expect(grid.root.querySelector('[data-range-row]')).toBeNull()
@@ -553,6 +559,7 @@ describe('grid paste without the async Clipboard API (plain-HTTP deployment)', (
     removeClipboardApi()
     const grid = await mountGrid()
     await mouse(grid.root.querySelector('tbody tr.meta-grid__row')!.querySelectorAll<HTMLElement>('.meta-grid__cell')[2], 'click') // row r1, Amount
+    grid.get('.meta-grid').focus() // a real click on a cell focuses the grid root (nearest focusable ancestor)
     const gridRoot = grid.get('.meta-grid')
     expect((await key(gridRoot, 'v', { ctrlKey: true })).defaultPrevented).toBe(false)
     const event = await nativePaste(gridRoot, '42')
@@ -567,6 +574,7 @@ describe('grid paste without the async Clipboard API (plain-HTTP deployment)', (
     removeClipboardApi()
     const grid = await mountGrid()
     await mouse(grid.get('.meta-grid__cell'), 'click')
+    grid.get('.meta-grid').focus() // a real click on a cell focuses the grid root (nearest focusable ancestor)
     expect((await nativePaste(grid.get('.meta-grid'), null)).defaultPrevented).toBe(false)
     expect(grid.patchCell).not.toHaveBeenCalled()
   })
@@ -584,6 +592,133 @@ describe('grid paste without the async Clipboard API (plain-HTTP deployment)', (
     // Even a paste that reaches the grid root itself while the editor is open (editor lost DOM focus)
     // must not write behind the editor's back: the old Ctrl+V shortcut had the same `!editCell` rule.
     expect((await nativePaste(grid.get('.meta-grid'), 'behind the editor')).defaultPrevented).toBe(false)
+    expect(grid.patchCell).not.toHaveBeenCalled()
+  })
+
+  // Real Chrome (verification/cell-text-keyboard-paste.spec.ts): after a click on a cell's TEXT the
+  // paste event targets the span holding the caret, while DOM focus is on the grid root.
+  it('single cell: a paste aimed at the text inside the cell (where Chrome puts it) is written', async () => {
+    vi.stubEnv('VITE_MULTITABLE_RANGE_FILL_ENABLED', 'false')
+    removeClipboardApi()
+    const grid = await mountGrid()
+    const cell = grid.get('.meta-grid__cell')
+    await mouse(cell, 'click')
+    grid.get('.meta-grid').focus()
+    const inner = Array.from(cell.querySelectorAll<HTMLElement>('*')).find(el => el.textContent === 'alpha' && el.children.length === 0)
+    expect(inner, 'the cell renders its text in an inner element').toBeTruthy()
+    expect(document.activeElement).toBe(grid.get('.meta-grid'))
+    const event = await nativePaste(inner!, 'from the caret')
+    expect(event.defaultPrevented).toBe(true)
+    expect(grid.patchCell).toHaveBeenCalledWith('r1', 'title', 'from the caret', 5)
+  })
+
+  it('range: a paste aimed at the text inside a selected cell is written', async () => {
+    removeClipboardApi()
+    const grid = await mountGrid()
+    await rectangle(grid, 0, 0, 0, 1)
+    const inner = Array.from(grid.cell(0, 1).querySelectorAll<HTMLElement>('*')).find(el => el.textContent === 'other1' && el.children.length === 0)
+    expect(inner).toBeTruthy()
+    expect(document.activeElement).toBe(grid.get('.meta-grid'))
+    expect((await nativePaste(inner!, 'x\ty')).defaultPrevented).toBe(true)
+    await settled(grid)
+    expect(grid.commitRange).toHaveBeenCalledWith([
+      { recordId: 'r1', fieldId: 'title', value: 'x', expectedVersion: 5 },
+      { recordId: 'r1', fieldId: 'other', value: 'y', expectedVersion: 5 },
+    ])
+  })
+
+  it('a caret inside an editable element keeps its native paste even while the grid root has focus', async () => {
+    vi.stubEnv('VITE_MULTITABLE_RANGE_FILL_ENABLED', 'false')
+    removeClipboardApi()
+    const grid = await mountGrid()
+    const cell = grid.get('.meta-grid__cell')
+    await mouse(cell, 'click')
+    grid.get('.meta-grid').focus()
+    const editable = document.createElement('span')
+    editable.setAttribute('contenteditable', 'true')
+    cell.appendChild(editable)
+    expect((await nativePaste(editable, 'typed')).defaultPrevented).toBe(false)
+    expect(grid.patchCell).not.toHaveBeenCalled()
+    editable.remove()
+  })
+
+  it('a paste while no cell has focus writes nothing outside range mode', async () => {
+    vi.stubEnv('VITE_MULTITABLE_RANGE_FILL_ENABLED', 'false')
+    removeClipboardApi()
+    const grid = await mountGrid()
+    await mouse(grid.get('.meta-grid__cell'), 'click')
+    // Focus left the grid (e.g. the user clicked elsewhere on the page): the grid does not paste.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    expect((await nativePaste(grid.get('.meta-grid'), 'nowhere')).defaultPrevented).toBe(false)
+    expect(grid.patchCell).not.toHaveBeenCalled()
+  })
+
+  it.each<[string, string, number, unknown]>([
+    ['spreadsheet trailing CRLF', 'abc\r\n', 0, 'abc'],
+    ['spreadsheet trailing LF', 'abc\n', 0, 'abc'],
+    ['quoted multi-line cell', '"line1\nline2"\r\n', 0, 'line1\nline2'],
+    ['multi-cell copy keeps the top-left cell', 'a\tb\nc\td', 0, 'a'],
+    ['a stray quote the matrix grammar rejects stays as typed', 'He said "hi"\r\n', 0, 'He said "hi"'],
+    ['number with a trailing line break', '42\r\n', 2, 42],
+    ['empty spreadsheet cell into a number field clears it (never 0)', '\r\n', 2, null],
+    ['empty spreadsheet cell into a text field clears it', '\n', 0, ''],
+  ])('single cell reads the clipboard like the range paste: %s', async (_name, text, col, value) => {
+    vi.stubEnv('VITE_MULTITABLE_RANGE_FILL_ENABLED', 'false')
+    removeClipboardApi()
+    const grid = await mountGrid()
+    await mouse(grid.root.querySelector('tbody tr.meta-grid__row')!.querySelectorAll<HTMLElement>('.meta-grid__cell')[col], 'click')
+    grid.get('.meta-grid').focus()
+    await nativePaste(grid.get('.meta-grid'), text)
+    expect(grid.patchCell).toHaveBeenCalledTimes(1)
+    expect(grid.patchCell).toHaveBeenCalledWith('r1', fields()[col].id, value, 5)
+  })
+
+  it('range: a second paste while the first is still saving says to wait and writes once', async () => {
+    removeClipboardApi()
+    const grid = await mountGrid()
+    const pending = deferredOperation()
+    grid.commitRange.mockReturnValueOnce(pending.promise)
+    await clickCell(grid, 0, 0)
+    await nativePaste(grid.get('.meta-grid'), 'first')
+    await vi.waitFor(() => expect(grid.commitRange).toHaveBeenCalledTimes(1))
+    const second = await nativePaste(grid.get('.meta-grid'), 'second')
+    expect(second.defaultPrevented).toBe(true)
+    await nextTick()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('Still working on the previous operation. Please wait.')
+    pending.resolve()
+    await settled(grid)
+    expect(grid.commitRange).toHaveBeenCalledTimes(1)
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('Range saved (range undo is unavailable).')
+  })
+
+  it('range: the busy hint does not outlive an operation that ends without a status of its own', async () => {
+    const grid = await mountGrid()
+    const pending = deferredOperation()
+    writeText.mockReturnValueOnce(pending.promise)
+    await rectangle(grid, 0, 0, 0, 1)
+    grid.get('[data-test="range-copy"]').click()
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    await nativePaste(grid.get('.meta-grid'), 'second')
+    await nextTick()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('Still working on the previous operation. Please wait.')
+    // Escape drops the selection mid-copy, so the copy finishes without reporting anything.
+    await key(grid.get('.meta-grid'), 'Escape')
+    pending.resolve()
+    await settled(grid)
+    expect(grid.root.querySelector('[data-test="range-status"]')).toBeNull()
+    expect(grid.commitRange).not.toHaveBeenCalled()
+  })
+
+  it('range: a paste with no focused cell and no selection asks for a target (zh)', async () => {
+    removeClipboardApi()
+    useLocale().setLocale('zh-CN')
+    const grid = await mountGrid()
+    grid.get('.meta-grid').focus()
+    const event = await nativePaste(grid.get('.meta-grid'), 'orphan')
+    expect(event.defaultPrevented).toBe(true)
+    await nextTick()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('请先选中要粘贴的单元格')
+    expect(grid.commitRange).not.toHaveBeenCalled()
     expect(grid.patchCell).not.toHaveBeenCalled()
   })
 
@@ -714,6 +849,7 @@ describe('grid paste without the async Clipboard API (plain-HTTP deployment)', (
     removeClipboardApi()
     const grid = await mountGrid()
     await mouse(grid.get('.meta-grid__cell'), 'click')
+    grid.get('.meta-grid').focus() // a real click on a cell focuses the grid root (nearest focusable ancestor)
     expect((await nativePaste(grid.get('.meta-grid'), '')).defaultPrevented).toBe(true)
     expect((await nativeImagePaste(grid.get('.meta-grid'))).defaultPrevented).toBe(true)
     expect(grid.patchCell).not.toHaveBeenCalled()

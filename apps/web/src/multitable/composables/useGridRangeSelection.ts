@@ -49,6 +49,9 @@ export function useGridRangeSelection(options: Options) {
     clear()
   }, { flush: 'sync' })
   watch(options.editing, editing => { if (editing) clear() })
+  // PASTE_BUSY only describes the operation that was running; an operation that ends without a status
+  // of its own (e.g. nothing to write) must not leave it on screen.
+  watch(busy, isBusy => { if (!isBusy && status.value === 'PASTE_BUSY') status.value = '' })
 
   function valid(point: CellPoint) {
     return point.row >= 0 && point.col >= 0 && point.row < options.rows().length && point.col < options.fields().length
@@ -171,9 +174,12 @@ export function useGridRangeSelection(options: Options) {
     await pasteFrom(readClipboardText)
   }
   // Keyboard paste: the text already read from the native paste event. Same pipeline as the button.
+  // The paste event is already preventDefault-ed by the caller, so every "not now" says why.
   function pasteText(text: string, focus: CellPoint) {
     if (!enabled.value || options.editing()) return false
+    if (busy.value) { status.value = 'PASTE_BUSY'; return true }
     if (!selection.value) select(focus)
+    if (!selection.value) { status.value = 'PASTE_NO_TARGET'; return true }
     void pasteFrom(() => Promise.resolve(text))
     return true
   }
