@@ -169,6 +169,8 @@ describe('independent snapshot consent to existing BOM engine', () => {
     const results = await Promise.all([c.run(() => flow.complete(c.req)),c.run(() => flow.complete(c.req))])
     expect(results[0].data.id).toBe(results[1].data.id)
     expect((await pool.query('SELECT count(*)::int n FROM meta_plm_bom_review_bindings WHERE data_source_id=$1', [c.source])).rows[0].n).toBe(1)
+    expect((await pool.query('SELECT count(*)::int n FROM meta_records WHERE sheet_id=$1', [results[0].data.sheetId])).rows[0].n).toBe(3)
+    expect((await pool.query('SELECT count(*)::int n FROM meta_record_revisions WHERE sheet_id=$1', [results[0].data.sheetId])).rows[0].n).toBe(3)
   })
   it.each(['meta-tenant','meta-org'])('rechecks separate current Meta membership %s after native export', async org => {
     const c = await prepared()
