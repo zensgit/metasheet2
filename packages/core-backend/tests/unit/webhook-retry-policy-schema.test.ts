@@ -13,6 +13,7 @@ import {
 const baseCreate = {
   name: 'Hook',
   url: 'https://example.com/hook',
+  sheetId: 'sheet1',
   events: ['record.created'],
 }
 

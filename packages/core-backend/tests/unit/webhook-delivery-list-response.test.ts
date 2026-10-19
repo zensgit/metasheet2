@@ -2,8 +2,10 @@
  * GET /api/multitable/webhooks/:id/deliveries returns status fields only.
  *
  * Route-level: the real WebhookService runs over an in-memory DB stub (one webhook owned by the
- * caller, its own delivery rows), so each stored row passes through the service mapping and the
- * route's list mapping exactly as in production.
+ * caller and bound to a sheet, its own delivery rows), so each stored row passes through the service
+ * mapping and the route's list mapping exactly as in production. The owner's current access to the bound
+ * sheet is stood in as granted (it reads the database in its own transaction, covered by the real-DB
+ * suites).
  */
 import express from 'express'
 import request from 'supertest'
@@ -40,6 +42,7 @@ function webhookRow() {
     created_at: '2026-10-01T00:00:00.000Z',
     failure_count: 0,
     max_retries: 3,
+    sheet_id: SHEET_ID,
   }
 }
 
@@ -103,6 +106,10 @@ async function buildApp(rows: unknown[]) {
   vi.doMock('../../src/middleware/auth', () => ({ authenticate, authMiddleware: authenticate, default: authenticate }))
   vi.doMock('../../src/db/db', () => ({ db: createDbStub(rows) }))
   vi.doMock('../../src/db/pg', () => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }))
+  vi.doMock('../../src/multitable/webhook-delivery-authority', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../../src/multitable/webhook-delivery-authority')>()
+    return { ...actual, authorizeWebhookOwnerCurrentAccess: async () => ({ ok: true as const }) }
+  })
   const { apiTokensRouter } = await import('../../src/routes/api-tokens')
   const app = express()
   app.use(express.json())
@@ -119,6 +126,7 @@ afterEach(() => {
   vi.doUnmock('../../src/middleware/auth')
   vi.doUnmock('../../src/db/db')
   vi.doUnmock('../../src/db/pg')
+  vi.doUnmock('../../src/multitable/webhook-delivery-authority')
   vi.resetModules()
 })
 

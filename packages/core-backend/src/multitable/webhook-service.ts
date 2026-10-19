@@ -21,6 +21,7 @@ import {
   WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS,
   WEBHOOK_DEFAULT_MAX_RETRIES,
 } from './webhooks'
+import { WEBHOOK_CHECK_FAILED, authorizeWebhookDelivery } from './webhook-delivery-authority'
 
 const logger = new Logger('WebhookService')
 
@@ -82,6 +83,7 @@ function rowToWebhook(row: {
   max_retries: number
   retry_base_delay_ms?: number | null
   retry_max_delay_ms?: number | null
+  sheet_id?: string | null
 }): Webhook {
   const events =
     typeof row.events === 'string'
@@ -113,7 +115,41 @@ function rowToWebhook(row: {
     maxRetries: row.max_retries,
     retryBaseDelayMs: row.retry_base_delay_ms ?? undefined,
     retryMaxDelayMs: row.retry_max_delay_ms ?? undefined,
+    sheetId: typeof row.sheet_id === 'string' && row.sheet_id.length > 0 ? row.sheet_id : null,
   }
+}
+
+/**
+ * How a PATCH relates to the stored webhook. A change of `active` false → true, a different `url`, a
+ * different event set, or binding a not-yet-bound webhook needs the caller to pass the create-time sheet
+ * access check again (on `recheckSheetId`); a field that is sent again with its stored value does not.
+ * Turning the webhook off never needs it. The bound sheet cannot be changed.
+ */
+export type WebhookUpdatePlan =
+  | { kind: 'refuse'; reason: 'sheet_immutable' | 'sheet_binding_required' }
+  | { kind: 'apply'; recheckSheetId: string | null; bindSheetId: string | null }
+
+export function planWebhookUpdate(
+  existing: Pick<Webhook, 'url' | 'events' | 'active' | 'sheetId'>,
+  input: Pick<WebhookUpdateInput, 'url' | 'events' | 'active' | 'sheetId'>,
+): WebhookUpdatePlan {
+  const requestedSheetId = typeof input.sheetId === 'string' ? input.sheetId.trim() : ''
+  let bindSheetId: string | null = null
+  if (requestedSheetId) {
+    if (existing.sheetId === null) bindSheetId = requestedSheetId
+    else if (existing.sheetId !== requestedSheetId) return { kind: 'refuse', reason: 'sheet_immutable' }
+  }
+  const activating = input.active === true && existing.active !== true
+  const urlChanged = input.url !== undefined && input.url.trim() !== existing.url
+  const eventsChanged =
+    input.events !== undefined
+    && (new Set(input.events).size !== new Set(existing.events).size
+      || input.events.some((evt) => !existing.events.includes(evt)))
+  const needsRecheck = activating || urlChanged || eventsChanged || bindSheetId !== null
+  if (!needsRecheck) return { kind: 'apply', recheckSheetId: null, bindSheetId: null }
+  const targetSheetId = bindSheetId ?? existing.sheetId
+  if (!targetSheetId) return { kind: 'refuse', reason: 'sheet_binding_required' }
+  return { kind: 'apply', recheckSheetId: targetSheetId, bindSheetId }
 }
 
 /** Map a DB row to the domain WebhookDelivery. */
@@ -178,6 +214,10 @@ export class WebhookService {
     if (!input.url || input.url.trim().length === 0) {
       throw new Error('Webhook URL is required')
     }
+    const sheetId = typeof input.sheetId === 'string' ? input.sheetId.trim() : ''
+    if (!sheetId) {
+      throw new Error('Webhook sheetId is required')
+    }
     try {
       const parsed = new URL(input.url)
       if (
@@ -221,6 +261,7 @@ export class WebhookService {
         max_retries: maxRetries,
         retry_base_delay_ms: retryBaseDelayMs,
         retry_max_delay_ms: retryMaxDelayMs,
+        sheet_id: sheetId,
       })
       .execute()
 
@@ -237,6 +278,7 @@ export class WebhookService {
       maxRetries,
       retryBaseDelayMs: retryBaseDelayMs ?? undefined,
       retryMaxDelayMs: retryMaxDelayMs ?? undefined,
+      sheetId,
     }
 
     logger.info(`Webhook created: ${id} by user ${userId}`)
@@ -269,6 +311,15 @@ export class WebhookService {
 
     const updates: Record<string, unknown> = {
       updated_at: nowTimestamp(),
+    }
+
+    // Binding: a not-yet-bound webhook takes the given sheet; the same sheet again is a no-op; a different
+    // sheet is refused (the binding is fixed once set).
+    const requestedSheetId = typeof input.sheetId === 'string' ? input.sheetId.trim() : ''
+    if (requestedSheetId) {
+      const storedSheetId = typeof row.sheet_id === 'string' && row.sheet_id.length > 0 ? row.sheet_id : null
+      if (storedSheetId === null) updates.sheet_id = requestedSheetId
+      else if (storedSheetId !== requestedSheetId) throw new Error('Webhook sheetId cannot be changed')
     }
 
     if (input.name !== undefined) updates.name = input.name.trim()
@@ -338,7 +389,8 @@ export class WebhookService {
   // ─── Delivery ────────────────────────────────────────────────────────
 
   /**
-   * Queue deliveries for all active webhooks subscribed to the given event type.
+   * Queue deliveries for the active webhooks bound to the event's sheet and subscribed to the event type,
+   * each only when its owner can currently read what it would receive (see webhook-delivery-authority).
    */
   async deliverEvent(
     event: WebhookEventType,
@@ -352,19 +404,34 @@ export class WebhookService {
   ): Promise<WebhookDelivery[]> {
     // Ops switch on: no webhook lookup, no delivery row, no send.
     if (outboundOpsSwitchOn) return []
+    // Only webhooks bound to the event's sheet are candidates; an event without a string sheetId has none.
+    const eventSheetId =
+      payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as { sheetId?: unknown }).sheetId
+        : undefined
+    if (typeof eventSheetId !== 'string' || eventSheetId.length === 0) return []
     const rows = await this.db
       .selectFrom('multitable_webhooks')
       .selectAll()
       .where('active', '=', true)
+      .where('sheet_id', '=', eventSheetId)
       .execute()
 
     const matching = rows
       .map((r) => rowToWebhook(r as Parameters<typeof rowToWebhook>[0]))
       .filter((wh) => wh.events.includes(event))
 
+    const durable = typeof eventId === 'string' && eventId.length > 0
+    let failedChecks = 0
     const deliveries: WebhookDelivery[] = []
     for (const wh of matching) {
-      const delivery = await this.createDeliveryRecord(wh.id, event, payload, eventId)
+      // Decide per webhook; a failed check for one webhook does not stop the others.
+      const decision = await authorizeWebhookDelivery(this.db, wh, event, payload)
+      if (decision.deliver === false) {
+        if (decision.reason === WEBHOOK_CHECK_FAILED) failedChecks += 1
+        continue
+      }
+      const delivery = await this.createDeliveryRecord(wh.id, event, decision.payload, eventId)
       // A null claim (durable path only) = this (webhook, event) was already delivered/claimed by a prior
       // attempt → skip the HTTP send entirely (the redelivery is terminally handled; the caller/adapter maps
       // an error-free return to success). Never reachable on the legacy path (eventId undefined → always a row).
@@ -378,6 +445,11 @@ export class WebhookService {
       })
     }
 
+    // Durable path: after every webhook was handled, surface failed checks so the consumer redelivers;
+    // webhooks already claimed for this event id are not sent again (the claim dedups them).
+    if (durable && failedChecks > 0) {
+      throw new Error(`webhook delivery check failed for ${failedChecks} webhook(s)`)
+    }
     return deliveries
   }
 
@@ -398,7 +470,24 @@ export class WebhookService {
       return
     }
 
-    const bodyStr = JSON.stringify(delivery.payload)
+    // Re-check before every attempt (first send and every retry) and re-mask the stored body.
+    const decision = await authorizeWebhookDelivery(this.db, wh, delivery.event, delivery.payload)
+    if (decision.deliver === false) {
+      if (decision.reason === WEBHOOK_CHECK_FAILED) {
+        await this.handleDeliveryCheckFailure(delivery, wh)
+        return
+      }
+      // A refusal is not an endpoint failure: no send, no failure_count change, no auto-disable.
+      await this.db
+        .updateTable('multitable_webhook_deliveries')
+        .set({ status: 'failed' })
+        .where('id', '=', delivery.id)
+        .execute()
+      delivery.status = 'failed'
+      return
+    }
+
+    const bodyStr = JSON.stringify(decision.payload)
     const timestamp = new Date().toISOString()
 
     const headers: Record<string, string> = {
@@ -625,6 +714,40 @@ export class WebhookService {
       attemptCount: 0,
       createdAt: now,
     }
+  }
+
+  /**
+   * A delivery check that could not be completed: nothing is sent, the attempt is counted and the row is
+   * rescheduled with the normal backoff (failed once max_retries is reached). failure_count is unchanged,
+   * so a check failure never auto-disables the webhook.
+   */
+  private async handleDeliveryCheckFailure(
+    delivery: WebhookDelivery,
+    wh: Webhook,
+  ): Promise<void> {
+    delivery.attemptCount += 1
+    if (delivery.attemptCount >= wh.maxRetries) {
+      await this.db
+        .updateTable('multitable_webhook_deliveries')
+        .set({ status: 'failed', attempt_count: delivery.attemptCount })
+        .where('id', '=', delivery.id)
+        .execute()
+      delivery.status = 'failed'
+      return
+    }
+    const delay = WebhookService.computeBackoffMs(
+      delivery.attemptCount,
+      wh.retryBaseDelayMs,
+      wh.retryMaxDelayMs,
+    )
+    const nextRetry = new Date(Date.now() + delay).toISOString()
+    delivery.nextRetryAt = nextRetry
+    delivery.status = 'pending'
+    await this.db
+      .updateTable('multitable_webhook_deliveries')
+      .set({ status: 'pending', attempt_count: delivery.attemptCount, next_retry_at: nextRetry })
+      .where('id', '=', delivery.id)
+      .execute()
   }
 
   private async handleDeliveryFailure(

@@ -5,6 +5,10 @@
  * registry, sets the env value, and imports the service fresh. The DB is an in-memory recording
  * stub (no shared database): each case holds exactly one webhook and one fixture payload, and the
  * fetch stub only ever sees this file's own requests.
+ *
+ * The fixture webhook is bound to the fixture sheet, and the delivery rules are stood in as "the owner can
+ * read everything on that sheet" (body unchanged): the rules open their own read transaction, which the
+ * recording stub cannot host. The rules are covered by their own unit and real-DB suites.
  */
 import { createHmac } from 'crypto'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -22,7 +26,6 @@ const WEBHOOK_SECRET = 'whsec_ops_fixture'
 const OWNER_ID = 'user_ops_1'
 const SHEET_ID = 'sheet_ops_1'
 const STORED_PAYLOAD = {
-  event: 'record.created',
   sheetId: SHEET_ID,
   recordId: 'rec_ops_1',
   data: { fld_title: 'Hello' },
@@ -40,6 +43,7 @@ function webhookRow() {
     created_at: '2026-10-01T00:00:00.000Z',
     failure_count: 0,
     max_retries: 3,
+    sheet_id: SHEET_ID,
   }
 }
 
@@ -174,6 +178,16 @@ function setRawSwitch(raw: string | undefined) {
 
 async function loadService(raw: string | undefined) {
   vi.resetModules()
+  vi.doMock('../../src/multitable/webhook-delivery-authority', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../../src/multitable/webhook-delivery-authority')>()
+    return {
+      ...actual,
+      authorizeWebhookDelivery: async (_db: unknown, _webhook: unknown, _event: unknown, payload: unknown) => ({
+        deliver: true as const,
+        payload: { ...(payload as Record<string, unknown>) },
+      }),
+    }
+  })
   setRawSwitch(raw)
   // Same Logger module instance webhook-service binds to (registry reset above, not since).
   const { Logger } = await import('../../src/core/logger')
@@ -231,6 +245,7 @@ beforeEach(() => {
 afterEach(() => {
   setRawSwitch(originalEnv)
   vi.restoreAllMocks()
+  vi.doUnmock('../../src/multitable/webhook-delivery-authority')
   vi.resetModules()
 })
 
