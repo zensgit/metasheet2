@@ -547,6 +547,7 @@ const {
   provisionProjectSheet,
   // G1 field defect (R67): the contract option sets onto ONE registered project sheet (the repair leg).
   syncProjectSheetContractOptions,
+  markProjectSheetPlmSystemColumns,
   grantProjectSheetRoles,
   projectSheetViewHandles,
   buildProjectTargetBinding,
@@ -4855,6 +4856,11 @@ function requireStockPreparationAudit() {
    * under the per-tenant lock archive / restore take (archived → 409, the create replay's rule) → the patch →
    * ONE audit row (`project_target_create` / `contract_options_synced`, the sheet as subject, the objectId and
    * counts in the detail).
+   *
+   * B (awaiting the owner's A/B/C ruling): the same locked step also marks the sheet's `plm_system` columns
+   * read-only for people (`markProjectSheetPlmSystemColumns`, idempotent — already-marked columns are not
+   * written again). This is the rollout path for project sheets created before the lock existed; it changes
+   * column metadata only, never a row. The counts ride the same audit row.
    */
   async function repairProjectSheetContractOptions(req, res) {
     const user = getUser(req)
@@ -4887,6 +4893,9 @@ function requireStockPreparationAudit() {
     const repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
       row: locked,
       options: await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+      // B (awaiting owner): the same call marks the sheet's PLM columns read-only for people — the rollout
+      // path for sheets created before the lock existed. Idempotent; registry-resolved objectId only.
+      plmColumnLock: await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
     }))
     await audit.append({
       tenantId,
@@ -4900,6 +4909,9 @@ function requireStockPreparationAudit() {
         syncedFieldCount: repaired.options.synced,
         skippedFieldCount: repaired.options.skipped,
         optionCount: repaired.options.optionCount,
+        plmLockMarkedFieldCount: repaired.plmColumnLock.marked,
+        plmLockAlreadyMarkedFieldCount: repaired.plmColumnLock.alreadyMarked,
+        plmLockMissingFieldCount: repaired.plmColumnLock.missing,
       },
     })
     return sendOk(res, {
@@ -4907,6 +4919,7 @@ function requireStockPreparationAudit() {
       projectNo,
       target: { sheetId: repaired.row.sheetId, objectId: repaired.row.objectId, fieldCount: repaired.options.synced },
       evidence: repaired.options.evidence,
+      plmColumnLock: { marked: repaired.plmColumnLock.marked, alreadyMarked: repaired.plmColumnLock.alreadyMarked, missing: repaired.plmColumnLock.missing },
     })
   }
 
@@ -9994,6 +10007,10 @@ function requireStockPreparationAudit() {
             fillViewCreated: Boolean(provisioned.fillView && provisioned.fillView.created === true),
             todoViewCreated: provisioned.todoView.created === true,
             ownBaseSource: provisioned.ownBaseSource || 'unknown',
+            // B (awaiting owner): the PLM columns marked read-only for people at create (counts only).
+            plmLockMarkedFieldCount: provisioned.plmColumnLock.marked,
+            plmLockAlreadyMarkedFieldCount: provisioned.plmColumnLock.alreadyMarked,
+            plmLockMissingFieldCount: provisioned.plmColumnLock.missing,
           },
         })
       }
@@ -10060,6 +10077,8 @@ function requireStockPreparationAudit() {
         ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
         // G1 field defect (R67): the contract option sets the create leg wrote onto the sheet (counts only).
         ...(provisioned ? { options: { synced: provisioned.options.synced, skipped: provisioned.options.skipped } } : {}),
+        // B (awaiting owner): the PLM columns the create leg marked read-only for people (counts only).
+        ...(provisioned ? { plmColumnLock: { marked: provisioned.plmColumnLock.marked, alreadyMarked: provisioned.plmColumnLock.alreadyMarked, missing: provisioned.plmColumnLock.missing } } : {}),
         // S3 fix round 1 (R6): what the overview leg did, values-free (`code` is a closed error code).
         overview: { ensured: overviewOutcome.ensured, created: overviewOutcome.created, code: overviewOutcome.code },
       }, created ? 201 : 200)

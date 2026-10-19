@@ -64,6 +64,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const PLM_SYSTEM_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id)
 const { STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 
@@ -555,12 +556,19 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
       todoView: { created: true, skipped: null },
       // G1 field defect (R67): the contract option set landed on the decision column (counts only).
       options: { synced: 1, skipped: 0 },
+      // B (awaiting owner): every plm_system column of the new sheet marked read-only for people (counts only).
+      plmColumnLock: { marked: PLM_SYSTEM_IDS.length, alreadyMarked: 0, missing: 0 },
       // S3 fix round 1 (R6): this substrate is an OLDER host (no stamp declaration), so the create's
       // best-effort overview leg refuses before any IO and says so with its closed code — the create stands.
       overview: { ensured: false, created: false, code: 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED' },
     })
     assert.equal(h.provisioning.calls.filter((c) => c[0] === 'ensureObject').length, 1, 'ONE sheet provisioned')
-    assert.deepEqual(h.provisioning.calls.filter((c) => c[0] === 'patchObjectFieldProperty'), [['patchObjectFieldProperty', objectId, 'lastPlmRefreshDecision']], 'G1 field defect (R67): ONE option patch, the decision column of THIS sheet')
+    // G1 field defect (R67): ONE option patch, the decision column of THIS sheet — then (B, awaiting owner) ONE lock
+    // patch per plm_system column of THIS sheet, in template order, and nothing else.
+    assert.deepEqual(h.provisioning.calls.filter((c) => c[0] === 'patchObjectFieldProperty'), [
+      ['patchObjectFieldProperty', objectId, 'lastPlmRefreshDecision'],
+      ...PLM_SYSTEM_IDS.map((id) => ['patchObjectFieldProperty', objectId, id]),
+    ], 'the option patch, then the PLM column locks — all on THIS sheet')
     assert.equal(h.provisioning.calls.find((c) => c[0] === 'ensureObject')[1], objectId)
     assert.deepEqual(h.provisioning.calls.filter((c) => c[0] === 'ensureView').map((c) => c[1]), [STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID, STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID])
     assert.equal(h.db.rows.length, 1)
@@ -572,7 +580,14 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
       ['project_target_create', PROJECT, sheetId, 'sheet_created', 'u_pull'],
       ['project_target_grant', PROJECT, sheetId, 'granted', 'u_pull'],
     ])
-    assert.deepEqual(h.auditAppends[0].detail, { fillViewCreated: true, todoViewCreated: true, ownBaseSource: 'derived' })
+    assert.deepEqual(h.auditAppends[0].detail, {
+      fillViewCreated: true,
+      todoViewCreated: true,
+      ownBaseSource: 'derived',
+      plmLockMarkedFieldCount: PLM_SYSTEM_IDS.length,
+      plmLockAlreadyMarkedFieldCount: 0,
+      plmLockMissingFieldCount: 0,
+    })
     assert.deepEqual(h.auditAppends[1].detail, { roleCount: 2, granted: 2, alreadyGranted: 0 })
     for (const entry of h.auditAppends) {
       assert.ok(!JSON.stringify(entry.detail).includes(ROLE_A), 'role ids never ride the plugin audit detail (the host history carries them)')
