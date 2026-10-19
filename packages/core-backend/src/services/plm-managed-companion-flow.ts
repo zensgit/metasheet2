@@ -17,6 +17,7 @@ import {
 } from '../auth/plm-managed-session'
 import { BomReviewError, parseManagedSnapshot, type ManagedSnapshot } from '../multitable/plm-bom-review-wire'
 import { currentManagedRequest } from './plm-managed-request-context'
+import { queueSnapshotShareCancellationOnQuery, drainSnapshotShareCancellation, pendingSnapshotShareCancellations } from './plm-managed-snapshot-share-flow'
 import {
   nativeExchange,
   nativeManagedContext,
@@ -851,6 +852,7 @@ async function stopLink(actor: ManagedActor, reason: StopReason, selector: { lin
        WHERE link_id = $1 AND generation = $2 AND status = 'pending'`,
       [text(link.id), Number(link.generation)],
     )
+    const shareIds = await queueSnapshotShareCancellationOnQuery(client.query.bind(client), text(link.id), Number(link.generation))
     const sessions = await client.query(
       `SELECT delegation_id, intent_id FROM plm_managed_sessions WHERE link_id = $1 AND generation = $2`,
       [text(link.id), Number(link.generation)],
@@ -883,12 +885,15 @@ async function stopLink(actor: ManagedActor, reason: StopReason, selector: { lin
        LIMIT 1`,
       [text(link.id), Number(link.generation)],
     )
-    return { ids, inflight: inflight.rows.length > 0 }
+    return { ids, shareIds, inflight: inflight.rows.length > 0 }
   })
   let pending = outboxIds.inflight
   for (const outboxId of outboxIds.ids) {
     const result = await sendFrozenRevoke(outboxId)
     if (result.state !== 'acked') pending = true
+  }
+  for (const shareId of outboxIds.shareIds) {
+    if (!await drainSnapshotShareCancellation(shareId)) pending = true
   }
   return { ok: true, state: pending ? 'pending' : 'acked' }
 }
@@ -992,7 +997,7 @@ export async function retryManagedRevoke(actor: ManagedActor, body: unknown): Pr
   if (keys !== 'outboxId') throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
   const outboxId = exactString(record.outboxId)
   const owner = await query(
-    `SELECT l.meta_user_id FROM plm_managed_revoke_outbox o
+    `SELECT l.meta_user_id,l.data_source_id FROM plm_managed_revoke_outbox o
      JOIN plm_managed_identity_links l ON l.id = o.link_id
      WHERE o.id = $1`,
     [outboxId],
@@ -1001,7 +1006,11 @@ export async function retryManagedRevoke(actor: ManagedActor, body: unknown): Pr
   if (!metaUserId) throw new ManagedCompanionRefusal(404, 'PLM_MANAGED_OUTBOX_NOT_FOUND')
   if (actor.id !== metaUserId && !isAdmin(actor)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_ACTOR_REFUSED')
   const sent = await sendFrozenRevoke(outboxId)
-  return { ok: true, state: sent.state }
+  let pending = sent.state !== 'acked'
+  for (const shareId of await pendingSnapshotShareCancellations(text(owner.rows[0]?.data_source_id))) {
+    if (!await drainSnapshotShareCancellation(shareId)) pending = true
+  }
+  return { ok: true, state: pending ? 'pending' : 'acked' }
 }
 
 async function retrySourceRevokes(actor: ManagedActor, dataSourceId: string): Promise<{ ok: true; state: 'pending' | 'acked' }> {
@@ -1041,6 +1050,9 @@ async function retrySourceRevokes(actor: ManagedActor, dataSourceId: string): Pr
     [dataSourceId],
   )
   if (inflight.rows.length > 0) pending = true
+  for (const shareId of await pendingSnapshotShareCancellations(dataSourceId)) {
+    if (!await drainSnapshotShareCancellation(shareId)) pending = true
+  }
   return { ok: true, state: pending ? 'pending' : 'acked' }
 }
 
@@ -1089,7 +1101,7 @@ export async function readManagedSessionStatus(actor: ManagedActor, dataSourceId
   return {
     ok: true,
     linked: text(row.status) === 'active',
-    pendingRevoke: pending.rows.length > 0 || inflight.rows.length > 0,
+    pendingRevoke: pending.rows.length > 0 || inflight.rows.length > 0 || (await pendingSnapshotShareCancellations(dataSourceId)).length > 0,
     generation: Number(row.generation),
     expiresAt: expires ? new Date(expires as string).toISOString() : null,
   }

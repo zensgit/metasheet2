@@ -35,6 +35,7 @@
         :initial-part-id="readyPart"
         :eco-intent-enabled="ecoIntentEnabled"
       />
+      <PlmSnapshotSharePanel :data-source-id="readySource" :part-id="readyPart ?? ''" />
     </template>
   </section>
 </template>
@@ -55,6 +56,7 @@ import {
   type PlmIntegrationCapabilitiesResult,
 } from '../services/integration/workbench'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
+import PlmSnapshotSharePanel from '../components/plm/PlmSnapshotSharePanel.vue'
 
 type QueryHint =
   | { status: 'missing' | 'blank' | 'array' | 'ambiguous' }

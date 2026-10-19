@@ -2,6 +2,7 @@
  * Backchannel client for the native managed-login provider.
  * Public browser navigation stays in the flow. This module never logs secrets.
  */
+import { parseNativeSnapshotShareExport, snapshotShareTargetSchema, type SnapshotShareAuthority, type SnapshotShareTarget } from './plm-managed-snapshot-share-wire'
 import { MANAGED_EXCHANGE_ABORT_SECONDS, ManagedCompanionRefusal, type ManagedClientRegistration } from './plm-managed-companion'
 
 export type NativeExchange = {
@@ -57,7 +58,7 @@ function headersFor(registration: ManagedClientRegistration): Record<string, str
   }
 }
 
-async function postJson(url: string, body: Record<string, string>, headers: Record<string, string>): Promise<Response> {
+async function postJson(url: string, body: Record<string, unknown>, headers: Record<string, string>): Promise<Response> {
   return caller()(url, {
     method: 'POST',
     headers,
@@ -201,4 +202,60 @@ export async function nativeManagedContext(
   )
   if (!response.ok) throw new ManagedCompanionRefusal(502, 'PLM_MANAGED_READ_REFUSED')
   return response.json()
+}
+
+
+/** Separate purpose: preparing a snapshot never consumes a personal read grant. */
+export async function nativePrepareSnapshotShare(
+  registration: ManagedClientRegistration,
+  input: { operationId: string; nativeUserId: number; rootPartId: string; target: SnapshotShareTarget; state: string; codeChallenge: string },
+): Promise<{ intentId: string; operationId: string; navigationUrl: string }> {
+  if (!Number.isSafeInteger(input.nativeUserId) || input.nativeUserId < 1) {
+    throw new ManagedCompanionRefusal(403, 'PLM_SNAPSHOT_SHARE_IDENTITY_REFUSED')
+  }
+  const target = snapshotShareTargetSchema.parse(input.target)
+  const response = await postJson(`${registration.nativeBaseUrl}/api/v1/auth/bom-snapshot-share/prepare`, {
+    client_id: registration.clientId, client_secret: registration.clientSecret, callback: registration.callback,
+    operation_id: input.operationId, native_user_id: input.nativeUserId, root_part_id: input.rootPartId,
+    target, state: input.state, code_challenge: input.codeChallenge, code_challenge_method: 'S256',
+  }, headersFor(registration))
+  if (!response.ok) throw new ManagedCompanionRefusal(502, 'PLM_SNAPSHOT_SHARE_PREPARE_REFUSED')
+  const body = asRecord(await response.json())
+  const intentId = body?.intent_id
+  if (typeof intentId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(intentId)
+      || body?.operation_id !== input.operationId || body?.policy !== 'authorized_snapshot_target_acl.v1'
+      || body?.confirmation_path !== `/bom-snapshot-share?intent=${intentId}`) {
+    throw new ManagedCompanionRefusal(502, 'PLM_SNAPSHOT_SHARE_PREPARE_REFUSED')
+  }
+  return { intentId, operationId: input.operationId, navigationUrl: `${registration.nativeBaseUrl}${body.confirmation_path}` }
+}
+
+export async function nativeExportSnapshotShare(
+  registration: ManagedClientRegistration,
+  input: { code: string; codeVerifier: string },
+  authority: SnapshotShareAuthority,
+): Promise<ReturnType<typeof parseNativeSnapshotShareExport>> {
+  if (!/^yus_[0-9a-f-]{36}\.[0-9a-f]{64}$/.test(input.code)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_SNAPSHOT_SHARE_PURPOSE_REFUSED')
+  }
+  const response = await postJson(`${registration.nativeBaseUrl}/api/v1/auth/bom-snapshot-share/export`, {
+    client_id: registration.clientId, client_secret: registration.clientSecret, callback: registration.callback,
+    code: input.code, code_verifier: input.codeVerifier,
+  }, headersFor(registration))
+  if (!response.ok) throw new ManagedCompanionRefusal(502, 'PLM_SNAPSHOT_SHARE_EXPORT_REFUSED')
+  return parseNativeSnapshotShareExport(await response.json(), authority)
+}
+
+/** Cleanup uses the preparing client, including when new issuance is disabled. */
+export async function nativeCancelSnapshotShare(
+  registration: ManagedClientRegistration,
+  input: { intentId: string; operationId: string },
+): Promise<void> {
+  const response = await postJson(`${registration.nativeBaseUrl}/api/v1/auth/bom-snapshot-share/cancel`, {
+    client_id: registration.clientId, client_secret: registration.clientSecret, callback: registration.callback,
+    intent_id: input.intentId, operation_id: input.operationId,
+  }, headersFor(registration))
+  if (!response.ok || asRecord(await response.json())?.revoked !== true) {
+    throw new ManagedCompanionRefusal(502, 'PLM_SNAPSHOT_SHARE_CANCEL_REFUSED')
+  }
 }

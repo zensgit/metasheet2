@@ -7,6 +7,7 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { describeManagedCookie, managedSessionClientOrigin, revokePresentedManagedSession } from '../auth/plm-managed-session'
 import { buildFeaturePayload } from './auth'
+import { handoffSnapshotShare } from '../services/plm-managed-snapshot-share-flow'
 import {
   MANAGED_SESSION_COOKIE,
   ManagedCompanionRefusal,
@@ -133,9 +134,11 @@ router.post('/start', async (req: Request, res: Response) => {
   }
 })
 
-router.get('/callback', (req: Request, res: Response) => {
+router.get('/callback', async (req: Request, res: Response) => {
   try {
-    handoffManagedCallback(req, res)
+    if (typeof req.query.code === 'string' && req.query.code.startsWith('yus_')) {
+      await handoffSnapshotShare(req, res)
+    } else handoffManagedCallback(req, res)
   } catch (error) {
     if (!res.headersSent) sendRefusal(res, error)
   }

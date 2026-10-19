@@ -263,6 +263,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Managed return', titleZh: '托管返回', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
   },
   {
+    path: '/plm/snapshot-share-return',
+    name: 'plm-snapshot-share-return',
+    component: () => import('../views/PlmSnapshotShareReturnView.vue'),
+    meta: { title: 'Snapshot share return', titleZh: '快照分享返回', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
+  },
+  {
     // PLM-COLLAB P3-D2: token-bound BOM-review embed. Bare page (no shell, no metasheet session) --
     // it is authed by a PLM-minted embed token delivered via postMessage from an allowlisted parent,
     // NOT by a metasheet session. Mirrors the public-form route's no-session meta.
