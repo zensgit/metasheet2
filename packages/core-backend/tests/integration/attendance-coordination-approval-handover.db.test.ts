@@ -1,0 +1,767 @@
+/**
+ * Attendance settlement coordination — the approval service's handed-over mode on a real PostgreSQL
+ * (P1-1 acceptance A10 lifecycle, A07 retry ownership and A01's "only tests assemble it"; S3).
+ *
+ * Every leg assembles the mode by hand: a coordinator over its own `pg.Pool`, the coordinated-
+ * transaction port, and the suspended-method bridge that turns the service's own COMMIT into a wait
+ * on the port. Nothing in production builds this (the static inertness guard pins that).
+ *
+ * Fully formed rounds (a real template published through the running server, the original approved
+ * over HTTP, the cancel round created in-process — the corpus's own fixture shape):
+ *  - M06 creation handed over: the port commits once; the service sends no BEGIN / COMMIT / ROLLBACK
+ *    and releases nothing; the request number is read on the handed-over connection and not on the
+ *    main pool; the work after the service's COMMIT (projection, read-back) runs after release, with
+ *    no quota held and no coordination context;
+ *  - M08 reject and revoke handed over: the same lifecycle, and the round reaches its terminal outcome;
+ *  - a refusal inside the handed-over dispatch is rethrown unchanged after the port's ROLLBACK, and
+ *    the row is untouched.
+ *
+ * Attendance-sourced rounds (rows inserted directly, as the lock-order census does; the round is
+ * half-formed, which carries everything up to and including the post-lock recheck):
+ *  - a stale coordinated requirement is caught by the recheck under the row lock: the service asks
+ *    the port for a restart instead of answering 409, the next attempt receives the requirement read
+ *    under the lock, and three disagreements answer the entry's registered conflict code;
+ *  - a canonical org: the backend holds class-00 at transaction level from S2 and the service's own
+ *    class-00 call sends nothing;
+ *  - a wait past the handed-over lock timeout (55P03) answers the existing 503 contention code, for a
+ *    canonical and for a legacy org; without a coordinated requirement the raw 55P03 passes through;
+ *  - a legacy org handed over never parses the W4 org key, while the default path on the same round
+ *    still fails in the key parser (the pre-existing behaviour the design's §15 E-f records, which
+ *    P1-3 retires by routing legacy rounds through this mode).
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import net from 'net'
+import crypto from 'node:crypto'
+import { Pool, type PoolClient } from 'pg'
+
+import { MetaSheetServer } from '../../src/index'
+import { pool as mainPool } from '../../src/db/pg'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { ensureApprovalSchemaReady, ensureLocalUserRow, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import {
+  ApprovalProductService,
+  resolveCancelRoundRolloutLockRequirementV1,
+  type ApprovalSettlementCoordinationHandoverV1,
+  type CancelRoundRolloutLockRequirementV1,
+} from '../../src/services/ApprovalProductService'
+import type { ApprovalActionRequest } from '../../src/types/approval-product'
+import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
+import { deriveSettlementCoordinationCapacityV1 } from '../../src/attendance/coordination/settlement-coordination-capacity'
+import { currentSettlementCoordinationContextV1 } from '../../src/attendance/coordination/settlement-coordination-context'
+import { planSettlementCoordinationV1 } from '../../src/attendance/coordination/settlement-coordination-handover'
+import {
+  coordinatedTransactionV1,
+  handOverToSuspendedMethodV1,
+  type SettlementCoordinationBodyContextV1,
+} from '../../src/attendance/coordination/settlement-coordination-port'
+import {
+  SettlementCoordinationScopeChangedError,
+  createSettlementCoordinatorV1,
+  type SettlementCoordinationUnitRequestV1,
+  type SettlementCoordinatorV1,
+} from '../../src/attendance/coordination/settlement-coordinator'
+import { advisoryLocksOf, backendPid, isBigintLock } from '../helpers/settlement-coordination-db'
+
+const dbUrl = process.env.DATABASE_URL
+const describeIfDatabase = dbUrl ? describe : describe.skip
+const TS = Date.now()
+
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(dbUrl).toBeTruthy()
+})
+
+const DESTROY = new Error('test: never hand a test connection to the next test')
+const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+const CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+/** The class-00 helper's own statement (w4c0-identity); the service must never send it when handed over. */
+const CLASS_ZERO_SHARED = 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
+const TRANSACTION_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK)\b/i
+const PROBE_ACTOR = { userId: 'wi-handover-probe-actor', userName: 'handover probe', roles: [] as string[] }
+
+const READ_COMMITTED: SettlementCoordinationUnitRequestV1 = {
+  needsClassZero: false,
+  quotaClass: 'short',
+  handover: { isolation: 'READ COMMITTED', timeouts: { kind: 'none' }, entryLabel: 'test.m06-m08' },
+}
+function serializableCanonical(lockTimeoutMs?: number): SettlementCoordinationUnitRequestV1 {
+  return {
+    needsClassZero: true,
+    quotaClass: 'short',
+    handover: {
+      isolation: 'SERIALIZABLE',
+      timeouts: lockTimeoutMs === undefined ? { kind: 'w4-runner' } : { kind: 'lock-timeout-only', lockTimeoutMs },
+      entryLabel: 'test.m07',
+    },
+  }
+}
+function serializableLegacy(lockTimeoutMs: number): SettlementCoordinationUnitRequestV1 {
+  return {
+    needsClassZero: false,
+    quotaClass: 'short',
+    handover: { isolation: 'SERIALIZABLE', timeouts: { kind: 'lock-timeout-only', lockTimeoutMs }, entryLabel: 'test.m07-legacy' },
+  }
+}
+
+interface AttemptRecord {
+  attempt: number
+  org: string
+  recheck: unknown
+  /** Statements the service sent on the handed-over connection. */
+  method: string[]
+  /** Statements sent once the service asked to commit, or after it settled: the port's. */
+  port: string[]
+  releases: number
+  /** What the service saw when its COMMIT returned. */
+  resumed: { context: unknown; held: number; idle: number; total: number } | null
+}
+
+interface World {
+  coordinator: SettlementCoordinatorV1
+  pool: Pool
+  attempts: AttemptRecord[]
+}
+
+function statementText(text: unknown): string {
+  return typeof text === 'string' ? text : String((text as { text?: unknown } | null)?.text ?? text)
+}
+
+/**
+ * Runs `method` in handed-over mode on the attempt's connection and records what the service did
+ * with it: the statements it sent (its own, then the port's once it asked to commit), the releases
+ * it caused, and what it saw when its COMMIT returned.
+ */
+async function drive<T>(
+  context: SettlementCoordinationBodyContextV1,
+  world: World,
+  fields: Pick<ApprovalSettlementCoordinationHandoverV1, 'rolloutLock' | 'canonicalOrg'>,
+  method: (handover: ApprovalSettlementCoordinationHandoverV1) => Promise<T>,
+) {
+  const client = context.client as unknown as PoolClient
+  const record: AttemptRecord = {
+    attempt: context.attempt,
+    org: context.orgLexical,
+    recheck: context.recheck,
+    method: [],
+    port: [],
+    releases: 0,
+    resumed: null,
+  }
+  world.attempts.push(record)
+  let phase: 'method' | 'port' = 'method'
+  // The prototype's query: a wrapper left by an earlier attempt on this pooled connection is replaced, not stacked.
+  const realQuery = (Object.getPrototypeOf(client) as { query: (...args: unknown[]) => unknown }).query
+  Object.defineProperty(client, 'query', {
+    configurable: true,
+    writable: true,
+    value: (...args: unknown[]) => {
+      ;(phase === 'method' ? record.method : record.port).push(statementText(args[0]))
+      return realQuery.apply(client, args)
+    },
+  })
+  const realRelease = client.release
+  Object.defineProperty(client, 'release', {
+    configurable: true,
+    writable: true,
+    value: (error?: Error | boolean) => {
+      record.releases += 1
+      return realRelease.call(client, error)
+    },
+  })
+  return handOverToSuspendedMethodV1(context, async (commit) => {
+    const handover: ApprovalSettlementCoordinationHandoverV1 = {
+      client: client as unknown as ApprovalSettlementCoordinationHandoverV1['client'],
+      ...fields,
+      commit: async () => {
+        phase = 'port'
+        await commit()
+        record.resumed = {
+          context: currentSettlementCoordinationContextV1(),
+          held: world.coordinator.deps.quota.snapshot().global.short.held,
+          idle: world.pool.idleCount,
+          total: world.pool.totalCount,
+        }
+      },
+    }
+    try {
+      return await method(handover)
+    } finally {
+      phase = 'port'
+    }
+  })
+}
+
+function coordinatorOn(pool: Pool): SettlementCoordinatorV1 {
+  return createSettlementCoordinatorV1({
+    pool: { connect: () => pool.connect() },
+    capacity: deriveSettlementCoordinationCapacityV1({ poolMax: 20 }),
+    connectTimeoutMs: 10_000,
+  })
+}
+
+function expectBaseline(coordinator: SettlementCoordinatorV1): void {
+  const { quota, ledger } = coordinator.deps
+  expect(quota.snapshot()).toEqual({ global: { short: { held: 0, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [] })
+  expect(ledger.snapshot().holding).toEqual([])
+  expect(ledger.selfCheck(quota.snapshot())).toEqual([])
+}
+
+function world(): World & { end(): Promise<void> } {
+  const pool = new Pool({ connectionString: dbUrl, max: 1 })
+  return { coordinator: coordinatorOn(pool), pool, attempts: [], end: () => pool.end() }
+}
+
+async function canListenOnEphemeralPort(): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.listen(0, '127.0.0.1', () => server.close(() => resolve(true)))
+  })
+}
+
+const mintedUserIds = new Set<string>()
+
+async function authToken(baseUrl: string, userId: string): Promise<string> {
+  await ensureLocalUserRow(userId)
+  mintedUserIds.add(userId)
+  const response = await fetch(
+    `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+  )
+  expect(response.status).toBe(200)
+  const payload = (await response.json()) as { token: string }
+  return payload.token
+}
+
+async function jsonRequest(baseUrl: string, path: string, token: string, options: { method?: string; body?: unknown } = {}): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: options.method || 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+  })
+}
+
+function oneNodeGraph(approverId: string) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'approval_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: [approverId], approvalMode: 'single' } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e-s-a', source: 'start', target: 'approval_a' },
+      { key: 'e-a-end', source: 'approval_a', target: 'end' },
+    ],
+  }
+}
+
+describeIfDatabase('attendance settlement coordination — the approval service handed over (real database)', () => {
+  let server: MetaSheetServer | undefined
+  let baseUrl = ''
+  let observer: Pool
+  const createdTemplateIds = new Set<string>()
+  const createdApprovalIds = new Set<string>()
+  const createdRoundIds = new Set<string>()
+  const grantedUserIds = new Set<string>()
+  const rawInstanceIds: string[] = []
+  const rawRequestIds: string[] = []
+  const rawRoundIds: string[] = []
+
+  const main = () => poolManager.get()
+
+  beforeAll(async () => {
+    expect(await canListenOnEphemeralPort()).toBe(true)
+    await ensureApprovalSchemaReady()
+    observer = new Pool({ connectionString: dbUrl, max: 3 })
+    server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    await server.start()
+    const address = server.getAddress()
+    const port = address && typeof address === 'object' ? address.port : undefined
+    expect(port).toBeTruthy()
+    baseUrl = `http://127.0.0.1:${port}`
+  }, 120_000)
+
+  afterAll(async () => {
+    try {
+      if (rawRoundIds.length > 0) await observer.query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [rawRoundIds])
+      if (rawRequestIds.length > 0) await observer.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [rawRequestIds])
+      if (rawInstanceIds.length > 0) await observer.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [rawInstanceIds])
+      const approvalIds = [...createdApprovalIds]
+      const roundIds = [...createdRoundIds]
+      const templateIds = [...createdTemplateIds]
+      if (roundIds.length > 0) await main().query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [roundIds])
+      if (approvalIds.length > 0) {
+        await main().query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await main().query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await main().query('DELETE FROM approval_metrics WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await main().query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [approvalIds])
+      }
+      if (templateIds.length > 0) {
+        await main().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await main().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await main().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      if (mintedUserIds.size > 0) {
+        await main().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...mintedUserIds]])
+        mintedUserIds.clear()
+      }
+      if (grantedUserIds.size > 0) await main().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
+    } finally {
+      await observer?.end()
+      await server?.stop()
+    }
+  }, 60_000)
+
+  // ── fully formed rounds, through the running server ───────────────────────────────────────────
+
+  async function publishTemplate(adminToken: string, graph: unknown, label: string): Promise<string> {
+    const templateKey = `wi-handover-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'settlement handover cancel-round fixture',
+        description: 'attendance-coordination-approval-handover.db.test.ts',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+        approvalGraph: graph,
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  async function approvedDocument(label: string): Promise<{ documentId: string; requesterId: string; approverId: string }> {
+    const suffix = `${label}-${TS}-${Math.floor(Math.random() * 1e6)}`
+    const approverId = `wi-handover-apr-${suffix}`
+    const requesterId = `wi-handover-req-${suffix}`
+    grantedUserIds.add(requesterId)
+    await grantApprovalWriteForIntegrationActor(requesterId)
+    const adminToken = await authToken(baseUrl, `wi-handover-admin-${suffix}`)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const approverToken = await authToken(baseUrl, approverId)
+    const templateId = await publishTemplate(adminToken, oneNodeGraph(approverId), label)
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+    const approveResponse = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, approverToken, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(approveResponse.status, await approveResponse.clone().text()).toBe(200)
+    return { documentId, requesterId, approverId }
+  }
+
+  async function trackRound(engineInstanceId: string): Promise<void> {
+    const row = await main().query<{ id: string }>('SELECT id FROM approval_rounds WHERE engine_instance_id = $1', [engineInstanceId])
+    for (const round of row.rows) createdRoundIds.add(round.id)
+  }
+
+  async function pendingCancelRound(label: string) {
+    const doc = await approvedDocument(label)
+    const dto = await new ApprovalProductService().createCancelRoundInstance(doc.documentId, { userId: doc.requesterId })
+    createdApprovalIds.add(dto.id)
+    await trackRound(dto.id)
+    const row = await main().query('SELECT * FROM approval_instances WHERE id = $1', [dto.id])
+    expect(isCancelRoundInstance(row.rows[0])).toBe(true)
+    return { ...doc, roundInstanceId: dto.id }
+  }
+
+  async function roundOutcome(engineInstanceId: string): Promise<string | null> {
+    const row = await main().query<{ outcome: string }>('SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1', [engineInstanceId])
+    return row.rows[0]?.outcome ?? null
+  }
+
+  async function instanceState(id: string): Promise<{ status: string; version: number } | null> {
+    const row = await main().query<{ status: string; version: number }>('SELECT status, version FROM approval_instances WHERE id = $1', [id])
+    return row.rows[0] ?? null
+  }
+
+  function expectOneCommittedAttempt(attempts: AttemptRecord[]): AttemptRecord {
+    expect(attempts).toHaveLength(1)
+    const [run] = attempts
+    expect(run.method.filter((s) => TRANSACTION_CONTROL.test(s))).toEqual([])
+    expect(run.port.map((s) => s.trim())).toEqual(['COMMIT'])
+    expect(run.releases).toBe(1)
+    expect(run.resumed).toEqual({ context: null, held: 0, idle: 1, total: 1 })
+    return run
+  }
+
+  function expectOneRolledBackAttempt(attempts: AttemptRecord[]): AttemptRecord {
+    expect(attempts).toHaveLength(1)
+    const [run] = attempts
+    expect(run.method.filter((s) => TRANSACTION_CONTROL.test(s))).toEqual([])
+    expect(run.port.map((s) => s.trim())).toEqual(['ROLLBACK'])
+    expect(run.releases).toBe(1)
+    expect(run.resumed).toBeNull()
+    return run
+  }
+
+  it('M06 handed over: the port owns the transaction, the request number is read on the handed-over connection, and the work after the service COMMIT runs after release', async () => {
+    const doc = await approvedDocument('m06')
+    const w = world()
+    const mainQueries = vi.spyOn(mainPool as unknown as { query: (...args: unknown[]) => unknown }, 'query')
+    try {
+      const dto = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, {}, (handover) =>
+            new ApprovalProductService().createCancelRoundInstance(doc.documentId, { userId: doc.requesterId }, { settlementCoordinationHandover: handover }),
+          ),
+      })
+      createdApprovalIds.add(dto.id)
+      await trackRound(dto.id)
+      const run = expectOneCommittedAttempt(w.attempts)
+      expect(run.method.some((s) => s.includes('approval_request_no_seq'))).toBe(true)
+      expect(mainQueries.mock.calls.some(([text]) => statementText(text).includes('approval_request_no_seq'))).toBe(false)
+      expect(dto.status).toBe('pending')
+      expect((await instanceState(dto.id))?.status).toBe('pending')
+      expect(await roundOutcome(dto.id)).toBe('pending')
+      expect(w.pool.idleCount).toBe(1)
+      expectBaseline(w.coordinator)
+    } finally {
+      mainQueries.mockRestore()
+      await w.end()
+    }
+  }, 60_000)
+
+  it('M08 reject handed over: the round ends rejected; the service sends no transaction control and releases nothing', async () => {
+    const round = await pendingCancelRound('reject')
+    const w = world()
+    try {
+      const dto = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+            new ApprovalProductService().dispatchAction(
+              round.roundInstanceId,
+              { action: 'reject', comment: 'handed-over reject' } as ApprovalActionRequest,
+              { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+              handover,
+            ),
+          ),
+      })
+      expect(dto.status).toBe('rejected')
+      expect(await roundOutcome(round.roundInstanceId)).toBe('rejected')
+      expect((await instanceState(round.roundInstanceId))?.status).toBe('rejected')
+      expectOneCommittedAttempt(w.attempts)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 60_000)
+
+  it('M08 revoke handed over: the requester withdraws the round through the port', async () => {
+    const round = await pendingCancelRound('revoke')
+    const w = world()
+    try {
+      const dto = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+            new ApprovalProductService().dispatchAction(
+              round.roundInstanceId,
+              { action: 'revoke' } as ApprovalActionRequest,
+              { userId: round.requesterId, userName: 'handed-over requester', roles: [] },
+              handover,
+            ),
+          ),
+      })
+      expect(dto.status).toBe('revoked')
+      expect(await roundOutcome(round.roundInstanceId)).toBe('withdrawn')
+      expectOneCommittedAttempt(w.attempts)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 60_000)
+
+  it('a refusal inside the handed-over dispatch is rethrown unchanged after the port rolls back, and the row is untouched', async () => {
+    const round = await pendingCancelRound('refusal')
+    const before = await instanceState(round.roundInstanceId)
+    const w = world()
+    try {
+      const failure = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+            new ApprovalProductService().dispatchAction(
+              round.roundInstanceId,
+              { action: 'handle' } as ApprovalActionRequest,
+              { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+              handover,
+            ),
+          ),
+      }).then(
+        () => null,
+        (error) => error,
+      )
+      expect(failure).toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' })
+      expect(await instanceState(round.roundInstanceId)).toEqual(before)
+      expect(await roundOutcome(round.roundInstanceId)).toBe('pending')
+      expectOneRolledBackAttempt(w.attempts)
+      expect(w.pool.idleCount).toBe(1)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 60_000)
+
+  // ── attendance-sourced rounds, rows inserted directly ─────────────────────────────────────────
+
+  async function seedAttendanceCancelRound(requestOrg: string): Promise<{
+    roundInstanceId: string
+    originalInstanceId: string
+    requestId: string
+    requestOrg: string
+  }> {
+    const instanceOrg = crypto.randomUUID()
+    const originalInstanceId = `wi-handover-original-${crypto.randomUUID()}`
+    await observer.query(`INSERT INTO approval_instances (id, status, workflow_key, org_id) VALUES ($1, 'approved', $2, $3)`, [
+      originalInstanceId,
+      ATTENDANCE_WORKFLOW_KEY,
+      instanceOrg,
+    ])
+    rawInstanceIds.push(originalInstanceId)
+    const requestId = crypto.randomUUID()
+    await observer.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+       VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+      [requestId, crypto.randomUUID(), requestOrg, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+    )
+    rawRequestIds.push(requestId)
+    const roundInstanceId = `wi-handover-round-${crypto.randomUUID()}`
+    await observer.query(`INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id) VALUES ($1, 'pending', $2, $3, $4)`, [
+      roundInstanceId,
+      CANCEL_ROUND_WORKFLOW_KEY,
+      originalInstanceId,
+      instanceOrg,
+    ])
+    rawInstanceIds.push(roundInstanceId)
+    const roundId = `wi-handover-roundrow-${crypto.randomUUID()}`
+    await observer.query(
+      `INSERT INTO approval_rounds (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+       VALUES ($1, $2, 'cancel', $3, $4, 'pending', '{}'::jsonb)`,
+      [roundId, originalInstanceId, roundInstanceId, `wi-handover-requester-${crypto.randomUUID()}`],
+    )
+    rawRoundIds.push(roundId)
+    return { roundInstanceId, originalInstanceId, requestId, requestOrg }
+  }
+
+  /** What the production pre-read says for this round — the port's candidate in P1-3. */
+  async function productionRequirement(roundInstanceId: string): Promise<CancelRoundRolloutLockRequirementV1> {
+    const client = await observer.connect()
+    try {
+      return await resolveCancelRoundRolloutLockRequirementV1(
+        client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+        roundInstanceId,
+        'approve',
+      )
+    } finally {
+      client.release()
+    }
+  }
+
+  function approveHandedOver(w: World, roundInstanceId: string, fields: Pick<ApprovalSettlementCoordinationHandoverV1, 'rolloutLock' | 'canonicalOrg'>) {
+    return (context: SettlementCoordinationBodyContextV1) =>
+      drive(context, w, fields, (handover) =>
+        new ApprovalProductService().dispatchAction(roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR, handover),
+      )
+  }
+
+  async function holdingRowLock<T>(roundInstanceId: string, body: () => Promise<T>): Promise<T> {
+    const rival = await observer.connect()
+    try {
+      await rival.query('BEGIN')
+      await rival.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [roundInstanceId])
+      return await body()
+    } finally {
+      await rival.query('ROLLBACK').catch(() => undefined)
+      rival.release(DESTROY)
+    }
+  }
+
+  it('a stale coordinated requirement is caught under the row lock: the service asks for a restart, the next attempt receives the requirement read under the lock; the canonical class-00 call sends nothing while S2 holds the key', async () => {
+    const seeded = await seedAttendanceCancelRound(crypto.randomUUID())
+    const real = await productionRequirement(seeded.roundInstanceId)
+    expect(real).toEqual({ kind: 'required', orgId: seeded.requestOrg, documentId: seeded.originalInstanceId, requestId: seeded.requestId })
+    const classZeroKey = planSettlementCoordinationV1(seeded.requestOrg, { needsClassZero: true }).classZeroKey as bigint
+    const w = world()
+    let classZeroHeld: boolean | null = null
+    try {
+      const result = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: serializableCanonical(),
+        candidate: { org: seeded.requestOrg },
+        body: async (context) => {
+          if (context.attempt > 1) return { restarted: true, org: context.orgLexical, recheck: context.recheck }
+          const pid = await backendPid(context.client as unknown as PoolClient)
+          classZeroHeld = (await advisoryLocksOf(observer, pid)).some((row) => isBigintLock(row, classZeroKey) && row.granted && row.mode === 'ShareLock')
+          // The same org, another request id: the prefix lock finds no row, the row lock is taken, the recheck disagrees.
+          return drive(context, w, { rolloutLock: { ...real, requestId: crypto.randomUUID() } as CancelRoundRolloutLockRequirementV1, canonicalOrg: true }, (handover) =>
+            new ApprovalProductService().dispatchAction(seeded.roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR, handover),
+          )
+        },
+      })
+      expect(w.attempts).toHaveLength(1)
+      const [first] = w.attempts
+      expect(result).toEqual({ restarted: true, org: first.org, recheck: real })
+      expect(classZeroHeld).toBe(true)
+      expect(first.method.some((s) => s.includes(CLASS_ZERO_SHARED))).toBe(false)
+      expect(first.method.some((s) => /FOR UPDATE/i.test(s))).toBe(true)
+      expect(first.method.filter((s) => TRANSACTION_CONTROL.test(s))).toEqual([])
+      expect(first.port.map((s) => s.trim())).toEqual(['ROLLBACK'])
+      expect(first.releases).toBe(1)
+      expect(first.resumed).toBeNull()
+      expect(await productionRequirement(seeded.roundInstanceId)).toEqual(real)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 30_000)
+
+  it("three disagreements answer the entry's registered conflict code, each attempt rolled back and released", async () => {
+    const seeded = await seedAttendanceCancelRound(crypto.randomUUID())
+    const real = await productionRequirement(seeded.roundInstanceId)
+    const w = world()
+    try {
+      const failure = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: serializableCanonical(),
+        candidate: { org: seeded.requestOrg },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { ...real, requestId: crypto.randomUUID() } as CancelRoundRolloutLockRequirementV1, canonicalOrg: true }, (handover) =>
+            new ApprovalProductService().dispatchAction(seeded.roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR, handover),
+          ),
+      }).then(
+        () => null,
+        (error) => error,
+      )
+      expect(failure).toBeInstanceOf(SettlementCoordinationScopeChangedError)
+      expect((failure as SettlementCoordinationScopeChangedError).code).toBe('CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED')
+      expect(w.attempts).toHaveLength(3)
+      for (const run of w.attempts) {
+        expect(run.port.map((s) => s.trim())).toEqual(['ROLLBACK'])
+        expect(run.releases).toBe(1)
+        expect(run.resumed).toBeNull()
+      }
+      expect(w.pool.idleCount).toBe(1)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 30_000)
+
+  it('a wait past the handed-over lock timeout answers the existing contention code (canonical org, class-00 not re-sent)', async () => {
+    const seeded = await seedAttendanceCancelRound(crypto.randomUUID())
+    const real = await productionRequirement(seeded.roundInstanceId)
+    const w = world()
+    try {
+      const failure = await holdingRowLock(seeded.roundInstanceId, () =>
+        coordinatedTransactionV1({
+          coordinator: w.coordinator,
+          request: serializableCanonical(300),
+          candidate: { org: seeded.requestOrg },
+          body: approveHandedOver(w, seeded.roundInstanceId, { rolloutLock: real, canonicalOrg: true }),
+        }).then(
+          () => null,
+          (error) => error,
+        ),
+      )
+      expect(failure).toMatchObject({ statusCode: 503, code: 'CANCEL_ROUND_DISPATCH_CONTENDED' })
+      const run = expectOneRolledBackAttempt(w.attempts)
+      expect(run.method.some((s) => s.includes(CLASS_ZERO_SHARED))).toBe(false)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 30_000)
+
+  it('without a coordinated requirement the raw lock-timeout error passes through unchanged', async () => {
+    const seeded = await seedAttendanceCancelRound(crypto.randomUUID())
+    const w = world()
+    try {
+      const failure = await holdingRowLock(seeded.roundInstanceId, () =>
+        coordinatedTransactionV1({
+          coordinator: w.coordinator,
+          request: {
+            needsClassZero: false,
+            quotaClass: 'short',
+            handover: { isolation: 'READ COMMITTED', timeouts: { kind: 'lock-timeout-only', lockTimeoutMs: 300 }, entryLabel: 'test.control' },
+          },
+          candidate: { org: crypto.randomUUID() },
+          body: approveHandedOver(w, seeded.roundInstanceId, { rolloutLock: { kind: 'none' } }),
+        }).then(
+          () => null,
+          (error) => error,
+        ),
+      )
+      expect((failure as { code?: unknown }).code).toBe('55P03')
+      expect((failure as { statusCode?: unknown }).statusCode).toBeUndefined()
+      expectOneRolledBackAttempt(w.attempts)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 30_000)
+
+  it('a legacy org handed over: no class-00, no org-key parse, and the same contention code; the default path on the same round still fails in the key parser', async () => {
+    const legacyOrg = `legacy-org-${TS}-${Math.floor(Math.random() * 1e6)}`
+    const seeded = await seedAttendanceCancelRound(legacyOrg)
+    const real = await productionRequirement(seeded.roundInstanceId)
+    expect(real).toMatchObject({ kind: 'required', orgId: legacyOrg })
+    const w = world()
+    try {
+      const failure = await holdingRowLock(seeded.roundInstanceId, () =>
+        coordinatedTransactionV1({
+          coordinator: w.coordinator,
+          request: serializableLegacy(300),
+          candidate: { org: legacyOrg },
+          body: approveHandedOver(w, seeded.roundInstanceId, { rolloutLock: real, canonicalOrg: false }),
+        }).then(
+          () => null,
+          (error) => error,
+        ),
+      )
+      expect(failure).toMatchObject({ statusCode: 503, code: 'CANCEL_ROUND_DISPATCH_CONTENDED' })
+      const run = expectOneRolledBackAttempt(w.attempts)
+      expect(run.method.some((s) => s.includes(CLASS_ZERO_SHARED))).toBe(false)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+
+    // Control — the default path (not handed over) on the same legacy round: SERIALIZABLE BEGIN, then
+    // the class-00 acquisition parses the org key and refuses it (design §15 E-f, pre-existing).
+    const control = await new ApprovalProductService()
+      .dispatchAction(seeded.roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR)
+      .then(
+        () => null,
+        (error) => error,
+      )
+    expect(control).toBeInstanceOf(Error)
+    const described = `${String((control as { code?: unknown }).code)} ${String((control as Error).message)}`
+    expect(described).toContain('W4C0_ROLLOUT_ORG_KEY_INVALID')
+  }, 30_000)
+})

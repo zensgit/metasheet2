@@ -2188,6 +2188,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-coordination-acquire.db.test.ts',
   'tests/integration/attendance-coordination-cleanup.db.test.ts',
   'tests/integration/attendance-coordination-key-credential.db.test.ts',
+  'tests/integration/attendance-coordination-approval-handover.db.test.ts',
   'tests/integration/attendance-coordination-port.db.test.ts',
   'tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts',
   'tests/integration/attendance-csv-export-bom.test.ts',

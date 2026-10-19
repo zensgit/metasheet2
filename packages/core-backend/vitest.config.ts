@@ -950,6 +950,7 @@ export default defineConfig({
       // P1-1 S2: the coordinator (quota, prober, connect race, restart) on a real pool; same two-point wiring.
       'tests/integration/attendance-coordination-acquire.db.test.ts',
       // P1-1 S3: the coordinated-transaction port, the handed-over runner and the class-00 re-entry; same two-point wiring.
+      'tests/integration/attendance-coordination-approval-handover.db.test.ts',
       'tests/integration/attendance-coordination-port.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
