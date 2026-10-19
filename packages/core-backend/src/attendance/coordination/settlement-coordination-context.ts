@@ -46,6 +46,25 @@ export class SettlementCoordinationRestartSignalV1 extends Error {
   }
 }
 
+/**
+ * The post-lock recheck found another org or scope (§3.2 step 6.5): the coordination unit restarts
+ * under `org`. `detail` is handed to the next attempt's body (the requirement read under the lock).
+ */
+export class SettlementCoordinationRecheckMismatchV1 extends Error {
+  readonly org: string
+  /** The entry's registered conflict code for a used-up recheck counter. */
+  readonly conflictCode: string | undefined
+  readonly detail: unknown
+
+  constructor(org: string, conflictCode?: string, detail?: unknown) {
+    super('settlement coordination recheck mismatch')
+    this.name = 'SettlementCoordinationRecheckMismatchV1'
+    this.org = org
+    this.conflictCode = conflictCode
+    this.detail = detail
+  }
+}
+
 export type SettlementCoordinationNestingKindV1 = 'context' | 'quota' | 'main-pool' | 'pool-transaction'
 
 /** A coordination entry or main-pool access where the contract forbids nesting. */

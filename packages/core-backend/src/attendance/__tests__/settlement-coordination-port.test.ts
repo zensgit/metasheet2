@@ -9,9 +9,11 @@ import {
 } from '../coordination/settlement-coordination-context'
 import { AttendanceCoordinationCommitNotCommittedError } from '../coordination/settlement-coordination-handover'
 import {
+  SettlementCoordinationAttemptAbandonedError,
   SettlementCoordinationRecheckMismatchV1,
   SettlementCoordinationRestartSignalV1,
   coordinatedTransactionV1,
+  handOverToSuspendedMethodV1,
   settlementCoordinationResultAfterCommitV1,
 } from '../coordination/settlement-coordination-port'
 import { SettlementCoordinationScopeChangedError } from '../coordination/settlement-coordinator'
@@ -454,3 +456,135 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     baseline()
   })
 })
+
+describe('coordinated transaction port: recheck detail and abandon notices', () => {
+  it('the next attempt sees the detail of the recheck mismatch that restarted it', async () => {
+    const { coordinator, baseline } = setup()
+    const seen: unknown[] = []
+    await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) => {
+        seen.push(context.recheck)
+        if (context.attempt === 1) throw new SettlementCoordinationRecheckMismatchV1('legacy-org-moved', 'TEST_CONFLICT', { kind: 'moved' })
+        return 'second'
+      },
+    })
+    expect(seen).toEqual([null, { kind: 'moved' }])
+    baseline()
+  })
+
+  it('abandon observers run once when the attempt ends without a commit, and never on a commit', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const notices: string[] = []
+    let runs = 0
+    await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) => {
+        runs += 1
+        context.onAbandon(() => void notices.push(`abandoned ${runs}`))
+        if (runs === 1) throw new SettlementCoordinationRestartSignalV1(serializationError('abandon'))
+        if (runs === 2) pool.clients[pool.clients.length - 1].failOnce.set('COMMIT', serializationError('commit'))
+        return runs
+      },
+    })
+    expect(notices).toEqual(['abandoned 1', 'abandoned 2'])
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async (context) => {
+          context.onAbandon(() => void notices.push('abandoned by error'))
+          throw new Error('test: business')
+        },
+      }),
+    ).rejects.toThrow('test: business')
+    expect(notices).toEqual(['abandoned 1', 'abandoned 2', 'abandoned by error'])
+    baseline()
+  })
+})
+
+describe('coordinated transaction port: a method suspended at its own COMMIT', () => {
+  it('everything the method does after its COMMIT runs after the port committed and released', async () => {
+    const { pool, coordinator, quota, baseline } = setup()
+    const order: string[] = []
+    const result = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) =>
+        handOverToSuspendedMethodV1(context, async (commit) => {
+          await context.client.query('UPDATE t SET v = 1')
+          order.push('before commit')
+          await commit()
+          order.push(`after commit: held=${quota.snapshot().global.short.held} released=${pool.clients[0].released.length} context=${String(currentSettlementCoordinationContextV1())}`)
+          return 'approval read after release'
+        }),
+    })
+    expect(result).toBe('approval read after release')
+    expect(order).toEqual(['before commit', 'after commit: held=0 released=1 context=null'])
+    expect(pool.clients[0].calls.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
+    baseline()
+  })
+
+  it('an error before the commit is the body error: the port rolls back and rethrows it', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const business = new Error('test: 409 before commit')
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async (context) => handOverToSuspendedMethodV1(context, async () => Promise.reject(business)),
+      }),
+    ).rejects.toBe(business)
+    expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
+    baseline()
+  })
+
+  it('an attempt that ends without a commit wakes the suspended method with the abandon error; the next attempt runs the method again', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const woken: unknown[] = []
+    let runs = 0
+    const result = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) =>
+        handOverToSuspendedMethodV1(context, async (commit) => {
+          runs += 1
+          if (runs === 1) pool.clients[0].failOnce.set('COMMIT', serializationError('commit'))
+          try {
+            await commit()
+          } catch (error) {
+            woken.push(error)
+            throw error
+          }
+          return `run ${runs}`
+        }),
+    })
+    expect(result).toBe('run 2')
+    expect(woken).toHaveLength(1)
+    expect(woken[0]).toBeInstanceOf(SettlementCoordinationAttemptAbandonedError)
+    baseline()
+  })
+
+  it('a method that returns without asking to commit is refused and rolled back', async () => {
+    const { pool, coordinator, baseline } = setup()
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async (context) => handOverToSuspendedMethodV1(context, async () => 'no commit'),
+      }),
+    ).rejects.toThrow(/returned without asking to commit/)
+    expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
+    baseline()
+  })
+})
+

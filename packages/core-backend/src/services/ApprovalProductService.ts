@@ -205,6 +205,7 @@ import {
   type AttendanceW4TransactionClientV1,
 } from '../attendance/w4c0-identity'
 import { isRetryableSqlState } from '../attendance/w4c0-operation-registry'
+import { SettlementCoordinationRecheckMismatchV1 } from '../attendance/coordination/settlement-coordination-context'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
   buildApprovalCompletionEvent,
@@ -1949,6 +1950,37 @@ async function rollbackQuietly(client: ApprovalDbClient | null): Promise<void> {
   } catch {
     // Ignore rollback errors so the original failure is preserved.
   }
+}
+
+/**
+ * Settlement coordination handover (r6.1 §1.1 P1-1, §3.4 M06 / M07 / M08). Dormant in P1-1: only
+ * tests assemble it. The coordinated-transaction port has borrowed `client`, begun its transaction
+ * (SERIALIZABLE for a cancel-round approve that needs the rollout lock, READ COMMITTED otherwise) and
+ * holds the coordination locks. In this mode `dispatchAction` and `createCancelRoundInstance` do not
+ * borrow, BEGIN, COMMIT, ROLLBACK or release. At their COMMIT they call `commit()`, which returns
+ * only after the port has committed and released the connection, so everything they do after their
+ * COMMIT — post-commit delivery, the final read — runs after release, in the order it always has.
+ */
+export interface ApprovalSettlementCoordinationHandoverV1 {
+  readonly client: ApprovalDbClient
+  /** `dispatchAction` only: the rollout-lock requirement the port coordinated (its candidate read). */
+  readonly rolloutLock?: CancelRoundRolloutLockRequirementV1
+  /** `dispatchAction` only: whether that org is canonical (class-00 held); a legacy org never parses the org key. */
+  readonly canonicalOrg?: boolean
+  commit(): Promise<void>
+}
+
+function isLockNotAvailableSqlState(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '55P03'
+}
+
+/** The rollout-lock requirement under the row lock disagrees with the coordinated one: restart (§3.2 step 6.5). */
+function handedOverRolloutRecheckMismatchV1(
+  coordinated: CancelRoundRolloutLockRequirementV1,
+  underRowLock: CancelRoundRolloutLockRequirementV1,
+): SettlementCoordinationRecheckMismatchV1 {
+  const org = underRowLock.kind === 'required' ? underRowLock.orgId : coordinated.kind === 'required' ? coordinated.orgId : ''
+  return new SettlementCoordinationRecheckMismatchV1(org, 'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED', underRowLock)
 }
 
 function normalizeFormField(
@@ -9019,9 +9051,10 @@ export class ApprovalProductService {
   async createCancelRoundInstance(
     documentId: string,
     actor: { userId: string; userName?: string },
-    options: { reason?: string | null } = {},
+    options: { reason?: string | null; settlementCoordinationHandover?: ApprovalSettlementCoordinationHandoverV1 } = {},
   ): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
+    const handover = options.settlementCoordinationHandover
 
     const instanceId = crypto.randomUUID()
     // lock:140 — `apr_…` is an APPLICATION-generated id, not part of the DDL's own generation.
@@ -9030,8 +9063,9 @@ export class ApprovalProductService {
     let client: ApprovalDbClient | null = null
     let initialAssignmentCount = 0
     try {
-      client = await pool.connect()
-      await client.query('BEGIN')
+      if (handover) client = handover.client
+      else client = await pool.connect()
+      if (!handover) await client.query('BEGIN')
 
       // §9-4 order for this path: no rollout/advisory lock is taken here at all (creation never
       // touches W4 attendance calculation) — the only row this transaction must serialize against
@@ -9672,7 +9706,7 @@ export class ApprovalProductService {
         )
       }
 
-      const requestNo = await this.allocateRequestNo()
+      const requestNo = await this.allocateRequestNo(handover ? client : undefined)
       const title = `撤销「${original.title ?? documentId}」`
 
       await client.query(
@@ -9748,8 +9782,16 @@ export class ApprovalProductService {
       )
 
       await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
-      await client.query('COMMIT')
+      if (handover) {
+        // The port commits and releases; the connection is not ours any more.
+        await handover.commit()
+        client = null
+      } else {
+        await client.query('COMMIT')
+      }
     } catch (error) {
+      // A handed-over transaction is rolled back (and its connection released) by the port alone.
+      if (handover) client = null
       await rollbackQuietly(client)
       // The pre-check above cannot close a concurrent-insert race by itself — this is the
       // authoritative backstop (I3, §5): translate the partial unique index's raw 23505 into the
@@ -11666,10 +11708,23 @@ export class ApprovalProductService {
     id: string,
     request: ApprovalActionRequest,
     actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null },
+    settlementCoordinationHandover?: ApprovalSettlementCoordinationHandoverV1,
   ): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
+    const handover = settlementCoordinationHandover
+    if (handover && !handover.rolloutLock) throw new Error('settlement coordination: a handed-over dispatch needs the coordinated rollout-lock requirement')
 
     let client: ApprovalDbClient | null = null
+    // Settlement coordination: a handed-over transaction is committed by the port. `commit()` returns
+    // once it has, and the connection is the port's again — not ours to touch or release.
+    const commitTransaction = async (): Promise<void> => {
+      if (!handover) {
+        await client!.query('COMMIT')
+        return
+      }
+      await handover.commit()
+      client = null
+    }
     // Hoisted out of the `try` so the catch can tell the two error surfaces this method now has
     // apart: only a dispatch that took this branch runs under SERIALIZABLE and holds an advisory
     // lock, so only it can produce a serialization failure / advisory deadlock that did not exist
@@ -11688,7 +11743,8 @@ export class ApprovalProductService {
       | { readonly result: AttendanceRequestOperationBoundaryResultV1; readonly requestId: string }
       | null = null
     try {
-      client = await pool.connect()
+      if (handover) client = handover.client
+      else client = await pool.connect()
 
       // ─── Lock §3 C-2 全局锁序 — the rollout lock must precede every row lock ────────────────────
       // BEFORE `BEGIN`, by construction: PostgreSQL fixes a transaction's isolation level at its
@@ -11697,22 +11753,28 @@ export class ApprovalProductService {
       // `assertExternalTransactionIsolationV1`). It is advisory only: a stale answer is caught by
       // the fail-closed re-assert under the row lock below, which is what makes it safe to read
       // outside the transaction.
-      rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
+      // Handed over: the port read the requirement before its BEGIN (its candidate, §3.2 step 0).
+      if (handover) rolloutLock = handover.rolloutLock!
+      else rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
 
       if (rolloutLock.kind === 'required') {
-        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        if (!handover) await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
         // FIRST lock of the transaction — before the instance row lock below, which is the whole
-        // point. Reuses the production acquirer (one key derivation, no local hash).
-        await acquireAttendanceCalculationRolloutLock(
-          client as unknown as AttendanceW4TransactionClientV1,
-          parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
-          'shared',
-        )
+        // point. Reuses the production acquirer (one key derivation, no local hash). Handed over, a
+        // canonical org's call is a re-entrant no-op (S1 / S2 hold class-00); a legacy org neither
+        // takes class-00 nor parses an org key (r6.1 §3.4 M07).
+        if (!handover || handover.canonicalOrg === true) {
+          await acquireAttendanceCalculationRolloutLock(
+            client as unknown as AttendanceW4TransactionClientV1,
+            parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
+            'shared',
+          )
+        }
         await acquireBusinessTripRequestPrefixV1(client as unknown as AttendanceW4TransactionClientV1, {
           orgId: rolloutLock.orgId, requestId: rolloutLock.requestId,
         })
       } else {
-        await client.query('BEGIN')
+        if (!handover) await client.query('BEGIN')
       }
 
       const instanceResult = await client.query<ApprovalInstanceRow>(
@@ -11730,6 +11792,8 @@ export class ApprovalProductService {
       // be allowed to proceed holding the wrong lock, or none. Placed before any DML on this path.
       const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
       if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
+        // Handed over, the port restarts (at most twice, then the same conflict code).
+        if (handover) throw handedOverRolloutRecheckMismatchV1(rolloutLock, rolloutLockUnderRowLock)
         throw new ServiceError(
           'Cancel-round rollout lock scope changed between the pre-read and the instance row lock',
           409,
@@ -12028,7 +12092,10 @@ export class ApprovalProductService {
               policyKey: nodeOperationPolicyKey,
             },
           }, actor)
-          await client.query('COMMIT')
+          // Unreachable when handed over: a cancel-round action carries no node-operation policy key
+          // (r6.1 §1.1), and the port has no commit-then-refuse channel, so refuse before committing.
+          if (handover) throw new Error('settlement coordination: the node-operation policy refusal is unreachable when handed over')
+          await commitTransaction()
           // §1.1: 409, not 403 — matches `APPROVAL_REVOKE_DISABLED` and the `*_UNSUPPORTED` refusals.
           // §2.4 / X-1: `details` IS serialized to clients, so it carries `{ nodeKey, operation }`
           // ONLY — never an actor id, target id, seat count, or form value — and the message is
@@ -12230,7 +12297,7 @@ export class ApprovalProductService {
             )
           }
         }
-        await client.query('COMMIT')
+        await commitTransaction()
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
@@ -12264,7 +12331,7 @@ export class ApprovalProductService {
         }, actor)
         // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the transfer txn.
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-        await client.query('COMMIT')
+        await commitTransaction()
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
@@ -12374,7 +12441,7 @@ export class ApprovalProductService {
           }, actor)
           // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the add_sign txn.
           await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-          await client.query('COMMIT')
+          await commitTransaction()
           await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
           return (await this.getApproval(id, actor.userId, actor.roles))!
         }
@@ -12443,7 +12510,7 @@ export class ApprovalProductService {
           },
           targetUserId: targetAssignmentUserId,
         }, actor)
-        await client.query('COMMIT')
+        await commitTransaction()
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
@@ -12549,7 +12616,7 @@ export class ApprovalProductService {
             )
           }
         }
-        await client.query('COMMIT')
+        await commitTransaction()
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
         return (await this.getApproval(id, actor.userId, actor.roles))!
@@ -12739,7 +12806,7 @@ export class ApprovalProductService {
           if (handlerFieldWrite.revisions.length > 0) {
             await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
           }
-          await client.query('COMMIT')
+          await commitTransaction()
           return (await this.getApproval(id, actor.userId, actor.roles))!
         }
 
@@ -12857,7 +12924,7 @@ export class ApprovalProductService {
           await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
         }
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-        await client.query('COMMIT')
+        await commitTransaction()
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents)
         // Lock-3 §2.5 / OD-L3-4(a): handler wall-clock is EXCLUDED from the per-node breakdown — NO
         // `emitNodeDecisionMetric` for the handler node (it is not approver latency). The instance-level
@@ -12966,7 +13033,7 @@ export class ApprovalProductService {
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
         // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the return txn.
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-        await client.query('COMMIT')
+        await commitTransaction()
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         // H-1 P1-1: AWAITED close — a return can resolve back to the node it was issued from when the
         // target is skipped and the cascade lands here again (constructed and covered: an
@@ -13050,7 +13117,7 @@ export class ApprovalProductService {
             )
           }
         }
-        await client.query('COMMIT')
+        await commitTransaction()
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
@@ -13128,7 +13195,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, queueAdvance.createdTasks)
-          await client.query('COMMIT')
+          await commitTransaction()
           await this.emitApprovalTaskCreatedEventsPostCommit(id, queueAdvance.createdTasks)
           this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
           return (await this.getApproval(id, actor.userId, actor.roles))!
@@ -13167,7 +13234,7 @@ export class ApprovalProductService {
               ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
             },
           }, actor)
-          await client.query('COMMIT')
+          await commitTransaction()
           return (await this.getApproval(id, actor.userId, actor.roles))!
         }
       } else if (approvalMode === 'any') {
@@ -13316,7 +13383,7 @@ export class ApprovalProductService {
               ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
             },
           }, actor)
-          await client.query('COMMIT')
+          await commitTransaction()
           return (await this.getApproval(id, actor.userId, actor.roles))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
@@ -13539,7 +13606,7 @@ export class ApprovalProductService {
             evaluation: finalEvaluation,
             policySnapshotAtDecision,
           })
-          await client.query('COMMIT')
+          await commitTransaction()
           // Metrics only — `safeMetricsCall`-wrapped, and deliberately NOT
           // `emitApprovalCompletionEvent` / `buildCompletionEvent`, which is what 判据 IV's
           // 「零完成事件」 names. The terminal metric reports `rejected`, matching the engine row.
@@ -13760,7 +13827,7 @@ export class ApprovalProductService {
       // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the advance txn (after
       // every assignment write + same-txn auto-approval / parallel-cancel cascade). Flag OFF ⇒ no-op.
       await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-      await client.query('COMMIT')
+      await commitTransaction()
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
       // P1-1 defense-in-depth: the node just advanced past `currentNodeKey`, so sweep every still-`sent`
       // card of this instance to `superseded`. Best-effort — a card-ledger hiccup must never fail a
@@ -13804,6 +13871,8 @@ export class ApprovalProductService {
         await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
+      // A handed-over transaction is rolled back (and its connection released) by the port alone.
+      if (handover) client = null
       await rollbackQuietly(client)
       // Values-free mapping for the ONE new error surface this restructure opens. Scoped to the
       // branch that created it: only a `required` dispatch runs under SERIALIZABLE and holds the
@@ -13812,7 +13881,9 @@ export class ApprovalProductService {
       // is not a repo-wide retry-semantics change smuggled in under a cancel-round commit.
       // `isRetryableSqlState` is the repo's single predicate for the pair (exported by
       // w4c0-operation-registry precisely so two layers cannot drift).
-      if (rolloutLock.kind === 'required' && isRetryableSqlState(error)) {
+      // Handed over (r6.1 §3.2 step 8(d)): a wait past S2's lock_timeout (55P03) answers the same 503.
+      const contendedWhenHandedOver = handover !== undefined && rolloutLock.kind === 'required' && isLockNotAvailableSqlState(error)
+      if ((rolloutLock.kind === 'required' && isRetryableSqlState(error)) || contendedWhenHandedOver) {
         throw new ServiceError(
           'Approval action hit transient transaction contention; retry the action',
           503,
@@ -14117,12 +14188,14 @@ export class ApprovalProductService {
     return Boolean(result.rows[0]?.exists)
   }
 
-  private async allocateRequestNo(): Promise<string> {
+  private async allocateRequestNo(client?: ApprovalDbClient | null): Promise<string> {
     if (!pool) throw new Error('Database not available')
 
-    const result = await pool.query<{ request_no: string }>(
-      `SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`,
-    )
+    // Settlement coordination (r6.1 §3.2 step 11, N-09): on a handed-over transaction the sequence is
+    // read on that connection rather than on a second pool connection. Sequence values are not
+    // rolled back either way, so the semantics do not change.
+    const sql = `SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`
+    const result = client ? await client.query<{ request_no: string }>(sql) : await pool.query<{ request_no: string }>(sql)
     return result.rows[0]?.request_no || `AP-${normalizePage(Date.now(), 100001)}`
   }
 

@@ -30,6 +30,8 @@ const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = {
   'packages/core-backend/src/attendance/w4c0-operation-registry.ts': ['SettlementCoordinationRestartSignalV1', 'currentSettlementCoordinationContextV1'],
   // The class-00 helper: re-entrant no-op only inside an active context whose credential covers it.
   'packages/core-backend/src/attendance/w4c0-identity.ts': ['currentSettlementCoordinationContextV1'],
+  // dispatchAction's handed-over mode: a recheck mismatch asks the port for a restart.
+  'packages/core-backend/src/services/ApprovalProductService.ts': ['SettlementCoordinationRecheckMismatchV1'],
 }
 
 /** Identifiers that activate the coordination path → production files allowed to declare them. */
@@ -38,7 +40,7 @@ const ACTIVATION: ReadonlyArray<Readonly<{ name: string; pattern: RegExp; declar
   { name: 'new SettlementCoordinatorV1', pattern: /\bnew\s+SettlementCoordinatorV1\b/, declaredIn: [] },
   { name: 'coordinated transaction port', pattern: /\bcoordinatedTransaction\w*\b/, declaredIn: [] },
   { name: 'coordination context run', pattern: /\brunInSettlementCoordinationContextV1\b/, declaredIn: [] },
-  { name: 'handed-over option', pattern: /\bsettlementCoordinationHandover\b/, declaredIn: [] },
+  { name: 'handed-over option', pattern: /\bsettlementCoordinationHandover\b/, declaredIn: ['packages/core-backend/src/services/ApprovalProductService.ts'] },
   {
     name: 'handed-over runner',
     pattern: /\brunAttendanceResultOperationHandedOverV1\b/,

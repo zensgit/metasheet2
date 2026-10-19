@@ -26,6 +26,7 @@
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 import {
   AttendanceCoordinationNestingError,
+  SettlementCoordinationRecheckMismatchV1,
   SettlementCoordinationRestartSignalV1,
   assertNoSettlementCoordinationContextV1,
   runInSettlementCoordinationContextV1,
@@ -44,21 +45,7 @@ import type {
   SettlementCoordinatorV1,
 } from './settlement-coordinator'
 
-export { SettlementCoordinationRestartSignalV1 }
-
-/** The post-lock recheck found another org (§3.2 step 6.5): restart under `org`. */
-export class SettlementCoordinationRecheckMismatchV1 extends Error {
-  readonly org: string
-  /** The entry's registered conflict code for a used-up recheck counter. */
-  readonly conflictCode: string | undefined
-
-  constructor(org: string, conflictCode?: string) {
-    super('settlement coordination recheck mismatch')
-    this.name = 'SettlementCoordinationRecheckMismatchV1'
-    this.org = org
-    this.conflictCode = conflictCode
-  }
-}
+export { SettlementCoordinationRecheckMismatchV1, SettlementCoordinationRestartSignalV1 }
 
 const DEFERRED = Symbol('settlement-coordination-deferred-result')
 
@@ -80,8 +67,12 @@ export interface SettlementCoordinationBodyContextV1 {
   readonly client: AttendanceW4TransactionClientV1
   readonly orgLexical: string
   readonly attempt: number
+  /** The `detail` of the recheck mismatch that restarted this attempt, or null. */
+  readonly recheck: unknown
   /** Work to run after COMMIT, release and quota return, outside the coordination context. */
   afterCommit(callback: () => unknown): void
+  /** Called once if this attempt ends without a commit (rollback, restart or uncertain COMMIT). */
+  onAbandon(callback: () => void): void
 }
 
 export interface SettlementCoordinatedTransactionOptionsV1<T> {
@@ -127,9 +118,20 @@ export async function coordinatedTransactionV1<T>(options: SettlementCoordinated
   const unit = options.unit ?? options.coordinator.openUnit(options.request)
   try {
     let org = 'org' in options.candidate ? options.candidate.org : await unit.readCandidate(options.candidate.read)
+    let recheck: unknown = null
     for (;;) {
       const handle = await unit.acquire(org)
       const callbacks: Array<() => unknown> = []
+      const abandoned: Array<() => void> = []
+      const abandon = (): void => {
+        for (const callback of abandoned.splice(0)) {
+          try {
+            callback()
+          } catch {
+            // An abandon observer cannot change how the attempt ended.
+          }
+        }
+      }
       let outcome: T | SettlementCoordinationDeferredResultV1<T>
       try {
         outcome = await runInSettlementCoordinationContextV1(
@@ -147,22 +149,37 @@ export async function coordinatedTransactionV1<T>(options: SettlementCoordinated
               client: handle.client,
               orgLexical: handle.plan.key.org.lexical,
               attempt: handle.attempt,
+              recheck,
               afterCommit: (callback) => {
                 callbacks.push(callback)
+              },
+              onAbandon: (callback) => {
+                abandoned.push(callback)
               },
             }),
         )
       } catch (error) {
         if (error instanceof SettlementCoordinationRestartSignalV1) {
-          await unit.restart(handle, { reason: 'serialization', transaction: 'live', error: error.original })
+          try {
+            await unit.restart(handle, { reason: 'serialization', transaction: 'live', error: error.original })
+          } finally {
+            abandon()
+          }
+          recheck = null
           continue
         }
         if (error instanceof SettlementCoordinationRecheckMismatchV1) {
-          await unit.restart(handle, { reason: 'recheck', transaction: 'live', error, conflictCode: error.conflictCode })
+          try {
+            await unit.restart(handle, { reason: 'recheck', transaction: 'live', error, conflictCode: error.conflictCode })
+          } finally {
+            abandon()
+          }
           org = error.org
+          recheck = error.detail ?? null
           continue
         }
         await rollbackAfterBodyError(handle)
+        abandon()
         throw error
       }
       const committed = await commitSettlementCoordinationTransactionV1(handle.client, handle.credential)
@@ -176,16 +193,78 @@ export async function coordinatedTransactionV1<T>(options: SettlementCoordinated
         if (onRetryable !== 'restart') {
           // The server already rolled the transaction back: the connection is clean.
           handle.end()
+          abandon()
           throw onRetryable(committed.error)
         }
-        await unit.restart(handle, { reason: 'serialization', transaction: 'ended', commit: committed })
+        try {
+          await unit.restart(handle, { reason: 'serialization', transaction: 'ended', commit: committed })
+        } finally {
+          abandon()
+        }
+        recheck = null
         continue
       }
       // Uncertain: never committed as far as we know; no callback, no second run, connection destroyed.
       handle.end(new AttendanceCoordinationConnectionUncertainError(committed.reason))
+      abandon()
       throw committed.error ?? new AttendanceCoordinationConnectionUncertainError(committed.reason)
     }
   } finally {
     if (!options.unit) unit.close()
   }
 }
+
+/** The attempt that a suspended method was waiting on ended without a commit. */
+export class SettlementCoordinationAttemptAbandonedError extends Error {
+  readonly code = 'ATTENDANCE_COORDINATION_ATTEMPT_ABANDONED'
+
+  constructor() {
+    super('ATTENDANCE_COORDINATION_ATTEMPT_ABANDONED')
+    this.name = 'SettlementCoordinationAttemptAbandonedError'
+  }
+}
+
+/**
+ * Bridges a method written around its own COMMIT to the port. `start` runs the method with a
+ * `commit` that, instead of sending COMMIT, suspends the method until the port has committed and
+ * released (and rejects if the attempt ends otherwise). The body's result is deferred, so whatever
+ * the method does after its COMMIT — post-commit work, the final read — runs after release and
+ * outside the coordination context, in the order the method already has.
+ *
+ * The body resolves once the method asks to commit; an error the method throws before that is the
+ * body's error (the port rolls back). A method that returns without asking to commit is refused.
+ */
+export async function handOverToSuspendedMethodV1<T>(
+  context: SettlementCoordinationBodyContextV1,
+  start: (commit: () => Promise<void>) => Promise<T>,
+): Promise<SettlementCoordinationDeferredResultV1<T>> {
+  let requestCommit!: () => void
+  const commitRequested = new Promise<void>((resolve) => {
+    requestCommit = resolve
+  })
+  let releaseCommit!: () => void
+  let abandonCommit!: (error: unknown) => void
+  const committed = new Promise<void>((resolve, reject) => {
+    releaseCommit = resolve
+    abandonCommit = reject
+  })
+  committed.catch(() => undefined)
+  context.onAbandon(() => abandonCommit(new SettlementCoordinationAttemptAbandonedError()))
+  const running = start(async () => {
+    requestCommit()
+    await committed
+  })
+  // The method's own outcome is observed through the race below and through the deferred result.
+  running.catch(() => undefined)
+  await Promise.race([
+    commitRequested,
+    running.then(() => {
+      throw new Error('settlement coordination: the handed-over method returned without asking to commit')
+    }),
+  ])
+  return settlementCoordinationResultAfterCommitV1(async () => {
+    releaseCommit()
+    return running
+  })
+}
+
