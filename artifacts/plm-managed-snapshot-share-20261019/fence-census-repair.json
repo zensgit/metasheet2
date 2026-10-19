@@ -1,0 +1,45 @@
+{
+  "source": "9df4f21b2172b4176d47f85a66dd9f391dc4926e",
+  "pr": 6455,
+  "original_head": "16381a8d39659e8f59b244d8b1051c2e80401b3b",
+  "scope": "exact own PLM snapshot call graph ledger only; analyzer and mandatory guard assertions preserved",
+  "reports": {
+    "red": {
+      "sha256": "acbfaee43867356a358e90dc63efd2e7ae5e9096719475f6a8c22638f04b2fe4",
+      "numPassedTests": 37,
+      "numFailedTests": 12,
+      "numPendingTests": 0,
+      "success": false
+    },
+    "corrected": {
+      "sha256": "e68096b28f341834937d33d0cb7f089a847f368c3b40e5d8b4e82e4f4b130294",
+      "numPassedTests": 49,
+      "numFailedTests": 0,
+      "numPendingTests": 0,
+      "success": true
+    }
+  },
+  "actual_holders": [
+    {
+      "key": "multitable/plm-bom-review-service.ts :: PlmBomReviewService.create :: fenceWriterEntry",
+      "writesVia": [
+        "PlmBomReviewService.publishSnapshot"
+      ],
+      "entryWritesVia": []
+    },
+    {
+      "key": "multitable/plm-bom-review-service.ts :: PlmBomReviewService.create :: publishSnapshot",
+      "writesVia": [],
+      "entryWritesVia": [
+        "PlmBomReviewService.publishSnapshot>PlmBomReviewService.writeSnapshot"
+      ]
+    },
+    {
+      "key": "services/plm-managed-snapshot-share-flow.ts :: PlmManagedSnapshotShareFlow.complete :: publishConsentedSnapshotOnQuery",
+      "writesVia": [],
+      "entryWritesVia": [
+        "PlmBomReviewService.publishConsentedSnapshotOnQuery>PlmBomReviewService.publishSnapshot"
+      ]
+    }
+  ]
+}
