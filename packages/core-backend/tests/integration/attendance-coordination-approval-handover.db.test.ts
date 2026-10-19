@@ -976,16 +976,27 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     expect((failure as { statusCode?: unknown }).statusCode).toBeUndefined()
   }, 60_000)
 
-  it('A10 ①: a handed-over comment and approve on a real cancel round never reach the node-operation policy branch', async () => {
+  async function recordCount(instanceId: string, action: string): Promise<number> {
+    const rows = await observer.query<{ n: number }>('SELECT count(*)::int AS n FROM approval_records WHERE instance_id = $1 AND action = $2', [instanceId, action])
+    return rows.rows[0]?.n ?? 0
+  }
+
+  // Opus S3 closure P3-N4: handed over, the policy branch fails closed before COMMIT and the port rolls
+  // its denial row back, so "no policy_denied row" alone cannot tell whether the branch ran. Each
+  // action's own result is asserted instead; a dispatch that entered the branch ends in the plain
+  // "unreachable when handed over" error and fails both (oscl_19).
+  it('A10 ①: a handed-over comment commits its one record and a handed-over approve reaches its own refusal past the policy gate; neither enters the node-operation policy branch (kills oscl_19)', async () => {
     const round = await pendingCancelRound('a10-allowed')
-    const w = world()
+    expect(await recordCount(round.roundInstanceId, 'comment')).toBe(0)
+    const commenting = world()
+    const approving = world()
     try {
       const commented = await coordinatedTransactionV1({
-        coordinator: w.coordinator,
+        coordinator: commenting.coordinator,
         request: READ_COMMITTED,
         candidate: { org: crypto.randomUUID() },
         body: (context) =>
-          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+          drive(context, commenting, { rolloutLock: { kind: 'none' } }, (handover) =>
             new ApprovalProductService().dispatchAction(
               round.roundInstanceId,
               { action: 'comment', comment: 'handed-over comment' } as ApprovalActionRequest,
@@ -997,12 +1008,22 @@ describeIfDatabase('attendance settlement coordination — the approval service 
         (value) => ({ value }),
         (error) => ({ error }),
       )
+      // The comment branch's own result: the round's DTO back, one comment record, committed by the
+      // port in exactly one attempt; the round stays pending.
+      expect(commented).toMatchObject({ value: { id: round.roundInstanceId, status: 'pending' } })
+      expectOneCommittedAttempt(commenting.attempts)
+      expect(await recordCount(round.roundInstanceId, 'comment')).toBe(1)
+      const afterComment = await instanceState(round.roundInstanceId)
+      expect(afterComment?.status).toBe('pending')
+      expect(await roundOutcome(round.roundInstanceId)).toBe('pending')
+      expectBaseline(commenting.coordinator)
+
       const approved = await coordinatedTransactionV1({
-        coordinator: w.coordinator,
+        coordinator: approving.coordinator,
         request: m07(),
         candidate: { org: crypto.randomUUID() },
         body: (context) =>
-          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+          drive(context, approving, { rolloutLock: { kind: 'none' } }, (handover) =>
             new ApprovalProductService().dispatchAction(
               round.roundInstanceId,
               { action: 'approve' } as ApprovalActionRequest,
@@ -1014,14 +1035,20 @@ describeIfDatabase('attendance settlement coordination — the approval service 
         (value) => ({ value }),
         (error) => ({ error }),
       )
-      for (const outcome of [commented, approved]) {
-        expect((outcome as { error?: { code?: unknown } }).error?.code).not.toBe('APPROVAL_NODE_OPERATION_DISABLED')
-      }
+      // The approve's own result on a round whose original document has no attendance request behind
+      // it: the terminal approve reaches the in-lock final evaluation (after the policy gate) and is
+      // refused there with 409 CANCEL_ROUND_BUSINESS_TARGET_MISSING (the same refusal the default
+      // path gives in approval-cancel-round-redemption.db.test.ts); the port rolls back in one attempt.
+      expect(approved).toMatchObject({ error: { statusCode: 409, code: 'CANCEL_ROUND_BUSINESS_TARGET_MISSING' } })
+      expectOneRolledBackAttempt(approving.attempts)
+      expect(await instanceState(round.roundInstanceId)).toEqual(afterComment)
+      expect(await roundOutcome(round.roundInstanceId)).toBe('pending')
+      expect(await recordCount(round.roundInstanceId, 'comment')).toBe(1)
       expect(await policyDenials(round.roundInstanceId)).toBe(0)
-      for (const run of w.attempts) expect(run.method.filter((sql) => TRANSACTION_CONTROL.test(sql))).toEqual([])
-      expectBaseline(w.coordinator)
+      expectBaseline(approving.coordinator)
     } finally {
-      await w.end()
+      await commenting.end()
+      await approving.end()
     }
   }, 60_000)
 

@@ -51,6 +51,8 @@ export class FakeClient extends EventEmitter implements SettlementCoordinationCl
   /** Statements (exact text) that fail once with the given error. */
   readonly failOnce = new Map<string, Error>()
   onRelease: (() => void) | null = null
+  /** Set by a pool that reuses connections (`FakePool.reuse`): told of every release, after it is booked. */
+  returnTo: ((client: FakeClient, error: unknown) => void) | null = null
   /** Set by `lose()`: like pg after a connection error, every later query fails at once. */
   lost: Error | null = null
 
@@ -91,6 +93,7 @@ export class FakeClient extends EventEmitter implements SettlementCoordinationCl
   release(error?: unknown): void {
     this.onRelease?.()
     this.released.push(error ?? null)
+    this.returnTo?.(this, error)
   }
 }
 
@@ -99,6 +102,13 @@ export class FakePool implements SettlementCoordinationPoolV1 {
   readonly pending: Array<{ succeed(): FakeClient; fail(error: Error): void }> = []
   connects = 0
   manual = false
+  /**
+   * Like pg-pool: a client released without an error (and not lost) goes back to the idle list and is
+   * handed out again by the next connect, so a test can watch the same client across release and
+   * re-borrow. Off by default: every connect then makes a new client.
+   */
+  reuse = false
+  readonly idle: FakeClient[] = []
   onConnect: (() => void) | null = null
 
   constructor(private readonly world: FakeLockWorld) {}
@@ -120,7 +130,12 @@ export class FakePool implements SettlementCoordinationPoolV1 {
   }
 
   #client(): FakeClient {
+    const reused = this.reuse ? this.idle.shift() : undefined
+    if (reused) return reused
     const client = new FakeClient(this.world)
+    client.returnTo = (released, error) => {
+      if (this.reuse && !error && !released.lost) this.idle.push(released)
+    }
     this.clients.push(client)
     return client
   }

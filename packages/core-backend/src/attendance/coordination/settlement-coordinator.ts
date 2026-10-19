@@ -154,6 +154,12 @@ export interface SettlementCoordinatorDepsV1 {
 }
 
 export interface SettlementCoordinationUnitRequestV1 {
+  /**
+   * Whether the entry depends on the class-00 family (W4 rollout lock) — a property of the entry, not
+   * of the org. The planner decides per attempt from the org that attempt coordinates: a canonical org
+   * takes class-00 when this is true, a legacy org never does (its key is not parsed). So one unit
+   * stays correct when a recheck restart moves it from a canonical to a legacy org or back (Codex S3 §4 C).
+   */
   readonly needsClassZero: boolean
   readonly quotaClass: SettlementCoordinationQuotaClassV1
   readonly handover: SettlementCoordinationHandoverOptionsV1

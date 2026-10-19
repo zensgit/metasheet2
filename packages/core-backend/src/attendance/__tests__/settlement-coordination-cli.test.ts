@@ -346,3 +346,72 @@ describe('CLI variant: what reaches the caller the first time (Opus P3-4)', () =
   })
 })
 
+
+describe('CLI variant: between attempts (Opus S3 closure NIT-c1, NIT-c3)', () => {
+  it('the refused attempt\'s unit is closed before the backoff sleep: nothing is in flight or held while the CLI waits (NIT-c3)', async () => {
+    const { world, coordinator, ledger, quota, baseline } = setup()
+    world.dedicatedBusy = true
+    const duringSleep: unknown[] = []
+    const result = await coordinatedTransactionCliV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      retry: {
+        backoffMs: [10],
+        jitter: 0,
+        sleep: async () => {
+          duringSleep.push({ inFlight: ledger.snapshot().inFlight, holding: ledger.snapshot().holding, quota: quota.snapshot() })
+          world.dedicatedBusy = false
+        },
+      },
+      body: async () => 'committed',
+    })
+    expect(result).toBe('committed')
+    expect(duringSleep).toEqual([
+      {
+        inFlight: { short: 0, long: 0 },
+        holding: [],
+        quota: { global: { short: { held: 0, waiting: 0 }, long: { held: 0, waiting: 0 } }, orgs: [] },
+      },
+    ])
+    baseline()
+  })
+
+  it('a candidate read whose borrow is refused is retried with a fresh unit, and the next attempt reads, commits once (NIT-c1, kills oscl_18)', async () => {
+    const { pool, coordinator, records, baseline } = setup()
+    const connect = pool.connect.bind(pool)
+    let refusals = 1
+    pool.connect = () => (refusals-- > 0 ? Promise.reject(new Error('test: the pool refused the connection')) : connect())
+    const refused: Array<{ attempt: number; code: string; sleepMs: number }> = []
+    let reads = 0
+    let bodies = 0
+    const result = await coordinatedTransactionCliV1({
+      coordinator,
+      request: REQUEST,
+      candidate: {
+        read: async (client) => {
+          reads += 1
+          await client.query('SELECT org FROM candidate')
+          return ORG
+        },
+      },
+      retry: { backoffMs: [10], jitter: 0, sleep: async () => undefined, onBusy: ({ attempt, error, sleepMs }) => void refused.push({ attempt, code: error.code, sleepMs }) },
+      body: async (context) => {
+        bodies += 1
+        await context.client.query('UPDATE t SET v = 1')
+        return `committed for ${context.orgLexical}`
+      },
+    })
+    expect(result).toBe(`committed for ${ORG}`)
+    expect(refused).toEqual([{ attempt: 1, code: 'ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE', sleepMs: 10 }])
+    expect(reads).toBe(1)
+    expect(bodies).toBe(1)
+    // The refused borrow made no client: the candidate read ran on the first, the transaction on the second.
+    expect(pool.clients).toHaveLength(2)
+    expect(pool.clients[0].calls).toEqual(['SELECT org FROM candidate'])
+    expect(pool.clients.flatMap((client) => client.calls).filter((sql) => sql === 'COMMIT')).toEqual(['COMMIT'])
+    expect(pool.clients[1].calls.at(-1)).toBe('COMMIT')
+    expect(records.map((record) => record.outcome)).toEqual(['handed-over'])
+    baseline()
+  })
+})

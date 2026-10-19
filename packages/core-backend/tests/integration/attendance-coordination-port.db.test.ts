@@ -321,7 +321,7 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
     }
   })
 
-  it('a backend terminated inside the body: the COMMIT is uncertain, the connection is destroyed and no callback runs', async () => {
+  it('a backend terminated inside the body: the attempt fails either before COMMIT (the error was heard) or at an uncertain COMMIT; either way the connection is destroyed and no callback runs', async () => {
     const pool = new Pool({ connectionString: dbUrl, max: 1 })
     const coordinator = coordinatorOn(pool)
     let pid = 0

@@ -1165,3 +1165,56 @@ describe('settlement coordinator: a throwing attempt observer (Fable S2 closure 
     baseline()
   })
 })
+
+describe('settlement coordinator: the give-back path takes this unit\'s listener off (Opus S3 closure P3-N3)', () => {
+  // `#giveBack` (S1 contended, stop before the try, after an unlock, after a rollback) must give the
+  // connection back through `#release`: listener off first, destroyed when it reported an error.
+  // Both cases go red when it calls `client.release()` directly (oscl_17).
+  it('a contended S1 gives the connection back without our listener; the next borrower of the same connection holds only its own (kills oscl_17)', async () => {
+    const { world, pool, coordinator, baseline } = setup()
+    pool.reuse = true
+    world.dedicatedBusy = true
+    const first = coordinator.openUnit({ ...REQUEST, oneShot: true })
+    await expect(first.acquire(ORG)).rejects.toMatchObject({ code: 'ATTENDANCE_SETTLEMENT_COORDINATION_BUSY' })
+    first.close()
+    expect(pool.clients).toHaveLength(1)
+    const [client] = pool.clients
+    expect(client.released).toEqual([null])
+    expect(client.listenerCount('error')).toBe(0)
+    expect(pool.idle).toEqual([client])
+
+    world.dedicatedBusy = false
+    const second = coordinator.openUnit({ ...REQUEST, oneShot: true })
+    const handle = await second.acquire(ORG)
+    expect(handle.client).toBe(client)
+    expect(pool.clients).toHaveLength(1)
+    expect(pool.connects).toBe(2)
+    expect(client.listenerCount('error')).toBe(1)
+    handle.end()
+    second.close()
+    expect(client.released).toEqual([null, null])
+    expect(client.listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('an error the connection reports after the borrow and before a contended S1 destroys it with that error on the give-back (kills oscl_17)', async () => {
+    const { world, pool, coordinator, baseline } = setup()
+    pool.reuse = true
+    world.dedicatedBusy = true
+    const reported = new Error('test: the connection reported an error')
+    // Emitted while S1 is on its way, without making the client unqueryable, so S1 still answers contended.
+    world.before.set('SELECT idle', async () => {
+      pool.clients[0].emit('error', reported)
+    })
+    const unit = coordinator.openUnit({ ...REQUEST, oneShot: true })
+    await expect(unit.acquire(ORG)).rejects.toMatchObject({ code: 'ATTENDANCE_SETTLEMENT_COORDINATION_BUSY' })
+    unit.close()
+    const [client] = pool.clients
+    expect(client.calls).toHaveLength(1)
+    expect(client.calls[0]).toMatch(/^SELECT idle/)
+    expect(client.released).toEqual([reported])
+    expect(client.listenerCount('error')).toBe(0)
+    expect(pool.idle).toEqual([])
+    baseline()
+  })
+})

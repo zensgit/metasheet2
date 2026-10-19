@@ -191,21 +191,24 @@ export async function coordinatedTransactionCliV1<T>(options: SettlementCoordina
   const request: SettlementCoordinationUnitRequestV1 = { background: true, ...requested, oneShot: true }
   for (let attempt = 1; ; attempt += 1) {
     const unit = options.coordinator.openUnit(request)
+    let error: unknown
     try {
       return await coordinatedTransactionV1<T>({ ...rest, request, unit })
-    } catch (error) {
-      // Only this attempt's own refused acquisition is retried: it wrote nothing. The same error class
-      // from a body, a post-commit callback or a deferred result is not, since the outer transaction
-      // may already be committed.
-      if (!unit.refused(error) || attempt >= attempts) throw error
-      if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
-      const base = schedule.length === 0 ? 0 : schedule[Math.min(attempt, schedule.length) - 1]
-      const sleepMs = Math.max(0, Math.round(base * (1 + jitter * (2 * random() - 1))))
-      retry.onBusy?.({ attempt, error: error as SettlementCoordinationAcquireError, sleepMs })
-      await sleep(sleepMs, request.signal)
-      if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
+    } catch (thrown) {
+      error = thrown
     } finally {
+      // Closed before any backoff: a unit waiting for its next attempt would still count as in flight.
       unit.close()
     }
+    // Only this attempt's own refused acquisition is retried: it wrote nothing. The same error class
+    // from a body, a post-commit callback or a deferred result is not, since the outer transaction
+    // may already be committed.
+    if (!unit.refused(error) || attempt >= attempts) throw error
+    if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
+    const base = schedule.length === 0 ? 0 : schedule[Math.min(attempt, schedule.length) - 1]
+    const sleepMs = Math.max(0, Math.round(base * (1 + jitter * (2 * random() - 1))))
+    retry.onBusy?.({ attempt, error: error as SettlementCoordinationAcquireError, sleepMs })
+    await sleep(sleepMs, request.signal)
+    if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
   }
 }
