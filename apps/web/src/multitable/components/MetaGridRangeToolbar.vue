@@ -39,6 +39,9 @@ const message = computed(() => {
     INVALID_CLIPBOARD: ['剪贴板不是有效的矩形表格。', 'Clipboard is not a valid rectangular table.'],
     OUT_OF_BOUNDS: ['目标超出已加载的可见单元格。', 'Destination exceeds loaded visible cells.'],
     CLIPBOARD: ['无法访问剪贴板，请检查浏览器权限。', 'Clipboard unavailable. Check browser permissions.'],
+    // The button cannot read the clipboard without the async Clipboard API (plain-HTTP deployment);
+    // the keyboard shortcut's native paste event can.
+    CLIPBOARD_USE_SHORTCUT: ['当前环境请直接按 Ctrl+V（Mac 为 ⌘V）粘贴到选区', 'Press Ctrl+V (⌘V on Mac) to paste into the range here.'],
   }
   const pair = pairs[props.status] ?? ['操作未确认成功，请刷新核对后再试。', 'Operation not confirmed. Refresh and check before retrying.']
   return pair[props.zh ? 0 : 1]
