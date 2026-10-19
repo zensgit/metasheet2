@@ -9,7 +9,8 @@
  * Two halves:
  *   1. Tripwire — no file under apps/web/src except src/utils/clipboard.ts may touch the native API
  *      (`navigator.clipboard` / `navigator?.clipboard`); every caller goes through `copyText()` /
- *      `readClipboardText()` / `canCopyText()`.
+ *      `readClipboardText()` / `canCopyText()` / `canReadClipboardText()`; keyboard paste reads the
+ *      native paste event through `pasteEventText()`.
  *   2. Contract of `copyText()` itself — native pass-through, execCommand('copy') fallback on an
  *      off-screen textarea that is always removed again, `false` (never a throw) when nothing works.
  */
@@ -17,7 +18,14 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { canCopyText, ClipboardReadUnavailableError, copyText, readClipboardText } from '../src/utils/clipboard'
+import {
+  canCopyText,
+  canReadClipboardText,
+  ClipboardReadUnavailableError,
+  copyText,
+  pasteEventText,
+  readClipboardText,
+} from '../src/utils/clipboard'
 
 const SRC_ROOT = resolve(__dirname, '../src')
 const HELPER = 'utils/clipboard.ts'
@@ -209,5 +217,31 @@ describe('copyText() / canCopyText() / readClipboardText()', () => {
     await expect(readClipboardText()).resolves.toBe('a\tb')
     stubClipboard(undefined)
     await expect(readClipboardText()).rejects.toBeInstanceOf(ClipboardReadUnavailableError)
+  })
+
+  it('canReadClipboardText(): true only when readText exists (false on plain HTTP, and with write-only stubs)', () => {
+    stubClipboard({ readText: vi.fn().mockResolvedValue('') })
+    expect(canReadClipboardText()).toBe(true)
+    stubClipboard({ writeText: vi.fn().mockResolvedValue(undefined) })
+    expect(canReadClipboardText()).toBe(false)
+    stubClipboard(undefined)
+    expect(canReadClipboardText()).toBe(false)
+  })
+
+  it('pasteEventText(): reads text/plain from the paste event, needs no Clipboard API, null without clipboardData', () => {
+    stubClipboard(undefined)
+    const withData = (getData: (type: string) => string) => {
+      const event = new Event('paste') as ClipboardEvent
+      Object.defineProperty(event, 'clipboardData', { value: { getData } })
+      return event
+    }
+    const getData = vi.fn((type: string) => (type === 'text/plain' ? 'a\tb' : '<b>a</b>'))
+    expect(pasteEventText(withData(getData))).toBe('a\tb')
+    expect(getData).toHaveBeenCalledWith('text/plain')
+    expect(pasteEventText(withData(() => ''))).toBe('') // image-only paste: no text flavour
+    expect(pasteEventText(withData(() => { throw new Error('denied') }))).toBe('')
+    const bare = new Event('paste') as ClipboardEvent
+    Object.defineProperty(bare, 'clipboardData', { value: null })
+    expect(pasteEventText(bare)).toBeNull()
   })
 })
