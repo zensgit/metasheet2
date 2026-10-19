@@ -35,6 +35,8 @@ afterEach(() => {
 
 describe('production pool: settlement coordination nesting notes (P1-1 allowed change 2)', () => {
   it('count mode: inside a live context a raw connect, a raw query and a ConnectionPool query are each noted once', async () => {
+    // Production behaviour; tests default to 'throw' (tests/setup.ts).
+    setSettlementCoordinationNestingModeV1('count')
     const pool = closedPool()
     try {
       const before = settlementCoordinationNestedMainPoolAccessesV1()
