@@ -9,6 +9,8 @@ callback = cfg['callback']
 issuer = cfg['issuer']
 secret = cfg['secret']
 root_part_id = cfg.get('root_part_id', 'part')
+sharing_enabled = cfg.get('sharing_enabled', bool(cfg.get('snapshot_share')))
+assert type(sharing_enabled) is bool, 'sharing_enabled must be boolean'
 for key, value in {
     'JWT_SECRET_KEY': 'synthetic-native-managed-read-configured-only',
     'DATABASE_URL': 'sqlite:///' + str(root / 'global.db'),
@@ -21,7 +23,7 @@ for key, value in {
     'ENABLE_METASHEET': 'true',
     'PLM_MANAGED_LOGIN_ENABLED': 'true',
     'PLM_BOM_READ_SESSION_ENABLED': 'true',
-    'PLM_BOM_SNAPSHOT_SHARE_ENABLED': 'true' if cfg.get('snapshot_share') else 'false',
+    'PLM_BOM_SNAPSHOT_SHARE_ENABLED': 'true' if sharing_enabled else 'false',
     'PLM_BOM_WRITE_GRANT_ENABLED': 'true',
     'PLM_APPROVAL_CARD_ENABLED': 'true',
     'PLM_RECORD_PUSH_ENABLED': 'false',
@@ -61,41 +63,51 @@ from yuantus.meta_engine.models.meta_bom_writeback_audit import MetaBomWriteback
 import_all_models()
 tenant_engine = business_db.create_db_engine('sqlite:///' + str(root / 'tenant_default_fixture-org.db'))
 identity_engine = identity_db.get_identity_engine()
-for eng in (business_db.engine, identity_engine, tenant_engine):
-    with eng.begin() as connection:
-        connection.exec_driver_sql('BEGIN')
-        (build_tenant_provisioning_metadata() if eng is tenant_engine else Base.metadata).create_all(connection)
 identity = identity_db.get_identity_sessionmaker()
 tenant = sessionmaker(bind=tenant_engine, expire_on_commit=False)
-with identity() as db:
-    db.add(Tenant(id='default', is_active=True))
-    db.commit()
-    db.add(Organization(id='fixture-org', tenant_id='default', is_active=True))
-    db.add(AuthUser(id=42, tenant_id='default', username='writer', is_active=True))
-    db.commit()
-    db.add(OrgMembership(tenant_id='default', org_id='fixture-org', user_id=42, roles=['engineer'], is_active=True))
-    db.add(AuthCredential(user_id=42, password_hash=hash_password('synthetic-browser-password')))
-    db.commit()
-with business_db.SessionLocal() as db:
-    db.add(RBACUser(id=900, user_id=42, username='writer', is_active=True))
-    db.commit()
-with tenant() as db:
-    db.add(Permission(id='permission'))
-    db.add(Access(id='ace', permission_id='permission', identity_id='900', can_get=True, can_update=True))
-    db.add_all([
-        ItemType(id='Part', permission_id='permission'),
-        ItemType(id='Part BOM', is_relationship=True, permission_id='permission'),
-    ])
-    db.commit()
-    db.add_all([
-        Item(id=root_part_id, item_type_id='Part', config_id=root_part_id, generation=1, is_current=True, state='Draft', properties={'item_number': 'P-001', 'name': 'Fixture assembly'}),
-        Item(id='child', item_type_id='Part', config_id='child', generation=1, is_current=True, state='Draft', properties={'item_number': 'C-001', 'name': 'Fixture child'}),
-    ])
-    db.commit()
-    db.add(Item(id='line', item_type_id='Part BOM', config_id='line', generation=1, is_current=True, source_id=root_part_id, related_id='child', properties={'quantity': 1}))
-    db.add(AppLicense(id='read-lic', app_name='plm.bom_multitable', license_key='fixture-read', status='Active', tenant_id='default', org_id='fixture-org'))
-    db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
-    db.commit()
+if cfg.get('restore_existing') is True:
+    marker = root.parent / '.plm-managed-paired-owned'
+    assert root.name == 'restored-native' and marker.is_file() and not root.is_symlink(), 'owned restored root required'
+    ownership = json.loads(marker.read_text())
+    assert ownership['kind'] == 'plm-managed-companion-paired'
+    assert root.parent.name == 'plm-managed-paired-' + ownership['nonce']
+    for name in ('global.db', 'identity.db', 'tenant_default_fixture-org.db'):
+        database = root / name
+        assert database.is_file() and not database.is_symlink(), 'missing or linked restored database'
+else:
+    for eng in (business_db.engine, identity_engine, tenant_engine):
+        with eng.begin() as connection:
+            connection.exec_driver_sql('BEGIN')
+            (build_tenant_provisioning_metadata() if eng is tenant_engine else Base.metadata).create_all(connection)
+    with identity() as db:
+        db.add(Tenant(id='default', is_active=True))
+        db.commit()
+        db.add(Organization(id='fixture-org', tenant_id='default', is_active=True))
+        db.add(AuthUser(id=42, tenant_id='default', username='writer', is_active=True))
+        db.commit()
+        db.add(OrgMembership(tenant_id='default', org_id='fixture-org', user_id=42, roles=['engineer'], is_active=True))
+        db.add(AuthCredential(user_id=42, password_hash=hash_password('synthetic-browser-password')))
+        db.commit()
+    with business_db.SessionLocal() as db:
+        db.add(RBACUser(id=900, user_id=42, username='writer', is_active=True))
+        db.commit()
+    with tenant() as db:
+        db.add(Permission(id='permission'))
+        db.add(Access(id='ace', permission_id='permission', identity_id='900', can_get=True, can_update=True))
+        db.add_all([
+            ItemType(id='Part', permission_id='permission'),
+            ItemType(id='Part BOM', is_relationship=True, permission_id='permission'),
+        ])
+        db.commit()
+        db.add_all([
+            Item(id=root_part_id, item_type_id='Part', config_id=root_part_id, generation=1, is_current=True, state='Draft', properties={'item_number': 'P-001', 'name': 'Fixture assembly'}),
+            Item(id='child', item_type_id='Part', config_id='child', generation=1, is_current=True, state='Draft', properties={'item_number': 'C-001', 'name': 'Fixture child'}),
+        ])
+        db.commit()
+        db.add(Item(id='line', item_type_id='Part BOM', config_id='line', generation=1, is_current=True, source_id=root_part_id, related_id='child', properties={'quantity': 1}))
+        db.add(AppLicense(id='read-lic', app_name='plm.bom_multitable', license_key='fixture-read', status='Active', tenant_id='default', org_id='fixture-org'))
+        db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
+        db.commit()
 
 def item_snapshot(db):
     return sorted([{'id': item.id, 'generation': item.generation, 'state': item.state,
@@ -123,6 +135,7 @@ for line in sys.stdin:
             audits = db.query(MetaBomWritebackAudit).all()
             report = {
                 'write_audits': len(audits),
+                'snapshot_sharing_enabled': __import__('yuantus.config.settings', fromlist=['get_settings']).get_settings().PLM_BOM_SNAPSHOT_SHARE_ENABLED,
                 'write_subjects': sorted({row.user_id for row in audits}),
                 'write_lines': sorted({row.bom_line_id for row in audits}),
                 **({'snapshot_source_unchanged': item_snapshot(db) == initial_items} if initial_items is not None else {}),
