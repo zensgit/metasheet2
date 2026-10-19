@@ -6,6 +6,7 @@ import {
   ATTENDANCE_W4_CONNECTION_UNCERTAIN,
   AttendanceCleaningConnectionUncertainError,
   AttendanceW4ConnectionUncertainPrimitiveError,
+  attendanceW4ConnectionDiscardV1,
   isAttendanceW4ConnectionUncertainV1,
   markAttendanceW4ConnectionUncertainV1,
   runAttendanceResultOperationHandedOverV1,
@@ -134,6 +135,19 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
     expect(failure).toBeInstanceOf(AttendanceW4ConnectionUncertainPrimitiveError)
     expect(failure).toMatchObject({ code: 'W4C0_CONNECTION_UNCERTAIN', cause: 'boom' })
     expect(isAttendanceW4ConnectionUncertainV1(failure)).toBe(true)
+  })
+
+  it('the discard value is truthy for every uncertain value, so pg destroys the connection: a marked non-Error object travels as a registry error', () => {
+    const plain = { code: 'ATTENDANCE_TEST_PLAIN' }
+    expect(markAttendanceW4ConnectionUncertainV1(plain)).toBe(plain)
+    const discard = attendanceW4ConnectionDiscardV1(plain)
+    expect(discard).toBeInstanceOf(AttendanceW4ConnectionUncertainPrimitiveError)
+    expect((discard as { cause?: unknown }).cause).toBe(plain)
+    const error = markAttendanceW4ConnectionUncertainV1(new Error('marked')) as Error
+    expect(attendanceW4ConnectionDiscardV1(error)).toBe(error)
+    expect(attendanceW4ConnectionDiscardV1({ code: 'ATTENDANCE_TEST_UNMARKED' })).toBeUndefined()
+    expect(attendanceW4ConnectionDiscardV1(new Error('unmarked'))).toBeUndefined()
+    expect(attendanceW4ConnectionDiscardV1(undefined)).toBeUndefined()
   })
 
   it('the predicate recognises the two uncertain classes that predate the mark, not a plain error; marking is idempotent', () => {
