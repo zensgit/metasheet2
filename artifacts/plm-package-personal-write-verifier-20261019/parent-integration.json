@@ -1,0 +1,10 @@
+{
+  "source_merge": "b951ab5f37b0b96c89583bc899d60b217442539e",
+  "integration_doc": "4013daca93",
+  "verifier_source": "97e31900e52cde62ad558c0e09227436b110e99a",
+  "all_verifier_scripts_equal_source": true,
+  "successful_parent": "69a6d4ebd0b67409eed11d2e1c8c8058e89856c5",
+  "backend_census_inputs_equal_parent": true,
+  "parent_successful_checks": 23,
+  "history_replaced": false
+}
