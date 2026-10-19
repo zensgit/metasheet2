@@ -11785,6 +11785,13 @@ export class ApprovalProductService {
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
       }
+      // Settlement coordination: the handed-over mode exists for cancel-round instances only (r6.1
+      // §3.4; every other dispatch keeps its own transaction). Refused here, before any write, so the
+      // port's ROLLBACK leaves the row as it was, and the node-operation policy branch below stays
+      // out of reach of every handed-over dispatch, not only of the cancel-round action set.
+      if (handover && !isCancelRoundInstance(instance)) {
+        throw new Error('settlement coordination: only a cancel-round instance is dispatched handed over')
+      }
       // Fail-closed re-assert (lock §3 C-2). The SAME predicate, re-evaluated now that the
       // instance row is locked. Refuses in BOTH directions, and the direction that matters is
       // `none` → `required`: `attendance_requests.org_id` is NOT immutable (4 upsert writers set

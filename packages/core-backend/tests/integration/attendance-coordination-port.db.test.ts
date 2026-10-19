@@ -279,8 +279,9 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
         request: REQUEST,
         candidate: { org: crypto.randomUUID() },
         body: async (context) => {
+          // No error listener of the test's own: the coordinator's listener is what keeps the
+          // terminated backend from taking the process down (Codex S3-CX-01).
           const client = context.client as PoolClient
-          client.on('error', () => undefined)
           pid = await backendPid(client)
           await observer.query('SELECT pg_terminate_backend($1)', [pid])
           await waitForBackendGone(observer, pid)

@@ -30,11 +30,18 @@ describe('the policy-refusal branch is unreachable in handed-over mode (r6.1 §1
     for (const action of allowed) expect(ACTION_POLICY_KEYS[action as keyof typeof ACTION_POLICY_KEYS]).toBeNull()
   })
 
-  it('in dispatchAction the cancel-round gate runs before the policy check, and the policy branch refuses before committing when handed over', () => {
+  it('in dispatchAction a handed-over dispatch is refused unless the instance is a cancel round; the cancel-round gate runs before the policy check, and the policy branch refuses before committing when handed over', () => {
     const start = SOURCE.indexOf('  async dispatchAction(')
     const end = SOURCE.indexOf('      await rollbackQuietly(client)', start)
     const body = SOURCE.slice(start, end)
+    // Handed over, only a cancel-round instance gets past the row lock (Codex S3 §4 B): the refusal
+    // comes right after the instance row is read, before the gate and before any write.
+    const rowRead = body.indexOf("FOR UPDATE`")
+    const cancelRoundOnly = body.indexOf('if (handover && !isCancelRoundInstance(instance)) {')
+    expect(rowRead).toBeGreaterThan(-1)
+    expect(cancelRoundOnly).toBeGreaterThan(rowRead)
     const gate = body.indexOf('assertCancelRoundActionAllowed(instance, request.action)')
+    expect(cancelRoundOnly).toBeLessThan(gate)
     const policyKey = body.indexOf('const nodeOperationPolicyKey: NodeOperationPolicyActionKey | null = ACTION_POLICY_KEYS[request.action]')
     const policyBranch = body.indexOf('if (nodeOperationPolicyKey !== null && currentNodeKey) {')
     const refuse = body.indexOf('if (handover) throw new Error(\'settlement coordination: the node-operation policy refusal is unreachable when handed over\')')
