@@ -954,6 +954,10 @@ export default defineConfig({
       'tests/integration/attendance-coordination-port.db.test.ts',
       // P1-1 S4: every W4 runner-connection releaser destroys on the uncertainty mark (A05 / A06); same two-point wiring.
       'tests/integration/attendance-w4-release-destroy.db.test.ts',
+      // P1-1 S5: production inertness from the real composition root (A01) and the hot-path measurement (A12); same two-point wiring.
+      'tests/integration/attendance-p11-hotpath-compare.db.test.ts',
+      'tests/integration/attendance-p11-inertness-baseline.db.test.ts',
+      'tests/integration/attendance-p11-inertness-head.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
       // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane
