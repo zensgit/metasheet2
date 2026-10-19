@@ -1,0 +1,89 @@
+{
+  "source_sha": "b16f00a4d95fc53592178a456dedc0aa89be5daf",
+  "native_sha": "606eb7e517a2ad85e9fb97a44aa467a197f6ea20",
+  "actual": {
+    "owned": "/tmp/plm-managed-paired-vw20066t",
+    "nonce": "vw20066t",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 0,
+      "write_subjects": [],
+      "write_lines": [],
+      "snapshot_source_unchanged": true
+    },
+    "snapshot_share": {
+      "ok": true,
+      "explicit_native_confirmation": true,
+      "pre_confirmation_records": 0,
+      "published_bindings": 1,
+      "destination_grid_rendered": true,
+      "native_rpc": "real HTTP",
+      "target": "share-target",
+      "installed_image": false,
+      "native_storage": "isolated SQLite fixture",
+      "meta_storage": "actual PostgreSQL"
+    },
+    "snapshot_export": {
+      "ok": true,
+      "generic_csv_export": true,
+      "ungranted_export_forbidden": true,
+      "outsider_without_target_read_forbidden": true,
+      "unlink_acknowledged": true,
+      "retained_target_acl_export": true,
+      "new_share_after_unlink_refused": true
+    },
+    "snapshot_pre_review": {
+      "ok": true,
+      "imported_record": true,
+      "missing_submit_permission_forbidden": true,
+      "real_approval_engine": true,
+      "separate_meta_reviewer": true,
+      "actual_durable_event_replayed_twice": true,
+      "one_completion_notification": true,
+      "snapshot_record_unchanged": true
+    },
+    "meta": {
+      "ok": true,
+      "bom_line": "line",
+      "open_sessions": 1,
+      "dev_token_requests": 0,
+      "embed_requests": 0,
+      "ordinary_owner_start": true,
+      "meta_user": "meta-owner",
+      "native_subject_hint": "42",
+      "native_workspace_launch": true,
+      "root_part_id": "yur_public-part"
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "report_sha256": "68522fc175ee699f98b9ae3065048732bdf51bdfaede9cdd36bc9b1643c33e59",
+  "counterexamples": [
+    {
+      "proof": "/tmp/plm-snapshot-pre-review-20261019.json",
+      "reason": "Synthetic predecessor lacked actual namespace-admission table; refusal retained, actual migration subsequently applied.",
+      "cleanup": "owner nonce qvvl44va stopped and removed true"
+    },
+    {
+      "proof": "/tmp/plm-snapshot-pre-review-v2-20261019.json",
+      "reason": "Synthetic users.department and meta_bases.created_at missing; actual template-read gate refused. Fixture columns aligned with existing schema, no production gate changed.",
+      "cleanup": "owner nonce _30kj7xp stopped and removed true"
+    }
+  ],
+  "boundaries": [
+    "Actual imported record submitted through authenticated HTTP to existing record-approval route; template setup and reviewer dispatch use the real existing ApprovalProductService.",
+    "Completion delivered using the actual persisted durable event payload to the production completion sink twice; this is not a full background-consumer deployment.",
+    "Real native Uvicorn and Meta Node are separate source processes; existing PG14 suite separately verifies a fresh Node retry.",
+    "Native SQLite fixture, Meta PG15.17 and synthetic predecessor catalog do not qualify a complete fresh-install migration chain, image or production acceptance."
+  ]
+}
