@@ -44,7 +44,9 @@ import {
   type ApprovalSettlementCoordinationHandoverV1,
   type CancelRoundRolloutLockRequirementV1,
 } from '../../src/services/ApprovalProductService'
+import { CancelRoundOutletForbiddenError } from '../../src/services/ApprovalBridgeService'
 import { APPROVAL_POLICY_DENIED_ACTION, type ApprovalActionRequest } from '../../src/types/approval-product'
+import { CANCEL_ROUND_APPROVAL_NODE_KEY, CANCEL_ROUND_PUBLISHED_DEFINITION_ID } from '../../src/db/seeds/approval-cancel-round-published-definition'
 import { W4_TRANSACTION_LOCK_TIMEOUT_MS } from '../../src/attendance/w4c0-operation-contract'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { deriveSettlementCoordinationCapacityV1 } from '../../src/attendance/coordination/settlement-coordination-capacity'
@@ -1062,4 +1064,193 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     expect(await instanceState(round.roundInstanceId)).toEqual(before)
     expect(await policyDenials(round.roundInstanceId)).toBe(0)
   }, 120_000)
+
+  // ── S5 G4 (A10-P6): A10 ② as the record specified ─────────────────────────────────────────────
+  //
+  // DELTA-REVIEW §8 O-2 ② / TEST-MATRIX A10: the round's node carries all four `allow*` switches
+  // explicitly false, and transfer / add_sign / reduce_sign / return must STILL be refused by the
+  // cancel-round gate, with zero `policy_denied` rows and zero business writes. The leg above runs on
+  // the seed graph, whose node leaves the switches unset (absent ≡ allowed), so swapping the gate and
+  // the node-operation policy check is invisible there; here the policy check would refuse too, and
+  // only the gate's own refusal is accepted.
+  //
+  // How the switches get there. A cancel round's runtime graph is the seeded published definition
+  // that every cancel round shares (nothing in production authors it), so it is NOT edited here: a
+  // concurrent suite would read the edit. Instead a fixture template whose single approval node has
+  // the round's node key and the four switches false is published through the running server (the
+  // production authoring path, so the stored policy is what the server's own normaliser wrote), and
+  // THIS round's `published_definition_id` is pointed at it. Production never re-points a round; the
+  // re-point is the fixture construct, stated as such. The service reads the policy the way it always
+  // does — the instance's `published_definition_id` → `approval_published_definitions.runtime_graph`
+  // — and the positive control below reads it back through the same service (`getApproval`'s
+  // `nodeOperations`, built from the predicate the policy check uses) before any action is sent.
+
+  const ALL_SWITCHES_OFF = {
+    allowTransfer: false,
+    allowAddSign: false,
+    allowReduceSign: false,
+    allowReturn: false,
+    commentRequired: 'reject_only',
+  } as const
+
+  function cancelNodeSwitchesOffGraph(approverId: string) {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: CANCEL_ROUND_APPROVAL_NODE_KEY,
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: [approverId], approvalMode: 'all', nodeOperationPolicy: { ...ALL_SWITCHES_OFF } },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-cancel', source: 'start', target: CANCEL_ROUND_APPROVAL_NODE_KEY },
+        { key: 'e-cancel-end', source: CANCEL_ROUND_APPROVAL_NODE_KEY, target: 'end' },
+      ],
+    }
+  }
+
+  async function recordRows(instanceId: string): Promise<Array<{ id: string; action: string }>> {
+    const rows = await observer.query<{ id: string; action: string }>(
+      'SELECT id::text AS id, action FROM approval_records WHERE instance_id = $1 ORDER BY id',
+      [instanceId],
+    )
+    return rows.rows
+  }
+
+  async function seatRows(instanceId: string): Promise<Array<{ id: string; assignee_id: string; node_key: string | null; is_active: boolean }>> {
+    const rows = await observer.query<{ id: string; assignee_id: string; node_key: string | null; is_active: boolean }>(
+      'SELECT id::text AS id, assignee_id, node_key, is_active FROM approval_assignments WHERE instance_id = $1 ORDER BY id',
+      [instanceId],
+    )
+    return rows.rows
+  }
+
+  function gateRefusalOf(action: string, failure: unknown) {
+    const error = failure as { name?: unknown; message?: unknown; statusCode?: unknown; code?: unknown; details?: unknown } | null
+    return {
+      action,
+      isGateError: failure instanceof CancelRoundOutletForbiddenError,
+      name: error?.name,
+      message: error?.message,
+      statusCode: error?.statusCode,
+      code: error?.code,
+      details: error?.details,
+    }
+  }
+
+  function expectedGateRefusal(action: string) {
+    return {
+      action,
+      isGateError: true,
+      name: 'CancelRoundOutletForbiddenError',
+      message: `Cancel-round instances do not accept action "${action}"`,
+      statusCode: 409,
+      code: 'CANCEL_ROUND_OUTLET_FORBIDDEN',
+      details: undefined,
+    }
+  }
+
+  it('A10 ② all four allow switches false: transfer, add_sign, reduce_sign and return are refused by the cancel-round gate, handed over and on the default path, with no policy_denied row and nothing written', async () => {
+    const round = await pendingCancelRound('a10-switches-off')
+    const service = new ApprovalProductService()
+
+    // The round as created: the shared seed definition, stopped at the seed's node, switches unset.
+    const created = await observer.query<{ published_definition_id: string; current_node_key: string }>(
+      'SELECT published_definition_id::text AS published_definition_id, current_node_key FROM approval_instances WHERE id = $1',
+      [round.roundInstanceId],
+    )
+    expect(created.rows).toEqual([{ published_definition_id: CANCEL_ROUND_PUBLISHED_DEFINITION_ID, current_node_key: CANCEL_ROUND_APPROVAL_NODE_KEY }])
+    expect((await service.getApproval(round.roundInstanceId, round.approverId, []))?.nodeOperations).toEqual({
+      allowTransfer: true,
+      allowAddSign: true,
+      allowReduceSign: true,
+      allowReturn: true,
+      commentRequired: 'reject_only',
+    })
+
+    // The fixture definition, published through the server; the stored node policy is the four
+    // switches false (the normaliser kept every key).
+    const adminToken = await authToken(baseUrl, `wi-handover-admin-a10-off-${TS}-${Math.floor(Math.random() * 1e6)}`)
+    const fixtureTemplateId = await publishTemplate(adminToken, cancelNodeSwitchesOffGraph(round.approverId), 'a10-switches-off')
+    const definitions = await observer.query<{ id: string; runtime_graph: { nodes?: Array<{ key?: string; config?: Record<string, unknown> }> } }>(
+      'SELECT id::text AS id, runtime_graph FROM approval_published_definitions WHERE template_id = $1 AND is_active = TRUE',
+      [fixtureTemplateId],
+    )
+    expect(definitions.rows).toHaveLength(1)
+    const fixtureDefinition = definitions.rows[0]
+    const storedNode = (fixtureDefinition.runtime_graph.nodes ?? []).find((node) => node?.key === CANCEL_ROUND_APPROVAL_NODE_KEY)
+    expect(storedNode?.config?.nodeOperationPolicy).toEqual(ALL_SWITCHES_OFF)
+
+    const repointed = await observer.query(
+      'UPDATE approval_instances SET published_definition_id = $2::uuid WHERE id = $1',
+      [round.roundInstanceId, fixtureDefinition.id],
+    )
+    expect(repointed.rowCount).toBe(1)
+
+    // POSITIVE CONTROL: the service now resolves all four switches false for this round's seat, so the
+    // node-operation policy check WOULD refuse each of the four actions below if it ran first.
+    expect((await service.getApproval(round.roundInstanceId, round.approverId, []))?.nodeOperations).toEqual(ALL_SWITCHES_OFF)
+
+    const before = await instanceState(round.roundInstanceId)
+    const recordsBefore = await recordRows(round.roundInstanceId)
+    const seatsBefore = await seatRows(round.roundInstanceId)
+    expect(before?.status).toBe('pending')
+    expect(seatsBefore.filter((seat) => seat.is_active).map((seat) => ({ assignee_id: seat.assignee_id, node_key: seat.node_key }))).toEqual([
+      { assignee_id: round.approverId, node_key: CANCEL_ROUND_APPROVAL_NODE_KEY },
+    ])
+
+    const requests: ApprovalActionRequest[] = [
+      { action: 'transfer', targetUserId: `wi-handover-target-${TS}`, comment: 'transfer' } as ApprovalActionRequest,
+      { action: 'add_sign', targetUserIds: [`wi-handover-target-${TS}`], comment: 'add sign' } as ApprovalActionRequest,
+      { action: 'reduce_sign', targetAssignmentUserId: round.approverId, comment: 'reduce sign' } as ApprovalActionRequest,
+      { action: 'return', targetNodeKey: 'start', comment: 'return' } as ApprovalActionRequest,
+    ]
+    for (const request of requests) {
+      // Handed over (the A10 mode).
+      const w = world()
+      try {
+        const handedOverFailure = await coordinatedTransactionV1({
+          coordinator: w.coordinator,
+          request: READ_COMMITTED,
+          candidate: { org: crypto.randomUUID() },
+          transactionDepth: () => 0,
+          body: (context) =>
+            drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+              new ApprovalProductService().dispatchAction(
+                round.roundInstanceId,
+                request,
+                { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+                handover,
+              ),
+            ),
+        }).then(
+          () => null,
+          (error) => error,
+        )
+        expect(gateRefusalOf(request.action, handedOverFailure)).toEqual(expectedGateRefusal(request.action))
+        expectOneRolledBackAttempt(w.attempts)
+        expectBaseline(w.coordinator)
+      } finally {
+        await w.end()
+      }
+
+      // The default path on the same round. Here a policy refusal would COMMIT its `policy_denied`
+      // row before answering, so the zero-row assertion below discriminates on this path.
+      const defaultFailure = await new ApprovalProductService()
+        .dispatchAction(round.roundInstanceId, request, { userId: round.approverId, userName: 'default-path approver', roles: [] })
+        .then(
+          () => null,
+          (error) => error,
+        )
+      expect(gateRefusalOf(request.action, defaultFailure)).toEqual(expectedGateRefusal(request.action))
+    }
+
+    expect(await policyDenials(round.roundInstanceId)).toBe(0)
+    expect(await instanceState(round.roundInstanceId)).toEqual(before)
+    expect(await recordRows(round.roundInstanceId)).toEqual(recordsBefore)
+    expect(await seatRows(round.roundInstanceId)).toEqual(seatsBefore)
+    expect(await roundOutcome(round.roundInstanceId)).toBe('pending')
+  }, 180_000)
 })

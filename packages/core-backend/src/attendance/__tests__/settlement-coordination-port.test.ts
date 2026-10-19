@@ -369,15 +369,20 @@ describe('coordinated transaction port: restarts (P11-A07)', () => {
 })
 
 describe('coordinated transaction port: nesting (P11-A11)', () => {
-  it('a coordinated transaction inside a body is refused, and so is any quota acquisition there', async () => {
+  // A11 「递归取配额两种模式均拒绝」: the refusal must not depend on the main-pool nesting mode, so the
+  // case runs under both. The file's afterEach puts the mode back to 'count' after each run.
+  it.each(['count', 'throw'] as const)('a coordinated transaction inside a body is refused, and so is any quota acquisition there - nesting mode %s', async (mode) => {
     const { coordinator, baseline } = setup()
+    setSettlementCoordinationNestingModeV1(mode)
+    const countedBefore = settlementCoordinationNestedMainPoolAccessesV1()
     const errors: unknown[] = []
-    await coordinatedTransactionV1({
+    const outer = await coordinatedTransactionV1({
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
+      transactionDepth: () => 0,
       body: async () => {
-        await coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: 'legacy-org-inner' }, body: async () => 'inner' }).catch((error) => errors.push(error))
+        await coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: 'legacy-org-inner' }, transactionDepth: () => 0, body: async () => 'inner' }).catch((error) => errors.push(error))
         try {
           coordinator.openUnit(REQUEST)
         } catch (error) {
@@ -386,9 +391,19 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
         return 'outer'
       },
     })
+    expect(outer).toBe('outer')
     expect(errors).toHaveLength(2)
     for (const error of errors) expect(error).toBeInstanceOf(AttendanceCoordinationNestingError)
-    expect((errors as AttendanceCoordinationNestingError[]).map((error) => error.kind)).toEqual(['context', 'quota'])
+    expect(
+      (errors as AttendanceCoordinationNestingError[]).map((error) => ({ code: error.code, kind: error.kind, detail: error.detail, message: error.message })),
+    ).toEqual([
+      { code: 'ATTENDANCE_COORDINATION_NESTED', kind: 'context', detail: null, message: 'ATTENDANCE_COORDINATION_NESTED:context' },
+      { code: 'ATTENDANCE_COORDINATION_NESTED', kind: 'quota', detail: null, message: 'ATTENDANCE_COORDINATION_NESTED:quota' },
+    ])
+    // Neither refusal is a main-pool access: nothing is counted in either mode.
+    expect(settlementCoordinationNestedMainPoolAccessesV1()).toBe(countedBefore)
+    // The mode the case ran under is still the one it set (setting it again returns the previous mode).
+    expect(setSettlementCoordinationNestingModeV1(mode)).toBe(mode)
     baseline()
   })
 
