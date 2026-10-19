@@ -18,6 +18,10 @@ import {
   type PersonalBomWriteOperation,
   type PersonalBomWriteTarget,
 } from '../services/plm-personal-bom-write-wire'
+import {
+  personalChangeReadManagementUrl, preparePersonalChangeRead, parsePersonalChangeRead,
+  PlmPersonalChangeReadError, type PersonalChangeReadAuthority, type PersonalChangeReadCall,
+} from '../services/plm-personal-bom-change-read-wire'
 import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
 import { createHash } from 'node:crypto'
@@ -2744,6 +2748,27 @@ export class PLMAdapter extends HTTPAdapter {
     } catch (error) {
       if (error instanceof PlmPersonalBomWriteError) throw error
       throw new PlmPersonalBomWriteError(503, 'PLM_BOM_WRITE_UNAVAILABLE')
+    }
+  }
+
+  /** Frozen persisted-source authority only. No shared interceptor, cached config, redirect or retry. */
+  personalBomChangeReadManagementUrl(sourceConfig: unknown, authority: PersonalChangeReadAuthority): string {
+    return personalChangeReadManagementUrl(sourceConfig, authority)
+  }
+
+  async personalBomChangeReadRequest(call: PersonalChangeReadCall, grant: string, authority: PersonalChangeReadAuthority) {
+    if (this.mockMode) throw new PlmPersonalChangeReadError(403, 'PLM_CHANGE_READ_FORBIDDEN')
+    const prepared = preparePersonalChangeRead(call, grant, authority)
+    try {
+      const response = await fetch(prepared.url, { method: prepared.method, headers: prepared.headers,
+        ...(prepared.body === undefined ? {} : { body: prepared.body }),
+        redirect: 'error', signal: AbortSignal.timeout(8000) })
+      if (!response.ok) throw new PlmPersonalChangeReadError(
+        [401,403,404,409].includes(response.status) ? response.status : 503, 'PLM_CHANGE_READ_UNAVAILABLE')
+      return parsePersonalChangeRead(prepared, response.status, await response.text())
+    } catch (error) {
+      if (error instanceof PlmPersonalChangeReadError) throw error
+      throw new PlmPersonalChangeReadError(503, 'PLM_CHANGE_READ_UNAVAILABLE')
     }
   }
 
