@@ -654,6 +654,21 @@ describe('settlement coordinator: nothing is handed over once the budget is gone
     baseline()
   })
 
+  it('a connection that arrives just as the budget runs out goes back untried', async () => {
+    const { clock, pool, coordinator, baseline } = setup({ connectTimeoutMs: 10_000 })
+    pool.manual = true
+    // Scheduled before the race timer, so at 300 ms the connect wins and spends the whole budget.
+    clock.setTimer(300, () => void pool.pending[0].succeed())
+    const unit = coordinator.openUnit({ ...REQUEST, budgetMs: 300 })
+    const acquiring = track(unit.acquire(ORG))
+    await clock.advance(300)
+    expect((acquiring.error as SettlementCoordinationAcquireError).code).toBe('ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE')
+    expect(pool.clients[0].calls).toEqual([])
+    expect(pool.clients[0].released).toEqual([null])
+    unit.close()
+    baseline()
+  })
+
   it('an unlock that does not confirm both releases destroys the connection', async () => {
     const { clock, world, pool, coordinator, baseline } = setup()
     world.before.set('SELECT idle', () => clock.sleep(6000))
@@ -710,8 +725,8 @@ describe('settlement coordinator: one acquisition at a time, and close() while o
     baseline()
   })
 
-  it('close() in the same turn as the quota is granted: the granted lease goes straight back', async () => {
-    const { coordinator, ledger, baseline } = setup({ txnSlots: 2, orgTxnSlots: 1 })
+  it('close() in the same turn as the quota is granted: the granted lease goes straight back, nothing is borrowed', async () => {
+    const { pool, coordinator, ledger, baseline } = setup({ txnSlots: 2, orgTxnSlots: 1 })
     const holder = coordinator.openUnit(REQUEST)
     const held = await holder.acquire(ORG)
     const waiting = coordinator.openUnit(REQUEST)
@@ -722,6 +737,7 @@ describe('settlement coordinator: one acquisition at a time, and close() while o
     waiting.close()
     await settle()
     expect(acquiring.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    expect(pool.connects).toBe(1)
     expect(ledger.snapshot().inFlight.short).toBe(1)
     holder.close()
     baseline()
