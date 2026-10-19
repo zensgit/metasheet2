@@ -67,3 +67,14 @@ pending personal-write/retired-grant coupled recovery remain separate acceptance
 Keep the source and subsequent documentation heads distinct and verify exact-head
 CI after publication. Draft only; no merge, deployment, production enablement or
 claim that the master goal is complete.
+
+## Exact-source CI census repair
+
+Source `8365e42ab0fdc597ce5771c77972a773ad838640` completed 18 checks successfully.
+The managed companion consumer stopped at its exact unit census: all 119 tests
+passed, while its pre-existing expected count was 93. The 26 added adapter
+counterexamples account for the difference. The workflow now requires exactly
+119 passed/total tests with zero failures, pending or todo; its assertion logic
+and PostgreSQL/web acceptance thresholds are unchanged. The same seven-file
+suite and the original assertion script pass locally on Node 20. This is a CI
+census correction, not installed-image or full-goal acceptance.

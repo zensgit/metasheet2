@@ -95,7 +95,7 @@ jobs:
             tests/unit/plm-bom-review-wire.test.ts \
             tests/unit/plm-managed-snapshot-share-wire.test.ts \
             tests/unit/plm-managed-snapshot-share-transport.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 93
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 119
 
       - name: Start owned socket PostgreSQL 16
         run: |

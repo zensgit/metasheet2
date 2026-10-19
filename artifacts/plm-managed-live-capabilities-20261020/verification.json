@@ -54,5 +54,16 @@
   "actual_eco_dom_qualified": false,
   "postgres_concurrency_qualified": false,
   "whole_goal_qualified": false,
-  "production_qualified": false
+  "production_qualified": false,
+  "ci_census_repair": {
+    "source": "8365e42ab0fdc597ce5771c77972a773ad838640",
+    "run": 39293974198,
+    "job": 118201578928,
+    "source_checks_success": 18,
+    "failure": "All 119 unit tests passed; exact previous census expected93",
+    "fixed_exact_census": 119,
+    "local_report": "/tmp/plm-meta6459-consumer-unit-fixed-20261020.json",
+    "original_assertion_script_unchanged": true,
+    "postgres_web_thresholds_unchanged": true
+  }
 }
