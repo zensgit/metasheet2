@@ -23,8 +23,11 @@
 //   J-04 tenancy / permission: a floor operator, a foreign action and a tenant mismatch are refused
 //        on the enqueue AND the poll; a job is read back only by whoever started it.
 //   J-05 one in-flight dry-run per project: a second enqueue while one runs is 409 IN_PROGRESS
-//        (`ownJob` says whose), costs no credential load; it frees on completion; a guard that refuses
-//        after the slot was claimed frees it too.
+//        (`ownJob` says whose — the CALLER, whichever opt-in value they pressed with), costs no
+//        credential load, and a request-carried `?workspaceId=` cannot split the slot; it frees on
+//        completion; a guard that refuses after the slot was claimed frees it too.
+//   J-05b the window between the slot claim and the `running` record (B2a + credential load): the
+//        same caller's second press is 409 ownJob and its poll already answers `running`, never 404.
 //   J-06 the project sheet's registry row + overview are stamped ONCE, from inside the job — previewed
 //        on success, refused + code on a typed failure — and the stored failure is the synchronous
 //        route's exact error envelope.
@@ -93,6 +96,7 @@ function mount(options = {}) {
       async getExternalSystem(input = {}) { return system(input) },
       async getExternalSystemForAdapter(input = {}) {
         identity.push(['load', input.tenantId || null, input.principal || null])
+        if (holder.loadGate) await holder.loadGate
         if (holder.failLoads > 0) {
           holder.failLoads -= 1
           throw Object.assign(new Error('synthetic credential store refusal'), { status: 503, code: 'SYNTHETIC_CREDENTIALS_UNAVAILABLE' })
@@ -236,6 +240,13 @@ test('J-02 every refusal is the same status, body and host-call trace on both la
     { name: 'an unregistered project (switch on)', user: PULLER, body: { parameters: { projectNo: 'PRJ-R67-NOPE' } } },
     { name: 'an archived project', user: PULLER, body: { parameters: { projectNo: 'PRJ-R67-ARCH' } }, seed: (h) => h.seedRegistryRow('PRJ-R67-ARCH', { archived: true }) },
     { name: 'parameters that are not an object', user: PULLER, body: { parameters: 'PRJ-R67-J1' } },
+    // THE ONE PLACEMENT DIFFERENCE, pinned rather than hidden. The job lane validates `parameters` at its
+    // slot claim (it needs the project number to key the slot), i.e. after the tenant wall and BEFORE the
+    // B2a fence; the synchronous route only meets the same validator inside the plan, after the
+    // credential load (and stamps `refused` there). Same status, same body; the job lane's host calls
+    // are a strict PREFIX of the synchronous route's — it stops earlier and never loads a credential.
+    { name: 'an unknown parameters key', user: PULLER, body: { parameters: { projectNo: PROJECT, sheetId: 'sheet_x' } }, seed: (h) => h.seedRegistryRow(PROJECT), jobStopsEarlier: true },
+    { name: 'a parameters object with no projectNo', user: PULLER, body: { parameters: {} } },
     {
       name: 'the S1 wall (a registered sheet the registry does not attribute to the caller)',
       user: PULLER,
@@ -266,7 +277,15 @@ test('J-02 every refusal is the same status, body and host-call trace on both la
     assert.ok(answers.sync.status >= 400, `${scenario.name}: the scenario is a refusal (got ${answers.sync.status})`)
     assert.equal(answers.job.status, answers.sync.status, `${scenario.name}: same status`)
     assert.deepEqual(answers.job.body, answers.sync.body, `${scenario.name}: same body`)
-    assert.deepEqual(answers.job.trace, answers.sync.trace, `${scenario.name}: same host calls, same order`)
+    if (scenario.jobStopsEarlier) {
+      for (const [channel, calls] of Object.entries(answers.job.trace)) {
+        assert.deepEqual(calls, answers.sync.trace[channel].slice(0, calls.length), `${scenario.name}: ${channel} is a prefix of the synchronous trace`)
+      }
+      assert.deepEqual(answers.job.trace.identity, [], `${scenario.name}: the job lane refused before any credential load`)
+      assert.ok(answers.sync.trace.identity.length > 0, `${scenario.name}: calibration — the synchronous route refused later`)
+    } else {
+      assert.deepEqual(answers.job.trace, answers.sync.trace, `${scenario.name}: same host calls, same order`)
+    }
     assert.equal(answers.job.jobKeys, 0, `${scenario.name}: a refused enqueue leaves no job record`)
   }
 
@@ -399,9 +418,24 @@ test('J-05 one in-flight dry-run per project: 409 while running (ownJob says who
     const other = await startJob(h, PULLER_B)
     assert.equal(other.statusCode, 409, JSON.stringify(other.body))
     assert.deepEqual({ ...other.body.error.details }, { status: 'running', ownJob: false })
-    // The value-bearing variant of the same project is the same target.
+    // The value-bearing variant of the same project is the same target — and still the caller's OWN
+    // trial, so the page attaches instead of telling them someone else is pulling.
     const flagged = await startJob(h, PULLER, dryRunBody({ includeMissingComponents: true }))
     assert.equal(flagged.statusCode, 409, JSON.stringify(flagged.body))
+    assert.deepEqual({ ...flagged.body.error.details }, { status: 'running', ownJob: true })
+    // A request-carried workspace is not a different target: no second trial of the project.
+    for (const workspaceId of ['workspace-other', 'workspace-default']) {
+      const steered = await startJob(h, PULLER_B, dryRunBody(), { tenantId: TENANT, workspaceId })
+      assert.equal(steered.statusCode, 409, `?workspaceId=${workspaceId}: ${JSON.stringify(steered.body)}`)
+      assert.equal(steered.body.error.code, 'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS')
+    }
+    const ownSteered = await startJob(h, PULLER, dryRunBody(), { tenantId: TENANT, workspaceId: 'workspace-other' })
+    assert.equal(ownSteered.statusCode, 409, JSON.stringify(ownSteered.body))
+    assert.deepEqual({ ...ownSteered.body.error.details }, { status: 'running', ownJob: true })
+    // …and the caller's poll finds the one job whatever workspace it names.
+    const steeredPoll = await pollJob(h, PULLER, { tenantId: TENANT, projectNo: PROJECT, workspaceId: 'workspace-other' })
+    assert.equal(steeredPoll.statusCode, 200, JSON.stringify(steeredPoll.body))
+    assert.equal(steeredPoll.body.data.status, 'running')
     assert.equal(h.identity.length, loadsBefore, 'a refused second enqueue loaded no credential and built no adapter')
     assert.equal((await pollJob(h, PULLER)).body.data.status, 'running', 'the running job is untouched')
 
@@ -425,6 +459,38 @@ test('J-05 one in-flight dry-run per project: 409 while running (ownJob says who
     assert.equal(retried.statusCode, 202, `the refused enqueue did not keep the project: ${JSON.stringify(retried.body)}`)
     await settle(g)
   } finally { g.restore() }
+})
+
+// ── J-05b ────────────────────────────────────────────────────────────────────────────────────────
+test('J-05b between the slot claim and the running record (B2a + credential load) a second own press attaches and its poll answers running, never 404', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    let releaseLoad
+    h.holder.loadGate = new Promise((resolve) => { releaseLoad = resolve })
+    // The first enqueue is held INSIDE the credential load: slot claimed, no `running` record yet.
+    const first = startJob(h, PULLER)
+    for (let i = 0; i < 20 && h.identity.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(h.identity.length, 1, 'calibration: the first enqueue is inside the credential load')
+    assert.deepEqual(jobKeysIn(h.context.storage), [], 'calibration: no running record has been written yet')
+
+    const again = await startJob(h, PULLER)
+    assert.equal(again.statusCode, 409, JSON.stringify(again.body))
+    assert.deepEqual({ ...again.body.error.details }, { status: 'running', ownJob: true })
+    const polled = await pollJob(h, PULLER)
+    assert.equal(polled.statusCode, 200, `the attached poll finds the claimed job: ${JSON.stringify(polled.body)}`)
+    assert.equal(polled.body.data.status, 'running')
+    // Another caller's poll does not see it — the window answers only its own record.
+    assert.equal((await pollJob(h, PULLER_B)).statusCode, 404)
+
+    h.holder.loadGate = null
+    releaseLoad()
+    const started = await first
+    assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+    assert.equal(started.body.data.jobId, polled.body.data.jobId, 'the window answered the job that was then launched')
+    await settle(h)
+    assert.equal((await pollJob(h, PULLER)).body.data.status, 'succeeded')
+  } finally { h.restore() }
 })
 
 // ── J-06 ─────────────────────────────────────────────────────────────────────────────────────────
@@ -513,7 +579,7 @@ test('J-08 a running record no live slot backs is INTERRUPTED and frees the proj
   const realNow = Date.now
   try {
     h.seedRegistryRow(PROJECT)
-    const recordKey = dryRunJobs.__internals.dryRunJobRecordKey({ tenantId: TENANT, workspaceId: 'workspace-default', actionId: ACTION_ID, projectNo: PROJECT, principal: PULLER.id, valueBearing: false })
+    const recordKey = dryRunJobs.__internals.dryRunJobRecordKey({ tenantId: TENANT, actionId: ACTION_ID, projectNo: PROJECT, principal: PULLER.id, valueBearing: false })
     await h.context.storage.set(recordKey, { jobId: 'dry-run-earlier-process', status: 'running', startedAt: new Date(Date.now() - 5000).toISOString(), finishedAt: null, instanceId: 'an-earlier-process' })
     const polled = await pollJob(h, PULLER)
     assert.equal(polled.statusCode, 200, JSON.stringify(polled.body))

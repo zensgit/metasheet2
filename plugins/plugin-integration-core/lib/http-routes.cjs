@@ -5971,10 +5971,11 @@ function requireStockPreparationAudit() {
     if (!mark) return null
     // A job names its target; the plan's own validator, so a malformed number is the same 400.
     const { projectNo } = normalizeActionParameters(body.parameters)
+    // No workspace: it is a request query field with no registry behind it, so it may not split the
+    // project's one slot (fix round 1). The tenant is the one the dry-run's own guards derived.
     mark.ticket = reserveDryRunJob({
       storage: context.storage,
       tenantId,
-      workspaceId: resolveWorkspaceId(req, {}) || 'workspace-default',
       actionId,
       projectNo,
       principal: requestPrincipal(req),
@@ -7312,7 +7313,6 @@ function requireStockPreparationAudit() {
       return sendOk(res, await readDryRunJob({
         storage: context.storage,
         tenantId: dryRunTenantId,
-        workspaceId: resolveWorkspaceId(req, {}) || 'workspace-default',
         actionId,
         projectNo,
         principal: requestPrincipal(req),

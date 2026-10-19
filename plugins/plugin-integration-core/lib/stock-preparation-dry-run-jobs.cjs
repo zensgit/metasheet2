@@ -23,11 +23,16 @@
 // client advances a job by POSTing `…/run`, synchronously per call), so its run route would hit the
 // same 60 s cliff; this lane adds the one thing it does not have — a detached in-process run.
 //
-// ONE IN-FLIGHT DRY-RUN PER TARGET (tenant × workspace × action × project number), across callers,
+// ONE IN-FLIGHT DRY-RUN PER TARGET (tenant × action × project number), across callers,
 // answered the way the large-BOM apply lane answers a concurrent chunk: 409 with a status token. The
 // slot is in-process (`ecosystem.config.cjs` runs one forked backend); a record that says `running`
 // but has no live slot in THIS process is reported `failed` / `STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED`
 // (the process restarted under it) and frees the target.
+//
+// NO WORKSPACE IN EITHER KEY (fix round 1). `workspaceId` is a request query field this plugin has no
+// registry to validate against, so keying the slot by it let `?workspaceId=a`, `=b` and none run three
+// trials of one project side by side — three PLM reads, the exact load this lane exists to stop. The
+// tenant is the proven/derived one the route hands in; the project number is the target.
 //
 // ONE RECORD PER (caller, target, value-bearing?) — a new enqueue overwrites the previous record, so
 // the store is bounded without a sweeper. A finished record is kept for the dry-run token's own TTL
@@ -90,23 +95,21 @@ function digest(parts) {
 
 function requiredScope(input = {}) {
   const tenantId = optionalString(input.tenantId)
-  const workspaceId = optionalString(input.workspaceId)
   const actionId = optionalString(input.actionId)
   const projectNo = optionalString(input.projectNo)
-  if (!tenantId || !workspaceId || !actionId || !projectNo) {
+  if (!tenantId || !actionId || !projectNo) {
     throw new StockPreparationDryRunJobError(
       422,
       'STOCK_PREPARATION_DRY_RUN_JOB_SCOPE_REQUIRED',
-      'the background dry-run needs a tenant, workspace, action and project number',
+      'the background dry-run needs a tenant, action and project number',
       {
         tenantIdPresent: Boolean(tenantId),
-        workspaceIdPresent: Boolean(workspaceId),
         actionIdPresent: Boolean(actionId),
         projectNoPresent: Boolean(projectNo),
       },
     )
   }
-  return { tenantId, workspaceId, actionId, projectNo }
+  return { tenantId, actionId, projectNo }
 }
 
 function requiredPrincipal(value) {
@@ -125,14 +128,14 @@ function requiredPrincipal(value) {
 /** The in-flight slot key: one per target, across callers. In-process only, never persisted. */
 function dryRunJobTargetKey(input = {}) {
   const scope = requiredScope(input)
-  return digest(['target', scope.tenantId, scope.workspaceId, scope.actionId, scope.projectNo])
+  return digest(['target', scope.tenantId, scope.actionId, scope.projectNo])
 }
 
 /** The durable record key: one per caller × target × value-bearing. A digest, never a clear value. */
 function dryRunJobRecordKey(input = {}) {
   const scope = requiredScope(input)
   const principal = requiredPrincipal(input.principal)
-  return `${DRY_RUN_JOB_KEY_PREFIX}${digest(['record', scope.tenantId, scope.workspaceId, scope.actionId, scope.projectNo, principal, input.valueBearing === true])}`
+  return `${DRY_RUN_JOB_KEY_PREFIX}${digest(['record', scope.tenantId, scope.actionId, scope.projectNo, principal, input.valueBearing === true])}`
 }
 
 function isoAt(ms) {
@@ -169,6 +172,9 @@ function reserveDryRunJob(input = {}) {
   const storage = ensureDurableDryRunJobStorage(input.storage)
   const targetKey = dryRunJobTargetKey(input)
   const recordKey = dryRunJobRecordKey(input)
+  // WHO started it, apart from which record it writes: the same caller pressing with the other
+  // `includeMissingComponents` value is still looking at their OWN trial (fix round 1).
+  const ownerKey = digest(['owner', requiredPrincipal(input.principal)])
   const inFlight = inFlightMap(storage)
   const held = inFlight.get(targetKey)
   if (held) {
@@ -176,7 +182,7 @@ function reserveDryRunJob(input = {}) {
       409,
       'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS',
       'a dry-run for this project is already running',
-      { status: 'running', ownJob: held.recordKey === recordKey },
+      { status: 'running', ownJob: held.ownerKey === ownerKey },
     )
   }
   const jobId = optionalString(typeof input.createJobId === 'function' ? input.createJobId() : '') || `dry-run-${crypto.randomUUID()}`
@@ -184,6 +190,8 @@ function reserveDryRunJob(input = {}) {
     jobId,
     targetKey,
     recordKey,
+    ownerKey,
+    reservedAt: isoAt(nowMs(input)),
     storage,
     detached: false,
     released: false,
@@ -256,6 +264,13 @@ async function readDryRunJob(input = {}) {
   const targetKey = dryRunJobTargetKey(input)
   const recordKey = dryRunJobRecordKey(input)
   const atMs = nowMs(input)
+  // THE WINDOW BETWEEN CLAIM AND LAUNCH (fix round 1). The slot is claimed before the B2a fence and the
+  // credential load, the `running` record is written only after them — so a second press by the same
+  // caller in between is told 409 `ownJob` and attaches, and its first poll must find the job, not 404.
+  const pending = inFlightMap(storage).get(targetKey)
+  if (pending && !pending.detached && pending.recordKey === recordKey) {
+    return publicDryRunJob({ jobId: pending.jobId, status: 'running', startedAt: pending.reservedAt, finishedAt: null }, atMs)
+  }
   const record = await storage.get(recordKey)
   if (!record || typeof record !== 'object' || !STOCK_PREPARATION_DRY_RUN_JOB_STATUSES.includes(record.status)) {
     throw new StockPreparationDryRunJobError(404, 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND', 'no dry-run job for this project', {})
