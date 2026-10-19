@@ -133,6 +133,11 @@ export function shouldLogSettlementCoordinationAttemptV1(record: SettlementCoord
 export interface SettlementCoordinationStatsV1 {
   /** `onAttempt` observers that threw; an observer never changes an acquisition's outcome. */
   attemptObserverFailures: number
+  /**
+   * Recheck restarts that ran out on an entry with no registered conflict code and answered the
+   * fallback code (S1 note 8: never silent). Alerting on it belongs to P1-7.
+   */
+  scopeChangedFallbacks: number
 }
 
 export interface SettlementCoordinatorDepsV1 {
@@ -558,6 +563,7 @@ export class SettlementCoordinationUnitV1 {
       } else {
         this.#recheckRestarts += 1
         if (this.#recheckRestarts > SETTLEMENT_COORDINATION_INNER_RESTART_LIMIT) {
+          if (input.conflictCode === undefined) this.#deps.stats.scopeChangedFallbacks += 1
           throw new SettlementCoordinationScopeChangedError(input.conflictCode ?? SETTLEMENT_COORDINATION_SCOPE_CHANGED)
         }
       }
@@ -938,6 +944,6 @@ export function createSettlementCoordinatorV1(input: {
     random: input.random ?? Math.random,
     connectTimeoutMs: input.connectTimeoutMs,
     onAttempt: input.onAttempt,
-    stats: { attemptObserverFailures: 0 },
+    stats: { attemptObserverFailures: 0, scopeChangedFallbacks: 0 },
   })
 }

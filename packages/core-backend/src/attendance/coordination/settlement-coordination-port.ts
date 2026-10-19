@@ -85,8 +85,11 @@ export interface SettlementCoordinatedTransactionOptionsV1<T> {
   readonly body: (context: SettlementCoordinationBodyContextV1) => Promise<T | SettlementCoordinationDeferredResultV1<T>>
   /** 40001 / 40P01 at COMMIT: `'restart'` (default) or the entry's error, for entries that must not retry. */
   readonly onRetryableCommit?: 'restart' | ((error: unknown) => unknown)
-  /** `ConnectionPool` transaction depth: the port refuses to start inside a pool transaction. */
-  readonly transactionDepth?: () => number
+  /**
+   * `ConnectionPool` transaction depth (§3.2: the coordinator's entry asserts it is zero). Required, so an
+   * entry wired in production cannot forget it; an entry outside the main process passes `() => 0`.
+   */
+  readonly transactionDepth: () => number
   /** A post-commit callback failed; the transaction stays committed and the remaining callbacks still run. */
   readonly onCallbackError?: (error: unknown) => void
 }
@@ -263,7 +266,11 @@ export async function handOverToSuspendedMethodV1<T>(
   })
   committed.catch(() => undefined)
   context.onAbandon(() => abandonCommit(new SettlementCoordinationAttemptAbandonedError()))
+  let asked = false
   const running = start(async () => {
+    // One COMMIT per attempt: a second call is a programming error in the method, never a second COMMIT.
+    if (asked) throw new Error('settlement coordination: commit() called twice in one attempt')
+    asked = true
     requestCommit()
     await committed
   })

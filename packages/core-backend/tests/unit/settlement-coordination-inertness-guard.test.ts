@@ -67,8 +67,10 @@ function walk(dir: string, out: string[]): void {
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return
+  } catch (error) {
+    // Only a root that does not exist is skipped; any other failure would shrink the population silently.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
   }
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue
@@ -104,8 +106,11 @@ function coordinationImports(text: string): Array<{ specifier: string; names: st
   }
   const required = /\brequire\(\s*['"]([^'"]*coordination\/[^'"]*)['"]\s*\)/g
   for (const match of text.matchAll(required)) found.push({ specifier: match[1], names: ['<require>'] })
-  const dynamic = /\bimport\(\s*['"]([^'"]*coordination\/[^'"]*)['"]\s*\)/g
+  const dynamic = /\bimport\(\s*['"`]([^'"`]*coordination\/[^'"`]*)['"`]\s*\)/g
   for (const match of text.matchAll(dynamic)) found.push({ specifier: match[1], names: ['<dynamic import>'] })
+  // A bare side-effect import runs the module without naming anything it exports.
+  const bare = /(?:^|[;\n])\s*import\s+['"]([^'"]*coordination\/[^'"]*)['"]/g
+  for (const match of text.matchAll(bare)) found.push({ specifier: match[1], names: ['<side-effect import>'] })
   return found
 }
 
@@ -161,8 +166,21 @@ describe('settlement coordination stays out of production call paths (P11-A01, s
       "export * from './coordination/settlement-coordination-budget'",
       "const g = require('../coordination/settlement-coordination-key')",
       "const h = await import('./coordination/settlement-coordination-clock')",
+      'const i = await import(`./coordination/settlement-coordination-cli`)',
+      "import './attendance/coordination/settlement-coordination-cli'",
     ].join('\n')
-    expect(coordinationImports(sample).flatMap((entry) => entry.names)).toEqual(['a', 'B', 'c', 'E', 'f', '*', '<require>', '<dynamic import>'])
+    expect(coordinationImports(sample).flatMap((entry) => entry.names)).toEqual([
+      'a',
+      'B',
+      'c',
+      'E',
+      'f',
+      '*',
+      '<require>',
+      '<dynamic import>',
+      '<dynamic import>',
+      '<side-effect import>',
+    ])
   })
 })
 
@@ -311,6 +329,8 @@ function checkCoordinationCallSitesV1(sources: ReadonlyArray<{ relative: string;
           }
         } else if (isActivationName(node.text) && !isOwnDeclarationName(node)) {
           report(node, 'activation reference in production')
+        } else if (node.text === 'ApprovalSettlementCoordinationHandoverV1' && relative !== APS_FILE) {
+          report(node, 'handover type outside the approval service')
         }
       }
       if (ts.isStringLiteralLike(node) && (node.text === HANDED_OVER_OPTION || isActivationName(node.text))) {
@@ -363,8 +383,97 @@ describe('settlement coordination call sites on the syntax tree (P11-A01, static
       'activation reference in production',
     ])
     expect(check(route, 'const open = coordinatedTransactionV1; void open')).toEqual(['activation reference in production'])
+    expect(check(route, 'const h: ApprovalSettlementCoordinationHandoverV1 = make()')).toEqual(['handover type outside the approval service'])
     expect(check(route, "const options = { ['settlementCoordinationHandover']: h }")).toEqual(['watched name as a string'])
     expect(check(route, 'void service.createCancelRoundInstance.apply(service, [id, actor, opts])')).toEqual(['createCancelRoundInstance called through call / apply / bind'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The coordination modules themselves do nothing at import time (Opus S3 P3-6)
+// ---------------------------------------------------------------------------
+
+const INERT_CONSTRUCTORS: ReadonlySet<string> = new Set(['AsyncLocalStorage', 'Set', 'Map', 'WeakMap', 'WeakSet', 'Error'])
+
+/**
+ * Values a module may compute while it loads: literals, functions, frozen literals, empty collections,
+ * symbols, and calls to a function declared at the top of the same module with inert arguments (a
+ * helper whose body is in the reviewed file). A call to anything imported is never inert.
+ */
+function isInertInitializer(node: ts.Expression, localFunctions: ReadonlySet<string> = new Set()): boolean {
+  const inert = (inner: ts.Expression): boolean => isInertInitializer(inner, localFunctions)
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node)) {
+    return inert(node.expression)
+  }
+  if (ts.isLiteralExpression(node) || ts.isNoSubstitutionTemplateLiteral(node)) return true
+  if (node.kind === ts.SyntaxKind.TrueKeyword || node.kind === ts.SyntaxKind.FalseKeyword || node.kind === ts.SyntaxKind.NullKeyword) return true
+  if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) return true
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node) || ts.isClassExpression(node)) return true
+  if (ts.isPrefixUnaryExpression(node)) return inert(node.operand)
+  if (ts.isBinaryExpression(node)) return inert(node.left) && inert(node.right)
+  if (ts.isTemplateExpression(node)) return node.templateSpans.every((span) => inert(span.expression))
+  if (ts.isArrayLiteralExpression(node)) return node.elements.every((element) => ts.isExpression(element) && inert(element))
+  if (ts.isObjectLiteralExpression(node)) {
+    return node.properties.every((property) =>
+      ts.isPropertyAssignment(property) ? inert(property.initializer) : ts.isMethodDeclaration(property) || ts.isShorthandPropertyAssignment(property))
+  }
+  if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && INERT_CONSTRUCTORS.has(node.expression.text)) {
+    return (node.arguments ?? []).every((argument) => inert(argument))
+  }
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression.getText()
+    if (callee === 'Symbol' || callee === 'Symbol.for' || callee === 'Object.freeze' || localFunctions.has(callee)) return node.arguments.every((argument) => inert(argument))
+  }
+  return false
+}
+
+function importTimeStatements(relative: string, text: string): string[] {
+  const sourceFile = ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const localFunctions = new Set(
+    sourceFile.statements.flatMap((statement) => (ts.isFunctionDeclaration(statement) && statement.name ? [statement.name.text] : [])),
+  )
+  const offending: string[] = []
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isImportDeclaration(statement)
+      || ts.isExportDeclaration(statement)
+      || ts.isFunctionDeclaration(statement)
+      || ts.isClassDeclaration(statement)
+      || ts.isInterfaceDeclaration(statement)
+      || ts.isTypeAliasDeclaration(statement)
+      || ts.isEnumDeclaration(statement)
+      || ts.isModuleDeclaration(statement)
+    ) {
+      continue
+    }
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.initializer && !isInertInitializer(declaration.initializer, localFunctions)) offending.push(`${relative}: ${declaration.getText(sourceFile).slice(0, 120)}`)
+      }
+      continue
+    }
+    offending.push(`${relative}: ${statement.getText(sourceFile).slice(0, 120)}`)
+  }
+  return offending
+}
+
+describe('the coordination modules do nothing at import time (Opus S3 P3-6)', () => {
+  it('every top-level statement is a declaration, an import / export, or an inert constant', () => {
+    const dir = path.join(REPO_ROOT, COORDINATION_DIR)
+    const modules = fs.readdirSync(dir).filter((name) => name.endsWith('.ts'))
+    expect(modules.length).toBeGreaterThanOrEqual(10)
+    const offending = modules.flatMap((name) => importTimeStatements(`${COORDINATION_DIR}${name}`, fs.readFileSync(path.join(dir, name), 'utf8')))
+    expect(offending).toEqual([])
+  })
+
+  it('controls: a registration call, a top-level expression and a computed constant are caught; the shapes the modules use are not', () => {
+    const probe = 'packages/core-backend/src/attendance/coordination/probe.ts'
+    expect(importTimeStatements(probe, "const storage = new AsyncLocalStorage<number>()\nconst MARK = Symbol.for('x')\nexport const LIMITS = Object.freeze([1, 2])\nconst guard = { mode: 'count', counted: 0 }")).toEqual([])
+    expect(importTimeStatements(probe, 'registerGlobally()')).toHaveLength(1)
+    expect(importTimeStatements(probe, 'export const handle = startTimer()')).toHaveLength(1)
+    expect(importTimeStatements(probe, 'const pool = new Pool()')).toHaveLength(1)
+    expect(importTimeStatements(probe, "function entry(name: string) { return Object.freeze({ name }) }\nexport const REGISTRY = Object.freeze([entry('a')])")).toEqual([])
+    expect(importTimeStatements(probe, "import { register } from './elsewhere'\nexport const REGISTRY = Object.freeze([register('a')])")).toHaveLength(1)
   })
 })
 

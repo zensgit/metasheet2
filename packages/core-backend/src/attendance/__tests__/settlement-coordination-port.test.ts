@@ -456,6 +456,8 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
         body: async (context) => Promise.reject(new SettlementCoordinationRecheckMismatchV1(context.orgLexical === ORG ? 'legacy-org-x' : ORG)),
       }),
     ).rejects.toBeInstanceOf(SettlementCoordinationScopeChangedError)
+    // S1 note 8: answering the fallback code is never silent.
+    expect(coordinator.deps.stats.scopeChangedFallbacks).toBe(1)
     baseline()
   })
 })
@@ -801,6 +803,121 @@ describe('coordinated transaction port: a failing error reporter (Codex S3-CX-05
     expect(ran).toEqual(['first', 'second'])
     expect(pool.clients[0].calls.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
     baseline()
+  })
+})
+
+describe('coordinated transaction port: review round 1, Opus findings', () => {
+  it('two coordinated transactions running at once each see only their own context (A11; Opus P2-3)', async () => {
+    const { coordinator, baseline } = setup()
+    const OTHER = '7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a'
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let arrived = 0
+    const seen: Record<string, string[]> = { [ORG]: [], [OTHER]: [] }
+    const run = (org: string) =>
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org },
+        body: async () => {
+          seen[org].push(String(currentSettlementCoordinationContextV1()?.orgLexical))
+          arrived += 1
+          if (arrived === 2) release()
+          await barrier
+          seen[org].push(String(currentSettlementCoordinationContextV1()?.orgLexical))
+          return org
+        },
+      })
+    await expect(Promise.all([run(ORG), run(OTHER)])).resolves.toEqual([ORG, OTHER])
+    expect(seen).toEqual({ [ORG]: [ORG, ORG], [OTHER]: [OTHER, OTHER] })
+    baseline()
+  })
+
+  it('a post-commit callback of one transaction runs outside every context while another transaction\'s body runs', async () => {
+    const { coordinator, baseline } = setup()
+    const OTHER = '7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a'
+    let inCallback: unknown = 'not run'
+    let release!: () => void
+    const bodyHeld = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let entered!: () => void
+    const otherEntered = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const other = coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: OTHER },
+      body: async () => {
+        entered()
+        await bodyHeld
+        return currentSettlementCoordinationContextV1()?.orgLexical
+      },
+    })
+    await otherEntered
+    await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) => {
+        context.afterCommit(() => {
+          inCallback = currentSettlementCoordinationContextV1()
+        })
+        return 'first'
+      },
+    })
+    release()
+    await expect(other).resolves.toBe(OTHER)
+    expect(inCallback).toBeNull()
+    baseline()
+  })
+
+  it('an error the suspended method throws after its COMMIT reaches the caller; the transaction stays committed and the resources are back (Opus P3-3, OM-B1)', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const after = new Error('test: post-commit work failed')
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async (context) =>
+          handOverToSuspendedMethodV1(context, async (commit) => {
+            await commit()
+            throw after
+          }),
+      }),
+    ).rejects.toBe(after)
+    expect(pool.clients[0].calls.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
+    expect(pool.clients[0].released).toEqual([null])
+    baseline()
+  })
+
+  it('a second commit() in one attempt is refused as a programming error: the first one still commits once, and the error reaches the caller (Opus NIT-2)', async () => {
+    const { pool, coordinator, baseline } = setup()
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async (context) =>
+          handOverToSuspendedMethodV1(context, async (commit) => {
+            void commit()
+            await commit()
+            return 'never'
+          }),
+      }),
+    ).rejects.toThrow('commit() called twice')
+    expect(pool.clients[0].calls.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
+    expect(pool.clients[0].released).toEqual([null])
+    baseline()
+  })
+
+  it('the nesting mode accepts only its two values (Opus P3-9)', () => {
+    expect(() => setSettlementCoordinationNestingModeV1('loud' as never)).toThrow(TypeError)
+    expect(setSettlementCoordinationNestingModeV1('count')).toBe('count')
   })
 })
 

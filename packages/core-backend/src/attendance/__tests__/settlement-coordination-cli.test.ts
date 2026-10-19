@@ -8,9 +8,15 @@ import {
   createSettlementCoordinationCliCoordinatorV1,
   deriveSettlementCoordinationCliCapacityV1,
 } from '../coordination/settlement-coordination-cli'
-import { coordinatedTransactionV1, handOverToSuspendedMethodV1, settlementCoordinationResultAfterCommitV1 } from '../coordination/settlement-coordination-port'
-import { SettlementCoordinationAbortedError, SettlementCoordinationAcquireError } from '../coordination/settlement-coordinator'
-import { FakeLockWorld, FakePool, ORG, REQUEST, setupFakeCoordination as setup } from '../../../tests/helpers/settlement-coordination-fakes'
+import {
+  SettlementCoordinationRecheckMismatchV1,
+  SettlementCoordinationRestartSignalV1,
+  coordinatedTransactionV1,
+  handOverToSuspendedMethodV1,
+  settlementCoordinationResultAfterCommitV1,
+} from '../coordination/settlement-coordination-port'
+import { SettlementCoordinationAbortedError, SettlementCoordinationAcquireError, SettlementCoordinationScopeChangedError } from '../coordination/settlement-coordinator'
+import { FakeLockWorld, FakePool, ORG, REQUEST, serializationError, setupFakeCoordination as setup } from '../../../tests/helpers/settlement-coordination-fakes'
 
 describe('CLI variant of the coordinated-transaction port (§1.1 P1-1, §3.5)', () => {
   it('retries a refused acquisition with a fresh one-shot unit per attempt and the schedule in between; no contention state is made', async () => {
@@ -269,6 +275,73 @@ describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-0
     ).rejects.toBe(thrown)
     expect(runs).toBe(1)
     expect(commits(pool)).toBe(1)
+    baseline()
+  })
+})
+
+describe('CLI variant: what reaches the caller the first time (Opus P3-4)', () => {
+  it('an exhausted restart counter: the original 40001 goes up after the unit\'s own restarts, never retried by the CLI', async () => {
+    const { coordinator, baseline } = setup()
+    const slept: number[] = []
+    const thrown: unknown[] = []
+    const failure = await coordinatedTransactionCliV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      retry: { attempts: 5, sleep: async (ms) => void slept.push(ms) },
+      body: async () => {
+        const error = serializationError(`attempt ${thrown.length + 1}`)
+        thrown.push(error)
+        throw new SettlementCoordinationRestartSignalV1(error)
+      },
+    }).then(
+      () => null,
+      (error) => error,
+    )
+    expect(thrown).toHaveLength(3)
+    expect(failure).toBe(thrown[2])
+    expect(slept).toEqual([])
+    baseline()
+  })
+
+  it('a conflict code from a used-up recheck counter is not retried', async () => {
+    const { coordinator, baseline } = setup()
+    const slept: number[] = []
+    await expect(
+      coordinatedTransactionCliV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        retry: { attempts: 5, sleep: async (ms) => void slept.push(ms) },
+        body: async (context) => Promise.reject(new SettlementCoordinationRecheckMismatchV1(context.orgLexical === ORG ? 'legacy-org-x' : ORG, 'TEST_CONFLICT')),
+      }),
+    ).rejects.toMatchObject({ code: 'TEST_CONFLICT' })
+    expect(slept).toEqual([])
+    expect(SettlementCoordinationScopeChangedError).toBeDefined()
+    baseline()
+  })
+
+  it('an uncertain COMMIT is not retried: one body, the connection destroyed, the COMMIT error goes up', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const slept: number[] = []
+    let bodies = 0
+    const commitFailure = new Error('test: connection reset during COMMIT')
+    await expect(
+      coordinatedTransactionCliV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        retry: { attempts: 5, sleep: async (ms) => void slept.push(ms) },
+        body: async () => {
+          bodies += 1
+          pool.clients[pool.clients.length - 1].failOnce.set('COMMIT', commitFailure)
+          return 'never'
+        },
+      }),
+    ).rejects.toBe(commitFailure)
+    expect(bodies).toBe(1)
+    expect(slept).toEqual([])
+    expect(pool.clients[0].released[0]).toBeInstanceOf(Error)
     baseline()
   })
 })
