@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "cleanup": true,
+  "scope": "Verify the paired fixture reopens only explicitly owned restored native stores.\n\nA prerequisite for the dual-system scenario, not installed product acceptance.\n",
+  "restored_store_count": 3,
+  "fresh_native_process": true,
+  "original_root_unavailable": true,
+  "sharing_disabled_in_actual_settings": true,
+  "database_logical_hashes": {
+    "global.db": "65211e502610076ecd84eea28555487988f5472b1e46d4ae3f09ebe75ce11bc9",
+    "identity.db": "d952141753ca81438bf8f9e858ea3ba9ca7606439816e827a9002f7949c4894a",
+    "tenant_default_fixture-org.db": "17410bef38858b3cdf18fc0729c542edf2ead0154a0d36195bc77e74000b2a93"
+  },
+  "no_fixture_reseeding": true,
+  "missing_and_linked_database_refused": true
+}
