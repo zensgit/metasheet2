@@ -322,7 +322,10 @@ parser.add_argument('--browser-cache', required=True)
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
+parser.add_argument('--snapshot-share', action='store_true')
 args = parser.parse_args()
+if args.snapshot_share and args.browser_script != 'entry-run.mts':
+    parser.error('--snapshot-share requires --browser-script entry-run.mts')
 meta = Path(args.meta_checkout).resolve()
 native = Path(args.native_checkout).resolve()
 pg = Path(args.pg_bin)
@@ -386,6 +389,7 @@ def run_pg(tool, args, timeout):
 def redact(text):
     text = re.sub(r'yur_[A-Za-z0-9._~-]+', '[read credential]', text)
     text = re.sub(r'yuw_[A-Za-z0-9._~-]+', '[write grant]', text)
+    text = re.sub(r'yus_[A-Za-z0-9._~-]+', '[snapshot grant]', text)
     text = re.sub(r'code=[^&\s]+', 'code=[redacted]', text)
     return text.replace(secret, '[client secret]')
 
@@ -432,8 +436,10 @@ try:
             body = self.rfile.read(length) if length else None
             headers = {
                 key: value for key, value in self.headers.items()
-                if key.lower() not in ('connection', 'content-length', 'transfer-encoding')
+                if key.lower() not in ('connection', 'content-length', 'transfer-encoding', 'x-forwarded-proto')
             }
+            # This loopback-only TLS terminator supplies the authenticated transport scheme.
+            headers['X-Forwarded-Proto'] = 'https'
             upstream = http.client.HTTPConnection('127.0.0.1', native_port, timeout=30)
             try:
                 upstream.request(self.command, self.path, body=body, headers=headers)
@@ -463,6 +469,7 @@ try:
         'issuer': native_origin + '/installation',
         'secret': secret,
         'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
+        'snapshot_share': args.snapshot_share,
     }
     env = os.environ.copy()
     env['PYTHONPATH'] = str(native / 'src')
@@ -503,6 +510,7 @@ try:
         'secret': secret,
         'nativePid': child.pid,
         'workspaceEntry': args.workspace_entry,
+        'snapshotShare': args.snapshot_share,
         'rootPartId': config['root_part_id'],
     }
     node_log = (owned / 'node.log').open('w')
@@ -548,6 +556,11 @@ try:
     child.stdin.flush()
     native_report = json.loads(child.stdout.readline())
     proof['native'] = native_report
+    if args.snapshot_share:
+        proof['snapshot_share'] = one_line('SNAPSHOT_SHARE_PROOF ')
+        assert proof['snapshot_share']['ok'] is True
+        proof['snapshot_export'] = one_line('SNAPSHOT_EXPORT_PROOF ')
+        assert proof['snapshot_export']['ok'] is True
     if args.browser_script == 'run.mts':
         proof['meta'] = one_line('PAIRED_PROOF ')
         assert proof['meta']['ok'] is True

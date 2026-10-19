@@ -22,6 +22,8 @@ Object.assign(process.env, {
   LOG_LEVEL: 'error',
   RBAC_TOKEN_TRUST: 'true',
   PLM_MANAGED_COMPANION_ENABLED: 'true',
+  PLM_MANAGED_SNAPSHOT_SHARE_ENABLED: input.snapshotShare ? 'true' : 'false',
+  ...(input.snapshotShare ? { PLM_BOM_REVIEW_ENABLED: 'true', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' } : {}),
   PLM_PERSONAL_BOM_WRITE_ENABLED: 'true',
   PLM_API_TOKEN: 'shared-must-not-be-used',
   PLM_BASE_URL: 'http://127.0.0.1:9',
@@ -51,18 +53,31 @@ const sourceConfig = {
   options: { apiMode: 'yuantus', tenantId: 'default', orgId: 'fixture-org' },
 }
 
-await pool.query(`
-  CREATE TABLE users (
+if (input.snapshotShare) {
+  const { bootstrapPlmBomReviewTestDb } = await import(root + '/tests/plm-bom-review/bootstrap.ts')
+  const { bootstrapBomReviewNativeHttpDb } = await import(root + '/tests/plm-bom-review/native-bootstrap.ts')
+  await bootstrapPlmBomReviewTestDb(pool)
+  await bootstrapBomReviewNativeHttpDb(pool)
+  await pool.query(`ALTER TABLE users
+    ALTER COLUMN permissions TYPE jsonb USING to_jsonb(permissions),
+    ADD COLUMN email text, ADD COLUMN username text, ADD COLUMN mobile text, ADD COLUMN name text,
+    ADD COLUMN password_hash text, ADD COLUMN must_change_password boolean,
+    ADD COLUMN created_at timestamptz DEFAULT now(), ADD COLUMN updated_at timestamptz DEFAULT now();
+    ALTER TABLE data_sources ADD COLUMN auto_connect boolean DEFAULT false;`)
+} else {
+  await pool.query(`  CREATE TABLE users (
     id text PRIMARY KEY, email text, username text, mobile text, name text, role text,
     permissions jsonb, password_hash text, is_active boolean, must_change_password boolean,
     activation_status text, local_password_set boolean, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now()
   );
-  CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean, created_at timestamptz DEFAULT now());
-  CREATE UNIQUE INDEX user_orgs_user_org_uidx ON user_orgs (user_id, org_id);
   CREATE TABLE data_sources (
     id text PRIMARY KEY, name text, owner_id text, workspace_id text, tenant_id text, scope_kind text,
     type text, config jsonb, is_active boolean, deleted_at timestamptz, auto_connect boolean DEFAULT false
-  );
+  );`)
+}
+await pool.query(`
+  CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean, created_at timestamptz DEFAULT now());
+  CREATE UNIQUE INDEX user_orgs_user_org_uidx ON user_orgs (user_id, org_id);
   CREATE TABLE user_sessions (
     id text PRIMARY KEY, user_id text, issued_at timestamptz, expires_at timestamptz, last_seen_at timestamptz,
     revoked_at timestamptz, revoked_by text, revoke_reason text, ip_address text, user_agent text,
@@ -80,10 +95,17 @@ const { up: upIntents } = await import(root + '/src/db/migrations/zzzz2026101702
 await upManaged(db)
 await upBindings(db)
 await upIntents(db)
+if (input.snapshotShare) {
+  const { up } = await import(root + '/src/db/migrations/zzzz20261019010000_create_plm_snapshot_share_intents.ts')
+  await up(db)
+}
 await pool.query(
   `INSERT INTO users (id, email, name, role, permissions, is_active, activation_status, must_change_password, local_password_set)
    VALUES ('meta-owner', 'owner@example.test', 'Owner', 'user', '[]'::jsonb, true, 'activated', false, true)`,
 )
+if (input.snapshotShare) {
+  await pool.query("INSERT INTO meta_bases(id,owner_id,name,workspace_id) VALUES('share-target','meta-owner','Confirmed collaboration audience','workspace-1')")
+}
 await pool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('meta-owner', 'meta-org', true)`)
 await pool.query(
   `INSERT INTO data_sources (id, name, owner_id, workspace_id, tenant_id, scope_kind, type, config, is_active, auto_connect)
@@ -147,6 +169,13 @@ app.use('/api/auth', authRouter)
 app.use('/api/plm/managed-login', managed)
 app.use('/api/me/plm-bom-write-bindings', createPlmPersonalBomWriteBindingsRouter(service))
 app.use(workbench)
+if (input.snapshotShare) {
+  const { createPlmBomReviewsRouter } = await import(root + '/src/routes/plm-bom-reviews.ts')
+  const { univerMetaRouter } = await import(root + '/src/routes/univer-meta.ts')
+  const { poolManager } = await import(root + '/src/integration/db/connection-pool.ts')
+  app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({ pool: poolManager.get(), dataSourceManager: ds.getDataSourceManager() }))
+  app.use('/api/multitable', univerMetaRouter())
+}
 const metaServer = await new Promise<import('node:http').Server>((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
 })
@@ -171,6 +200,7 @@ const vite = await createServer({
     host: '127.0.0.1',
     port: input.vitePort,
     strictPort: true,
+    hmr: false,
     proxy: { '/api': { target: metaBase, changeOrigin: false } },
   },
 })
@@ -272,6 +302,32 @@ try {
   const openSessions = await pool.query(`SELECT count(*)::int AS n FROM plm_managed_sessions WHERE revoked_at IS NULL`)
   assert.equal(openSessions.rows[0].n, 1)
 
+  if (input.snapshotShare) {
+    const panel = page.getByTestId('plm-snapshot-share')
+    const targets = page.waitForResponse(response => response.url().includes('/managed-share/targets'))
+    await panel.getByRole('button', { name: '分享 BOM 快照到协作空间' }).click()
+    const targetsResponse = await targets
+    assert.equal(targetsResponse.status(), 200, await targetsResponse.text())
+    await panel.locator('select').selectOption('share-target')
+    await panel.locator('input').fill('Native confirmed snapshot')
+    await panel.getByRole('button', { name: '前往元图确认' }).click()
+    await page.waitForURL(url => url.pathname === '/bom-snapshot-share')
+    await page.locator('#consent:not([disabled])').waitFor()
+    assert((await page.locator('#details').innerText()).includes('Confirmed collaboration audience'))
+    assert.equal((await pool.query('SELECT count(*)::int n FROM meta_records')).rows[0].n, 0)
+    await page.locator('#consent').check()
+    await page.locator('#confirm').click()
+    await page.waitForURL(url => url.origin === input.origin && url.pathname.startsWith('/multitable/'), { timeout: 120000 })
+    const saved = (await pool.query("SELECT binding_id FROM plm_snapshot_share_intents WHERE status='published'")).rows
+    assert.equal(saved.length, 1)
+    const binding = (await pool.query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1', [saved[0].binding_id])).rows[0]
+    assert(binding?.sheet_id)
+    assert((await pool.query('SELECT count(*)::int n FROM meta_records WHERE sheet_id=$1', [binding.sheet_id])).rows[0].n > 0)
+    writeSync(1, 'SNAPSHOT_SHARE_PROOF ' + JSON.stringify({ ok: true, explicit_native_confirmation: true,
+      pre_confirmation_records: 0, published_bindings: 1, native_rpc: 'real HTTP', target: 'share-target',
+      installed_image: false, native_storage: 'isolated SQLite fixture', meta_storage: 'actual PostgreSQL' }) + '\n')
+  }
+
   const ownerContext = await browser.newContext({ ignoreHTTPSErrors: true })
   await ownerContext.addInitScript({
     content: `localStorage.setItem('auth_token', ${JSON.stringify(loginJwt)})`,
@@ -287,6 +343,39 @@ try {
   assert(!ownerSeen.some((url) => url.includes('/api/auth/dev-token')))
   await ownerPage.close()
   await ownerContext.close()
+
+  if (input.snapshotShare) {
+    const binding = (await pool.query(`SELECT b.* FROM meta_plm_bom_review_bindings b
+      JOIN plm_snapshot_share_intents i ON i.binding_id=b.id WHERE i.status='published'`)).rows[0]
+    const exportUrl = metaBase + '/api/multitable/sheets/' + binding.sheet_id + '/export-xlsx?format=csv&viewId=' + binding.view_id
+    const noExport = await fetch(exportUrl, { headers: { Authorization: 'Bearer ' + loginJwt } })
+    assert.equal(noExport.status, 403, await noExport.text())
+    // Independent existing Meta read/export permission; native consent never mints it.
+    await pool.query("INSERT INTO user_permissions(user_id,permission_code) VALUES('meta-owner','multitable:read')")
+    const exportJwt = jwt.sign({ userId: 'meta-owner', role: 'user', roles: ['user'], perms: ['multitable:read'], tenantId: 'meta-org' },
+      process.env.JWT_SECRET, { expiresIn: '5m' })
+    const ownerHeaders = { Authorization: 'Bearer ' + exportJwt }
+    const exported = await fetch(exportUrl, { headers: ownerHeaders })
+    assert.equal(exported.status, 200, await exported.clone().text())
+    assert((await exported.text()).includes('C-001'))
+    await pool.query(`INSERT INTO users(id,role,permissions,is_active,activation_status,local_password_set,must_change_password)
+      VALUES('target-outsider','user','[]'::jsonb,true,'activated',true,false)`)
+    const outsiderJwt = jwt.sign({ userId: 'target-outsider', role: 'user', roles: ['user'], perms: ['attendance:read'], tenantId: 'meta-org' },
+      process.env.JWT_SECRET, { expiresIn: '5m' })
+    const refused = await fetch(exportUrl, { headers: { Authorization: 'Bearer ' + outsiderJwt } })
+    assert.equal(refused.status, 403, await refused.text())
+    const unlinked = await fetch(metaBase + '/api/plm/managed-login/unlink', { method: 'POST',
+      headers: { ...ownerHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ dataSourceId: 'source-1' }) })
+    assert.equal(unlinked.status, 200, await unlinked.clone().text())
+    assert.equal((await unlinked.json() as { state: string }).state, 'acked')
+    const retained = await fetch(exportUrl, { headers: ownerHeaders })
+    assert.equal(retained.status, 200, await retained.clone().text())
+    assert((await retained.text()).includes('C-001'))
+    const targetsAfterUnlink = await context.request.get(input.origin + '/api/plm-bom-reviews/managed-share/targets?dataSourceId=source-1&partId=' + encodeURIComponent(rootPartId))
+    assert([401,403].includes(targetsAfterUnlink.status()), await targetsAfterUnlink.text())
+    writeSync(1, 'SNAPSHOT_EXPORT_PROOF ' + JSON.stringify({ ok: true, generic_csv_export: true,
+      ungranted_export_forbidden: true, outsider_without_target_read_forbidden: true, unlink_acknowledged: true, retained_target_acl_export: true, new_share_after_unlink_refused: true }) + '\n')
+  }
 
   writeSync(1, 'ENTRY_BOOTSTRAP_PROOF ' + JSON.stringify({
     ok: true,

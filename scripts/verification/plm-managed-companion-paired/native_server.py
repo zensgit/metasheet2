@@ -21,6 +21,7 @@ for key, value in {
     'ENABLE_METASHEET': 'true',
     'PLM_MANAGED_LOGIN_ENABLED': 'true',
     'PLM_BOM_READ_SESSION_ENABLED': 'true',
+    'PLM_BOM_SNAPSHOT_SHARE_ENABLED': 'true' if cfg.get('snapshot_share') else 'false',
     'PLM_BOM_WRITE_GRANT_ENABLED': 'true',
     'PLM_APPROVAL_CARD_ENABLED': 'true',
     'PLM_RECORD_PUSH_ENABLED': 'false',
@@ -99,7 +100,7 @@ with tenant() as db:
 app = create_app()
 assert not app.dependency_overrides
 import uvicorn
-server = uvicorn.Server(uvicorn.Config(app, fd=int(cfg['fd']), log_level='warning', lifespan='off'))
+server = uvicorn.Server(uvicorn.Config(app, fd=int(cfg['fd']), log_level='warning', lifespan='off', proxy_headers=True, forwarded_allow_ips='127.0.0.1'))
 thread = threading.Thread(target=server.run, daemon=True)
 thread.start()
 deadline = __import__('time').monotonic() + 40
