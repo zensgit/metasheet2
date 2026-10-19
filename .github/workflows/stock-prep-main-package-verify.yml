@@ -290,6 +290,11 @@ jobs:
           # input" above), never the raw ${{ inputs.base_path }} -- behaviour for
           # every legal input is unchanged, but a mangled input never reaches Vite.
           VITE_BASE_PATH: ${{ env.WEB_BASE_PATH }}
+          # Multitable range fill is ON in every offline package (owner 2026-10-18, #6079). Literal
+          # 'true' only. scripts/ops/multitable-onprem-package-build.sh defaults the same switch to
+          # true and refuses to package a web dist whose baked value differs, so dropping this line
+          # fails the package step instead of shipping range fill OFF.
+          VITE_MULTITABLE_RANGE_FILL_ENABLED: 'true'
         run: |
           pnpm --filter @metasheet/web build
           pnpm --filter @metasheet/core-backend build

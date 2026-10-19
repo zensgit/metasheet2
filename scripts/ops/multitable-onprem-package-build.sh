@@ -8,6 +8,16 @@ OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/releases/multitable-onprem}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
 BUILD_WEB="${BUILD_WEB:-0}"
 BUILD_BACKEND="${BUILD_BACKEND:-0}"
+# Multitable range fill (select / drag-fill / copy range / paste range) is a BUILD-TIME web switch,
+# default OFF everywhere else (Dockerfile.frontend, build-dingtalk-staging-images.sh). The offline
+# package builds it ON by default: owner decision 2026-10-18 (#6079). Only the literal strings true
+# and false are accepted; an unset variable means true, an empty or any other value stops the build
+# before anything runs. The value must also match what the PACKAGED web dist actually carries --
+# assert_packaged_web_range_fill reads the bytes, because the CI lanes build the web app in an
+# earlier step and call this script with BUILD_WEB=0.
+VITE_MULTITABLE_RANGE_FILL_ENABLED="${VITE_MULTITABLE_RANGE_FILL_ENABLED-true}"
+RANGE_FILL_PROBE="${ROOT_DIR}/scripts/ops/multitable-onprem-web-range-fill-probe.mjs"
+RANGE_FILL_IN_PACKAGED_DIST=""
 PACKAGE_PREFIX="${PACKAGE_PREFIX:-metasheet-multitable-onprem}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)}"
 PACKAGE_TAG="${PACKAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
@@ -521,6 +531,10 @@ function write_build_provenance() {
   "ciRunId": "${GITHUB_RUN_ID:-local}",
   "ciRunAttempt": "${GITHUB_RUN_ATTEMPT:-local}",
   "builtAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "webBuildFlags": {
+    "VITE_MULTITABLE_RANGE_FILL_ENABLED": "${VITE_MULTITABLE_RANGE_FILL_ENABLED}",
+    "rangeFillInPackagedDist": "${RANGE_FILL_IN_PACKAGED_DIST}"
+  },
   "fixMarkers": {
     "issue1912": {
       "title": "K3 WISE M1 Material Save-only backend fix",
@@ -531,6 +545,24 @@ function write_build_provenance() {
   }
 }
 EOF
+}
+
+function assert_packaged_web_range_fill() {
+  # Reads the web dist that is about to ship (the staged copy) and requires its baked range-fill
+  # switch to equal VITE_MULTITABLE_RANGE_FILL_ENABLED. The probe answers on|off|unknown; unknown
+  # (a toolchain change moved the minified shape, or the dist has no range toolbar) fails too.
+  local expected observed
+  expected="off"
+  if [[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" ]]; then
+    expected="on"
+  fi
+  observed="$(node "$RANGE_FILL_PROBE" "${PACKAGE_ROOT}/apps/web/dist")" \
+    || die "range-fill probe could not read the packaged web dist"
+  if [[ "$observed" != "$expected" ]]; then
+    die "packaged web dist has range fill '${observed}' but VITE_MULTITABLE_RANGE_FILL_ENABLED=${VITE_MULTITABLE_RANGE_FILL_ENABLED} requires '${expected}'; rebuild apps/web with VITE_MULTITABLE_RANGE_FILL_ENABLED=true (or BUILD_WEB=1), or set VITE_MULTITABLE_RANGE_FILL_ENABLED=false to package an OFF build on purpose"
+  fi
+  RANGE_FILL_IN_PACKAGED_DIST="$observed"
+  info "Packaged web dist range fill: ${observed}"
 }
 
 function cleanup() {
@@ -565,12 +597,21 @@ fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`, 'utf8')
 EOF
 }
 
+[[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" || "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "false" ]] \
+  || die "VITE_MULTITABLE_RANGE_FILL_ENABLED must be literal true or false"
+
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
 fi
 
 if [[ "$BUILD_WEB" == "1" ]]; then
-  run pnpm --filter @metasheet/web build
+  # Only the literal true reaches Vite; false builds with the variable removed, which is the
+  # front end's own default (grid-range-fill-flags.ts enables on the exact string 'true' only).
+  web_build_env=(env -u VITE_MULTITABLE_RANGE_FILL_ENABLED)
+  if [[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" ]]; then
+    web_build_env=(env VITE_MULTITABLE_RANGE_FILL_ENABLED=true)
+  fi
+  run "${web_build_env[@]}" pnpm --filter @metasheet/web build
 fi
 
 if [[ "$BUILD_BACKEND" == "1" ]]; then
@@ -593,6 +634,8 @@ for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
 prune_node_modules "$PACKAGE_ROOT"
+
+assert_packaged_web_range_fill
 
 stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
