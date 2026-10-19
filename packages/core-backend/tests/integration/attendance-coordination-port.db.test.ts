@@ -93,6 +93,13 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
     const coordinator = coordinatorOn(pool)
     let pid = 0
     const seen: Array<Record<string, unknown>> = []
+    // Resolved by the test after the port returned: a promise chained on it INSIDE the body inherits the
+    // body's async context, so it must find no live coordination context by then.
+    let resume!: () => void
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    let probe: Promise<unknown> | null = null
     try {
       const result = await coordinatedTransactionV1({
         coordinator,
@@ -101,6 +108,7 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
         body: async (context) => {
           pid = await backendPid(context.client as PoolClient)
           await context.client.query(`INSERT INTO ${schema}.t VALUES (1, 1)`)
+          probe = resumed.then(() => currentSettlementCoordinationContextV1())
           context.afterCommit(async () => {
             const state = await observer.query('SELECT state FROM pg_stat_activity WHERE pid = $1', [pid])
             const borrowed = await pool.query('SELECT 1 AS one')
@@ -118,6 +126,8 @@ describeIfDatabase('attendance settlement coordination — the coordinated-trans
       expect(result).toBe('committed')
       expect(await valueOf(1)).toBe(1)
       expect(seen).toEqual([{ context: null, held: 0, state: 'idle', locks: 0, borrowed: 1 }])
+      resume()
+      expect(await probe).toBeNull()
       expectBaseline(coordinator)
     } finally {
       await pool.end()
