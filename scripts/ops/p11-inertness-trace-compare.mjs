@@ -20,9 +20,10 @@
  *  - other top-level fields (e.g. the sweep's `candidateBorrows`) are printed, never compared: they
  *    depend on rows other suites left in the shared database.
  * `_meta.json`: the entry list and pool size must match. `_resources.json`: active resources by type
- *  after boot and after the entries; `--resources strict` (default) treats a count difference as a
- *  difference, `--resources report` only prints it (use it when the head-vs-head run shows the counts
- *  are noisy on that machine).
+ *  after boot and after the entries. The after-boot counts are always reported only (the server's own
+ *  start-up work may still be in flight, and a head-vs-head run differed there); for the after-entries
+ *  counts `--resources strict` (default) treats a difference as a difference and `--resources report`
+ *  only prints it.
  * Files of any other format in the directories (e.g. `hotpath.json`) are skipped.
  *
  * Blind spot: the traces fold every string and numeric literal (`'?'`, `<n>`), so a statement whose
@@ -229,8 +230,13 @@ function main() {
         note(`RESOURCES ${phase}: same (${kinds.map((kind) => `${kind}=${a[kind] ?? 0}`).join(' ')})`)
         continue
       }
-      note(`RESOURCES ${phase}: ${differing.map((kind) => `${kind} base=${a[kind] ?? 0} head=${b[kind] ?? 0}`).join('; ')}${resources === 'report' ? ' (report only)' : ''}`)
-      if (resources === 'strict') unexplained += 1
+      // The boot snapshot is taken while the server's own start-up work may still be in flight, so its
+      // counts vary from run to run (a head-against-head run differed there); it is reported only. The
+      // after-entries snapshot is taken once every entry has gone quiet and is the stable evidence that no
+      // timer or handle was added.
+      const reportOnly = resources === 'report' || phase === 'afterBoot'
+      note(`RESOURCES ${phase}: ${differing.map((kind) => `${kind} base=${a[kind] ?? 0} head=${b[kind] ?? 0}`).join('; ')}${reportOnly ? ' (report only)' : ''}`)
+      if (!reportOnly) unexplained += 1
     }
   }
 
