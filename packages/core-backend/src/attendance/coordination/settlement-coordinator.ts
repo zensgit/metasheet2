@@ -94,10 +94,15 @@ export interface SettlementCoordinationAttemptRecordV1 {
   readonly waits: Readonly<Record<SettlementCoordinationStageV1, number>>
 }
 
+/** A connect that took at least the first backoff step waited; a new connection's handshake does not. */
+export const SETTLEMENT_COORDINATION_LOGGED_CONNECT_WAIT_MS = 25
+
 /**
  * §3.2 step 10: a record is worth a log line only when the attempt tried more than once or actually
- * waited — queued for quota, lost a connect race, waited for a prober or backed off. The budget still
- * counts every millisecond; an immediate grant or a fast round trip is not a wait here.
+ * waited — queued for quota (whether or not the permit came), waited for a connection (a lost race,
+ * or at least `SETTLEMENT_COORDINATION_LOGGED_CONNECT_WAIT_MS` whatever the outcome), waited for a
+ * prober or backed off. The budget still counts every millisecond; an immediate grant or a fast round
+ * trip is not a wait here.
  */
 export function shouldLogSettlementCoordinationAttemptV1(record: SettlementCoordinationAttemptRecordV1): boolean {
   let tries = 0
@@ -105,9 +110,20 @@ export function shouldLogSettlementCoordinationAttemptV1(record: SettlementCoord
     if (event.kind === 's1') tries += 1
     else if (event.kind === 'prober-wait' || event.kind === 'backoff') return true
     else if (event.kind === 'quota' && event.detail?.queued === true) return true
-    else if (event.kind === 'connect' && (event.detail?.kind === 'timeout' || event.detail?.kind === 'aborted')) return true
+    else if (event.kind === 'connect') {
+      const kind = event.detail?.kind
+      const waitedMs = event.detail?.waitedMs
+      if (kind === 'timeout' || kind === 'aborted') return true
+      if (typeof waitedMs === 'number' && waitedMs >= SETTLEMENT_COORDINATION_LOGGED_CONNECT_WAIT_MS) return true
+    }
   }
   return tries > 1
+}
+
+/** Counters the coordinator keeps about itself (read by tests and, later, by metrics). */
+export interface SettlementCoordinationStatsV1 {
+  /** `onAttempt` observers that threw; an observer never changes an acquisition's outcome. */
+  attemptObserverFailures: number
 }
 
 export interface SettlementCoordinatorDepsV1 {
@@ -120,6 +136,7 @@ export interface SettlementCoordinatorDepsV1 {
   /** `DB_CONNECT_TIMEOUT` of the pool. */
   readonly connectTimeoutMs: number
   readonly onAttempt?: (record: SettlementCoordinationAttemptRecordV1) => void
+  readonly stats: SettlementCoordinationStatsV1
 }
 
 export interface SettlementCoordinationUnitRequestV1 {
@@ -292,8 +309,9 @@ export class SettlementCoordinationUnitV1 {
       const client = await this.#borrow(null, null)
       const started = this.#deps.clock.now()
       let destroyWith: unknown
+      let candidate: T
       try {
-        return await read(client)
+        candidate = await read(client)
       } catch (error) {
         destroyWith = error instanceof Error ? error : new Error('candidate read failed')
         throw error
@@ -303,6 +321,9 @@ export class SettlementCoordinationUnitV1 {
         client.release(destroyWith)
         this.#deps.ledger.dropClient(this.#id)
       }
+      // Closed or aborted while the read ran: the caller is gone, so no candidate is handed out.
+      if (this.#cancelled()) throw new SettlementCoordinationAbortedError()
+      return candidate
     } finally {
       this.#busy = false
       if (this.#closed) this.#leave()
@@ -364,10 +385,16 @@ export class SettlementCoordinationUnitV1 {
               throw stopAfterTry
             }
             const handoverStarted = this.#deps.clock.now()
-            const handover = await runSettlementCoordinationHandoverV1(client, plan, this.#request.handover)
+            let handoverDecidedAt: number | null = null
+            const handover = await runSettlementCoordinationHandoverV1(client, plan, this.#request.handover, {
+              decided: () => {
+                handoverDecidedAt = this.#deps.clock.now()
+              },
+            })
             record.event('handover', { kind: handover.kind, ...(handover.kind === 'uncertain' ? { reason: handover.reason } : {}) })
-            // S2's transaction-level re-grant is part of the try (§3.2 step 6.4).
-            this.budget.record('dedicated', this.#deps.clock.now() - handoverStarted)
+            // S2's transaction-level re-grant is part of the try (§3.2 step 6.4); the ROLLBACK a failed
+            // handover runs before it returns is cleanup and is not.
+            this.budget.record('dedicated', (handoverDecidedAt ?? this.#deps.clock.now()) - handoverStarted)
             if (handover.kind === 'uncertain') {
               owned = false
               this.#destroy(client, lease, handover.reason, record)
@@ -501,10 +528,11 @@ export class SettlementCoordinationUnitV1 {
   }
 
   /**
-   * Leaves the coordinator. Closing while an acquisition, candidate read or restart is in flight
-   * cancels it: its waits end, it gives back whatever it holds and leaves the ledger itself once it
-   * settles. Closing while the unit holds a handed-over attempt is a programming error: the attempt is
-   * destroyed and close throws.
+   * Leaves the coordinator. Closing while an acquisition or a candidate read is in flight cancels it:
+   * its waits end, it gives back whatever it holds, fails with `ATTENDANCE_COORDINATION_ABORTED` and
+   * leaves the ledger once it settles. A restart in flight finishes converting its resources and
+   * returns as usual before the unit leaves. Closing while the unit holds a handed-over attempt is a
+   * programming error: the attempt is destroyed and close throws.
    */
   close(): void {
     if (this.#closed) return
@@ -534,9 +562,13 @@ export class SettlementCoordinationUnitV1 {
     if (this.#active) throw new Error('settlement coordination unit already holds an attempt (overlapping acquisition)')
   }
 
+  #cancelled(): boolean {
+    return this.#closed || this.#abort.signal.aborted
+  }
+
   /** Why the attempt may not go on (closed or aborted first, then a spent budget), or null. */
   #stopReason(): Error | null {
-    if (this.#closed || this.#abort.signal.aborted) return new SettlementCoordinationAbortedError()
+    if (this.#cancelled()) return new SettlementCoordinationAbortedError()
     if (this.budget.exhausted()) return this.#exhausted()
     return null
   }
@@ -591,6 +623,8 @@ export class SettlementCoordinationUnitV1 {
       })
     } catch (error) {
       this.budget.record('quota', this.#deps.clock.now() - started)
+      const ended = error instanceof CoordinationWaitEndedError ? error : null
+      record.event('quota', { waitedMs: this.#deps.clock.now() - started, queued: ended?.queued === true, ended: ended?.reason ?? 'error' })
       if (error instanceof CoordinationWaitEndedError && error.reason === 'deadline') {
         throw this.#request.background
           ? new SettlementCoordinationAcquireError(SETTLEMENT_COORDINATION_CAPACITY_BUSY, this.budget.waits())
@@ -774,19 +808,26 @@ export class SettlementCoordinationUnitV1 {
     })
   }
 
+  /** Hands the record to the observer. An observer that throws is counted and otherwise ignored. */
   #emit(record: AttemptRecorder, outcome: 'handed-over' | 'failed', code: string | null): void {
-    this.#deps.onAttempt?.(
-      Object.freeze({
-        entryLabel: this.#request.handover.entryLabel,
-        attempt: record.attempt,
-        org: record.org,
-        quotaClass: record.quotaClass,
-        outcome,
-        code,
-        events: Object.freeze([...record.events]),
-        waits: this.budget.waits(),
-      }),
-    )
+    const observer = this.#deps.onAttempt
+    if (!observer) return
+    try {
+      observer(
+        Object.freeze({
+          entryLabel: this.#request.handover.entryLabel,
+          attempt: record.attempt,
+          org: record.org,
+          quotaClass: record.quotaClass,
+          outcome,
+          code,
+          events: Object.freeze([...record.events]),
+          waits: this.budget.waits(),
+        }),
+      )
+    } catch {
+      this.#deps.stats.attemptObserverFailures += 1
+    }
   }
 }
 
@@ -822,5 +863,6 @@ export function createSettlementCoordinatorV1(input: {
     random: input.random ?? Math.random,
     connectTimeoutMs: input.connectTimeoutMs,
     onAttempt: input.onAttempt,
+    stats: { attemptObserverFailures: 0 },
   })
 }

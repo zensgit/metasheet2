@@ -229,11 +229,20 @@ describe('settlement coordination quota: org first, global second; global back f
     const quota = new SettlementCoordinationQuotaV1(capacity)
     const first = await quota.acquire('org-a', 'short', { clock })
     expect(first.queued).toBe(false)
+    // Queued at the org level.
     const second = quota.acquire('org-a', 'short', { clock })
     await settle()
     first.release()
     const lease = await second
     expect(lease.queued).toBe(true)
+    // Org free at once, queued at the global level (capacity: 2 global permits).
+    const other = await quota.acquire('org-b', 'short', { clock })
+    const third = quota.acquire('org-c', 'short', { clock })
+    await settle()
+    other.release()
+    const globalOnly = await third
+    expect(globalOnly.queued).toBe(true)
+    globalOnly.release()
     lease.release()
   })
 

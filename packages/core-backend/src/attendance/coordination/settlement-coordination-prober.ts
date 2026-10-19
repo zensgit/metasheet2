@@ -178,7 +178,7 @@ export class SettlementCoordinationProberRegistryV1 {
           this.#armTimers(current)
         }
         waiter.cleanup()
-        reject(new CoordinationWaitEndedError(reason))
+        reject(new CoordinationWaitEndedError(reason, { queued: true }))
       }
       state.queue.push(waiter)
       // Joining is activity, not news: it never postpones the takeover of a silent prober.

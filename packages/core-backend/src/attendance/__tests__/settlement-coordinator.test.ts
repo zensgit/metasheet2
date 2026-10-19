@@ -39,6 +39,8 @@ class FakeLockWorld {
   readonly before = new Map<string, () => Promise<void>>()
   /** What the session unlock (cleanup before handover) answers. */
   unlockRow: Record<string, unknown> = { u_k: true, u_c: true }
+  /** When set, S2 fails with this error (the handover then rolls back and reports uncertain). */
+  s2Error: Error | null = null
 
   /** `withClassZero`: whether this S1 carries the class-00 layer (plans without it answer c_ok = true). */
   nextS1(withClassZero: boolean): Record<string, unknown> | Error {
@@ -74,7 +76,10 @@ class FakeClient implements SettlementCoordinationClientV1 {
       return { rows: [row], command: 'SELECT' }
     }
     if (sql.startsWith('BEGIN')) return { rows: [], command: 'BEGIN' }
-    if (sql.startsWith('SELECT x_k')) return { rows: [{ x_k: true, x_c: true, u_k: true, u_c: true }], command: 'SELECT' }
+    if (sql.startsWith('SELECT x_k')) {
+      if (this.world.s2Error) throw this.world.s2Error
+      return { rows: [{ x_k: true, x_c: true, u_k: true, u_c: true }], command: 'SELECT' }
+    }
     if (sql.startsWith('SELECT u_k') || sql.startsWith('SELECT pg_advisory_unlock_shared')) return { rows: [this.world.unlockRow], command: 'SELECT' }
     return { rows: [], command: sql.split(/\s+/)[0].toUpperCase() }
   }
@@ -117,7 +122,7 @@ class FakePool implements SettlementCoordinationPoolV1 {
   }
 }
 
-function setup(options: { connectTimeoutMs?: number; takeoverMs?: number; txnSlots?: number; orgTxnSlots?: number } = {}) {
+function setup(options: { connectTimeoutMs?: number; takeoverMs?: number; txnSlots?: number; orgTxnSlots?: number; observerThrows?: boolean } = {}) {
   const clock = new ManualCoordinationClock()
   const world = new FakeLockWorld()
   const pool = new FakePool(world)
@@ -129,7 +134,10 @@ function setup(options: { connectTimeoutMs?: number; takeoverMs?: number; txnSlo
     clock,
     random: () => 0.5,
     takeoverMs: options.takeoverMs,
-    onAttempt: (record) => records.push(record),
+    onAttempt: (record) => {
+      records.push(record)
+      if (options.observerThrows) throw new Error('test: attempt observer failed')
+    },
   })
   const { quota, ledger, prober } = coordinator.deps
   const baseline = () => {
@@ -654,6 +662,19 @@ describe('settlement coordinator: nothing is handed over once the budget is gone
     baseline()
   })
 
+  it('closed and out of budget at the same checkpoint: the acquisition fails as aborted (Fable S2 closure NIT-N5)', async () => {
+    const { clock, world, pool, coordinator, baseline } = setup()
+    world.before.set('SELECT idle', () => clock.sleep(6000))
+    const unit = coordinator.openUnit(REQUEST)
+    const acquiring = track(unit.acquire(ORG))
+    await settle()
+    unit.close()
+    await clock.advance(6000)
+    expect(acquiring.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    expect(pool.clients[0].calls[1]).toMatch(/^SELECT u_k/)
+    baseline()
+  })
+
   it('a connection that arrives just as the budget runs out goes back untried', async () => {
     const { clock, pool, coordinator, baseline } = setup({ connectTimeoutMs: 10_000 })
     pool.manual = true
@@ -665,6 +686,22 @@ describe('settlement coordinator: nothing is handed over once the budget is gone
     expect((acquiring.error as SettlementCoordinationAcquireError).code).toBe('ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE')
     expect(pool.clients[0].calls).toEqual([])
     expect(pool.clients[0].released).toEqual([null])
+    unit.close()
+    baseline()
+  })
+
+  it('a handover that fails at once spends nothing on its slow cleanup ROLLBACK (Codex S2 closure P3-01)', async () => {
+    const { clock, world, pool, coordinator, baseline } = setup()
+    world.s2Error = Object.assign(new Error('test: S2 failed'), { code: 'XX000' })
+    world.before.set('ROLLBACK', () => clock.sleep(6000))
+    const unit = coordinator.openUnit(REQUEST)
+    const acquiring = track(unit.acquire(ORG))
+    await clock.advance(6000)
+    expect(acquiring.error).toBeInstanceOf(AttendanceCoordinationConnectionUncertainError)
+    expect(acquiring.error).toMatchObject({ reason: 's2-statement-failed' })
+    expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
+    expect(pool.clients[0].released[0]).toBeInstanceOf(AttendanceCoordinationConnectionUncertainError)
+    expect(unit.budget.spentMs).toBe(0)
     unit.close()
     baseline()
   })
@@ -834,6 +871,65 @@ describe('settlement coordinator: one acquisition at a time, and close() while o
   })
 })
 
+describe('settlement coordinator: the candidate read and close() / abort (Codex S2 closure P3-03)', () => {
+  it('an acquisition during an in-flight candidate read is refused before it takes anything (Fable S2 closure NIT-N5)', async () => {
+    const { pool, coordinator, quota, ledger, baseline } = setup()
+    pool.manual = true
+    const unit = coordinator.openUnit(REQUEST)
+    const reading = track(unit.readCandidate(async () => 'candidate'))
+    await settle()
+    expect(pool.pending).toHaveLength(1)
+    await expect(unit.acquire(ORG)).rejects.toThrow(/overlapping/)
+    expect(pool.connects).toBe(1)
+    expect(quota.snapshot().global.short.held).toBe(0)
+    expect(ledger.snapshot().holding).toEqual([])
+    pool.pending[0].succeed()
+    await settle()
+    expect(reading.value).toBe('candidate')
+    unit.close()
+    baseline()
+  })
+
+  it('close() while the candidate read runs: the read finishes, its connection goes back once, and no candidate is handed out', async () => {
+    const { clock, pool, coordinator, ledger, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const reading = track(
+      unit.readCandidate(async (client) => {
+        await client.query('SELECT 1')
+        await clock.sleep(100)
+        return 'candidate-org'
+      }),
+    )
+    await settle()
+    unit.close()
+    expect(ledger.snapshot().inFlight.short).toBe(1)
+    await clock.advance(100)
+    expect(reading.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    expect(pool.clients[0].released).toEqual([null])
+    expect(ledger.snapshot().inFlight.short).toBe(0)
+    baseline()
+  })
+
+  it('an abort while the candidate read runs: no candidate is handed out, the connection goes back once', async () => {
+    const { clock, pool, coordinator, baseline } = setup()
+    const controller = new AbortController()
+    const unit = coordinator.openUnit({ ...REQUEST, signal: controller.signal })
+    const reading = track(
+      unit.readCandidate(async () => {
+        await clock.sleep(100)
+        return 'candidate-org'
+      }),
+    )
+    await settle()
+    controller.abort()
+    await clock.advance(100)
+    expect(reading.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    expect(pool.clients[0].released).toEqual([null])
+    unit.close()
+    baseline()
+  })
+})
+
 describe('settlement coordinator: ledger self-check', () => {
   it('a permit taken outside any unit is reported', async () => {
     const { coordinator, quota, ledger } = setup()
@@ -898,6 +994,63 @@ describe('settlement coordinator: attempt records worth a log line (§3.2 step 1
     ;(acquiring.value as { end(): void }).end()
     holder.close()
     queued.close()
+    baseline()
+  })
+
+  it('a quota wait that runs out or is aborted is worth a log line (Codex S2 closure P3-02)', async () => {
+    const { clock, coordinator, records, baseline } = setup({ txnSlots: 3, orgTxnSlots: 1 })
+    const holder = coordinator.openUnit(REQUEST)
+    const held = await holder.acquire(ORG)
+    const outOfTime = coordinator.openUnit({ ...REQUEST, handover: { ...REQUEST.handover, entryLabel: 'unit.out-of-time' } })
+    const waitingOut = track(outOfTime.acquire(ORG))
+    await clock.advance(5000)
+    expect((waitingOut.error as SettlementCoordinationAcquireError).code).toBe('ATTENDANCE_COORDINATION_CAPACITY_BUSY')
+    const controller = new AbortController()
+    const aborted = coordinator.openUnit({ ...REQUEST, signal: controller.signal, handover: { ...REQUEST.handover, entryLabel: 'unit.aborted' } })
+    const waitingAborted = track(aborted.acquire(ORG))
+    await settle()
+    controller.abort()
+    await settle()
+    expect(waitingAborted.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    for (const label of ['unit.out-of-time', 'unit.aborted']) {
+      const record = records.find((entry) => entry.entryLabel === label) as SettlementCoordinationAttemptRecordV1
+      expect(record.outcome).toBe('failed')
+      expect(record.events.find((event) => event.kind === 'quota')?.detail).toMatchObject({ queued: true })
+      expect(shouldLogSettlementCoordinationAttemptV1(record)).toBe(true)
+    }
+    held.end()
+    holder.close()
+    outOfTime.close()
+    aborted.close()
+    baseline()
+  })
+
+  it('a connect that waited is worth a log line whether it then succeeds or fails; one refused at once is not (Codex S2 closure P3-02)', async () => {
+    const { clock, pool, coordinator, records, baseline } = setup({ connectTimeoutMs: 1000 })
+    pool.manual = true
+    const slowSuccess = coordinator.openUnit(REQUEST)
+    const succeeding = track(slowSuccess.acquire(ORG))
+    await clock.advance(900)
+    pool.pending[0].succeed()
+    await settle()
+    expect(succeeding.done).toBe(true)
+    expect(shouldLogSettlementCoordinationAttemptV1(records[0])).toBe(true)
+    ;(succeeding.value as { end(): void }).end()
+    slowSuccess.close()
+    const slowFailure = coordinator.openUnit(REQUEST)
+    const failing = track(slowFailure.acquire(ORG))
+    await clock.advance(900)
+    pool.pending[1].fail(new Error('test: connect refused late'))
+    await settle()
+    expect((failing.error as SettlementCoordinationAcquireError).code).toBe('ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE')
+    expect(shouldLogSettlementCoordinationAttemptV1(records[1])).toBe(true)
+    slowFailure.close()
+    pool.manual = false
+    pool.connect = () => Promise.reject(new Error('test: refused at once'))
+    const refused = coordinator.openUnit(REQUEST)
+    await expect(refused.acquire(ORG)).rejects.toMatchObject({ code: 'ATTENDANCE_COORDINATION_CONNECTION_UNAVAILABLE' })
+    expect(shouldLogSettlementCoordinationAttemptV1(records[2])).toBe(false)
+    refused.close()
     baseline()
   })
 
@@ -1022,6 +1175,47 @@ describe('settlement coordinator: coordination restart (§3.2 step 8, A07)', () 
     baseline()
   })
 
+  it('a second restart while one is converting is refused and leaves the first alone (Fable S2 closure NIT-N5)', async () => {
+    const { clock, world, pool, coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    const handle = await unit.acquire(ORG)
+    world.before.set('ROLLBACK', () => clock.sleep(100))
+    const first = track(unit.restart(handle, { reason: 'serialization', transaction: 'live', error: serializationError('1') }))
+    await settle()
+    await expect(unit.restart(handle, { reason: 'serialization', transaction: 'live', error: serializationError('2') })).rejects.toThrow(/overlapping restart/)
+    await clock.advance(100)
+    expect(first.done).toBe(true)
+    expect(first.error).toBeUndefined()
+    expect(pool.clients[0].released).toEqual([null])
+    expect(unit.innerRestarts.serialization).toBe(1)
+    unit.close()
+    baseline()
+  })
+
+  it('three COMMIT-time 40001 restarts: the third rethrows exactly the error the commit primitive returned (Fable S2 closure NIT-N5)', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const unit = coordinator.openUnit(REQUEST)
+    let last: unknown = null
+    let thrown: unknown = null
+    for (const label of ['1', '2', '3']) {
+      const handle = await unit.acquire(ORG)
+      const error = serializationError(`commit ${label}`)
+      pool.clients[pool.clients.length - 1].failOnce.set('COMMIT', error)
+      const committed = await commitSettlementCoordinationTransactionV1(handle.client, handle.credential)
+      expect(committed).toEqual({ kind: 'retryable', error })
+      last = error
+      try {
+        await unit.restart(handle, { reason: 'serialization', transaction: 'ended', commit: committed })
+      } catch (caught) {
+        thrown = caught
+      }
+    }
+    expect(thrown).toBe(last)
+    expect(unit.innerRestarts.serialization).toBe(3)
+    unit.close()
+    baseline()
+  })
+
   it('ending an attempt invalidates its credential: COMMIT through the old handle is refused and nothing is sent', async () => {
     const { pool, coordinator, baseline } = setup()
     const unit = coordinator.openUnit(REQUEST)
@@ -1092,5 +1286,30 @@ describe('settlement coordinator: coordination restart (§3.2 step 8, A07)', () 
     handle.end()
     await expect(unit.restart(handle, { reason: 'serialization', transaction: 'live', error: null })).rejects.toThrow(/does not hold/)
     unit.close()
+  })
+})
+
+describe('settlement coordinator: a throwing attempt observer (Fable S2 closure NIT-N4)', () => {
+  it('changes neither the outcome nor the bookkeeping, and each failure is counted', async () => {
+    const { pool, coordinator, ledger, baseline } = setup({ observerThrows: true })
+    // Success path: the handle still reaches the caller.
+    const unit = coordinator.openUnit(REQUEST)
+    const handle = await unit.acquire(ORG)
+    expect(coordinator.deps.stats.attemptObserverFailures).toBe(1)
+    handle.end()
+    unit.close()
+    // Failure path of a unit closed in flight: it still leaves the ledger.
+    pool.manual = true
+    const other = coordinator.openUnit(REQUEST)
+    const acquiring = track(other.acquire(ORG))
+    await settle()
+    other.close()
+    await settle()
+    expect(acquiring.error).toBeInstanceOf(SettlementCoordinationAbortedError)
+    expect(coordinator.deps.stats.attemptObserverFailures).toBe(2)
+    expect(ledger.snapshot().inFlight.short).toBe(0)
+    pool.pending[0].succeed()
+    await settle()
+    baseline()
   })
 })

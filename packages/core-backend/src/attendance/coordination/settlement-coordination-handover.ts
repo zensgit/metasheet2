@@ -254,6 +254,11 @@ async function rollbackQuietly(client: AttendanceW4TransactionClientV1): Promise
   }
 }
 
+/** Observers of a handover. `decided` runs once the outcome is known, before any cleanup ROLLBACK. */
+export interface SettlementCoordinationHandoverHooksV1 {
+  readonly decided?: () => void
+}
+
 /**
  * Call only after S1 returned `acquired` on the same connection. BEGIN goes as its own statement;
  * S2 must be the first snapshot-taking statement of the transaction, so nothing else is sent in
@@ -263,6 +268,7 @@ export async function runSettlementCoordinationHandoverV1(
   client: AttendanceW4TransactionClientV1,
   plan: SettlementCoordinationPlanV1,
   options: SettlementCoordinationHandoverOptionsV1,
+  hooks: SettlementCoordinationHandoverHooksV1 = {},
 ): Promise<SettlementCoordinationHandoverOutcomeV1> {
   if (!ISOLATIONS.has(options.isolation)) throw new AttendanceCoordinationKeyError('ATTENDANCE_COORDINATION_ISOLATION_INVALID')
   const s2 = buildSettlementCoordinationS2Sql({
@@ -270,6 +276,12 @@ export async function runSettlementCoordinationHandoverV1(
     timeouts: options.timeouts,
     entryLabel: options.entryLabel,
   })
+  // The cleanup ROLLBACK of a failed handover is not part of the try (budget: §3.2 step 9).
+  const cleanUp = async (reason: SettlementCoordinationUncertainReasonV1, error?: unknown): Promise<SettlementCoordinationUncertainV1> => {
+    hooks.decided?.()
+    await rollbackQuietly(client)
+    return uncertain(reason, error)
+  }
   let begun: unknown
   try {
     begun = await client.query(`BEGIN ISOLATION LEVEL ${options.isolation}`)
@@ -279,29 +291,16 @@ export async function runSettlementCoordinationHandoverV1(
   // COMMIT is trusted only on its COMMIT tag. A client that does not report command tags would turn
   // every real commit into `commit-not-committed` after the business work is done; refuse it here,
   // before anything happens inside the transaction.
-  if ((begun as { command?: unknown } | null)?.command !== 'BEGIN') {
-    await rollbackQuietly(client)
-    return uncertain('begin-unacknowledged')
-  }
+  if ((begun as { command?: unknown } | null)?.command !== 'BEGIN') return cleanUp('begin-unacknowledged')
   let row: Record<string, unknown> | null
   try {
     row = singleRow(await client.query(s2))
   } catch (error) {
-    await rollbackQuietly(client)
-    return uncertain('s2-statement-failed', error)
+    return cleanUp('s2-statement-failed', error)
   }
-  if (row === null) {
-    await rollbackQuietly(client)
-    return uncertain('s2-result-invalid')
-  }
-  if (row.x_k !== true || row.x_c !== true) {
-    await rollbackQuietly(client)
-    return uncertain('s2-regrant-failed')
-  }
-  if (row.u_k !== true || row.u_c !== true) {
-    await rollbackQuietly(client)
-    return uncertain('s2-unlock-failed')
-  }
+  if (row === null) return cleanUp('s2-result-invalid')
+  if (row.x_k !== true || row.x_c !== true) return cleanUp('s2-regrant-failed')
+  if (row.u_k !== true || row.u_c !== true) return cleanUp('s2-unlock-failed')
   return Object.freeze({ kind: 'handed-over' as const, credential: mintCredential(client, plan) })
 }
 

@@ -85,7 +85,7 @@ export class CoordinationSemaphoreV1 {
         const index = this.#queue.indexOf(waiter)
         if (index >= 0) this.#queue.splice(index, 1)
         waiter.cleanup()
-        reject(new CoordinationWaitEndedError(reason))
+        reject(new CoordinationWaitEndedError(reason, { queued: true }))
       }
       this.#queue.push(waiter)
       if (options.deadline !== undefined) {

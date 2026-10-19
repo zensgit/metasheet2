@@ -26,11 +26,14 @@ export type CoordinationWaitEndReasonV1 = 'deadline' | 'aborted'
 export class CoordinationWaitEndedError extends Error {
   readonly code = 'ATTENDANCE_COORDINATION_WAIT_ENDED'
   readonly reason: CoordinationWaitEndReasonV1
+  /** Whether the waiter had joined a queue before the wait ended (false: it ended on entry). */
+  readonly queued: boolean
 
-  constructor(reason: CoordinationWaitEndReasonV1) {
+  constructor(reason: CoordinationWaitEndReasonV1, options: Readonly<{ queued?: boolean }> = {}) {
     super(`ATTENDANCE_COORDINATION_WAIT_ENDED:${reason}`)
     this.name = 'CoordinationWaitEndedError'
     this.reason = reason
+    this.queued = options.queued === true
   }
 }
 
