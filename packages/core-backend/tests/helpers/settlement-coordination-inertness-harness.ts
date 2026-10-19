@@ -34,11 +34,13 @@
  *    them), the lock sample after the first can be taken while the second runs.
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { Client, type Pool, type PoolClient } from 'pg'
+import { promisify } from 'node:util'
+import { Client, Pool, type PoolClient } from 'pg'
 import { expect, vi } from 'vitest'
 
 import type { MetaSheetServer } from '../../src/index'
@@ -57,6 +59,12 @@ import { transitionAttendanceW7ContextSourceV1 } from '../../src/attendance/w7-c
 import { sweepAttendanceScheduledRunsOnceV1 } from '../../src/attendance/w4c2-scheduled-run-ops-worker'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { ensureLocalUserRow, grantApprovalWriteForIntegrationActor } from './approval-schema-bootstrap'
+import {
+  assertDroppableScratchDatabaseName,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from './scratch-database'
 
 // ---------------------------------------------------------------------------------------------------
 // The settlement-coordination key space, as `pg_locks` shows it
@@ -575,6 +583,106 @@ export async function bootP11CompositionRoot(): Promise<P11Boot> {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// The scratch database each inertness file runs on
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * Why the inertness files do not use the shared test database: in CI every attendance file runs in
+ * one invocation against one database, and earlier files leave `attendance_scheduled_runs` rows in
+ * state `running`. The sweep entry's scan stamps `last_attempt_at` on such a row, a row-state trigger
+ * refuses some of them (`W4C2_RUN_STATE`), and the entry then fails for a reason that is not a
+ * property of the code under comparison. Each inertness file therefore creates its own database,
+ * migrates it with the full migration set, and drops it in `afterAll`, as
+ * `attendance-w4c2-sweep-call-through.db.test.ts` does.
+ *
+ * The files pick the name and rebind `DATABASE_URL` in their `vi.hoisted` block, before
+ * `connection-pool` builds the pool manager from it at module load (pg pools connect lazily, so
+ * nothing connects before the database exists). These functions do the rest, in `beforeAll` /
+ * `afterAll`. They use the shared URL only to reach the server's maintenance database `postgres`,
+ * through a one-connection admin pool that is closed again before the server boots, so it never shows
+ * up in the active-resource counts the baseline file records.
+ */
+
+/** Ceiling for the migration child; the files' `beforeAll` budgets add this to their previous budget. */
+export const P11_SCRATCH_MIGRATION_TIMEOUT_MS = 240_000
+
+const CORE_BACKEND_DIR = path.resolve(__dirname, '../..')
+const execFileAsync = promisify(execFile)
+
+function p11AdminUrl(sharedUrl: string): string {
+  const adminUrl = new URL(sharedUrl)
+  adminUrl.pathname = '/postgres'
+  return adminUrl.toString()
+}
+
+function p11AdminPool(sharedUrl: string): Pool {
+  return new Pool({ connectionString: p11AdminUrl(sharedUrl), max: 1, application_name: 'p11-scratch-admin' })
+}
+
+/**
+ * Creates the empty scratch database. Refuses a name that already exists (it would belong to someone
+ * else, and `afterAll` drops only what this call created).
+ */
+export async function createP11ScratchDatabase(sharedUrl: string, name: string): Promise<void> {
+  assertDroppableScratchDatabaseName(name)
+  const admin = p11AdminPool(sharedUrl)
+  try {
+    const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name])
+    if (existing.rows.length !== 0) throw new Error('P11_SCRATCH_DATABASE_NAME_COLLISION')
+    await admin.query(`CREATE DATABASE "${name}"`)
+  } finally {
+    await admin.end()
+  }
+}
+
+/**
+ * Migrates the scratch database with the same CLI `pnpm migrate` runs (`tsx src/db/migrate.ts`), in
+ * a child process, as the sweep call-through suite does: kysely's file provider `import()`s each
+ * migration from code outside the test runner's transform graph, which tsx resolves and the runner
+ * does not. The child inherits the environment (so a `MIGRATION_EXCLUDE` set for the run applies here
+ * too) with `DATABASE_URL` pointing at the scratch database. Asynchronous, so a slow migration ends in
+ * the child's own timeout with a code rather than a blocked event loop.
+ */
+export async function migrateP11ScratchDatabase(scratchUrl: string): Promise<void> {
+  try {
+    await execFileAsync('pnpm', ['exec', 'tsx', 'src/db/migrate.ts'], {
+      cwd: CORE_BACKEND_DIR,
+      env: { ...process.env, DATABASE_URL: scratchUrl },
+      timeout: P11_SCRATCH_MIGRATION_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+  } catch (error) {
+    const failure = error as { code?: unknown; signal?: unknown; killed?: unknown } | null
+    throw new Error(
+      `P11_SCRATCH_MIGRATION_FAILED code=${String(failure?.code ?? 'unknown')} signal=${String(failure?.signal ?? 'none')} killed=${String(failure?.killed === true)}`,
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Drops the scratch database through `dropScratchDatabase` (revoke, drain, drop, read back) and
+ * logs its values-free outcome line unconditionally; a failed drop is logged and re-thrown.
+ */
+export async function dropP11ScratchDatabase(sharedUrl: string, name: string, label: string): Promise<void> {
+  const admin = p11AdminPool(sharedUrl)
+  try {
+    const outcome = await dropScratchDatabase(admin, name)
+    console.log(formatScratchDropOutcome(label, outcome))
+  } catch (error) {
+    console.log(formatScratchDropFailure(label, error))
+    throw error
+  } finally {
+    await admin.end().catch(() => undefined)
+  }
+}
+
+/** The composition root's main pool (`poolManager`'s), for the teardown's termination handler. */
+export function p11MainPool(): Pool {
+  return poolManager.get().getInternalPool()
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Approval fixtures (published over HTTP, outside every recorded entry)
 // ---------------------------------------------------------------------------------------------------
 
@@ -1028,8 +1136,11 @@ export const P11_ENTRY_PLAN: readonly P11EntryPlanItem[] = Object.freeze([
       expectInsideOwnTransaction(run.trace, /FROM attendance_scheduled_runs WHERE state = '\?'/, 'COMMIT')
       expectBorrowsReturned(run.trace)
     },
-    // Only the scan borrow is compared: the candidates (at most one) are whatever `running` rows other
-    // suites left in the shared database, so their number is not a property of the code.
+    // Only the scan borrow is compared. The inertness files run on their own freshly migrated scratch
+    // database, where nothing creates a `running` scheduled run before this entry (the attendance
+    // scheduler is off and no org is on the W4 allowlist while the server runs), so `candidateBorrows`
+    // is 0 on both refs there. It stays out of the comparison as before: a candidate (at most one) is
+    // a data row, not a property of the code.
     written: (run) => ({
       candidateBorrows: new Set(run.trace.steps.filter((step) => step.b !== 'b0').map((step) => step.b)).size,
       steps: run.trace.steps.filter((step) => step.b === 'b0').map(({ t: _t, ...rest }) => rest),

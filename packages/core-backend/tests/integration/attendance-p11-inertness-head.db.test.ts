@@ -20,6 +20,11 @@
  *    as `settlement-coordination-child-process.test.ts` spawns its child) loads the module the way
  *    production does, with no setup file and no test runner in it, so what it prints is the
  *    initializer's own mode.
+ *
+ * Database isolation, as in the baseline file: the DB half runs on its own scratch database, created
+ * and migrated with the full migration set in `beforeAll` and dropped in `afterAll` (the harness's
+ * scratch-database section says why). The `vi.hoisted` block below rebinds `DATABASE_URL` to it before
+ * any import builds the pool manager. The fresh-process mode probe touches no database.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
@@ -43,20 +48,45 @@ import {
   P11ApprovalFixtures,
   P11StatementRecorder,
   P11_ENTRY_PLAN,
+  P11_SCRATCH_MIGRATION_TIMEOUT_MS,
   bootP11CompositionRoot,
+  createP11ScratchDatabase,
+  dropP11ScratchDatabase,
   emptyP11EntryContext,
+  migrateP11ScratchDatabase,
+  p11MainPool,
   settlementCoordinationLocksOf,
   type P11EntryContext,
 } from '../helpers/settlement-coordination-inertness-harness'
+import { attachOwnedPoolTerminationHandler } from '../helpers/scratch-database'
 
-// Hoisted above every import by Vitest: the same 9-connection main pool as the baseline file.
-const priorPoolMax = vi.hoisted(() => {
-  const prior = process.env.DB_POOL_MAX
+// Hoisted above every import by Vitest: the same 9-connection main pool as the baseline file, built on
+// this file's own scratch database (see the baseline file's hoisted block; pg pools connect lazily, so
+// nothing connects before `beforeAll` has created and migrated it).
+const hoisted = vi.hoisted(() => {
+  const priorPoolMax = process.env.DB_POOL_MAX
+  const sharedUrl = process.env.DATABASE_URL
   process.env.DB_POOL_MAX = '9'
-  return prior
+  let scratch: { name: string; url: string } | null = null
+  if (sharedUrl) {
+    const name = `ms2_p11head_${process.pid.toString(36)}${Math.random().toString(36).slice(2, 10).padEnd(8, '0')}`
+    const url = new URL(sharedUrl)
+    url.pathname = `/${name}`
+    scratch = { name, url: url.toString() }
+    process.env.DATABASE_URL = scratch.url
+  }
+  return { priorPoolMax, sharedUrl, scratch }
 })
 
-const dbUrl = process.env.DATABASE_URL
+function restoreHoistedEnv(): void {
+  if (hoisted.priorPoolMax === undefined) delete process.env.DB_POOL_MAX
+  else process.env.DB_POOL_MAX = hoisted.priorPoolMax
+  if (hoisted.sharedUrl === undefined) delete process.env.DATABASE_URL
+  else process.env.DATABASE_URL = hoisted.sharedUrl
+}
+
+/** The shared URL the run was given (the scratch database is reached through `hoisted.scratch`). */
+const dbUrl = hoisted.sharedUrl
 const describeIfDatabase = dbUrl ? describe : describe.skip
 
 const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
@@ -84,12 +114,20 @@ describeIfDatabase('P1-1 production inertness — existing entries never run ins
   let previousMode: SettlementCoordinationNestingModeV1 | null = null
   /** Entries that sent a statement while a coordination context was active (must stay empty). */
   const insideContext: Array<{ label: string; sql: string }> = []
+  let scratchCreated = false
 
+  // Budget: the previous 180 s plus the migration child's ceiling (see the baseline file's budget note).
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
+    const scratch = hoisted.scratch
+    if (!scratch || !dbUrl) throw new Error('P11_SCRATCH_DATABASE_NOT_PREPARED')
+    await createP11ScratchDatabase(dbUrl, scratch.name)
+    scratchCreated = true
+    await migrateP11ScratchDatabase(scratch.url)
     // Production mode for the whole file: a nested access is counted, not refused.
     previousMode = setSettlementCoordinationNestingModeV1('count')
-    ctx.observer = new Pool({ connectionString: dbUrl, max: 2 })
+    // The lock sampler filters `pg_locks` on the observer's own database, so it must be the scratch one.
+    ctx.observer = new Pool({ connectionString: scratch.url, max: 2 })
     await ensureApprovalSchemaReady()
     ctx.boot = await bootP11CompositionRoot()
     if (!ctx.boot.server) return
@@ -103,19 +141,31 @@ describeIfDatabase('P1-1 production inertness — existing entries never run ins
     recorder.observePool(ctx.boot.mainPool)
     ctx.fixtures = new P11ApprovalFixtures(ctx.boot.baseUrl, `head${Date.now().toString(36)}`)
     ctx.people = await ctx.fixtures.people('chain')
-  }, 180_000)
+  }, 180_000 + P11_SCRATCH_MIGRATION_TIMEOUT_MS)
 
+  // No row-by-row cleanup: the scratch database is dropped. Same teardown as the baseline file.
   afterAll(async () => {
     recorder?.uninstall()
     if (previousMode) setSettlementCoordinationNestingModeV1(previousMode)
+    const teardownHandlers = [p11MainPool(), ctx.observer]
+      .filter((pool): pool is Pool => Boolean(pool))
+      .map((pool) => attachOwnedPoolTerminationHandler(pool))
     try {
-      if (ctx.observer && ctx.fixtures) await ctx.fixtures.cleanup(ctx.observer)
+      try {
+        await ctx.observer?.end()
+      } finally {
+        await ctx.boot?.server?.stop()
+      }
     } finally {
-      await ctx.observer?.end()
-      await ctx.boot?.server?.stop()
-      ctx.boot?.restoreEnv()
-      if (priorPoolMax === undefined) delete process.env.DB_POOL_MAX
-      else process.env.DB_POOL_MAX = priorPoolMax
+      try {
+        if (scratchCreated && hoisted.scratch && dbUrl) {
+          await dropP11ScratchDatabase(dbUrl, hoisted.scratch.name, 'p11-inertness-head')
+        }
+      } finally {
+        for (const handler of teardownHandlers) handler.detach()
+        ctx.boot?.restoreEnv()
+        restoreHoistedEnv()
+      }
     }
   }, 60_000)
 

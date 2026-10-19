@@ -25,6 +25,7 @@ async function connectionError(): Promise<void> {
   })
   try {
     await coordinatedTransactionV1({
+      transactionDepth: () => 0,
       coordinator,
       request: REQUEST,
       candidate: { org: ORG },
@@ -65,6 +66,7 @@ async function cli(failures: number, backoffMs: number, abortAfterMs: number | n
   const started = Date.now()
   try {
     const value = await coordinatedTransactionCliV1({
+      transactionDepth: () => 0,
       coordinator,
       request: { ...REQUEST, signal: controller.signal },
       candidate: { org: ORG },
