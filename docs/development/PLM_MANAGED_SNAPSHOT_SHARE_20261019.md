@@ -1,0 +1,28 @@
+# Managed BOM snapshot sharing: design and verification
+
+Implementation `505f1abe3dde175f047264eaefe28c3e2fc0f732`; exact concurrent record-count assertions `9be2eb7757576b035602e49f899bbab729e730ca`; accepted base `218d7bd82a259d7ca8db88d509fc7371c2d3b51f`. Native counterpart is Draft Yuantus #363. This isolated Meta candidate is not published yet.
+
+## Owner decision and authority
+
+The owner selected a one-time authorized snapshot: a native object reader may share only after separate native confirmation of the target audience and current Meta target authorization. Native revoke/unlink stops new source reads, refresh and writeback; existing copies remain under target permissions. Read, approval and write grants do not authorize sharing. Native Auth identity, Meta actor, tenant and organization are checked separately; no MetaID or shared credential fallback.
+
+## Implementation
+
+A durable five-minute Meta intent freezes operation, actor, separate tenant/organization, source/link/session generations and fingerprint, target base/name, native registration, PKCE and nonce. Callback GET only hands off to a fixed return page; purpose-specific POST exports the independently confirmed native snapshot. Strict receipt validation hashes the original snapshot bytes and verifies frozen source, target, operation and expiry.
+
+Publication reuses the existing BOM engine, record/history writer and base/sheet permission locks. Link-first locking follows existing unlink writer order; current source/session/memberships/target are rechecked after export. Final database-clock checks after record writes roll back expired sessions/intents/receipts. A database trigger forbids retargeting and terminal-state reversal. Concurrent callbacks and lost acknowledgements resolve to one binding, three fixture records and three revisions; fresh-process retry does not fetch native data again.
+
+Existing stop, revoke, transfer and unlink paths enqueue frozen native cancellation in the same transaction. Cancellation retries use the original registration/operation and remain pending honestly on unavailable acknowledgement. Published snapshots are retained and do not use the legacy refresh adapter. Browser start/return components use the existing origin-wide authentication Web Lock, exact current managed identity and a frozen operation; native grants and secrets are never persisted in browser storage.
+
+## Actual verification
+
+- Exact additive workflow commands: **93 backend unit and 198 web tests passed**, zero skipped/pending/todo; original gates retained.
+- Existing managed PostgreSQL suite: **34 passed**, zero skipped.
+- New actual PostgreSQL 15.17 suite: **14 passed**, zero skipped. Covers real record/history publication, concurrent idempotency, exact cardinality, fresh Node process retry, separate tenant/organization checks, target revoke, in-flight unlink and flags-off cancellation, retained target ACL, forced-password changes, actual PostgreSQL membership lock wait, and session expiry during the existing writer. Owned nonce `b555de9295720a0f` stopped and directory removed; proof/report preserved outside it.
+- Backend TypeScript, app Vue types, affected workflow actionlint and diff check passed. Changed frontend sources lint passed using the installed offline parser. Backend lint retains four pre-existing control-regex errors in unchanged legacy lines; baseline comparison found no introduced errors. This is not a whole-backend lint pass.
+
+Compact evidence: `artifacts/plm-managed-snapshot-share-20261019/proof.json`.
+
+## Open acceptance
+
+Native RPC is a controlled fixture in the PostgreSQL suite. Actual native confirmation/export over HTTP plus the rendered Meta target-share/return route, generic export permissions, and reused collaboration/pre-review consumers still require connected verification. Local PG15 does not replace CI PG16. Minimal test predecessor catalogs are not complete fresh-install migration evidence. Installed images, runtime package lifecycle, real customer/device and production acceptance remain separate. All PRs stay Draft; no merge or deployment.
