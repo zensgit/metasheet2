@@ -112,9 +112,9 @@ describeIfDatabase('P1-1 production inertness — existing entries through the r
   let scratchCreated = false
 
   // Budget: the previous 180 s for the approval schema, the boot and the fixtures, plus the migration
-  // child's own ceiling. The full migration set takes tens of seconds in CI and longer on a slower
-  // host (the sweep call-through's 120 s `beforeAll`, the same migration plus one boot, was seen to run
-  // out there).
+  // child's own ceiling. A fresh database with the full migration set takes seconds in CI (about 7 s
+  // for the whole step) and 30–55 s on the slower execution host, where the sweep call-through's 120 s
+  // `beforeAll`, the same migration plus one boot, was seen to run out.
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
     const scratch = hoisted.scratch
