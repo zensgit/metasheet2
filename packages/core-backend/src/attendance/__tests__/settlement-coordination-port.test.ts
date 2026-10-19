@@ -407,6 +407,76 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
     baseline()
   })
 
+  // S5 G5: in the case above the port's own context check refuses first, so the unit's checks were
+  // never reached. Here the unit is opened outside any context and used inside one: only the unit's
+  // own `assertNoSettlementCoordinationContextV1('quota')` stands between it and a second quota.
+  const quotaNesting = { code: 'ATTENDANCE_COORDINATION_NESTED', kind: 'quota', detail: null, message: 'ATTENDANCE_COORDINATION_NESTED:quota' }
+  const describeNesting = (errors: unknown[]) =>
+    errors.map((error) => (error instanceof AttendanceCoordinationNestingError ? { code: error.code, kind: error.kind, detail: error.detail, message: error.message } : error))
+
+  it.each(['count', 'throw'] as const)('a unit opened outside any context is refused acquire() inside a body with the quota nesting error, before it takes anything - nesting mode %s (kills S5G-A11-M3s-acquire)', async (mode) => {
+    const { pool, coordinator, baseline } = setup()
+    setSettlementCoordinationNestingModeV1(mode)
+    const countedBefore = settlementCoordinationNestedMainPoolAccessesV1()
+    const outside = coordinator.openUnit(REQUEST)
+    const errors: unknown[] = []
+    const outer = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      transactionDepth: () => 0,
+      body: async () => {
+        await outside.acquire('legacy-org-inner').then(
+          () => errors.push('acquired'),
+          (error) => errors.push(error),
+        )
+        return 'outer'
+      },
+    })
+    expect(outer).toBe('outer')
+    expect(describeNesting(errors)).toEqual([quotaNesting])
+    // Only the outer transaction borrowed; the refused unit took no quota or connection and stays usable.
+    expect(pool.connects).toBe(1)
+    expect(outside.active).toBe(false)
+    expect(settlementCoordinationNestedMainPoolAccessesV1()).toBe(countedBefore)
+    outside.close()
+    baseline()
+  })
+
+  it.each(['count', 'throw'] as const)('a unit opened outside any context is refused readCandidate() inside a body with the quota nesting error, before the read runs - nesting mode %s (kills S5G-A11-M3s-readCandidate)', async (mode) => {
+    const { pool, coordinator, baseline } = setup()
+    setSettlementCoordinationNestingModeV1(mode)
+    const countedBefore = settlementCoordinationNestedMainPoolAccessesV1()
+    const outside = coordinator.openUnit(REQUEST)
+    const errors: unknown[] = []
+    let reads = 0
+    const outer = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      transactionDepth: () => 0,
+      body: async () => {
+        await outside
+          .readCandidate(async () => {
+            reads += 1
+            return 'legacy-org-inner'
+          })
+          .then(
+            () => errors.push('read'),
+            (error) => errors.push(error),
+          )
+        return 'outer'
+      },
+    })
+    expect(outer).toBe('outer')
+    expect(describeNesting(errors)).toEqual([quotaNesting])
+    expect(reads).toBe(0)
+    expect(pool.connects).toBe(1)
+    expect(settlementCoordinationNestedMainPoolAccessesV1()).toBe(countedBefore)
+    outside.close()
+    baseline()
+  })
+
   it('the port refuses to start inside a pool transaction', async () => {
     const { pool, coordinator, baseline } = setup()
     await expect(
