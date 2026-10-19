@@ -18,20 +18,25 @@
  *
  * Faults are one-shot and armed BEFORE the boundary call; each arm returns the fresh error object
  * it will throw, so a leg can assert it receives that same object. A faulted statement is never
- * sent to the server:
+ * sent to the server (outcome `faulted`):
  *  - body: the first statement after the runner's `BEGIN ISOLATION LEVEL SERIALIZABLE` and its two
  *    `set_config` calls, counted by position (a body may itself start with a `set_config`);
  *  - rollback: the next `ROLLBACK` (the server transaction stays open; only a destroy ends it);
  *  - commit: the next `COMMIT` (also when it arrives as a config object, as the CCON wrapper sends it).
+ * One fault is the exception, a lost result rather than a failed send (outcome `lost`):
+ *  - rollback-lost: the next `ROLLBACK` IS sent and runs on the server (its transaction really ends,
+ *    the connection is idle again), then the client is handed the armed error instead of the result.
+ *    Same shape as `attendance-report-cleaning-proposal.db.test.ts`'s lost-response faults.
  *
  * Pool events (`release`, `remove`) are recorded per borrow, not per client: with `max: 1` the same
  * pg client is handed out again after a normal return.
  */
 import { Pool, type PoolClient } from 'pg'
 
-export type AttendanceW4ReleaseProbeFaultKind = 'body' | 'rollback' | 'commit'
+export type AttendanceW4ReleaseProbeFaultKind = 'body' | 'rollback' | 'rollback-lost' | 'commit'
 
-export type AttendanceW4ReleaseProbeStatementOutcome = 'ok' | 'error' | 'faulted'
+/** `faulted`: never sent. `lost`: sent and executed by the server, then failed on the client. */
+export type AttendanceW4ReleaseProbeStatementOutcome = 'ok' | 'error' | 'faulted' | 'lost'
 
 export interface AttendanceW4ReleaseProbeStatement {
   readonly text: string
@@ -83,10 +88,12 @@ export interface AttendanceW4ReleaseProbe {
   /** `code` (default `'PROBE_BODY'`) is the SQLSTATE-like code the thrown body error carries, e.g. `'40001'`. */
   failNextBodyStatement(options?: AttendanceW4ReleaseProbeArmOptions & { readonly code?: string }): Error
   failNextRollback(options?: AttendanceW4ReleaseProbeArmOptions): Error
+  /** The next ROLLBACK runs on the server; its result is replaced by the returned error on the client. */
+  loseNextRollbackResult(options?: AttendanceW4ReleaseProbeArmOptions): Error
   failNextCommit(code: string, options?: AttendanceW4ReleaseProbeArmOptions): Error
   /** Faults armed but not yet attached to any checkout. */
   pendingFaults(): AttendanceW4ReleaseProbeFaultKind[]
-  /** Statement shape of a checkout: `<label>:<outcome>`; the faulted body statement is labelled `body`. */
+  /** Statement shape of a checkout: `<label>:<outcome>`; the faulted body statement is labelled `body`; a lost ROLLBACK is `ROLLBACK:lost`. */
   shape(borrow: AttendanceW4ReleaseProbeBorrow): string[]
   /** Only BEGIN / COMMIT / ROLLBACK / the idle probe, as `<label>:<outcome>`. */
   controlShape(borrow: AttendanceW4ReleaseProbeBorrow): string[]
@@ -203,16 +210,23 @@ export function createAttendanceW4ReleaseProbe(connectionString: string): Attend
         if (state.sinceBegin === 3) fault = take('body')
       }
       if (!fault && text === 'ROLLBACK') fault = take('rollback')
+      if (!fault && text === 'ROLLBACK') fault = take('rollback-lost')
       if (!fault && text === 'COMMIT') fault = take('commit')
       const statement: AttendanceW4ReleaseProbeStatement = { text, outcome: 'pending', fault: fault ? fault.kind : null }
       state.statements.push(statement)
-      if (fault) {
+      // A lost-result fault lets the statement through to the server and fails only the reply.
+      const lost = fault !== null && fault.kind === 'rollback-lost' ? fault : null
+      if (fault && !lost) {
         statement.outcome = 'faulted'
         return Promise.reject(fault.error)
       }
       const sent = originalQuery.apply(client, args) as Promise<unknown>
       return sent.then(
         (result) => {
+          if (lost) {
+            statement.outcome = 'lost'
+            throw lost.error
+          }
           statement.outcome = 'ok'
           return result
         },
@@ -272,6 +286,9 @@ export function createAttendanceW4ReleaseProbe(connectionString: string): Attend
     },
     failNextRollback(options) {
       return arm('rollback', Object.assign(new Error('probe: rollback failed'), { code: 'PROBE_ROLLBACK' }), options)
+    },
+    loseNextRollbackResult(options) {
+      return arm('rollback-lost', Object.assign(new Error('probe: rollback result lost'), { code: 'PROBE_ROLLBACK_LOST' }), options)
     },
     failNextCommit(code, options) {
       return arm('commit', Object.assign(new Error('probe: commit failed'), { code }), options)

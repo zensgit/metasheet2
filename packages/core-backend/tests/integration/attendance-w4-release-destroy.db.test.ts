@@ -18,7 +18,8 @@
  *    ROLLBACK, a business error with a failed ROLLBACK, a COMMIT failing with 57014, and the control
  *    that a COMMIT failing with 40001 is still retried on the same connection.
  *
- * Faults are injected client-side by the probe (the faulted statement is never sent). Each body
+ * Faults are injected client-side by the probe (the faulted statement is never sent), except the A04
+ * (d1) legs' lost ROLLBACK result, which runs on the server and fails only on the client. Each body
  * failure is the first statement of the boundary's runner body, which no boundary maps or wraps
  * before the runner sees it (SYNC's body-level `catch` that rewrites a string `code` sits around a
  * later block, not around its first statement).
@@ -37,7 +38,7 @@ import { up as w4c2Up } from '../../src/db/migrations/zzzz20260727100000_w4c2_sc
 import { up as w4c3aLegacyPlanUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
 import { up as w4c2SweepFairnessUp } from '../../src/db/migrations/zzzz20260805120000_w4c2_scheduled_run_sweep_fairness'
 import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import { assertConnectionIsIdleV1, type AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import { AttendanceW4OperationError } from '../../src/attendance/w4c0-operation-contract'
 import {
   attendanceW4ConnectionDiscardV1,
@@ -1013,8 +1014,20 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
       reasonCode: 'legacy_rollback_window_closed' as const,
     })
 
+    /** The probe backend's transaction state as the server reports it, read from another connection. */
+    async function serverTransactionState(pid: number): Promise<Array<{ state: string; no_transaction: boolean }>> {
+      const { rows } = await observer.query(
+        'SELECT state, xact_start IS NULL AS no_transaction FROM pg_stat_activity WHERE pid = $1',
+        [pid],
+      )
+      return rows as Array<{ state: string; no_transaction: boolean }>
+    }
+
+    // The ROLLBACK runs on the server and only its result is lost: the transaction has really ended and
+    // the connection is idle, so the runner's Gate E would admit a second attempt. The mark check in
+    // runControlTransaction is the only thing that stops one (TEST-MATRIX A04).
     it.each(['W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH', 'W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT'] as const)(
-      '(d1) a %s precondition whose ROLLBACK failed is marked and not retried; the caller can destroy the connection with it',
+      '(d1) a %s precondition whose ROLLBACK ran on the server but whose result was lost is marked and not retried, although Gate E would admit a retry; the caller destroys the connection with it',
       async (code) => {
         await withProbe(async (probe) => {
           const hookError = new AttendanceW4C3aRolloutControlError(code)
@@ -1025,21 +1038,33 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           })
           try {
             // Faults attach at checkout, so they are armed before the connection is borrowed.
-            probe.failNextRollback()
+            const rollbackError = probe.loseNextRollbackResult()
             const client = (await probe.pool().connect()) as PoolClient
             const error = await caught(() =>
               closeLegacyRollbackWindowV1(client as unknown as AttendanceW4TransactionClientV1, closeInput(`close-d1-${code}`)),
             )
 
-            expect(error).toBe(hookError)
-            expect((error as { code?: unknown }).code).toBe(code)
-            expect(isAttendanceW4ConnectionUncertainV1(error)).toBe(true)
-            expect(calls).toEqual(['close'])
-            expect(probe.pendingFaults()).toEqual([])
             expect(probe.borrows).toHaveLength(1)
             const borrow = probe.borrows[0]!
-            expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:faulted'])
-            // The release is the caller's job; the error carries what it needs to destroy the connection.
+            // Exactly one attempt: one BEGIN, the ROLLBACK executed on the server with its reply lost.
+            expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:lost'])
+            expect(calls).toEqual(['close'])
+            expect(error).toBe(hookError)
+            expect(error).not.toBe(rollbackError)
+            expect((error as { code?: unknown }).code).toBe(code)
+            expect(isAttendanceW4ConnectionUncertainV1(error)).toBe(true)
+            expect(isAttendanceW4ConnectionUncertainV1(rollbackError)).toBe(false)
+            expect(probe.pendingFaults()).toEqual([])
+            expect(borrow.unfired).toEqual([])
+            expect(borrow.releaseCalls).toEqual([])
+
+            // The server ended the transaction: the connection is idle and the next Gate E passes on it.
+            expect(await serverTransactionState(borrow.pid)).toEqual([{ state: 'idle', no_transaction: true }])
+            await expect(assertConnectionIsIdleV1(client as unknown as AttendanceW4TransactionClientV1)).resolves.toBeUndefined()
+            expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:lost', 'idle-probe:error'])
+
+            // Even so the caller's discard value is the error, and the release destroys the connection.
+            expect(attendanceW4ConnectionDiscardV1(error)).toBe(error)
             client.release(attendanceW4ConnectionDiscardV1(error))
             await expectDestroyed(probe, borrow, error)
           } finally {
@@ -1048,6 +1073,41 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         })
       },
     )
+
+    // The ROLLBACK never reaches the server: its transaction stays open, so here Gate E would refuse a
+    // second attempt on its own; only the destroy ends the transaction.
+    it('(d1, never sent) a CLOSE_CONFLICT precondition whose ROLLBACK never reached the server is marked and not retried; the server transaction stays open until the caller destroys the connection', async () => {
+      await withProbe(async (probe) => {
+        const hookError = new AttendanceW4C3aRolloutControlError('W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT')
+        const calls: string[] = []
+        __setW4C3aRolloutControlAfterExclusiveLockForTests(async (kind) => {
+          calls.push(kind)
+          throw hookError
+        })
+        try {
+          probe.failNextRollback()
+          const client = (await probe.pool().connect()) as PoolClient
+          const error = await caught(() =>
+            closeLegacyRollbackWindowV1(client as unknown as AttendanceW4TransactionClientV1, closeInput('close-d1-never-sent')),
+          )
+
+          expect(error).toBe(hookError)
+          expect((error as { code?: unknown }).code).toBe('W4C3A_ROLLOUT_CONTROL_CLOSE_CONFLICT')
+          expect(isAttendanceW4ConnectionUncertainV1(error)).toBe(true)
+          expect(calls).toEqual(['close'])
+          expect(probe.pendingFaults()).toEqual([])
+          expect(probe.borrows).toHaveLength(1)
+          const borrow = probe.borrows[0]!
+          expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:faulted'])
+          expect(await serverTransactionState(borrow.pid)).toEqual([{ state: 'idle in transaction', no_transaction: false }])
+          // The release is the caller's job; the error carries what it needs to destroy the connection.
+          client.release(attendanceW4ConnectionDiscardV1(error))
+          await expectDestroyed(probe, borrow, error)
+        } finally {
+          __setW4C3aRolloutControlAfterExclusiveLockForTests(null)
+        }
+      })
+    })
 
     it('(d2) control: an unmarked CLOSE_CONFLICT is still retried once on the same connection, as before', async () => {
       await withProbe(async (probe) => {

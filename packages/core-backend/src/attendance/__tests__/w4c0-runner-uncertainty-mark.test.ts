@@ -150,6 +150,10 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
     expect(attendanceW4ConnectionDiscardV1(undefined)).toBeUndefined()
   })
 
+  it('the mark key is the registered symbol of the contract (§5.3), so another copy of the module reads the same mark', () => {
+    expect(ATTENDANCE_W4_CONNECTION_UNCERTAIN).toBe(Symbol.for('ms2.attendance.w4.connectionUncertain'))
+  })
+
   it('the predicate recognises the two uncertain classes that predate the mark, not a plain error; marking is idempotent', () => {
     expect(isAttendanceW4ConnectionUncertainV1(new AttendanceCleaningConnectionUncertainError())).toBe(true)
     expect(isAttendanceW4ConnectionUncertainV1(new OnlinePunchConnectionUncertainError())).toBe(true)
@@ -174,6 +178,30 @@ describe('W4 runner — the uncertainty mark (r6.1 §1.1 P1-1 连接销毁语义
         attendanceCleaningSheetIds: ['sheet-a'],
       }),
     ).rejects.toBeInstanceOf(AttendanceCleaningConnectionUncertainError)
+  })
+
+  it('the fenced path keeps its own class on a COMMIT that fails with anything but 40001 / 40P01, and the COMMIT error itself is not marked (unchanged behaviour)', async () => {
+    const commitError = sqlError('57014')
+    const { sent, client } = connection({
+      commit: () => {
+        throw commitError
+      },
+    })
+    const failure = await runAttendanceResultOperationTransactionV1(client, async () => 'ok', {
+      attendanceCleaningAuthority: true,
+      attendanceCleaningSheetIds: ['sheet-a'],
+    }).then(
+      () => null,
+      (thrown) => thrown,
+    )
+    expect(failure).toBeInstanceOf(AttendanceCleaningConnectionUncertainError)
+    expect((failure as { code?: unknown }).code).toBe('W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN')
+    expect(failure).not.toBe(commitError)
+    expect(isAttendanceW4ConnectionUncertainV1(commitError)).toBe(false)
+    expect(Object.getOwnPropertySymbols(commitError)).toEqual([])
+    expect(begins(sent)).toBe(1)
+    expect(sent.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
+    expect(sent.filter((sql) => sql === 'ROLLBACK')).toHaveLength(1)
   })
 
   it('the handed-over runner marks nothing: its connection belongs to the port', async () => {

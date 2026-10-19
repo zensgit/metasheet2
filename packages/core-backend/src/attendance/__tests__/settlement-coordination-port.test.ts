@@ -487,6 +487,8 @@ describe('coordinated transaction port: nesting (P11-A11)', () => {
   })
 
   it('main-pool access inside the body counts in production mode and throws in test mode; outside a body nothing happens', async () => {
+    // Explicit, not inherited from the previous case's afterEach: the setup files start in 'throw'.
+    setSettlementCoordinationNestingModeV1('count')
     const { coordinator, baseline } = setup()
     noteSettlementCoordinationMainPoolAccessV1('test.outside')
     const before = settlementCoordinationNestedMainPoolAccessesV1()
