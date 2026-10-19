@@ -44,7 +44,8 @@ import {
   type ApprovalSettlementCoordinationHandoverV1,
   type CancelRoundRolloutLockRequirementV1,
 } from '../../src/services/ApprovalProductService'
-import type { ApprovalActionRequest } from '../../src/types/approval-product'
+import { APPROVAL_POLICY_DENIED_ACTION, type ApprovalActionRequest } from '../../src/types/approval-product'
+import { W4_TRANSACTION_LOCK_TIMEOUT_MS } from '../../src/attendance/w4c0-operation-contract'
 import { isCancelRoundInstance } from '../../src/attendance/w4c3b-central-approval-hooks'
 import { deriveSettlementCoordinationCapacityV1 } from '../../src/attendance/coordination/settlement-coordination-capacity'
 import { currentSettlementCoordinationContextV1 } from '../../src/attendance/coordination/settlement-coordination-context'
@@ -76,7 +77,7 @@ const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
 const CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
 /** The class-00 helper's own statement (w4c0-identity); the service must never send it when handed over. */
 const CLASS_ZERO_SHARED = 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
-const TRANSACTION_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK)\b/i
+const TRANSACTION_CONTROL = /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT)\b/i
 const PROBE_ACTOR = { userId: 'wi-handover-probe-actor', userName: 'handover probe', roles: [] as string[] }
 
 const READ_COMMITTED: SettlementCoordinationUnitRequestV1 = {
@@ -95,7 +96,9 @@ function m07(lockTimeoutMs?: number): SettlementCoordinationUnitRequestV1 {
     quotaClass: 'short',
     handover: {
       isolation: 'SERIALIZABLE',
-      timeouts: lockTimeoutMs === undefined ? { kind: 'w4-runner' } : { kind: 'lock-timeout-only', lockTimeoutMs },
+      // r6.1 §3.2 step 6: M07's S2 sets only lock_timeout (W4_TRANSACTION_LOCK_TIMEOUT_MS by default) and
+      // keeps the session's statement_timeout.
+      timeouts: { kind: 'lock-timeout-only', lockTimeoutMs: lockTimeoutMs ?? W4_TRANSACTION_LOCK_TIMEOUT_MS },
       entryLabel: 'test.m07',
     },
   }
@@ -792,7 +795,9 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     }
 
     // Control — the default path (not handed over) on the same legacy round: SERIALIZABLE BEGIN, then
-    // the class-00 acquisition parses the org key and refuses it (design §15 E-f, pre-existing).
+    // the class-00 acquisition parses the org key and refuses it (design §15 E-f, pre-existing). What
+    // this pins is that the default path is unchanged by S3; P1-3 retires E-f by routing legacy rounds
+    // through the handed-over mode and flips this control in the same commit.
     const control = await new ApprovalProductService()
       .dispatchAction(seeded.roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR)
       .then(
@@ -945,4 +950,115 @@ describeIfDatabase('attendance settlement coordination — the approval service 
       await w.end()
     }
   }, 60_000)
+
+  // ── review round 1, Opus findings: the default path's 55P03, and A10 ①② on a real cancel round ──
+
+  async function policyDenials(instanceId: string): Promise<number> {
+    const rows = await observer.query<{ n: number }>('SELECT count(*)::int AS n FROM approval_records WHERE instance_id = $1 AND action = $2', [
+      instanceId,
+      APPROVAL_POLICY_DENIED_ACTION,
+    ])
+    return rows.rows[0]?.n ?? 0
+  }
+
+  it('the default path keeps the raw 55P03: a row-lock wait past the class-00 helper\'s lock timeout is not mapped to 503 (Opus P2-2)', async () => {
+    const seeded = await seedAttendanceCancelRound(crypto.randomUUID())
+    const failure = await holdingRowLock(seeded.roundInstanceId, () =>
+      new ApprovalProductService().dispatchAction(seeded.roundInstanceId, { action: 'approve' } as ApprovalActionRequest, PROBE_ACTOR).then(
+        () => null,
+        (error) => error,
+      ),
+    )
+    expect((failure as { code?: unknown }).code).toBe('55P03')
+    expect((failure as { statusCode?: unknown }).statusCode).toBeUndefined()
+  }, 60_000)
+
+  it('A10 ①: a handed-over comment and approve on a real cancel round never reach the node-operation policy branch', async () => {
+    const round = await pendingCancelRound('a10-allowed')
+    const w = world()
+    try {
+      const commented = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+            new ApprovalProductService().dispatchAction(
+              round.roundInstanceId,
+              { action: 'comment', comment: 'handed-over comment' } as ApprovalActionRequest,
+              { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+              handover,
+            ),
+          ),
+      }).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      )
+      const approved = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: m07(),
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+            new ApprovalProductService().dispatchAction(
+              round.roundInstanceId,
+              { action: 'approve' } as ApprovalActionRequest,
+              { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+              handover,
+            ),
+          ),
+      }).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      )
+      for (const outcome of [commented, approved]) {
+        expect((outcome as { error?: { code?: unknown } }).error?.code).not.toBe('APPROVAL_NODE_OPERATION_DISABLED')
+      }
+      expect(await policyDenials(round.roundInstanceId)).toBe(0)
+      for (const run of w.attempts) expect(run.method.filter((sql) => TRANSACTION_CONTROL.test(sql))).toEqual([])
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 60_000)
+
+  it('A10 ②: every action outside the cancel-round set is refused by the cancel-round gate before the policy check, with nothing written', async () => {
+    const round = await pendingCancelRound('a10-forbidden')
+    const before = await instanceState(round.roundInstanceId)
+    const requests: ApprovalActionRequest[] = [
+      { action: 'transfer', targetUserId: `wi-handover-target-${TS}`, comment: 'transfer' } as ApprovalActionRequest,
+      { action: 'add_sign', targetUserIds: [`wi-handover-target-${TS}`], comment: 'add sign' } as ApprovalActionRequest,
+      { action: 'reduce_sign', targetAssignmentUserId: round.approverId, comment: 'reduce sign' } as ApprovalActionRequest,
+      { action: 'return', targetNodeKey: 'start', comment: 'return' } as ApprovalActionRequest,
+    ]
+    for (const request of requests) {
+      const w = world()
+      try {
+        const failure = await coordinatedTransactionV1({
+          coordinator: w.coordinator,
+          request: READ_COMMITTED,
+          candidate: { org: crypto.randomUUID() },
+          body: (context) =>
+            drive(context, w, { rolloutLock: { kind: 'none' } }, (handover) =>
+              new ApprovalProductService().dispatchAction(
+                round.roundInstanceId,
+                request,
+                { userId: round.approverId, userName: 'handed-over approver', roles: [] },
+                handover,
+              ),
+            ),
+        }).then(
+          () => null,
+          (error) => error,
+        )
+        expect({ action: request.action, failure }).toMatchObject({ action: request.action, failure: { statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' } })
+        expectOneRolledBackAttempt(w.attempts)
+        expectBaseline(w.coordinator)
+      } finally {
+        await w.end()
+      }
+    }
+    expect(await instanceState(round.roundInstanceId)).toEqual(before)
+    expect(await policyDenials(round.roundInstanceId)).toBe(0)
+  }, 120_000)
 })

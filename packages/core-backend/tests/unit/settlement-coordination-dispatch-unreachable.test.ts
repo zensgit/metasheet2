@@ -54,4 +54,14 @@ describe('the policy-refusal branch is unreachable in handed-over mode (r6.1 §1
     expect(refuse).toBeLessThan(refusalCommit)
     expect(refusalCommit).toBeLessThan(conflict)
   })
+
+  it('the 55P03 → 503 mapping holds only when handed over: the default path keeps raising the raw 55P03 (Opus P2-2)', () => {
+    const start = SOURCE.indexOf('  async dispatchAction(')
+    const catchAt = SOURCE.indexOf('      await rollbackQuietly(client)', start)
+    const end = SOURCE.indexOf('    } finally {', catchAt)
+    const catchBody = SOURCE.slice(catchAt, end)
+    expect(catchBody).toContain("const contendedWhenHandedOver = handover !== undefined && rolloutLock.kind === 'required' && isLockNotAvailableSqlState(error)")
+    expect(catchBody).toContain("if ((rolloutLock.kind === 'required' && isRetryableSqlState(error)) || contendedWhenHandedOver) {")
+  })
 })
+
