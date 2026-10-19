@@ -1,0 +1,229 @@
+{
+  "source": "41491e383c3f890397a857a2bb04d75136c375bf",
+  "parent": "f40b38ef72e2fd6bce5d2f6938e6490d88084990",
+  "scope": "test fixture encoding and actual server metadata only",
+  "old_configuration_red": {
+    "helper_head": "f40b38ef72e2fd6bce5d2f6938e6490d88084990",
+    "helper_sha256": "fc2b053fcc07821a9773b5577c696a1600bba431e30816c2550b85bb979384f0",
+    "pg_binary": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-pg16-runtime-20261019-y7640_uy/install/bin",
+    "owned_root": "/tmp/plm-pg16-encoding-5egxvogz",
+    "mode": "original helper initdb arguments and locale",
+    "expected_server_encoding": "UTF8",
+    "ok": false,
+    "actual_server": "160015|SQL_ASCII",
+    "postgres_stopped": true,
+    "owned_directory_removed": true
+  },
+  "self_check": {
+    "ok": true,
+    "command": "self-check",
+    "status0Running": true,
+    "status3ProvesStopped": true,
+    "unexpectedStatusRetained": true,
+    "missingAfterStartRetained": true,
+    "symlinkRetained": true,
+    "timeoutRetained": true,
+    "signalRetained": true,
+    "directoryRemoved": true,
+    "startedCluster": false,
+    "owned": "/tmp/plm-managed-paired-status-ab1ace03bf461d82-qu1g6_9t",
+    "nonce": "ab1ace03bf461d82"
+  },
+  "inputs": {
+    "native": "4f5d2f4964b6b781ab059fe1696597912e0e36de",
+    "meta_product": "430effa1e9aef4b36be7b7da1ad191fbb2128990",
+    "renderer_commit": "05b1d23e814cbbd7c4378b9fb960251358caf291",
+    "helper_sha256": "ae2495114a49f6f31cfe7b8a555f46587e7cc84c5ce76155807d24373a754ebb"
+  },
+  "approval_write_ECO": {
+    "raw_sha256": "898e462df8c41a69ded12a2b0ad955716b5b169dc551f942fa202b719ce68f7a",
+    "local_raw": "/tmp/plm-package-personal-approval-pg16-20261019.json",
+    "postgres": {
+      "version_num": 160015,
+      "server_encoding": "UTF8"
+    },
+    "ok": true,
+    "native": {
+      "write_audits": 1,
+      "snapshot_sharing_enabled": false,
+      "snapshot_items_hash": "bbde568a259eccc2412b0ce25c3de324d818bc8eef60a9393017a25d18939818",
+      "write_subjects": [
+        42
+      ],
+      "write_lines": [
+        "line"
+      ],
+      "personal_package_eco": {
+        "count": 1,
+        "rbac_creators": [
+          900
+        ],
+        "target_versions": 1,
+        "source_versions": 1,
+        "distinct_product_versions": true,
+        "target_generations": [
+          1
+        ],
+        "target_creators": [
+          900
+        ],
+        "line_quantity": 4
+      },
+      "personal_grants_revoked": 1,
+      "personal_revoke_audits": 1,
+      "personal_package_approval": {
+        "commands": 1,
+        "subjects": [
+          42
+        ],
+        "rbac_actors": [
+          900
+        ],
+        "votes": [
+          "approved"
+        ]
+      }
+    },
+    "meta": {
+      "ok": true,
+      "handshakes": 2,
+      "bom_line": "line",
+      "write_patch": 200,
+      "eco_intent": {
+        "accepted": 200,
+        "duplicate_idempotent": true,
+        "authority": "native personal bom_write grant",
+        "personal_unbind_outage": "pending-then-revoked",
+        "retry_with_meta_flag_off": true,
+        "duplicate_retry": true,
+        "frozen_identity_sha256": "37a5b177e50e140a5548407efb18396f13445f65527e20bd6ddb988432e24c4e"
+      },
+      "personal_approval": {
+        "approved": true,
+        "purpose_isolation": true,
+        "native_subject": "42",
+        "meta_owner_distinct": true,
+        "source_receipt_idempotent": true,
+        "native_threshold_preserved": true,
+        "binding_unbound": true,
+        "decision_entry": "existing authenticated approval card actions HTTP route",
+        "notification_sent": false
+      },
+      "meta_audit_rows": 2,
+      "native_logout": 204,
+      "transfer": "acked",
+      "rebind_generation": 2,
+      "revoke_outage": "pending-then-acked",
+      "late_callback_open_sessions": 0,
+      "callback_urls_observed": 3
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    },
+    "independent_review": {
+      "ok": true,
+      "proof_sha256": "898e462df8c41a69ded12a2b0ad955716b5b169dc551f942fa202b719ce68f7a",
+      "postgres": {
+        "version_num": 160015,
+        "server_encoding": "UTF8"
+      },
+      "native_actor": 42,
+      "native_rbac_actor": 900,
+      "line_changes": 1,
+      "ECO_intents": 1,
+      "approval_commands": 1,
+      "two_person_threshold_preserved": true,
+      "independent_purpose_grants": true,
+      "frozen_retry_under_flag_off": true,
+      "real_notifications": false,
+      "owned_cleanup_verified": true
+    }
+  },
+  "configuration_snapshot_restore": {
+    "raw_sha256": "55f77c265c2e76ada33c8b5b7f60c8cbda80e8f0547b8d2d8e2eae35019d7d04",
+    "local_raw": "/tmp/plm-package-config-restore-pg16-20261019.json",
+    "postgres": {
+      "version_num": 160015,
+      "server_encoding": "UTF8"
+    },
+    "configuration_upgrade": {
+      "ok": true,
+      "encrypted_intent_persisted_before_upgrade": true,
+      "identity_material_unchanged": true,
+      "snapshot_sharing_disabled": true,
+      "source_manifest_sha256": "b2bdf79d1742d3966e1652bead5723414374323ec7df212bc4e715d53ea4ff8a"
+    },
+    "snapshot_restore": {
+      "ok": true,
+      "native_stopped": true,
+      "fresh_meta_process": true,
+      "pending_native_intent_id": "9e78b2ae-ecb5-4c62-9412-8c8157b6b42e",
+      "retained_target_export": true,
+      "outsider_forbidden": true,
+      "new_share_refused": true,
+      "flags_disabled": true,
+      "changed_registration_refused": true,
+      "frozen_identity_sha256": "681aaadd5af6254383ec2bdd9b0d5ff913f8e3398f2cc0b20516625fb9bf790e",
+      "original_cancellation_acked": true,
+      "duplicate_idempotent": true,
+      "managed_revoke_acked": true,
+      "published_records_unchanged": true,
+      "meta_table_count": 86,
+      "all_restored_meta_rows_equal_before_start": true,
+      "native_store_count": 3,
+      "native_rows_equal_before_start": true,
+      "original_native_path_unavailable": true,
+      "original_meta_database_unavailable": true,
+      "native_business_unchanged": true,
+      "native_write_audits": 0,
+      "scope": "Actual source-process PostgreSQL/native SQLite restore and real HTTP; not installed image/volume/host acceptance"
+    },
+    "snapshot_share": {
+      "ok": true,
+      "explicit_native_confirmation": true,
+      "pre_confirmation_records": 0,
+      "published_bindings": 1,
+      "destination_grid_rendered": true,
+      "native_rpc": "real HTTP",
+      "target": "share-target",
+      "installed_image": false,
+      "native_storage": "isolated SQLite fixture",
+      "meta_storage": "actual PostgreSQL"
+    },
+    "snapshot_export": {
+      "ok": true,
+      "generic_csv_export": true,
+      "ungranted_export_forbidden": true,
+      "outsider_without_target_read_forbidden": true,
+      "unlink_acknowledged": false,
+      "unlink_pending": true,
+      "retained_target_acl_export": true,
+      "new_share_after_unlink_refused": true
+    },
+    "snapshot_pre_review": {
+      "ok": true,
+      "imported_record": true,
+      "missing_submit_permission_forbidden": true,
+      "real_approval_engine": true,
+      "separate_meta_reviewer": true,
+      "actual_durable_event_replayed_twice": true,
+      "one_completion_notification": true,
+      "submission_audit_persisted": true,
+      "snapshot_record_unchanged": true
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "boundary": "local source-process PostgreSQL16/nativeSQLite proof, not CI ECR image/full installed70/PM2/Nginx/volume/customer/production acceptance"
+}

@@ -424,10 +424,16 @@ def redact(text):
     return text.replace(secret, '[client secret]')
 
 try:
-    run_pg('initdb', ['-D', str(data), '-A', 'trust', '-U', 'plm_test'], 60)
+    run_pg('initdb', ['-D', str(data), '-A', 'trust', '-U', 'plm_test', '--encoding=UTF8'], 60)
     run_pg('pg_ctl', ['-D', str(data), '-l', str(owned / 'pg.log'), '-o', f"-h '' -k {sock} -p 5432", '-w', 'start'], 60)
     started = True
     run_pg('createdb', ['-h', str(sock), '-p', '5432', '-U', 'plm_test', 'plm_managed_paired'], 30)
+    proof['postgres'] = json.loads(run_pg('psql', [
+        '-XAt', '-h', str(sock), '-p', '5432', '-U', 'plm_test', '-d', 'plm_managed_paired',
+        '-c', "SELECT json_build_object('version_num', current_setting('server_version_num')::int, "
+              "'server_encoding', current_setting('server_encoding'))",
+    ], 30).stdout)
+    assert proof['postgres']['server_encoding'] == 'UTF8'
     preview = socket.socket()
     preview.bind(('127.0.0.1', 0))
     vite_port = preview.getsockname()[1]
