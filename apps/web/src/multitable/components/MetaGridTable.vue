@@ -467,7 +467,7 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
-import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked } from '../utils/field-permissions'
 import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
@@ -1210,10 +1210,12 @@ function canShowLockAction(recordId: string): boolean {
 // deriveFieldPermissions) — a client-side mirror of the same predicate the server write paths reject on,
 // so a mirror-link cell (or any field.property.mirrorOf/readOnly) is never editable even if the
 // per-field permission map is stale, not yet loaded, or a future call site forgets to thread it.
+// `!isFieldHumanWriteLocked(f)` is the same defense for a PLM-system column on a 备料 project sheet
+// (`property.humanWriteLock`): no editor ever opens on it; copying it is unaffected.
 const isEditable = (recordId: string, f: MetaField) =>
   !isRowLocked(recordId) &&
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) &&
-  !isFieldAlwaysReadOnly(f) && !props.fieldReadOnlyIds?.includes(f.id)
+  !isFieldAlwaysReadOnly(f) && !isFieldHumanWriteLocked(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {

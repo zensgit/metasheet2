@@ -1,5 +1,5 @@
 import type { MetaField, MetaRecord } from '../types'
-import { isFieldAlwaysReadOnly, isPropertyHiddenField } from './field-permissions'
+import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked, isPropertyHiddenField } from './field-permissions'
 import { resolveAttachmentFieldProperty, resolveLinkFieldProperty, resolveRatingFieldProperty, resolveSelectFieldOptions } from './field-config'
 import { isPersonSingleRecordField } from './person-fields'
 
@@ -7,6 +7,13 @@ export interface CellPoint { row: number; col: number }
 export interface CellRange { top: number; left: number; bottom: number; right: number }
 export type FillMode = 'copy' | 'series'
 export interface RangeChange { recordId: string; fieldId: string; value: unknown; expectedVersion: number }
+/**
+ * A plan plus the destination cells it SKIPPED because their column is human-write-locked (a PLM-system
+ * column on a 备料 project sheet, `property.humanWriteLock`). Those columns are skipped, never written and
+ * never fatal: the rest of the range still applies, and the caller says how many were left alone. Every OTHER
+ * read-only cell keeps the old all-or-nothing READ_ONLY refusal.
+ */
+export interface RangePlan { changes: RangeChange[]; skippedLockedCells: number }
 type ErrorCode = 'INVALID_RANGE' | 'TOO_LARGE' | 'INVALID_CLIPBOARD' | 'OUT_OF_BOUNDS'
   | 'READ_ONLY' | 'INVALID_VALUE' | 'INCOMPATIBLE_TYPE' | 'INVALID_SERIES'
 export class RangeOperationError extends Error {
@@ -244,6 +251,10 @@ function changeAt(context: PlanContext, rowIndex: number, col: number, value: un
 }
 
 export function planRangePaste(args: PlanContext & { target: CellRange; matrix: string[][] }): RangeChange[] {
+  return planRangePasteWithSkips(args).changes
+}
+
+export function planRangePasteWithSkips(args: PlanContext & { target: CellRange; matrix: string[][] }): RangePlan {
   checkRange(args.target, args)
   const { width, height } = matrixShape(args.matrix)
   if (args.matrix.some(row => row.some(value => typeof value !== 'string'))) fail('INVALID_CLIPBOARD')
@@ -253,13 +264,17 @@ export function planRangePaste(args: PlanContext & { target: CellRange; matrix: 
   if (rangeSize(target) > LIMIT) fail('TOO_LARGE')
   if ((target.bottom - target.top + 1) % height || (target.right - target.left + 1) % width) fail('INVALID_RANGE')
   const changes: RangeChange[] = []
+  let skippedLockedCells = 0
   for (let row = target.top; row <= target.bottom; row++) {
     for (let col = target.left; col <= target.right; col++) {
+      // Skipped BEFORE the clipboard text is parsed for it: a locked column's cell is never a write, so its
+      // text can neither fail the paste (INVALID_VALUE) nor reach the server.
+      if (isFieldHumanWriteLocked(args.fields[col])) { skippedLockedCells++; continue }
       const text = args.matrix[(row - target.top) % height][(col - target.left) % width]
       changes.push(changeAt(args, row, col, clipboardValue(text, args.fields[col])))
     }
   }
-  return changes
+  return { changes, skippedLockedCells }
 }
 
 function series(values: unknown[], field: MetaField): (index: number) => unknown {
@@ -288,6 +303,10 @@ function series(values: unknown[], field: MetaField): (index: number) => unknown
 const modulo = (value: number, length: number) => ((value % length) + length) % length
 
 export function planRangeFill(args: PlanContext & { source: CellRange; target: CellRange; mode: FillMode }): RangeChange[] {
+  return planRangeFillWithSkips(args).changes
+}
+
+export function planRangeFillWithSkips(args: PlanContext & { source: CellRange; target: CellRange; mode: FillMode }): RangePlan {
   const { source, target } = args
   checkRange(source, args); checkRange(target, args)
   if (args.mode !== 'copy' && args.mode !== 'series') fail('INVALID_RANGE')
@@ -296,11 +315,14 @@ export function planRangeFill(args: PlanContext & { source: CellRange; target: C
   const horizontal = target.left !== source.left || target.right !== source.right
   if (vertical && horizontal) fail('INVALID_RANGE')
   if (rangeSize(source) > LIMIT || rangeSize(target) - rangeSize(source) > LIMIT) fail('TOO_LARGE')
-  if (!vertical && !horizontal) return []
+  if (!vertical && !horizontal) return { changes: [], skippedLockedCells: 0 }
   const height = source.bottom - source.top + 1, width = source.right - source.left + 1
   const generators = new Map<number, (index: number) => unknown>()
   if (args.mode === 'series') {
     for (let axis = vertical ? source.left : source.top; axis <= (vertical ? source.right : source.bottom); axis++) {
+      // A vertical fill's axis IS a column: a locked one is skipped whole below, so it gets no generator
+      // (its values could otherwise fail the series check for cells that are never written).
+      if (vertical && isFieldHumanWriteLocked(args.fields[axis])) continue
       const values: unknown[] = []
       const firstField = args.fields[vertical ? axis : source.left]
       for (let i = 0; i < (vertical ? height : width); i++) {
@@ -312,9 +334,12 @@ export function planRangeFill(args: PlanContext & { source: CellRange; target: C
     }
   }
   const changes: RangeChange[] = []
+  let skippedLockedCells = 0
   for (let row = target.top; row <= target.bottom; row++) {
     for (let col = target.left; col <= target.right; col++) {
       if (rangeContains(source, { row, col })) continue
+      // Locked destination column: skipped before any type / series / value check — never a write.
+      if (isFieldHumanWriteLocked(args.fields[col])) { skippedLockedCells++; continue }
       const sourceCol = source.left + modulo(col - source.left, width)
       const sourceField = args.fields[sourceCol], targetField = args.fields[col]
       if (sourceField.type !== targetField.type) fail('INCOMPATIBLE_TYPE')
@@ -328,5 +353,5 @@ export function planRangeFill(args: PlanContext & { source: CellRange; target: C
       changes.push(changeAt(args, row, col, value))
     }
   }
-  return changes
+  return { changes, skippedLockedCells }
 }

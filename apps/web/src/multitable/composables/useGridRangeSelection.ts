@@ -2,7 +2,7 @@ import { canReadClipboardText, copyText, readClipboardText } from '../../utils/c
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import type { MetaField, MetaRecord } from '../types'
 import {
-  parseClipboardMatrix, planRangeFill, planRangePaste, rangeContains, rangeFromPoints,
+  parseClipboardMatrix, planRangeFillWithSkips, planRangePasteWithSkips, rangeContains, rangeFromPoints,
   serializeClipboardMatrix, cloneRangeValue, type CellPoint, type CellRange, type FillMode, type RangeChange,
 } from '../utils/grid-range-fill'
 
@@ -106,8 +106,13 @@ export function useGridRangeSelection(options: Options) {
       'INVALID_VALUE', 'INCOMPATIBLE_TYPE', 'INVALID_SERIES', 'RANGE_STALE', 'RANGE_READ_ONLY', 'RANGE_BUSY'].includes(code)
       ? code : 'FAILED'
   }
-  async function commit(changes: RangeChange[], context: string) {
-    if (!changes.length) return
+  // `skippedLockedCells`: destination cells in human-write-locked (PLM-system) columns the planner left alone.
+  // Nothing else to write → say so (READ_ONLY_PLM_SYSTEM); a write that also skipped some → DONE_PLM_SKIPPED.
+  async function commit(changes: RangeChange[], context: string, skippedLockedCells = 0) {
+    if (!changes.length) {
+      if (skippedLockedCells > 0 && options.contextKey() === context) status.value = 'READ_ONLY_PLM_SYSTEM'
+      return
+    }
     try {
       await options.commit(changes)
     } catch (error) {
@@ -119,7 +124,7 @@ export function useGridRangeSelection(options: Options) {
       throw error
     }
     // A successful projection can change row versions and clear selection; do not label it stale.
-    if (options.contextKey() === context) status.value = 'DONE'
+    if (options.contextKey() === context) status.value = skippedLockedCells > 0 ? 'DONE_PLM_SKIPPED' : 'DONE'
   }
   async function pointerUp(event: MouseEvent) {
     if (event.button !== 0) return
@@ -137,9 +142,9 @@ export function useGridRangeSelection(options: Options) {
     if (pending.kind !== 'fill' || !target) return
     busy.value = true
     try {
-      const changes = planRangeFill({ rows: pending.rows, fields: options.fields(), source: pending.source,
+      const plan = planRangeFillWithSkips({ rows: pending.rows, fields: options.fields(), source: pending.source,
         target, mode: pending.mode, canWrite: options.canWrite })
-      await commit(changes, options.contextKey())
+      await commit(plan.changes, options.contextKey(), plan.skippedLockedCells)
     } catch (error) {
       if (pending.signature === signature.value) reportError(error)
     } finally { busy.value = false }
@@ -204,9 +209,9 @@ export function useGridRangeSelection(options: Options) {
         status.value = 'CLIPBOARD_EMPTY'
         return
       }
-      const changes = planRangePaste({ rows, fields: options.fields(), target,
+      const plan = planRangePasteWithSkips({ rows, fields: options.fields(), target,
         matrix: parseClipboardMatrix(text), canWrite: options.canWrite })
-      await commit(changes, context)
+      await commit(plan.changes, context, plan.skippedLockedCells)
     } catch (error) {
       if (epoch === generation && before === signature.value) reportError(error)
     } finally { busy.value = false }

@@ -33,6 +33,8 @@ const message = computed(() => {
     RANGE_REFRESH_REQUIRED: ['填充已保存，但显示刷新失败；请刷新核对，无需重复提交。', 'Range saved, but display refresh failed. Refresh to check; do not resubmit.'],
     READ_ONLY: ['选区含不可写单元格，未提交。', 'Range contains read-only cells; nothing submitted.'],
     RANGE_READ_ONLY: ['选区含不可写单元格，未提交。', 'Range contains read-only cells; nothing submitted.'],
+    DONE_PLM_SKIPPED: ['已保存；PLM 系统列只读，已跳过（不支持选区撤销）。', 'Saved; PLM-system columns are read-only and were skipped (range undo is unavailable).'],
+    READ_ONLY_PLM_SYSTEM: ['选区只含 PLM 系统列（只读），未提交。', 'Only read-only PLM-system columns selected; nothing submitted.'],
     TOO_LARGE: ['单次最多填写 1,000 格。', 'Limit: 1,000 destination cells.'],
     INVALID_SERIES: ['仅支持数字或日期的等差序列。', 'Use constant-step numeric or date series.'],
     INCOMPATIBLE_TYPE: ['源与目标字段类型不匹配。', 'Source and destination field types differ.'],
