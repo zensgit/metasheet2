@@ -2196,4 +2196,72 @@ onMounted(async () => {
   padding: 8px 0;
   border-bottom: 1px solid var(--el-border-color-lighter, #eee);
 }
+
+/* Up to 960px. Above that width none of these rules apply.
+   - Long words in block text (titles, descriptions, comment bodies) break instead of widening the
+     page; `break-word` leaves min-content sizes alone, so labels in flex rows keep their words.
+   - The view switcher, the status switcher and the create form wrap, and the create controls,
+     the detail's completion-mode select and its comment textareas are capped at their container.
+   - The home's main column (beside the lists sidebar above 720px) is too narrow for a long title
+     plus status, due date and action on one line, so the task rows wrap: the title starts at 10em
+     and grows up to its own width, and whatever does not fit after it moves to the next line, so
+     the status, due date and action keep their own widths instead of being squeezed. The same rule
+     keeps the title on the drag handle's line in the assigned view's group boards. Titles and
+     assignee ids may break anywhere. */
+@media (max-width: 960px) {
+  .tasks-view {
+    overflow-wrap: break-word;
+  }
+
+  .tasks-view__detail-assignee-id {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-view__switcher,
+  .tasks-view__create {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__create select,
+  .tasks-view__create input,
+  .tasks-view__completion-mode-switch select,
+  .tasks-view__detail textarea {
+    max-width: 100%;
+  }
+
+  .tasks-view__item {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__item-title {
+    flex: 1 1 10em;
+    min-width: 0;
+    max-width: max-content;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Narrow screens (the one-column rule is the existing one above): tighter page padding, assignee
+   rows that wrap their status and remove button under the user id, and the create title on a row
+   of its own so the completion mode, date, time and create button wrap beneath it instead of
+   squeezing it. */
+@media (max-width: 720px) {
+  .tasks-view {
+    padding: 16px;
+  }
+
+  .tasks-view__create {
+    align-items: center;
+  }
+
+  .tasks-view__detail-assignee {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__create-title {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+}
 </style>

@@ -221,4 +221,17 @@ function onAdd(): void {
 .tasks-detail-lists__error {
   color: var(--el-color-danger, #c45656);
 }
+
+/* Up to 960px: the row wraps, so its labels keep their width and only a list name wider than the
+   line breaks; the select, which sizes itself to the longest list name, is capped at the form. */
+@media (max-width: 960px) {
+  .tasks-detail-lists__item {
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-detail-lists__add select {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
 </style>
