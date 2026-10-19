@@ -729,6 +729,28 @@ describe('coordinated transaction port: connection errors while held (S1 note 1;
     baseline()
   })
 
+  it('a connection that reported an error during a candidate read that still returned is destroyed, not returned to the pool', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const result = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: {
+        read: async () => {
+          pool.clients[0].lose(lost())
+          return ORG
+        },
+      },
+      body: async () => 'committed on the next connection',
+    })
+    expect(result).toBe('committed on the next connection')
+    expect(pool.clients).toHaveLength(2)
+    expect(pool.clients[0].released).toHaveLength(1)
+    expect(pool.clients[0].released[0]).toBeInstanceOf(Error)
+    expect(pool.clients[0].listenerCount('error')).toBe(0)
+    expect(pool.clients[1].released).toEqual([null])
+    baseline()
+  })
+
   it('a clean commit takes only its own listener off: a listener someone else added stays, and none of ours reaches the next borrower', async () => {
     const { pool, coordinator, baseline } = setup()
     const other = (): void => undefined
