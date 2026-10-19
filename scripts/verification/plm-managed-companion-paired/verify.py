@@ -323,6 +323,7 @@ parser.add_argument('--node', required=True)
 parser.add_argument('--pg-bin', required=True)
 parser.add_argument('--browser-cache', required=True)
 parser.add_argument('--browser-module')
+parser.add_argument('--package-renderer')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
@@ -330,6 +331,8 @@ parser.add_argument('--snapshot-share', action='store_true')
 parser.add_argument('--snapshot-pre-review', action='store_true')
 parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
+if args.package_renderer and not args.snapshot_restore:
+    parser.error('--package-renderer requires --snapshot-restore')
 if args.snapshot_restore and not args.snapshot_share:
     parser.error('--snapshot-restore requires --snapshot-share')
 if args.snapshot_pre_review and not args.snapshot_share:
@@ -486,6 +489,49 @@ try:
         'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
         'snapshot_share': args.snapshot_share,
     }
+    package_meta_env = None
+    if args.package_renderer:
+        import importlib.util
+        import hashlib
+        renderer = Path(args.package_renderer).resolve(strict=True)
+        assert renderer.name == 'render_runtime_env.py'
+        inputs = json.loads(renderer.with_name('package-inputs.example').read_text())
+        native_head = subprocess.check_output(['git', '-C', str(native), 'rev-parse', 'HEAD'], text=True).strip()
+        subprocess.run(['git', '-C', str(native), 'merge-base', '--is-ancestor', inputs['native_sha'], native_head], check=True)
+        subprocess.run(['git', '-C', str(native), 'diff', '--exit-code', inputs['native_sha'], '--', 'src'], check=True, stdout=subprocess.DEVNULL)
+        assert inputs['meta_sha'] == subprocess.check_output(['git', '-C', str(meta), 'rev-parse', 'HEAD'], text=True).strip()
+        inputs.update(snapshot_share_enabled=True, clients=[{
+            'client_id': 'managed-fixture', 'tenant_id': 'default', 'org_id': 'fixture-org',
+            'origin': origin, 'callback': config['callback'], 'issuer': config['issuer'],
+            'native_base_url': native_origin,
+        }])
+        inputs['images'] = {name: f'example.invalid/{name}@sha256:{index:064x}'
+                            for index, name in enumerate(('postgres', 'redis', 'backend', 'web'), 1)}
+        input_path = owned / 'package-inputs.json'
+        input_path.write_text(json.dumps(inputs))
+        rendered = owned / 'rendered-package'
+        result = subprocess.run([args.python, str(renderer), '--inputs', str(input_path), '--out', str(rendered)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, 'Package configuration rendering failed'
+        spec = importlib.util.spec_from_file_location('paired_package_loader', renderer.with_name('check_compose_config.py'))
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        manifest, _compose = loader._load_retained(rendered)
+        hashes = manifest['file_sha256']
+        config['package_native_env'] = loader._env_map(rendered / 'native.env', hashes['native_env'])
+        package_meta_env = loader._env_map(rendered / 'meta.env', hashes['meta_env'])
+        secret = json.loads(package_meta_env['PLM_MANAGED_COMPANION_CLIENTS_JSON'])[0]['clientSecret']
+        config['secret'] = secret
+        # Source fixture owns its transport/storage; consume all capability and identity values unchanged.
+        excluded = ('NODE_ENV', 'HOST', 'PORT', 'STORAGE_PATH', 'DATABASE_URL',
+                    'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD', 'REDIS_URL')
+        package_meta_env = {key: value for key, value in package_meta_env.items() if key not in excluded}
+        proof['rendered_package'] = {'ok': True, 'file_sha256': hashes,
+            'renderer_sha256': hashlib.sha256(renderer.read_bytes()).hexdigest(),
+            'native_source_pin': inputs['native_sha'], 'native_checkout': native_head, 'native_src_matches_pin': True,
+            'meta_fixture_topology_exclusions': list(excluded),
+            'native_config_keys': sorted(config['package_native_env']), 'meta_config_keys': sorted(package_meta_env),
+            'images_launched': False}
     env = os.environ.copy()
     env['PYTHONPATH'] = str(native / 'src')
     env['PAIRED_MANAGED_CONFIG'] = json.dumps(config)
@@ -538,6 +584,7 @@ try:
         'snapshotRestore': args.snapshot_restore,
         'browserModule': str(module) if args.browser_module else None,
         'rootPartId': config['root_part_id'],
+        'packageMetaEnv': package_meta_env,
     }
     node_log = (owned / 'node.log').open('w')
     script = Path(__file__).with_name(args.browser_script)

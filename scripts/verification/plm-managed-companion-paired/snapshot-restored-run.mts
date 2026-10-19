@@ -9,7 +9,7 @@ const input = JSON.parse(await readFile('/dev/stdin', 'utf8'))
 assert(input.pgUrl.includes('/plm_snapshot_restored?host=/tmp/plm-managed-paired-'))
 const root = input.metaCheckout + '/packages/core-backend'
 const require = createRequire(root + '/package.json')
-const registration = { issuer: input.issuer, clientId: 'managed-fixture', clientSecret: input.secret,
+const registration = input.packageMetaEnv ? JSON.parse(input.packageMetaEnv.PLM_MANAGED_COMPANION_CLIENTS_JSON)[0] : { issuer: input.issuer, clientId: 'managed-fixture', clientSecret: input.secret,
   callback: input.callback, origin: input.origin, nativeTenantId: 'default', nativeOrgId: 'fixture-org', nativeBaseUrl: input.nativeOrigin }
 Object.assign(process.env, {
   NODE_ENV: 'test', DATABASE_URL: input.pgUrl, JWT_SECRET: 'paired-managed-secret-abcdefghijklmnopqrstuvwxyz',
@@ -20,6 +20,11 @@ Object.assign(process.env, {
   PLM_API_TOKEN: 'shared-must-not-be-used', PLM_BASE_URL: 'http://127.0.0.1:9',
   PLM_MANAGED_COMPANION_CLIENTS_JSON: JSON.stringify([registration]),
 })
+if (input.packageMetaEnv) {
+  Object.assign(process.env, input.packageMetaEnv)
+  for (const key of ['PLM_MANAGED_COMPANION_ENABLED', 'PLM_MANAGED_SNAPSHOT_SHARE_ENABLED', 'PLM_PERSONAL_BOM_WRITE_ENABLED', 'PLM_APPROVAL_CARD_ENABLED', 'PLM_BOM_REVIEW_ENABLED'])
+    process.env[key] = 'false'
+}
 const express = require('express'), jwt = require('jsonwebtoken')
 const { Pool } = require('pg'), { Kysely, PostgresDialect } = require('kysely')
 const pool = new Pool({ connectionString: input.pgUrl, max: 4 })

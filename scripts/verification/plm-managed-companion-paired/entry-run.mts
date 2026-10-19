@@ -40,6 +40,14 @@ Object.assign(process.env, {
   }]),
 })
 
+if (input.packageMetaEnv) {
+  Object.assign(process.env, input.packageMetaEnv)
+  for (const key of ['PLM_MANAGED_SNAPSHOT_SHARE_ENABLED', 'PLM_BOM_REVIEW_ENABLED', 'AUTOMATION_DURABLE_DELIVERY_ENABLED', 'MULTITABLE_ENABLE_WRITER_FENCE'])
+    assert.equal(process.env[key], 'true', key)
+  assert.equal(process.env.PLM_PERSONAL_BOM_WRITE_ENABLED, 'false')
+  assert.equal(process.env.PLM_APPROVAL_CARD_ENABLED, 'false')
+}
+
 const express = require('express')
 const jwt = require('jsonwebtoken')
 const { Pool } = require('pg')

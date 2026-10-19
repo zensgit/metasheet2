@@ -49,6 +49,16 @@ for key, value in {
 }.items():
     os.environ['YUANTUS_' + key] = value
 
+if cfg.get('package_native_env') is not None:
+    package_env = cfg['package_native_env']
+    assert all(key.startswith('YUANTUS_') for key in package_env)
+    assert package_env['YUANTUS_PLM_BOM_WRITE_GRANT_ENABLED'] == 'false'
+    assert package_env['YUANTUS_PLM_APPROVAL_CARD_ENABLED'] == 'false'
+    os.environ.update(package_env)
+    if cfg.get('restore_existing') is True:
+        for key in ('YUANTUS_ENABLE_METASHEET', 'YUANTUS_PLM_MANAGED_LOGIN_ENABLED', 'YUANTUS_PLM_BOM_SNAPSHOT_SHARE_ENABLED'):
+            os.environ[key] = 'false'
+
 from sqlalchemy.orm import sessionmaker
 from yuantus.security.auth.models import AuthCredential, Tenant, Organization, AuthUser, OrgMembership
 from yuantus.security.auth.passwords import hash_password
