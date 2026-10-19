@@ -324,6 +324,7 @@ parser.add_argument('--pg-bin', required=True)
 parser.add_argument('--browser-cache', required=True)
 parser.add_argument('--browser-module')
 parser.add_argument('--package-renderer')
+parser.add_argument('--package-config-retention', action='store_true')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
@@ -331,6 +332,8 @@ parser.add_argument('--snapshot-share', action='store_true')
 parser.add_argument('--snapshot-pre-review', action='store_true')
 parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
+if args.package_config_retention and not args.package_renderer:
+    parser.error('--package-config-retention requires --package-renderer')
 if args.package_renderer and not args.snapshot_restore:
     parser.error('--package-renderer requires --snapshot-restore')
 if args.snapshot_restore and not args.snapshot_share:
@@ -625,6 +628,30 @@ try:
     if proof['node_cleanup'].get('ok') is not True:
         Path(args.output + '.failure.log').write_text(redact(result_text)[-20000:])
         raise SystemExit('paired node cleanup incomplete')
+    if args.package_config_retention:
+        # The original processes have persisted an encrypted intent and are now quiesced.
+        # Exercise the real upgrade renderer before the fresh restored processes consume it.
+        key_file = owned / 'existing-native-key.env'
+        key_file.write_text('YUANTUS_JWT_SECRET_KEY=' + config['package_native_env']['YUANTUS_JWT_SECRET_KEY'] + '\n')
+        key_file.chmod(0o600)
+        inputs.update(native_install='existing', meta_install='existing', existing_native_jwt_file=str(key_file),
+                      existing_meta_package_dir=str(rendered), snapshot_share_enabled=False)
+        input_path.write_text(json.dumps(inputs))
+        upgraded = owned / 'upgraded-package'
+        result = subprocess.run([args.python, str(renderer), '--inputs', str(input_path), '--out', str(upgraded)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, 'Existing package configuration upgrade failed'
+        upgraded_manifest, _compose = loader._load_retained(upgraded)
+        old_values = loader._env_map(rendered / 'meta.env', hashes['meta_env'])
+        new_values = loader._env_map(upgraded / 'meta.env', upgraded_manifest['file_sha256']['meta_env'])
+        for key in ('JWT_SECRET', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT', 'DATABASE_URL', 'REDIS_PASSWORD', 'REDIS_URL', 'PLM_MANAGED_COMPANION_CLIENTS_JSON'):
+            assert old_values[key] == new_values[key], 'Upgrade changed ' + key
+        assert new_values['PLM_MANAGED_SNAPSHOT_SHARE_ENABLED'] == 'false'
+        payload['packageMetaEnv'] = {key: value for key, value in new_values.items() if key not in excluded}
+        config['package_native_env'] = loader._env_map(upgraded / 'native.env', upgraded_manifest['file_sha256']['native_env'])
+        proof['configuration_upgrade'] = dict(ok=True, encrypted_intent_persisted_before_upgrade=True,
+            identity_material_unchanged=True, snapshot_sharing_disabled=True,
+            source_manifest_sha256=upgraded_manifest['meta_material']['source_manifest_sha256'])
     if args.snapshot_restore:
         proof['snapshot_cancel_pending'] = one_line('SNAPSHOT_CANCEL_PENDING_PROOF ')
         assert proof['snapshot_cancel_pending']['ok'] is True
