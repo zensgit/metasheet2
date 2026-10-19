@@ -9,6 +9,8 @@ callback = cfg['callback']
 issuer = cfg['issuer']
 secret = cfg['secret']
 root_part_id = cfg.get('root_part_id', 'part')
+managed_enabled = cfg.get('managed_enabled', True)
+assert type(managed_enabled) is bool, 'managed_enabled must be boolean'
 sharing_enabled = cfg.get('sharing_enabled', bool(cfg.get('snapshot_share')))
 assert type(sharing_enabled) is bool, 'sharing_enabled must be boolean'
 for key, value in {
@@ -20,8 +22,8 @@ for key, value in {
     'ENVIRONMENT': 'test',
     'SCHEMA_MODE': 'migrations',
     'AUTH_MODE': 'required',
-    'ENABLE_METASHEET': 'true',
-    'PLM_MANAGED_LOGIN_ENABLED': 'true',
+    'ENABLE_METASHEET': 'true' if managed_enabled else 'false',
+    'PLM_MANAGED_LOGIN_ENABLED': 'true' if managed_enabled else 'false',
     'PLM_BOM_READ_SESSION_ENABLED': 'true',
     'PLM_BOM_SNAPSHOT_SHARE_ENABLED': 'true' if sharing_enabled else 'false',
     'PLM_BOM_WRITE_GRANT_ENABLED': 'true',
@@ -136,6 +138,7 @@ for line in sys.stdin:
             report = {
                 'write_audits': len(audits),
                 'snapshot_sharing_enabled': __import__('yuantus.config.settings', fromlist=['get_settings']).get_settings().PLM_BOM_SNAPSHOT_SHARE_ENABLED,
+                'snapshot_items_hash': hashlib.sha256(json.dumps(item_snapshot(db), sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                 'write_subjects': sorted({row.user_id for row in audits}),
                 'write_lines': sorted({row.bom_line_id for row in audits}),
                 **({'snapshot_source_unchanged': item_snapshot(db) == initial_items} if initial_items is not None else {}),

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 import { writeSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
@@ -109,6 +110,8 @@ if (input.snapshotPreReview) {
   const { up: submitPermission } = await import(root + '/src/db/migrations/zzzz20260915121000_add_multitable_submit_approval_permission.ts')
   const { up: namespaceAdmissions } = await import(root + '/src/db/migrations/zzzz20260411120000_create_user_namespace_admissions.ts')
   await namespaceAdmissions(db)
+  const { up: auditSchema } = await import(root + '/src/db/migrations/zz20251231_create_audit_tables.ts')
+  await auditSchema(db)
   await submissions(db)
   await submitPermission(db)
 }
@@ -234,7 +237,7 @@ const vite = await createServer({
   },
 })
 await vite.listen()
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ channel: 'chromium', headless: true })
 const context = await browser.newContext({ ignoreHTTPSErrors: true })
 const page = await context.newPage()
 page.setDefaultTimeout(60000)
@@ -433,20 +436,39 @@ try {
       assert.equal((await pool.query('SELECT status FROM multitable_record_approval_submissions WHERE id=$1', [submission.id])).rows[0].status, 'approved')
       assert.equal((await pool.query("SELECT count(*)::int n FROM meta_record_subscription_notifications WHERE sheet_id=$1 AND record_id=$2 AND event_type='notification.sent'", [binding.sheet_id,record.id])).rows[0].n, 1)
       assert.deepEqual((await pool.query('SELECT data,version FROM meta_records WHERE id=$1', [record.id])).rows, before.rows)
+      assert.equal((await pool.query("SELECT count(*) FROM audit_logs WHERE action='multitable.record.approval.submitted'")).rows[0].count, '1')
       writeSync(1, 'SNAPSHOT_PRE_REVIEW_PROOF ' + JSON.stringify({ ok: true, imported_record: true, missing_submit_permission_forbidden: true,
-        real_approval_engine: true, separate_meta_reviewer: true, actual_durable_event_replayed_twice: true, one_completion_notification: true, snapshot_record_unchanged: true }) + '\n')
+        real_approval_engine: true, separate_meta_reviewer: true, actual_durable_event_replayed_twice: true, one_completion_notification: true, submission_audit_persisted: true, snapshot_record_unchanged: true }) + '\n')
+    }
+    if (input.snapshotRestore) {
+      const pending = await context.request.post(metaBase + '/api/plm-bom-reviews/managed-share/start', {
+        headers: { ...ownerHeaders, Origin: input.origin, 'x-plm-snapshot-share': 'start' },
+        data: { operationId: randomUUID(), dataSourceId: 'source-1', partId: rootPartId,
+          baseId: 'share-target', name: 'Unconfirmed before recovery' },
+      })
+      assert.equal(pending.status(), 200, await pending.text())
+      const waiting = (await pool.query("SELECT id,native_intent_id FROM plm_snapshot_share_intents WHERE status='prepared'")).rows
+      assert.equal(waiting.length, 1)
+      assert(waiting[0].native_intent_id)
+      process.kill(input.nativePid, 'SIGSTOP')
     }
     const unlinked = await fetch(metaBase + '/api/plm/managed-login/unlink', { method: 'POST',
       headers: { ...ownerHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ dataSourceId: 'source-1' }) })
     assert.equal(unlinked.status, 200, await unlinked.clone().text())
-    assert.equal((await unlinked.json() as { state: string }).state, 'acked')
+    assert.equal((await unlinked.json() as { state: string }).state, input.snapshotRestore ? 'pending' : 'acked')
+    if (input.snapshotRestore) {
+      const waiting = (await pool.query("SELECT id FROM plm_snapshot_share_intents WHERE status='cancel_pending'")).rows
+      assert.equal(waiting.length, 1)
+      writeSync(1, 'SNAPSHOT_CANCEL_PENDING_PROOF ' + JSON.stringify({ ok: true,
+        actual_native_outage: true, durable_pending_cancellation: true, unconfirmed_intents: 1 }) + '\n')
+    }
     const retained = await fetch(exportUrl, { headers: ownerHeaders })
     assert.equal(retained.status, 200, await retained.clone().text())
     assert((await retained.text()).includes('C-001'))
     const targetsAfterUnlink = await context.request.get(input.origin + '/api/plm-bom-reviews/managed-share/targets?dataSourceId=source-1&partId=' + encodeURIComponent(rootPartId))
     assert([401,403].includes(targetsAfterUnlink.status()), await targetsAfterUnlink.text())
     writeSync(1, 'SNAPSHOT_EXPORT_PROOF ' + JSON.stringify({ ok: true, generic_csv_export: true,
-      ungranted_export_forbidden: true, outsider_without_target_read_forbidden: true, unlink_acknowledged: true, retained_target_acl_export: true, new_share_after_unlink_refused: true }) + '\n')
+      ungranted_export_forbidden: true, outsider_without_target_read_forbidden: true, unlink_acknowledged: !input.snapshotRestore, unlink_pending: Boolean(input.snapshotRestore), retained_target_acl_export: true, new_share_after_unlink_refused: true }) + '\n')
   }
 
   writeSync(1, 'ENTRY_BOOTSTRAP_PROOF ' + JSON.stringify({
@@ -468,7 +490,9 @@ try {
   await page.screenshot({ path: '/tmp/plm-managed-b2b-entry-fail.png', fullPage: true }).catch(() => undefined)
   writeSync(2, (error instanceof Error ? error.stack || error.message : String(error)) + '\n')
 } finally {
-  try { process.kill(input.nativePid, 'SIGCONT') } catch { /* already continued */ }
+  if (!input.snapshotRestore || !proved) {
+    try { process.kill(input.nativePid, 'SIGCONT') } catch { /* already continued */ }
+  }
 }
 
 const failures: string[] = []

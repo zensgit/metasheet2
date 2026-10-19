@@ -324,7 +324,10 @@ parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
 parser.add_argument('--snapshot-share', action='store_true')
 parser.add_argument('--snapshot-pre-review', action='store_true')
+parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
+if args.snapshot_restore and not args.snapshot_share:
+    parser.error('--snapshot-restore requires --snapshot-share')
 if args.snapshot_pre_review and not args.snapshot_share:
     parser.error('--snapshot-pre-review requires --snapshot-share')
 if args.snapshot_share and args.browser_script != 'entry-run.mts':
@@ -356,6 +359,7 @@ proof = {'owned': str(owned), 'nonce': nonce, 'ok': False}
 started = False
 child = None
 proxy_server = None
+native_sock = None
 node = None
 tests_ok = False
 failure = None
@@ -485,7 +489,8 @@ try:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True, env=env,
         pass_fds=(native_sock.fileno(),), cwd=owned,
     )
-    native_sock.close()
+    if not args.snapshot_restore:
+        native_sock.close()
     deadline = time.monotonic() + 60
     ready = ''
     while time.monotonic() < deadline:
@@ -497,6 +502,13 @@ try:
             if ready.strip().startswith('{'):
                 break
     assert json.loads(ready).get('ready') is True
+    initial_native_report = None
+    if args.snapshot_restore:
+        child.stdin.write('report\n')
+        child.stdin.flush()
+        assert select.select([child.stdout], [], [], 15)[0]
+        initial_native_report = json.loads(child.stdout.readline())
+        assert initial_native_report['snapshot_source_unchanged'] is True
     node_env = os.environ.copy()
     node_env.pop('NODE_TLS_REJECT_UNAUTHORIZED', None)
     node_env['NODE_EXTRA_CA_CERTS'] = str(owned / 'cert.pem')
@@ -515,6 +527,7 @@ try:
         'workspaceEntry': args.workspace_entry,
         'snapshotShare': args.snapshot_share,
         'snapshotPreReview': args.snapshot_pre_review,
+        'snapshotRestore': args.snapshot_restore,
         'rootPartId': config['root_part_id'],
     }
     node_log = (owned / 'node.log').open('w')
@@ -556,9 +569,20 @@ try:
     if proof['node_cleanup'].get('ok') is not True:
         Path(args.output + '.failure.log').write_text(redact(result_text)[-20000:])
         raise SystemExit('paired node cleanup incomplete')
-    child.stdin.write('report\n')
-    child.stdin.flush()
-    native_report = json.loads(child.stdout.readline())
+    if args.snapshot_restore:
+        proof['snapshot_cancel_pending'] = one_line('SNAPSHOT_CANCEL_PENDING_PROOF ')
+        assert proof['snapshot_cancel_pending']['ok'] is True
+        from snapshot_restore import restore_snapshot_pair
+        proof['snapshot_restore'] = restore_snapshot_pair(
+            child, config, payload, owned, native_root, native_sock, env, node_env,
+            args.python, args.node, tsx, run_pg,
+            lambda port: globals().__setitem__('native_port', port))
+        native_report = proof['snapshot_restore'].pop('native_report')
+        assert native_report['snapshot_items_hash'] == initial_native_report['snapshot_items_hash']
+    else:
+        child.stdin.write('report\n')
+        child.stdin.flush()
+        native_report = json.loads(child.stdout.readline())
     proof['native'] = native_report
     if args.snapshot_share:
         assert native_report['snapshot_source_unchanged'] is True
@@ -688,6 +712,8 @@ finally:
         except Exception as exc:
             cleanup['failures'].append('proxy: ' + str(exc))
             cleanup['proxyClosed'] = False
+    if native_sock is not None:
+        native_sock.close()
     cleanup['nativeChildStopped'] = reap(child, 'native', stop_stdin=True)
     node_stopped = reap(node, 'node', stop_stdin=False)
     if not node_stopped:
