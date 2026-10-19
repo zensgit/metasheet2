@@ -40,6 +40,7 @@ const ACTIVATION: ReadonlyArray<Readonly<{ name: string; pattern: RegExp; declar
   { name: 'new SettlementCoordinatorV1', pattern: /\bnew\s+SettlementCoordinatorV1\b/, declaredIn: [] },
   { name: 'coordinated transaction port', pattern: /\bcoordinatedTransaction\w*\b/, declaredIn: [] },
   { name: 'coordination context run', pattern: /\brunInSettlementCoordinationContextV1\b/, declaredIn: [] },
+  { name: 'CLI coordinator factory', pattern: /\bcreateSettlementCoordinationCliCoordinatorV1\b/, declaredIn: [] },
   { name: 'handed-over option', pattern: /\bsettlementCoordinationHandover\b/, declaredIn: ['packages/core-backend/src/services/ApprovalProductService.ts'] },
   {
     name: 'handed-over runner',

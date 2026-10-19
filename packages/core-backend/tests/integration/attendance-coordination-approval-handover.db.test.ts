@@ -165,6 +165,9 @@ async function drive<T>(
     writable: true,
     value: (error?: Error | boolean) => {
       record.releases += 1
+      // The attempt's connection goes back to the pool here: stop recording, so that the next
+      // attempt's S1 / BEGIN / S2 on the same pooled connection are not booked to this attempt.
+      delete (client as { query?: unknown }).query
       return realRelease.call(client, error)
     },
   })
