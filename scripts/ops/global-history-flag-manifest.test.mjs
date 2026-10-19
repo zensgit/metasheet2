@@ -271,6 +271,7 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
+  'MULTITABLE_OUTBOUND_WEBHOOKS_DISABLED', // ops switch that pauses subscription webhook sends (default off) — not a Global-History/recovery flag
   // W9: kill-switch for the stock-prep per-chunk batch idempotency-key lookup (perf, default ON; set
   // to `false`/`0`/`off`/`no` to fall back to the per-row lookup). Not a Global-History/recovery
   // flag, which is what this list means: NON_GH_EXACT is the EXCLUSION list for the grep below, so
