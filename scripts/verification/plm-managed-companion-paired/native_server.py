@@ -53,11 +53,14 @@ if cfg.get('package_native_env') is not None:
     package_env = cfg['package_native_env']
     assert all(key.startswith('YUANTUS_') for key in package_env)
     assert package_env['YUANTUS_PLM_BOM_WRITE_GRANT_ENABLED'] == ('true' if cfg.get('package_personal_write') else 'false')
-    assert package_env['YUANTUS_PLM_APPROVAL_CARD_ENABLED'] == 'false'
+    assert package_env['YUANTUS_PLM_APPROVAL_CARD_ENABLED'] == ('true' if cfg.get('package_personal_approval') else 'false')
     os.environ.update(package_env)
     if cfg.get('restore_existing') is True:
         for key in ('YUANTUS_ENABLE_METASHEET', 'YUANTUS_PLM_MANAGED_LOGIN_ENABLED', 'YUANTUS_PLM_BOM_SNAPSHOT_SHARE_ENABLED'):
             os.environ[key] = 'false'
+
+if cfg.get('package_personal_approval'):
+    os.environ['YUANTUS_ECO_AUTHZ_MODE'] = 'enforce'
 
 from sqlalchemy.orm import sessionmaker
 from yuantus.security.auth.models import AuthCredential, Tenant, Organization, AuthUser, OrgMembership
@@ -139,6 +142,34 @@ else:
         db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
         db.commit()
 
+if cfg.get('package_personal_approval'):
+    import uuid
+    from yuantus.security.rbac.models import RBACRole, RBACPermission, RBACResource
+    from yuantus.meta_engine.models.eco import ECO, ECOStage
+    from yuantus.meta_engine.services.eco_service import ECOApprovalService
+    approval_eco_id, approval_stage_id = str(uuid.uuid4()), str(uuid.uuid4())
+    with business_db.SessionLocal() as db:
+        resource = RBACResource(id=21, name='ECO', resource_type='business')
+        db.add(resource)
+        role = RBACRole(id=1, name='engineer', is_active=True)
+        role.permissions.append(RBACPermission(id=21, name='eco.auto_assign', action='execute', resource_id=21, is_active=True))
+        db.add(role)
+        native_actor = db.get(RBACUser, 900)
+        native_actor.roles.append(role)
+        db.commit()
+    with tenant() as db:
+        db.add(ItemType(id='ECO', permission_id='permission'))
+        ace = db.get(Access, 'ace')
+        ace.can_create = ace.can_delete = True
+        db.add(ECOStage(id=approval_stage_id, name='Owned review', sequence=10,
+            approval_type='mandatory', approval_roles=['engineer'], min_approvals=2, auto_progress=False))
+        db.add(ECO(id=approval_eco_id, name='Owned approval fixture', eco_type='product',
+            state='progress', stage_id=approval_stage_id, tenant_id='default', org_id='fixture-org', created_by_id=900))
+        db.commit()
+    with tenant() as db, identity() as auth, business_db.SessionLocal() as rbac:
+        ECOApprovalService(db, identity_db=auth, rbac_db=rbac, tenant_id='default', org_id='fixture-org').auto_assign_stage_approvers(approval_eco_id, 900)
+        db.commit()
+
 def item_snapshot(db):
     return sorted([{'id': item.id, 'generation': item.generation, 'state': item.state,
                     'properties': item.properties} for item in db.query(Item).all()], key=lambda item: item['id'])
@@ -198,6 +229,16 @@ for line in sys.stdin:
                     PlmApprovalGrant.purpose == 'bom_write', PlmApprovalGrant.revoked_at.isnot(None)).count()
                 report['personal_revoke_audits'] = identity_db_session.query(AuditLog).filter_by(
                     path='/api/v1/plm-bom-write-grant/grant', method='DELETE').count()
+        if cfg.get('package_personal_approval'):
+            from yuantus.meta_engine.models.plm_approval_card import PlmApprovalCardCommand
+            from yuantus.meta_engine.models.eco import ECOApproval
+            with tenant() as db:
+                commands = db.query(PlmApprovalCardCommand).all()
+                votes = db.query(ECOApproval).filter_by(eco_id=approval_eco_id, user_id=900).all()
+                report['personal_package_approval'] = {'commands': len(commands),
+                    'subjects': sorted({row.actor_auth_user_id for row in commands}),
+                    'rbac_actors': sorted({row.actor_rbac_user_id for row in commands}),
+                    'votes': [row.status for row in votes]}
         print(json.dumps(report), flush=True)
     elif command == 'stop':
         server.should_exit = True

@@ -326,6 +326,7 @@ parser.add_argument('--browser-module')
 parser.add_argument('--package-renderer')
 parser.add_argument('--package-config-retention', action='store_true')
 parser.add_argument('--package-personal-write', action='store_true')
+parser.add_argument('--package-personal-approval', action='store_true')
 parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
@@ -335,6 +336,8 @@ parser.add_argument('--snapshot-restore', action='store_true')
 args = parser.parse_args()
 if args.package_config_retention and not args.package_renderer:
     parser.error('--package-config-retention requires --package-renderer')
+if args.package_personal_approval and not args.package_personal_write:
+    parser.error('--package-personal-approval requires the generated personal write profile')
 if args.package_personal_write and (not args.package_renderer or args.browser_script != 'run.mts' or args.snapshot_share):
     parser.error('--package-personal-write requires --package-renderer, run.mts and no snapshot mode')
 if args.package_config_retention and not args.snapshot_restore:
@@ -414,6 +417,7 @@ def run_pg(tool, args, timeout):
 
 def redact(text):
     text = re.sub(r'yur_[A-Za-z0-9._~-]+', '[read credential]', text)
+    text = re.sub(r'yua_[A-Za-z0-9._~-]+', '[approval grant]', text)
     text = re.sub(r'yuw_[A-Za-z0-9._~-]+', '[write grant]', text)
     text = re.sub(r'yus_[A-Za-z0-9._~-]+', '[snapshot grant]', text)
     text = re.sub(r'code=[^&\s]+', 'code=[redacted]', text)
@@ -471,6 +475,15 @@ try:
                 upstream.request(self.command, self.path, body=body, headers=headers)
                 response = upstream.getresponse()
                 payload = response.read()
+                if response.status >= 400:
+                    try:
+                        error_body = json.loads(payload)
+                        detail = error_body.get('detail', error_body.get('error', {}))
+                        selected = {key: detail[key] for key in ('code', 'reason', 'message') if key in detail} if isinstance(detail, dict) else redact(str(detail))[:300]
+                        proof.setdefault('native_refusals', []).append({'status': response.status,
+                            'path': self.path.split('?', 1)[0], 'detail': selected})
+                    except (ValueError, TypeError):
+                        pass
                 self.send_response(response.status)
                 for key, value in response.getheaders():
                     if key.lower() not in ('transfer-encoding', 'connection', 'content-length'):
@@ -497,6 +510,7 @@ try:
         'root_part_id': 'yur_public-part' if args.workspace_entry else 'part',
         'snapshot_share': args.snapshot_share,
         'package_personal_write': args.package_personal_write,
+        'package_personal_approval': args.package_personal_approval,
     }
     package_meta_env = None
     if args.package_renderer:
@@ -515,7 +529,7 @@ try:
             'native_base_url': native_origin,
         }])
         if args.package_personal_write:
-            inputs.update(personal_bom_write_enabled=True, personal_connection_id='personal-fixture')
+            inputs.update(personal_bom_write_enabled=True, personal_connection_id='personal-fixture', personal_approval_enabled=args.package_personal_approval)
         inputs['images'] = {name: f'example.invalid/{name}@sha256:{index:064x}'
                             for index, name in enumerate(('postgres', 'redis', 'backend', 'web'), 1)}
         input_path = owned / 'package-inputs.json'
@@ -596,6 +610,7 @@ try:
         'browserModule': str(module) if args.browser_module else None,
         'rootPartId': config['root_part_id'],
         'packageMetaEnv': package_meta_env,
+        'packagePersonalApproval': args.package_personal_approval,
     }
     node_log = (owned / 'node.log').open('w')
     script = Path(__file__).with_name(args.browser_script)
@@ -706,6 +721,10 @@ try:
             assert native_report['personal_revoke_audits'] == 1
             assert proof['meta']['eco_intent']['retry_with_meta_flag_off'] is True
             assert proof['meta']['eco_intent']['duplicate_retry'] is True
+        if args.package_personal_approval:
+            assert proof['meta']['personal_approval']['approved'] is True
+            assert proof['meta']['personal_approval']['purpose_isolation'] is True
+            assert native_report['personal_package_approval'] == {'commands': 1, 'subjects': [42], 'rbac_actors': [900], 'votes': ['approved']}
     else:
         proof['meta'] = one_line('ENTRY_BOOTSTRAP_PROOF ')
         assert proof['meta']['ok'] is True

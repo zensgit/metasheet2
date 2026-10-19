@@ -40,7 +40,7 @@ Object.assign(process.env, {
 if (input.packageMetaEnv) {
   Object.assign(process.env, input.packageMetaEnv)
   assert.equal(process.env.PLM_PERSONAL_BOM_WRITE_ENABLED, 'true')
-  assert.equal(process.env.PLM_APPROVAL_CARD_ENABLED, 'false')
+  assert.equal(process.env.PLM_APPROVAL_CARD_ENABLED, input.packagePersonalApproval ? 'true' : 'false')
 }
 
 const express = require('express')
@@ -161,6 +161,12 @@ app.use((req, res, next) => {
 })
 app.use('/api/plm/managed-login', managed)
 app.use('/api/me/plm-bom-write-bindings', createPlmPersonalBomWriteBindingsRouter(service))
+const packageApproval = input.packagePersonalApproval
+  ? await (await import('./approval-package.mts')).preparePackageApproval(root, pool, db) : undefined
+if (packageApproval) {
+  app.use('/api/me/plm-approval-bindings', packageApproval.router)
+  app.use(packageApproval.decisions)
+}
 app.use(workbench)
 const metaServer = await new Promise<import('node:http').Server>((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
@@ -275,6 +281,7 @@ async function meta(path: string, method = 'GET', body?: unknown): Promise<{ sta
 
 let proved = false
 let ecoProof: Record<string, unknown> | undefined
+let approvalProof: Record<string, unknown> | undefined
 let personalBindingId: string | undefined
 let frozenRetired: unknown
 try {
@@ -327,6 +334,17 @@ try {
     assert.equal(duplicateEco.status, 200)
     assert.deepEqual(await duplicateEco.json(), eco)
     ecoProof = { accepted: 200, duplicate_idempotent: true, authority: 'native personal bom_write grant' }
+  }
+
+  if (packageApproval) {
+    await page.goto(input.nativeOrigin + '/personal-approval-grants')
+    await page.locator('#purpose').selectOption('approval')
+    await page.locator('#connection').selectOption('personal-fixture')
+    await page.locator('#create:not([disabled])').click()
+    await page.locator('#issued').waitFor()
+    const approvalGrant = await page.locator('#secret').inputValue()
+    assert(approvalGrant.startsWith('yua_'))
+    approvalProof = await packageApproval.execute(meta, approvalGrant, grant, input.nativeOrigin)
   }
 
   const nativeLogout = await page.request.post(input.nativeOrigin + '/api/v1/auth/logout', {
@@ -413,6 +431,7 @@ try {
     bom_line: 'line',
     write_patch: 200,
     ...(ecoProof ? { eco_intent: ecoProof } : {}),
+    ...(approvalProof ? { personal_approval: approvalProof } : {}),
     meta_audit_rows: audits.rows.length,
     native_logout: 204,
     transfer: 'acked',
