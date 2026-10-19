@@ -55,19 +55,25 @@ const ALLOWED_DIFFERENCES = Object.freeze([])
 
 function usage(message) {
   if (message) process.stderr.write(`${message}\n`)
-  process.stderr.write('usage: node scripts/ops/p11-inertness-trace-compare.mjs <base-dir> <head-dir> [--resources strict|report]\n')
+  process.stderr.write('usage: node scripts/ops/p11-inertness-trace-compare.mjs <base-dir> <head-dir> [--resources strict|report] [--order borrow|strict]\n')
   process.exit(2)
 }
 
 function parseArgs(argv) {
   const positional = []
   let resources = 'strict'
+  let order = 'borrow'
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--resources') {
       const value = argv[i + 1]
       if (value !== 'strict' && value !== 'report') usage('--resources takes strict or report')
       resources = value
+      i += 1
+    } else if (arg === '--order') {
+      const value = argv[i + 1]
+      if (value !== 'borrow' && value !== 'strict') usage('--order takes borrow or strict')
+      order = value
       i += 1
     } else if (arg.startsWith('--')) {
       usage(`unknown option ${arg}`)
@@ -76,7 +82,7 @@ function parseArgs(argv) {
     }
   }
   if (positional.length !== 2) usage('two trace directories are required')
-  return { baseDir: positional[0], headDir: positional[1], resources }
+  return { baseDir: positional[0], headDir: positional[1], resources, order }
 }
 
 function readDir(dir) {
@@ -105,6 +111,33 @@ function stepLine(step) {
   const outcome = step.ok === true ? 'ok' : step.ok === false ? `ERR:${step.code ?? '?'}` : 'unsettled'
   const locks = Array.isArray(step.locks) && step.locks.length > 0 ? ` locks=[${step.locks.join(',')}]` : ''
   return `q ${step.b} ${outcome} n=${step.n ?? 0}${locks} ${step.sql ?? ''}`
+}
+
+/**
+ * Per-borrow view (the default, `--order borrow`): one line per checkout — its statements in order, then
+ * how it was returned — with the borrow label dropped and the lines sorted. An entry that runs work
+ * concurrently (parallel queries, post-commit handlers) interleaves its borrows differently from run to
+ * run, and checkout order (hence the labels) varies with it; a changed statement, an extra or missing
+ * checkout, or a statement moved between transactions still shows. `--order strict` compares the full
+ * step order instead.
+ */
+function borrowLines(steps) {
+  const order = []
+  const byBorrow = new Map()
+  for (const step of steps ?? []) {
+    const borrow = step.b ?? '?'
+    if (!byBorrow.has(borrow)) {
+      byBorrow.set(borrow, [])
+      order.push(borrow)
+    }
+    if (step.k === 'acquire') continue
+    if (step.k === 'release') {
+      byBorrow.get(borrow).push(`release destroy=${step.destroy === true}`)
+      continue
+    }
+    byBorrow.get(borrow).push(stepLine(step).replace(/^q \S+ /, 'q '))
+  }
+  return order.map((borrow) => byBorrow.get(borrow).join(' ⏎ ')).sort()
 }
 
 /** Line diff (longest common subsequence); returns [{ op: ' ' | '-' | '+', line }]. */
@@ -156,7 +189,7 @@ function printDiff(diff) {
 }
 
 function main() {
-  const { baseDir, headDir, resources } = parseArgs(process.argv.slice(2))
+  const { baseDir, headDir, resources, order } = parseArgs(process.argv.slice(2))
   const base = readDir(baseDir)
   const head = readDir(headDir)
   let unexplained = 0
@@ -219,7 +252,8 @@ function main() {
     const entry = a.entry
     const extra = Object.keys(a).filter((key) => !['format', 'entry', 'steps'].includes(key))
     for (const key of extra) note(`ENTRY ${entry}: ${key} base=${JSON.stringify(a[key])} head=${JSON.stringify(b[key])} (report only)`)
-    const diff = diffLines((a.steps ?? []).map(stepLine), (b.steps ?? []).map(stepLine))
+    const view = order === 'borrow' ? borrowLines : (steps) => (steps ?? []).map(stepLine)
+    const diff = diffLines(view(a.steps), view(b.steps))
     const changed = diff.filter((row) => row.op !== ' ')
     if (changed.length === 0) {
       note(`ENTRY ${entry}: same (${(a.steps ?? []).length} steps)`)
