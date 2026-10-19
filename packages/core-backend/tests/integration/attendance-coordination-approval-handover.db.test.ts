@@ -442,6 +442,32 @@ describeIfDatabase('attendance settlement coordination — the approval service 
     }
   }, 60_000)
 
+  it('M06 handed over and refused: a second round on a document that has one pending is rethrown unchanged after the port rolls back', async () => {
+    const round = await pendingCancelRound('m06-dup')
+    const w = world()
+    try {
+      const failure = await coordinatedTransactionV1({
+        coordinator: w.coordinator,
+        request: READ_COMMITTED,
+        candidate: { org: crypto.randomUUID() },
+        body: (context) =>
+          drive(context, w, {}, (handover) =>
+            new ApprovalProductService().createCancelRoundInstance(round.documentId, { userId: round.requesterId }, { settlementCoordinationHandover: handover }),
+          ),
+      }).then(
+        () => null,
+        (error) => error,
+      )
+      expect(failure).toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_ALREADY_PENDING' })
+      expect(await roundOutcome(round.roundInstanceId)).toBe('pending')
+      expectOneRolledBackAttempt(w.attempts)
+      expect(w.pool.idleCount).toBe(1)
+      expectBaseline(w.coordinator)
+    } finally {
+      await w.end()
+    }
+  }, 60_000)
+
   it('M08 reject handed over: the round ends rejected; the service sends no transaction control and releases nothing', async () => {
     const round = await pendingCancelRound('reject')
     const w = world()
