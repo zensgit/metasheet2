@@ -74,14 +74,16 @@ function isProduction(relative: string): boolean {
 /** Named imports per coordination module specifier, from `import … from '…/coordination/…'` (and `export … from`). */
 function coordinationImports(text: string): Array<{ specifier: string; names: string[] }> {
   const found: Array<{ specifier: string; names: string[] }> = []
-  const statement = /\b(?:import|export)\s+(type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]*coordination\/[^'"]*)['"]/g
+  // The clause is one of the import grammar's shapes (`{…}`, `*`, `* as X`, `X`, `X, {…}`), so a match
+  // never runs across another statement.
+  const statement = /\b(?:import|export)\s+(?:type\s+)?((?:[\w$]+\s*,\s*)?(?:\{[^{}]*\}|\*(?:\s+as\s+[\w$]+)?|[\w$]+))\s+from\s+['"]([^'"]*coordination\/[^'"]*)['"]/g
   for (const match of text.matchAll(statement)) {
-    const clause = match[2]
-    const braces = clause.match(/\{([\s\S]*)\}/)
+    const clause = match[1]
+    const braces = clause.match(/\{([^{}]*)\}/)
     const names = braces
       ? braces[1].split(',').map((part) => part.replace(/\btype\s+/, '').trim().split(/\s+as\s+/)[0]).filter(Boolean)
       : [clause.trim()]
-    found.push({ specifier: match[3], names })
+    found.push({ specifier: match[2], names })
   }
   const required = /\brequire\(\s*['"]([^'"]*coordination\/[^'"]*)['"]\s*\)/g
   for (const match of text.matchAll(required)) found.push({ specifier: match[1], names: ['<require>'] })
@@ -134,12 +136,15 @@ describe('settlement coordination stays out of production call paths (P11-A01, s
 
   it('the import scanner sees named, type-only, aliased, re-exported, required and dynamic imports', () => {
     const sample = [
+      "import { performance } from 'node:perf_hooks'",
+      "export interface Unrelated { a: string }",
       "import { a, type B, c as d } from '../attendance/coordination/settlement-coordinator'",
       "import type { E } from './coordination/settlement-coordination-context'",
       "export { f } from './coordination/settlement-coordination-port'",
+      "export * from './coordination/settlement-coordination-budget'",
       "const g = require('../coordination/settlement-coordination-key')",
       "const h = await import('./coordination/settlement-coordination-clock')",
     ].join('\n')
-    expect(coordinationImports(sample).flatMap((entry) => entry.names)).toEqual(['a', 'B', 'c', 'E', 'f', '<require>', '<dynamic import>'])
+    expect(coordinationImports(sample).flatMap((entry) => entry.names)).toEqual(['a', 'B', 'c', 'E', 'f', '*', '<require>', '<dynamic import>'])
   })
 })
