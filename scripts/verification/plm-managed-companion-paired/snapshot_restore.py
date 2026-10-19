@@ -11,6 +11,8 @@ import subprocess
 
 def restore_snapshot_pair(child, config, payload, owned, native_root, listener, env, node_env,
                           python, node, tsx, run_pg, set_native_port):
+    if not __debug__:
+        raise RuntimeError("Verification requires assertions enabled")
     ownership = json.loads((owned / '.plm-managed-paired-owned').read_text())
     assert ownership['kind'] == 'plm-managed-companion-paired' and not owned.is_symlink()
     assert ownership['nonce'] and owned == Path('/tmp') / ('plm-managed-paired-' + ownership['nonce'])

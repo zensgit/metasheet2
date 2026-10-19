@@ -2,6 +2,9 @@
 import json, os, sys, threading, hashlib
 from pathlib import Path
 
+if not __debug__:
+    raise RuntimeError("Verification requires assertions enabled")
+
 cfg = json.loads(os.environ['PAIRED_MANAGED_CONFIG'])
 root = Path(cfg['root'])
 origin = cfg['origin']

@@ -17,6 +17,8 @@ import urllib.request
 
 
 def verify(native, python, output):
+    if not __debug__:
+        raise RuntimeError("Verification requires assertions enabled")
     native = Path(native).resolve(strict=True)
     output = Path(output)
     assert not output.exists() and not output.is_symlink(), 'new report required'

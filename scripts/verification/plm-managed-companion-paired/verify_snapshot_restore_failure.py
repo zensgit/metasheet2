@@ -2,6 +2,8 @@
 import json,os,signal,socket,subprocess,sys,tempfile
 from pathlib import Path
 from snapshot_restore import restore_snapshot_pair
+if not __debug__:
+ raise RuntimeError("Verification requires assertions enabled")
 class OwnedFailure(Exception):pass
 with tempfile.TemporaryDirectory(prefix='plm-managed-paired-',dir='/tmp') as name:
  root=Path(name);(root/'.plm-managed-paired-owned').write_text(json.dumps({'nonce':root.name.removeprefix('plm-managed-paired-'),'kind':'plm-managed-companion-paired'}))

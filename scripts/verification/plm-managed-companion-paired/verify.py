@@ -3,6 +3,9 @@ import argparse, http.client, json, os, re, secrets, select, shutil, signal, soc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+if not __debug__:
+    raise RuntimeError("Verification requires assertions enabled")
+
 class PgCtlStatusUnproved(RuntimeError):
     pass
 
