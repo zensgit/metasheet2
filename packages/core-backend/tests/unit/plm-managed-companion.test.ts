@@ -36,6 +36,7 @@ import {
 import { setManagedFixtureClockForTests, setManagedFlowHooksForTests } from '../../src/services/plm-managed-companion-flow'
 import { setManagedNativeFetchForTests } from '../../src/services/plm-managed-native-http'
 import { managedRequestContext } from '../../src/services/plm-managed-request-context'
+import * as managedFlow from '../../src/services/plm-managed-companion-flow'
 
 const origin = 'https://native.example.test'
 const ownerId = 'meta-owner'
@@ -261,7 +262,7 @@ describe('legacy shared transport sentinel', () => {
       features: { bom_multitable: { supported: true } },
     })))
     const manifest = await adapter.getIntegrationCapabilities()
-    expect(manifest.manifest?.features.bom_multitable?.supported).toBe(true)
+    expect(manifest).toEqual({ available: false, reason: 'unavailable' })
     expect(manifest.manifest?.features.bom_eco_revision).toBeUndefined()
     expect(manifest.manifest?.features.bom_multitable_writeback).toBeUndefined()
     expect(readSharedTransportAudit().calls).toBe(0)
@@ -379,7 +380,16 @@ describe('managed capability discovery', () => {
     process.env.PLM_MANAGED_COMPANION_CLIENTS_JSON = JSON.stringify([registration])
     process.env.PLM_MANAGED_COMPANION_TEST_HOOKS = 'true'
     setManagedBindingReaderForTests(reader)
-    setManagedNativeFetchForTests(fetcher)
+    vi.spyOn(managedFlow, 'relayManagedBomSnapshot').mockImplementation(async () => {
+      if (!managedRequestContext.getStore()?.sessionId) {
+        return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' }
+      }
+      // Adapter admission and pre/post source checks; transport is tested separately.
+      const response = await fetcher('fixture-managed-read')
+      if (!response.ok) return { kind: 'refusal', status: 502, code: 'PLM_MANAGED_READ_REFUSED' }
+      return { kind: 'ok', entitled: true, snapshot: {} as never,
+        advisoryCapabilities: await response.json() }
+    })
     const a = new PLMAdapter({ get: async () => undefined } as never,
       { info() {}, warn() {}, error() {}, debug() {} } as never,
       { id: 'src-managed', name: 'managed', type: 'plm', connection: { url: origin },
@@ -388,26 +398,30 @@ describe('managed capability discovery', () => {
     return a
   }
 
-  it('reads real native advisory features without shared credentials and does not cache entitlement', async () => {
+  function readCapabilities(a: PLMAdapter) {
+    const read = () => a.getIntegrationCapabilities()
+    return managedRequestContext.getStore() ? read() : managedRequestContext.run({
+      userId: ownerId, sessionId: 'managed-session', conflict: false, metaTenantId: 'meta-tenant',
+    }, read)
+  }
+
+  it('uses the authenticated read relay and does not cache advisory entitlement', async () => {
     let entitled = true
     const fetched = vi.fn(async (_url: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
       new Response(JSON.stringify(payload(entitled))))
     const a = configured(fetched)
-    const enabled = await a.getIntegrationCapabilities()
+    const enabled = await readCapabilities(a)
     expect(enabled.available).toBe(true)
     if (!enabled.available) throw new Error('real advisory missing')
     expect(enabled.manifest.features.bom_eco_revision?.entitled).toBe(true)
     expect(enabled.manifest.features.bom_eco_revision?.actions).toEqual(['eco_revision_intent'])
     entitled = false
-    expect((await a.getIntegrationCapabilities()).manifest?.features.bom_eco_revision?.entitled).toBe(false)
+    expect((await readCapabilities(a)).manifest?.features.bom_eco_revision?.entitled).toBe(false)
     expect(fetched).toHaveBeenCalledTimes(2)
-    const [url, options] = fetched.mock.calls[0]
-    expect(url).toBe(origin + '/api/v1/integrations/capabilities')
-    expect(options).toMatchObject({ method: 'GET', credentials: 'omit', redirect: 'error',
-      headers: { 'x-tenant-id': registration.nativeTenantId, 'x-org-id': registration.nativeOrgId } })
-    expect(new Headers(options?.headers).has('authorization')).toBe(false)
-    expect(new Headers(options?.headers).has('cookie')).toBe(false)
-    expect(JSON.stringify(options)).not.toContain(registration.clientSecret)
+    expect(managedFlow.relayManagedBomSnapshot).toHaveBeenCalledWith({
+      userId: ownerId, dataSourceId: 'src-managed', partId: rootPartId,
+    })
+    expect(JSON.stringify(vi.mocked(managedFlow.relayManagedBomSnapshot).mock.calls)).not.toContain(registration.clientSecret)
     expect(readSharedTransportAudit().calls).toBe(0)
   })
 
@@ -416,7 +430,7 @@ describe('managed capability discovery', () => {
     const a = configured(fetched)
     if (flag === 'unset') delete process.env.PLM_MANAGED_COMPANION_ENABLED
     else process.env.PLM_MANAGED_COMPANION_ENABLED = flag
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).not.toHaveBeenCalled()
     expect(readSharedTransportAudit().calls).toBe(0)
   })
@@ -425,7 +439,7 @@ describe('managed capability discovery', () => {
     const fetched = vi.fn(async () => new Response(JSON.stringify(payload(true))))
     const a = configured(fetched)
     process.env.PLM_MANAGED_COMPANION_CLIENTS_JSON = JSON.stringify([{ ...registration, [field]: 'https://another.example.test' }])
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).not.toHaveBeenCalled()
   })
 
@@ -433,7 +447,7 @@ describe('managed capability discovery', () => {
     let generation = 1
     const fetched = vi.fn(async () => { generation = 2; return new Response(JSON.stringify(payload(true))) })
     const a = configured(fetched, async () => ({ kind: 'bound', row: bindingRow({ generation, link_generation: generation }) }))
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).toHaveBeenCalledOnce()
     expect(readSharedTransportAudit().calls).toBe(0)
   })
@@ -443,7 +457,7 @@ describe('managed capability discovery', () => {
       let row = bindingRow()
       const fetched = vi.fn(async () => { row = { ...row, [field]: 'changed' }; return new Response(JSON.stringify(payload(true))) })
       const a = configured(fetched, async () => ({ kind: 'bound', row }))
-      expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+      expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
       expect(fetched).toHaveBeenCalledOnce()
       expect(readSharedTransportAudit().calls).toBe(0)
     })
@@ -451,34 +465,34 @@ describe('managed capability discovery', () => {
   it.each([302, 404, 503])('does not fall back after native HTTP %s', async (status) => {
     const fetched = vi.fn(async () => new Response('{}', { status }))
     const a = configured(fetched)
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(readSharedTransportAudit().calls).toBe(0)
   })
 
   it('does not return a stale cached manifest after unlink', async () => {
     let row = bindingRow()
     const a = configured(async () => new Response(JSON.stringify(payload(true))), async () => ({ kind: 'bound', row }))
-    expect((await a.getIntegrationCapabilities()).available).toBe(true)
+    expect((await readCapabilities(a)).available).toBe(true)
     row = { ...row, binding_status: 'revoked' }
     await expect(a.getIntegrationCapabilities()).rejects.toMatchObject({ code: 'PLM_MANAGED_SHARED_TRANSPORT_REFUSED' })
     expect(readSharedTransportAudit().calls).toBe(0)
   })
 
-  it('does not use a mock or shared client when the public request aborts', async () => {
+  it('does not use a mock or shared client when the authenticated read relay aborts', async () => {
     const fetched = vi.fn(async () => { throw new Error('owned abort') })
     const a = configured(fetched)
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).toHaveBeenCalledOnce()
     expect(readSharedTransportAudit().calls).toBe(0)
   })
 
-  it('refuses a registration changed during the public request', async () => {
+  it('refuses a registration changed during the authenticated read', async () => {
     const fetched = vi.fn(async () => {
       process.env.PLM_MANAGED_COMPANION_CLIENTS_JSON = JSON.stringify([{ ...registration, nativeBaseUrl: 'https://another.example.test' }])
       return new Response(JSON.stringify(payload(true)))
     })
     const a = configured(fetched)
-    expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).toHaveBeenCalledOnce()
   })
 
@@ -486,8 +500,8 @@ describe('managed capability discovery', () => {
     'refuses a stale owner or conflicting authenticated request %s', async actor => {
       const fetched = vi.fn(async () => new Response(JSON.stringify(payload(true))))
       const a = configured(fetched)
-      await managedRequestContext.run({ ...actor, sessionId: null }, async () => {
-        expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+      await managedRequestContext.run({ ...actor, sessionId: 'managed-session' }, async () => {
+        expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
       })
       expect(fetched).not.toHaveBeenCalled()
       expect(readSharedTransportAudit().calls).toBe(0)
@@ -496,8 +510,8 @@ describe('managed capability discovery', () => {
   it.each([undefined, null, registration.nativeTenantId])('does not substitute native or missing scope for Meta tenant %s', async metaTenantId => {
     const fetched = vi.fn(async () => new Response(JSON.stringify(payload(true))))
     const a = configured(fetched)
-    await managedRequestContext.run({ userId: ownerId, sessionId: null, conflict: false, metaTenantId }, async () => {
-      expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
+    await managedRequestContext.run({ userId: ownerId, sessionId: 'managed-session', conflict: false, metaTenantId }, async () => {
+      expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
     })
     expect(fetched).not.toHaveBeenCalled()
   })
@@ -506,10 +520,10 @@ describe('managed capability discovery', () => {
     const fetched = vi.fn(async (_url: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
       new Response(JSON.stringify(payload(true))))
     const a = configured(fetched)
-    await managedRequestContext.run({ userId: ownerId, sessionId: null, conflict: false, metaTenantId: 'meta-tenant' }, async () => {
-      expect((await a.getIntegrationCapabilities()).available).toBe(true)
+    await managedRequestContext.run({ userId: ownerId, sessionId: 'managed-session', conflict: false, metaTenantId: 'meta-tenant' }, async () => {
+      expect((await readCapabilities(a)).available).toBe(true)
     })
-    expect(new Headers(fetched.mock.calls[0]?.[1]?.headers).get('x-tenant-id')).toBe(registration.nativeTenantId)
+    expect(managedFlow.relayManagedBomSnapshot).toHaveBeenCalledWith({ userId: ownerId, dataSourceId: 'src-managed', partId: rootPartId })
   })
 
   it('refuses a source tenant different from the persisted Meta binding even with a matching fingerprint', async () => {
@@ -519,7 +533,15 @@ describe('managed capability discovery', () => {
     expect(bindingFingerprintMatches(row)).toBe(true)
     const fetched = vi.fn(async () => new Response(JSON.stringify(payload(true))))
     const a = configured(fetched, async () => ({ kind: 'bound', row }))
+    expect(await readCapabilities(a)).toEqual({ available: false, reason: 'unavailable' })
+    expect(fetched).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch advisory metadata without a current managed read session', async () => {
+    const fetched = vi.fn(async () => new Response(JSON.stringify(payload(true))))
+    const a = configured(fetched)
     expect(await a.getIntegrationCapabilities()).toEqual({ available: false, reason: 'unavailable' })
     expect(fetched).not.toHaveBeenCalled()
+    expect(readSharedTransportAudit().calls).toBe(0)
   })
 })

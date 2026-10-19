@@ -12,18 +12,15 @@
     "fix": "explicit positive unbound classification in legacy unit fixture only; no production gate changed"
   },
   "current_unit": {
-    "name": "vitest tests",
-    "tests": "278",
-    "failures": "0",
-    "errors": "0",
-    "time": "8.636",
-    "skipped": 0
+    "managed": 141,
+    "additional_security": 172,
+    "skipped": 0,
+    "final_adapter_recheck": 36
   },
-  "junit_sha256": "5f29555dab2352691eef56c3e39fbf27b0ee07fa8167bf7d4a6da76e386c7382",
   "typecheck": {
     "passed": true,
-    "node": "20.20.2",
-    "command": "tsc -p packages/core-backend/tsconfig.json --noEmit"
+    "log": "/tmp/plm-managed-authenticated-capabilities-final-tsc-20261020.log",
+    "bytes": 0
   },
   "parent_census_passed": 49,
   "parent_reconciliation": {
@@ -40,19 +37,13 @@
     }
   },
   "source_files_sha256": {
-    "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
-    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "2e9c94bb159fa83d6907dd697955d0fe1de9f6a4f5b31eb501b330257d9fe133",
-    "packages/core-backend/src/routes/plm-workbench.ts": "e2940bb86db409a2a57497922d9d6c3b1811d9067946d6dbdbab614d76128ab8",
-    "packages/core-backend/src/services/plm-managed-native-http.ts": "28aeb797cbe32d8998fe043b5817557856811a203007117a3258493e9ab60702",
-    "packages/core-backend/src/services/plm-managed-request-context.ts": "13257bd888f2150c4e9e764b4d4ea4299eabbf84d9255259280a0fb70cc3facc",
-    "packages/core-backend/tests/unit/jwt-middleware.test.ts": "b089977039ac9535148526cd50c45bd428fb695bba96b820ca8bb73e17b6941f",
-    "packages/core-backend/tests/unit/plm-adapter-capabilities.test.ts": "be021ee6e83f908c4154ed58466b44935fc0574344962c18511bbe644088d7fd",
-    "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "2d947651562cd7336041ca2e8a4f9cc5a28908985244a7750a4b219467d8feb6",
-    "packages/core-backend/tests/unit/plm-workbench-capabilities-routes.test.ts": "0830a30b75ec0344fc7e09e6e51bf19c16554259c5e8d327bc67ffd940b494e7"
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "1cb03b90ecae5c15fca68cd2d3c10a409d2b47dd9aa14aef90d912c3a1dcbdbe",
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": "ad32228c99cf0030e3558e83ca682f582852b0bdf5dff3177d500312bb305093",
+    "packages/core-backend/src/services/plm-managed-native-http.ts": "65d59fb9c62f517ef906c8670d47cdca02ffb14e4de08d325d40b5058bf046e1"
   },
   "fixed_source_images_qualified": false,
   "actual_eco_dom_qualified": false,
-  "postgres_concurrency_qualified": false,
+  "postgres_concurrency_qualified": true,
   "whole_goal_qualified": false,
   "production_qualified": false,
   "ci_census_repair": {
@@ -65,5 +56,72 @@
     "local_report": "/tmp/plm-meta6459-consumer-unit-fixed-20261020.json",
     "original_assertion_script_unchanged": true,
     "postgres_web_thresholds_unchanged": true
-  }
+  },
+  "initial_public_attempt": {
+    "current_unit": {
+      "name": "vitest tests",
+      "tests": "278",
+      "failures": "0",
+      "errors": "0",
+      "time": "8.636",
+      "skipped": 0
+    },
+    "junit_sha256": "5f29555dab2352691eef56c3e39fbf27b0ee07fa8167bf7d4a6da76e386c7382",
+    "source_files_sha256": {
+      "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+      "packages/core-backend/src/data-adapters/PLMAdapter.ts": "2e9c94bb159fa83d6907dd697955d0fe1de9f6a4f5b31eb501b330257d9fe133",
+      "packages/core-backend/src/routes/plm-workbench.ts": "e2940bb86db409a2a57497922d9d6c3b1811d9067946d6dbdbab614d76128ab8",
+      "packages/core-backend/src/services/plm-managed-native-http.ts": "28aeb797cbe32d8998fe043b5817557856811a203007117a3258493e9ab60702",
+      "packages/core-backend/src/services/plm-managed-request-context.ts": "13257bd888f2150c4e9e764b4d4ea4299eabbf84d9255259280a0fb70cc3facc",
+      "packages/core-backend/tests/unit/jwt-middleware.test.ts": "b089977039ac9535148526cd50c45bd428fb695bba96b820ca8bb73e17b6941f",
+      "packages/core-backend/tests/unit/plm-adapter-capabilities.test.ts": "be021ee6e83f908c4154ed58466b44935fc0574344962c18511bbe644088d7fd",
+      "packages/core-backend/tests/unit/plm-managed-companion.test.ts": "2d947651562cd7336041ca2e8a4f9cc5a28908985244a7750a4b219467d8feb6",
+      "packages/core-backend/tests/unit/plm-workbench-capabilities-routes.test.ts": "0830a30b75ec0344fc7e09e6e51bf19c16554259c5e8d327bc67ffd940b494e7"
+    },
+    "source": "8365e42ab0fdc597ce5771c77972a773ad838640"
+  },
+  "repair_base": "5b6c633553150402e94c228d415cfee7f585ee71",
+  "native_provider_source": "f86d2323ffa1d21ed0d450598f5ec7107e92362f",
+  "authenticated_reports": {
+    "managed": {
+      "path": "/tmp/plm-managed-authenticated-unit-20261020.json",
+      "sha256": "728af6cf130988b0a62e4dd5ba2be8639147161a17734bafd609975c05288749",
+      "actual_assertion_statuses": {
+        "passed": 141
+      }
+    },
+    "security": {
+      "path": "/tmp/plm-managed-authenticated-security-boundaries-20261020.json",
+      "sha256": "09cf60987e48e70a4078fdad3d2fc1ff521db8f7178ecf3a646ab612fd2c846b",
+      "actual_assertion_statuses": {
+        "passed": 172
+      }
+    },
+    "postgres": {
+      "path": "/tmp/plm-managed-authenticated-pg-census-20261020.json",
+      "sha256": "0c3561124272bd1e7d71774a413b68d781ffec91273979236b48efc295ae9340",
+      "actual_assertion_statuses": {
+        "passed": 38
+      }
+    },
+    "cross_process_target": {
+      "path": "/tmp/plm-managed-authenticated-pg-crossprocess-20261020.json",
+      "sha256": "21222a746229d533f9e84801af5e5ae3b0735a3536c723bf99ed807195b2f6bf",
+      "actual_assertion_statuses": {
+        "skipped": 37,
+        "passed": 1
+      }
+    },
+    "final_adapter": {
+      "path": "/tmp/plm-managed-authenticated-adapter-final-20261020.json",
+      "sha256": "ebc9331fca12b531ed13d42099ade42019460f0e179b628b3e5448b5b83fbe04",
+      "actual_assertion_statuses": {
+        "passed": 36
+      }
+    }
+  },
+  "postgres_scope": "Managed capability source invalidation/live advisory; not installed ECO or personal-write pending recovery",
+  "cross_process_scope": "One owner transfer case uses a separate Node process and distinct PostgreSQL backend; final exact-head CI still required",
+  "native_auth_allowlist_changed": false,
+  "canonical_snapshot_hash_changed": false
 }

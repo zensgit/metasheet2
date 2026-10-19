@@ -50,19 +50,6 @@ function caller(): FetchImpl {
   return fetchOverride ?? fetch
 }
 
-/** Public advisory metadata only: no client secret, purpose grant or shared login. */
-export async function nativePublicCapabilities(registration: ManagedClientRegistration): Promise<unknown> {
-  const response = await caller()(`${registration.nativeBaseUrl}/api/v1/integrations/capabilities`, {
-    method: 'GET',
-    headers: headersFor(registration),
-    credentials: 'omit',
-    redirect: 'error',
-    signal: AbortSignal.timeout(MANAGED_EXCHANGE_ABORT_SECONDS * 1000),
-  })
-  if (!response.ok) throw new ManagedCompanionRefusal(502, 'PLM_MANAGED_CAPABILITIES_UNAVAILABLE')
-  return response.json()
-}
-
 function headersFor(registration: ManagedClientRegistration): Record<string, string> {
   return {
     'content-type': 'application/json',

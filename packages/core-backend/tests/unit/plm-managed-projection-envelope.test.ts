@@ -10,7 +10,7 @@ vi.mock('../../src/services/plm-managed-companion', async (original) => ({
   classifyManagedSource: mocks.classify,
   isPlmManagedCompanionEnabled: () => true,
   bindingFingerprintMatches: () => true,
-  registrationFor: () => ({ clientId: 'client' }),
+  registrationFor: () => ({ clientId: 'client', issuer: 'fixture' }),
   openCredential: () => 'synthetic-personal-read',
 }))
 import { relayManagedBomContext, relayManagedBomSnapshot } from '../../src/services/plm-managed-companion-flow'
@@ -28,15 +28,16 @@ function read() {
     () => relayManagedBomContext({ userId: 'meta-person-900', dataSourceId: 'source', partId: 'P' }))
 }
 beforeEach(() => {
-  mocks.classify.mockResolvedValue({ kind: 'managed', row: {
+  mocks.classify.mockResolvedValue({ kind: 'bound', row: {
     meta_user_id: 'meta-person-900', frozen_root_part_id: 'P', client_origin: 'https://meta.invalid', generation: 3,
+    native_auth_user_id: '42', native_tenant_id: 'native-tenant', native_org_id: 'native-org', installation_issuer: 'fixture',
   } })
   mocks.query.mockResolvedValue({ rows: [{
     root_part_id: 'P', client_origin: 'https://meta.invalid', native_subject: '42',
     native_tenant_id: 'native-tenant', native_org_id: 'native-org', client_id: 'client',
     installation_issuer: 'fixture', delegation_id: 'delegation', credential_ciphertext: 'opaque',
   }] })
-  mocks.status.mockResolvedValue({ root_part_id: 'P', client_origin: 'https://meta.invalid', subject: '42', scope: MANAGED_COMPANION_SCOPE })
+  mocks.status.mockResolvedValue({ root_part_id: 'P', client_origin: 'https://meta.invalid', subject: '42', scope: MANAGED_COMPANION_SCOPE, tenant_id: 'native-tenant', org_id: 'native-org', issuer: 'fixture', client_id: 'client', delegation_id: 'delegation' })
   mocks.context.mockResolvedValue(payload())
 })
 afterEach(() => vi.resetAllMocks())
@@ -90,5 +91,49 @@ describe('managed personal projection envelope', () => {
     await expect(read()).resolves.toEqual({ kind: 'legacy' })
     expect(mocks.context).not.toHaveBeenCalled()
     expect(mocks.query).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('live advisory on the authenticated read envelope', () => {
+  it('carries optional metadata outside the unchanged canonical snapshot', async () => {
+    const raw = payload()
+    const advisory = { provider: 'yuantus-plm', advisory: true, schema_version: 'v1', features: {} }
+    mocks.context.mockResolvedValue({ ...raw, integration_capabilities: advisory })
+    const result = await managedRequestContext.run({ userId: 'meta-person-900', sessionId: 'session', conflict: false },
+      () => relayManagedBomSnapshot({ userId: 'meta-person-900', dataSourceId: 'source', partId: 'P' }))
+    expect(result).toEqual({ kind: 'ok', entitled: true, snapshot: raw, advisoryCapabilities: advisory })
+    if (result.kind !== 'ok') throw Error('authenticated read missing')
+    expect(result.snapshot).not.toHaveProperty('integration_capabilities')
+    expect(result.snapshot.context).toEqual(raw.context)
+    await expect(read()).resolves.toEqual({ kind: 'ok', entitled: true, context: raw.context })
+  })
+
+  it.each(['native_subject', 'native_tenant_id', 'native_org_id', 'installation_issuer'])(
+    'refuses changed session %s before any native transport', async field => {
+      const current = (await mocks.query()).rows[0]
+      mocks.query.mockResolvedValue({ rows: [{ ...current, [field]: 'foreign' }] })
+      await expect(read()).resolves.toMatchObject({ kind: 'refusal', status: 403 })
+      expect(mocks.status).not.toHaveBeenCalled()
+      expect(mocks.context).not.toHaveBeenCalled()
+    })
+
+  it.each(['tenant_id', 'org_id', 'issuer', 'client_id', 'delegation_id'])(
+    'refuses mismatched native status %s before reading a projection', async field => {
+      const current = await mocks.status()
+      mocks.status.mockClear()
+      mocks.status.mockResolvedValue({ ...current, [field]: 'foreign' })
+      await expect(read()).resolves.toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_NATIVE_STATUS_REFUSED' })
+      expect(mocks.context).not.toHaveBeenCalled()
+    })
+
+  it('does not return advisory data from a projection with foreign native authority', async () => {
+    const raw = payload()
+    raw.source.tenant_id = 'foreign'
+    mocks.context.mockResolvedValue({ ...raw, integration_capabilities: { features: { secret: {} } } })
+    const result = await managedRequestContext.run({ userId: 'meta-person-900', sessionId: 'session', conflict: false },
+      () => relayManagedBomSnapshot({ userId: 'meta-person-900', dataSourceId: 'source', partId: 'P' }))
+    expect(result).toMatchObject({ kind: 'refusal', status: 403 })
+    expect(result).not.toHaveProperty('advisoryCapabilities')
   })
 })

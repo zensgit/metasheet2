@@ -1,80 +1,25 @@
-# Live native advisory capabilities for managed PLM sources
+# Live native capabilities through the authenticated managed read
 
-The installed-image verification reached a real personal BOM write and a real
-personal ECO API revision, but the existing managed adapter returned a fixed
-read-only manifest. The frontend therefore hid its already-implemented ECO action.
-This change discovers actual native advisory features and entitlement instead of
-hardcoding permission or bypassing the missing UI with an API positive control.
+The installed-image counterexample showed that the general native capability endpoint returns 401 under required authentication. An anonymous advisory request therefore cannot complete the real ECO UI path. This repair preserves native authentication and reuses the existing root-scoped personal managed BOM read instead.
 
-## Identity and transport
+## Authority and transport
 
-The existing native `GET /api/v1/integrations/capabilities` is public advisory
-metadata, scoped by native tenant/org. The adapter uses the durable managed source
-and the canonical installation registration to select that endpoint. It sends only
-the existing native tenant/org headers, omits credentials, rejects redirects and
-uses the existing bounded timeout. It does not connect the inherited shared client
-or send a client secret, cookie, read delegation, approval grant or write grant.
-This advisory request is not authority to read PLM objects or perform a write.
+The native companion `f86d2323ffa1d21ed0d450598f5ec7107e92362f` adds optional `integration_capabilities` to the existing managed-context envelope after its live read/session, root, identity, tenant/org, membership, ACL and license checks. The Meta adapter calls the existing authenticated managed-session relay and validates the native projection authority before using that optional advisory field. No endpoint, credential purpose or approval engine is added. An older provider without the field keeps its authenticated BOM read and safely hides the unavailable advisory action.
 
-Before and after the request, the source fingerprint, active binding/link,
-generation, owner, both identity namespaces and registration must still agree.
-The registered native origin and Meta client origin must match their persisted
-counterparts. A non-null source Meta tenant must match the persisted Meta binding.
-For authenticated requests, the current owner and verified Meta tenant must match
-too; a conflicting ordinary/managed principal, missing provenance, a native tenant
-substituted for Meta tenant, or a stale owner fails closed before transport.
+The general native endpoint stays bearer-protected. Its anonymous helper was removed; there is no public/shared fallback. The existing installation secret still validates the delegation through the existing status backchannel. The actual object read uses only the stored personal `yur` credential, native tenant/org and frozen root; neither the installation secret nor an approval/write grant substitutes for that read. A read grant cannot perform a line or ECO write. Those operations retain their independently bound `yuw` grant and native write/license/ACL/idempotency checks.
 
-The existing request context carries the Meta tenant only when a signature-verified
-claim agrees with the authenticated tenant. A legacy header backfill, missing claim
-or rejected claim cannot establish it. No new authentication or approval engine is
-introduced. Native personal writes retain their independent `yuw` grant, native
-identity, entitlement, ACL, scope and idempotency checks.
+The relay additionally compares the stored session's native subject, tenant/org and installation with the durable binding, then checks the complete native status tuple including client, issuer and delegation. Meta owner and signature-verified Meta tenant remain separate from native identity. Source fingerprint, binding/link generation and canonical origins must agree before and after the request. Concurrent owner transfer, unlink/revoke or changed registration discards the result. Switch disablement, missing provenance/session, transport failure or malformed metadata cannot reach the inherited shared client or mock data.
 
-Managed capability reads bypass the legacy manifest cache, so license changes are
-observed on the next read. The Meta capability response is `no-store` and varies on
-ordinary/managed authentication and tenant/org headers. Transport failure, unlink,
-disablement, changed registration or concurrent source changes never fall through
-to shared credentials or mock-mode data. Positively unbound legacy adapters retain
-their existing handshake and cache behavior.
+The response remains no-store. Managed results are not cached, so an independent license change appears on the next read. Advisory metadata stays outside `context` and the parsed canonical snapshot, preserving the persistent snapshot/hash contract; it grants no write authority. Existing unbound legacy handshake behavior is retained.
 
-## Source and verification
+## Verification and current limits
 
-The initial seven new counterexamples failed on the old static manifest. Current
-managed-adapter, native transport, personal line/ECO binding/intent/provenance and
-JWT middleware tests pass: **278 tests, zero failures/errors**, including live
-entitlement changes, no shared transport, invalid switch values, native/Meta tenant
-separation, source/registration changes during fetch, stale owner, conflicting
-principal, rejected provenance and no-store response headers. Backend TypeScript
-`--noEmit` also passes on Node 20.
+The native companion's two regressions failed before implementation, then 65 real-HTTP read-session/capability tests passed with zero skips. They retain anonymous/read-grant 401 at the general endpoint, read-grant 401 at ECO write, live independent ECO license changes, and read/session revocation. Native auth middleware and credential admit sets are unchanged.
 
-Nine legacy handshake tests were independently shown to fail on the exact original
-adapter because an unavailable database is not proof that a source is unbound.
-Their fixture now explicitly supplies the existing positive unbound classification;
-production refusal on missing storage remains unchanged.
+Meta unit checks passed in two disjoint groups: 141 managed consumer tests and 172 identity/personal line/ECO/provenance/route tests, zero failures or skips. The final small identity-return simplification was checked again by all 36 adapter tests. The unchanged exact-report assertion script accepted these actual assertion lists. Full backend TypeScript noEmit passes on Node20. The workflow's exact unit census rises from119 to141 and PostgreSQL census from34 to38; neither the assertion logic nor web198 gate is relaxed.
 
-The candidate was reconciled with qualified parent
-`b88ee9aa40eecd1967246572b2cc6490c1a3429e`. Its intervening changes were documentation
-and the existing publication-fence test repair; all six original patch files were
-byte-identical after reconciliation. The original patch and stash were retained.
-The parent schema-fence census and falsification tests passed separately (49 tests);
-its ledger and gates were not changed. Compact evidence is in
-`artifacts/plm-managed-live-capabilities-20261020/verification.json`.
+The complete disposable PostgreSQL suite passed 38 actual assertions with zero skips, including live advisory/older-provider compatibility, concurrent owner transfer and durable unlink invalidation. The owner transfer fixture was then strengthened to use a separate Node process and a different PostgreSQL backend PID; that case passed independently (one actual assertion, 37 deliberately filtered). The preceding full38 run used a separate connection in the parent process. Every owned cluster was stopped and removed with matching markers. The targeted Vitest JSON summary misleadingly counted filtered tests as passed; evidence here uses individual assertion statuses, and the unchanged CI assertion script already rejects skipped assertions.
 
-Actual fixed-source offline SPA/backend image construction and the real native
-unified-entry **ECO DOM** journey are still required. The earlier API positive is
-not UI completion. PostgreSQL concurrent configuration/identity rejection and
-pending personal-write/retired-grant coupled recovery remain separate acceptance.
-Keep the source and subsequent documentation heads distinct and verify exact-head
-CI after publication. Draft only; no merge, deployment, production enablement or
-claim that the master goal is complete.
+The initial full38 extension had one fixture error: unlink was called with a string instead of its existing object request contract. Only that failed case was fixed and checked before the complete exact38 census. Raw failures remain preserved. Existing schema-fence ledgers, source count baselines and frozen receipts were not rewritten.
 
-## Exact-source CI census repair
-
-Source `8365e42ab0fdc597ce5771c77972a773ad838640` completed 18 checks successfully.
-The managed companion consumer stopped at its exact unit census: all 119 tests
-passed, while its pre-existing expected count was 93. The 26 added adapter
-counterexamples account for the difference. The workflow now requires exactly
-119 passed/total tests with zero failures, pending or todo; its assertion logic
-and PostgreSQL/web acceptance thresholds are unchanged. The same seven-file
-suite and the original assertion script pass locally on Node 20. This is a CI
-census correction, not installed-image or full-goal acceptance.
+The source began from qualified parent `b88ee9aa40eecd1967246572b2cc6490c1a3429e`; application attempt8365 and CI census head5b are retained as history. Their 19 green checks did not prove installed ECO UI behavior: the strict image/browser run supplied the decisive 401 counterexample. The current authenticated repair still needs fixed-source backend/SPA image rebuilds, mandatory real ECO DOM, personal write/retired-grant coupled recovery and exact-head CI. Native companion publication follows the retained queue; do not replace the useful queued363 perf job. This remains Draft only, with no merge, deployment, production enablement or full master-goal completion claim.

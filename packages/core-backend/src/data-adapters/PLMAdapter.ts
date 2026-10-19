@@ -33,7 +33,7 @@ import {
   noteSharedTransportCall,
   type ManagedBindingRow,
 } from '../services/plm-managed-companion'
-import { nativePublicCapabilities } from '../services/plm-managed-native-http'
+import { relayManagedBomSnapshot } from '../services/plm-managed-companion-flow'
 import { currentManagedRequest } from '../services/plm-managed-request-context'
 
 /**
@@ -1636,7 +1636,7 @@ export class PLMAdapter extends HTTPAdapter {
       row.native_org_id, row.meta_user_id, row.meta_tenant_id, row.meta_org_id, row.client_origin,
       registration.issuer, registration.clientId, registration.callback, registration.origin,
       registration.nativeTenantId, registration.nativeOrgId, registration.nativeBaseUrl])
-    return { registration, identity }
+    return identity
   }
 
   private capabilityResult(value: unknown): IntegrationCapabilitiesResult {
@@ -1671,14 +1671,18 @@ export class PLMAdapter extends HTTPAdapter {
       try {
         const before = await classifyManagedSource(this.config.id)
         if (before.kind !== 'bound') return { available: false, reason: 'unavailable' }
-        const frozen = this.managedCapabilityIdentity(before.row)
-        const manifest = await nativePublicCapabilities(frozen.registration)
+        const frozenIdentity = this.managedCapabilityIdentity(before.row)
+        const read = await relayManagedBomSnapshot({
+          userId: currentManagedRequest()?.userId ?? undefined, dataSourceId: this.config.id,
+          partId: before.row.frozen_root_part_id,
+        })
+        if (read.kind !== 'ok') return { available: false, reason: 'unavailable' }
         const after = await classifyManagedSource(this.config.id)
-        if (after.kind !== 'bound' || this.managedCapabilityIdentity(after.row).identity !== frozen.identity) {
+        if (after.kind !== 'bound' || this.managedCapabilityIdentity(after.row) !== frozenIdentity) {
           return { available: false, reason: 'unavailable' }
         }
         // Entitlement is live tenant metadata. Never reuse the legacy cached result.
-        return this.capabilityResult(manifest)
+        return this.capabilityResult(read.advisoryCapabilities)
       } catch {
         return { available: false, reason: 'unavailable' }
       }

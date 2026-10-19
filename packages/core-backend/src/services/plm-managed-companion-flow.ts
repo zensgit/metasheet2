@@ -1117,7 +1117,7 @@ type ManagedBomReadInput = {
 export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promise<
   | { kind: 'legacy' }
   | { kind: 'refusal'; status: number; code: string }
-  | { kind: 'ok'; entitled: true; snapshot: ManagedSnapshot }
+  | { kind: 'ok'; entitled: true; snapshot: ManagedSnapshot; advisoryCapabilities?: unknown }
 > {
   const classified = await classifyManagedSource(input.dataSourceId)
   if (classified.kind === 'unbound') return { kind: 'legacy' }
@@ -1143,7 +1143,11 @@ export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promi
     )
     const session = found.rows[0]
     if (!session) return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' }
-    if (text(session.root_part_id) !== input.partId || text(session.client_origin) !== row.client_origin) {
+    if (text(session.root_part_id) !== input.partId || text(session.client_origin) !== row.client_origin
+      || text(session.native_subject) !== row.native_auth_user_id
+      || text(session.native_tenant_id) !== row.native_tenant_id
+      || text(session.native_org_id) !== row.native_org_id
+      || text(session.installation_issuer) !== row.installation_issuer) {
       return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_READ_REFUSED' }
     }
     const registration = registrationFor({
@@ -1156,7 +1160,10 @@ export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promi
     }
     const status = await nativeStatus(registration, text(session.delegation_id))
     if (!status || status.root_part_id !== input.partId || status.client_origin !== text(session.client_origin)
-      || status.subject !== text(session.native_subject) || status.scope !== MANAGED_COMPANION_SCOPE) {
+      || status.subject !== text(session.native_subject) || status.scope !== MANAGED_COMPANION_SCOPE
+      || status.tenant_id !== text(session.native_tenant_id) || status.org_id !== text(session.native_org_id)
+      || status.issuer !== registration.issuer || status.client_id !== registration.clientId
+      || status.delegation_id !== text(session.delegation_id)) {
       return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_NATIVE_STATUS_REFUSED' }
     }
     const credential = openCredential(text(session.credential_ciphertext))
@@ -1167,7 +1174,8 @@ export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promi
       org_id: text(session.native_org_id),
       auth_user_id: text(session.native_subject),
     })
-    return { kind: 'ok', entitled: true, snapshot }
+    return { kind: 'ok', entitled: true, snapshot,
+      advisoryCapabilities: (payload as Record<string, unknown>).integration_capabilities }
   } catch (error) {
     if (error instanceof ManagedCompanionRefusal) return { kind: 'refusal', status: error.status, code: error.code }
     return { kind: 'refusal', status: error instanceof BomReviewError ? error.status : 502, code: 'PLM_MANAGED_READ_REFUSED' }
