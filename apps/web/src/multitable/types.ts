@@ -1648,6 +1648,8 @@ export interface Webhook {
   maxRetries?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
+  /** The sheet the webhook is bound to; null = not bound yet (receives no events). */
+  sheetId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -1656,6 +1658,8 @@ export interface WebhookCreateInput {
   name: string
   url: string
   events: string[]
+  /** The sheet the webhook is bound to. Required on create; on update only to bind an unbound webhook. */
+  sheetId: string
   secret?: string
   active?: boolean
   maxRetries?: number
@@ -1663,14 +1667,18 @@ export interface WebhookCreateInput {
   retryMaxDelayMs?: number
 }
 
+/** Delivery history item: status fields only (no stored request or response body). */
 export interface WebhookDelivery {
   id: string
   webhookId: string
   event: string
-  httpStatus: number | null
-  success: boolean
-  retryCount: number
-  timestamp: string
+  status: 'pending' | 'success' | 'failed'
+  httpStatus?: number | null
+  /** Attempts made so far, the first attempt included. */
+  attemptCount: number
+  createdAt: string
+  deliveredAt?: string
+  nextRetryAt?: string
 }
 
 // --- DingTalk Group Destinations ---

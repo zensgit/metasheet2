@@ -455,7 +455,7 @@ describe('ApiTokenService', () => {
       name: 'Limited',
       scopes: ['records:read'],
     })
-    expect(ApiTokenService.hasScope(token, 'webhooks:manage')).toBe(false)
+    expect(ApiTokenService.hasScope(token, 'comments:write')).toBe(false)
   })
 
   // ── Rotation ──────────────────────────────────────────────────────
