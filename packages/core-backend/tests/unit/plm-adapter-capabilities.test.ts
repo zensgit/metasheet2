@@ -1,5 +1,11 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { PLMAdapter, isFeatureAvailable } from '../../src/data-adapters/PLMAdapter'
+import { setManagedBindingReaderForTests } from '../../src/services/plm-managed-companion'
+
+// These legacy handshake cases need a positively classified unbound source,
+// rather than a missing database being mistaken for permission to use it.
+beforeEach(() => setManagedBindingReaderForTests(async () => ({ kind: 'unbound' })))
+afterEach(() => setManagedBindingReaderForTests(null))
 
 const createAdapter = () => {
   const configService = { get: vi.fn().mockResolvedValue(undefined) }

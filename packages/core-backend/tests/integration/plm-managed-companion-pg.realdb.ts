@@ -54,6 +54,7 @@ import {
 } from '../../src/services/plm-managed-companion-flow'
 import { setManagedNativeFetchForTests } from '../../src/services/plm-managed-native-http'
 import { managedRequestContext } from '../../src/services/plm-managed-request-context'
+import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 
 function explicitUrl(): string {
   const raw = process.env.PLM_MANAGED_COMPANION_TEST_PG_URL
@@ -195,7 +196,7 @@ let revokeStatus = 204
 let exchangeStatus = 200
 let nativeActive = true
 
-function installNative() {
+function installNative(advisory?: () => unknown, beforeContext?: () => Promise<void>) {
   setManagedNativeFetchForTests(async (url, init) => {
     const href = String(url)
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null
@@ -215,7 +216,11 @@ function installNative() {
       })
     }
     if (href.endsWith('/revoke')) return new Response(null, { status: revokeStatus })
-    if (href.includes('/managed-context')) return Response.json(contextBody(String(href.split('/').at(-2))))
+    if (href.includes('/managed-context')) {
+      if (beforeContext) await beforeContext()
+      return Response.json({ ...contextBody(String(href.split('/').at(-2))),
+        ...(advisory ? { integration_capabilities: advisory() } : {}) })
+    }
     return new Response('missing', { status: 404 })
   })
 }
@@ -2327,3 +2332,111 @@ async function blockedBy(holderPid: number): Promise<boolean> {
   }
   return false
 }
+
+
+describe('live advisory through real persistent managed sessions', () => {
+  function advisory(entitled = true) {
+    return { provider: 'yuantus-plm', schema_version: 'v1', advisory: true, features: {
+      bom_eco_revision: { supported: true, entitled, actions: ['eco_revision_intent'] },
+    } }
+  }
+  async function currentRead() {
+    const { res, state } = await beginLogin()
+    const done = responseDouble()
+    await completeManagedCallback(callbackRequest(res, state) as never, done as never)
+    expect(done.statusCode).toBe(302)
+    const sessions = await countSessions()
+    expect(sessions).toHaveLength(1)
+    const adapter = new PLMAdapter({ get: async () => undefined } as never,
+      { info() {}, warn() {}, error() {}, debug() {} } as never,
+      { id: SOURCE, name: 'owned', type: 'plm', connection: { url: ORIGIN },
+        credentials: { token: 'shared-control-must-not-be-used' } } as never)
+    return { read: () => managedRequestContext.run({ userId: OWNER,
+      sessionId: String(sessions[0].id), metaTenantId: TENANT, conflict: false },
+      () => adapter.getIntegrationCapabilities()), sessionId: String(sessions[0].id) }
+  }
+
+  it('reads live advisory without shared fallback and observes license changes', async () => {
+    let entitled = true
+    installNative(() => advisory(entitled))
+    const { read } = await currentRead()
+    const first = await read()
+    expect(first.available).toBe(true)
+    if (!first.available) throw Error('authenticated advisory missing')
+    expect(first.manifest.features.bom_eco_revision?.entitled).toBe(true)
+    entitled = false
+    expect((await read()).manifest?.features.bom_eco_revision?.entitled).toBe(false)
+    expect(nativeCalls.filter(call => call.url.includes('/managed-context'))).toHaveLength(2)
+    expect(nativeCalls.some(call => call.url.includes('/integrations/capabilities'))).toBe(false)
+    expect(readSharedTransportAudit().calls).toBe(0)
+  })
+
+  it('rejects live advisory after concurrent owner transfer from another Node process', async () => {
+    let reached!: () => void
+    let release!: () => void
+    const arrived = new Promise<void>(resolve => { reached = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    installNative(() => advisory(), async () => { reached(); await held })
+    const { read } = await currentRead()
+    const pool = new Pool({ connectionString: pgUrl, max: 1 })
+    const pending = read()
+    try {
+      await arrived
+      const parentBackend = Number((await pool.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const child = String.raw`const {Client}=require('pg');(async()=>{
+        const raw=process.env.PLM_MANAGED_COMPANION_TEST_PG_URL;
+        if(!raw||!new URL(raw).searchParams.get('host')?.startsWith('/tmp/plm-managed-consumer-pg-'))throw Error('owned_socket_required');
+        const c=new Client({connectionString:raw});await c.connect();try{
+          const backend=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+          const changed=await c.query('UPDATE data_sources SET owner_id=$1 WHERE id=$2',[process.argv[1],process.argv[2]]);
+          console.log(JSON.stringify({pid:process.pid,backend,rowCount:changed.rowCount}));
+        }finally{await c.end()}
+      })().catch(()=>{process.stderr.write('owned_mutator_failed');process.exitCode=1})`
+      const changed = JSON.parse(execFileSync(process.execPath, ['-e', child, OTHER, SOURCE], {
+        encoding: 'utf8', env: { ...process.env }, timeout: 10000,
+      })) as { pid: number; backend: number; rowCount: number }
+      expect(changed.pid).not.toBe(process.pid)
+      expect(changed.backend).not.toBe(parentBackend)
+      expect(changed.rowCount).toBe(1)
+      release()
+      expect(await pending).toEqual({ available: false, reason: 'unavailable' })
+      expect(readSharedTransportAudit().calls).toBe(0)
+    } finally {
+      release()
+      await pending
+      await pool.query('UPDATE data_sources SET owner_id=$1 WHERE id=$2', [OWNER, SOURCE])
+      await pool.end()
+    }
+  })
+
+  it('rejects live advisory after concurrent unlink and keeps the local revoke durable', async () => {
+    let reached!: () => void
+    let release!: () => void
+    const arrived = new Promise<void>(resolve => { reached = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    installNative(() => advisory(), async () => { reached(); await held })
+    const { read, sessionId } = await currentRead()
+    const pending = read()
+    try {
+      await arrived
+      await unlinkManagedSource({ id: OWNER, authenticatedTenantId: TENANT }, { dataSourceId: SOURCE })
+      release()
+      expect(await pending).toEqual({ available: false, reason: 'unavailable' })
+      expect((await query('SELECT revoked_at FROM plm_managed_sessions WHERE id=$1', [sessionId])).rows[0].revoked_at).not.toBeNull()
+      expect(readSharedTransportAudit().calls).toBe(0)
+    } finally {
+      release()
+      await pending
+    }
+  })
+
+  it('degrades live advisory for an older provider while its authenticated read remains usable', async () => {
+    installNative()
+    const { read, sessionId } = await currentRead()
+    expect(await read()).toEqual({ available: false, reason: 'unavailable' })
+    const context = await managedRequestContext.run({ userId: OWNER, sessionId, conflict: false },
+      () => relayManagedBomContext({ userId: OWNER, dataSourceId: SOURCE, partId: 'part' }))
+    expect(context).toMatchObject({ kind: 'ok', entitled: true })
+    expect(readSharedTransportAudit().calls).toBe(0)
+  })
+})

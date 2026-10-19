@@ -94,8 +94,10 @@ jobs:
             tests/unit/plm-managed-projection-envelope.test.ts \
             tests/unit/plm-bom-review-wire.test.ts \
             tests/unit/plm-managed-snapshot-share-wire.test.ts \
-            tests/unit/plm-managed-snapshot-share-transport.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 93
+            tests/unit/plm-managed-snapshot-share-transport.test.ts \
+            tests/unit/plm-managed-capability-read-transport.test.ts \
+            tests/unit/plm-managed-adapter-startup.test.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 142
 
       - name: Start owned socket PostgreSQL 16
         run: |
@@ -136,7 +138,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
             --config vitest.plm-managed-companion.config.ts \
             --reporter=json --outputFile=/tmp/plm-managed-pg.json
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 34
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-pg.json 38
 
       - name: Remove owned socket PostgreSQL
         if: always()

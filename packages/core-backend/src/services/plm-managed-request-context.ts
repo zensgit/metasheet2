@@ -4,6 +4,7 @@ export type ManagedRequestStore = {
   userId: string | null
   sessionId: string | null
   conflict: boolean
+  metaTenantId?: string | null
 }
 
 export const managedRequestContext = new AsyncLocalStorage<ManagedRequestStore>()

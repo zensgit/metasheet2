@@ -19,6 +19,8 @@ vi.mock('../../src/metrics/metrics', () => ({
 }))
 
 import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware, optionalJwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { attachVerifiedTenantClaim } from '../../src/auth/verified-tenant-claim'
+import { currentManagedRequest } from '../../src/services/plm-managed-request-context'
 
 describe('jwt auth whitelist', () => {
   it('does not whitelist metrics endpoints anymore', () => {
@@ -86,6 +88,22 @@ describe('jwt auth whitelist', () => {
 })
 
 describe('jwt auth middleware', () => {
+  it.each([
+    { claim: { kind: 'present', value: 'verified-meta' }, tenantId: 'verified-meta', expected: 'verified-meta' },
+    { claim: { kind: 'present', value: 'another-meta' }, tenantId: 'verified-meta', expected: null },
+    { claim: { kind: 'absent' }, tenantId: undefined, expected: null },
+    { claim: { kind: 'rejected' }, tenantId: 'verified-meta', expected: null },
+  ] as const)('publishes only verified matching Meta tenant provenance to request context: %s', async input => {
+    const user = { id: 'meta-person', role: 'admin', tenantId: input.tenantId }
+    attachVerifiedTenantClaim(user, input.claim)
+    authServiceMocks.verifyToken.mockResolvedValue(user)
+    const req = { headers: { authorization: 'Bearer owned-token', 'x-tenant-id': 'native-tenant-sentinel' } } as unknown as Request
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn().mockReturnThis() } as unknown as Response
+    const next = vi.fn(() => expect(currentManagedRequest()?.metaTenantId).toBe(input.expected))
+    await jwtAuthMiddleware(req, res, next)
+    expect(next).toHaveBeenCalledOnce()
+  })
+
   it('preserves tenantId on authenticated requests', async () => {
     authServiceMocks.verifyToken.mockResolvedValue({
       id: 'user-1',

@@ -82,6 +82,10 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
     const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/ds-1/capabilities')
 
     expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    expect(res.headers.vary.toLowerCase().split(/,\s*/)).toEqual(expect.arrayContaining([
+      'authorization', 'cookie', 'x-tenant-id', 'x-org-id',
+    ]))
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, manifest: MANIFEST })
     expect(getIntegrationCapabilities).toHaveBeenCalledTimes(1)
   })
@@ -95,6 +99,7 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
     const res = await request(pinned.url()).get('/api/plm-workbench/data-sources/nope/capabilities')
 
     expect(res.status).toBe(404)
+    expect(res.headers['cache-control']).toBe('no-store')
     expect(res.body.data_source_id).toBe('nope')
   })
 
