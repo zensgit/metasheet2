@@ -133,6 +133,16 @@ async function nativePaste(target: HTMLElement, text: string | null) {
   await nextTick()
   return event
 }
+// What a browser delivers for a copied screenshot: an image flavour only; getData('text/plain') is ''.
+async function nativeImagePaste(target: HTMLElement) {
+  const event = new Event('paste', { bubbles: true, cancelable: true })
+  const getData = vi.fn((type: string) => (type === 'image/png' ? 'binary-image-data' : ''))
+  Object.defineProperty(event, 'clipboardData', { value: { types: ['image/png', 'Files'], getData } })
+  target.dispatchEvent(event)
+  await nextTick()
+  expect(getData).toHaveBeenCalledWith('text/plain')
+  return event
+}
 function removeClipboardApi() {
   Reflect.deleteProperty(navigator, 'clipboard')
   expect('clipboard' in navigator).toBe(false)
@@ -659,13 +669,64 @@ describe('grid paste without the async Clipboard API (plain-HTTP deployment)', (
     ])
   })
 
+  // Empty paste: an empty clipboard, or one holding only an image / only HTML, reads as ''. Tiled over a
+  // range it would clear every selected cell (up to 1,000) and range writes cannot be undone, so it
+  // writes nothing and says so, on the keyboard path and on the button path alike.
+  const EMPTY = 'The clipboard has no text to paste; nothing was changed.'
+  it('range: an empty keyboard paste writes nothing and says so', async () => {
+    removeClipboardApi()
+    const grid = await mountGrid()
+    await rectangle(grid, 0, 0, 1, 1)
+    const event = await nativePaste(grid.get('.meta-grid'), '')
+    expect(event.defaultPrevented).toBe(true)
+    await settled(grid)
+    expect(grid.commitRange).not.toHaveBeenCalled()
+    expect(grid.patchCell).not.toHaveBeenCalled()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe(EMPTY)
+    expect(grid.state.rows[0].data.title).toBe('alpha')
+  })
+
+  it('range: an image-only paste writes nothing, is kept from the browser, and says so (zh)', async () => {
+    removeClipboardApi()
+    useLocale().setLocale('zh-CN')
+    const grid = await mountGrid()
+    await rectangle(grid, 0, 0, 1, 1)
+    const event = await nativeImagePaste(grid.get('.meta-grid'))
+    expect(event.defaultPrevented).toBe(true)
+    await settled(grid)
+    expect(grid.commitRange).not.toHaveBeenCalled()
+    expect(grid.patchCell).not.toHaveBeenCalled()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('剪贴板里没有可粘贴的文字，未做任何修改')
+  })
+
+  it('button: an empty clipboard writes nothing and says so', async () => {
+    const grid = await mountGrid()
+    await rectangle(grid, 0, 0, 1, 1)
+    await paste(grid, '')
+    expect(readText).toHaveBeenCalledTimes(1)
+    expect(grid.commitRange).not.toHaveBeenCalled()
+    expect(grid.patchCell).not.toHaveBeenCalled()
+    expect(grid.get('[data-test="range-status"]').textContent).toBe(EMPTY)
+  })
+
+  it('single cell: an empty or image-only paste never clears the focused cell', async () => {
+    vi.stubEnv('VITE_MULTITABLE_RANGE_FILL_ENABLED', 'false')
+    removeClipboardApi()
+    const grid = await mountGrid()
+    await mouse(grid.get('.meta-grid__cell'), 'click')
+    expect((await nativePaste(grid.get('.meta-grid'), '')).defaultPrevented).toBe(true)
+    expect((await nativeImagePaste(grid.get('.meta-grid'))).defaultPrevented).toBe(true)
+    expect(grid.patchCell).not.toHaveBeenCalled()
+    // Positive control on the same focused cell: real text is still written.
+    await nativePaste(grid.get('.meta-grid'), 'kept working')
+    expect(grid.patchCell).toHaveBeenCalledWith('r1', 'title', 'kept working', 5)
+  })
+
   const tooLarge = Array.from({ length: 1001 }, () => 'v').join('\n')
   const SAVED = 'Range saved (range undo is unavailable).'
-  // An empty clipboard and an image-only paste both read as '' (readText() resolves '' too), so both
-  // paths clear the destination exactly as the button always has; there is no separate "empty" message.
   it.each([
     ['plain value', 'new', {}, 0, SAVED, 1],
-    ['empty clipboard / no text flavour', '', {}, 0, SAVED, 1],
+    ['empty clipboard / no text flavour', '', {}, 0, EMPTY, 0],
     ['ragged matrix', 'a\tb\nc', {}, 0, 'Clipboard is not a valid rectangular table.', 0],
     ['over the 1,000-cell limit', tooLarge, {}, 0, 'Limit: 1,000 destination cells.', 0],
     ['read-only destination field', 'new', { fieldReadOnlyIds: ['title'] }, 0, 'Range contains read-only cells; nothing submitted.', 0],

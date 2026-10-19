@@ -191,6 +191,13 @@ export function useGridRangeSelection(options: Options) {
         status.value = 'STALE'
         return
       }
+      // An empty read (empty clipboard, or only an image / only HTML) would parse as one empty cell and
+      // tile it over the whole selection: up to 1,000 cells cleared, and range writes cannot be undone.
+      // Write nothing and say why. Same rule for the button and for keyboard paste.
+      if (text === '') {
+        status.value = 'CLIPBOARD_EMPTY'
+        return
+      }
       const changes = planRangePaste({ rows, fields: options.fields(), target,
         matrix: parseClipboardMatrix(text), canWrite: options.canWrite })
       await commit(changes, context)

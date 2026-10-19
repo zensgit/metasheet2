@@ -41,6 +41,7 @@ const message = computed(() => {
     CLIPBOARD: ['无法访问剪贴板，请检查浏览器权限。', 'Clipboard unavailable. Check browser permissions.'],
     // The button cannot read the clipboard without the async Clipboard API (plain-HTTP deployment);
     // the keyboard shortcut's native paste event can.
+    CLIPBOARD_EMPTY: ['剪贴板里没有可粘贴的文字，未做任何修改', 'The clipboard has no text to paste; nothing was changed.'],
     CLIPBOARD_USE_SHORTCUT: ['当前环境请直接按 Ctrl+V（Mac 为 ⌘V）粘贴到选区', 'Press Ctrl+V (⌘V on Mac) to paste into the range here.'],
   }
   const pair = pairs[props.status] ?? ['操作未确认成功，请刷新核对后再试。', 'Operation not confirmed. Refresh and check before retrying.']

@@ -1684,6 +1684,9 @@ function copyFocusedCell() {
 // `text` comes from the native paste event (onGridPaste) — never from a programmatic clipboard read, which
 // does not exist on a plain-HTTP deployment.
 function pasteFocusedCell(text: string) {
+  // Empty paste (empty clipboard, or only an image / only HTML) never clears the cell; same rule as the
+  // range paste, which also reports it (CLIPBOARD_EMPTY). There is no status bar without the range toolbar.
+  if (text === '') return
   if (focusRow.value < 0 || focusCol.value < 0) return
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
