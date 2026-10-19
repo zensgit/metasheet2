@@ -46,6 +46,8 @@ const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = {
   'packages/core-backend/src/attendance/w4c0-identity.ts': ['currentSettlementCoordinationContextV1'],
   // dispatchAction's handed-over mode: a recheck mismatch asks the port for a restart.
   'packages/core-backend/src/services/ApprovalProductService.ts': ['SettlementCoordinationRecheckMismatchV1'],
+  // The production nesting guard (count mode): every main-pool connect is noted.
+  'packages/core-backend/src/integration/db/connection-pool.ts': ['noteSettlementCoordinationMainPoolAccessV1'],
 }
 
 /** Identifiers that activate the coordination path → production files allowed to declare them. */
