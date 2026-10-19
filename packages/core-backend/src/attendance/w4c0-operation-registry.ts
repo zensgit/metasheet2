@@ -130,7 +130,11 @@ export function markAttendanceW4ConnectionUncertainV1(error: unknown): unknown {
 
 /** The mark, or one of the uncertain error classes that predate it. */
 export function isAttendanceW4ConnectionUncertainV1(error: unknown): boolean {
-  if (error instanceof AttendanceCleaningConnectionUncertainError || error instanceof OnlinePunchConnectionUncertainError) return true
+  if (
+    error instanceof AttendanceCleaningConnectionUncertainError
+    || error instanceof OnlinePunchConnectionUncertainError
+    || error instanceof AttendanceW4ConnectionUncertainPrimitiveError
+  ) return true
   if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false
   return (error as Record<symbol, unknown>)[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)
 }
