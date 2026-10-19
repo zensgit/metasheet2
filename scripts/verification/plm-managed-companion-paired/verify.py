@@ -323,7 +323,10 @@ parser.add_argument('--output', required=True)
 parser.add_argument('--browser-script', default='run.mts')
 parser.add_argument('--workspace-entry', action='store_true')
 parser.add_argument('--snapshot-share', action='store_true')
+parser.add_argument('--snapshot-pre-review', action='store_true')
 args = parser.parse_args()
+if args.snapshot_pre_review and not args.snapshot_share:
+    parser.error('--snapshot-pre-review requires --snapshot-share')
 if args.snapshot_share and args.browser_script != 'entry-run.mts':
     parser.error('--snapshot-share requires --browser-script entry-run.mts')
 meta = Path(args.meta_checkout).resolve()
@@ -511,6 +514,7 @@ try:
         'nativePid': child.pid,
         'workspaceEntry': args.workspace_entry,
         'snapshotShare': args.snapshot_share,
+        'snapshotPreReview': args.snapshot_pre_review,
         'rootPartId': config['root_part_id'],
     }
     node_log = (owned / 'node.log').open('w')
@@ -557,10 +561,14 @@ try:
     native_report = json.loads(child.stdout.readline())
     proof['native'] = native_report
     if args.snapshot_share:
+        assert native_report['snapshot_source_unchanged'] is True
         proof['snapshot_share'] = one_line('SNAPSHOT_SHARE_PROOF ')
         assert proof['snapshot_share']['ok'] is True
         proof['snapshot_export'] = one_line('SNAPSHOT_EXPORT_PROOF ')
         assert proof['snapshot_export']['ok'] is True
+        if args.snapshot_pre_review:
+            proof['snapshot_pre_review'] = one_line('SNAPSHOT_PRE_REVIEW_PROOF ')
+            assert proof['snapshot_pre_review']['ok'] is True
     if args.browser_script == 'run.mts':
         proof['meta'] = one_line('PAIRED_PROOF ')
         assert proof['meta']['ok'] is True

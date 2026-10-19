@@ -97,6 +97,13 @@ with tenant() as db:
     db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
     db.commit()
 
+def item_snapshot(db):
+    return sorted([{'id': item.id, 'generation': item.generation, 'state': item.state,
+                    'properties': item.properties} for item in db.query(Item).all()], key=lambda item: item['id'])
+
+with tenant() as db:
+    initial_items = item_snapshot(db) if cfg.get('snapshot_share') else None
+
 app = create_app()
 assert not app.dependency_overrides
 import uvicorn
@@ -118,6 +125,7 @@ for line in sys.stdin:
                 'write_audits': len(audits),
                 'write_subjects': sorted({row.user_id for row in audits}),
                 'write_lines': sorted({row.bom_line_id for row in audits}),
+                **({'snapshot_source_unchanged': item_snapshot(db) == initial_items} if initial_items is not None else {}),
             }
         print(json.dumps(report), flush=True)
     elif command == 'stop':

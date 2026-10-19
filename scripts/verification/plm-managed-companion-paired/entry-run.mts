@@ -99,6 +99,19 @@ if (input.snapshotShare) {
   const { up } = await import(root + '/src/db/migrations/zzzz20261019010000_create_plm_snapshot_share_intents.ts')
   await up(db)
 }
+if (input.snapshotPreReview) {
+  const { ensureApprovalSchemaReady } = await import(root + '/tests/helpers/approval-schema-bootstrap.ts')
+  await ensureApprovalSchemaReady()
+  await pool.query(`ALTER TABLE users ADD COLUMN is_admin boolean DEFAULT false, ADD COLUMN department text;
+    ALTER TABLE meta_bases ADD COLUMN created_at timestamptz DEFAULT now(), ADD COLUMN updated_at timestamptz DEFAULT now();
+    CREATE TABLE permissions(code text PRIMARY KEY,name text,description text);`)
+  const { up: submissions } = await import(root + '/src/db/migrations/zzzz20260915120000_create_multitable_record_approval_submissions.ts')
+  const { up: submitPermission } = await import(root + '/src/db/migrations/zzzz20260915121000_add_multitable_submit_approval_permission.ts')
+  const { up: namespaceAdmissions } = await import(root + '/src/db/migrations/zzzz20260411120000_create_user_namespace_admissions.ts')
+  await namespaceAdmissions(db)
+  await submissions(db)
+  await submitPermission(db)
+}
 await pool.query(
   `INSERT INTO users (id, email, name, role, permissions, is_active, activation_status, must_change_password, local_password_set)
    VALUES ('meta-owner', 'owner@example.test', 'Owner', 'user', '[]'::jsonb, true, 'activated', false, true)`,
@@ -112,6 +125,18 @@ await pool.query(
    VALUES ('source-1', 'Paired PLM', 'meta-owner', 'workspace-1', 'meta-org', 'private', 'plm', $1::jsonb, true, false)`,
   [JSON.stringify(sourceConfig)],
 )
+
+if (input.snapshotPreReview) {
+  await pool.query(`INSERT INTO users(id,email,name,role,permissions,is_active,activation_status,local_password_set,must_change_password)
+    VALUES('meta-reviewer','reviewer@example.test','Separate Meta Reviewer','user','[]'::jsonb,true,'activated',true,false);
+    INSERT INTO user_orgs(user_id,org_id,is_active) VALUES('meta-reviewer','meta-org',true);`)
+  for (const actor of ['meta-owner', 'meta-reviewer']) {
+    for (const code of ['multitable:read','multitable:submit-approval','approvals:read','approvals:write']) {
+      await pool.query('INSERT INTO permissions(code,name) VALUES($1,$1) ON CONFLICT DO NOTHING', [code])
+      await pool.query('INSERT INTO user_permissions(user_id,permission_code) VALUES($1,$2)', [actor, code])
+    }
+  }
+}
 
 const { provisionManagedLink } = await import(root + '/src/services/plm-managed-companion-flow.ts')
 const link = await provisionManagedLink({ id: 'meta-owner', role: 'user', authenticatedTenantId: 'meta-org' }, {
@@ -175,6 +200,10 @@ if (input.snapshotShare) {
   const { poolManager } = await import(root + '/src/integration/db/connection-pool.ts')
   app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({ pool: poolManager.get(), dataSourceManager: ds.getDataSourceManager() }))
   app.use('/api/multitable', univerMetaRouter())
+  if (input.snapshotPreReview) {
+    const { createMultitableRecordApprovalRoutes } = await import(root + '/src/routes/multitable-record-approvals.ts')
+    app.use('/api/multitable', createMultitableRecordApprovalRoutes())
+  }
 }
 const metaServer = await new Promise<import('node:http').Server>((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
@@ -318,13 +347,15 @@ try {
     await page.locator('#consent').check()
     await page.locator('#confirm').click()
     await page.waitForURL(url => url.origin === input.origin && url.pathname.startsWith('/multitable/'), { timeout: 120000 })
+    await page.locator('.mt-workbench').waitFor({ state: 'visible', timeout: 90000 })
+    await page.getByText('C-001', { exact: true }).first().waitFor({ state: 'visible', timeout: 90000 })
     const saved = (await pool.query("SELECT binding_id FROM plm_snapshot_share_intents WHERE status='published'")).rows
     assert.equal(saved.length, 1)
     const binding = (await pool.query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1', [saved[0].binding_id])).rows[0]
     assert(binding?.sheet_id)
     assert((await pool.query('SELECT count(*)::int n FROM meta_records WHERE sheet_id=$1', [binding.sheet_id])).rows[0].n > 0)
     writeSync(1, 'SNAPSHOT_SHARE_PROOF ' + JSON.stringify({ ok: true, explicit_native_confirmation: true,
-      pre_confirmation_records: 0, published_bindings: 1, native_rpc: 'real HTTP', target: 'share-target',
+      pre_confirmation_records: 0, published_bindings: 1, destination_grid_rendered: true, native_rpc: 'real HTTP', target: 'share-target',
       installed_image: false, native_storage: 'isolated SQLite fixture', meta_storage: 'actual PostgreSQL' }) + '\n')
   }
 
@@ -364,6 +395,47 @@ try {
       process.env.JWT_SECRET, { expiresIn: '5m' })
     const refused = await fetch(exportUrl, { headers: { Authorization: 'Bearer ' + outsiderJwt } })
     assert.equal(refused.status, 403, await refused.text())
+    if (input.snapshotPreReview) {
+      const { ApprovalProductService } = await import(root + '/src/services/ApprovalProductService.ts')
+      const approvals = new ApprovalProductService()
+      const template = await approvals.createTemplate({ key: 'snapshot-review-' + Date.now(), name: 'Snapshot collaboration pre-review',
+        visibilityScope: { type: 'all', ids: [] }, formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+        approvalGraph: { nodes: [ { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'approval_1', type: 'approval', name: 'Separate reviewer', config: {
+            assigneeSources: [{ kind: 'static_user', userIds: ['meta-reviewer'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: 'End', config: {} } ],
+          edges: [{ key: 'start-review', source: 'start', target: 'approval_1' }, { key: 'review-end', source: 'approval_1', target: 'end' }] } })
+      await approvals.publishTemplate(template.id, { policy: { allowRevoke: true } })
+      const record = (await pool.query('SELECT id FROM meta_records WHERE sheet_id=$1 ORDER BY id LIMIT 1', [binding.sheet_id])).rows[0]
+      const url = metaBase + '/api/multitable/sheets/' + binding.sheet_id + '/records/' + record.id + '/approvals'
+      const before = await pool.query('SELECT data,version FROM meta_records WHERE id=$1', [record.id])
+      const body = JSON.stringify({ templateId: template.id, formData: { summary: 'Review the authorized snapshot; no native mutation' } })
+      const missingSubmit = await fetch(url, { method: 'POST', headers: { ...ownerHeaders, 'content-type': 'application/json' }, body })
+      assert.equal(missingSubmit.status, 403, await missingSubmit.text())
+      const reviewJwt = jwt.sign({ userId: 'meta-owner', role: 'user', roles: ['user'], tenantId: 'meta-org',
+        perms: ['multitable:read','multitable:submit-approval','approvals:read','approvals:write'] }, process.env.JWT_SECRET, { expiresIn: '5m' })
+      const submitted = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + reviewJwt, 'content-type': 'application/json' }, body })
+      assert.equal(submitted.status, 201, await submitted.clone().text())
+      const submission = (await pool.query('SELECT * FROM multitable_record_approval_submissions WHERE record_id=$1', [record.id])).rows[0]
+      assert.equal(submission.status, 'pending')
+      const { loadAuthorizedApprovalActor } = await import(root + '/src/multitable/automation-approval-bridge-service.ts')
+      await approvals.dispatchAction(submission.approval_instance_id, { action: 'approve', comment: 'Snapshot reviewed' }, await loadAuthorizedApprovalActor('meta-reviewer'))
+      const instance = (await pool.query('SELECT status FROM approval_instances WHERE id=$1', [submission.approval_instance_id])).rows[0]
+      assert.equal(instance.status, 'approved')
+      const event = (await pool.query("SELECT payload FROM meta_automation_outbox WHERE event_type='approval.approved' AND payload->'approval'->>'instanceId'=$1", [submission.approval_instance_id])).rows
+      assert.equal(event.length, 1)
+      const { createRecordApprovalCompletionSink, createPoolTransactionRunner } = await import(root + '/src/multitable/record-approval-submission-service.ts')
+      const { poolManager } = await import(root + '/src/integration/db/connection-pool.ts')
+      const actualPool = poolManager.get()
+      const sink = createRecordApprovalCompletionSink(actualPool.query.bind(actualPool), { runInTransaction: createPoolTransactionRunner(actualPool) })
+      await sink.handleApprovalCompletion(event[0].payload)
+      await sink.handleApprovalCompletion(event[0].payload)
+      assert.equal((await pool.query('SELECT status FROM multitable_record_approval_submissions WHERE id=$1', [submission.id])).rows[0].status, 'approved')
+      assert.equal((await pool.query("SELECT count(*)::int n FROM meta_record_subscription_notifications WHERE sheet_id=$1 AND record_id=$2 AND event_type='notification.sent'", [binding.sheet_id,record.id])).rows[0].n, 1)
+      assert.deepEqual((await pool.query('SELECT data,version FROM meta_records WHERE id=$1', [record.id])).rows, before.rows)
+      writeSync(1, 'SNAPSHOT_PRE_REVIEW_PROOF ' + JSON.stringify({ ok: true, imported_record: true, missing_submit_permission_forbidden: true,
+        real_approval_engine: true, separate_meta_reviewer: true, actual_durable_event_replayed_twice: true, one_completion_notification: true, snapshot_record_unchanged: true }) + '\n')
+    }
     const unlinked = await fetch(metaBase + '/api/plm/managed-login/unlink', { method: 'POST',
       headers: { ...ownerHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ dataSourceId: 'source-1' }) })
     assert.equal(unlinked.status, 200, await unlinked.clone().text())
