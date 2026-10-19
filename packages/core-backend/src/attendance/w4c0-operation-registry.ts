@@ -128,6 +128,16 @@ export function markAttendanceW4ConnectionUncertainV1(error: unknown): unknown {
   return error
 }
 
+/**
+ * What a releaser passes to `release(error?)` for an error that left its body: the error itself
+ * (wrapped when it is not an `Error`) when the connection's state is unknown, so the pool destroys the
+ * connection; `undefined` otherwise, so it goes back. The error that propagates is never changed.
+ */
+export function attendanceW4ConnectionDiscardV1(error: unknown): Error | undefined {
+  if (!isAttendanceW4ConnectionUncertainV1(error)) return undefined
+  return error instanceof Error ? error : new AttendanceW4ConnectionUncertainPrimitiveError(error)
+}
+
 /** The mark, or one of the uncertain error classes that predate it. */
 export function isAttendanceW4ConnectionUncertainV1(error: unknown): boolean {
   if (
