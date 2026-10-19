@@ -115,7 +115,7 @@ export function clearManagedProbeMarker(): void {
 export function isManagedEntryLocation(): boolean {
   if (typeof window === 'undefined') return false
   const path = window.location.pathname || ''
-  if (path === '/plm/managed-entry' || path === '/plm/managed-return') return true
+  if (path === '/plm/managed-entry' || path === '/plm/managed-return' || path === '/plm/snapshot-share-return') return true
   const managed = new URLSearchParams(window.location.search || '').get('managed')
   return managed === 'ready' || managed === 'refused'
 }

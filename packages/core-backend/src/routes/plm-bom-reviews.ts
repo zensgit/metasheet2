@@ -2,6 +2,8 @@ import { Router } from 'express'
 import jwt from 'jsonwebtoken'
 import { z, ZodError } from 'zod'
 import { authenticate } from '../middleware/auth'
+import { PlmManagedSnapshotShareFlow } from '../services/plm-managed-snapshot-share-flow'
+import { ManagedCompanionRefusal } from '../services/plm-managed-companion'
 import {
   PlmBomReviewService,
   type BomReviewDependencies,
@@ -13,6 +15,19 @@ import {
 export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
   const router = Router(),
     service = new PlmBomReviewService(deps)
+  const shares = new PlmManagedSnapshotShareFlow(deps)
+  router.get('/managed-share/targets', authenticate, async (req, res, next) => {
+    res.set('Cache-Control', 'no-store')
+    try { res.json(await shares.targets(req)) } catch (error) { next(error) }
+  })
+  router.post('/managed-share/start', authenticate, async (req, res, next) => {
+    res.set('Cache-Control', 'no-store').set('Referrer-Policy', 'no-referrer')
+    try { res.json(await shares.start(req, res)) } catch (error) { next(error) }
+  })
+  router.post('/managed-share/complete', authenticate, async (req, res, next) => {
+    res.set('Cache-Control', 'no-store').set('Referrer-Policy', 'no-referrer')
+    try { res.json(await shares.complete(req)) } catch (error) { next(error) }
+  })
   router.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
     try {
@@ -148,7 +163,7 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
       res: import('express').Response,
       _next: import('express').NextFunction,
     ) => {
-      const known = e instanceof BomReviewError
+      const known = e instanceof BomReviewError || e instanceof ManagedCompanionRefusal
       res.status(known ? e.status : e instanceof ZodError ? 400 : 503).json({
         ok: false,
         error: {

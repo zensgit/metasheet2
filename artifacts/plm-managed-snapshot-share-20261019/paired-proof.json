@@ -1,0 +1,106 @@
+{
+  "source_sha": "607444d3d3088f0c685bb4c7cfce7d9ea384bc8a",
+  "native_sha": "d87a73143778f90d7a5e381237b17950d1e0fa40",
+  "connected": {
+    "owned": "/tmp/plm-managed-paired-jhr7vswh",
+    "nonce": "jhr7vswh",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 0,
+      "write_subjects": [],
+      "write_lines": []
+    },
+    "snapshot_share": {
+      "ok": true,
+      "explicit_native_confirmation": true,
+      "pre_confirmation_records": 0,
+      "published_bindings": 1,
+      "native_rpc": "real HTTP",
+      "target": "share-target",
+      "installed_image": false,
+      "native_storage": "isolated SQLite fixture",
+      "meta_storage": "actual PostgreSQL"
+    },
+    "snapshot_export": {
+      "ok": true,
+      "generic_csv_export": true,
+      "ungranted_export_forbidden": true,
+      "outsider_without_target_read_forbidden": true,
+      "unlink_acknowledged": true,
+      "retained_target_acl_export": true,
+      "new_share_after_unlink_refused": true
+    },
+    "meta": {
+      "ok": true,
+      "bom_line": "line",
+      "open_sessions": 1,
+      "dev_token_requests": 0,
+      "embed_requests": 0,
+      "ordinary_owner_start": true,
+      "meta_user": "meta-owner",
+      "native_subject_hint": "42",
+      "native_workspace_launch": true,
+      "root_part_id": "yur_public-part"
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "original_entry_regression": {
+    "owned": "/tmp/plm-managed-paired-ho3fjeuk",
+    "nonce": "ho3fjeuk",
+    "ok": true,
+    "node_cleanup": {
+      "ok": true,
+      "failures": []
+    },
+    "native": {
+      "write_audits": 0,
+      "write_subjects": [],
+      "write_lines": []
+    },
+    "meta": {
+      "ok": true,
+      "bom_line": "line",
+      "open_sessions": 1,
+      "dev_token_requests": 0,
+      "embed_requests": 0,
+      "ordinary_owner_start": true,
+      "meta_user": "meta-owner",
+      "native_subject_hint": "42",
+      "native_workspace_launch": true,
+      "root_part_id": "yur_public-part"
+    },
+    "cleanup": {
+      "postgresStopped": true,
+      "directoryRemoved": true,
+      "markerMatched": true,
+      "nativeChildStopped": true,
+      "proxyClosed": true,
+      "failures": []
+    }
+  },
+  "limits": [
+    "Source-process fixture: native SQLite identity/tenant/global, actual Meta PostgreSQL15.17, installed cached Chromium; no image/full migration-chain/install claim.",
+    "Sharing panel, native confirmation and return navigation exercised; full destination grid rendering and generic pre-review still open.",
+    "Existing global multitable:read confers export/read authority; it is not a target-outsider case. Sharing consent does not mint this permission.",
+    "Actual CI16 and current-head CI not yet accepted."
+  ],
+  "earlier_counterexamples": [
+    "v1: fixture passed raw pg Pool lacking production transaction interface; fixed to actual poolManager.",
+    "v2: existing writer-fence/durable-delivery flags not configured in synthetic harness; required existing gates enabled only in owned sharing mode.",
+    "v3: TLS fixture omitted authenticated forwarded scheme; native strict same-origin gate correctly refused. Loopback TLS proxy now overwrites X-Forwarded-Proto, uvicorn trusts only loopback.",
+    "v5: fixture owner had no independent Meta read/export permission; export correctly403.",
+    "v6: asserted global multitable:read holder was target-outsider; actual existing global permission permits it. Negative now uses actual unprivileged outsider; no production permission changes."
+  ],
+  "owned_cleanup": "All failed/successful paired fixtures confirmed stopped/removed by owner nonce; raw redacted failure logs retained under /tmp, no unknown data removed."
+}

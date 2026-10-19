@@ -92,8 +92,10 @@ jobs:
             tests/unit/plm-managed-adapter-refute.test.ts \
             tests/unit/plm-managed-companion.test.ts \
             tests/unit/plm-managed-projection-envelope.test.ts \
-            tests/unit/plm-bom-review-wire.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 48
+            tests/unit/plm-bom-review-wire.test.ts \
+            tests/unit/plm-managed-snapshot-share-wire.test.ts \
+            tests/unit/plm-managed-snapshot-share-transport.test.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 93
 
       - name: Start owned socket PostgreSQL 16
         run: |
@@ -169,6 +171,9 @@ jobs:
             }
           '
 
+      - name: Snapshot sharing PostgreSQL and cross-process publication
+        run: node scripts/verification/plm-managed-companion-ci/snapshot-share.mjs
+
       - name: Managed companion web specs
         run: |
           set -euo pipefail
@@ -187,8 +192,9 @@ jobs:
             tests/api.spec.ts \
             tests/sessionCenterView.spec.ts \
             tests/App.spec.ts \
-            tests/dingtalk-auth-callback.spec.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 187
+            tests/dingtalk-auth-callback.spec.ts \
+            tests/plmSnapshotShare.spec.ts
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-web.json 198
 
       - name: Backend types
         run: pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false --incremental false

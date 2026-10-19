@@ -602,9 +602,7 @@ export class PlmBomReviewService {
       canonical(fetched.snapshot.source) !== canonical(p.source)
     )
       throw new Failure(409, 'SOURCE_CHANGED')
-    const id = randomUUID(),
-      sheetId = getObjectSheetId('plm-bom-review', v.previewId),
-      viewId = getObjectViewId('plm-bom-review', v.previewId, 'grid')
+    const sheetId = getObjectSheetId('plm-bom-review', v.previewId)
     return this.deps.pool
       .transaction(async ({ query }) => {
         await this.runtime(query)
@@ -624,101 +622,7 @@ export class PlmBomReviewService {
         const source = await this.source(query, actor, p.data_source_id, true)
         if (source.fingerprint !== fetched.fingerprint)
           throw new Failure(409, 'SOURCE_CHANGED')
-        const fields = Object.fromEntries(
-          SOURCE_FIELDS.map((k) => [
-            k,
-            getObjectFieldId('plm-bom-review', v.previewId, k),
-          ]),
-        )
-        const descriptors = [
-          ...SOURCE_FIELDS.map((k) => ({
-            id: fields[k],
-            name: `PLM ${k}`,
-            type: 'string' as const,
-            property: { readOnly: true },
-          })),
-          ...LOCAL_FIELDS.map((f) => ({
-            ...f,
-            id: getObjectFieldId('plm-bom-review', v.previewId, f.id),
-            property:
-              'property' in f ? { options: [...f.property.options] } : {},
-          })),
-        ]
-        await createSheet({ query, sheetId, baseId: p.base_id, name: p.name })
-        await ensureFields({ query, sheetId, fields: descriptors })
-        await createView({
-          query,
-          sheetId,
-          viewId,
-          name: '全部',
-          type: 'grid',
-        })
-        await query(
-          "INSERT INTO spreadsheet_permissions(sheet_id,subject_type,subject_id,perm_code) VALUES($1,'user',$2,'spreadsheet:admin')",
-          [sheetId, actor],
-        )
-        for (const f of descriptors)
-          await recordConfigRevision(query, {
-            sheetId,
-            entityType: 'field',
-            entityId: f.id,
-            action: 'create',
-            before: null,
-            after: f,
-            changedKeys: ['name', 'type', 'property'],
-            batchId: id,
-            actorId: actor,
-          })
-        await recordConfigRevision(query, {
-          sheetId,
-          entityType: 'permission',
-          entityId: `${sheetId}:${actor}`,
-          action: 'create',
-          before: null,
-          after: {
-            subject_type: 'user',
-            subject_id: actor,
-            perm_code: 'spreadsheet:admin',
-          },
-          changedKeys: ['subject_type', 'subject_id', 'perm_code'],
-          batchId: id,
-          actorId: actor,
-        })
-        const b = (
-          await query(
-            `INSERT INTO meta_plm_bom_review_bindings(id,data_source_id,part_id,creator_id,source_fingerprint,source,base_id,sheet_id,view_id,name,fields,status,snapshot_hash,last_synced_at,line_count,occurrence_count)
-      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,'active',$12,$13,$14,$15) RETURNING *`,
-            [
-              id,
-              p.data_source_id,
-              p.part_id,
-              actor,
-              fetched.fingerprint,
-              JSON.stringify(fetched.snapshot.source),
-              p.base_id,
-              sheetId,
-              viewId,
-              p.name,
-              JSON.stringify(fields),
-              p.snapshot_hash,
-              fetched.snapshot.snapshot_at,
-              projectBomRows(fetched.snapshot).size,
-              fetched.snapshot.context.lines.length,
-            ],
-          )
-        ).rows[0] as Binding
-        await this.initializeOwnerView(query, actor, b, v.previewId)
-        await query(
-          'INSERT INTO meta_plm_bom_review_state_fields(binding_id,field_id,owner_field_id,due_field_id) VALUES($1,$2,$3,$4)',
-          [b.id, getObjectFieldId('plm-bom-review', v.previewId, 'status'), getObjectFieldId('plm-bom-review', v.previewId, 'owner'), getObjectFieldId('plm-bom-review', v.previewId, 'due_date')],
-        )
-        await this.initializeStatusViews(query,actor,b,v.previewId)
-        await this.writeSnapshot(query, actor, b, fetched.snapshot)
-        await query(
-          'UPDATE meta_plm_bom_review_previews SET request_id=$2,binding_id=$3 WHERE id=$1',
-          [v.previewId, v.requestId, id],
-        )
-        return this.dto(b, actor, true)
+        return this.publishSnapshot(query, actor, locked, v.requestId, fetched.snapshot, fetched.fingerprint)
       })
       .catch((error: unknown) => {
         const violation = error as { code?: string; constraint?: string }
@@ -729,6 +633,139 @@ export class PlmBomReviewService {
           throw new Failure(409, 'BINDING_CONFLICT')
         throw error
       })
+  }
+  async authorizeSnapshotTargetOnQuery(query: PlmQuery, actor: string, baseId: string): Promise<void> {
+    await this.runtime(query)
+    await this.base(query, actor, baseId)
+  }
+  async retainedSnapshotOnQuery(query: PlmQuery, actor: string, bindingId: string) {
+    const binding = (await query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1', [bindingId])).rows[0] as Binding
+    if (!binding) throw new Failure(404, 'NOT_FOUND')
+    // Already authorized copies are governed by target ACL, including after native unlink.
+    await this.sheet(query, actor, binding, false)
+    return this.dto(binding, actor, false)
+  }
+  /** Internal server flow only: caller holds its durable share intent and mapping/session locks. */
+  async publishConsentedSnapshotOnQuery(query: PlmQuery, actor: string, intent: {
+    id: string; operation_id: string; base_id: string; name: string; data_source_id: string;
+    source_fingerprint: string; source_identity: ShareSnapshot['source']; expires_at: Date;
+    target: { sheet_id: string; user_id: string; base_id: string; source_id: string };
+  }, snapshot: ShareSnapshot) {
+    if (intent.target.user_id !== actor || intent.target.base_id !== intent.base_id
+        || intent.target.source_id !== intent.data_source_id
+        || intent.target.sheet_id !== getObjectSheetId('plm-bom-review', intent.id)
+        || canonical(snapshot.source) !== canonical(intent.source_identity)) throw new Failure(403, 'FORBIDDEN')
+    await fenceWriterEntry(query, intent.target.sheet_id)
+    await this.authorizeSnapshotTargetOnQuery(query, actor, intent.base_id)
+    const preview = (await query(`INSERT INTO meta_plm_bom_review_previews
+      (id,actor_id,data_source_id,part_id,base_id,name,source_fingerprint,snapshot_hash,source,expires_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) RETURNING *`,
+      [intent.id,actor,intent.data_source_id,snapshot.source.part_id,intent.base_id,intent.name,
+        intent.source_fingerprint,snapshotHash(snapshot),JSON.stringify(snapshot.source),intent.expires_at])).rows[0]
+    return { ...await this.publishSnapshot(query, actor, preview, intent.operation_id, snapshot, intent.source_fingerprint), canRefresh: false }
+  }
+  private async publishSnapshot(
+    query: PlmQuery, actor: string, p: any, requestId: string,
+    snapshot: ShareSnapshot, fingerprint: string,
+  ) {
+    const id = randomUUID(),
+      sheetId = getObjectSheetId('plm-bom-review', p.id),
+      viewId = getObjectViewId('plm-bom-review', p.id, 'grid')
+    const fields = Object.fromEntries(
+      SOURCE_FIELDS.map((k) => [
+        k,
+        getObjectFieldId('plm-bom-review', p.id, k),
+      ]),
+    )
+    const descriptors = [
+      ...SOURCE_FIELDS.map((k) => ({
+        id: fields[k],
+        name: `PLM ${k}`,
+        type: 'string' as const,
+        property: { readOnly: true },
+      })),
+      ...LOCAL_FIELDS.map((f) => ({
+        ...f,
+        id: getObjectFieldId('plm-bom-review', p.id, f.id),
+        property:
+          'property' in f ? { options: [...f.property.options] } : {},
+      })),
+    ]
+    await createSheet({ query, sheetId, baseId: p.base_id, name: p.name })
+    await ensureFields({ query, sheetId, fields: descriptors })
+    await createView({
+      query,
+      sheetId,
+      viewId,
+      name: '全部',
+      type: 'grid',
+    })
+    await query(
+      "INSERT INTO spreadsheet_permissions(sheet_id,subject_type,subject_id,perm_code) VALUES($1,'user',$2,'spreadsheet:admin')",
+      [sheetId, actor],
+    )
+    for (const f of descriptors)
+      await recordConfigRevision(query, {
+        sheetId,
+        entityType: 'field',
+        entityId: f.id,
+        action: 'create',
+        before: null,
+        after: f,
+        changedKeys: ['name', 'type', 'property'],
+        batchId: id,
+        actorId: actor,
+      })
+    await recordConfigRevision(query, {
+      sheetId,
+      entityType: 'permission',
+      entityId: `${sheetId}:${actor}`,
+      action: 'create',
+      before: null,
+      after: {
+        subject_type: 'user',
+        subject_id: actor,
+        perm_code: 'spreadsheet:admin',
+      },
+      changedKeys: ['subject_type', 'subject_id', 'perm_code'],
+      batchId: id,
+      actorId: actor,
+    })
+    const b = (
+      await query(
+        `INSERT INTO meta_plm_bom_review_bindings(id,data_source_id,part_id,creator_id,source_fingerprint,source,base_id,sheet_id,view_id,name,fields,status,snapshot_hash,last_synced_at,line_count,occurrence_count)
+  VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,'active',$12,$13,$14,$15) RETURNING *`,
+        [
+          id,
+          p.data_source_id,
+          p.part_id,
+          actor,
+          fingerprint,
+          JSON.stringify(snapshot.source),
+          p.base_id,
+          sheetId,
+          viewId,
+          p.name,
+          JSON.stringify(fields),
+          p.snapshot_hash,
+          snapshot.snapshot_at,
+          projectBomRows(snapshot).size,
+          snapshot.context.lines.length,
+        ],
+      )
+    ).rows[0] as Binding
+    await this.initializeOwnerView(query, actor, b, p.id)
+    await query(
+      'INSERT INTO meta_plm_bom_review_state_fields(binding_id,field_id,owner_field_id,due_field_id) VALUES($1,$2,$3,$4)',
+      [b.id, getObjectFieldId('plm-bom-review', p.id, 'status'), getObjectFieldId('plm-bom-review', p.id, 'owner'), getObjectFieldId('plm-bom-review', p.id, 'due_date')],
+    )
+    await this.initializeStatusViews(query,actor,b,p.id)
+    await this.writeSnapshot(query, actor, b, snapshot)
+    await query(
+      'UPDATE meta_plm_bom_review_previews SET request_id=$2,binding_id=$3 WHERE id=$1',
+      [p.id, requestId, id],
+    )
+    return this.dto(b, actor, true)
   }
   private async replay(actor: string, p: any, requestId: string) {
     return this.deps.pool.transaction(async ({ query }) => {

@@ -21,6 +21,7 @@ for key, value in {
     'ENABLE_METASHEET': 'true',
     'PLM_MANAGED_LOGIN_ENABLED': 'true',
     'PLM_BOM_READ_SESSION_ENABLED': 'true',
+    'PLM_BOM_SNAPSHOT_SHARE_ENABLED': 'true' if cfg.get('snapshot_share') else 'false',
     'PLM_BOM_WRITE_GRANT_ENABLED': 'true',
     'PLM_APPROVAL_CARD_ENABLED': 'true',
     'PLM_RECORD_PUSH_ENABLED': 'false',
@@ -96,10 +97,17 @@ with tenant() as db:
     db.add(AppLicense(id='line-lic', app_name='plm.bom_multitable_writeback', license_key='fixture-line', status='Active', tenant_id='default', org_id='fixture-org'))
     db.commit()
 
+def item_snapshot(db):
+    return sorted([{'id': item.id, 'generation': item.generation, 'state': item.state,
+                    'properties': item.properties} for item in db.query(Item).all()], key=lambda item: item['id'])
+
+with tenant() as db:
+    initial_items = item_snapshot(db) if cfg.get('snapshot_share') else None
+
 app = create_app()
 assert not app.dependency_overrides
 import uvicorn
-server = uvicorn.Server(uvicorn.Config(app, fd=int(cfg['fd']), log_level='warning', lifespan='off'))
+server = uvicorn.Server(uvicorn.Config(app, fd=int(cfg['fd']), log_level='warning', lifespan='off', proxy_headers=True, forwarded_allow_ips='127.0.0.1'))
 thread = threading.Thread(target=server.run, daemon=True)
 thread.start()
 deadline = __import__('time').monotonic() + 40
@@ -117,6 +125,7 @@ for line in sys.stdin:
                 'write_audits': len(audits),
                 'write_subjects': sorted({row.user_id for row in audits}),
                 'write_lines': sorted({row.bom_line_id for row in audits}),
+                **({'snapshot_source_unchanged': item_snapshot(db) == initial_items} if initial_items is not None else {}),
             }
         print(json.dumps(report), flush=True)
     elif command == 'stop':

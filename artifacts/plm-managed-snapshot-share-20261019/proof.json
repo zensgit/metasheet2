@@ -1,0 +1,72 @@
+{
+  "implementation_sha": "505f1abe3dde175f047264eaefe28c3e2fc0f732",
+  "cardinality_test_sha": "9be2eb7757576b035602e49f899bbab729e730ca",
+  "base": "218d7bd82a259d7ca8db88d509fc7371c2d3b51f",
+  "owner_policy": "Explicit independent native object-reader sharing confirmation and current target permission; retained snapshot follows target ACL after unlink, no new source reads/refresh/writes.",
+  "pg14": {
+    "out": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-snapshot-share-ci-D0AkhE",
+    "started": {
+      "ok": true,
+      "command": "start",
+      "nonce": "b555de9295720a0f",
+      "root": "/tmp/plm-managed-consumer-pg-b555de9295720a0f",
+      "data": "/tmp/plm-managed-consumer-pg-b555de9295720a0f/data",
+      "socket": "/tmp/plm-managed-consumer-pg-b555de9295720a0f/s",
+      "postgresStopped": false,
+      "postgresRunning": true,
+      "directoryRemoved": false,
+      "locale": "C",
+      "markerMatched": true,
+      "dsn": "postgresql://plm_test@localhost/plm_managed?host=/tmp/plm-managed-consumer-pg-b555de9295720a0f/s&port=5432",
+      "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+    },
+    "cleanup": {
+      "ok": true,
+      "command": "cleanup",
+      "nonce": "b555de9295720a0f",
+      "root": "/tmp/plm-managed-consumer-pg-b555de9295720a0f",
+      "data": "/tmp/plm-managed-consumer-pg-b555de9295720a0f/data",
+      "socket": "/tmp/plm-managed-consumer-pg-b555de9295720a0f/s",
+      "postgresStopped": true,
+      "postgresRunning": false,
+      "directoryRemoved": true,
+      "locale": "C",
+      "markerMatched": true,
+      "pgBin": "/opt/homebrew/opt/postgresql@15/bin"
+    },
+    "passed": true,
+    "report": {
+      "ok": true,
+      "file": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-snapshot-share-ci-D0AkhE/tests.json",
+      "expected": 14,
+      "numPassedTests": 14
+    },
+    "reportSha256": "d45ded923c47609eee372dc415c9a58ee30fddac006f25a0995462d7d4562677"
+  },
+  "verification": {
+    "unit": 93,
+    "web": 198,
+    "existing_managed_pg": 34,
+    "new_snapshot_pg": 14,
+    "skipped": 0,
+    "postgres_version": "15.17 local; CI 16 pending",
+    "backend_types": "PASS",
+    "web_types": "PASS",
+    "actionlint": "PASS",
+    "web_changed_source_lint": "PASS",
+    "backend_changed_source_lint": "4 pre-existing no-control-regex errors baseline matched; no new errors"
+  },
+  "limits": [
+    "Native RPC controlled in PG suite; actual paired native HTTP and rendered sharing browser acceptance pending.",
+    "Generic record/export and pre-review consumer closure pending.",
+    "No installed image, full install/migration, customer data, production or whole-goal completion claim."
+  ],
+  "logs": [
+    "/tmp/plm-share-ci-final-my756nnp/unit93.json",
+    "/tmp/plm-share-ci-final-my756nnp/web198.json",
+    "/tmp/plm-meta-snapshot-pg-20261019/4148792282591cf7-result.json",
+    "/tmp/plm-share-final-backend-types-20261019.log",
+    "/tmp/plm-share-final-web-types-20261019.log",
+    "/tmp/plm-share-old-flow-lint-baseline-20261019.json"
+  ]
+}
