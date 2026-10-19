@@ -85,6 +85,8 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
   "scripts/ops/multitable-onprem-package-verify.sh"
+  # The verifier's range-fill provenance check calls this probe beside itself, so it ships with it.
+  "scripts/ops/multitable-onprem-web-range-fill-probe.mjs"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
   # (C3), evidence compiler (C10), delivery readiness compiler, postdeploy
   # smoke + summary, the #1542 metadata seed helper, mock fixtures, and the
@@ -558,6 +560,10 @@ function assert_packaged_web_range_fill() {
   fi
   observed="$(node "$RANGE_FILL_PROBE" "${PACKAGE_ROOT}/apps/web/dist")" \
     || die "range-fill probe could not read the packaged web dist"
+  if [[ "$observed" == "unknown" ]]; then
+    # Not a switch problem: changing VITE_MULTITABLE_RANGE_FILL_ENABLED cannot fix this.
+    die "range-fill probe cannot read the switch from the packaged web dist (answer: unknown). The probe no longer matches what this build emits (range toolbar text missing, or not exactly one baked default of the grid-range-fill-flags.ts shape) -- a toolchain upgrade or a source change moved it. Update RANGE_FILL_TOOLBAR_TEXT / RANGE_FILL_BAKED_DEFAULT_SHAPE in scripts/ops/multitable-onprem-web-range-fill-probe.mjs; do not change VITE_MULTITABLE_RANGE_FILL_ENABLED. Reproduce locally: VITE_MULTITABLE_RANGE_FILL_ENABLED=true pnpm --filter @metasheet/web build && node scripts/ops/multitable-onprem-web-range-fill-probe.mjs apps/web/dist (prints the reason on stderr); node --test scripts/ops/__tests__/multitable-onprem-package-range-fill.test.mjs checks the source binding"
+  fi
   if [[ "$observed" != "$expected" ]]; then
     die "packaged web dist has range fill '${observed}' but VITE_MULTITABLE_RANGE_FILL_ENABLED=${VITE_MULTITABLE_RANGE_FILL_ENABLED} requires '${expected}'; rebuild apps/web with VITE_MULTITABLE_RANGE_FILL_ENABLED=true (or BUILD_WEB=1), or set VITE_MULTITABLE_RANGE_FILL_ENABLED=false to package an OFF build on purpose"
   fi
