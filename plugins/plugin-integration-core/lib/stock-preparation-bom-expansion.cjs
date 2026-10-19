@@ -38,6 +38,21 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
   ...LARGE_BOM_BOUNDED_ERROR_TYPES,
   READ_CURSOR_BROKEN_ERROR_TYPE,
 ])
+// A READ THAT ANSWERED SOMETHING ELSE (R67 ③ fix round). Every read this module issues is an equality
+// read, and a source that applied — or did not say it skipped — its filter must not return a row the
+// filter excludes. Such a row is a transport cross-wire (one read handed another read's answer), not
+// data, and believing it is how a swapped part answer turned into a quiet `missing_component` hold
+// with an apply token. So it is a FAILED READ with its own closed code: global error, status
+// `failed`, `canApply: false`, at every read width including 1 and on the pre-R67 path too.
+//
+// Deliberately NOT a member of `INCOMPLETE_READ_ERROR_TYPES`: that list is the B2a seam's roster of
+// classified bounds (b2a-trial-registry.cjs), and an armed read that hits this already refuses there
+// as an unclassified global error (`C6_FULL_BATCH_INCOMPLETE`), fail-closed, with no roster change.
+const READ_ROW_MISMATCH_ERROR_TYPE = 'read_row_mismatch'
+const STRUCTURED_READ_ERROR_TYPES = Object.freeze([
+  ...INCOMPLETE_READ_ERROR_TYPES,
+  READ_ROW_MISMATCH_ERROR_TYPE,
+])
 
 // ---------------------------------------------------------------------------
 // PROJECT-SUBTREE ROOT DISCOVERY — the OPTIONAL second root segment.
@@ -615,8 +630,31 @@ function isReadLimitError(error) {
     error &&
     error.name === 'StockPreparationBomExpansionError' &&
     error.details &&
-    INCOMPLETE_READ_ERROR_TYPES.includes(error.details.code),
+    STRUCTURED_READ_ERROR_TYPES.includes(error.details.code),
   )
+}
+
+// One returned value against one filter value. `toKey` (trimmed string — SQL Server ignores trailing
+// blanks in `=`), compared CASE-INSENSITIVELY: SQL Server's default collations are, so an id stored
+// upper-case in one table and lower-case in another is one id to the source and must not be called a
+// mismatch here. A cross-wire hands back a DIFFERENT id, which no collation folds.
+function sameFilterValue(rowValue, filterValue) {
+  const left = toKey(rowValue)
+  const right = toKey(filterValue)
+  return left !== null && right !== null && left.toLowerCase() === right.toLowerCase()
+}
+
+// The first filter column some returned row does not satisfy, or `undefined`. The columns are the
+// read's own (normalized) filter keys — i.e. the read plan's configured, dictionary-resolved names,
+// never a literal — read through `readField` like every other column.
+function firstFilterFieldARowViolates(records, normalizedFilters) {
+  for (const record of records) {
+    if (!isPlainObject(record)) continue
+    for (const [field, value] of Object.entries(normalizedFilters)) {
+      if (!sameFilterValue(readField(record, field), value)) return field
+    }
+  }
+  return undefined
 }
 
 function readLimitErrorDetails(error, fallbackObject) {
@@ -700,6 +738,22 @@ async function readPages(adapter, object, normalizedFilters, options, stats, bef
     for (const record of records) {
       if (isPlainObject(record)) rows.push(record)
     }
+    // ROW SELF-VALIDATION (see READ_ROW_MISMATCH_ERROR_TYPE). Exempt ONLY when the source DECLARED it did
+    // not apply the filter (`filtersApplied === false` — a legal whole-table answer from
+    // `bridge:legacy-sql-readonly`, pinned by the project-subtree suite); those reads keep exactly the
+    // treatment they had (the walk re-filters the ones it always re-filtered). `true` or not stated —
+    // the shipped SQL adapter states nothing because its WHERE always applies — is held to the filter.
+    if (stat.filtersApplied !== false) {
+      const field = firstFilterFieldARowViolates(records, normalizedFilters)
+      if (field !== undefined) {
+        throw new StockPreparationBomExpansionError('PLM read answered a row its own filter excludes', {
+          code: READ_ROW_MISMATCH_ERROR_TYPE,
+          object,
+          field,
+          page,
+        })
+      }
+    }
     // COMPLETE-BATCH CHECK, opt-in. `done === false` with no `nextCursor` is the source saying the
     // batch is unfinished and refusing to say where to resume — §9.1's 断游标. Gated on
     // `requireCompleteBatch` so an unarmed deployment keeps the exact loop it had: the common fixture
@@ -761,8 +815,10 @@ async function readPages(adapter, object, normalizedFilters, options, stats, bef
 //     the walk has consumed (single-page reads; a multi-page read finishes its pages) — so a run that
 //     stops early, on `maxReadCount` included, issues at most that many queries more than the serial
 //     walk would have; none starts once the walk has returned (it returns at its first global error);
-//     queued read-aheads are dropped and in-flight ones awaited before the expansion returns, so no
-//     read outlives it. And they are COUNTED:
+//     queued read-aheads are dropped as the expansion returns and in-flight ones ask for no further
+//     page. A run with no global error has nothing in flight by then; a run stopped early does not
+//     wait for its in-flight read-aheads — they finish in the background and are discarded (see
+//     `close`). And they are COUNTED:
 //     `readPhase.queriesIssued` is every adapter call, `summary.readCount` stays the walk's own count,
 //     and on a run with no global error the two are equal by design (pinned per fixture).
 //   * WHAT IT DOES NOT TOUCH: the query shape (one equality-filtered read per call; the host adapter
@@ -1022,7 +1078,9 @@ function createPlmReadAheadEngine({ adapter, concurrency, options, readStats }) 
       entry.state = 'running'
       const stats = []
       try {
-        settle({ stats, rows: await readPages(countingAdapter, object, normalizedFilters, options, stats, () => {}) })
+        // Before every page: once the expansion has returned, a multi-page read-ahead still in flight
+        // does not ask for its next page — no NEW query reaches the source after the return.
+        settle({ stats, rows: await readPages(countingAdapter, object, normalizedFilters, options, stats, refuseAfterClose) })
       } catch (error) {
         settle({ stats, error })
       }
@@ -1063,14 +1121,28 @@ function createPlmReadAheadEngine({ adapter, concurrency, options, readStats }) 
     return outcome.rows
   }
 
-  // Drop every read-ahead still queued and wait for the ones in flight, so no read outlives the
-  // expansion (a caller may close the source right after) and the counters below are final.
+  function refuseAfterClose() {
+    if (closed) {
+      throw new StockPreparationBomExpansionError('read-ahead stopped: the expansion has returned', { code: 'read_ahead_closed' })
+    }
+  }
+
+  // Called once, as the expansion returns. Drops every read-ahead still queued (they settle `dropped`
+  // and are never issued) and stops in-flight ones from paging further — and does NOT wait for the
+  // in-flight ones (R67 ③ fix round). Two cases, and only one of them can have anything in flight:
+  //   * a run with no global error consumed every query it issued (`queriesNotConsumed` 0 — pinned),
+  //     so every read-ahead it started has already settled: nothing is in flight, nothing outlives it;
+  //   * a run the walk stopped early (a cycle, a cap, a failed read) may leave read-aheads in flight
+  //     that the walk will never claim. Waiting for them would hold the failed request open for up to
+  //     the source's own per-read timeout (mssql `requestTimeout`, 30 s by default, and `0` = none on a
+  //     dormant deployment) after the error is already known. They complete in the background and are
+  //     discarded. Their outcome promises never reject, so nothing surfaces as an unhandled rejection.
+  // The counters are final here either way: no new adapter call can start after `closed`.
   async function close() {
     closed = true
     if (limiter) {
       for (const task of limiter.dropQueued()) task.entry.drop()
     }
-    await Promise.all(entries.map((entry) => entry.outcome))
   }
 
   // VALUES-FREE by construction: five integers.
@@ -3111,6 +3183,7 @@ module.exports = {
   ROW_ERROR_LIMIT,
   ROW_ERROR_LIMIT_CEILING,
   READ_CURSOR_BROKEN_ERROR_TYPE,
+  READ_ROW_MISMATCH_ERROR_TYPE,
   SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
   SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
   SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,

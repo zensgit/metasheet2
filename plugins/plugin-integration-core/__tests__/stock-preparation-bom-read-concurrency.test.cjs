@@ -17,8 +17,11 @@
 //       touched — see the banner — so this bound IS the pooled-connection bound);
 //   (f) `summary.readCount` (the field's "PLM reads") equals the queries the source received on
 //       every run without a global error, and `readPhase` reports issued / not-consumed honestly;
-//   plus the engine's own guards (claim key check, drain on close, the lead cap that bounds what an
-//   early stop can waste) and the dry-run response's `plmReadPhase` stanza.
+//   plus the engine's own guards (claim key check, the lead cap that bounds what an early stop can
+//   waste, close-without-drain on a failed run) and the dry-run response's `plmReadPhase` stanza;
+//   and, from the fix round, ROW SELF-VALIDATION: a read answered with rows its own filter excludes
+//   (a transport cross-wire) fails the run as `read_row_mismatch` at every width, while a source that
+//   DECLARES it did not filter (`filtersApplied: false`) and a case-insensitive source do not.
 //
 // Everything here is synthetic (SYN-/R. ids) and runs on in-memory fake PLM sources — no database,
 // no real PLM.
@@ -230,6 +233,16 @@ function failing(predicate, code = 'SYN_SOURCE_FAILED') {
   return { failWhen: predicate, failCode: code }
 }
 
+// A MIS-ANSWER: the source answers a different read than the one it was asked (what a transport
+// cross-wire looks like from here). `object`/`field` name the read; `from` is asked, `to` is answered.
+function misanswer(object, field, from, to) {
+  return {
+    answerAs: (input) => (input.object === object && input.filters[field] === from
+      ? { ...input, filters: { ...input.filters, [field]: to } }
+      : input),
+  }
+}
+
 const FIXTURES = [
   { name: 'wide tree', tables: wideTree },
   { name: 'wide tree, paged (pageLimit 2)', tables: wideTree, input: { pageLimit: 2 } },
@@ -270,6 +283,9 @@ const FIXTURES = [
     abort: 'read_cursor_broken',
     multiPage: true,
   },
+  { name: "bomHead read answered with another part's heads", tables: wideTree, source: misanswer('DN_PDM_BomHeadInfo', 'part_id', 'R.1', 'R.2'), abort: 'read_row_mismatch' },
+  { name: "detail read answered with another BOM's details", tables: wideTree, source: misanswer('DN_PDM_BomDetailsInfo', 'bom_pid', 'BOM-R.2', 'BOM-R.3'), abort: 'read_row_mismatch' },
+  { name: 'part read answered with another part', tables: wideTree, source: misanswer('DN_PDM_PartLibraryInfo', 'OBJ_ID', 'R.1.2', 'R.1.3'), abort: 'read_row_mismatch' },
 ]
 
 // ── the committed SQL fixtures, replayed in memory ──────────────────────────────────────────────
@@ -498,8 +514,18 @@ function answer(tables, input, behaviour = {}) {
     error.code = behaviour.failCode || 'SYN_SOURCE_FAILED'
     throw error
   }
-  const { rows, fold } = lookupRows(tables, input.object)
-  const matches = rows.filter((row) => Object.entries(input.filters).every(([field, expected]) => row[fold ? field.toLowerCase() : field] === expected))
+  const asked = behaviour.answerAs ? behaviour.answerAs(input) : input
+  const { rows, fold } = lookupRows(tables, asked.object)
+  // `unfilteredObjects`: the whole table, and SAYS so (`filtersApplied: false`) — legal for the bridge.
+  const unfiltered = Array.isArray(behaviour.unfilteredObjects) && behaviour.unfilteredObjects.includes(asked.object)
+  // `caseInsensitiveObjects`: equality the way a SQL Server default collation does it.
+  const folding = Array.isArray(behaviour.caseInsensitiveObjects) && behaviour.caseInsensitiveObjects.includes(asked.object)
+  const same = (left, right) => (folding && typeof left === 'string' && typeof right === 'string'
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right)
+  const matches = unfiltered
+    ? rows
+    : rows.filter((row) => Object.entries(asked.filters).every(([field, expected]) => same(row[fold ? field.toLowerCase() : field], expected)))
   const offset = input.cursor ? Number(input.cursor) : 0
   const limit = input.limit || 1000
   const records = matches.slice(offset, offset + limit).map(clone)
@@ -512,7 +538,7 @@ function answer(tables, input, behaviour = {}) {
     records,
     nextCursor: done ? null : String(consumed),
     done,
-    metadata: { source: 'data-source:sql-readonly', filtersApplied: true, filterFields: Object.keys(input.filters).sort() },
+    metadata: { source: 'data-source:sql-readonly', filtersApplied: !unfiltered, filterFields: Object.keys(input.filters).sort() },
   }
 }
 
@@ -524,6 +550,8 @@ function instantSource(tables, behaviour) {
     adapter: {
       async read(input) {
         calls.push({ object: input.object, filters: { ...input.filters }, cursor: input.cursor || null })
+        // A read the source never answers (a hung connection with no request timeout).
+        if (behaviour && behaviour.hangWhen && behaviour.hangWhen(input)) return new Promise(() => {})
         return answer(tables, input, behaviour)
       },
     },
@@ -540,10 +568,14 @@ function virtualSource(tables, behaviour = {}, latency = () => 1) {
   let round = 0
   let maxPending = 0
   let seq = 0
+  let pendingAtSettle
+  let swaps = 0
   const adapter = {
     read(input) {
       calls.push({ round, object: input.object, filters: { ...input.filters }, cursor: input.cursor || null })
-      const due = round + Math.max(1, latency(input, seq++))
+      // A latency of Infinity is a read the source never answers.
+      const rounds = latency(input, seq++)
+      const due = rounds === Infinity ? Infinity : round + Math.max(1, rounds)
       return new Promise((resolve, reject) => {
         pending.push({ due, input: { ...input, filters: { ...input.filters } }, resolve, reject })
         maxPending = Math.max(maxPending, pending.length)
@@ -559,21 +591,40 @@ function virtualSource(tables, behaviour = {}, latency = () => 1) {
     for (;;) {
       await new Promise((resolve) => setImmediate(resolve))
       if (settled) {
+        // What was still in flight at the moment the expansion returned (no round has run since).
+        if (pendingAtSettle === undefined) pendingAtSettle = pending.length
         if (extra <= 0) break
         extra -= 1
-      } else if (pending.length === 0) {
-        throw new Error('virtual source: the expansion is waiting but no read is pending (deadlock)')
+      } else if (pending.every((entry) => entry.due === Infinity)) {
+        throw new Error('virtual source: the expansion is waiting but no read can ever complete (deadlock / hang)')
       }
       round += 1
       const due = pending.filter((entry) => entry.due <= round)
       for (const entry of due) pending.splice(pending.indexOf(entry), 1)
-      for (const entry of due) {
+      const answers = due.map((entry) => {
         try {
-          entry.resolve(answer(tables, entry.input, behaviour))
+          return { value: answer(tables, entry.input, behaviour) }
         } catch (error) {
-          entry.reject(error)
+          return { error }
+        }
+      })
+      // ONE TRANSPORT CROSS-WIRE: two concurrent part reads, each handed the other's answer.
+      if (behaviour.crossWirePartReads && swaps === 0) {
+        const parts = due
+          .map((entry, index) => index)
+          .filter((index) => due[index].input.object === 'DN_PDM_PartLibraryInfo' && !answers[index].error)
+        if (parts.length >= 2) {
+          const [first, second] = parts
+          const held = answers[first]
+          answers[first] = answers[second]
+          answers[second] = held
+          swaps += 1
         }
       }
+      due.forEach((entry, index) => {
+        if (answers[index].error) entry.reject(answers[index].error)
+        else entry.resolve(answers[index].value)
+      })
     }
     if (failure) throw failure
     return value
@@ -586,6 +637,8 @@ function virtualSource(tables, behaviour = {}, latency = () => 1) {
     get round() { return round },
     get maxPending() { return maxPending },
     get pendingCount() { return pending.length },
+    get pendingAtSettle() { return pendingAtSettle },
+    get swaps() { return swaps },
   }
 }
 
@@ -956,16 +1009,197 @@ async function testAClaimIsUsedOnlyForTheExactReadItWasIssuedFor() {
   console.log('  engine: a read-ahead answers only the exact read it was issued for; a queued wrong guess is dropped')
 }
 
+// WHAT OUTLIVES AN EXPANSION, by case (fix round 1):
+//   * a run with no global error returns with NOTHING in flight — every query it issued was consumed;
+//   * a run the walk stopped early may return with read-aheads still in flight (it does not wait for
+//     them; they finish and are discarded), but no NEW query reaches the source after it returned —
+//     not even the next page of a multi-page read-ahead.
 async function testNoReadOutlivesTheExpansion() {
-  for (const fixture of FIXTURES.filter((entry) => entry.abort)) {
+  for (const fixture of [...FIXTURES, ...SQL_FIXTURES].filter((entry) => !entry.abort)) {
+    for (const latency of [() => 1, seededLatency(31)]) {
+      const source = virtualSource(tablesOf(fixture), fixture.source, latency)
+      const result = await source.drive(expandPlmProjectBom(expansionInput(fixture, source.adapter, { readConcurrency: 8 })), { afterSettleRounds: 6 })
+      assert.equal(source.pendingAtSettle, 0, `${fixture.name}: a clean run returns with nothing in flight`)
+      assert.equal(source.calls.length, result.readPhase.queriesIssued, `${fixture.name}: and nothing after it`)
+    }
+  }
+  const stoppedEarly = [
+    ...FIXTURES.filter((entry) => entry.abort),
+    { name: 'cycle in the first branch, one row per page', tables: cyclicFirst, input: { pageLimit: 1 }, abort: 'cycle_detected' },
+  ]
+  for (const fixture of stoppedEarly) {
     const source = virtualSource(fixture.tables(), fixture.source)
-    const result = await source.drive(expandPlmProjectBom(expansionInput(fixture, source.adapter, { readConcurrency: 8 })), { afterSettleRounds: 6 })
-    const issuedAtReturn = result.readPhase.queriesIssued
-    assert.equal(source.calls.length, issuedAtReturn, `${fixture.name}: no adapter call after the expansion returned`)
-    assert.equal(source.pendingCount, 0, `${fixture.name}: nothing left in flight`)
+    const result = await source.drive(expandPlmProjectBom(expansionInput(fixture, source.adapter, { readConcurrency: 8 })), { afterSettleRounds: 12 })
+    assert.equal(source.calls.length, result.readPhase.queriesIssued, `${fixture.name}: no adapter call after the expansion returned`)
   }
   assert.deepEqual(unhandled, [], 'no read-ahead ever surfaced as an unhandled rejection')
-  console.log('  engine: queued read-aheads dropped, in-flight ones drained, nothing outlives the expansion')
+  console.log('  engine: a clean run returns with nothing in flight; a stopped run issues nothing after it returns')
+}
+
+function withinMs(promise, ms) {
+  let timer
+  return Promise.race([
+    promise.then((value) => ({ value })),
+    new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), ms) }),
+  ]).finally(() => clearTimeout(timer))
+}
+
+// FIX ROUND 1. A read-ahead the source never answers must not hold a FAILED expansion open: the walk
+// already knows the answer (here: a cycle under R.0), and waiting would keep the dry-run request open
+// for the source's own per-read timeout — or forever, on a deployment with no request timeout.
+async function testAFailedRunDoesNotWaitForItsReadAheads() {
+  const hangs = (input) => input.object === 'DN_PDM_BomHeadInfo' && /^R\.[123]/.test(String(input.filters.part_id))
+  const serialSource = instantSource(cyclicFirst(), { hangWhen: hangs })
+  const serial = await expandPlmProjectBom({ sourceAdapter: serialSource.adapter, projectNo: PROJECT, readConcurrency: 1 })
+  assert.ok(serial.errors.some((error) => error.type === 'cycle_detected'))
+  assert.equal(serialSource.calls.some(hangs), false, 'the serial walk never reaches the hanging reads')
+
+  const source = instantSource(cyclicFirst(), { hangWhen: hangs })
+  const outcome = await withinMs(expandPlmProjectBom({ sourceAdapter: source.adapter, projectNo: PROJECT, readConcurrency: 4 }), 5000)
+  assert.ok(!outcome.timedOut, 'x4: the failed run returned without waiting for its hanging read-ahead')
+  assert.ok(source.calls.some(hangs), 'x4: a read-ahead really was hanging when the walk stopped')
+  assert.equal(JSON.stringify(withoutReadPhase(outcome.value)), JSON.stringify(withoutReadPhase(serial)), 'x4: the same failure as the serial walk')
+
+  // The same on the deterministic clock: the run returns with the hanging read still in flight.
+  const virtual = virtualSource(cyclicFirst(), {}, (input) => (hangs(input) ? Infinity : 1))
+  const result = await virtual.drive(expandPlmProjectBom({ sourceAdapter: virtual.adapter, projectNo: PROJECT, readConcurrency: 4 }))
+  assert.equal(JSON.stringify(withoutReadPhase(result)), JSON.stringify(withoutReadPhase(serial)))
+  assert.ok(virtual.pendingAtSettle > 0, 'it returned with the hanging read-ahead still in flight')
+  assert.deepEqual(unhandled, [], 'and nothing surfaced as an unhandled rejection')
+  console.log('  fix 1: a failed run returns at once, leaving a hung read-ahead behind (x1 and x4 the same failure)')
+}
+
+// FIX ROUND 1, at the engine: close() returns at once with reads hung in flight, and every read-ahead
+// that never started settles `dropped` — never issued, and nothing can be left waiting on it.
+async function testCloseSettlesEveryUnstartedReadAheadAndDoesNotWait() {
+  const stuck = virtualSource({ T: [{ k: 'a' }, { k: 'b' }, { k: 'c' }, { k: 'd' }] }, {}, () => Infinity)
+  const engine = createPlmReadAheadEngine({ adapter: stuck.adapter, concurrency: 2, options: engineOptions(), readStats: [] })
+  const entries = ['a', 'b', 'c', 'd'].map((k) => engine.prefetch('T', { k }))
+  const closed = await withinMs(engine.close(), 2000)
+  assert.ok(!closed.timedOut, 'close() does not wait for reads in flight')
+  const unstarted = await withinMs(Promise.all([entries[2].outcome, entries[3].outcome]), 2000)
+  assert.deepEqual(unstarted.value, [{ dropped: true }, { dropped: true }], 'the two that never started settle dropped')
+  assert.equal(stuck.calls.length, 2, 'only the two that started were ever issued')
+  console.log('  fix 1: close() drops what never started and does not wait for what is in flight')
+}
+
+// FIX ROUND 2. A read answered with another read's rows fails the run with `read_row_mismatch` — at x1
+// and x4 alike, the same failed dry-run, no token, nothing stored, and apply refuses before any write.
+async function testAMisansweredReadFailsClosedAtEveryWidth() {
+  const cases = [
+    ['bomHead', misanswer('DN_PDM_BomHeadInfo', 'part_id', 'R.1', 'R.2'), 'DN_PDM_BomHeadInfo', 'part_id'],
+    ['bomDetail', misanswer('DN_PDM_BomDetailsInfo', 'bom_pid', 'BOM-R.2', 'BOM-R.3'), 'DN_PDM_BomDetailsInfo', 'bom_pid'],
+    ['part', misanswer('DN_PDM_PartLibraryInfo', 'OBJ_ID', 'R.1.2', 'R.1.3'), 'DN_PDM_PartLibraryInfo', 'OBJ_ID'],
+  ]
+  for (const [label, behaviour, object, field] of cases) {
+    const responses = []
+    for (const readConcurrency of [1, 4]) {
+      const expansion = await expandPlmProjectBom({ sourceAdapter: instantSource(wideTree(), behaviour).adapter, projectNo: PROJECT, readConcurrency })
+      assert.deepEqual(expansion.errors, [{ type: 'read_row_mismatch', object, field, page: 0 }], `${label} @${readConcurrency}: one values-free global error naming the read plan's column`)
+      assert.equal(expansion.status, 'failed')
+
+      const storage = memoryStorage()
+      const records = recordsApi()
+      const action = baseAction({ readConcurrency })
+      const dryRun = await dryRunStockPreparationAction({
+        action,
+        parameters: { projectNo: PROJECT },
+        sourceAdapter: instantSource(wideTree(), behaviour).adapter,
+        recordsApi: records.api,
+        tokenStore: storage,
+        plannedAt: '2026-10-18T00:00:00.000Z',
+      })
+      assert.equal(dryRun.status, 'failed', `${label} @${readConcurrency}`)
+      assert.equal(dryRun.canApply, false)
+      assert.equal(dryRun.dryRunToken, null)
+      assert.equal(storage.map.size, 0)
+      assert.deepEqual(dryRun.evidence.expansion.errorTypes, ['read_row_mismatch'])
+      assert.equal(JSON.stringify(dryRun.evidence).includes('R.1'), false, 'values-free')
+      responses.push(dryRunWithoutClock(dryRun))
+
+      const cleanStorage = memoryStorage()
+      const cleanRecords = recordsApi()
+      const clean = await dryRunStockPreparationAction({
+        action,
+        parameters: { projectNo: PROJECT },
+        sourceAdapter: instantSource(wideTree()).adapter,
+        recordsApi: cleanRecords.api,
+        tokenStore: cleanStorage,
+        plannedAt: '2026-10-18T00:00:00.000Z',
+      })
+      await assert.rejects(
+        () => applyStockPreparationAction({
+          sandboxPolicy: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
+          action,
+          parameters: { projectNo: PROJECT },
+          dryRunToken: clean.dryRunToken,
+          sourceAdapter: instantSource(wideTree(), behaviour).adapter,
+          recordsApi: cleanRecords.api,
+          tokenStore: cleanStorage,
+          permission: 'write',
+          plannedAt: '2026-10-18T00:00:00.000Z',
+        }),
+        (error) => error.code === 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH',
+      )
+      assert.deepEqual(cleanRecords.calls.filter((call) => call[0] !== 'queryRecords'), [], `${label} @${readConcurrency}: apply wrote nothing`)
+    }
+    assert.deepEqual(responses[1], responses[0], `${label}: the same failed dry-run at x1 and x4`)
+  }
+  console.log('  fix 2: a misanswered head / detail / part read fails as read_row_mismatch at x1 and x4; apply writes nothing')
+}
+
+// FIX ROUND 2, the judge's probe: a transport that hands two CONCURRENT part reads each other's answer.
+// Before the fix that was one row, four `missing_component` holds, `manual_confirm_required` and a
+// token. Serially there is never a second read in flight to swap with.
+async function testATransportCrossWireFailsClosed() {
+  for (const readConcurrency of [1, 4]) {
+    const source = virtualSource(wideTree(), { crossWirePartReads: true })
+    const dryRun = await source.drive(dryRunStockPreparationAction({
+      action: baseAction({ readConcurrency }),
+      parameters: { projectNo: PROJECT },
+      sourceAdapter: source.adapter,
+      recordsApi: recordsApi().api,
+      tokenStore: memoryStorage(),
+      plannedAt: '2026-10-18T00:00:00.000Z',
+    }))
+    if (readConcurrency === 1) {
+      assert.equal(source.swaps, 0, 'x1: never two reads in flight, nothing to swap')
+      assert.equal(dryRun.status, 'ready')
+    } else {
+      assert.equal(source.swaps, 1, 'x4: the transport really swapped two answers')
+      assert.equal(dryRun.status, 'failed')
+      assert.equal(dryRun.canApply, false)
+      assert.equal(dryRun.dryRunToken, null, 'no token is minted off a cross-wired read')
+      assert.deepEqual(dryRun.evidence.expansion.errorTypes, ['read_row_mismatch'])
+    }
+  }
+  console.log('  fix 2: a transport cross-wire between two concurrent part reads fails closed (no token)')
+}
+
+// FIX ROUND 2, the two answers that are NOT mismatches.
+async function testDeclaredUnfilteredAndCaseInsensitiveSourcesAreNotMismatches() {
+  for (const readConcurrency of [1, 4]) {
+    const honest = await expandPlmProjectBom({ sourceAdapter: instantSource(wideTree()).adapter, projectNo: PROJECT, readConcurrency })
+    // The bridge may legally answer with the whole table if it SAYS so; the walk re-filters part reads.
+    const whole = await expandPlmProjectBom({
+      sourceAdapter: instantSource(wideTree(), { unfilteredObjects: ['DN_PDM_PartLibraryInfo'] }).adapter,
+      projectNo: PROJECT,
+      readConcurrency,
+    })
+    assert.deepEqual(whole.errors, [], `@${readConcurrency}: a declared whole-table answer is not a mismatch`)
+    assert.deepEqual(whole.rows, honest.rows)
+    // A case-insensitive source: the BOM head stores the part id in another case and still matches.
+    const tables = wideTree()
+    tables.DN_PDM_BomHeadInfo = tables.DN_PDM_BomHeadInfo.map((head) => ({ ...head, part_id: head.part_id.toLowerCase() }))
+    const folded = await expandPlmProjectBom({
+      sourceAdapter: instantSource(tables, { caseInsensitiveObjects: ['DN_PDM_BomHeadInfo'] }).adapter,
+      projectNo: PROJECT,
+      readConcurrency,
+    })
+    assert.deepEqual(folded.errors, [], `@${readConcurrency}: a collation's case folding is not a mismatch`)
+    assert.deepEqual(folded.rows, honest.rows)
+  }
+  console.log('  fix 2: a declared whole-table answer and a case-insensitive source are not mismatches')
 }
 
 // THE WASTE BOUND. Whatever stops a walk early, the read-ahead has issued at most
@@ -1009,6 +1243,11 @@ async function main() {
   await testAClaimIsUsedOnlyForTheExactReadItWasIssuedFor()
   await testAnEarlyStopWastesAtMostTheLeadCap()
   await testNoReadOutlivesTheExpansion()
+  await testAFailedRunDoesNotWaitForItsReadAheads()
+  await testCloseSettlesEveryUnstartedReadAheadAndDoesNotWait()
+  await testAMisansweredReadFailsClosedAtEveryWidth()
+  await testATransportCrossWireFailsClosed()
+  await testDeclaredUnfilteredAndCaseInsensitiveSourcesAreNotMismatches()
   console.log('stock-preparation-bom-read-concurrency.test.cjs OK')
 }
 
