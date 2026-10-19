@@ -39,6 +39,10 @@ import type {
 } from './w4c0-identity'
 import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
 import {
+  SettlementCoordinationRestartSignalV1,
+  currentSettlementCoordinationContextV1,
+} from './coordination/settlement-coordination-context'
+import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
   assertConnectionIsIdleV1,
@@ -1127,5 +1131,28 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       // Never unlock-all or silently return an uncertain connection to its pool.
       if (sessionFenced) await releaseCleaningSessionFences(connection, held)
     }
+  }
+}
+
+/**
+ * Handed-over mode (settlement coordination, r6.1 §8 W-7). The coordinated-transaction port has
+ * already borrowed `connection`, proven it idle (S1, which takes the place of Gate E), begun the
+ * transaction and set its timeouts (S2). This runs `body` on it and nothing else: no Gate E, no
+ * BEGIN / COMMIT / ROLLBACK, no settings, no retry. A 40001 / 40P01 becomes the coordination restart
+ * signal, which only the port handles; every other error is rethrown unchanged. Refused unless
+ * `connection` is the active coordination context's own connection, so a body never runs outside
+ * the transaction the port opened. The default mode above is unchanged.
+ */
+export async function runAttendanceResultOperationHandedOverV1<T>(
+  connection: AttendanceW4TransactionClientV1,
+  body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+): Promise<T> {
+  const context = currentSettlementCoordinationContextV1()
+  if (!context || context.connection !== connection) fail('W4C0_CONNECTION_NOT_HANDED_OVER')
+  try {
+    return await body(connection)
+  } catch (error) {
+    if (isRetryableSqlState(error)) throw new SettlementCoordinationRestartSignalV1(error)
+    throw error
   }
 }

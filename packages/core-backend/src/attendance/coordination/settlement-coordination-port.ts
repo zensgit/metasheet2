@@ -26,13 +26,16 @@
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 import {
   AttendanceCoordinationNestingError,
+  SettlementCoordinationRestartSignalV1,
   assertNoSettlementCoordinationContextV1,
   runInSettlementCoordinationContextV1,
 } from './settlement-coordination-context'
 import {
   AttendanceCoordinationConnectionUncertainError,
+  SettlementCoordinationCredentialV1,
   commitSettlementCoordinationTransactionV1,
   rollbackSettlementCoordinationTransactionV1,
+  verifySettlementCoordinationCredentialV1,
 } from './settlement-coordination-handover'
 import type {
   SettlementCoordinationHandleV1,
@@ -41,16 +44,7 @@ import type {
   SettlementCoordinatorV1,
 } from './settlement-coordinator'
 
-/** 40001 / 40P01 inside a handed-over runner: restart the coordination unit. Never leaves the port. */
-export class SettlementCoordinationRestartSignalV1 extends Error {
-  readonly original: unknown
-
-  constructor(original: unknown) {
-    super('settlement coordination restart')
-    this.name = 'SettlementCoordinationRestartSignalV1'
-    this.original = original
-  }
-}
+export { SettlementCoordinationRestartSignalV1 }
 
 /** The post-lock recheck found another org (§3.2 step 6.5): restart under `org`. */
 export class SettlementCoordinationRecheckMismatchV1 extends Error {
@@ -141,10 +135,12 @@ export async function coordinatedTransactionV1<T>(options: SettlementCoordinated
         outcome = await runInSettlementCoordinationContextV1(
           {
             connection: handle.client,
-            credential: handle.credential,
             orgLexical: handle.plan.key.org.lexical,
             classZeroHeld: handle.plan.classZeroKey !== null,
             entryLabel: options.request.handover.entryLabel,
+            isLive: () => SettlementCoordinationCredentialV1.isLiveOn(handle.credential, handle.client),
+            covers: (connection, coveredOrg, needsClassZero) =>
+              verifySettlementCoordinationCredentialV1(connection, handle.credential, coveredOrg, { needsClassZero }),
           },
           () =>
             options.body({

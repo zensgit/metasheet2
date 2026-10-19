@@ -24,8 +24,13 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', '.git', 
 const EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.cjs', '.mjs', '.vue'])
 const COORDINATION_DIR = 'packages/core-backend/src/attendance/coordination/'
 
-/** Production file → the coordination exports it may import. Empty until S3 adds a dormant hook. */
-const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = {}
+/** Production file → the coordination exports it may import (dormant hooks; read-only context access). */
+const ALLOWED_IMPORTS: Readonly<Record<string, readonly string[]>> = {
+  // The handed-over runner: refuses outside the context, turns 40001 / 40P01 into the restart signal.
+  'packages/core-backend/src/attendance/w4c0-operation-registry.ts': ['SettlementCoordinationRestartSignalV1', 'currentSettlementCoordinationContextV1'],
+  // The class-00 helper: re-entrant no-op only inside an active context whose credential covers it.
+  'packages/core-backend/src/attendance/w4c0-identity.ts': ['currentSettlementCoordinationContextV1'],
+}
 
 /** Identifiers that activate the coordination path → production files allowed to declare them. */
 const ACTIVATION: ReadonlyArray<Readonly<{ name: string; pattern: RegExp; declaredIn: readonly string[] }>> = [
@@ -34,6 +39,11 @@ const ACTIVATION: ReadonlyArray<Readonly<{ name: string; pattern: RegExp; declar
   { name: 'coordinated transaction port', pattern: /\bcoordinatedTransaction\w*\b/, declaredIn: [] },
   { name: 'coordination context run', pattern: /\brunInSettlementCoordinationContextV1\b/, declaredIn: [] },
   { name: 'handed-over option', pattern: /\bsettlementCoordinationHandover\b/, declaredIn: [] },
+  {
+    name: 'handed-over runner',
+    pattern: /\brunAttendanceResultOperationHandedOverV1\b/,
+    declaredIn: ['packages/core-backend/src/attendance/w4c0-operation-registry.ts'],
+  },
 ]
 
 function walk(dir: string, out: string[]): void {

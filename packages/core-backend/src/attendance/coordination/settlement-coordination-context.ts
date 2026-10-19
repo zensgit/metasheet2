@@ -2,10 +2,14 @@
  * Attendance settlement coordination — the coordination context (§3.2 step 11).
  *
  * While a coordinated transaction's body runs, an AsyncLocalStorage carries its context: the
- * handed-over connection, the credential, the org and whether class-00 is held. The context counts
- * as active only while its credential is live on that connection. COMMIT, ROLLBACK and release all
- * invalidate the credential first, so work the body derived that runs after commit (post-commit
- * callbacks, timers started inside the body) no longer sees "inside a coordinated transaction".
+ * handed-over connection, the org and whether class-00 is held, plus two checks the port supplies
+ * over the transaction's credential. The context counts as active only while that credential is live
+ * on the connection. COMMIT, ROLLBACK and release all invalidate the credential first, so work the
+ * body derived that runs after commit (post-commit callbacks, timers started inside the body) no
+ * longer sees "inside a coordinated transaction".
+ *
+ * This module imports nothing from the rest of the package: the W4 runner and the class-00 helper
+ * read it without pulling the coordinator into their import graph.
  *
  * Two nesting guards read it:
  *  - acquiring coordination quota while a context is active is refused, in production as in tests;
@@ -17,14 +21,29 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import { SettlementCoordinationCredentialV1 } from './settlement-coordination-handover'
-
 export interface SettlementCoordinationContextV1 {
   readonly connection: object
-  readonly credential: SettlementCoordinationCredentialV1
   readonly orgLexical: string
   readonly classZeroHeld: boolean
   readonly entryLabel: string
+  /** Whether the transaction's credential is still live on `connection`. */
+  isLive(): boolean
+  /** No round trip: whether the live credential is `connection`'s and covers `org` (and class-00 when asked). */
+  covers(connection: object, org: unknown, needsClassZero: boolean): boolean
+}
+
+/**
+ * 40001 / 40P01 inside a handed-over runner: the coordination unit restarts (§3.2 step 8). Only the
+ * coordinated-transaction port catches it; it never reaches the port's caller.
+ */
+export class SettlementCoordinationRestartSignalV1 extends Error {
+  readonly original: unknown
+
+  constructor(original: unknown) {
+    super('settlement coordination restart')
+    this.name = 'SettlementCoordinationRestartSignalV1'
+    this.original = original
+  }
 }
 
 export type SettlementCoordinationNestingKindV1 = 'context' | 'quota' | 'main-pool' | 'pool-transaction'
@@ -48,8 +67,7 @@ const storage = new AsyncLocalStorage<SettlementCoordinationContextV1>()
 /** The context of the coordinated transaction this async flow is in, or null once it has ended. */
 export function currentSettlementCoordinationContextV1(): SettlementCoordinationContextV1 | null {
   const context = storage.getStore()
-  if (!context) return null
-  return SettlementCoordinationCredentialV1.isLiveOn(context.credential, context.connection) ? context : null
+  return context && context.isLive() ? context : null
 }
 
 /** Runs `body` inside `context`. Only the coordinated-transaction port calls this. */

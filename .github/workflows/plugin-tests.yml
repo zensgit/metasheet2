@@ -2009,6 +2009,7 @@ jobs:
             tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts \
             tests/integration/attendance-coordination-cleanup.db.test.ts \
             tests/integration/attendance-coordination-acquire.db.test.ts \
+            tests/integration/attendance-coordination-port.db.test.ts \
             tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
             tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts \
             tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts \
