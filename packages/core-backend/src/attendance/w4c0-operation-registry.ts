@@ -89,6 +89,52 @@ export class AttendanceCleaningConnectionUncertainError extends AttendanceW4Regi
   constructor() { super('W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN') }
 }
 
+/**
+ * Settlement coordination (r6.1 §1.1 P1-1 「连接销毁语义」): when the runner can no longer say what state
+ * the connection is in — ROLLBACK failed, or COMMIT failed with anything other than 40001 / 40P01 — it
+ * marks the original error and sends it out unchanged otherwise: same object, same `code`, same message.
+ * The mark is a non-enumerable own property keyed by this symbol, invisible to JSON, `Object.keys` and
+ * equality. Releasers read it with `isAttendanceW4ConnectionUncertainV1` and destroy the connection
+ * instead of returning it; a same-connection wrapper checks it before any retry.
+ */
+export const ATTENDANCE_W4_CONNECTION_UNCERTAIN = Symbol.for('ms2.attendance.w4.connectionUncertain')
+
+/** Error objects that cannot take the own property (frozen or sealed) are remembered by identity. */
+const uncertainByIdentity = new WeakSet<object>()
+
+/** A thrown primitive cannot carry the mark; it travels as `cause` of this registry error instead. */
+export class AttendanceW4ConnectionUncertainPrimitiveError extends AttendanceW4RegistryError {
+  readonly cause: unknown
+
+  constructor(cause: unknown) {
+    super('W4C0_CONNECTION_UNCERTAIN')
+    this.name = 'AttendanceW4ConnectionUncertainPrimitiveError'
+    this.cause = cause
+  }
+}
+
+/** Marks `error` as having left its connection in an unknown state; returns the same object. */
+export function markAttendanceW4ConnectionUncertainV1(error: unknown): unknown {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return new AttendanceW4ConnectionUncertainPrimitiveError(error)
+  }
+  const target = error as Record<symbol, unknown>
+  if (target[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)) return error
+  try {
+    Object.defineProperty(target, ATTENDANCE_W4_CONNECTION_UNCERTAIN, { value: true, enumerable: false, configurable: false, writable: false })
+  } catch {
+    uncertainByIdentity.add(error as object)
+  }
+  return error
+}
+
+/** The mark, or one of the uncertain error classes that predate it. */
+export function isAttendanceW4ConnectionUncertainV1(error: unknown): boolean {
+  if (error instanceof AttendanceCleaningConnectionUncertainError || error instanceof OnlinePunchConnectionUncertainError) return true
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false
+  return (error as Record<symbol, unknown>)[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)
+}
+
 function fail(code: string): never {
   throw new AttendanceW4RegistryError(code)
 }
@@ -1113,6 +1159,9 @@ export async function runAttendanceResultOperationTransactionV1<T>(
         // Retry only an explicit serialization/deadlock rollback; an ambiguous
         // commit must recover via the durable operation, never blindly reapply.
         if (sessionFenced && !isRetryableSqlState(error)) throw new AttendanceCleaningConnectionUncertainError()
+        // Settlement coordination: a COMMIT that failed with anything else left the connection's state
+        // unknown. The error keeps its object and code and goes out carrying the uncertainty mark.
+        if (!isRetryableSqlState(error)) throw markAttendanceW4ConnectionUncertainV1(error)
         throw error
       }
       return result
@@ -1120,6 +1169,9 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       try { await connection.query('ROLLBACK', []) } catch {
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
         if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+        // Settlement coordination: a failed ROLLBACK leaves the connection's state unknown — no further
+        // attempt on this connection, retryable or not; the original error goes out marked.
+        throw markAttendanceW4ConnectionUncertainV1(error)
       }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1
