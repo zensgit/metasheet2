@@ -810,9 +810,9 @@ function comparePositions(left, right) {
 // queued, not dropped; the walk's own reads still run — and resumes as the walk consumes. It is THE
 // bound on what an early stop (a cycle, a cap, a failed read) can waste, whatever the shape of the
 // BOM. 16 is measured, not guessed: on synthetic field-shaped BOMs of 150–1,200 reads (fan-out up to
-// 40 at the root, depth 5) 8 per slot cost a third of the speed-up at width 4 and 16 matched an
-// uncapped read-ahead exactly (__tests__/stock-preparation-bom-read-concurrency.test.cjs pins the
-// cap; the PR records the measurement).
+// 40 at the root, depth 5) 8 per slot lost about 28% of the speed-up at width 4 (2.8x instead of
+// 3.9x) and 16 matched an uncapped read-ahead exactly (__tests__/stock-preparation-bom-read-
+// concurrency.test.cjs pins the cap; the PR records the measurement).
 const READ_AHEAD_LEAD_PER_SLOT = 16
 
 // A counting semaphore over LOGICAL reads (`active`); a logical read pages sequentially inside its
