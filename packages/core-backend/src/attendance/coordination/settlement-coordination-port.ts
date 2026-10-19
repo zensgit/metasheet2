@@ -107,7 +107,12 @@ async function runCallbacks(callbacks: ReadonlyArray<() => unknown>, onError: ((
     try {
       await callback()
     } catch (error) {
-      onError?.(error)
+      try {
+        onError?.(error)
+      } catch {
+        // A failing reporter cannot stop the remaining callbacks or the deferred result: the
+        // transaction is committed, and a method suspended at its COMMIT must still be resumed.
+      }
     }
   }
 }
@@ -181,6 +186,14 @@ export async function coordinatedTransactionV1<T>(options: SettlementCoordinated
         await rollbackAfterBodyError(handle)
         abandon()
         throw error
+      }
+      // The connection reported an error while held (S1 note 1): its state is unknown, so no COMMIT is
+      // sent on it. Destroyed once, abandon notices run, and the connection's own error goes up.
+      const lost = handle.connectionError()
+      if (lost !== undefined) {
+        handle.end(new AttendanceCoordinationConnectionUncertainError('connection-error'))
+        abandon()
+        throw lost
       }
       const committed = await commitSettlementCoordinationTransactionV1(handle.client, handle.credential)
       if (committed.kind === 'committed') {

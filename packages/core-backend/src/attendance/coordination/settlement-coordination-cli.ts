@@ -7,8 +7,11 @@
  * attempt (`oneShot`: no contention state is made, read or ended, and nothing waits on another
  * process's prober), and the variant retries a refused acquisition itself: a fresh unit for every
  * attempt, a backoff sleep in between that no budget counts, and no retry for anything other than
- * an acquisition refusal — a business error, an exhausted restart counter, a conflict code or an
- * uncertain connection reach the caller the first time.
+ * that unit's own refusal — decided on the unit (`refused`), never on the error class, because the
+ * same class can arrive after COMMIT from a callback or a deferred result, and a business error, an
+ * exhausted restart counter, a conflict code or an uncertain connection reach the caller the first
+ * time. The backoff timer keeps the process alive: a CLI waiting for its next attempt must not exit
+ * under it.
  *
  * The coordinator comes from `createSettlementCoordinationCliCoordinatorV1`, which validates the
  * capacity before constructing anything (S3 note 9: a pool too small for the layout fails with a
@@ -141,7 +144,8 @@ export interface SettlementCoordinationCliRetryV1 {
   readonly backoffMs?: readonly number[]
   /** Fraction of the schedule entry spread symmetrically around it (0 … 1). Default 0.25. */
   readonly jitter?: number
-  readonly sleep?: (ms: number) => Promise<void>
+  /** Resolves after `ms`, or as soon as `signal` aborts. The default timer keeps the process alive. */
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   readonly random?: () => number
   /** Observer of each refused attempt, for the CLI's own progress output. */
   readonly onBusy?: (info: { readonly attempt: number; readonly error: SettlementCoordinationAcquireError; readonly sleepMs: number }) => void
@@ -153,10 +157,20 @@ export interface SettlementCoordinationCliTransactionOptionsV1<T> extends Omit<S
   readonly retry?: SettlementCoordinationCliRetryV1
 }
 
-function defaultSleep(ms: number): Promise<void> {
+/** Referenced on purpose: the process must stay up while the CLI waits for its next attempt. */
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    timer.unref?.()
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const done = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
   })
 }
 
@@ -176,16 +190,22 @@ export async function coordinatedTransactionCliV1<T>(options: SettlementCoordina
   const { retry: _retry, request: requested, ...rest } = options
   const request: SettlementCoordinationUnitRequestV1 = { background: true, ...requested, oneShot: true }
   for (let attempt = 1; ; attempt += 1) {
+    const unit = options.coordinator.openUnit(request)
     try {
-      return await coordinatedTransactionV1<T>({ ...rest, request })
+      return await coordinatedTransactionV1<T>({ ...rest, request, unit })
     } catch (error) {
-      if (!(error instanceof SettlementCoordinationAcquireError) || attempt >= attempts) throw error
+      // Only this attempt's own refused acquisition is retried: it wrote nothing. The same error class
+      // from a body, a post-commit callback or a deferred result is not, since the outer transaction
+      // may already be committed.
+      if (!unit.refused(error) || attempt >= attempts) throw error
       if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
       const base = schedule.length === 0 ? 0 : schedule[Math.min(attempt, schedule.length) - 1]
       const sleepMs = Math.max(0, Math.round(base * (1 + jitter * (2 * random() - 1))))
-      retry.onBusy?.({ attempt, error, sleepMs })
-      await sleep(sleepMs)
+      retry.onBusy?.({ attempt, error: error as SettlementCoordinationAcquireError, sleepMs })
+      await sleep(sleepMs, request.signal)
       if (request.signal?.aborted) throw new SettlementCoordinationAbortedError()
+    } finally {
+      unit.close()
     }
   }
 }

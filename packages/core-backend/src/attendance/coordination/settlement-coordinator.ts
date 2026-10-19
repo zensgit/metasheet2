@@ -54,6 +54,7 @@ import {
   type SettlementCoordinationHandoverOptionsV1,
   type SettlementCoordinationPlanV1,
   type SettlementCoordinationUncertainReasonV1,
+  type SettlementCoordinationTransactionClientV1,
 } from './settlement-coordination-handover'
 import { SettlementCoordinationLedgerV1 } from './settlement-coordination-ledger'
 import {
@@ -67,9 +68,16 @@ import {
   type SettlementCoordinationQuotaLeaseV1,
 } from './settlement-coordination-quota'
 
-/** A pooled connection: queries plus pg's `release(err?)` (a truthy `err` destroys it). */
-export interface SettlementCoordinationClientV1 extends AttendanceW4TransactionClientV1 {
+/**
+ * A pooled connection: tagged queries, pg's `release(err?)` (a truthy `err` destroys it) and pg's
+ * 'error' event. pg-pool takes its own idle listener off a client it hands out, so from the borrow to
+ * the release the coordinator is the listener (S1 note 1): without one, a backend lost between two
+ * statements would take the whole process down.
+ */
+export interface SettlementCoordinationClientV1 extends SettlementCoordinationTransactionClientV1 {
   release(error?: unknown): void
+  on(event: 'error', listener: (error: unknown) => void): unknown
+  removeListener(event: 'error', listener: (error: unknown) => void): unknown
 }
 
 export interface SettlementCoordinationPoolV1 {
@@ -235,10 +243,18 @@ export interface SettlementCoordinationHandleV1 {
   readonly plan: SettlementCoordinationPlanV1
   readonly attempt: number
   /**
-   * Ends the attempt: the connection goes back to the pool (destroyed when `error` is given), then
-   * the global quota, then the org quota. Exactly once.
+   * Ends the attempt: the connection goes back to the pool (destroyed when `error` is given, or when
+   * the connection reported an error while held), then the global quota, then the org quota. Exactly once.
    */
   end(error?: unknown): void
+  /** The first error the connection reported (pg's 'error' event) while this unit held it, or undefined. */
+  connectionError(): unknown
+}
+
+/** One borrowed connection's error watch: the listener this unit installed and what it heard. */
+interface ConnectionWatch {
+  readonly listener: (error: unknown) => void
+  error: unknown
 }
 
 interface ActiveAttempt {
@@ -283,6 +299,10 @@ export class SettlementCoordinationUnitV1 {
   #left = false
   #serializationRestarts = 0
   #recheckRestarts = 0
+  /** Connections this unit holds, each with the 'error' listener installed at the borrow. */
+  readonly #watched = new Map<SettlementCoordinationClientV1, ConnectionWatch>()
+  /** Acquisition refusals raised by this unit itself (see `refused`). */
+  readonly #refusals = new WeakSet<object>()
 
   constructor(deps: SettlementCoordinatorDepsV1, request: SettlementCoordinationUnitRequestV1) {
     this.#deps = deps
@@ -299,6 +319,15 @@ export class SettlementCoordinationUnitV1 {
   }
 
   /**
+   * Whether `error` is an acquisition refusal this unit raised itself (a candidate read or an
+   * acquisition that wrote nothing), as opposed to the same error class arriving from anywhere else —
+   * a body, a post-commit callback or another unit. Outer retries decide on this, never on the class.
+   */
+  refused(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && this.#refusals.has(error)
+  }
+
+  /**
    * §3.2 step 0, for entries without a pre-read: one short borrow outside quota, raced and counted
    * like any borrow; `read` runs its (at most two) autocommit reads and the connection goes back.
    */
@@ -308,7 +337,13 @@ export class SettlementCoordinationUnitV1 {
     this.#busy = true
     try {
       this.#throwIfStopped()
-      const client = await this.#borrow(null, null)
+      let client: SettlementCoordinationClientV1
+      try {
+        client = await this.#borrow(null, null)
+      } catch (error) {
+        if (error instanceof SettlementCoordinationAcquireError) this.#refusals.add(error)
+        throw error
+      }
       const started = this.#deps.clock.now()
       let destroyWith: unknown
       let candidate: T
@@ -320,7 +355,7 @@ export class SettlementCoordinationUnitV1 {
       } finally {
         this.budget.record('connect', this.#deps.clock.now() - started)
         invalidateSettlementCoordinationCredentialsV1(client)
-        client.release(destroyWith)
+        this.#release(client, destroyWith)
         this.#deps.ledger.dropClient(this.#id)
       }
       // Closed or aborted while the read ran: the caller is gone, so no candidate is handed out.
@@ -447,7 +482,7 @@ export class SettlementCoordinationUnitV1 {
         } finally {
           if (owned) {
             invalidateSettlementCoordinationCredentialsV1(client)
-            client.release(new Error('settlement coordination attempt failed unexpectedly'))
+            this.#release(client, new Error('settlement coordination attempt failed unexpectedly'))
             this.#deps.ledger.dropClient(this.#id)
             this.#returnLease(lease)
             record.event('destroyed', { reason: 'unexpected' })
@@ -458,6 +493,7 @@ export class SettlementCoordinationUnitV1 {
       this.#busy = false
       this.#handOverProbes()
       const mapped = this.#mapError(error)
+      if (mapped instanceof SettlementCoordinationAcquireError) this.#refusals.add(mapped)
       if (record) this.#emit(record, 'failed', (mapped as { code?: unknown }).code as string | undefined ?? null)
       if (this.#closed) this.#leave()
       throw mapped
@@ -695,6 +731,7 @@ export class SettlementCoordinationUnitV1 {
         if (lease) this.#returnLease(lease)
         throw error
       }
+      this.#watch(outcome.client)
       return outcome.client
     }
     if (outcome.kind === 'error') {
@@ -728,10 +765,42 @@ export class SettlementCoordinationUnitV1 {
     this.#deps.ledger.dropLease(this.#id)
   }
 
+  /**
+   * Installs this unit's 'error' listener on a connection it now holds. The listener only records the
+   * first error; nothing is sent on the connection from it. What it heard makes every later end of the
+   * connection a destroy, and the port refuses to COMMIT on it.
+   */
+  #watch(client: SettlementCoordinationClientV1): void {
+    const watch: ConnectionWatch = {
+      listener: (error: unknown) => {
+        if (watch.error === undefined) watch.error = error ?? new Error('settlement coordination connection reported an error')
+      },
+      error: undefined,
+    }
+    this.#watched.set(client, watch)
+    client.on('error', watch.listener)
+  }
+
+  /**
+   * The one way this unit gives a held connection back: its listener comes off first (so it never
+   * outlives the borrow or reaches the next borrower; other listeners are left alone), then pg's
+   * `release`, destroying when asked to or when the connection reported an error while held.
+   */
+  #release(client: SettlementCoordinationClientV1, error?: unknown): void {
+    const watch = this.#watched.get(client)
+    if (watch) {
+      this.#watched.delete(client)
+      client.removeListener('error', watch.listener)
+    }
+    const heard = watch?.error
+    const destroyWith = error ?? (heard === undefined ? undefined : heard instanceof Error ? heard : new AttendanceCoordinationConnectionUncertainError('connection-error'))
+    client.release(destroyWith)
+  }
+
   /** A clean connection (nothing held on its session) goes back; then global, then org. */
   #giveBack(client: SettlementCoordinationClientV1, lease: SettlementCoordinationQuotaLeaseV1, record: AttemptRecorder): void {
     invalidateSettlementCoordinationCredentialsV1(client)
-    client.release()
+    this.#release(client)
     this.#deps.ledger.dropClient(this.#id)
     this.#returnLease(lease)
     record.event('released')
@@ -776,7 +845,7 @@ export class SettlementCoordinationUnitV1 {
     record: AttemptRecorder,
   ): void {
     invalidateSettlementCoordinationCredentialsV1(client)
-    client.release(new AttendanceCoordinationConnectionUncertainError(reason))
+    this.#release(client, new AttendanceCoordinationConnectionUncertainError(reason))
     this.#deps.ledger.dropClient(this.#id)
     this.#returnLease(lease)
     record.event('destroyed', { reason })
@@ -796,7 +865,7 @@ export class SettlementCoordinationUnitV1 {
       this.#activeHandle = null
     }
     invalidateSettlementCoordinationCredentialsV1(active.client)
-    active.client.release(error)
+    this.#release(active.client, error)
     this.#deps.ledger.dropClient(this.#id)
     active.lease.release()
     this.#deps.ledger.dropLease(this.#id)
@@ -809,6 +878,7 @@ export class SettlementCoordinationUnitV1 {
       plan: active.plan,
       attempt,
       end: (error?: unknown) => this.#endAttempt(active, error),
+      connectionError: () => this.#watched.get(active.client)?.error,
     })
   }
 

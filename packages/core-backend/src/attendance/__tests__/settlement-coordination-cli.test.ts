@@ -8,6 +8,7 @@ import {
   createSettlementCoordinationCliCoordinatorV1,
   deriveSettlementCoordinationCliCapacityV1,
 } from '../coordination/settlement-coordination-cli'
+import { coordinatedTransactionV1, handOverToSuspendedMethodV1, settlementCoordinationResultAfterCommitV1 } from '../coordination/settlement-coordination-port'
 import { SettlementCoordinationAbortedError, SettlementCoordinationAcquireError } from '../coordination/settlement-coordinator'
 import { FakeLockWorld, FakePool, ORG, REQUEST, setupFakeCoordination as setup } from '../../../tests/helpers/settlement-coordination-fakes'
 
@@ -187,3 +188,88 @@ describe('CLI coordinator over a private pool', () => {
     expect(coordinator.deps.ledger.snapshot().holding).toEqual([])
   })
 })
+
+describe('CLI variant: only the attempt\'s own refusal is retried (Codex S3-CX-02)', () => {
+  const OTHER_ORG = '7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a'
+  const commits = (pool: FakePool) => pool.clients.flatMap((client) => client.calls).filter((sql) => sql === 'COMMIT').length
+
+  it('a refusal another unit raises after COMMIT (from the deferred result) is not retried: one body, one COMMIT, the refusal goes up', async () => {
+    const { world, pool, coordinator, baseline } = setup()
+    let bodies = 0
+    const slept: number[] = []
+    const failure = await coordinatedTransactionCliV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      retry: { attempts: 3, jitter: 0, sleep: async (ms) => void slept.push(ms) },
+      body: async (context) => {
+        bodies += 1
+        await context.client.query('UPDATE t SET v = 1')
+        return settlementCoordinationResultAfterCommitV1(async () => {
+          world.dedicatedBusy = true
+          return coordinatedTransactionV1({
+            coordinator,
+            request: { ...REQUEST, oneShot: true },
+            candidate: { org: OTHER_ORG },
+            body: async () => 'never',
+          })
+        })
+      },
+    }).then(
+      () => null,
+      (error) => error,
+    )
+    expect(failure).toBeInstanceOf(SettlementCoordinationAcquireError)
+    expect(bodies).toBe(1)
+    expect(commits(pool)).toBe(1)
+    expect(slept).toEqual([])
+    world.dedicatedBusy = false
+    baseline()
+  })
+
+  it('the same error class thrown by the body is not retried', async () => {
+    const { coordinator, baseline } = setup()
+    let bodies = 0
+    const slept: number[] = []
+    const thrown = new SettlementCoordinationAcquireError('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY', { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 })
+    await expect(
+      coordinatedTransactionCliV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        retry: { attempts: 3, sleep: async (ms) => void slept.push(ms) },
+        body: async () => {
+          bodies += 1
+          throw thrown
+        },
+      }),
+    ).rejects.toBe(thrown)
+    expect(bodies).toBe(1)
+    expect(slept).toEqual([])
+    baseline()
+  })
+
+  it('a method suspended at its COMMIT that throws the same class after resuming is not retried', async () => {
+    const { pool, coordinator, baseline } = setup()
+    let runs = 0
+    const thrown = new SettlementCoordinationAcquireError('ATTENDANCE_SETTLEMENT_COORDINATION_BUSY', { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 })
+    await expect(
+      coordinatedTransactionCliV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        retry: { attempts: 3, sleep: async () => undefined },
+        body: async (context) =>
+          handOverToSuspendedMethodV1(context, async (commit) => {
+            runs += 1
+            await commit()
+            throw thrown
+          }),
+      }),
+    ).rejects.toBe(thrown)
+    expect(runs).toBe(1)
+    expect(commits(pool)).toBe(1)
+    baseline()
+  })
+})
+

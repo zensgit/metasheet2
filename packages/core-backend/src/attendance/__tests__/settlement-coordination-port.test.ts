@@ -7,7 +7,10 @@ import {
   setSettlementCoordinationNestingModeV1,
   settlementCoordinationNestedMainPoolAccessesV1,
 } from '../coordination/settlement-coordination-context'
-import { AttendanceCoordinationCommitNotCommittedError } from '../coordination/settlement-coordination-handover'
+import {
+  AttendanceCoordinationCommitNotCommittedError,
+  AttendanceCoordinationConnectionUncertainError,
+} from '../coordination/settlement-coordination-handover'
 import {
   SettlementCoordinationAttemptAbandonedError,
   SettlementCoordinationRecheckMismatchV1,
@@ -584,6 +587,197 @@ describe('coordinated transaction port: a method suspended at its own COMMIT', (
       }),
     ).rejects.toThrow(/returned without asking to commit/)
     expect(pool.clients[0].calls.at(-1)).toBe('ROLLBACK')
+    baseline()
+  })
+})
+
+describe('coordinated transaction port: connection errors while held (S1 note 1; Codex S3-CX-01)', () => {
+  const lost = () => new Error('test: connection lost')
+
+  it('an error between two statements of the body: nothing goes unhandled, the next statement fails, the connection is destroyed once, no callback, the listener comes off', async () => {
+    const { pool, coordinator, baseline } = setup()
+    let ran = false
+    const failure = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) => {
+        context.afterCommit(() => {
+          ran = true
+        })
+        const client = pool.clients[0]
+        await new Promise<void>((resolve) =>
+          setImmediate(() => {
+            client.lose(lost())
+            resolve()
+          }),
+        )
+        await context.client.query('UPDATE t SET v = 1')
+        return 'never'
+      },
+    }).then(
+      () => null,
+      (error) => error,
+    )
+    const client = pool.clients[0]
+    expect((failure as Error).message).toMatch(/not queryable/)
+    expect(ran).toBe(false)
+    expect(client.calls.filter((sql) => sql === 'COMMIT')).toEqual([])
+    expect(client.released).toHaveLength(1)
+    expect(client.released[0]).toBeInstanceOf(Error)
+    expect(client.listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('an error after the last statement: no COMMIT is sent, the connection is destroyed once, abandon notices run and the connection error goes up', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const error = lost()
+    let abandoned = 0
+    const failure = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async (context) => {
+        context.onAbandon(() => {
+          abandoned += 1
+        })
+        await context.client.query('UPDATE t SET v = 1')
+        pool.clients[0].lose(error)
+        return 'never'
+      },
+    }).then(
+      () => null,
+      (thrown) => thrown,
+    )
+    const client = pool.clients[0]
+    expect(failure).toBe(error)
+    expect(statements(client.calls)).toEqual(['S1', 'BEGIN', 'S2', 'UPDATE'])
+    expect(client.released).toHaveLength(1)
+    expect(client.released[0]).toBeInstanceOf(AttendanceCoordinationConnectionUncertainError)
+    expect(abandoned).toBe(1)
+    expect(client.listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('repeated error events are absorbed: one destroy, the first error is the one reported', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const first = lost()
+    const failure = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async () => {
+        pool.clients[0].lose(first)
+        pool.clients[0].emit('error', new Error('test: second event'))
+        return 'never'
+      },
+    }).then(
+      () => null,
+      (thrown) => thrown,
+    )
+    expect(failure).toBe(first)
+    expect(pool.clients[0].released).toHaveLength(1)
+    expect(pool.clients[0].listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('an error while the handover is in flight fails the acquisition with the connection destroyed; the body never runs', async () => {
+    const { world, pool, coordinator, baseline } = setup()
+    world.before.set('SELECT x_k', async () => {
+      pool.clients[0].lose(lost())
+    })
+    let ran = false
+    await expect(
+      coordinatedTransactionV1({
+        coordinator,
+        request: REQUEST,
+        candidate: { org: ORG },
+        body: async () => {
+          ran = true
+          return 'never'
+        },
+      }),
+    ).rejects.toBeInstanceOf(AttendanceCoordinationConnectionUncertainError)
+    expect(ran).toBe(false)
+    expect(pool.clients[0].released).toHaveLength(1)
+    expect(pool.clients[0].released[0]).toBeInstanceOf(Error)
+    expect(pool.clients[0].listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('an error during the candidate short read destroys that connection and fails the read', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const failure = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: {
+        read: async (client) => {
+          pool.clients[0].lose(lost())
+          await client.query('SELECT 1')
+          return ORG
+        },
+      },
+      body: async () => 'never',
+    }).then(
+      () => null,
+      (thrown) => thrown,
+    )
+    expect((failure as Error).message).toMatch(/not queryable/)
+    expect(pool.clients).toHaveLength(1)
+    expect(pool.clients[0].released[0]).toBeInstanceOf(Error)
+    expect(pool.clients[0].listenerCount('error')).toBe(0)
+    baseline()
+  })
+
+  it('a clean commit takes only its own listener off: a listener someone else added stays, and none of ours reaches the next borrower', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const other = (): void => undefined
+    await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      body: async () => {
+        expect(pool.clients[0].listenerCount('error')).toBe(1)
+        pool.clients[0].on('error', other)
+        return 'first'
+      },
+    })
+    expect(pool.clients[0].released).toEqual([null])
+    expect(pool.clients[0].listeners('error')).toEqual([other])
+    await coordinatedTransactionV1({ coordinator, request: REQUEST, candidate: { org: ORG }, body: async () => 'second' })
+    expect(pool.clients[1].listenerCount('error')).toBe(0)
+    baseline()
+  })
+})
+
+describe('coordinated transaction port: a failing error reporter (Codex S3-CX-05)', () => {
+  it('a reporter that throws neither stops the remaining callbacks nor leaves a method suspended at its COMMIT hanging', async () => {
+    const { pool, coordinator, baseline } = setup()
+    const ran: string[] = []
+    let resumed = false
+    const result = await coordinatedTransactionV1({
+      coordinator,
+      request: REQUEST,
+      candidate: { org: ORG },
+      onCallbackError: () => {
+        throw new Error('test: reporter failed')
+      },
+      body: async (context) =>
+        handOverToSuspendedMethodV1(context, async (commit) => {
+          context.afterCommit(() => {
+            ran.push('first')
+            throw new Error('test: callback failed')
+          })
+          context.afterCommit(() => void ran.push('second'))
+          await commit()
+          resumed = true
+          return 'resumed'
+        }),
+    })
+    expect(result).toBe('resumed')
+    expect(resumed).toBe(true)
+    expect(ran).toEqual(['first', 'second'])
+    expect(pool.clients[0].calls.filter((sql) => sql === 'COMMIT')).toHaveLength(1)
     baseline()
   })
 })

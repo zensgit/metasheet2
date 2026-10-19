@@ -38,6 +38,25 @@ import {
   type SettlementCoordinationS2TimeoutsV1,
 } from './settlement-coordination-statements'
 
+/**
+ * A query result as the coordination primitives read it: the rows plus pg's command tag. BEGIN and
+ * COMMIT are trusted only on their tags (S1 note 6, S2 BEGIN self-check).
+ */
+export interface SettlementCoordinationQueryResultV1 {
+  command: string
+  rows: Array<Record<string, unknown>>
+}
+
+/**
+ * The connection the coordination primitives run on. Unlike the W4 client it must report pg's command
+ * tag, so a wrapper that drops the tag cannot be handed to S1, the handover, COMMIT, ROLLBACK or the
+ * session unlock at all (S3 note 6). It is still a W4 client: business code and the W4 runner take it
+ * as one.
+ */
+export interface SettlementCoordinationTransactionClientV1 extends AttendanceW4TransactionClientV1 {
+  query(sqlText: string, params?: unknown[]): Promise<SettlementCoordinationQueryResultV1>
+}
+
 export interface SettlementCoordinationPlanV1 {
   readonly key: SettlementCoordinationKeyV1
   /** Set only for a canonical org whose entry needs the class-00 family. */
@@ -71,6 +90,8 @@ export type SettlementCoordinationUncertainReasonV1 =
   | 'rollback-failed'
   | 'commit-failed'
   | 'commit-not-committed'
+  /** The connection reported an error (pg's 'error' event) while the unit held it. */
+  | 'connection-error'
 
 export type SettlementCoordinationUncertainV1 = Readonly<{
   kind: 'uncertain'
@@ -129,7 +150,7 @@ export type SettlementCoordinationS1OutcomeV1 =
 
 /** Runs S1 in autocommit on an idle, freshly borrowed connection (simple protocol: no values). */
 export async function runSettlementCoordinationS1V1(
-  client: AttendanceW4TransactionClientV1,
+  client: SettlementCoordinationTransactionClientV1,
   plan: SettlementCoordinationPlanV1,
 ): Promise<SettlementCoordinationS1OutcomeV1> {
   const sql = buildSettlementCoordinationS1Sql(statementKeys(plan))
@@ -246,7 +267,7 @@ export type SettlementCoordinationHandoverOutcomeV1 =
   | Readonly<{ kind: 'handed-over'; credential: SettlementCoordinationCredentialV1 }>
   | SettlementCoordinationUncertainV1
 
-async function rollbackQuietly(client: AttendanceW4TransactionClientV1): Promise<void> {
+async function rollbackQuietly(client: SettlementCoordinationTransactionClientV1): Promise<void> {
   try {
     await client.query('ROLLBACK')
   } catch {
@@ -265,7 +286,7 @@ export interface SettlementCoordinationHandoverHooksV1 {
  * between.
  */
 export async function runSettlementCoordinationHandoverV1(
-  client: AttendanceW4TransactionClientV1,
+  client: SettlementCoordinationTransactionClientV1,
   plan: SettlementCoordinationPlanV1,
   options: SettlementCoordinationHandoverOptionsV1,
   hooks: SettlementCoordinationHandoverHooksV1 = {},
@@ -335,7 +356,7 @@ function assertCredentialHeldBy(connection: object, credential: unknown): assert
 }
 
 export async function commitSettlementCoordinationTransactionV1(
-  client: AttendanceW4TransactionClientV1,
+  client: SettlementCoordinationTransactionClientV1,
   credential: SettlementCoordinationCredentialV1,
 ): Promise<SettlementCoordinationCommitOutcomeV1> {
   assertCredentialHeldBy(client, credential)
@@ -355,7 +376,7 @@ export async function commitSettlementCoordinationTransactionV1(
 }
 
 export async function rollbackSettlementCoordinationTransactionV1(
-  client: AttendanceW4TransactionClientV1,
+  client: SettlementCoordinationTransactionClientV1,
   credential: SettlementCoordinationCredentialV1,
 ): Promise<SettlementCoordinationRollbackOutcomeV1> {
   assertCredentialHeldBy(client, credential)
@@ -382,7 +403,7 @@ export type SettlementCoordinationReleaseOutcomeV1 =
  * destroyed.
  */
 export async function releaseSettlementCoordinationSessionLocksV1(
-  client: AttendanceW4TransactionClientV1,
+  client: SettlementCoordinationTransactionClientV1,
   plan: SettlementCoordinationPlanV1,
 ): Promise<SettlementCoordinationReleaseOutcomeV1> {
   let row: Record<string, unknown> | null
