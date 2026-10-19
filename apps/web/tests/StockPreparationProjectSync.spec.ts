@@ -19,14 +19,27 @@ import { describe, expect, it, vi } from 'vitest'
 // VALUES-FREE: the doubles below plant business values (drawing numbers, material codes, project
 // names, connection strings) in every response field a lazy implementation might carry through. No
 // step detail may contain one.
+//
+// R67 ④ (the last describe block) is the one exception to "never touches fetch": it drives the real
+// wire client against a module-boundary `apiFetch` mock, because the enqueue + poll lives there.
+
+const { wireFetch } = vi.hoisted(() => ({ wireFetch: vi.fn() }))
+vi.mock('../src/utils/api', () => ({
+  apiFetch: (...args: unknown[]) => wireFetch(...args),
+}))
 
 import {
   BATCH_ARCHIVE_DISABLED_CODE,
+  STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE,
+  STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE,
+  STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE,
+  STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   StockPreparationProjectSyncCallError,
   classifyPlanReadFailureReason,
   classifyPlanStep,
   clampErrorCode,
+  createStockPreparationProjectSyncApi,
   plannedCountsOf,
   runStockPreparationProjectSync,
   summarizeProjectSync,
@@ -574,5 +587,183 @@ describe('項目接入 — the pure helpers', () => {
     expect(report.verdict).toBe('not_run')
     expect(report.pass).toBe(true)
     expect(report.totalSteps).toBe(4)
+  })
+})
+
+// =============================================================================================
+// R67 ④ — `createStockPreparationProjectSyncApi().dryRun` through the background job lane. Drives
+// the REAL wire client (apiFetch mocked at the module boundary): enqueue (`POST …/dry-run-jobs`) +
+// poll (`GET …/dry-run-jobs?projectNo=`), never the synchronous `POST …/dry-run` unless the
+// deployment has no durable job store.
+// =============================================================================================
+
+describe('R67 ④ — the dry run is enqueued and polled', () => {
+  const JOB_ID = 'dry-run-00000000-0000-4000-8000-000000000001'
+  const instant = async (): Promise<void> => {}
+
+  function envelope(data: unknown, status = 200): Response {
+    return new Response(JSON.stringify({ ok: true, data }), { status })
+  }
+  function refusal(status: number, code: string, details: Record<string, unknown> = {}): Response {
+    return new Response(JSON.stringify({ ok: false, error: { code, message: 'refused', details } }), { status })
+  }
+  const running = (elapsedMs: number) => envelope({ jobId: JOB_ID, status: 'running', startedAt: '2026-10-19T00:00:00.000Z', finishedAt: null, elapsedMs })
+  const succeeded = (result: unknown) => envelope({ jobId: JOB_ID, status: 'succeeded', startedAt: '2026-10-19T00:00:00.000Z', finishedAt: '2026-10-19T00:01:30.000Z', elapsedMs: 90_000, result })
+  const failed = (httpStatus: number, code: string) => envelope({ jobId: JOB_ID, status: 'failed', startedAt: '2026-10-19T00:00:00.000Z', finishedAt: '2026-10-19T00:00:05.000Z', elapsedMs: 5_000, error: { httpStatus, code, message: 'refused' } })
+
+  /** `enqueues` answer the successive POSTs, `polls` the successive GETs; every call is logged. */
+  function wire({ enqueues = [], polls = [], sync = [] }: { enqueues?: Response[]; polls?: Response[]; sync?: Response[] }) {
+    const calls: { method: string; url: string; body: Record<string, unknown> | null }[] = []
+    wireFetch.mockReset()
+    wireFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      calls.push({ method, url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null })
+      if (String(url).includes('/dry-run-jobs')) {
+        const next = method === 'POST' ? enqueues.shift() : polls.shift()
+        if (!next) throw new Error(`unexpected ${method} ${url}`)
+        return next
+      }
+      if (String(url).includes('/dry-run')) {
+        const next = sync.shift()
+        if (!next) throw new Error(`unexpected ${method} ${url}`)
+        return next
+      }
+      throw new Error(`unrouted ${method} ${url}`)
+    })
+    return calls
+  }
+
+  it('D-01: enqueue (flagged body) → running polls report progress → the job\'s payload IS the plan, token included; the synchronous route is never called', async () => {
+    const calls = wire({ enqueues: [running(0)], polls: [running(30_000), running(62_000), succeeded(plan())] })
+    const progress: unknown[] = []
+    const result = await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).dryRun(PROJECT_NO, {
+      wait: instant,
+      onProgress: (p) => progress.push(p),
+    })
+    expect(result).toEqual(plan())
+    expect(result.dryRunToken).toBe('tok_abc')
+    expect(progress).toEqual([{ elapsedMs: 30_000, attached: false }, { elapsedMs: 62_000, attached: false }])
+    const posts = calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(posts[0].url).toBe('/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run-jobs?tenantId=syn-tenant')
+    expect(posts[0].body).toEqual({ parameters: { projectNo: PROJECT_NO }, includeMissingComponents: true })
+    const gets = calls.filter((call) => call.method === 'GET')
+    expect(gets).toHaveLength(3)
+    for (const get of gets) {
+      const query = new URL(get.url, 'http://x').searchParams
+      expect(query.get('projectNo')).toBe(PROJECT_NO)
+      expect(query.get('includeMissingComponents')).toBe('true')
+      expect(query.get('tenantId')).toBe('syn-tenant')
+    }
+    expect(calls.some((call) => /\/dry-run(\?|$)/.test(call.url))).toBe(false)
+  })
+
+  it('D-02: a failed job surfaces the synchronous route\'s own status + code, so the plan step classifies exactly as before', async () => {
+    wire({ enqueues: [running(0)], polls: [running(1_000), failed(409, 'TARGET_SHEET_FOREIGN_PROJECT')] })
+    const api = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO, undefined, { dryRun: { wait: instant } })
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED_FOREIGN_PROJECT', detail: { status: 409, code: 'TARGET_SHEET_FOREIGN_PROJECT' } })
+    expect(report.steps.map((step) => step.id)).toEqual(['dry-run'])
+  })
+
+  it('D-03: aborting stops the poll — no further GET after the signal fires', async () => {
+    const controller = new AbortController()
+    const calls = wire({ enqueues: [running(0)], polls: [running(1_000), running(2_000), running(3_000)] })
+    let waits = 0
+    const wait = async (): Promise<void> => {
+      waits += 1
+      if (waits === 1) controller.abort()
+    }
+    await expect(createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait, signal: controller.signal }))
+      .rejects.toMatchObject({ code: STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE })
+    expect(calls.filter((call) => call.method === 'GET')).toHaveLength(1)
+  })
+
+  it('D-04: this caller\'s own trial is already running (409 ownJob) — no second enqueue; it attaches and returns that job\'s plan', async () => {
+    const calls = wire({
+      enqueues: [refusal(409, STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE, { status: 'running', ownJob: true })],
+      polls: [running(40_000), succeeded(plan())],
+    })
+    const progress: unknown[] = []
+    const result = await createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant, onProgress: (p) => progress.push(p) })
+    expect(result).toEqual(plan())
+    expect(progress).toEqual([{ elapsedMs: 40_000, attached: true }])
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+  })
+
+  it('D-04b: attaching finds the values-free record when the running job was enqueued without the opt-in', async () => {
+    const calls = wire({
+      enqueues: [refusal(409, STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE, { status: 'running', ownJob: true })],
+      polls: [refusal(404, 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND'), succeeded(plan())],
+    })
+    expect(await createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })).toEqual(plan())
+    const flags = calls.filter((call) => call.method === 'GET').map((call) => new URL(call.url, 'http://x').searchParams.get('includeMissingComponents'))
+    expect(flags).toEqual(['true', 'false'])
+  })
+
+  it('D-05: someone else\'s trial of the project is running (409, not ours) — no attach, the step says PLAN_DRY_RUN_BUSY', async () => {
+    const calls = wire({ enqueues: [refusal(409, STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE, { status: 'running', ownJob: false })] })
+    const report = await runStockPreparationProjectSync(createStockPreparationProjectSyncApi({}), PROJECT_NO, undefined, { dryRun: { wait: instant } })
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_DRY_RUN_BUSY' })
+    expect(calls.filter((call) => call.method === 'GET')).toHaveLength(0)
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_DRY_RUN_BUSY.zh).toContain('另一位同事')
+  })
+
+  it('D-05b: a trial the server restarted under reports PLAN_DRY_RUN_INTERRUPTED (press again), not a broken source', async () => {
+    wire({ enqueues: [running(0)], polls: [failed(503, STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE)] })
+    const report = await runStockPreparationProjectSync(createStockPreparationProjectSyncApi({}), PROJECT_NO, undefined, { dryRun: { wait: instant } })
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_DRY_RUN_INTERRUPTED' })
+  })
+
+  it('D-06: no durable job store on this deployment (501) — the ONE case that falls back to the synchronous route', async () => {
+    const calls = wire({
+      enqueues: [refusal(501, STOCK_PREPARATION_DRY_RUN_JOB_STORE_UNAVAILABLE_CODE)],
+      sync: [envelope(plan())],
+    })
+    expect(await createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })).toEqual(plan())
+    expect(calls.map((call) => `${call.method} ${call.url.split('?')[0]}`)).toEqual([
+      'POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run-jobs',
+      'POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run',
+    ])
+    // …and nothing else falls back: an ordinary refusal of the enqueue is the dry run's refusal.
+    const other = wire({ enqueues: [refusal(503, 'SOURCE_UNAVAILABLE')] })
+    await expect(createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })).rejects.toMatchObject({ status: 503, code: 'SOURCE_UNAVAILABLE' })
+    expect(other.some((call) => /\/dry-run(\?|$)/.test(call.url))).toBe(false)
+  })
+
+  it('D-07: one dropped poll (a gateway blip with no envelope) is not a failed dry run; three in a row are', async () => {
+    const blip = () => new Response('<html>bad gateway</html>', { status: 502 })
+    wire({ enqueues: [running(0)], polls: [blip(), succeeded(plan())] })
+    expect(await createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })).toEqual(plan())
+    wire({ enqueues: [running(0)], polls: [blip(), blip(), blip(), succeeded(plan())] })
+    await expect(createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })).rejects.toMatchObject({ status: 502 })
+  })
+
+  it('D-08: the poll is bounded — a job that never ends stops at the budget, never an endless loop', async () => {
+    wire({ enqueues: [running(0)], polls: [running(1), running(2), running(3)] })
+    await expect(createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant, maxPolls: 3 }))
+      .rejects.toMatchObject({ code: 'STOCK_PREPARATION_DRY_RUN_POLL_BUDGET_EXCEEDED' })
+  })
+
+  it('D-09: dryRunJobStatus — running is reported for re-attach; nothing under either flag is null; it never enqueues', async () => {
+    let calls = wire({ polls: [running(75_000)] })
+    expect(await createStockPreparationProjectSyncApi({}).dryRunJobStatus!(PROJECT_NO)).toEqual({ status: 'running', elapsedMs: 75_000 })
+    calls = wire({ polls: [refusal(404, 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND'), refusal(404, 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND')] })
+    expect(await createStockPreparationProjectSyncApi({}).dryRunJobStatus!(PROJECT_NO)).toBeNull()
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0)
+    calls = wire({ polls: [refusal(403, 'OPERATOR_SCOPE_TENANT_REQUIRED'), running(2_000)] })
+    expect(await createStockPreparationProjectSyncApi({}).dryRunJobStatus!(PROJECT_NO)).toEqual({ status: 'running', elapsedMs: 2_000 })
+  })
+
+  it('D-10: B1 is kept on the job lane — a flagged ENQUEUE refused for the flag is retried once without it', async () => {
+    const calls = wire({
+      enqueues: [refusal(403, 'OPERATOR_SCOPE_TENANT_REQUIRED'), running(0)],
+      polls: [succeeded(plan())],
+    })
+    const result = await createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO, { wait: instant })
+    expect(result.missingComponentsUnavailableReason).toBe('scope_denied')
+    const posts = calls.filter((call) => call.method === 'POST')
+    expect(posts.map((call) => call.body?.includeMissingComponents)).toEqual([true, undefined])
+    expect(new URL(calls.find((call) => call.method === 'GET')!.url, 'http://x').searchParams.get('includeMissingComponents')).toBe('false')
   })
 })

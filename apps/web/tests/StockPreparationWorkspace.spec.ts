@@ -1197,14 +1197,23 @@ describe('StockPreparationWorkspace shell', () => {
           },
         }), { status: 200 })
       }
-      if (target.includes(`${SYNC_ACTION_BASE}/dry-run`)) {
+      // R67 ④: the dry run is enqueued (POST, no projectNo in the query) and polled (GET …?projectNo=).
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`) && !target.includes('projectNo=')) {
+        return new Response(JSON.stringify({ ok: true, data: { jobId: 'job_ws', status: 'running', elapsedMs: 0 } }), { status: 202 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`)) {
         return new Response(JSON.stringify({
           ok: true,
           data: {
-            status: 'ready',
-            canApply: true,
-            dryRunToken: 'tok_ws',
-            counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+            jobId: 'job_ws',
+            status: 'succeeded',
+            elapsedMs: 0,
+            result: {
+              status: 'ready',
+              canApply: true,
+              dryRunToken: 'tok_ws',
+              counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+            },
           },
         }), { status: 200 })
       }
@@ -1254,6 +1263,14 @@ describe('StockPreparationWorkspace shell', () => {
     // THE ASSERTION THIS PR IS ABOUT: the same route shape 项目备料页's board button produces.
     expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable/sheet_x/view_x' })
     expect(h.router.push).not.toHaveBeenCalledWith({ path: '/multitable' })
+    // R67 ④: 项目工作台's 试算 went through the background job lane — enqueued once, polled — and
+    // never through the synchronous route a 60 s gateway timeout cuts off.
+    const dryRunCalls = h.apiFetch.mock.calls
+      .map((call: unknown[]) => ({ url: String(call[0]), method: (call[1] as RequestInit | undefined)?.method ?? 'GET' }))
+      .filter((call: { url: string }) => call.url.includes(`${SYNC_ACTION_BASE}/dry-run`))
+    expect(dryRunCalls.filter((call: { url: string; method: string }) => call.method === 'POST' && call.url.includes('/dry-run-jobs'))).toHaveLength(1)
+    expect(dryRunCalls.some((call: { url: string; method: string }) => call.method === 'GET' && call.url.includes('/dry-run-jobs?') && call.url.includes('projectNo=PRJ-WS-1'))).toBe(true)
+    expect(dryRunCalls.some((call: { url: string }) => /\/dry-run(\?|$)/.test(call.url))).toBe(false)
   })
 
   it('打开备料多维表: with NO handle 项目工作台 keeps the old destination, and the label says so', async () => {
