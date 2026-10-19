@@ -1,0 +1,95 @@
+{
+  "ok": true,
+  "native": {
+    "write_audits": 1,
+    "snapshot_sharing_enabled": false,
+    "snapshot_items_hash": "bbde568a259eccc2412b0ce25c3de324d818bc8eef60a9393017a25d18939818",
+    "write_subjects": [
+      42
+    ],
+    "write_lines": [
+      "line"
+    ],
+    "personal_package_eco": {
+      "count": 1,
+      "rbac_creators": [
+        900
+      ],
+      "target_versions": 1,
+      "source_versions": 1,
+      "distinct_product_versions": true,
+      "target_generations": [
+        1
+      ],
+      "target_creators": [
+        900
+      ],
+      "line_quantity": 4
+    },
+    "personal_grants_revoked": 1,
+    "personal_revoke_audits": 1,
+    "personal_package_approval": {
+      "commands": 1,
+      "subjects": [
+        42
+      ],
+      "rbac_actors": [
+        900
+      ],
+      "votes": [
+        "approved"
+      ]
+    }
+  },
+  "meta": {
+    "ok": true,
+    "handshakes": 2,
+    "bom_line": "line",
+    "write_patch": 200,
+    "eco_intent": {
+      "accepted": 200,
+      "duplicate_idempotent": true,
+      "authority": "native personal bom_write grant",
+      "personal_unbind_outage": "pending-then-revoked",
+      "retry_with_meta_flag_off": true,
+      "duplicate_retry": true,
+      "frozen_identity_sha256": "455eb6e34ec6be49b5d3daba5c92504a69d15f34f9d13d84c39ae7a4ecda1276"
+    },
+    "personal_approval": {
+      "approved": true,
+      "purpose_isolation": true,
+      "native_subject": "42",
+      "meta_owner_distinct": true,
+      "source_receipt_idempotent": true,
+      "native_threshold_preserved": true,
+      "binding_unbound": true,
+      "decision_entry": "existing authenticated approval card actions HTTP route",
+      "notification_sent": false
+    },
+    "meta_audit_rows": 2,
+    "native_logout": 204,
+    "transfer": "acked",
+    "rebind_generation": 2,
+    "revoke_outage": "pending-then-acked",
+    "late_callback_open_sessions": 0,
+    "callback_urls_observed": 3
+  },
+  "node_cleanup": {
+    "ok": true,
+    "failures": []
+  },
+  "cleanup": {
+    "postgresStopped": true,
+    "directoryRemoved": true,
+    "markerMatched": true,
+    "nativeChildStopped": true,
+    "proxyClosed": true,
+    "failures": []
+  },
+  "verifier_source": "97e31900e52cde62ad558c0e09227436b110e99a",
+  "native_renderer_source": "f9c32bdf7",
+  "executed_native_checkout": "f042f13fbedcbbdcb46e6db1dcc11f2748999990",
+  "renderer_sha256": "d014b9a5747093f4fdbcb0f451c0fe5b1683f007a146256a678e14bdd262fde5",
+  "postgres_major": 15,
+  "meta_source": "430effa1e9aef4b36be7b7da1ad191fbb2128990"
+}
