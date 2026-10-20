@@ -14,6 +14,7 @@ RELOAD_NGINX="${RELOAD_NGINX:-1}"
 RUN_HEALTHCHECK="${RUN_HEALTHCHECK:-1}"
 API_BASE="${API_BASE:-http://127.0.0.1/api}"
 BASE_URL="${BASE_URL:-http://127.0.0.1}"
+BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:8900/health}"
 CHECK_NGINX="${CHECK_NGINX:-1}"
 
 function die() {
@@ -48,9 +49,18 @@ env \
   "${ROOT_DIR}/scripts/ops/attendance-onprem-update.sh"
 
 if [[ "$RUN_HEALTHCHECK" == "1" ]]; then
+  # A process manager can report online before the API binds its socket.
+  # Keep the full healthcheck below; readiness only absorbs startup transients.
+  if [[ "$RESTART_SERVICE" == "1" ]]; then
+    info "Waiting for backend readiness"
+    curl -fsS --retry 30 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
+      --max-time "${MAX_TIME:-10}" "$BACKEND_HEALTH_URL" >/dev/null \
+      || die "Backend did not become ready after upgrade"
+  fi
   info "Running healthcheck"
   env \
     BASE_URL="$BASE_URL" \
+    BACKEND_HEALTH_URL="$BACKEND_HEALTH_URL" \
     API_BASE="$API_BASE" \
     CHECK_NGINX="$CHECK_NGINX" \
     SERVICE_MANAGER=auto \
