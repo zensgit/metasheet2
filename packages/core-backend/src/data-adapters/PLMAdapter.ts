@@ -2764,7 +2764,7 @@ export class PLMAdapter extends HTTPAdapter {
         ...(prepared.body === undefined ? {} : { body: prepared.body }),
         redirect: 'error', signal: AbortSignal.timeout(8000) })
       if (!response.ok) throw new PlmPersonalChangeReadError(
-        [401,403,404,409].includes(response.status) ? response.status : 503, 'PLM_CHANGE_READ_UNAVAILABLE')
+        [401,403,404,409].includes(response.status) ? response.status : 503, 'PLM_CHANGE_READ_UNAVAILABLE', true)
       return parsePersonalChangeRead(prepared, response.status, await response.text())
     } catch (error) {
       if (error instanceof PlmPersonalChangeReadError) throw error

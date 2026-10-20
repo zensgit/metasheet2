@@ -2037,6 +2037,7 @@ export class MetaSheetServer {
         this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
           pool: poolManager.get(),
           dataSourceManager: getDataSourceManager(),
+          personalChangeReadProvider: () => this.injector.get(IPLMAdapter) as PLMAdapter,
         }))
       }
       this.app.use(plmEmbedRouter())

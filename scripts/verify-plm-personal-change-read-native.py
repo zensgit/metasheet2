@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--revoke-only", action="store_true", help="Only the changed self-revoke/received-error path")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(args.native_root.resolve() / "src"))
@@ -44,8 +45,10 @@ def main():
         row = client.post(api.ENDPOINT, headers=world.headers, json=api._body())
         assert row.status_code == 201
         issued = row.json()
-        world.write("meta-personal-read-native-1", {"quantity": 2})
-        event_id = api._event_id(world)
+        event_id = None
+        if not args.revoke_only:
+            world.write("meta-personal-read-native-1", {"quantity": 2})
+            event_id = api._event_id(world)
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen(128)
         origin = "http://127.0.0.1:" + str(sock.getsockname()[1])
         server = uvicorn.Server(uvicorn.Config(world.app, log_level="error", lifespan="off"))
@@ -58,7 +61,7 @@ def main():
         authority = {"origin": origin, "connectionId": api.CONN, "tenantId": "default", "orgId": "fixture-org",
             "authUserId": "42", "rootPartId": api.SCOPE["root_part_id"], "target": api.TARGET,
             "reviewBindingId": api.BINDING, "reviewBindingVersion": 1}
-        for revoke in (False, True):
+        for revoke in ((True,) if args.revoke_only else (False, True)):
             result = subprocess.run([os.environ.get("PLM_TEST_NODE_BINARY", "node"),
                 str(root / "node_modules/tsx/dist/cli.mjs"),
                 str(root / "packages/core-backend/tests/helpers/personal-change-read-native.ts")],

@@ -34,7 +34,7 @@ const bindingSchema = z.object({
 }).strict()
 
 export class PlmPersonalChangeReadError extends Error {
-  constructor(readonly status: number, readonly code: string) { super(code) }
+  constructor(readonly status: number, readonly code: string, readonly responseReceived = false) { super(code) }
 }
 export function requirePersonalChangeRead(): void {
   if (process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED !== 'true')

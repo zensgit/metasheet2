@@ -51,10 +51,16 @@ it('uses existing exact baseline/page/fact source, binding and cursor parsers',(
 it('self-revokes with flags off; sanitizes provider errors once and refuses non-origin URLs',async()=>{
  vi.stubEnv('PLM_PERSONAL_BOM_CHANGE_READ_ENABLED','false');const fetch=vi.fn().mockResolvedValueOnce(new Response(null,{status:204})).mockResolvedValueOnce(new Response(grant,{status:403}));vi.stubGlobal('fetch',fetch)
  expect(await adapter().personalBomChangeReadRequest({operation:'revoke'},grant,authority)).toBeNull();expect(fetch.mock.calls[0][1].method).toBe('DELETE')
- enabled();await expect(adapter().personalBomChangeReadRequest({operation:'verify'},grant,authority)).rejects.toMatchObject({status:403,code:'PLM_CHANGE_READ_UNAVAILABLE'})
+ enabled();await expect(adapter().personalBomChangeReadRequest({operation:'verify'},grant,authority)).rejects.toMatchObject({status:403,code:'PLM_CHANGE_READ_UNAVAILABLE',responseReceived:true})
  await expect(adapter().personalBomChangeReadRequest({operation:'verify'},grant,{...authority,origin:'https://provider.invalid/path'})).rejects.toMatchObject({status:403});expect(fetch).toHaveBeenCalledTimes(2)
 })
 it('preserves Native code-point limits and rejects invalid UTF-8 target strings',()=>{
  expect(snapshotShareTargetSchema.parse({...target,base_id:'😀'.repeat(128),audience:'😀'.repeat(1000)}).audience).toHaveLength(2000)
  for(const value of [{audience:'a'.repeat(1001)},{base_id:'😀'.repeat(129)},{audience:'\ud800'}])expect(snapshotShareTargetSchema.safeParse({...target,...value}).success).toBe(false)
+})
+
+it('distinguishes a local preflight refusal from an actual provider response',async()=>{
+ enabled();const fetch=vi.fn();vi.stubGlobal('fetch',fetch)
+ await expect(adapter().personalBomChangeReadRequest({operation:'revoke'},grant,{...authority,origin:'https://provider.invalid/path'})).rejects.toMatchObject({status:403,responseReceived:false})
+ expect(fetch).not.toHaveBeenCalled()
 })

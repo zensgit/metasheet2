@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import { z, ZodError } from 'zod'
 import { authenticate } from '../middleware/auth'
 import { PlmManagedSnapshotShareFlow } from '../services/plm-managed-snapshot-share-flow'
+import { PlmPersonalChangeReadError } from '../services/plm-personal-bom-change-read-wire'
 import { ManagedCompanionRefusal } from '../services/plm-managed-companion'
 import {
   PlmBomReviewService,
@@ -27,6 +28,43 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
   router.post('/managed-share/complete', authenticate, async (req, res, next) => {
     res.set('Cache-Control', 'no-store').set('Referrer-Policy', 'no-referrer')
     try { res.json(await shares.complete(req)) } catch (error) { next(error) }
+  })
+  router.use('/:id/personal-change-read', (_req,res,next) => {
+    res.set('Cache-Control','no-store').set('Referrer-Policy','no-referrer')
+    next()
+  })
+  const readBindingId = z.string().uuid()
+  router.get('/:id/personal-change-read/management-url', authenticate, async (req,res,next) => {
+    res.set('Cache-Control','no-store').set('Referrer-Policy','no-referrer')
+    try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
+      res.json({ok:true,data:await service.personalChangeReadManagement(req,readBindingId.parse(req.params.id))}) }
+    catch (error) { next(error) }
+  })
+  router.get('/:id/personal-change-read', authenticate, async (req,res,next) => {
+    res.set('Cache-Control','no-store')
+    try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
+      res.json({ok:true,data:await service.personalChangeReadState(req,readBindingId.parse(req.params.id))}) }
+    catch (error) { next(error) }
+  })
+  router.post('/:id/personal-change-read', (req,res,next) => {
+    // The existing HTTP audit reads req.body on finish, including denied requests.
+    res.locals.plmChangeReadInput = req.body
+    req.body = { grant: '[REDACTED]', expectedVersion: typeof req.body?.expectedVersion === 'number' ? req.body.expectedVersion : undefined }
+    res.once('finish', () => { delete res.locals.plmChangeReadInput })
+    next()
+  }, authenticate, async (req,res,next) => {
+    res.set('Cache-Control','no-store')
+    try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
+      const input = res.locals.plmChangeReadInput
+      delete res.locals.plmChangeReadInput
+      res.status(201).json({ok:true,data:await service.bindPersonalChangeRead(req,readBindingId.parse(req.params.id),input)}) }
+    catch (error) { next(error) }
+  })
+  router.delete('/:id/personal-change-read', authenticate, async (req,res,next) => {
+    res.set('Cache-Control','no-store')
+    try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
+      res.json({ok:true,data:await service.unbindPersonalChangeRead(req,readBindingId.parse(req.params.id))}) }
+    catch (error) { next(error) }
   })
   router.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
@@ -163,7 +201,7 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
       res: import('express').Response,
       _next: import('express').NextFunction,
     ) => {
-      const known = e instanceof BomReviewError || e instanceof ManagedCompanionRefusal
+      const known = e instanceof BomReviewError || e instanceof ManagedCompanionRefusal || e instanceof PlmPersonalChangeReadError
       res.status(known ? e.status : e instanceof ZodError ? 400 : 503).json({
         ok: false,
         error: {

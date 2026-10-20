@@ -21,7 +21,7 @@ async function main(){
   process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='false'
   assert.equal(await client.personalBomChangeReadRequest({operation:'revoke'},input.grant,input.authority),null)
   process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='true'
-  await assert.rejects(()=>client.personalBomChangeReadRequest({operation:'verify'},input.grant,input.authority),(e:any)=>e.status===401)
+  await assert.rejects(()=>client.personalBomChangeReadRequest({operation:'verify'},input.grant,input.authority),(e:any)=>e.status===401&&e.responseReceived===true)
   console.log('PLM_PERSONAL_CHANGE_READ_PROOF='+JSON.stringify({passed:true,phase:'revoke',calls,personalOnly,redirectOrRetry:false}));return
  }
  process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='true'
