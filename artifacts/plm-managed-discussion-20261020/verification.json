@@ -1,0 +1,47 @@
+{
+  "source": "b3b813991f2dd1b8b75f10e603697781b640e7b9",
+  "base": "237ed70305312c046a1b0be7bfb140198757e3fb",
+  "native_api_ref": "f87e019b2f01ae97dca2b2a13aa426c269e31a6b",
+  "native_executed_head": "e26ec6c12a6b361e63ac95235fe96b3d7d45d40a",
+  "native_product_paths_equal_to_pin": true,
+  "unit_assertions": 171,
+  "new_unit_assertions": 29,
+  "all_unit_statuses": "passed",
+  "real_pg_native_assertions": 19,
+  "all_integration_statuses": "passed",
+  "source_before": {
+    "files": 1437,
+    "sha256": "92679a42044603bb5adb0725bf9d3aeb0a719419292161aa448c78063967095a"
+  },
+  "source_after": {
+    "files": 1437,
+    "sha256": "92679a42044603bb5adb0725bf9d3aeb0a719419292161aa448c78063967095a"
+  },
+  "critical_git_blob_hashes_verified": {
+    "packages/core-backend/src/services/plm-managed-discussion.ts": "581db09c2dcc8b1239df99716bf90fd347ad058ea53f88f31f04274686d9a5a8",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "2e9d2149cbc01186f30e6b6f32da592c7c5b0172369e91d42e41f5208340d648",
+    "packages/core-backend/src/services/plm-managed-bom-authority.ts": "5b5e1a3c4074cb363024b18c31def782613d49ddd6d5f737412524180fe61b7d",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "8149f3a8986d9bb70f698fc5f67b05b2bfd4223650db2cac4916c2ad1ce01ab7",
+    "packages/core-backend/src/auth/visual-review-markup.ts": "0f4bd46fcb5b0b7274c1db069770cb9a2891fbcefbab9496fecb91f58ca54d42",
+    "packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts": "fd5fcc0484c323a57e92b990e27e9eee4ecba459da9aa2e679ff0a144c585c67",
+    "packages/core-backend/vitest.plm-managed-discussion.config.ts": "b63c678ed1be44ac8fd9df33abe865c645e024fd7cde2dacae3b61ad097042c5",
+    "scripts/verification/plm-managed-discussion/verify.py": "2e899f2f077ed3f3981e57c7fed8e1942a7f5701a37f31d98bfdb68a1500f580"
+  },
+  "typecheck_exit": 0,
+  "actionlint_exit": 0,
+  "cleanup": {
+    "directory_removed": true,
+    "errors": []
+  },
+  "raw_private_archive": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/plm-managed-discussion-20261020",
+  "remote_ci": "not yet run; publication waits for preserved #363 perf job118040891880 terminal",
+  "limits": [
+    "Meta sessions fixture provisioned against real Native delegation; no Meta callback persistence",
+    "Mounted actual JWT middleware/router; not full application or browser",
+    "One Native API process plus separate Meta test HTTP process and independent PG writers; not two Meta workers",
+    "Minimal predecessor catalog plus actual target migrations; not full migration chain",
+    "Plain Discussion only; no managed Visual admission/UI/key handoff/install acceptance",
+    "Existing f0ee packages do not contain this source or earlier shared expiry fix"
+  ]
+}
