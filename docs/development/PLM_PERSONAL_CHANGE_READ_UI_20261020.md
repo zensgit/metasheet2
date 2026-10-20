@@ -79,9 +79,9 @@ new settings remain open; this UI does not silently manufacture configuration.
   location and the empty owned directories removed. Its import-resolution failure
   is retained, not counted as a product or passing test.
 
-Production frontend/image compilation and visual browser QA are the next
-verification steps for this source commit. Source tests are not installed package
-or production acceptance. Real Native-issued grant plus real Meta authentication,
+Production frontend/image compilation and actual Chromium visual QA now pass
+within the boundaries below. Source/image tests are not installed package or
+production acceptance. Real Native-issued grant plus real Meta authentication,
 owned HTTP delivery and cross-process backup/restore still need their combined
 proof. Current installed images predate these changes. The whole W01–W23 goal
 remains active/incomplete. All publication remains held behind #363's valuable
@@ -107,3 +107,46 @@ an active button cannot dispatch a second start.
 The already-running valuable image build for source996f760586 is preserved; it
 qualifies only that earlier source. A corrected source/image must be built serially
 after it terminates. Neither image build is installation acceptance.
+
+## Production frontend build and visual closeout
+
+The original996 source image completed successfully and was retained. Only after
+that valuable build terminated did the corrected8f source build run. Both use the
+original tracked frontend recipe with only immutable Node20/Nginx1.27 base pins;
+PNPM10.16.1, frozen-lockfile, heap4096, full Vue project build and Vite production
+compilation remain unchanged. The original install fetched integrity-locked
+packages; this is not an additional offline-build claim. Existing product flags
+for YJS collaboration and range fill remain explicitly false.
+
+Corrected source `8f3816cb092a5ddbf15292dfd25a15344e4721a0` produced immutable
+frontend image `sha256:1b9aa0efdd984755634e96dac6aa7c1427f2464ddcfa3b89d46090197d4e0506`.
+Independent stopped/read-only/network-none image extraction checked165 static
+files, every referenced index asset, all explicit build-info fields, exact source
+Nginx config and the new personal module/corrected control. The synthetic test
+grant is absent from the bundle. Each owned audit container was verified then
+removed. This does not qualify running installation, API/browser security or
+full package acceptance. The image contains the frozen PNPM-resolved dependency
+versions; local test dependency links are not substituted for this production
+compilation.
+
+Actual Chromium143.0.7499.4 exercised the Vue UI with controlled API responses:
+explicit target/consent, immediate secret clearing/no automatic start, explicit
+start, local unbind with pending revoke and no grant in browser storage. Active
+and unbound screenshots were inspected. After the independent retry correction,
+only the changed active-control phase was requalified; its disabled control and
+`监听已启动` label were inspected. These are real browser layout/action checks,
+not real Native/Meta authentication or installed-image runtime proof. All owned
+Vite servers and exact temporary HTML files were cleaned.
+
+The macOS path-canonicalization and system-Python safe-tar-filter prebuild errors
+were terminal before any Docker build. The path boundary remains strict and the
+actual pinned Python3.11.15 supports the safe data filter. An initial Vite HTML
+proxy canonical-path error was corrected only in the disposable harness. Raw
+failed attempts are retained in the compact evidence index. No product policy,
+permission check, baseline or build threshold was relaxed.
+
+Source commit `996f760586fc1e06e762b6e3e246ad81cc0205a3` plus correction source
+`8f3816cb092a5ddbf15292dfd25a15344e4721a0` are separate from this single UI
+closeout document commit. Compact receipt:
+`artifacts/plm-personal-change-read-ui-20261020/verification.json`. Current remote
+head CI/Draft publication remain held behind the valuable parent job.
