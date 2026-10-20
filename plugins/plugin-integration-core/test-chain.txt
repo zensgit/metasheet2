@@ -79,11 +79,13 @@ node __tests__/stock-preparation-project-target-pack-reinstall.test.cjs
 node __tests__/stock-preparation-project-target-archive.test.cjs
 node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
+node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
 node __tests__/stock-preparation-bom-expansion.test.cjs
+node __tests__/stock-preparation-bom-read-concurrency.test.cjs
 node __tests__/stock-preparation-project-subtree-bridge.test.cjs
 node __tests__/stock-preparation-large-bom-jobs.test.cjs
 node __tests__/stock-preparation-conflict-planner.test.cjs
@@ -249,6 +251,7 @@ node __tests__/stock-preparation-department-fields-and-write-scoping.test.cjs
 node __tests__/stock-preparation-project-board.test.cjs
 node __tests__/stock-preparation-operator-pull-gate.test.cjs
 node __tests__/stock-preparation-dry-run-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-dry-run-jobs.test.cjs
 node __tests__/stock-preparation-mvp-persist-target-field-probe-routes.test.cjs
 node __tests__/stock-preparation-mvp-repair-routes.test.cjs
 node __tests__/stock-preparation-managed-table-relabel.test.cjs

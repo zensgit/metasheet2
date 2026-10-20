@@ -951,14 +951,15 @@ jobs:
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
       # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) = 97. Get each file's own
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) +
+      # multitable-onprem-package-range-fill.test.mjs (39) = 136. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=97
+          EXPECTED_OPS_TESTS_COUNT=136
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1522,6 +1523,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           METASHEET_REAL_DB_TEST_STEP: '1' # marks the real-DB allowlist step so a fail-not-skip sentinel can scope its throw here only
+          EXPECT_DB: '1' # a DB-expected run: EXPECT_DB-gated sentinels fail instead of skipping
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -1737,6 +1739,9 @@ jobs:
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
             tests/integration/multitable-webhook-durable-dedup.test.ts \
+            tests/integration/multitable-webhook-floor-realdb.test.ts \
+            tests/integration/multitable-webhook-switch-on-realdb.test.ts \
+            tests/integration/multitable-webhook-scoping-realdb.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
             tests/integration/multitable-ai-bulk-commit.test.ts \
@@ -1838,6 +1843,7 @@ jobs:
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
+            tests/integration/directory-dingtalk-openid-grant-path.db.test.ts \
             tests/integration/approval-requester-department.db.test.ts \
             tests/integration/approval-requester-title.db.test.ts \
             tests/integration/approval-requester-role.db.test.ts \

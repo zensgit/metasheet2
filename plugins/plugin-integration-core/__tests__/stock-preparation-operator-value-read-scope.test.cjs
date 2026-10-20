@@ -69,6 +69,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
@@ -970,7 +971,8 @@ async function main() {
     // `false` and "absent" must produce the SAME response — no key, no scope check, nothing moved.
     const explicitlyOff = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: false } })
     const strip = (response) => {
-      const data = JSON.parse(JSON.stringify(response.body.data))
+      // R67 ③: `withoutReadPhaseClock` is the JSON copy plus the read phase's wall-clock reading removed.
+      const data = withoutReadPhaseClock(response.body.data)
       delete data.dryRunToken // freshly minted per call, and deliberately not derived from the flag
       return data
     }
