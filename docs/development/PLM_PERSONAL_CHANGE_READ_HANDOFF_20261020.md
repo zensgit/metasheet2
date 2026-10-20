@@ -99,3 +99,8 @@ coordinated backup/restore still require their full proof. Current frontend imag
 predate this handoff. No install, deployment, production or whole-goal acceptance
 is claimed. All publication remains held behind #363's valuable queued job and
 all PRs remain Draft.
+
+Source commit: `059b06b595abf2bd4834541ce0b2db3aaaf72493`. Compact receipt:
+`artifacts/plm-personal-change-read-handoff-20261020/verification.json`.
+This is the single source-closeout document commit; exact remote head CI remains
+pending held publication. Owned QA PostgreSQL is stopped with its evidence retained.
