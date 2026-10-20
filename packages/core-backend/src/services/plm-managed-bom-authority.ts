@@ -1,5 +1,6 @@
 /** Shared current browser identity/source locks. Each product caller keeps its own purpose gate. */
 import type { Request } from 'express'
+import type { PersonalChangeReadAuthority } from './plm-personal-bom-change-read-wire'
 import type { PlmQuery } from '../multitable/plm-bom-review-db'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 import { currentManagedRequest } from './plm-managed-request-context'
@@ -55,4 +56,37 @@ export async function lockManagedBomAuthority(q: PlmQuery, req: Request, sourceI
   }
   return { row, reg, actor, source: { tenant_id: row.native_tenant_id as string, org_id: row.native_org_id as string,
     auth_user_id: row.native_auth_user_id as string, part_id: partId } }
+}
+
+/** Standing consent uses current identity/source locks, never a browser-session lifetime. */
+export async function lockStandingBomAuthority(q: PlmQuery, actor: string, scope: PersonalChangeReadAuthority) {
+  if (!isPlmManagedCompanionEnabled()) throw new Refusal(403,'PLM_MANAGED_COMPANION_DISABLED')
+  await q('SELECT id FROM plm_managed_identity_links WHERE id=$1 FOR SHARE',[scope.target.binding_id])
+  const row = (await q(`SELECT l.*,l.id AS link_id,l.status AS link_status,l.generation AS link_generation,
+    l.source_fingerprint AS link_source_fingerprint,b.status AS binding_status,b.generation,
+    b.frozen_origin,b.frozen_root_part_id,b.source_fingerprint,d.type AS source_type,d.owner_id,
+    d.config,d.is_active,d.deleted_at,d.tenant_id,d.workspace_id,d.scope_kind
+    FROM plm_managed_identity_links l JOIN plm_managed_source_bindings b
+      ON b.link_id=l.id AND b.data_source_id=l.data_source_id
+    JOIN data_sources d ON d.id=b.data_source_id
+    WHERE l.id=$1 AND l.data_source_id=$2 FOR SHARE OF l,b`,[scope.target.binding_id,scope.target.source_id])).rows[0]
+  if (!row || row.meta_user_id!==actor || scope.target.user_id!==actor
+    || row.meta_tenant_id!==scope.target.tenant_id || row.meta_org_id!==scope.target.org_id
+    || row.native_auth_user_id!==scope.authUserId || row.native_tenant_id!==scope.tenantId
+    || row.native_org_id!==scope.orgId || row.root_part_id!==scope.rootPartId
+    || Number(row.generation)!==scope.target.binding_generation
+    || row.source_fingerprint!==row.link_source_fingerprint
+    || row.tenant_id!==null && row.tenant_id!==scope.target.tenant_id
+    || !bindingFingerprintMatches(row as ManagedBindingRow)) throw new Refusal(403,'PLM_CHANGE_READ_IDENTITY_CHANGED')
+  const user=(await q('SELECT is_active,role,activation_status,must_change_password,local_password_set FROM users WHERE id=$1 FOR SHARE',[actor])).rows[0]
+  if (!user || user.must_change_password===true || evaluateUserAuthenticationGate(user))
+    throw new Refusal(403,'PLM_CHANGE_READ_USER_REFUSED')
+  for (const org of [scope.target.tenant_id,scope.target.org_id]) {
+    if (!(await q('SELECT org_id FROM user_orgs WHERE user_id=$1 AND org_id=$2 AND is_active=true FOR SHARE',[actor,org])).rows.length)
+      throw new Refusal(403,'PLM_CHANGE_READ_MEMBERSHIP_REFUSED')
+  }
+  const reg=registrationFor({issuer:row.installation_issuer,nativeTenantId:scope.tenantId,nativeOrgId:scope.orgId})
+  if (reg.clientId!==row.client_id || reg.callback!==row.callback || reg.origin!==row.client_origin
+    || new URL(reg.nativeBaseUrl).origin!==scope.origin) throw new Refusal(403,'PLM_CHANGE_READ_REGISTRATION_CHANGED')
+  return {row,reg}
 }

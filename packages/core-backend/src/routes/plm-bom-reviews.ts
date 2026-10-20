@@ -60,6 +60,11 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
       res.status(201).json({ok:true,data:await service.bindPersonalChangeRead(req,readBindingId.parse(req.params.id),input)}) }
     catch (error) { next(error) }
   })
+  router.post('/:id/personal-change-read/start', authenticate, async (req,res,next) => {
+    try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
+      res.json({ok:true,data:await service.startPersonalChangeRead(req,readBindingId.parse(req.params.id),req.body ?? null)}) }
+    catch (error) { next(error) }
+  })
   router.delete('/:id/personal-change-read', authenticate, async (req,res,next) => {
     res.set('Cache-Control','no-store')
     try { if (req.apiTokenId) throw new BomReviewError(401,'UNAUTHORIZED')
@@ -103,15 +108,15 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
     .strict()
   const id = z.string().uuid()
   router.post('/change-events', async (req,res,next) => {
-    try { res.json({ ok: true,data: await service.receiveChange(String(req.user!.id),req.body) }) }
+    try { res.json({ ok: true,data: await service.receiveChange(String(req.user!.id),req.body,undefined,req.authenticatedTenantId ?? null) }) }
     catch (e) { next(e) }
   })
   router.get('/:id/change-listener', async (req,res,next) => {
-    try { res.json({ ok: true,data: await service.changeListener(String(req.user!.id),id.parse(req.params.id)) }) }
+    try { res.json({ ok: true,data: await service.changeListener(String(req.user!.id),id.parse(req.params.id),undefined,req.authenticatedTenantId ?? null) }) }
     catch (e) { next(e) }
   })
   router.post('/:id/change-listener', async (req,res,next) => {
-    try { res.json({ ok: true,data: await service.changeListener(String(req.user!.id),id.parse(req.params.id),req.body ?? null) }) }
+    try { res.json({ ok: true,data: await service.changeListener(String(req.user!.id),id.parse(req.params.id),req.body ?? null,req.authenticatedTenantId ?? null) }) }
     catch (e) { next(e) }
   })
   router.get('/bases', async (req, res, next) => {

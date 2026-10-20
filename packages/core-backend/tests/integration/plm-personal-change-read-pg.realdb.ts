@@ -12,6 +12,7 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { bootstrapPlmBomReviewTestDb } from '../plm-bom-review/bootstrap'
 import { shareSnapshot } from '../plm-bom-review/fixture'
 import { up as managedUp } from '../../src/db/migrations/zzzz20261018010000_create_plm_managed_companion'
+import { up as workerUp, down as workerDown } from '../../src/db/migrations/zzzz20261020020000_stop_personal_reads_on_unlink'
 import { up, down } from '../../src/db/migrations/zzzz20261020010000_add_plm_listener_personal_reads'
 import { PlmBomReviewService, type BomReviewPool } from '../../src/multitable/plm-bom-review-service'
 import { managedRequestContext } from '../../src/services/plm-managed-request-context'
@@ -25,11 +26,13 @@ const db=new Kysely({dialect:new PostgresDialect({pool})})
 const origin='http://127.0.0.1:9'
 const reg={issuer:origin+'/installation',clientId:'listener-client',clientSecret:'owned-synthetic-client-secret',callback:origin+'/api/plm/managed-login/callback',origin,nativeTenantId:'t',nativeOrgId:'o',nativeBaseUrl:origin}
 let onVerify:(()=>Promise<void>)|undefined,replyChange:Record<string,unknown>|undefined,revokeFailure=false,invalidRevokeAck=false,localRevokeRefusal=false,remoteRevokeRefusal=false
+let readReply:((call:any,authority:PersonalChangeReadAuthority)=>Promise<unknown>)|undefined
 const calls:{operation:string;authority:PersonalChangeReadAuthority}[]=[]
 const provider={personalBomChangeReadManagementUrl:personalChangeReadManagementUrl,
  async personalBomChangeReadRequest(call:any,grant:string,authority:PersonalChangeReadAuthority){
   calls.push({operation:call.operation,authority:structuredClone(authority)})
   if(call.operation==='revoke'){if(remoteRevokeRefusal)throw new PlmPersonalChangeReadError(401,'REMOTE_REFUSAL',true);if(localRevokeRefusal)throw new PlmPersonalChangeReadError(403,'LOCAL_PREFLIGHT');if(revokeFailure)throw new Error('owned network loss');return invalidRevokeAck?{}:null}
+  if(call.operation!=='verify' && readReply)return readReply(call,authority)
   if(onVerify)await onVerify()
   return{schema:'yuantus.plm-bom-change-read-binding.v1',grant_id:grant.split('_')[1],connection_id:authority.connectionId,
    tenant_id:authority.tenantId,org_id:authority.orgId,auth_user_id:authority.authUserId,expires_at:new Date(Date.now()+86400000).toISOString(),purpose:'bom_change_read',
@@ -47,8 +50,8 @@ beforeAll(async()=>{
 })
 afterAll(async()=>{await pool.end()})
 function grant(){return'yue_'+randomUUID().replaceAll('-','')+'_'+'s'.repeat(43)}
-async function fixture(){
- onVerify=undefined;replyChange=undefined;revokeFailure=false;invalidRevokeAck=false;localRevokeRefusal=false;remoteRevokeRefusal=false
+async function fixture(sessionSeconds=300){
+ readReply=undefined;onVerify=undefined;replyChange=undefined;revokeFailure=false;invalidRevokeAck=false;localRevokeRefusal=false;remoteRevokeRefusal=false
  process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='true'
  const actor='owner-'+randomUUID(),source='source-'+randomUUID(),base='base-'+randomUUID(),link=randomUUID(),session=randomUUID(),intent=randomUUID()
  const config={connection:{url:origin,headers:{'x-tenant-id':'t','x-org-id':'o'}},options:{apiMode:'yuantus',tenantId:'t',orgId:'o',personalChangeReadConnectionId:'native-grant-connection'}}
@@ -68,7 +71,7 @@ async function fixture(){
  VALUES($1,$2,1,$3,'meta-tenant','meta-org',$4,'P',$5,$6,'t','o',$7,$8,$9,$9,$10,'enc:fixture','/plm/bom-review','consumed',now()+interval '5 minutes',now(),$11,'enc:read-fixture')`,[intent,link,actor,source,origin,reg.issuer,reg.callback,reg.clientId,'a'.repeat(64),'a'.repeat(43),'delegation-'+session])
  await pool.query("INSERT INTO plm_managed_source_bindings(data_source_id,link_id,generation,source_fingerprint,status,frozen_origin,frozen_root_part_id)VALUES($1,$2,1,$3,'active',$4,'P')",[source,link,fp,origin])
  await pool.query(`INSERT INTO plm_managed_sessions(id,intent_id,link_id,data_source_id,generation,delegation_id,credential_ciphertext,expires_at,scope,native_subject,native_tenant_id,native_org_id,meta_user_id,meta_tenant_id,meta_org_id,root_part_id,client_origin,installation_issuer,client_id)
- VALUES($1,$2,$3,$4,1,$5,'enc:read-fixture',now()+interval '5 minutes','bom_review_read','42','t','o',$6,'meta-tenant','meta-org','P',$7,$8,$9)`,[session,intent,link,source,'delegation-'+session,actor,origin,reg.issuer,reg.clientId])
+ VALUES($1,$2,$3,$4,1,$5,'enc:read-fixture',now()+make_interval(secs => $10),'bom_review_read','42','t','o',$6,'meta-tenant','meta-org','P',$7,$8,$9)`,[session,intent,link,source,'delegation-'+session,actor,origin,reg.issuer,reg.clientId,sessionSeconds])
  const headers:Record<string,string>={origin,'content-type':'application/json','x-plm-change-read':'bind'}
  const req={user:{id:actor},authenticatedTenantId:'meta-tenant',get:(key:string)=>headers[key.toLowerCase()]}as unknown as Request
  const run=<T>(fn:()=>Promise<T>)=>managedRequestContext.run({userId:actor,sessionId:session,conflict:false},fn)
@@ -207,4 +210,190 @@ it('rejects a retired replay while permitting a distinct fresh credential',async
  await service.unbindPersonalChangeRead(f.req,f.binding.id);f.headers['x-plm-change-read']='bind'
  await expect(f.bind(old)).rejects.toMatchObject({status:409,code:'PLM_CHANGE_READ_RETIRED_GRANT'})
  expect(await f.bind(grant())).toMatchObject({bound:true,pending:1})
+})
+
+
+async function personalListenerFixture(sessionSeconds=300){
+ if (!(await pool.query("SELECT to_regprocedure('meta_plm_change_read_link_stopped()') IS NOT NULL AS ready")).rows[0].ready) await workerUp(db)
+ const f=await fixture(sessionSeconds);await f.bind()
+ const event={schema:'yuantus.plm-change-event.v1',event_type:'bom.plm_change.applied',event_id:randomUUID(),
+  binding_id:f.binding.id,binding_version:f.binding.version,source:{connection_id:f.source,tenant_id:'t',org_id:'o',part_id:'P'},
+  change:{kind:'bom_line_writeback',audit_id:randomUUID(),bom_line_id:'RA1'},occurred_at:'2026-10-20T00:00:00.000000Z'}
+ let head=5,include=false,awaitRead:(()=>Promise<void>)|undefined
+ readReply=async(call,a)=>{
+  if(awaitRead)await awaitRead()
+  if(call.operation==='fact')return event
+  return{schema:'yuantus.plm-change-page.v1',source:event.source,head_sequence:head,next_sequence:head,
+   events:call.afterSequence===undefined||!include?[]:[{sequence:6,event}]}
+ }
+ return{...f,event,setRead:(options:{head?:number;include?:boolean;awaitRead?:()=>Promise<void>})=>{head=options.head??head;include=options.include??include;awaitRead=options.awaitRead},
+  start:()=>service.changeListener(f.actor,f.binding.id,{expectedVersion:f.binding.version},'meta-tenant')}
+}
+it('personal listener uses standing consent after browser expiry and skips all historical events',async()=>{
+ const f=await personalListenerFixture(2)
+ await new Promise(resolve=>setTimeout(resolve,2100))
+ expect((await pool.query('SELECT expires_at<clock_timestamp() AS expired FROM plm_managed_sessions WHERE id=$1',[f.session])).rows[0].expired).toBe(true)
+ expect(await f.start()).toMatchObject({status:'active',cursor:5})
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:5})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(0)
+ f.setRead({head:6,include:true})
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:6})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+ expect((await pool.query('SELECT * FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+ f.setRead({include:false});expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:6})
+})
+it.each(['false','TRUE','1',''])('personal listener read flag %s has no shared transport fallback',async flag=>{
+ const f=await personalListenerFixture();await f.start();const before=calls.length
+ process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED=flag
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'stopped'});expect(calls.length).toBe(before)
+})
+it('personal listener checks target permission after an empty page await',async()=>{
+ const f=await personalListenerFixture();await f.start()
+ f.setRead({awaitRead:async()=>{await pool.query("UPDATE spreadsheet_permissions SET perm_code='spreadsheet:read' WHERE sheet_id=$1 AND subject_id=$2",[f.binding.sheetId,f.actor])}})
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'stopped'})
+ expect((await pool.query('SELECT cursor FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0].cursor).toBe('5')
+})
+it('personal listener refuses a revoked immutable Native identity link before any read',async()=>{
+ const f=await personalListenerFixture();await f.start();const before=calls.length
+ await expect(pool.query("UPDATE plm_managed_identity_links SET native_auth_user_id='777' WHERE id=$1",[f.link])).rejects.toThrow('link_immutable')
+ await pool.query("UPDATE plm_managed_identity_links SET status='revoked',stopped_at=clock_timestamp(),stop_reason='revoked' WHERE id=$1",[f.link])
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'inactive'});expect(calls.length).toBe(before)
+})
+it('personal listener checks membership loss after fact verification without advancing inbox or cursor',async()=>{
+ const f=await personalListenerFixture();await f.start();f.setRead({head:6,include:true})
+ readReply=async(call,a)=>{
+  if(call.operation==='fact'){await pool.query("UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id='meta-org'",[f.actor]);return f.event}
+  return{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:6,next_sequence:6,events:[{sequence:6,event:f.event}]}
+ }
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'stopped'})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(0)
+ expect((await pool.query('SELECT cursor FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0].cursor).toBe('5')
+})
+it('personal listener start refuses source epoch change during fresh baseline',async()=>{
+ const f=await personalListenerFixture()
+ f.setRead({awaitRead:async()=>{await pool.query('UPDATE data_sources SET is_active=false WHERE id=$1',[f.source]);await pool.query('UPDATE data_sources SET is_active=true WHERE id=$1',[f.source])}})
+ await expect(f.start()).rejects.toMatchObject({status:403})
+ expect((await pool.query('SELECT status FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0].status).toBe('stopped')
+})
+it('personal listener refuses an expired standing grant before transport',async()=>{
+ const f=await personalListenerFixture();await pool.query("UPDATE meta_plm_bom_change_listeners SET personal_read_expires_at=clock_timestamp()-interval '1 second' WHERE binding_id=$1",[f.binding.id])
+ const before=calls.length;await expect(f.start()).rejects.toMatchObject({status:403});expect(calls.length).toBe(before)
+})
+it('personal stopped listener refuses a direct intake before any Native fact read',async()=>{
+ const f=await personalListenerFixture(),before=calls.length
+ await expect(service.receiveChange(f.actor,f.event)).rejects.toMatchObject({code:'LISTENER_STOPPED'});expect(calls.length).toBe(before)
+})
+
+it('personal listener unlink archives and clears credentials atomically before any worker tick',async()=>{
+ const f=await personalListenerFixture();await f.start();const before=calls.length
+ const client=await pool.connect()
+ try{await client.query('BEGIN');await client.query("UPDATE plm_managed_identity_links SET status='revoked',stopped_at=clock_timestamp(),stop_reason='revoked' WHERE id=$1",[f.link]);await client.query('ROLLBACK')}finally{client.release()}
+ expect((await pool.query('SELECT encrypted_personal_read_grant,status FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]).toMatchObject({status:'active',encrypted_personal_read_grant:expect.stringMatching(/^enc:/)})
+ await pool.query("UPDATE plm_managed_identity_links SET status='revoked',stopped_at=clock_timestamp(),stop_reason='revoked' WHERE id=$1",[f.link])
+ expect((await pool.query('SELECT encrypted_personal_read_grant,status,stop_reason FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]).toEqual({status:'stopped',encrypted_personal_read_grant:null,stop_reason:'LINK_REVOKED'})
+ expect((await pool.query('SELECT state,encrypted_grant FROM meta_plm_bom_change_read_retired_grants WHERE binding_id=$1',[f.binding.id])).rows).toMatchObject([{state:'pending',encrypted_grant:expect.stringMatching(/^enc:/)}])
+ expect(calls.length).toBe(before)
+ process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='false';revokeFailure=true
+ expect(await service.retryPersonalReadRevocations(f.actor,f.binding.id)).toEqual({pending:1,rejected:0})
+ revokeFailure=false;expect(await service.retryPersonalReadRevocations(f.actor,f.binding.id)).toEqual({pending:0,rejected:0})
+ await expect(workerDown(db)).rejects.toThrow('authority_evidence_present')
+})
+it('personal listener concurrent starts preserve one fresh baseline generation',async()=>{
+ const f=await personalListenerFixture();let release!:()=>void,seen=0;const gate=new Promise<void>(resolve=>{release=resolve})
+ f.setRead({awaitRead:async()=>{if(++seen===2)release();await gate}})
+ const results=await Promise.allSettled([f.start(),f.start()]);expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1)
+ expect((results.find(r=>r.status==='rejected') as PromiseRejectedResult).reason).toMatchObject({status:409})
+})
+it('personal listener old empty-page completion cannot revive a replaced grant generation',async()=>{
+ const f=await personalListenerFixture();await f.start();let replaced=false
+ f.setRead({awaitRead:async()=>{if(!replaced){replaced=true;await f.bind()}}})
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'superseded'})
+ expect((await pool.query('SELECT cursor,status FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]).toEqual({cursor:'5',status:'stopped'})
+})
+it('personal listener in another Node process commits inbox cursor and existing completion event together',async()=>{
+ const f=await personalListenerFixture();await f.start()
+ const worker=child({poll:true,id:f.binding.id,event:f.event,page:{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:6,next_sequence:6,events:[{sequence:6,event:f.event}]}})
+ const result=await worker.done;expect(result).toMatchObject({status:200,state:'active',cursor:6});expect(result.pid).not.toBe(process.pid)
+ expect((await pool.query('SELECT cursor FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0].cursor).toBe('6')
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+ expect((await pool.query('SELECT * FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+})
+
+it('personal listener concurrent independent poll processes commit one fact and one completion',async()=>{
+ const f=await personalListenerFixture();await f.start()
+ const input={poll:true,barrier:true,id:f.binding.id,event:f.event,page:{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:6,next_sequence:6,events:[{sequence:6,event:f.event}]}}
+ const a=child(input),b=child(input);await Promise.all([a.ready,b.ready]);a.release();b.release()
+ const results=await Promise.all([a.done,b.done]);expect(results[0].pid).not.toBe(results[1].pid)
+ expect(results.filter(r=>r.state==='active')).toHaveLength(1)
+ expect(results.filter(r=>r.state==='superseded')).toHaveLength(1)
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+ expect((await pool.query('SELECT * FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+})
+it('personal listener rolls back inbox completion and cursor together after a cursor commit failure',async()=>{
+ const f=await personalListenerFixture();await f.start();f.setRead({head:6,include:true})
+ const failingPool:BomReviewPool={query:tx.query,transaction:fn=>tx.transaction(({query})=>fn({query:async(sql,params)=>{
+  if(sql.includes('UPDATE meta_plm_bom_change_listeners SET cursor='))throw new Error('owned cursor fault')
+  return query(sql,params)
+ }}))}
+ const failing=new PlmBomReviewService({pool:failingPool,dataSourceManager:{getDataSource(){throw new Error('shared source adapter forbidden')}},personalChangeReadProvider:()=>provider})
+ expect(await failing.pollChanges(f.binding.id)).toEqual({state:'waiting'})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(0)
+ expect((await pool.query('SELECT * FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(0)
+ expect((await pool.query('SELECT cursor FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0].cursor).toBe('5')
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:6})
+})
+it('personal listener stops after a received Native-revocation response without shared retry',async()=>{
+ const f=await personalListenerFixture();await f.start();const before=calls.length
+ readReply=async()=>{throw new PlmPersonalChangeReadError(401,'REMOTE_REVOKED',true)}
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'stopped'});expect(calls.length).toBe(before+1)
+})
+it('personal listener prepares existing completion delivery without a cached shared adapter',async()=>{
+ const f=await personalListenerFixture();await f.start();f.setRead({head:6,include:true});await service.pollChanges(f.binding.id)
+ const completion=(await pool.query('SELECT id FROM meta_plm_bom_review_completion_events WHERE binding_id=$1',[f.binding.id])).rows[0]
+ const isolated=new PlmBomReviewService({pool:tx,dataSourceManager:{getDataSource(){throw new Error('shared source adapter forbidden')}},personalChangeReadProvider:()=>provider})
+ expect(await isolated.prepareCompletion(completion.id)).toMatchObject({state:'prepared'})
+ await pool.query("UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id='meta-org'",[f.actor])
+ expect(await isolated.deliverCompletion(completion.id)).toMatchObject({state:'cancelled'})
+})
+
+it('personal listener late page from a different process cannot commit after unlink',async()=>{
+ const f=await personalListenerFixture();await f.start()
+ const worker=child({poll:true,barrier:true,id:f.binding.id,event:f.event,page:{schema:'yuantus.plm-change-page.v1',source:f.event.source,head_sequence:6,next_sequence:6,events:[{sequence:6,event:f.event}]}})
+ await worker.ready
+ await pool.query("UPDATE plm_managed_identity_links SET status='revoked',stopped_at=clock_timestamp(),stop_reason='revoked' WHERE id=$1",[f.link])
+ worker.release();expect(await worker.done).toMatchObject({state:'stopped'})
+ expect((await pool.query('SELECT cursor,status,stop_reason,encrypted_personal_read_grant FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[f.binding.id])).rows[0]).toEqual({cursor:'5',status:'stopped',stop_reason:'LINK_REVOKED',encrypted_personal_read_grant:null})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(0)
+})
+it('personal listener requires the unlink retirement migration before admitting a read',async()=>{
+ const f=await personalListenerFixture(),before=calls.length
+ const missing:BomReviewPool={query:tx.query,transaction:fn=>tx.transaction(({query})=>fn({query:async(sql,params)=>sql.includes("to_regprocedure('meta_plm_change_read_link_stopped()')")?{rows:[{ready:false}],rowCount:1}:query(sql,params)}))}
+ const guarded=new PlmBomReviewService({pool:missing,dataSourceManager:{getDataSource(){throw new Error('shared source adapter forbidden')}},personalChangeReadProvider:()=>provider})
+ await expect(guarded.changeListener(f.actor,f.binding.id,{expectedVersion:f.binding.version},'meta-tenant')).rejects.toMatchObject({code:'RUNTIME_UNAVAILABLE'});expect(calls.length).toBe(before)
+})
+
+it('personal listener activation refuses the wrong authenticated Meta tenant before Native baseline',async()=>{
+ const f=await personalListenerFixture(),before=calls.length
+ await expect(service.changeListener(f.actor,f.binding.id,{expectedVersion:f.binding.version},'foreign-meta-tenant')).rejects.toMatchObject({status:403})
+ expect(calls.length).toBe(before)
+})
+
+it('personal listener browser start requires explicit Origin action and current target tenant',async()=>{
+ const f=await personalListenerFixture(),before=calls.length
+ await expect(f.run(()=>service.startPersonalChangeRead(f.req,f.binding.id,{expectedVersion:f.binding.version}))).rejects.toMatchObject({status:403})
+ expect(calls.length).toBe(before)
+ f.headers['x-plm-change-read']='start'
+ expect(await f.run(()=>service.startPersonalChangeRead(f.req,f.binding.id,{expectedVersion:f.binding.version}))).toMatchObject({status:'active',cursor:5})
+ await expect(service.changeListener(f.actor,f.binding.id,undefined,'foreign-meta-tenant')).rejects.toMatchObject({status:403})
+ const status=await service.changeListener(f.actor,f.binding.id,undefined,'meta-tenant');expect(JSON.stringify(status)).not.toContain('personal_read_authority')
+ await expect(service.receiveChange(f.actor,f.event,undefined,'foreign-meta-tenant')).rejects.toMatchObject({status:403})
+})
+
+it('personal listener drains the durable retired queue through the existing worker service with reads off',async()=>{
+ const f=await personalListenerFixture();f.headers['x-plm-change-read']='unbind';revokeFailure=true
+ expect(await service.unbindPersonalChangeRead(f.req,f.binding.id)).toEqual({pending:1,rejected:0})
+ revokeFailure=false;process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='false'
+ const groups=Number((await pool.query("SELECT count(DISTINCT binding_id) AS n FROM meta_plm_bom_change_read_retired_grants WHERE state IN ('pending','unknown')")).rows[0].n)
+ for(let i=0;i<Math.ceil(groups/50)+1;i++)await service.drainPersonalReadRevocations()
+ expect((await pool.query('SELECT state,encrypted_grant FROM meta_plm_bom_change_read_retired_grants WHERE binding_id=$1',[f.binding.id])).rows).toEqual([{state:'revoked',encrypted_grant:null}])
 })

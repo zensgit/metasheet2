@@ -30,3 +30,11 @@ it.each([false,true])('never audits a raw grant on success or authentication ref
  if(denied)expect(spy).not.toHaveBeenCalled()
  else expect(spy.mock.calls[0][2]).toEqual({grant:secret,expectedVersion:1})
 })
+
+it('routes explicit personal start through managed authentication before the normal bearer gate',async()=>{
+ const spy=vi.spyOn(PlmBomReviewService.prototype,'startPersonalChangeRead').mockResolvedValue({status:'active'}as never)
+ const app=express();app.use(express.json());app.use('/api/plm-bom-reviews',createPlmBomReviewsRouter({pool:{query:vi.fn(),transaction:vi.fn()},dataSourceManager:{}as never}));pinned.setApp(app)
+ const id=crypto.randomUUID(),response=await request(pinned.url()).post('/api/plm-bom-reviews/'+id+'/personal-change-read/start').send({expectedVersion:1})
+ expect(response.status).toBe(200);expect(response.headers['cache-control']).toBe('no-store');expect(response.headers['referrer-policy']).toBe('no-referrer')
+ expect(spy).toHaveBeenCalledWith(expect.objectContaining({user:{id:'owner'}}),id,{expectedVersion:1})
+})

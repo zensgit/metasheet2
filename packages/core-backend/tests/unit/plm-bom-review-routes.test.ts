@@ -61,9 +61,9 @@ describe('BOM share login route', () => {
     const response=await request(pinned.url()).post(`/api/plm-bom-reviews/${id}/change-listener`)
       .set('Authorization',`Bearer ${token}`).send({ expectedVersion: 1 })
     expect(response.status).toBe(200); expect(response.headers['cache-control']).toBe('no-store')
-    expect(spy).toHaveBeenCalledWith('owner',id,{ expectedVersion: 1 })
+    expect(spy).toHaveBeenCalledWith('owner',id,{ expectedVersion: 1 },null)
     await request(pinned.url()).get(`/api/plm-bom-reviews/${id}/change-listener`).set('Authorization',`Bearer ${token}`).expect(200)
-    expect(spy).toHaveBeenLastCalledWith('owner',id)
+    expect(spy).toHaveBeenLastCalledWith('owner',id,undefined,null)
   })
   it('uses authenticated actor, strict source query and no-store', async () => {
     fixture()

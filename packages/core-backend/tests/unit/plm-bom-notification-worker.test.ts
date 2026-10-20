@@ -22,6 +22,23 @@ function fixture() {
   return { worker,query,service,warn }
 }
 describe('BOM notification background lifecycle', () => {
+  it('drains frozen read revocations with personal reads off and without eligible bindings',async()=>{
+    vi.stubEnv('PLM_PERSONAL_BOM_CHANGE_READ_ENABLED','false')
+    const {worker,query,service}=fixture()
+    const drain=vi.fn(async()=>undefined)
+    Object.assign(service,{drainPersonalReadRevocations:drain})
+    query.mockResolvedValue({rows:[]})
+    await worker.start();expect(drain).toHaveBeenCalledOnce();expect(service.pollChanges).not.toHaveBeenCalled()
+    await worker.stop();await worker.tick();expect(drain).toHaveBeenCalledOnce()
+  })
+  it('stop awaits in-flight read cleanup and admits no subsequent polling',async()=>{
+    const {worker,service,query}=fixture();let release!:()=>void
+    const drain=vi.fn(()=>new Promise<void>(resolve=>{release=resolve}))
+    Object.assign(service,{drainPersonalReadRevocations:drain})
+    const start=worker.start();for(let i=0;i<10;i++)await Promise.resolve()
+    const stop=worker.stop();release();await Promise.all([start,stop])
+    expect(query).not.toHaveBeenCalled();expect(service.pollChanges).not.toHaveBeenCalled();expect(vi.getTimerCount()).toBe(0)
+  })
   it('revisits an eligible older retry while every completion page remains full',async () => {
     const { worker,query,service } = fixture()
     let page = 0
