@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: zensgit/yuantus-plm
-          ref: 'f87e019b2f01ae97dca2b2a13aa426c269e31a6b'
+          ref: 'ee067d96a51c041aeee7154701db14d98180949a'
           path: .ci-native-discussion
           persist-credentials: false
       - name: Prepare locked consumers and owned database tools
@@ -71,15 +71,15 @@ jobs:
             --pg-bin "$PLM_STANDALONE_PG_BIN" --redis-server "$PLM_DISCUSSION_REDIS_BINARY" \
             --redis-sha256 "$PLM_DISCUSSION_REDIS_SHA256" \
             --out artifacts/plm-managed-discussion-20261020/ci-runtime.json
-          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 25
+          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 27
           python - <<'PYTHON'
           import json
           from pathlib import Path
           report = json.loads(Path('artifacts/plm-managed-discussion-20261020/ci-runtime.json').read_text())
           assert report['passed'] and report['directory_removed'] and report['cleanup_errors'] == []
-          assert report['checks'] == 25 and report['test_exit'] == 0
+          assert report['checks'] == 27 and report['test_exit'] == 0
           assert report['source_before'] == report['source_after']
-          assert report['native_api_ref'] == report['native_checkout_head'] == 'f87e019b2f01ae97dca2b2a13aa426c269e31a6b'
+          assert report['native_api_ref'] == report['native_checkout_head'] == 'ee067d96a51c041aeee7154701db14d98180949a'
           PYTHON
       - name: Retain compact runtime evidence
         if: always()

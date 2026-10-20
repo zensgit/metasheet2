@@ -20,7 +20,7 @@ import time
 import urllib.request
 import uuid
 
-NATIVE_REF = 'f87e019b2f01ae97dca2b2a13aa426c269e31a6b'
+NATIVE_REF = 'ee067d96a51c041aeee7154701db14d98180949a'
 META = Path(__file__).resolve().parents[3]
 NATIVE_PATHS = ['src', 'requirements.lock', 'scripts/verification/plm-managed-package/discussion_native_fixture.py']
 
@@ -150,14 +150,14 @@ def verify(args):
                 raise RuntimeError('Owned Vitest process group exceeded its deadline; evidence retained')
         report = json.loads(tests.read_text())
         assertions = [a for suite in report['testResults'] for a in suite.get('assertionResults', [])]
-        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 25
+        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 27
         assert all(a['status'] == 'passed' for a in assertions), 'No skips/todo/failed tests permitted'
         worker_proof = json.loads(out.with_suffix('.workers.json').read_text())
         workers = worker_proof['workers']
         assert len(workers) == 2 and len({w['pid'] for w in workers}) == 2
         assert all(w['exit'] == 0 and w['stopped'] is True for w in workers)
         result['meta_workers'] = workers
-        result['checks'] = 25
+        result['checks'] = 27
         after = hashes()
         result['source_after'] = digest(after)
         assert after == before

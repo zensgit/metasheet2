@@ -135,9 +135,7 @@ async function fixture(seconds = 300, issued?: { delegation_id: string; credenti
     VALUES($1,$2,$3,$4,1,$5,$9,now()+make_interval(secs=>$8),'bom_review_read','42','default','fixture-org',$6,'meta-tenant','meta-org','part','https://meta.example.test',$7,'discussion-client')`,
     [session, intent, link, source, delegation, actor, proxy, seconds, ciphertext])
   async function req(body: unknown = { operation: 'create', body: { target_type: 'item', target_id: 'part', body: 'Managed real Native comment' } }) {
-    const response = await fetch(native + '/api/v1/bom/multitable/part/embed-token', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + bearer, 'x-tenant-id': 'default', 'x-org-id': 'fixture-org' },
-      body: JSON.stringify({ origin: 'https://meta.example.test' }) })
+    const response = await firstPartyMint()
     expect(response.status).toBe(200)
     return { user: { id: actor }, authenticatedTenantId: 'meta-tenant', body,
       headers: { origin: 'https://meta.example.test', 'content-type': 'application/json',
@@ -151,6 +149,32 @@ async function waitFor(check: () => Promise<boolean>) {
   const deadline = Date.now() + 5000
   while (!await check()) { if (Date.now() > deadline) throw new Error('Owned PG wait deadline'); await new Promise(resolve => setTimeout(resolve, 20)) }
 }
+function firstPartyMint(cookie = uiCookie, authorization?: string) {
+  return fetch(native + '/api/v1/auth/managed-login/discussion-token', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', origin: native, 'x-yuantus-ui-request': 'managed-login',
+      ...(cookie ? { Cookie: cookie } : {}), ...(authorization ? { Authorization: authorization } : {}) },
+    body: JSON.stringify({ root_part_id: 'part', client_id: 'discussion-client' }) })
+}
+it('requires the current UI cookie and refuses a normal bearer even with that cookie before minting', async () => {
+  expect((await firstPartyMint('')).status).toBe(401)
+  expect((await firstPartyMint('', 'Bearer ' + bearer)).status).toBe(401)
+  expect((await firstPartyMint(uiCookie, 'Bearer ' + bearer)).status).toBe(401)
+  const accepted = await firstPartyMint()
+  expect(accepted.status).toBe(200)
+  expect(Object.keys(await accepted.json() as object).sort()).toEqual(['embed_origin', 'embed_token', 'expires_in', 'navigation_url'])
+  expect(accepted.headers.get('cache-control')).toBe('no-store')
+})
+it('mints independent cookie-bound tokens concurrently and admits each only once across Meta processes', async () => {
+  const f = await delegatedFixture()
+  const requests = await Promise.all([f.req(), f.req()])
+  expect(requests[0].headers['x-plm-embed-token']).not.toBe(requests[1].headers['x-plm-embed-token'])
+  const created = await Promise.all(requests.map((request, index) => httpManaged(f, request, f.cookie, workers[index].url)))
+  expect(created.map(value => value.status)).toEqual([200, 200])
+  const ids = await Promise.all(created.map(async value => (await value.json() as any).data.id))
+  expect(ids[0]).not.toBe(ids[1])
+  const replayed = await Promise.all(requests.map((request, index) => httpManaged(f, request, f.cookie, workers[1 - index].url)))
+  expect(replayed.map(value => value.status)).toEqual([401, 401])
+})
 it('runs all eight operations against actual Native Discussion with separate Meta identity and live PG authority', async () => {
   const f = await fixture(); const created = await f.run(await f.req()) as { id: string; comments: { author_user_id: number }[] }
   expect(created.comments[0].author_user_id).toBe(42)
