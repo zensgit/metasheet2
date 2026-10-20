@@ -54,6 +54,7 @@ import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import {
   BATCH_ARCHIVE_DISABLED_CODE,
   StockPreparationProjectSyncCallError,
+  type StockPreparationDryRunOptions,
   type StockPreparationProjectSyncApi,
 } from '../src/services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../src/services/integration/stockPreparation/largeBomPull'
@@ -120,6 +121,10 @@ async function flushUi(cycles = 6): Promise<void> {
     await Promise.resolve()
     await nextTick()
   }
+  // Drain resolved HTTP/body promises without depending on the number of async wrappers.
+  // Intentionally unresolved request doubles remain pending for the cancellation assertions.
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await nextTick()
 }
 
 describe('StockPreparationProjectSyncPanel', () => {
@@ -645,7 +650,8 @@ describe('StockPreparationProjectSyncPanel', () => {
     const root = mountPanel({ api: double, onOpenMultitable })
     await runSync(root)
 
-    expect(double.dryRun).toHaveBeenCalledWith(PROJECT_NO)
+    // R67 ④: the panel hands the dry run its progress / stop-polling options.
+    expect(double.dryRun).toHaveBeenCalledWith(PROJECT_NO, expect.objectContaining({ signal: expect.anything(), onProgress: expect.any(Function) }))
     expect(double.apply).toHaveBeenCalledWith(PROJECT_NO, 'tok_abc')
 
     const steps = root.querySelectorAll('[data-testid="stock-prep-project-sync-step"]')
@@ -1015,5 +1021,127 @@ describe('StockPreparationProjectSyncPanel', () => {
     // The disclosure is a real <details> that is CLOSED by default: plain language first.
     expect(tech.tagName.toLowerCase()).toBe('details')
     expect(tech.getAttribute('data-open')).toBe('false')
+  })
+
+  // ---- R67 ④ — 试算 through the background job lane -------------------------------------------
+  //
+  // The run's dry-run step enqueues and polls (projectSync.ts; its wire half is pinned in
+  // StockPreparationProjectSync.spec.ts). What the PANEL owns: the progress line with the time taken,
+  // stopping the poll when it goes away (the job keeps running server-side), and showing a trial that
+  // is still running when it comes back — without ever starting one on its own.
+
+  it('R67-P1: while the background trial runs the panel says so with the elapsed time; the result then renders as before', async () => {
+    let finish: (plan: unknown) => void = () => {}
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        options?.onProgress?.({ elapsedMs: 83_000, attached: false })
+        return new Promise((resolve) => { finish = resolve })
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line).not.toBeNull()
+    expect(line.getAttribute('data-dry-run-progress')).toBe('run')
+    expect(line.textContent).toContain('1:23')
+    expect(line.textContent).toContain('后台试算')
+    finish({ status: 'ready', canApply: true, dryRunToken: 'tok_abc', counts: { add: 3, update: 2, skip: 7, inactive: 0, manual_confirm: 0 } })
+    await flushUi(12)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
+    expect((root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement).dataset.verdict).toBe('imported')
+    expect(double.apply).toHaveBeenCalledWith(PROJECT_NO, 'tok_abc')
+  })
+
+  it('R67-P1 (en): the progress line is bilingual and says leaving does not stop it', async () => {
+    h.locale = 'en'
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        options?.onProgress?.({ elapsedMs: 5_000, attached: true })
+        return new Promise(() => {})
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line.getAttribute('data-dry-run-progress')).toBe('attached')
+    expect(line.textContent).toContain('0:05')
+    expect(line.textContent).toContain('leaving this page does not stop it')
+  })
+
+  it('R67-P2: unmounting stops the poll (the signal handed to the dry run is aborted); the job is left running', async () => {
+    let seen: AbortSignal | undefined
+    const double = api({
+      dryRun: vi.fn().mockImplementation((_projectNo: string, options?: StockPreparationDryRunOptions) => {
+        seen = options?.signal
+        return new Promise(() => {})
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    expect(seen).toBeDefined()
+    expect(seen!.aborted).toBe(false)
+    app!.unmount()
+    app = null
+    expect(seen!.aborted).toBe(true)
+  })
+
+  it('R67-P3: re-attach — mounted on a project whose trial is still running, it shows it, polls until it ends, and never starts a run', async () => {
+    const statuses = [
+      { status: 'running' as const, elapsedMs: 61_000 },
+      { status: 'running' as const, elapsedMs: 63_000 },
+      { status: 'succeeded' as const, elapsedMs: 64_000 },
+    ]
+    let release: () => void = () => {}
+    const waits: number[] = []
+    const dryRunPollWait = vi.fn((ms: number) => {
+      waits.push(ms)
+      return new Promise<void>((resolve) => { release = resolve })
+    })
+    const double = api({ dryRunJobStatus: vi.fn().mockImplementation(async () => statuses.shift() ?? null) })
+    const root = mountPanel({ api: double, projectNo: PROJECT_NO, dryRunPollWait })
+    await flushUi()
+    let line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line).not.toBeNull()
+    expect(line.getAttribute('data-dry-run-progress')).toBe('resumed')
+    expect(line.textContent).toContain('1:01')
+    expect(double.dryRunJobStatus).toHaveBeenCalledWith(PROJECT_NO)
+    release()
+    await flushUi()
+    line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement
+    expect(line.textContent).toContain('1:03')
+    release()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
+    expect(waits).toEqual([2000, 2000])
+    expect(double.dryRun).not.toHaveBeenCalled()
+    expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  it('R67-P3b: unmounting while re-attached stops polling the status', async () => {
+    let release: () => void = () => {}
+    const dryRunPollWait = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const double = api({ dryRunJobStatus: vi.fn().mockResolvedValue({ status: 'running', elapsedMs: 1_000 }) })
+    mountPanel({ api: double, projectNo: PROJECT_NO, dryRunPollWait })
+    await flushUi()
+    expect(double.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    app!.unmount()
+    app = null
+    release()
+    await flushUi()
+    expect(double.dryRunJobStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('R67-P4: someone else\'s trial of the project is running — the step says to wait, not 「稍后再试」 for a broken source', async () => {
+    const root = mountPanel({
+      api: api({
+        dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/dry-run-jobs', { code: 'STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS' })),
+      }),
+    })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain('另一位同事')
+    expect(plan.textContent).not.toContain('没能连上取数')
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_DRY_RUN_BUSY')
   })
 })

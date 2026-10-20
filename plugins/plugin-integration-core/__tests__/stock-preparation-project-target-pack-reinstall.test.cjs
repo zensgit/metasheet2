@@ -155,8 +155,12 @@ const hostWrites = (h) => h.provisioning.calls.filter((c) => WRITE_CALLS.has(c[0
 // stock-preparation-project-targets.cjs `provisionProjectSheet`) — that write is the create path's, not the
 // installer's, so it is not counted as an install write here.
 const CONTRACT_OPTION_FIELD_IDS = new Set(['lastPlmRefreshDecision'])
+// B (awaiting owner): provisioning also marks the template's plm_system columns read-only for people
+// (`markProjectSheetPlmSystemColumns`, one patch per column) — the create path's write too, never the
+// installer's: a pack only ever patches its own `ext_` columns, none of which is a template column.
+const PLM_LOCK_FIELD_IDS = new Set(require(path.join(LIB, 'stock-preparation-project-targets.cjs')).PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS)
 const installerWrites = (h) => h.provisioning.calls.filter((c) => c[0] === 'ensureMissingObjectFields'
-  || (c[0] === 'patchObjectFieldProperty' && !CONTRACT_OPTION_FIELD_IDS.has(c[2])))
+  || (c[0] === 'patchObjectFieldProperty' && !CONTRACT_OPTION_FIELD_IDS.has(c[2]) && !PLM_LOCK_FIELD_IDS.has(c[2])))
 const provisionedProjectObjects = (h) => [...h.provisioning.objects.keys()].filter((key) => key.includes('plm_stock_preparation_sandbox_p_'))
 
 /**

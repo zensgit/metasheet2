@@ -1,5 +1,27 @@
 # 既有 #6337 收口验证
 
+## 2026-10-20 解除本地对齐阻断：冻结 main 的四层候选，尚未发布
+
+Owner 请求解决 blocked 后，本轮只在独立 managed worktree 中实施四支既有 PR 的本地叠层对齐；不推送、不触发/重跑 CI、不合并 PR、不部署、不访问客户数据、不真实发送。旧 dirty worktree 与旧验证 MD 均未重置或覆盖。
+
+冻结 main 为 `8a89e8352f399340f5e17935edd3c13814eaf355`；四个远端原 head 分别为 #6315 `e4e7272fb8af9e7f1a6dc74e7c92dbc7e7f0db40`、#6323 `cb19415978f71f7078b3a825fb18d3c92b0f9f59`、#6324 `53a9585cd97115e31e9335fca1599cbd64a0da3b`、#6337 `3c3341246c7fe3f0ed3bf09981d486e447771beb`。使用普通本地 merge commit 保留祖先，不重写远端历史。root/K3/PLM 本地提交为 `1d37957705c6a16fb6885173e6645c2c068738a8` / `1370b2d96` / `a971f4a15`；Automation 候选仍待整链验证。
+
+### 冲突决策与最小调整
+
+- 根层与 Automation 层的 pin 冲突按合并后真实源码 `computePackageProvenancePinSet` 计算，不取任一旧 hash。PLM 层同样重算。root 与 PLM 完整 provenance 已在 WSL 通过；Windows 直接执行曾因 bash 路径格式失败，原失败不删除。
+- PLM 同时保留 main 的并发预读和 SA01 的批准 BOM 版本：根预读、根实际读取使用指定版本，递归子件仍使用自己的版本。后置成员校验使用 main 已有的同一 SQL 值比较规则；版本批准的精确比较不取消。
+- 保留 main 的 `read_row_mismatch` fail-closed：只在源明确声明 `filtersApplied:false` 时本地筛选；声称已过滤或未声明却返回越界行仍失败，无 token、无写入。旧测试中的不正确成功预期改成拒绝断言。
+- 前端 strict preview 保留既有同步只读端点及严格响应合同；普通项目导入保留 main 的 durable job 路径。统一合并后重复的 HTTP mock；渲染测试等待已解决 Promise 的下一事件循环，不延长生产或测试超时，不删除取消/身份变化断言。
+- 后台 dry-run 守卫测试跟随真实 `resolveTableActionExecution` 收口，额外钉住内部 lookup、批准、可信 tenant 和 target-ready 顺序，不能因提取 helper 而丢掉原守卫证明。
+
+### 已有本地证据与待验
+
+PLM 三个前端整文件 **323/323**；8 套相关插件测试通过，覆盖 BOM/并发/table-actions/durable jobs/subtree/PLM-column lock/handoff/operator gate。并发套件包括 27 夹具 × 4 宽度 × 3 调度的 324 次输出一致性对照。去掉根预读版本和去掉根候选版本两项内存变异均 AssertionError，needle 各命中一次、源文件字节未变。没有把这些当作宜搭 71 项或全仓结果。
+
+Automation 合并候选的三整文件 CLI 合同首次在 Windows 挂载文件系统下运行：**397 通过 /32 失败 /0 skipped**。观察到自读变异 needle 未命中及权限/协议分类失败；待原生 LF 文件系统对照，当前不宣称这些全部是环境问题。前端首次 25 条失败、一次缺少测试工具包导入和早期 worker 配置错误均保留为本地过程失败；修复后才取得上述 323/323。没有安装新前端测试依赖。
+
+下一门：原生 Linux 同提交字节校验、完整 CLI 合同、真实隔离 PG/浏览器宜搭 71 项、PLM manual/interval/remaining-unknown 及停止清理。原 `3c334` 的远端成功证据只属于旧 head，不能代签此次 main 对齐候选；历史 ABORTED、SQL、时钟与租约风险保留。当前远端 PR 和 CI 均未改变。
+
 ## 2026-10-20 当前候选本地收尾：三组完整应用全部补验通过
 
 同一0353冻结源顺序执行既有manual、interval、remaining-unknown三个完整CLI，各自九阶段通过并经原validators/源与构建哈希复核。每组478冷迁移/空重放、web-package types 0诊断；三组ABORTED均0，actual-stop-resolved与production-stop-verified各1、正常owned PG停止删除。结束后本次source根目录无残留进程，全部6781源与Windows工作区一致、index空。

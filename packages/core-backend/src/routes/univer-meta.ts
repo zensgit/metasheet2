@@ -10,10 +10,17 @@ import {
   deriveRecordPermissions,
   deriveViewPermissions,
   type FieldPermissionScope,
-  isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
+  isFieldReadOnlyForPeople,
   isFieldWriteForbidden,
 } from '../multitable/permission-derivation'
+import {
+  carryHumanWriteLock,
+  humanWriteLockRefusalBody,
+  listHumanWriteLockedFieldIds,
+  stripHumanWriteLockKey,
+  withHumanWriteLockKey,
+} from '../multitable/human-write-lock'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
@@ -2594,9 +2601,16 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   // they special-case — which is exactly why the rule must live OUTSIDE the per-type switch and be SHARED.
   // It applies the same imported function, never a second copy: two independent copies of this rule is
   // precisely how the inconsistency survived in the first place.
-  return withLayer2VisibilityKeys(
-    withFieldRequiredWhenRule(
-      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The human write lock joins the same cross-cutting chain (shared `withHumanWriteLockKey`): this is the
+  // READ serializer too, and a dropped lock fails open. The person field-WRITE entry strips it again
+  // (`normalizeFieldWriteInput`), so keeping it here never lets a person set it.
+  return withHumanWriteLockKey(
+    withLayer2VisibilityKeys(
+      withFieldRequiredWhenRule(
+        withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+        property,
+      ),
       property,
     ),
     property,
@@ -5115,7 +5129,8 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       const property = normalizeJson(field.property)
       const base: FieldMutationGuard = {
         type: field.type,
-        readOnly: isFieldAlwaysReadOnly(field),
+        // Person write spine: always-read-only OR the human write lock (human-write-lock.ts).
+        readOnly: isFieldReadOnlyForPeople(field),
         hidden: isFieldPermissionHidden(field),
         // #16/P2: carry property so RecordWriteService.validateChanges' isPersonSingleRecord(property)
         // sees limitSingleRecord — without it a multiSelect person is wrongly rejected as single.
@@ -5139,7 +5154,7 @@ function filterVisiblePropertyFields(fields: UniverMetaField[]): UniverMetaField
   return fields.filter((field) => !isFieldPermissionHidden(field))
 }
 
-function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
+export function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
@@ -5325,6 +5340,24 @@ export async function loadReadableRecordFieldIds(
 ): Promise<Set<string>> {
   const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
   return maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
+}
+
+/**
+ * The same read-path field mask as {@link loadReadableRecordFieldIds}, for a caller that has no request: the
+ * access snapshot (read from the database by the caller) stands in for the request on every step, including
+ * the formula-taint chokepoint's foreign-sheet readability. Used by subscription webhook delivery, which
+ * filters each delivered value map with `filterRecordDataByFieldIds` over this set.
+ *
+ * FAIL CLOSED: no user / no sheet → EMPTY set.
+ */
+export async function loadReadableRecordFieldIdsForAccess(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+  capabilities: MultitableCapabilities,
+): Promise<Set<string>> {
+  const baseAllowed = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+  return maskStoredRecordFieldIds(undefined, query, sheetId, undefined, baseAllowed, access)
 }
 
 /**
@@ -6254,7 +6287,10 @@ async function normalizeFieldWriteInput(
   void query
   return {
     type: requestedType as UniverMetaField['type'],
-    property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
+    // The PERSON field-write entry (POST /fields, PATCH /fields/:fieldId): a person can never set the human
+    // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
+    // so a person can never clear it either. Only plugin provisioning writes it.
+    property: stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)),
   }
 }
 
@@ -14432,12 +14468,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
         const requestedType = parsed.data.type ?? mapFieldType(String(row.type))
-        const { type: nextType, property: nextProperty } = await normalizeFieldWriteInput(
+        const { type: nextType, property: normalizedNextProperty } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
           sheetId,
           requestedType,
           typeof parsed.data.property !== 'undefined' ? parsed.data.property : row.property,
         )
+        // Human write lock: the STORED value wins over the body, whatever the body said (set, cleared,
+        // changed or omitted). No administrator override — only plugin provisioning changes it.
+        const nextProperty = carryHumanWriteLock(row.property, normalizedNextProperty)
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
@@ -18988,6 +19027,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // body echoed the resolved sheet id back, which is exactly the value the move above removes.
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
+      // Human write lock (human-write-lock.ts): a PLM-system column answers its own closed code, before the
+      // generic refusal below (which would refuse it too — `deriveFieldPermissions` marks it read-only).
+      // Only for fields this caller can SEE, so the code is never an existence oracle; the ids are the
+      // caller's own submitted keys.
+      const humanLockedFieldIds = listHumanWriteLockedFieldIds(
+        patchContext.fields,
+        Object.keys(parsed.data.data ?? {}),
+        (fid) => patchContext.fieldPermissions[fid]?.visible === true,
+      )
+      if (humanLockedFieldIds.length > 0) {
+        return res.status(403).json(humanWriteLockRefusalBody(humanLockedFieldIds))
+      }
       const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
         isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
       )
@@ -21107,6 +21158,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
       // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
       // W1-3 LOCK-F2: shared predicate (`isFieldWriteForbidden`), same invariant as before.
+      //
+      // Human write lock first (human-write-lock.ts): a range paste / fill touching a PLM-system column is
+      // refused WHOLE with its own closed code — nothing in the batch is written (the per-column skip is the
+      // grid planner's job, not this route's). Visible fields only, caller-submitted ids only.
+      const humanLockedFieldIds = listHumanWriteLockedFieldIds(
+        fields,
+        parsed.data.changes.map((c) => c.fieldId),
+        (fid) => fieldPermissions[fid]?.visible === true,
+      )
+      if (humanLockedFieldIds.length > 0) {
+        return res.status(403).json(humanWriteLockRefusalBody(humanLockedFieldIds))
+      }
       const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) =>
         isFieldWriteForbidden(fieldPermissions[fid]),
       )

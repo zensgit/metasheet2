@@ -1136,6 +1136,9 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
     STOCK_PREP_OPERATOR_PULL_STEPS.map((step) => step.step),
     [
       'dry-run',
+      // R67 ④: the same dry-run, enqueued and polled.
+      'dry-run-job-start',
+      'dry-run-job-get',
       'apply',
       // The bounded background channel — the same pull, taken in pieces because the BOM is too big
       // to expand in one request. See P-07.
@@ -1190,14 +1193,15 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
 //
 // Every case before this block ran its admissions as PULLER, so none of them can show that the
 // OPERATOR is refused — a suite that renamed its actor would stay green with the gate still on
-// OPERATE. This block is the one that reddens on that: route by route, all eleven members of the
+// OPERATE. This block is the one that reddens on that: route by route, all thirteen members of the
 // split, the operate-only actor is refused and the pull actor is admitted. Then the complement: the
 // manifest routes the owner kept for the floor (confirm, value read-back, export, handoff, board,
 // directory) still admit the operate-only actor, so the reversal narrowed the pull and nothing else.
 async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
   const routes = mount()
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
-  assert.equal(ALL_MOVED_ROUTES.length, 11, 'P-14: the split has exactly eleven members')
+  // Thirteen since R67 ④ added the background dry-run's enqueue and poll.
+  assert.equal(ALL_MOVED_ROUTES.length, 13, 'P-14: the split has exactly thirteen members')
 
   for (const route of ALL_MOVED_ROUTES) {
     routes.resetHostCalls()

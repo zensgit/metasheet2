@@ -39,6 +39,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
@@ -316,7 +317,8 @@ async function apply(routes, dryRunToken) {
 /** Response data minus the random token. */
 function comparable(data) {
   const { dryRunToken, ...rest } = data
-  return { ...clone(rest), dryRunTokenShape: typeof dryRunToken }
+  // R67 ③: minus the read phase's wall-clock reading too — see support/dry-run-read-phase-clock.cjs.
+  return { ...withoutReadPhaseClock(rest), dryRunTokenShape: typeof dryRunToken }
 }
 
 // ── R1 ────────────────────────────────────────────────────────────────────────────────────────

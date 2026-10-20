@@ -65,6 +65,10 @@ const ROUTES = [
   ['POST', '/api/integration/pipelines/:id/external-write/apply', 'pipelinesExternalWriteApply'],
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
+  // R67 ④: the SAME dry-run, off the request/response cycle — enqueue (202) + poll the caller's job
+  // for one project. The synchronous route above stays for API / script callers.
+  ['POST', '/api/integration/table-actions/:actionId/dry-run-jobs', 'tableActionDryRunJobStart'],
+  ['GET', '/api/integration/table-actions/:actionId/dry-run-jobs', 'tableActionDryRunJobGet'],
   ['POST', '/api/integration/table-actions/:actionId/mvp-persist', 'tableActionMvpPersist'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', 'tableActionLargeBomExpansionJobStart'],
@@ -549,6 +553,7 @@ const {
   provisionProjectSheet,
   // G1 field defect (R67): the contract option sets onto ONE registered project sheet (the repair leg).
   syncProjectSheetContractOptions,
+  markProjectSheetPlmSystemColumns,
   grantProjectSheetRoles,
   projectSheetViewHandles,
   buildProjectTargetBinding,
@@ -633,6 +638,11 @@ const {
   runLargeBomCheckpointApplyJobChunk,
   runLargeBomBackgroundExpansionJob,
 } = require('./stock-preparation-large-bom-jobs.cjs')
+const {
+  launchDryRunJob,
+  readDryRunJob,
+  reserveDryRunJob,
+} = require('./stock-preparation-dry-run-jobs.cjs')
 const {
   buildConflictPolicyReview,
   deleteTableScopeConflictPolicies,
@@ -891,18 +901,21 @@ function sendOk(res, data, status = 200) {
   return sendJson(res, status, { ok: true, data })
 }
 
-function sendError(res, error) {
+// The error half of the envelope, shared by `sendError` and the background dry-run (R67 ④), which
+// stores exactly what the synchronous route would have answered.
+function errorResponse(error) {
   const status = Number.isInteger(error.status) ? error.status : inferHttpStatus(error)
   const code = inferErrorCode(error)
   const message = error.message || 'Internal server error'
   const details = error.details ? sanitizeIntegrationPayload(error.details) : undefined
+  return { status, error: { code, message, details } }
+}
+
+function sendError(res, error) {
+  const { status, error: body } = errorResponse(error)
   return sendJson(res, status, {
     ok: false,
-    error: {
-      code,
-      message,
-      details,
-    },
+    error: body,
   })
 }
 
@@ -2012,6 +2025,8 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   // table-actions
   'tableActionsList',
   'tableActionDryRun',
+  'tableActionDryRunJobStart',
+  'tableActionDryRunJobGet',
   'tableActionMvpPersist',
   'tableActionApply',
   'tableActionLargeBomExpansionJobStart',
@@ -4924,6 +4939,11 @@ function requireStockPreparationAudit() {
    * under the per-tenant lock archive / restore take (archived → 409, the create replay's rule) → the patch →
    * ONE audit row (`project_target_create` / `contract_options_synced`, the sheet as subject, the objectId and
    * counts in the detail).
+   *
+   * B (awaiting the owner's A/B/C ruling): the same locked step also marks the sheet's `plm_system` columns
+   * read-only for people (`markProjectSheetPlmSystemColumns`, idempotent — already-marked columns are not
+   * written again). This is the rollout path for project sheets created before the lock existed; it changes
+   * column metadata only, never a row. The counts ride the same audit row.
    */
   async function repairProjectSheetContractOptions(req, res) {
     const user = getUser(req)
@@ -4956,6 +4976,9 @@ function requireStockPreparationAudit() {
     const repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
       row: locked,
       options: await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+      // B (awaiting owner): the same call marks the sheet's PLM columns read-only for people — the rollout
+      // path for sheets created before the lock existed. Idempotent; registry-resolved objectId only.
+      plmColumnLock: await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
     }))
     await audit.append({
       tenantId,
@@ -4969,6 +4992,9 @@ function requireStockPreparationAudit() {
         syncedFieldCount: repaired.options.synced,
         skippedFieldCount: repaired.options.skipped,
         optionCount: repaired.options.optionCount,
+        plmLockMarkedFieldCount: repaired.plmColumnLock.marked,
+        plmLockAlreadyMarkedFieldCount: repaired.plmColumnLock.alreadyMarked,
+        plmLockMissingFieldCount: repaired.plmColumnLock.missing,
       },
     })
     return sendOk(res, {
@@ -4976,6 +5002,7 @@ function requireStockPreparationAudit() {
       projectNo,
       target: { sheetId: repaired.row.sheetId, objectId: repaired.row.objectId, fieldCount: repaired.options.synced },
       evidence: repaired.options.evidence,
+      plmColumnLock: { marked: repaired.plmColumnLock.marked, alreadyMarked: repaired.plmColumnLock.alreadyMarked, missing: repaired.plmColumnLock.missing },
     })
   }
 
@@ -6038,6 +6065,65 @@ function requireStockPreparationAudit() {
     }
     return safe
   }
+
+  // R67 ④ — THE BACKGROUND DRY-RUN LANE (record + slot: stock-preparation-dry-run-jobs.cjs).
+  //
+  // `tableActionDryRunJobStart` marks its request here and hands it to `tableActionDryRun` ITSELF,
+  // so the enqueue walks the synchronous route's guard chain line for line — gate, body, value
+  // scope, lookup, tenant, the S1 tenant wall, the B2a fence, the adapter load — and diverges at
+  // exactly two points inside that handler: the slot is claimed right after the tenant wall (a
+  // second enqueue for the project costs no B2a claim and no credential load), and the plan +
+  // stamping closure is launched detached instead of awaited. The closure captured the request, the
+  // resolved action, the tenant and the adapter the guards produced, so the job reads, plans and
+  // stamps as the SAME operator in the SAME tenant — there is no second identity to pick.
+  const dryRunJobRequests = new WeakMap()
+
+  /** Slot claim for a marked request; `null` (no-op) on the synchronous route. */
+  function reserveDryRunJobForRequest(req, { actionId, body, tenantId, includeMissingComponents }) {
+    const mark = dryRunJobRequests.get(req)
+    if (!mark) return null
+    // A job names its target; the plan's own validator, so a malformed number is the same 400.
+    const { projectNo } = normalizeActionParameters(body.parameters)
+    // No workspace: it is a request query field with no registry behind it, so it may not split the
+    // project's one slot (fix round 1). The tenant is the one the dry-run's own guards derived.
+    mark.ticket = reserveDryRunJob({
+      storage: context.storage,
+      tenantId,
+      actionId,
+      projectNo,
+      principal: requestPrincipal(req),
+      valueBearing: includeMissingComponents === true,
+    })
+    return mark.ticket
+  }
+
+  /** Launch the guarded closure detached; the stored failure is the synchronous route's own answer. */
+  function launchTableActionDryRunJob(ticket, run) {
+    return launchDryRunJob({
+      ticket,
+      run,
+      describeFailure(error) {
+        const { status, error: body } = errorResponse(toValuesFreeStockPreparationRouteError(error))
+        return { httpStatus: status, ...body }
+      },
+      onFailure(error) {
+        // The route wrapper's warn, for a failure no request is left to carry: same condition, same
+        // closed-list code, never a message or a value.
+        if (routeLogger && typeof routeLogger.warn === 'function' && !(error instanceof HttpRouteError) && !routeFailureLoggedByHandler(error)) {
+          routeLogger.warn('[plugin-integration-core] background dry-run failed: POST /api/integration/table-actions/:actionId/dry-run-jobs', {
+            code: loggableRouteFailureCode(error),
+          })
+        }
+      },
+      onRecordWriteFailure() {
+        if (routeLogger && typeof routeLogger.warn === 'function') {
+          routeLogger.warn('[plugin-integration-core] background dry-run result could not be stored; the next poll reports it interrupted')
+        }
+      },
+    })
+  }
+
+  const VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'includeMissingComponents'])
 
   const handlers = {
     ...createStockPreparationReadPlanManagementHandlers({
@@ -7218,6 +7304,10 @@ function requireStockPreparationAudit() {
       const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
+      // R67 ④: the background lane claims the project's one in-flight slot HERE — every guard above
+      // has passed, and nothing below (B2a claim, credential load, source read) has started. No-op on
+      // this synchronous route.
+      const dryRunJob = reserveDryRunJobForRequest(req, { actionId, body, tenantId: dryRunTenantId, includeMissingComponents })
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
       // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
@@ -7236,56 +7326,117 @@ function requireStockPreparationAudit() {
       // S3 (ADR §5 「谁更新、什么时候更新」: dry-run 结束): the registry row the overlay resolved gets
       // `last_pull_*` stamped — `previewed` with the run's distinct missing-component count, or
       // `refused` with the typed code of a run that threw. A stamp that fails never fails the run.
-      let dryRunResult
-      try {
-        dryRunResult = await dryRunStockPreparationAction({
-          action,
-          parameters: body.parameters,
-          sourceAdapter,
-          recordsApi: getMultitableRecordsApi(),
-          tokenStore: context.storage,
-          policyStore: context.storage,
-          conflictPolicyReview: body.conflictPolicyReview,
-          // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
-          // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
-          // tenant" a property of the code rather than of the caller's good manners.
-          includeMissingComponents,
-          // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
-          // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
-          // The apply route below resolves it the SAME way so the two agree on the plan revision.
-          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-          // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
-          targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
-          // The source->`ext_` mapping, from server config. null when unconfigured, which
-          // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
-          // Configured: the SAME object the apply route passes, so both routes expand the same rows
-          // and agree on the dry-run revision. It is never request-influenced.
-          extFieldMapping: stockPreparationExtFieldMapping,
-          // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
-          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-          // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
-          // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
-          // gate checks and the tenant whose source is about to be read are one value, not two that
-          // could disagree.
-          b2aTrialRegistry,
-          b2aClaimStore: context.storage,
-          b2aOperationClaim,
-          b2aRunId: dryRunB2aRunId,
-          // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
-          // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
-          b2aSourceObjects: dryRunB2aSourceObjects,
-          tenantId: dryRunTenantId,
-          now: Date.now(),
-        })
-      } catch (error) {
-        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
-        // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo)
-        throw error
+      // R67 ④: ONE closure for both lanes — awaited here, or run detached by the background lane.
+      const runDryRun = async () => {
+        let dryRunResult
+        try {
+          dryRunResult = await dryRunStockPreparationAction({
+            action,
+            parameters: body.parameters,
+            sourceAdapter,
+            recordsApi: getMultitableRecordsApi(),
+            tokenStore: context.storage,
+            policyStore: context.storage,
+            conflictPolicyReview: body.conflictPolicyReview,
+            // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+            // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+            // tenant" a property of the code rather than of the caller's good manners.
+            includeMissingComponents,
+            // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
+            // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
+            // The apply route below resolves it the SAME way so the two agree on the plan revision.
+            installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+            // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
+            targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
+            // The source->`ext_` mapping, from server config. null when unconfigured, which
+            // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
+            // Configured: the SAME object the apply route passes, so both routes expand the same rows
+            // and agree on the dry-run revision. It is never request-influenced.
+            extFieldMapping: stockPreparationExtFieldMapping,
+            // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
+            confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+            // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
+            // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
+            // gate checks and the tenant whose source is about to be read are one value, not two that
+            // could disagree.
+            b2aTrialRegistry,
+            b2aClaimStore: context.storage,
+            b2aOperationClaim,
+            b2aRunId: dryRunB2aRunId,
+            // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+            // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+            b2aSourceObjects: dryRunB2aSourceObjects,
+            tenantId: dryRunTenantId,
+            now: Date.now(),
+          })
+        } catch (error) {
+          await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
+          // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
+          if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo)
+          throw error
+        }
+        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
+        return dryRunResult
       }
-      await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
-      if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
-      return sendOk(res, dryRunResult)
+      if (dryRunJob) return sendOk(res, await launchTableActionDryRunJob(dryRunJob, runDryRun), 202)
+      return sendOk(res, await runDryRun())
+    },
+
+    // R67 ④ — 试算 in the background. NOT a second dry-run: it marks the request and runs the
+    // synchronous handler above, so every guard is the same line, and the handler answers 202 with
+    // the job once the guards (and the B2a fence and the adapter load) have passed. 409
+    // STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS while this project already has one running.
+    async tableActionDryRunJobStart(req, res) {
+      const mark = { ticket: null }
+      dryRunJobRequests.set(req, mark)
+      try {
+        return await handlers.tableActionDryRun(req, res)
+      } finally {
+        dryRunJobRequests.delete(req)
+        // A guard that refused after the slot was claimed: nothing was launched, free the project.
+        if (mark.ticket && !mark.ticket.detached) mark.ticket.release()
+      }
+    },
+
+    // R67 ④ — the caller's background dry-run for ONE project: running / succeeded (the exact
+    // dry-run payload, token included) / failed (the exact error the synchronous route would have
+    // answered). Same gate as the dry-run; the record is keyed by the caller's own principal, so a
+    // job is only ever read back by whoever started it. A value-bearing job (`includeMissingComponents`)
+    // is a separate record that only a request proving the operator value scope can address — the
+    // same proof, and the same tenant derivation, as the dry-run's own value path.
+    async tableActionDryRunJobGet(req, res) {
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const query = requestQuery(req)
+      for (const key of Object.keys(query)) {
+        if (!VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS.has(key)) {
+          throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', `unsupported query field: ${key}`, { field: key })
+        }
+      }
+      const { projectNo } = normalizeActionParameters({ projectNo: query.projectNo })
+      const flag = query.includeMissingComponents
+      if (flag !== undefined && flag !== 'true' && flag !== 'false') {
+        throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'includeMissingComponents must be true or false', { field: 'includeMissingComponents' })
+      }
+      const includeMissingComponents = flag === 'true'
+      const valueScope = includeMissingComponents
+        ? await resolveOperatorValueScope({
+          user: getUser(req),
+          authenticatedTenantId: req.authenticatedTenantId,
+          explicitTenantIds: collectExplicitTenantIds(req, {}),
+          tenantPrincipalDirectory,
+        })
+        : null
+      const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+      return sendOk(res, await readDryRunJob({
+        storage: context.storage,
+        tenantId: dryRunTenantId,
+        actionId,
+        projectNo,
+        principal: requestPrincipal(req),
+        valueBearing: includeMissingComponents,
+      }))
     },
 
     // B-stage ledger WRITE: repeat the readonly table-action plan server-side and persist ONLY
@@ -10007,6 +10158,10 @@ function requireStockPreparationAudit() {
             fillViewCreated: Boolean(provisioned.fillView && provisioned.fillView.created === true),
             todoViewCreated: provisioned.todoView.created === true,
             ownBaseSource: provisioned.ownBaseSource || 'unknown',
+            // B (awaiting owner): the PLM columns marked read-only for people at create (counts only).
+            plmLockMarkedFieldCount: provisioned.plmColumnLock.marked,
+            plmLockAlreadyMarkedFieldCount: provisioned.plmColumnLock.alreadyMarked,
+            plmLockMissingFieldCount: provisioned.plmColumnLock.missing,
           },
         })
       }
@@ -10073,6 +10228,8 @@ function requireStockPreparationAudit() {
         ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
         // G1 field defect (R67): the contract option sets the create leg wrote onto the sheet (counts only).
         ...(provisioned ? { options: { synced: provisioned.options.synced, skipped: provisioned.options.skipped } } : {}),
+        // B (awaiting owner): the PLM columns the create leg marked read-only for people (counts only).
+        ...(provisioned ? { plmColumnLock: { marked: provisioned.plmColumnLock.marked, alreadyMarked: provisioned.plmColumnLock.alreadyMarked, missing: provisioned.plmColumnLock.missing } } : {}),
         // S3 fix round 1 (R6): what the overview leg did, values-free (`code` is a closed error code).
         overview: { ensured: overviewOutcome.ensured, created: overviewOutcome.created, code: overviewOutcome.code },
       }, created ? 201 : 200)

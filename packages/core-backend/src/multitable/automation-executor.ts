@@ -99,6 +99,7 @@ import {
   STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL,
   loadStockPreparationOverviewSheetIds,
 } from './stock-preparation-overview-contract'
+import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -2895,6 +2896,30 @@ export class AutomationExecutor {
     return { actionType: action.type, status: 'failed', error: STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL }
   }
 
+  /**
+   * 备料 option B (human-write-lock.ts): `update_record` / `create_record` write `meta_records` with bare SQL on
+   * behalf of a rule a PERSON authored, so they must not write a column only the PLM pull may write. Checked at
+   * EXECUTION (not only at rule save), so a rule saved before the column was marked is refused too, and only the
+   * steps that actually name a locked column are affected. A failed step with the closed code; values-free log
+   * (counts and the fixed code only). Runs before any claim / write, read-only lookup only.
+   */
+  private async refuseHumanWriteLockedTargets(
+    actionType: 'update_record' | 'create_record',
+    sheetId: string,
+    fieldIds: string[],
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult | null> {
+    const locked = await findHumanWriteLockedFieldIds(this.deps.queryFn, sheetId, fieldIds)
+    if (locked.length === 0) return null
+    logger.warn('Automation step refused: it writes a human-write-locked column', {
+      code: 'FIELD_READONLY_PLM_SYSTEM',
+      actionType,
+      ruleId: context.ruleId,
+      lockedFieldCount: locked.length,
+    })
+    return { actionType, status: 'failed', error: HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL }
+  }
+
   private async notifyRuleCreatorOfDingTalkGroupFailure(
     failedStep: AutomationStepResult,
     context: ExecutionContext,
@@ -3333,6 +3358,10 @@ export class AutomationExecutor {
         effectiveSheetId = targetSheetId
         effectiveRecordId = targetRecordId
       }
+
+      // 备料 option B: a human-write-locked (PLM-system) column is never written by an automation.
+      const lockRefusal = await this.refuseHumanWriteLockedTargets('update_record', effectiveSheetId, Object.keys(patch), context)
+      if (lockRefusal) return lockRefusal
 
       // rich-longText write-path defense: this bare UPDATE bypasses the 5 record-write
       // validators, so sanitize any rich-longText value in the patch against the TARGET
@@ -3897,6 +3926,10 @@ export class AutomationExecutor {
       if (gate.crossBase && gate.ok === false) {
         return { actionType: 'create_record', status: 'failed', error: gate.error }
       }
+
+      // 备料 option B: an automation never seeds a human-write-locked (PLM-system) column on a new row.
+      const lockRefusal = await this.refuseHumanWriteLockedTargets('create_record', targetSheetId, Object.keys(data), context)
+      if (lockRefusal) return lockRefusal
 
       // rich-longText write-path defense: this bare INSERT bypasses the 5 record-write
       // validators, so sanitize any rich-longText value in `data` against the target sheet's

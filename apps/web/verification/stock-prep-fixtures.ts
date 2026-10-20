@@ -41,6 +41,8 @@ export const SYN_DECISION_ID = 'syn-decision-0001'
 export const SYN_DATA_SOURCE_ID = 'syn-datasource-0001'
 export const SYN_DATA_SOURCE_NAME = '示例数据源 A'
 export const SYN_FINGERPRINT = 'synfingerprint0001'
+/** R67 ④: the one background dry-run job id this world ever hands out. */
+export const SYN_DRY_RUN_JOB_ID = 'syn-dry-run-job-0001'
 
 /**
  * The five fixture worlds.
@@ -501,6 +503,8 @@ interface ScenarioState {
   dataSources: Array<Record<string, unknown>>
   /** Non-null makes that route refuse, which is ①a's 「? 看不到」 third state. */
   dataSourceRefusal: string | null
+  /** R67 ④: set by the first background dry-run enqueue; until then the poll finds no job. */
+  dryRunJobStarted: boolean
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -517,6 +521,7 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     manifestStatus: 200,
     dataSources: [synDataSourceRow()],
     dataSourceRefusal: null,
+    dryRunJobStarted: false,
   }
 
   if (scenario === 'fresh') {
@@ -841,9 +846,28 @@ function resolveResponder(method: string, path: string): Responder | null {
       return json(route, 200, envelope(synBoard(projectNo, state)))
     }
   }
+  // R67 ④: the background dry-run lane. The poll (GET) finds nothing until a page enqueues — so a
+  // mount that only asks 「is a trial of this project still running?」 is answered 「no」 — and the
+  // finished job carries exactly what the synchronous route's generic answer below always carried.
+  if (method === 'GET' && TABLE_ACTION_PATTERN.test(path) && TABLE_ACTION_PATTERN.exec(path)![2] === 'dry-run-jobs') {
+    return ({ route, state }) => (state.dryRunJobStarted
+      ? json(route, 200, envelope({
+        jobId: SYN_DRY_RUN_JOB_ID,
+        status: 'succeeded',
+        startedAt: '2026-10-19T00:00:00.000Z',
+        finishedAt: '2026-10-19T00:00:01.000Z',
+        elapsedMs: 1000,
+        result: { ok: true, step: 'dry-run', synthetic: true },
+      }))
+      : json(route, 404, refusal('STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND')))
+  }
   if (method === 'POST' && TABLE_ACTION_PATTERN.test(path)) {
     const step = TABLE_ACTION_PATTERN.exec(path)![2]
     return ({ route, state }) => {
+      if (step === 'dry-run-jobs') {
+        state.dryRunJobStarted = true
+        return json(route, 202, envelope({ jobId: SYN_DRY_RUN_JOB_ID, status: 'running', startedAt: '2026-10-19T00:00:00.000Z', finishedAt: null, elapsedMs: 0 }))
+      }
       if (step === 'confirmation-decisions/reconcile') {
         // 对账成功之后队列必须被重新读一次 —— P0-9 就是靠这个断言的。
         return json(route, 200, envelope({ scanned: 1, pending: state.queueRows.length }))
