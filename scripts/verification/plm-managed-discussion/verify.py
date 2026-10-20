@@ -74,7 +74,8 @@ def verify(args):
             'origin': 'https://meta.example.test', 'secret_sha256': hashlib.sha256(b'owned-client-secret').hexdigest()}])}
     config.update(VISUAL_PREVIEW_SESSION_ENABLED='true', LOCAL_STORAGE_PATH=str(root / 'visual-storage'))
     env.update(PLM_EMBED_VISUAL_PREVIEW_ENABLED='true', PLM_MANAGED_VISUAL_FIXTURE_ROOT=str(root),
-               PLM_MANAGED_VISUAL_PYTHON=args.python, PLM_MANAGED_VISUAL_NATIVE_TREE=str(native))
+               PLM_MANAGED_VISUAL_PYTHON=args.python, PLM_MANAGED_VISUAL_NATIVE_TREE=str(native),
+               PLM_MANAGED_VISUAL_PG_BIN=str(pg), PLM_MANAGED_VISUAL_RESTORE_PROOF=str(out.with_suffix('.visual-restore.json')))
     env.update({'YUANTUS_' + k: v for k, v in config.items()})
     env.update(YUANTUS_EMBED_PUBLIC_KEY=keys[1], YUANTUS_EMBED_KEY_ID='managed-pg', PLM_EMBED_AUDIENCE='metasheet2.embed',
                PLM_DISCUSSION_TENANT_DATABASE_URL=dburl + 'native_default_fixture-org' + query,

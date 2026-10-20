@@ -4,7 +4,7 @@
 import { beforeAll, afterAll, it, expect } from 'vitest'
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { fork, spawnSync, type ChildProcess } from 'node:child_process'
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import express, { type Request } from 'express'
@@ -35,6 +35,7 @@ const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
 let server: Server, metaServer: Server, metaUrl: string, proxy: string, installationIssuer: string, bearer: string, uiCookie: string
 let entered: (() => void) | undefined, release: Promise<void> | undefined
 let exchangeCalls = 0
+const nativePreviewStatuses: number[] = []
 const workers: { child: ChildProcess; url: string; exit: Promise<number | null>; stopped: () => boolean }[] = []
 const workerStops: { pid: number | undefined; exit: number | null; stopped: boolean }[] = []
 async function startWorker() {
@@ -75,6 +76,7 @@ beforeAll(async () => {
           ...(typeof req.headers['x-tenant-id'] === 'string' ? { 'x-tenant-id': req.headers['x-tenant-id'] } : {}),
           ...(typeof req.headers['x-org-id'] === 'string' ? { 'x-org-id': req.headers['x-org-id'] } : {}) },
         ...(['GET', 'HEAD'].includes(req.method!) ? {} : { body }), signal: AbortSignal.timeout(10000) })
+      if (req.url === '/api/v1/auth/embed/visual-preview-session') nativePreviewStatuses.push(response.status)
       res.statusCode = response.status; res.setHeader('Content-Type', response.headers.get('content-type') ?? 'application/json')
       res.end(Buffer.from(await response.arrayBuffer()))
     } catch { res.statusCode = 502; res.end('{}') }
@@ -447,13 +449,14 @@ it('managed frame discovery resolves each current cookie source rather than the 
 })
 
 
-function ownedNativeVisual(command: string) {
+function ownedNativeVisual(command: string, ...args: string[]) {
   const python = process.env.PLM_MANAGED_VISUAL_PYTHON, nativeTree = process.env.PLM_MANAGED_VISUAL_NATIVE_TREE
   if (!python || !nativeTree || !process.env.PLM_MANAGED_VISUAL_FIXTURE_ROOT) throw new Error('Owned Native Visual fixture required')
-  const result = spawnSync(python, [resolve('tests/integration/fixtures/seed-managed-visual-native.py'), command], {
+  const result = spawnSync(python, [resolve('tests/integration/fixtures/seed-managed-visual-native.py'), command, ...args], {
     cwd: nativeTree, env: process.env, encoding: 'utf8', timeout: 20000,
   })
   expect(result.status, result.stderr).toBe(0)
+  return result.stdout
 }
 async function visualFixture() {
   const f = await delegatedFixture()
@@ -495,6 +498,53 @@ it('managed Visual actual provider raster and bound markup survive independent M
   // PostgreSQL reload may serialize the same instant in its configured timezone.
   const normalizedTimes = (values: any[]) => values.map(value => ({ ...value, created_at: new Date(value.created_at).toISOString() }))
   expect(normalizedTimes(comments)).toEqual(normalizedTimes(thread.comments))
+  const restore = JSON.parse(ownedNativeVisual('restore-domain', thread.id))
+  expect(restore.domain_equal).toBe(true)
+  expect(restore.image_sha256).toBe(descriptor.preview_checksum)
+  const socket = createServer(); await new Promise<void>(resolve => socket.listen(0, '127.0.0.1', resolve))
+  const port = (socket.address() as { port: number }).port
+  await new Promise<void>(resolve => socket.close(() => resolve()))
+  const root = process.env.PLM_MANAGED_VISUAL_FIXTURE_ROOT!
+  const restoredUrl = 'http://127.0.0.1:' + port
+  const restoredNative = spawn(process.env.PLM_MANAGED_VISUAL_PYTHON!, ['-m', 'uvicorn', 'yuantus.api.app:app', '--host', '127.0.0.1', '--port', String(port)], {
+    cwd: root, env: { ...process.env,
+      YUANTUS_DATABASE_URL_TEMPLATE: process.env.YUANTUS_DATABASE_URL_TEMPLATE!.replace('/native_{tenant_id}_{org_id}?', '/restored_native_{tenant_id}_{org_id}?'),
+      YUANTUS_LOCAL_STORAGE_PATH: root + '/visual-restored-storage' }, stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  let shutdown = ''
+  restoredNative.stderr?.on('data', bytes => { shutdown = (shutdown + bytes).slice(-4000) })
+  const exit = new Promise<{ code: number | null; signal: string | null }>(resolve => restoredNative.once('exit', (code, signal) => resolve({ code, signal })))
+  try {
+    await waitFor(async () => { try { return (await fetch(restoredUrl + '/api/v1/health')).ok } catch { return false } })
+    const restoredThread = await fetch(restoredUrl + '/api/v1/discussions/' + thread.id, { headers: { Authorization: 'Bearer ' + bearer } })
+    expect(restoredThread.status).toBe(200)
+    const actual = await restoredThread.json() as any
+    expect(actual.comments[0]).toMatchObject({ id: thread.comments[0].id, body: 'Actual managed Visual pin', author_user_id: 42,
+      markup: { file_id: 'managed-visual-file', file_version: 'managed-visual-v1', preview_checksum: descriptor.preview_checksum, geometry: { x: 0.25, y: 0.5 } } })
+    const request = await f.req({ operation: 'preview-files' })
+    const minted = await fetch(restoredUrl + '/api/v1/auth/embed/visual-preview-session', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embed_token: request.headers['x-plm-embed-token'],
+        file_id: descriptor.file_id, version_id: descriptor.file_version }) })
+    expect(minted.status).toBe(200)
+    const capability = await minted.json() as any
+    expect(capability.render).toBe('available')
+    const raster = await fetch(restoredUrl + '/api/v1/auth/embed/visual-preview-session', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preview_token: capability.preview_token, origin: 'https://meta.example.test' }) })
+    expect(raster.status).toBe(200)
+    expect(raster.headers.get('content-type')).toMatch(/^image\/png/)
+    restore.restored_preview_sha256 = createHash('sha256').update(Buffer.from(await raster.arrayBuffer())).digest('hex')
+    expect(restore.restored_preview_sha256).toBe(descriptor.preview_checksum)
+    restore.restored_api_status = restoredThread.status
+    restore.restored_preview_status = raster.status
+  } finally {
+    restoredNative.kill('SIGTERM')
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const result = await Promise.race([exit, new Promise<never>((_, reject) => { timeout = setTimeout(() => { restoredNative.kill('SIGKILL'); reject(new Error('Restored Native shutdown timeout')) }, 10000) })])
+    clearTimeout(timeout)
+    expect((result.code === 0 || result.signal === 'SIGTERM') && shutdown.includes('Application shutdown complete.')).toBe(true)
+    restore.restored_worker = { pid: restoredNative.pid, ...result, stopped: true }
+  }
+  if (process.env.PLM_MANAGED_VISUAL_RESTORE_PROOF) writeFileSync(process.env.PLM_MANAGED_VISUAL_RESTORE_PROOF, JSON.stringify(restore))
 })
 it('managed Visual actual Native rejects a forged checksum and stale version while current descriptor succeeds', async () => {
   const f = await visualFixture(), descriptor = await actualVisualImage(f)
@@ -517,6 +567,16 @@ it('managed Visual actual Native entitlement fails closed and resumes only after
     expect(refused.status).toBe(503)
   } finally { ownedNativeVisual('restore-license') }
   expect((await httpManaged(f, await f.req({ operation: 'preview-files' }), f.cookie)).status).toBe(200)
+  const fresh = await f.req({ operation: 'preview-files' })
+  ownedNativeVisual('revoke-acl')
+  const before = nativePreviewStatuses.length
+  try {
+    expect((await httpManaged(f, fresh, f.cookie, workers[0].url)).status).toBe(503)
+    expect(nativePreviewStatuses.slice(before)).toEqual([401])
+  }
+  finally { ownedNativeVisual('restore-acl') }
+  await actualVisualImage(f, workers[1].url)
+  expect(nativePreviewStatuses.slice(-2)).toEqual([200, 200])
 })
 it('managed Visual actual delegation revocation stops preview before new Native capability calls', async () => {
   const f = await visualFixture()
