@@ -75,10 +75,12 @@ def verify(args):
     env.update({'YUANTUS_' + k: v for k, v in config.items()})
     env.update(YUANTUS_EMBED_PUBLIC_KEY=keys[1], YUANTUS_EMBED_KEY_ID='managed-pg', PLM_EMBED_AUDIENCE='metasheet2.embed',
                PLM_DISCUSSION_TENANT_DATABASE_URL=dburl + 'native_default_fixture-org' + query,
-               PLM_MANAGED_DISCUSSION_EXPIRY_PROOF=str(out.with_suffix('.expiry.json')))
+               PLM_MANAGED_DISCUSSION_EXPIRY_PROOF=str(out.with_suffix('.expiry.json')),
+               PLM_MANAGED_DISCUSSION_WORKER_PROOF=str(out.with_suffix('.workers.json')))
     source_files = [*sorted((META / 'packages/core-backend/src').rglob('*.ts')),
         META / 'packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts',
-        META / 'packages/core-backend/vitest.plm-managed-discussion.config.ts', Path(__file__).resolve()]
+        META / 'packages/core-backend/vitest.plm-managed-discussion.config.ts',
+        META / 'packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs', Path(__file__).resolve()]
     def hashes():
         return {str(p.relative_to(META)): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files}
     before = hashes()
@@ -91,6 +93,7 @@ def verify(args):
         'packages/core-backend/src/auth/visual-review-markup.ts',
         'packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts',
         'packages/core-backend/vitest.plm-managed-discussion.config.ts',
+        'packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs',
         'scripts/verification/plm-managed-discussion/verify.py']
     processes = {}
     result = {'scope': __doc__, 'passed': False, 'native_api_ref': NATIVE_REF,
@@ -147,9 +150,14 @@ def verify(args):
                 raise RuntimeError('Owned Vitest process group exceeded its deadline; evidence retained')
         report = json.loads(tests.read_text())
         assertions = [a for suite in report['testResults'] for a in suite.get('assertionResults', [])]
-        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 19
+        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 22
         assert all(a['status'] == 'passed' for a in assertions), 'No skips/todo/failed tests permitted'
-        result['checks'] = 19
+        worker_proof = json.loads(out.with_suffix('.workers.json').read_text())
+        workers = worker_proof['workers']
+        assert len(workers) == 2 and len({w['pid'] for w in workers}) == 2
+        assert all(w['exit'] == 0 and w['stopped'] is True for w in workers)
+        result['meta_workers'] = workers
+        result['checks'] = 22
         after = hashes()
         result['source_after'] = digest(after)
         assert after == before

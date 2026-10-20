@@ -1,9 +1,11 @@
 /** Actual PostgreSQL authority locks, production Redis and real Native API.
- * Meta session/identity rows are provisioned; this is not global JWT/cookie acceptance.
+ * Meta session rows are provisioned against live Native delegations; mounted JWT/router and independent workers run, not the full app or browser callback.
  */
 import { beforeAll, afterAll, it, expect } from 'vitest'
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
+import { fork, type ChildProcess } from 'node:child_process'
+import { resolve } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import express, { type Request } from 'express'
 import { Pool } from 'pg'
@@ -33,6 +35,32 @@ const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
 let server: Server, metaServer: Server, metaUrl: string, proxy: string, bearer: string, uiCookie: string
 let entered: (() => void) | undefined, release: Promise<void> | undefined
 let exchangeCalls = 0
+const workers: { child: ChildProcess; url: string; exit: Promise<number | null>; stopped: () => boolean }[] = []
+const workerStops: { pid: number | undefined; exit: number | null; stopped: boolean }[] = []
+async function startWorker() {
+  const child = fork(resolve('tests/integration/fixtures/plm-managed-discussion-worker.cjs'), [], {
+    execArgv: ['--require', resolve('../../node_modules/tsx/dist/cjs/index.cjs')],
+    env: process.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  })
+  // Keep private worker logs in the owned test report only on failure; never forward credentials.
+  let log = '', stopped = false
+  child.stdout?.on('data', data => { log = (log + data).slice(-4000) })
+  child.stderr?.on('data', data => { log = (log + data).slice(-4000) })
+  const exit = new Promise<number | null>(resolve => child.once('exit', resolve))
+  const ready = new Promise<string>((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error('Owned worker startup deadline')), 15000)
+    child.on('message', (message: any) => {
+      if (message?.type === 'stopped' && message.pid === child.pid) stopped = true
+      if (message?.type === 'ready' && message.pid === child.pid && Number.isInteger(message.port) && message.port > 0) {
+        clearTimeout(deadline); resolve('http://127.0.0.1:' + message.port)
+      }
+    })
+    child.once('exit', () => { clearTimeout(deadline); reject(new Error('Owned worker exited before ready: ' + log)) })
+  })
+  const worker = { child, url: '', exit, stopped: () => stopped }
+  workers.push(worker)
+  worker.url = await ready
+}
 beforeAll(async () => {
   server = createServer(async (req, res) => {
     let body = ''
@@ -71,12 +99,21 @@ beforeAll(async () => {
   metaServer = app.listen(0, '127.0.0.1')
   await new Promise<void>(resolve => metaServer.once('listening', resolve))
   metaUrl = 'http://127.0.0.1:' + (metaServer.address() as { port: number }).port
+  await startWorker(); await startWorker()
+  expect(workers[0].child.pid).not.toBe(workers[1].child.pid)
 })
 afterAll(async () => {
   entered = undefined; release = undefined
+  for (const worker of workers) {
+    worker.child.kill('SIGTERM')
+    const code = await Promise.race([worker.exit, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Owned worker shutdown deadline')), 10000))])
+    workerStops.push({ pid: worker.child.pid, exit: code, stopped: worker.stopped() })
+    expect(code).toBe(0); expect(worker.stopped()).toBe(true)
+  }
   metaServer.closeAllConnections(); await new Promise<void>(resolve => metaServer.close(() => resolve()))
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
   await closeRedisClient(); await poolManager.close(); await pool.end()
+  if (process.env.PLM_MANAGED_DISCUSSION_WORKER_PROOF) writeFileSync(process.env.PLM_MANAGED_DISCUSSION_WORKER_PROOF, JSON.stringify({ workers: workerStops }))
 })
 async function fixture(seconds = 300, issued?: { delegation_id: string; credential: string }) {
   const actor = 'meta-owner-' + randomUUID(), source = randomUUID(), link = randomUUID(), session = randomUUID(), intent = randomUUID()
@@ -211,8 +248,8 @@ async function delegatedFixture() {
     tenantId: 'meta-tenant', sessionId: f.session, expiresAt: f.expiresAt })
   return { ...f, jwt, cookie: 'ms_plm_managed_session=' + jwt }
 }
-async function httpManaged(f: Awaited<ReturnType<typeof fixture>>, request: Request, cookie?: string) {
-  return fetch(metaUrl + '/api/plm/managed-login/sources/' + f.source + '/discussion', { method: 'POST',
+async function httpManaged(f: Awaited<ReturnType<typeof fixture>>, request: Request, cookie?: string, origin = metaUrl) {
+  return fetch(origin + '/api/plm/managed-login/sources/' + f.source + '/discussion', { method: 'POST',
     headers: { ...(request.headers as Record<string, string>), ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(request.body) })
 }
 it('mounted global cookie gate requires independent Native Discussion authority and real live delegation', async () => {
@@ -294,4 +331,54 @@ it('actual unlink waits for the admitted Native operation, freezes revocation id
     const before = exchangeCalls
     expect((await httpManaged(f, await f.req(), f.cookie)).status).toBe(401); expect(exchangeCalls).toBe(before)
   } finally { unblock(); entered = undefined; release = undefined; await pending; await stopped }
+})
+
+
+it('two actual Meta processes share replay admission: one Native write and fresh token recovery on the other worker', async () => {
+  const f = await delegatedFixture(), request = await f.req()
+  const before = exchangeCalls
+  const responses = await Promise.all(workers.map(worker => httpManaged(f, request, f.cookie, worker.url)))
+  expect(responses.map(response => response.status).sort()).toEqual([200, 401])
+  expect(exchangeCalls).toBe(before + 1)
+  const winner = responses.findIndex(response => response.status === 200)
+  const created = (await responses[winner].json() as { data: { id: string; comments: { author_user_id: number }[] } }).data
+  expect(created.comments).toHaveLength(1); expect(created.comments[0].author_user_id).toBe(42)
+  const recovered = await httpManaged(f, await f.req({ operation: 'thread', threadId: created.id }), f.cookie, workers[1 - winner].url)
+  expect(recovered.status).toBe(200)
+  expect((await recovered.json() as { data: { id: string } }).data.id).toBe(created.id)
+})
+
+it('read and write races across actual Meta processes consume one shared embed token with a fresh-token positive', async () => {
+  const f = await delegatedFixture(), request = await f.req()
+  const before = exchangeCalls
+  const responses = await Promise.all([
+    httpManaged(f, { ...request, body: { operation: 'list' } } as Request, f.cookie, workers[0].url),
+    httpManaged(f, request, f.cookie, workers[1].url),
+  ])
+  expect(responses.map(response => response.status).sort()).toEqual([200, 401])
+  expect(exchangeCalls).toBe(before + 1)
+  const fresh = await httpManaged(f, await f.req({ operation: 'list' }), f.cookie, workers[0].url)
+  expect(fresh.status).toBe(200)
+})
+
+it('unlink in another Meta process waits for the admitted Native operation and stops both workers', async () => {
+  const f = await delegatedFixture(), request = await f.req()
+  let unblock!: () => void, admitted!: () => void
+  const admission = new Promise<void>(resolve => { admitted = resolve })
+  entered = admitted; release = new Promise<void>(resolve => { unblock = resolve })
+  let write: Promise<Response> | undefined, unlink: Promise<Response> | undefined
+  try {
+    write = httpManaged(f, request, f.cookie, workers[0].url)
+    await admission
+    unlink = fetch(workers[1].url + '/api/plm/managed-login/unlink', {
+      method: 'POST', headers: { Cookie: f.cookie, Origin: 'https://meta.example.test', 'Content-Type': 'application/json' }, body: JSON.stringify({ dataSourceId: f.source }),
+    })
+    await waitFor(async () => (await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE '%plm_managed_identity_links%'")).rows[0].n > 0)
+    unblock(); expect((await write).status).toBe(200); expect((await unlink).status).toBe(200)
+    const before = exchangeCalls
+    for (const worker of workers) expect((await httpManaged(f, await f.req(), f.cookie, worker.url)).status).toBe(401)
+    expect(exchangeCalls).toBe(before)
+    const fresh = await delegatedFixture()
+    expect((await httpManaged(fresh, await fresh.req(), fresh.cookie, workers[1].url)).status).toBe(200)
+  } finally { unblock(); entered = undefined; release = undefined; await Promise.allSettled([write, unlink]) }
 })

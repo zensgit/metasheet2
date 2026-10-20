@@ -71,13 +71,13 @@ jobs:
             --pg-bin "$PLM_STANDALONE_PG_BIN" --redis-server "$PLM_DISCUSSION_REDIS_BINARY" \
             --redis-sha256 "$PLM_DISCUSSION_REDIS_SHA256" \
             --out artifacts/plm-managed-discussion-20261020/ci-runtime.json
-          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 19
+          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 22
           python - <<'PYTHON'
           import json
           from pathlib import Path
           report = json.loads(Path('artifacts/plm-managed-discussion-20261020/ci-runtime.json').read_text())
           assert report['passed'] and report['directory_removed'] and report['cleanup_errors'] == []
-          assert report['checks'] == 19 and report['test_exit'] == 0
+          assert report['checks'] == 22 and report['test_exit'] == 0
           assert report['source_before'] == report['source_after']
           assert report['native_api_ref'] == report['native_checkout_head'] == 'f87e019b2f01ae97dca2b2a13aa426c269e31a6b'
           PYTHON
