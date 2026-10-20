@@ -2,6 +2,17 @@
 
 ## 2026-10-20 解除本地对齐阻断：冻结 main 的四层候选，尚未发布
 
+`87ee539` 完整 manual 的类型/两构建已通过，configured-app 在 `YIDA_BOARD_NAVIGATION` 失败：闭合帧为 GET / OTHER_API 被拒、BROWSER_PROCESS_FAILED；actual-stop-resolved=1、actual-stop-failed=0，production-stop-failed 原因为 EARLIER_PROBE_FAILED，最终 cleanup=`stopped-and-owned-database-removed`。不是 host.stop 失败或 ABORTED 根因证明。结果 SHA256 `80d8d80ab37e76e27d74ad37ab8295339f6a7c74d3f2b61dd8e1f71f4a0dd3ae`，stdout SHA256 `a21ef621add94a9426e4c02b1ee465df6f4146ec03a4ff8a26011454c296dced`。源码核对：main 的面板新增 onMounted→watchRunningDryRun→dryRunJobStatus GET；旧浏览器白名单不含它。下一步精确验证/登记该既有只读状态读取，不开放 job POST 或任意查询，完整对照未通过前不签唯一根因。
+
+阶段更新：首个对齐 Automation 提交为 `99af64e916183102b3e28faab41486ee368c7091`。原生 LF 副本的 14077 个已检出文件逐一按 Git blob 验证，sourceSet SHA256 `883eae9f635ece1f33a9966db7ca9de1a19db0d5cd08d07fb1b11380ebbf395e`；不带环境文件，离线依赖安装禁 lifecycle/配置脚本，固定浏览器通过原模块哈希，不下载。
+
+- 同提交三整文件 CLI 合同 **429/429**，零失败/跳过；挂载目录的 397/32 不冒充本次结果。stdout SHA256 `98bc4fe40188267537af7da3917a71afe581a83f9f8b2ad0e0f19f5e44280760`。
+- 8 个前端整文件 **827/827**；stdout SHA256 `b3a31d4311115d71f422909886c7d70b0aa477d4454f359ac6094379d42a5133`。完整 provenance 通过，stdout SHA256 `f100c276587a34f70f4ea13506812da8b9ad5788bdb3ca0c655dc4f92f088a04`。
+- 原宜搭 CLI **71/71=66+5**、exit0；原调用方先核对 `stopped-owned-pg-removed` 才发布通过结果。stdout SHA256 `77f33b48143d6b1249b9534ae1e88907a582b22ee4b733234fa3ba24541a9336`。源码前后未变，未真实发送。
+- **完整 manual 应用失败**：harness-types 通过，web-package-types 两条 TS2322；`StockPreparationProjectPlanFailureReason` 未纳入 main 新增的 `PLAN_DRY_RUN_BUSY` / `PLAN_DRY_RUN_INTERRUPTED`，而函数已返回它们。不是 ABORTED/停止失败；数据库尚未启动，cleanup=`not-started`。原结果 SHA256 `022f66bbef22d058361780bccdb557c60de0644c35bcdce9af32ab98d83c1468`，stdout SHA256 `0a497a89a211d647487ff8ba3f894efced20da3e2f406c202cfb905646fb3ba1`。
+
+最小类型补丁先普通本地提交到 PLM `9a86734b8`，再由 Automation 本地 merge `87ee53946371ed85adb56d3302535c7fbf447d95` 继承；只加两个既有封闭状态类型及两条真实客户端拒绝测试，不用类型强转、any 或扩大响应词汇。三前端整文件 **325/325**。新原生候选 sourceSet SHA256 `f1cd9f00fcdaf1d19e0eab4b9af0ee2175796234cbb137de6612ce8c71010f3c`，仍 14077 文件/逐 Git blob 核对；后续全链结果待记，99af64 的 71 项不直接代签 87ee539。远端均未更新。
+
 Owner 请求解决 blocked 后，本轮只在独立 managed worktree 中实施四支既有 PR 的本地叠层对齐；不推送、不触发/重跑 CI、不合并 PR、不部署、不访问客户数据、不真实发送。旧 dirty worktree 与旧验证 MD 均未重置或覆盖。
 
 冻结 main 为 `8a89e8352f399340f5e17935edd3c13814eaf355`；四个远端原 head 分别为 #6315 `e4e7272fb8af9e7f1a6dc74e7c92dbc7e7f0db40`、#6323 `cb19415978f71f7078b3a825fb18d3c92b0f9f59`、#6324 `53a9585cd97115e31e9335fca1599cbd64a0da3b`、#6337 `3c3341246c7fe3f0ed3bf09981d486e447771beb`。使用普通本地 merge commit 保留祖先，不重写远端历史。root/K3/PLM 本地提交为 `1d37957705c6a16fb6885173e6645c2c068738a8` / `1370b2d96` / `a971f4a15`；Automation 候选仍待整链验证。
