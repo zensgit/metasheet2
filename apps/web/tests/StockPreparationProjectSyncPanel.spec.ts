@@ -1085,6 +1085,19 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(seen!.aborted).toBe(true)
   })
 
+  it('R67-P3-wire: seeded mount reads only the two scoped job statuses through the real client', async () => {
+    h.fetch.mockImplementation(async () => new Response(JSON.stringify({
+      ok: false, error: { code: 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND' },
+    }), { status: 404 }))
+    mountPanel({ projectNo: PROJECT_NO, scope: { tenantId: 'synthetic_tenant' } })
+    await flushUi()
+    expect(h.fetch).toHaveBeenCalledTimes(2)
+    expect(h.fetch.mock.calls.map(([url]) => String(url))).toEqual(['true', 'false'].map(flag =>
+      '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run-jobs?'
+        + new URLSearchParams({ tenantId: 'synthetic_tenant', projectNo: PROJECT_NO, includeMissingComponents: flag })))
+    for (const [, init] of h.fetch.mock.calls) expect(init).toBeUndefined()
+  })
+
   it('R67-P3: re-attach — mounted on a project whose trial is still running, it shows it, polls until it ends, and never starts a run', async () => {
     const statuses = [
       { status: 'running' as const, elapsedMs: 61_000 },
