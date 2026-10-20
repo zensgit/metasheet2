@@ -238,6 +238,9 @@ test('constructor denies actor impersonation and missing explicit workspace', as
   assert.throws(() => h.createRunner({ context: { ...context(), actorId: 'synthetic-admin' } }), { code: 'YIDA_RUN_INVALID_INPUT' })
   const absent = context(); delete absent.workspaceId
   assert.throws(() => h.createRunner({ context: absent }), { code: 'YIDA_RUN_INVALID_INPUT' })
+  // All ordinary owner dependencies are valid here. A second failure cannot
+  // mask this assertion: the public factory must reject the private override.
+  assert.throws(() => h.createRunner({ terminal: {} }), { code: 'YIDA_RUN_INVALID_INPUT' })
   assert.equal(h.snapshots.length + h.db.events.length, 0)
 })
 

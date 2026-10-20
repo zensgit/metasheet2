@@ -21,6 +21,7 @@ import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
 import { scheduleIntervalMs } from './automation-triggers'
 import { containsAutomationReadAction } from '../integration/automation-read-authoring-policy'
+import { containsYidaAutomationAction } from '../integration/yida-automation-authoring-policy'
 
 const logger = new Logger('AutomationScheduler')
 // Node clamps larger timeout delays to 1ms, which would spin long-horizon cron rules.
@@ -648,6 +649,7 @@ export class AutomationScheduler {
     let cronTimezone: string | undefined
     if (trigger.type === 'schedule.interval') {
       const read = containsAutomationReadAction(undefined, undefined, rule.actions)
+        || containsYidaAutomationAction(undefined, undefined, rule.actions)
       intervalMs = scheduleIntervalMs(trigger.config, read)
       if (intervalMs === null) {
         logger.warn(`Rule ${rule.id}: invalid interval configuration`)

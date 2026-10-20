@@ -513,6 +513,28 @@ async function changeTargetOnSecondRead(f) {
   }
 }
 
+test('explicit delegated PURE primitives bind service digest without changing the owner factory', async () => {
+  const [{ createInternalYidaAutomationAuthorityPrimitives, createYidaSendAuthorityPrimitives }] = await modules
+  const workerId = 'synthetic-worker'
+  const f = await fixture('original', options => createInternalYidaAutomationAuthorityPrimitives({ ...options, workerId }))
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  const authorized = { ...grant(), actorId: workerId }
+  assert.match(f.port.executionPayloadDigest(selected, authorized), /^[a-f0-9]{64}$/)
+  for (const actorId of [context.ownerId, 'different-worker']) {
+    assert.throws(() => f.port.executionPayloadDigest(selected, { ...authorized, actorId }), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+  }
+  assert.throws(() => f.port.executionPayloadDigest(structuredClone(selected), authorized), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.fresh().executionPayloadDigest(selected, authorized), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => createInternalYidaAutomationAuthorityPrimitives({ security: f.security, context, workerId: context.ownerId }),
+    { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+  assert.throws(() => createYidaSendAuthorityPrimitives({ security: f.security, context, workerId }), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  const owner = createYidaSendAuthorityPrimitives({ security: f.security, context }, workerId)
+  const owned = await owner.resolveSelectionInTransaction(f.trx, f.selection())
+  assert.throws(() => owner.executionPayloadDigest(owned, authorized), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+  assert.equal(f.calls.every(sql => sql.startsWith('SELECT ')), true)
+  assert.equal(['send', 'fetch', 'admit', 'tokenClient', 'formTransport'].some(key => Object.hasOwn(f.port, key)), false)
+})
+
 test('preview rejects authenticated permanent target identity change after selection and before projection', async () => {
   const f = await fixture(); await changeTargetOnSecondRead(f)
   await rejected(f.port.previewInTransaction(f.trx, f.selection()), 'CONFLICT')

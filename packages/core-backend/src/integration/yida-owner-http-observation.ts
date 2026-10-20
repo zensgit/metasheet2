@@ -2,8 +2,9 @@ import { apiPathHasPrefix } from '../auth/api-path-policy'
 
 /** Shared router/observation boundary. This policy conveys no authorization. */
 export const YIDA_OWNER_HTTP_PREFIX = '/api/integration/yida-owner-send'
+export const YIDA_AUTOMATION_HTTP_PREFIX = '/api/integration/yida-automation-authorizations'
 
 /** Cover the whole owner subtree, including requests refused before routing. */
 export function isYidaOwnerHttpObservationPath(path: string): boolean {
-  return apiPathHasPrefix(path, YIDA_OWNER_HTTP_PREFIX)
+  return apiPathHasPrefix(path, YIDA_OWNER_HTTP_PREFIX) || apiPathHasPrefix(path, YIDA_AUTOMATION_HTTP_PREFIX)
 }

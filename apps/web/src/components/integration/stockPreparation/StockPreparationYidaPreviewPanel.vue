@@ -3,7 +3,7 @@
     <h3>宜搭静态预演（不发送）</h3>
     <p>仅在本页处理粘贴的本地 JSON；请勿填写凭据。目标标识和远端状态均未核验。</p>
     <p>预演不会查询或推送。项目分配是用户选择的本地候选，尚非获批准的生产数量政策。</p>
-    <fieldset class="sp-yida-preview__editor" :disabled="ownerSendLocked || initializationLocked">
+    <fieldset class="sp-yida-preview__editor" :disabled="ownerSendLocked || initializationLocked || automationLocked">
     <label>预演合同<select v-model="previewMode" data-testid="sp-yida-preview-mode"><option value="mapping">字段映射 v1（默认）</option><option value="protocol">表单字段目录与协议 v2（仅本地）</option></select></label>
     <div class="sp-yida-preview__examples">
       <button type="button" data-testid="sp-yida-example-primary" @click="loadExample('primary')">填入合成样例 A（创建）</button>
@@ -90,11 +90,16 @@
     </section>
     <section v-if="persistentInput" class="sp-yida-preview__owner-entry">
       <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
-      <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked" @click="initializationOpen = true">打开本地初始化（不发送）</button>
-      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" />
+      <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || automationLocked" @click="initializationOpen = true">打开本地初始化（不发送）</button>
+      <fieldset v-if="initializationOpen" :disabled="automationLocked"><StockPreparationYidaInitializationPanel :draft-input="persistentInput" @locked-change="initializationLocked = $event" /></fieldset>
       <p>以下是独立服务器确认流程，默认关闭；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
-      <button v-if="!ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（需服务器开通）</button>
-      <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" @locked-change="ownerSendLocked = $event" />
+      <button v-if="!ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked || automationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（需服务器开通）</button>
+      <fieldset v-if="ownerSendOpen" :disabled="automationLocked"><StockPreparationYidaOwnerSendPanel :draft-input="persistentInput" @locked-change="ownerSendLocked = $event" /></fieldset>
+    </section>
+    <section v-if="sheetId && projectNo">
+      <button v-if="!automationOpen" type="button" data-testid="sp-yida-auto-open" :disabled="ownerSendLocked || initializationLocked" @click="automationOpen = true">打开有限自动授权（另行确认）</button>
+      <StockPreparationYidaAutomationPanel v-if="automationOpen" :sheet-id="sheetId" :project-no="projectNo" :scope-key="scopeKey ?? ''"
+        :disabled="ownerSendLocked || initializationLocked" @locked-change="automationLocked = $event" />
     </section>
   </section>
 </template>
@@ -106,11 +111,14 @@ import { buildYidaProjectAllocationPreview, YidaAllocationError, type YidaProjec
 import { exportYidaRuleTemplate, parseYidaRuleTemplate, YidaRuleTemplateError, type YidaRuleTemplateRules, type YidaRuleTemplateAllocation } from '../../../../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
 import StockPreparationYidaOwnerSendPanel from './StockPreparationYidaOwnerSendPanel.vue'
 import StockPreparationYidaInitializationPanel from './StockPreparationYidaInitializationPanel.vue'
+import StockPreparationYidaAutomationPanel from './StockPreparationYidaAutomationPanel.vue'
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 type FieldMapEntry = YidaStaticConfig['fieldMap'][number] & { businessKey: boolean; emptyKey: boolean }
 type CatalogEntry = { id: string; control: 'text' | 'number' | 'select' | 'radio'; required: boolean; optionsText: string; optionsMode: 'lines' | 'json' }
 type AllocationMode = 'original' | 'equal_integer' | 'equal_decimal_exact'
+const props = defineProps<{ sheetId?: string | null; projectNo?: string; scopeKey?: string }>()
+const automationOpen = ref(false), automationLocked = ref(false)
 function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false } }
 function blankCatalogEntry(): CatalogEntry { return { id: '', control: 'text', required: false, optionsText: '', optionsMode: 'lines' } }
 const previewMode = ref<'mapping' | 'protocol'>('mapping')
@@ -170,11 +178,13 @@ function candidateReasons(expandedIndex: number): string {
   return plan.value?.rows.find((row) => row.index === expandedIndex)?.issues.map(rowIssueReason).join(', ') ?? ''
 }
 function clearResults(): void {
+  automationOpen.value = false; automationLocked.value = false
   persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false
   initializationOpen.value = false; initializationLocked.value = false
   plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
 }
 function invalidateOutputs(): void { clearResults(); ruleExportText.value = ''; ruleImportNotice.value = '' }
+watch(() => [props.sheetId, props.projectNo, props.scopeKey], invalidateOutputs, { flush: 'sync' })
 watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
 function loadExample(kind: 'primary' | 'renamed'): void {
   applyExample(createYidaStaticExample(kind))

@@ -612,6 +612,7 @@ tests/network-unavailable-copy.spec.ts
 tests/useAttendanceSessionGuard.spec.ts
 tests/useAuth.spec.ts
 tests/useSessionOrg.spec.ts
+tests/YidaAutomation.spec.ts
 todoApi
 TodoCenterView
 todoCountsRealtime

@@ -29,6 +29,18 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      // SA06D opt-in owned-PG suite. Its sentinel fails without a synthetic DB;
+      // run explicitly with the dedicated local/integration config, never skip-green.
+      'tests/integration/yida-automation-authorization-store-realdb.test.ts',
+      'tests/integration/yida-automation-authoring-realdb.test.ts',
+      'tests/integration/yida-automation-live-authority-realdb.test.ts',
+      'tests/integration/yida-automation-dispatch-claim-realdb.test.ts',
+      'tests/integration/yida-automation-execution-realdb.test.ts',
+      'tests/integration/yida-automation-send-realdb.test.ts',
+      'tests/integration/yida-automation-runtime-realdb.test.ts',
+        'tests/integration/yida-automation-http-realdb.test.ts',
+        'tests/integration/yida-automation-installed-binding-realdb.test.ts',
+        'tests/integration/yida-automation-management-host-realdb.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:

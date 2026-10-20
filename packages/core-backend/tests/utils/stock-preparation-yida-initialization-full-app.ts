@@ -11,6 +11,8 @@ import type { Logger, PreviewServer } from '../../../../apps/web/node_modules/vi
 import type { YidaInitializationState } from '../../../../apps/web/src/services/integration/yidaInitialization'
 import { ownerOffDraftBody } from './stock-preparation-yida-owner-off-full-app'
 import { createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
+import { createYidaAutomationDefaultOffBrowserWindow, runYidaAutomationDefaultOffBrowser } from './yida-automation-default-off-browser'
+import { createYidaAuthorizedBrowserWindow, runYidaAuthorizedBrowser, type YidaAuthorizedBrowserInput } from './yida-automation-authorized-browser'
 
 export interface YidaInitializationBrowserInput {
   apiOrigin: string
@@ -142,12 +144,35 @@ function validateState(value: unknown, commandId: string, initialized: boolean, 
  * actual project board -> actual initialization panel. The original OFF window
  * has already ended. All routes continue to the real migrated synthetic host. */
 export async function runYidaInitializationFullApp(input: YidaInitializationBrowserInput, root: string) {
+  const observed = await runYidaBrowser(input, root)
+  assert(observed.kind === 'initialization', 'APP_BROWSER_YIDA_INIT_RESULT_REQUIRED')
+  const { kind: _kind, ...result } = observed
+  return result
+}
+
+/** Same real login/bundle/firewall shell, separate fresh browser context. This
+ * test-only entry cannot initialize material or substitute a client session. */
+export async function runYidaAuthorizationFullApp(input: Omit<YidaInitializationBrowserInput, 'projectNo'>,
+  root: string, authorized: YidaAuthorizedBrowserInput) {
+  try {
+    const observed = await runYidaBrowser({ ...input, projectNo: 'DEMO-P1' }, root, authorized)
+    assert(observed.kind === 'authorized', 'APP_BROWSER_YIDA_AUTH_RESULT_REQUIRED')
+    const { kind: _kind, ...result } = observed
+    return result
+  } catch (error) {
+    console.error('YIDA_AUTO_AUTH_SHELL_FAILURE ' + JSON.stringify(initializationBrowserFailure(error)))
+    throw error
+  }
+}
+
+async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'projectNo'> & { projectNo: 'SYN-YIDA-PREVIEW' | 'DEMO-P1' },
+  root: string, authorized?: YidaAuthorizedBrowserInput) {
   const failureScope = createInitializationBrowserFailureScope()
   const api = new URL(input.apiOrigin)
   assert(api.origin === input.apiOrigin && api.protocol === 'http:' && api.hostname === '127.0.0.1'
     && api.port && !api.username && !api.password, 'APP_BROWSER_YIDA_INIT_LOCAL_HOST_REQUIRED')
   assert(input.identifier && input.password && input.tenantId && input.ownerId && input.commandId
-    && input.projectNo === 'SYN-YIDA-PREVIEW', 'APP_BROWSER_YIDA_INIT_SYNTHETIC_INPUT_REQUIRED')
+    && input.projectNo === (authorized ? 'DEMO-P1' : 'SYN-YIDA-PREVIEW'), 'APP_BROWSER_YIDA_INIT_SYNTHETIC_INPUT_REQUIRED')
   const scratch = await realpath(input.scratchDir), ownedTmp = await realpath(path.join(root, 'tmp'))
   assert(scratch === input.scratchDir && path.dirname(scratch) === ownedTmp
     && /^stock-preparation-plm-full-app-[a-f0-9-]{36}$/u.test(path.basename(scratch)), 'APP_BROWSER_YIDA_INIT_SCRATCH_REQUIRED')
@@ -222,6 +247,8 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     if (candidate) assert.equal(browser.version(), candidate.version, 'APP_BROWSER_YIDA_INIT_PINNED_BROWSER_VERSION_REQUIRED')
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', serviceWorkers: 'block' })
     const window = createInitializationRequestWindow(uiOrigin, () => token, input.commandId)
+    const automaticOff = createYidaAutomationDefaultOffBrowserWindow(uiOrigin, () => token, input.ownerId)
+    const automaticOn = authorized ? createYidaAuthorizedBrowserWindow(uiOrigin, () => token, authorized) : undefined
     const boardPath = '/api/integration/stock-preparation/projects/' + input.projectNo + '/board'
     const scopeQuery = '?' + new URLSearchParams({ tenantId: input.tenantId })
     const ordinaryReads = new Set(['/api/auth/me', '/api/todo/count', '/api/approvals/admin/capability',
@@ -235,7 +262,11 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
         const request = route.request(), url = new URL(request.url()), method = request.method(), headers = request.headers()
         if (url.origin !== uiOrigin) counts.externalRequests += 1
         assert(url.origin === uiOrigin && !url.username && !url.password, 'APP_BROWSER_YIDA_INIT_ORIGIN_DENIED')
-        if (membersOff.isCandidate(request)) {
+        if (automaticOn?.candidate(request)) {
+          automaticOn.accept(request)
+        } else if (automaticOff.candidate(request)) {
+          automaticOff.accept(request)
+        } else if (membersOff.isCandidate(request)) {
           await verifiedLogin
           membersOff.accept(request)
         } else if (projectSheetsOff.isCandidate(request)) {
@@ -296,6 +327,15 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     context.on('response', response => {
       const task = (async () => {
         const url = new URL(response.url())
+        // The explicit UI journey reads the actual Response in full. Merely
+        // seeing an event or matching a URL is never body-completion evidence.
+        if (automaticOn?.candidate(response.request())) {
+          assert(automaticOn.matched(response.request()), 'APP_BROWSER_YIDA_AUTH_RESPONSE_IDENTITY_REQUIRED')
+          return
+        }
+        if (automaticOff.candidate(response.request())) {
+          await automaticOff.response(response); return
+        }
         if (membersOff.isCandidate(response.request())) {
           membersOff.response(response.request(), response.status(), await response.json())
           return
@@ -321,6 +361,8 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     const page = await context.newPage()
     page.on('pageerror', () => note('PAGE_ERROR')); page.on('console', event => {
       if (event.type() !== 'error') return
+      try { if (automaticOff.consoleRefusal(event.location().url, event.text())) return }
+      catch { note('AUTOMATION_OFF_CONSOLE_INVALID'); return }
       try { if (membersOff.consoleRefusal(event.location().url, event.text())) return }
       catch { note('MEMBERS_OFF_CONSOLE_INVALID'); return }
       try { if (projectSheetsOff.consoleRefusal(event.location().url, event.text())) return }
@@ -361,6 +403,15 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
       && boardData.pullTargetReady === true && boardData.pulledRowCount === 1 && boardData.activePulledRowCount === 0,
     'APP_BROWSER_YIDA_INIT_REAL_BOARD_INVALID')
     await page.locator('[data-testid="stock-prep-panel"][data-active="project-board"]').waitFor()
+    if (authorized && automaticOn) {
+      assert.equal(data(boardData.fillTarget).sheetId, authorized.rule.sheetId)
+      const authorization = await runYidaAuthorizedBrowser(page, automaticOn, authorized, uiOrigin, settled)
+      projectSheetsOff.verify(); membersOff.verify(); await settled()
+      assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.bundleDocuments === 1
+        && counts.initializationGets === 0 && counts.initializationPosts === 0 && counts.reloads === 0)
+      return { kind: 'authorized' as const, status: 'passed' as const, authorization, counts, evidence: { realPasswordLogin: true,
+        freshBrowserContext: true, productionBundle: true, servedBundleBytesVerified: true, matchingProjectBoard: true } }
+    }
     const openPanel = async () => {
       await page.getByTestId('stock-prep-project-board-title').filter({ hasText: input.projectNo }).waitFor()
       await page.getByTestId('stock-prep-project-board-yida').click()
@@ -415,12 +466,20 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.initializationResponses === 4
       && counts.boardResponses >= 2 && counts.bundleDocuments === 2 && [...served].filter(key => key.endsWith('.js')).length >= 2
       && [...served].some(key => key.endsWith('.css')), 'APP_BROWSER_YIDA_INIT_FULL_JOURNEY_REQUIRED')
-    return { status: 'passed' as const, state: initialized, evidence: { realPasswordLogin: true, freshBrowserContext: true,
+    // The original init checks above remain unchanged. The separate new window
+    // uses this SAME real page/session and its actual board's target handle.
+    const fillTarget = data(boardData.fillTarget)
+    assert(typeof fillTarget.sheetId === 'string' && fillTarget.sheetId)
+    automaticOff.configure(fillTarget.sheetId, afterReload)
+    const automationOff = await runYidaAutomationDefaultOffBrowser(page, automaticOff, settled)
+    return { kind: 'initialization' as const, status: 'passed' as const, state: initialized, evidence: { realPasswordLogin: true, freshBrowserContext: true,
       productionBundle: true, servedBundleBytesVerified: true, realProjectBoardNavigation: true, actualInitializationPanel: true,
       openingNoInitializationRequests: true, explicitEmptySlotGet: true, realSdkPost201: true, manualGetSameDraft: true,
-      reloadSamePrincipalAndDraft: true, privateControlsCleared, defaultOff: true, tokenIssued: false, externalWriteAttempted: false }, counts }
+      reloadSamePrincipalAndDraft: true, privateControlsCleared, defaultOff: true, tokenIssued: false, externalWriteAttempted: false }, counts, automationOff }
   } catch {
     // Never forward Playwright call logs, filled values, URL, JWT or DB handles.
+    if (authorized) console.error('YIDA_AUTO_AUTH_SHELL_COUNTS ' + JSON.stringify({
+      ...initializationBrowserFailure(failureScope.failure()), counts, faults: [...faults] }))
     rejectLogin?.(new Error('APP_BROWSER_YIDA_INIT_LOGIN_FAILED'))
     throw failureScope.failure()
   } finally {

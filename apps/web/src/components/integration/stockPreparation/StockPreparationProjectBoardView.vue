@@ -593,7 +593,7 @@
           >宜搭静态预演（不发送）</button>
         </div>
 
-        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen" />
+        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen" :sheet-id="composedFillTarget?.sheetId ?? null" :project-no="openedProjectNo" :scope-key="JSON.stringify(scope)" />
 
         <p v-if="handoffNotice" class="sp-board__notice" data-testid="stock-prep-project-board-handoff-notice" role="status">
           {{ handoffNotice }}

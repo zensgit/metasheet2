@@ -82,6 +82,7 @@ import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificati
 import { loadSheetMemberUserIdSet } from './permission-service'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import { AUTOMATION_READ_AUTHORING_INVALID, containsAutomationReadAction, validAutomationReadAuthoringShape } from '../integration/automation-read-authoring-policy'
+import { YIDA_AUTOMATION_ACTION_TYPE, YIDA_AUTOMATION_AUTHORING_INVALID, containsYidaAutomationAction, validYidaAutomationAuthoringShape } from '../integration/yida-automation-authoring-policy'
 import type { ReadScheduleOccurrence } from '../integration/automation-read-contracts'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -157,6 +158,7 @@ const MAX_AUTOMATION_DEPTH = 3
 export type AutomationRuleValidationCode =
   | 'VALIDATION_ERROR'
   | typeof AUTOMATION_READ_AUTHORING_INVALID
+  | typeof YIDA_AUTOMATION_AUTHORING_INVALID
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
@@ -1265,6 +1267,7 @@ export type AutomationRule = {
   actions?: AutomationAction[] | null
   // A6-1 opt-in (nullable; NULL/'legacy' = no job rows, 'workflow_job_v1' = persist jobs)
   execution_mode?: string | null
+  integration_authority_revision?: string
 }
 
 export type AutomationQueryFn = (
@@ -1444,6 +1447,8 @@ export class AutomationService {
     schedulerRuntime: AutomationSchedulerRuntimeOptions = {},
     notificationService?: AutomationDeps['notificationService'],
     automationReadSchedule?: Readonly<{ produce(occurrence: ReadScheduleOccurrence, signal: AbortSignal): Promise<void> }>,
+    yidaAutomationSchedule?: Readonly<{ produce(occurrence: Readonly<{ ruleId: string; triggerType: 'schedule.interval';
+      scheduledAtMs: number; anchorMs: number; intervalMs: number }>, signal: AbortSignal): Promise<void> }>,
   ) {
     this.eventBus = eventBus
     this.db = db
@@ -1506,6 +1511,15 @@ export class AutomationService {
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule, occurrence) => {
+        // A private authoring node must NEVER fall through to ordinary
+        // scheduler execution while its owner-bound producer is not installed.
+        if (containsYidaAutomationAction(undefined, undefined, rule.actions)) {
+          if (occurrence?.triggerType === 'schedule.interval' && rule.trigger.type === 'schedule.interval'
+            && !this.readScheduleController.signal.aborted && yidaAutomationSchedule) {
+            await yidaAutomationSchedule.produce(Object.freeze({ ruleId: rule.id, ...occurrence }), this.readScheduleController.signal)
+          }
+          return
+        }
         if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
           // No ordinary executor fallback, even when no activation/runtime is
           // installed. The producer independently locks the CURRENT DB rule,
@@ -1640,6 +1654,11 @@ export class AutomationService {
    * Create a new automation rule persisted to PostgreSQL.
    */
   async createRule(sheetId: string, input: CreateRuleInput): Promise<AutomationRule> {
+    if (!validYidaAutomationAuthoringShape({ actionType: input.actionType, actionConfig: input.actionConfig,
+      actions: input.actions, executionMode: input.executionMode, triggerType: input.triggerType,
+      triggerConfig: input.triggerConfig, conditions: input.conditions })) {
+      throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+    }
     if (!validAutomationReadAuthoringShape({
       actionType: input.actionType, actionConfig: input.actionConfig, actions: input.actions,
       executionMode: input.executionMode, triggerType: input.triggerType,
@@ -1891,6 +1910,15 @@ export class AutomationService {
       if (!existing || existing.sheet_id !== sheetId) return null
 
       // Raw merged shape first: normalization must never erase forbidden keys.
+      if (!validYidaAutomationAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existing.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existing.action_config,
+        actions: input.actions !== undefined ? input.actions : existing.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existing.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existing.trigger_type,
+        triggerConfig: input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config,
+        conditions: input.conditions !== undefined ? input.conditions : existing.conditions,
+      })) throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
       if (!validAutomationReadAuthoringShape({
         actionType: input.actionType !== undefined ? input.actionType : existing.action_type,
         actionConfig: input.actionConfig !== undefined ? input.actionConfig : existing.action_config,
@@ -2102,6 +2130,15 @@ export class AutomationService {
     ) {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
+      if (!validYidaAutomationAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existingForApproval.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existingForApproval.action_config,
+        actions: input.actions !== undefined ? input.actions : existingForApproval.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existingForApproval.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existingForApproval.trigger_type,
+        triggerConfig: input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config,
+        conditions: input.conditions !== undefined ? input.conditions : existingForApproval.conditions,
+      })) throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
       // Every write (including name, enabled, conditions and trigger-only edits)
       // validates the resulting read action. DB CHECK closes the read/update race.
       if (!validAutomationReadAuthoringShape({
@@ -2271,6 +2308,10 @@ export class AutomationService {
       .catch((error: unknown) => {
         // A concurrent partial edit can invalidate the final row AFTER the
         // application check. Never expose PostgreSQL's row-containing DETAIL.
+        if (error && typeof error === 'object' && 'code' in error && error.code === '23514'
+          && 'constraint' in error && error.constraint === 'chk_automation_yida_authorized_shape') {
+          throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+        }
         if (error && typeof error === 'object' && 'code' in error && error.code === '23514'
           && 'constraint' in error && error.constraint === 'chk_automation_read_preview_shape') {
           throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
@@ -5242,6 +5283,9 @@ export class AutomationService {
       conditions: (row.conditions as ConditionGroup) ?? null,
       actions: (row.actions as AutomationAction[]) ?? null,
       execution_mode: (row.execution_mode as string) ?? null,
+      ...(row.action_type === YIDA_AUTOMATION_ACTION_TYPE && typeof row.integration_authority_revision === 'string'
+        && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(row.integration_authority_revision)
+        ? { integration_authority_revision: row.integration_authority_revision } : {}),
     }
   }
 }
@@ -5249,6 +5293,7 @@ export class AutomationService {
 // ── Route helpers ────────────────────────────────────────────────────────
 
 export type SerializedAutomationRule = {
+  integrationAuthorityRevision?: string
   id: string
   sheetId: string
   name: string
@@ -5296,6 +5341,9 @@ export function serializeAutomationRule(rule: AutomationRule): SerializedAutomat
     updatedAt: rule.updated_at,
     createdBy: rule.created_by ?? undefined,
     executionMode: rule.execution_mode ?? null,
+    ...(rule.action_type === YIDA_AUTOMATION_ACTION_TYPE && typeof rule.integration_authority_revision === 'string'
+      && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(rule.integration_authority_revision)
+      ? { integrationAuthorityRevision: rule.integration_authority_revision } : {}),
   }
 }
 
@@ -5335,6 +5383,10 @@ export function parseCreateRuleInput(
   // An explicitly empty config cannot borrow a valid modern config and mask an
   // invalid raw read action. Missing legacy config may still use the modern pair.
   const rawActionConfig = body && Object.hasOwn(body, 'actionConfig') ? body.actionConfig : firstAction?.config
+  if (!validYidaAutomationAuthoringShape({ actionType, actionConfig: rawActionConfig, actions,
+    executionMode: body?.executionMode, triggerType, triggerConfig, conditions: body?.conditions })) {
+    throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+  }
   if (!validAutomationReadAuthoringShape({ actionType, actionConfig: rawActionConfig,
     actions, executionMode: body?.executionMode, triggerType })) {
     throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)

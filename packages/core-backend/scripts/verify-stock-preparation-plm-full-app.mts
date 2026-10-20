@@ -21,7 +21,13 @@ import { observeYidaOwnerOffQueries, ownerOffDatabaseCounts, ownerOffTables, pro
 import type { provisionYidaInitializationAnchor } from '../src/integration/yida-initialization-bootstrap.ts'
 import type { Queryable } from '../src/multitable/automation-durable-dispatcher.ts'
 import type { YidaInitializationBrowserInput, runYidaInitializationFullApp } from '../tests/utils/stock-preparation-yida-initialization-full-app.ts'
+import { runYidaAuthorizationFullApp } from '../tests/utils/stock-preparation-yida-initialization-full-app.ts'
 import { assertRequiredMainMigrationInventory } from '../tests/utils/stock-preparation-main-migration-contract.ts'
+import { verifyYidaAutomationMainDefaultOff } from '../tests/utils/yida-automation-main-full-app.ts'
+import { createYidaMainSyntheticVendor, verifyYidaAutomationMainSyntheticExecution } from '../tests/utils/yida-automation-main-synthetic-send.ts'
+import { beginYidaMainInFlightStop } from '../tests/utils/yida-automation-main-inflight-stop.ts'
+import { observeUnknownLedger } from '../tests/utils/yida-automation-main-fresh-consent-fence.ts'
+import { verifyYidaMainRemainingUnknown } from '../tests/utils/yida-automation-main-remaining-unknown.ts'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 interface NamespaceScopeAuthority {
@@ -31,12 +37,17 @@ interface NamespaceScopeAuthority {
 }
 const namespaceAuthority = createRequire(import.meta.url)(path.join(root,
   'scripts/ops/lib/stock-preparation-plm-namespace-scope.cjs')) as NamespaceScopeAuthority
-assert(Number(process.argv.length) === 4, 'APP_CONFIGURED_NAMESPACE_ARGUMENT_REQUIRED')
-const namespaceScope = namespaceAuthority.decodeScope(root, process.argv.splice(3, 1)[0])
+assert([4, 5].includes(Number(process.argv.length)), 'APP_CONFIGURED_NAMESPACE_ARGUMENT_REQUIRED')
+const namespaceScope = namespaceAuthority.decodeScope(root, process.argv.splice(process.argv.length - 1, 1)[0])
 namespaceAuthority.assertOwnedNamespaceScope(namespaceScope)
+const yidaArgument = process.argv.splice(3, 1)[0]
+assert(yidaArgument === undefined || yidaArgument === '--yida-case=remaining-unknown', 'APP_CONFIGURED_YIDA_CASE_INVALID')
+const yidaCase = yidaArgument ? 'remaining-unknown' : undefined
+assert.equal(yidaCase, (namespaceScope as { owner: { yidaCase?: string } }).owner.yidaCase, 'APP_CONFIGURED_YIDA_CASE_SCOPE_REQUIRED')
 assert(process.argv.length === 3 && ['--automation-scenario=manual', '--automation-scenario=interval'].includes(process.argv[2]),
   'APP_AUTOMATION_EXACT_SCENARIO_ARGUMENT_REQUIRED')
 const automationScenario = process.argv[2] === '--automation-scenario=interval' ? 'interval' : 'manual'
+assert(yidaCase === undefined || automationScenario === 'manual', 'APP_CONFIGURED_YIDA_CASE_SCENARIO_REQUIRED')
 const automationStage = `automation-${automationScenario}`
 const coreRequire = createRequire(path.join(root, 'packages/core-backend/package.json'))
 const coreModulePath = (relative: string) => configuredCoreModulePath(root, relative)
@@ -71,6 +82,7 @@ let host: HostServer | undefined
 let k3: Awaited<ReturnType<typeof createK3FullAppFixture>> | undefined
 let automation: Awaited<ReturnType<typeof createAutomationFullAppFixture | typeof createAutomationIntervalFullAppFixture>> | undefined
 let ownerOffQueryObservation: ReturnType<typeof observeYidaOwnerOffQueries> | undefined
+let freshQueryObservation: ReturnType<typeof observeUnknownLedger> | undefined
 let collabIo: SocketServer | undefined
 let collaboration: ObservedCollaboration | undefined
 let hostListener: HttpServer | undefined
@@ -83,6 +95,9 @@ let liveCollaborationClientCount = 0
 let collaborationDisconnects = 0
 let collaborationStopStarted = false
 let collaborationCompletion: Promise<{ disconnects: number; allDisconnected: boolean }> | undefined
+let yidaInFlight: Awaited<ReturnType<typeof beginYidaMainInFlightStop>> | undefined
+let yidaStopCheck: Promise<void> | undefined
+let actualStopSucceeded = false
 const emergencyCleanup: Array<() => void | Promise<void>> = []
 const stage = (name: string, data: Record<string, unknown> = {}) => console.log('PLM_FULL_APP_PROBE ' + JSON.stringify({ stage: name, ...data }))
 const timers = new Map<number, { value: WeakRef<{ hasRef(): boolean; _repeat?: number; _destroyed?: boolean }>; origin: string }>()
@@ -165,8 +180,16 @@ try {
   await configureAutomationFullAppDeployment(scratch, fixture)
   stage('synthetic-fixture-seeded', { platformMigrationCount: migrationCount, sourceRoleCount: 7,
     seededVersions: 0, seededReceipts: 0, b2aArmed: true, b2aRegistrations: 3 })
-  host = new MetaSheetServer({ port: 0, host: '127.0.0.1',
-    pluginDirs: [path.join(root, 'plugins/plugin-integration-core')], manageProcessSignals: false })
+  const originalFetch = globalThis.fetch
+  const syntheticVendor = createYidaMainSyntheticVendor(originalFetch)
+  emergencyCleanup.unshift(() => syntheticVendor.close())
+  try {
+    // Capture only the remote test boundary. Routes/JWT/plugin/worker remain
+    // the original compiled main; restore global fetch BEFORE start/login/UI.
+    globalThis.fetch = syntheticVendor.fetch
+    host = new MetaSheetServer({ port: 0, host: '127.0.0.1',
+      pluginDirs: [path.join(root, 'plugins/plugin-integration-core')], manageProcessSignals: false })
+  } finally { globalThis.fetch = originalFetch }
   await host.start()
   // The actual compiled index must reference the same initialized manager
   // that real HTTP routes use. Observe it without repairing or initializing it.
@@ -249,6 +272,14 @@ try {
   assert.equal((await query('SELECT count(*)::int AS count FROM meta_records WHERE id=$1 AND sheet_id=$2',
     [yidaRowId, fixture.target.sheetId])).rows[0]?.count, 1, 'APP_CONFIGURED_YIDA_FIXTURE_ROW_REQUIRED')
   stage('yida-synthetic-board-ready', { seededTargetRows: 1, seededActiveRows: 0, separateFromPlmProject: true })
+  // Separate inactive board for the REAL draft project. Seed before the
+  // original business snapshot; never weaken project consent to reuse SYN.
+  assert.notEqual(fixture.projectNo, 'DEMO-P1', 'APP_CONFIGURED_YIDA_AUTH_SEPARATE_PROJECT_REQUIRED')
+  await query('INSERT INTO meta_records (id,sheet_id,data,version) VALUES ($1,$2,$3::jsonb,1)',
+    [randomUUID(), fixture.target.sheetId, JSON.stringify({
+      [fixture.target.fieldIdMap.projectNo]: 'DEMO-P1', [fixture.target.fieldIdMap.active]: false,
+    })])
+  stage('yida-authorization-synthetic-board-ready', { seededTargetRows: 1, seededActiveRows: 0, separateFromPlmProject: true })
   k3 = await createK3FullAppFixture({ root, origin, ownerToken: loggedIn.data.token, ownerId: owner, tenantId, query })
   assert.equal(k3.stats().closed, false, 'APP_CONFIGURED_KTHREE_LISTENER_REQUIRED')
   stage('k3-synthetic-server-ready', { listening: true })
@@ -258,6 +289,10 @@ try {
     registeredConnections: 1, registeredExternalSystems: 1, targetEnsured: true,
     sourceBindingSeeded: false, syntheticAdminOwnerOnly: true })
   const { Client } = coreRequire('pg') as { Client: { prototype: object } }
+  // Install before the original Automation observer captures client-own query
+  // methods; remain inactive until the later exact unknown-row negative case.
+  freshQueryObservation = observeUnknownLedger(Client)
+  emergencyCleanup.unshift(() => freshQueryObservation?.restore())
   ownerOffQueryObservation = observeYidaOwnerOffQueries(Client)
   emergencyCleanup.unshift(() => ownerOffQueryObservation?.restore())
   await ownerOffQueryObservation.positiveControl(() => query('SELECT count(*)::int AS count FROM integration_yida_draft_rows'))
@@ -620,7 +655,7 @@ try {
       })().catch(() => reject(new Error('APP_CONFIGURED_YIDA_INIT_CHILD_FAILED')))
     })
   })
-  assert.deepEqual(Object.keys(initializationResult).sort(), ['counts', 'evidence', 'state', 'status'])
+  assert.deepEqual(Object.keys(initializationResult).sort(), ['automationOff', 'counts', 'evidence', 'state', 'status'])
   const initialized = initializationResult.state
   assert(initialized.commandId === initializationAnchor.commandId && initialized.status === 'initialized'
     && initialized.canSend === false && initialized.tokenIssued === false && initialized.externalWriteAttempted === false
@@ -656,6 +691,61 @@ try {
     counts: initializationResult.counts, authority: { managedAnchorCommitted: true, actualDurableChainMatched: true,
       singleInitialization: true, credentialMaterials: 1, draftOperations: 1, draftRows: 2, approvedTargets: 1,
       sendRows: 0, originalBusinessSnapshotUnchanged: true } })
+  const automaticBrowser = initializationResult.automationOff
+  assert.deepEqual(automaticBrowser.evidence, { actualPanel: true, openingQuiet: true, actualServerDraftMembers: true,
+    actualSdkRuleCreated: true, ruleNotAuthorization: true, twoRowsSelected: true, originalPreviewOff403: true,
+    errorRetained: true, approvalAndRequestAbsent: true, responseStubs: 0, storageInjections: 0 })
+  assert.deepEqual({ ...automaticBrowser.counts, expectedConsoleErrors: 0 }, { requests: 4, responses: 4, ruleGets: 1,
+    rulePosts: 1, initializationGets: 1, previewPosts: 1, expectedConsoleErrors: 0 })
+  assert([0, 1].includes(automaticBrowser.counts.expectedConsoleErrors))
+  assert.equal(automaticBrowser.rule.sheetId, fixture.target.sheetId)
+  assert.deepEqual((await query(`SELECT id,created_by,integration_authority_revision::text AS revision,action_config
+    FROM automation_rules WHERE id=$1 AND sheet_id=$2`, [automaticBrowser.rule.id, fixture.target.sheetId])).rows,
+  [{ id: automaticBrowser.rule.id, created_by: owner, revision: automaticBrowser.rule.revision,
+    action_config: { authorizationSlot: automaticBrowser.rule.slot } }], 'APP_CONFIGURED_YIDA_AUTO_BROWSER_ACTUAL_RULE_REQUIRED')
+  assert.deepEqual((await query(`SELECT (SELECT count(*)::int FROM integration_yida_auto_grants) AS grants,
+    (SELECT count(*)::int FROM integration_yida_auto_requests) AS requests,
+    (SELECT count(*)::int FROM integration_yida_auto_admissions) AS admissions,
+    (SELECT count(*)::int FROM integration_yida_delivery_ledger) AS ledgers`)).rows,
+  [{ grants: 0, requests: 0, admissions: 0, ledgers: 0 }], 'APP_CONFIGURED_YIDA_AUTO_BROWSER_OFF_DURABLE_REQUIRED')
+  stage('yida-automation-default-off-browser-verified', { evidence: automaticBrowser.evidence,
+    counts: automaticBrowser.counts, actualRuleMatched: true, grants: 0, requests: 0, admissions: 0, ledgers: 0 })
+  // Separate from, and AFTER, every original default-OFF/initialization proof.
+  // Keep both send flags OFF; exercise real main/JWT/plugin/shared-loop gates.
+  const yidaAutomaticOff = await verifyYidaAutomationMainDefaultOff({ origin, ownerToken: loggedIn.data.token,
+    ownerId: owner, tenantId, sheetId: fixture.target.sheetId, currentProjectNo: yidaProjectNo,
+    operationId: initialized.draft.operationId, rowKeys: initialized.draft.rows.map(row => row.rowKey), query,
+    hashPassword: password => bcrypt.hash(password, 10) })
+  assert.deepEqual(await configuredBusinessSnapshot(query, fixture), before, 'APP_CONFIGURED_YIDA_AUTO_BUSINESS_CHANGED')
+  stage('yida-automation-default-off-main-verified', yidaAutomaticOff)
+  if (yidaCase === 'remaining-unknown') {
+    const remaining = await verifyYidaMainRemainingUnknown({ origin, ownerToken: loggedIn.data.token,
+      ownerId: owner, tenantId, operationId: initialized.draft.operationId,
+      rowKeys: initialized.draft.rows.map(row => row.rowKey), rule: automaticBrowser.rule, query, vendor: syntheticVendor })
+    assert.deepEqual(await configuredBusinessSnapshot(query, fixture), before, 'APP_CONFIGURED_YIDA_REMAINING_BUSINESS_CHANGED')
+    stage('yida-automation-remaining-unknown-verified', { ...remaining, originalBusinessSnapshotUnchanged: true,
+      originalSendFlagsRestored: [undefined, 'false'].includes(process.env.INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED)
+        && [undefined, 'false'].includes(process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED) })
+  } else if (automationScenario === 'manual') {
+  const yidaSynthetic = await verifyYidaAutomationMainSyntheticExecution({ origin, ownerToken: loggedIn.data.token,
+    ownerId: owner, tenantId, operationId: initialized.draft.operationId,
+    rowKeys: initialized.draft.rows.map(row => row.rowKey), rule: automaticBrowser.rule, query, vendor: syntheticVendor,
+    queryObservation: freshQueryObservation, reportFreshFence: evidence => stage('yida-automation-fresh-consent-fence-verified', evidence),
+    report: phase => stage('yida-automation-synthetic-execution-progress', { phase }),
+    browserExecute: async () => {
+      const result = await runYidaAuthorizationFullApp({ apiOrigin: origin, identifier, password, scratchDir: scratch,
+        tenantId, ownerId: owner, commandId: initializationAnchor.commandId, compiledWeb }, root,
+      { operationId: initialized.draft!.operationId, rowKeys: initialized.draft!.rows.map(row => row.rowKey), rule: automaticBrowser.rule })
+      stage('yida-automation-authorized-browser-verified', { evidence: result.authorization.evidence,
+        counts: result.authorization.counts, session: result.evidence, browserAndPreviewServerClosed: true })
+      return { grantId: result.authorization.grantId }
+    } })
+  assert([undefined, 'false'].includes(process.env.INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED))
+  assert([undefined, 'false'].includes(process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED))
+  assert.deepEqual(await configuredBusinessSnapshot(query, fixture), before, 'APP_CONFIGURED_YIDA_SYNTHETIC_BUSINESS_CHANGED')
+  stage('yida-automation-synthetic-execution-verified', { ...yidaSynthetic, originalSendFlagsRestored: true,
+    originalBusinessSnapshotUnchanged: true })
+  }
   const sessions = await query('SELECT count(*)::int AS count FROM user_sessions WHERE user_id=$1', [owner])
   assert(typeof sessions.rows[0].count === 'number' && sessions.rows[0].count >= 2)
   stage('real-sessions-persisted', { ownerSetupAndBrowserSessionsPresent: true })
@@ -770,6 +860,17 @@ try {
     httpListenerOpen: hostListener.listening, sourcePoolOpen: true,
     collaborationInitialized: collaboration.getIO() === collabIo, liveCollaborationClients: liveCollaborationClientCount,
     transports: ['websocket', 'polling'], activeMaintenance })
+  if (automationScenario === 'interval') {
+    // A separate original scenario, not a replacement for the manual page
+    // proof. Start last so its held native form reaches REAL stop in budget.
+    yidaInFlight = await beginYidaMainInFlightStop({ origin, ownerToken: loggedIn.data.token,
+      ownerId: owner, tenantId, operationId: initialized.draft.operationId,
+      rowKeys: initialized.draft.rows.map(row => row.rowKey), rule: automaticBrowser.rule, query, vendor: syntheticVendor })
+    emergencyCleanup.unshift(() => yidaInFlight?.close())
+    assert.deepEqual(await configuredBusinessSnapshot(query, fixture), before, 'APP_CONFIGURED_YIDA_INFLIGHT_BUSINESS_CHANGED')
+    stage('yida-automation-natural-interval-verified', yidaInFlight.natural)
+    stage('yida-automation-inflight-ready', { ...yidaInFlight.ready, originalBusinessSnapshotUnchanged: true })
+  }
 } catch (error) {
   const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
     && /^[A-Z0-9_]{3,80}$/.test(error.code) ? error.code : null
@@ -786,6 +887,8 @@ try {
 } finally {
   try { ownerOffQueryObservation?.restore() }
   catch { stage('yida-owner-query-observer-restore-failed'); process.exitCode = 1 }
+  try { freshQueryObservation?.restore() }
+  catch { stage('yida-fresh-query-observer-restore-failed'); process.exitCode = 1 }
   try {
     assert(k3, 'APP_CONFIGURED_KTHREE_FIXTURE_REQUIRED')
     await k3.close()
@@ -793,14 +896,44 @@ try {
     stage('k3-synthetic-server-closed', { closed: true })
   } catch { stage('k3-synthetic-server-close-failed'); process.exitCode = 1 }
   try { automation?.dispose() } catch { stage(`${automationStage}-observer-close-failed`); process.exitCode = 1 }
+  let yidaStopArmed = false
+  try {
+    if (yidaInFlight) { yidaInFlight.markStopping(); yidaStopArmed = true }
+  } catch { yidaInFlight?.close(); stage('yida-automation-inflight-stop-failed', { phase: 'ARM' }); process.exitCode = 1 }
   try {
     assert(host, 'APP_CONFIGURED_HOST_REQUIRED')
     collaborationStopStarted = true
     const stopped = host.stop('PLM_FULL_APP_COMPLETE')
     assert.equal(host.stop('PLM_FULL_APP_REPEAT'), stopped, 'APP_CONFIGURED_STOP_PROMISE_IDENTITY_REQUIRED')
+    if (yidaInFlight && yidaStopArmed) {
+      yidaStopCheck = yidaInFlight.duringStop(stopped, () => mainPool?.getInternalPool().ended !== false)
+      void yidaStopCheck.catch(() => undefined)
+    }
     await stopped
+    actualStopSucceeded = true
     stage('actual-stop-resolved')
   } catch { stage('actual-stop-failed'); process.exitCode = 1 }
+  if (yidaInFlight) {
+    try {
+      assert(actualStopSucceeded && yidaStopCheck, 'APP_CONFIGURED_YIDA_INFLIGHT_ACTUAL_STOP_REQUIRED')
+      await yidaStopCheck
+      // The main pool must already be closed. Read the SAME owned database
+      // with a separate actual client, then close it before timer assertions.
+      assert.equal(mainPool?.getInternalPool().ended, true)
+      const { Client } = coreRequire('pg') as typeof import('pg')
+      const observer = new Client({ connectionString: process.env.DATABASE_URL,
+        connectionTimeoutMillis: 5000, statement_timeout: 5000 })
+      try {
+        await observer.connect()
+        const evidence = await yidaInFlight.verifyAfterStop((sql, values) => observer.query(sql, values))
+        assert([undefined, 'false'].includes(process.env.INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED))
+        assert([undefined, 'false'].includes(process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED))
+        stage('yida-automation-inflight-stop-verified', { ...evidence, originalSendFlagsRestored: true })
+      } finally { await observer.end() }
+    } catch {
+      yidaInFlight.close(); stage('yida-automation-inflight-stop-failed', { phase: 'VERIFY' }); process.exitCode = 1
+    }
+  }
   try {
     // Preserve the earlier acceptance failure instead of misreporting a socket
     // child that the failed browser path never reached. This remains a failed

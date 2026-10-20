@@ -89,6 +89,8 @@ export async function launchFullAppNamespace(options, cleanEnvironment) {
   assert.equal(process.versions.node.split('.')[0], '20', 'PLM_FULL_APP_NAMESPACE_NODE20_REQUIRED')
   assert(options && path.isAbsolute(options.pgBin) && ['manual', 'interval'].includes(options.automationScenario),
     'PLM_FULL_APP_NAMESPACE_OPTIONS_INVALID')
+  assert(options.yidaCase === undefined || options.yidaCase === 'remaining-unknown' && options.automationScenario === 'manual',
+    'PLM_FULL_APP_NAMESPACE_YIDA_CASE_INVALID')
   const node = fs.realpathSync(process.execPath), executable = fs.readFileSync(node)
   assert(executable.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70])), 'PLM_FULL_APP_NAMESPACE_ELF_REQUIRED')
   const nonce = randomUUID(), directory = path.join(repository, 'tmp', 'stock-preparation-plm-full-app-namespace-' + nonce)
@@ -97,6 +99,7 @@ export async function launchFullAppNamespace(options, cleanEnvironment) {
   const owner = { owner: 'PLM_FULL_APP_NAMESPACE', nonce, repoRoot: repository, pid: process.pid,
     uid: process.getuid(), parentNamespace: fs.readlinkSync('/proc/self/ns/net'), node, nodeSha256: hash(executable),
     pgBin: options.pgBin, automationScenario: options.automationScenario,
+    ...(options.yidaCase ? { yidaCase: options.yidaCase } : {}),
     ...(options.browserCandidate ? { browserCandidate: require('./stock-preparation-yida-browser-candidate.cjs')
       .pinnedBrowserForRoot(repository, options.browserCandidate) } : {}),
     sources: scopes.SOURCE_PATHS.map(relative => ({ path: relative, sha256: hash(fs.readFileSync(path.join(repository, relative))) })) }
@@ -132,6 +135,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === file) {
       path.join(repository, 'scripts/ops/run-stock-preparation-plm-full-app.mjs'),
       `--plm-full-app-namespace=${scope.nonce}:${scope.ownerSha256}:${scope.preloadSha256}`,
       `--pg-bin=${scope.owner.pgBin}`, `--automation-scenario=${scope.owner.automationScenario}`,
+      ...(scope.owner.yidaCase ? [`--yida-case=${scope.owner.yidaCase}`] : []),
       ...(scope.owner.browserCandidate ? [`--browser-candidate=${scope.owner.browserCandidate.id}`] : [])],
     cleanEnvironment(process.env), 1050000, 'PLM_FULL_APP_RESULT ')
     console.log('PLM_FULL_APP_NAMESPACE_RESULT ' + JSON.stringify({ passed: true, workerReceiptObserved: true,

@@ -48,7 +48,7 @@ const candidateStep = extractStep(workflow, 'stock-preparation-pinned-browser-in
 const candidateArchiveSha = '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d'
 const candidateBinarySha = '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925'
 
-test('fixed candidate installer precedes all three exact acceptance selectors without weakening default install', () => {
+test('fixed candidate installer precedes all four exact acceptance selectors without weakening default install', () => {
   assert.match(candidateStep.header, /if: matrix.node-version == '20.x'/u)
   assert.match(candidateStep.run, /set -euo pipefail/u)
   assert(candidateStep.run.includes('https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip'))
@@ -64,7 +64,14 @@ test('fixed candidate installer precedes all three exact acceptance selectors wi
     'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529',
   ])
   assert(step.run.includes(`${runner} --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529`))
-  assert.equal((workflow.match(/--browser-candidate(?:=| )upstream-1719529/gu) ?? []).length, 3)
+  const remaining = extractStep(workflow, 'stock-preparation-yida-remaining-unknown')
+  assert.match(remaining.header, /if: matrix.node-version == '20.x'/u)
+  assert.match(remaining.header, /timeout-minutes: 10/u)
+  assert(!remaining.header.includes('continue-on-error'))
+  assert.equal(remaining.run.trim(), 'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --yida-case=remaining-unknown --browser-candidate=upstream-1719529')
+  assert(workflow.indexOf('id: stock-preparation-plm-full-app\n') < workflow.indexOf('id: stock-preparation-yida-remaining-unknown\n'))
+  assert(workflow.indexOf('id: stock-preparation-yida-remaining-unknown\n') < workflow.indexOf(`id: ${stepId}\n`))
+  assert.equal((workflow.match(/--browser-candidate(?:=| )upstream-1719529/gu) ?? []).length, 4)
   assert(!candidateStep.header.includes('continue-on-error'))
 })
 

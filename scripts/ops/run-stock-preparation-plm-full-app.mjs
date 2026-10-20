@@ -11,6 +11,8 @@ import { StringDecoder } from 'node:string_decoder'
 import { types } from 'node:util'
 import { startOwnedPostgres } from './lib/stock-preparation-plm-owned-pg.mjs'
 import { verifyBuildReceipt } from './lib/stock-preparation-plm-builds.mjs'
+import { validateYidaAutomationEvidence } from './lib/stock-preparation-yida-automation-evidence.mjs'
+export { validateYidaAutomationEvidence }
 
 const filename = fileURLToPath(import.meta.url)
 const repository = path.resolve(path.dirname(filename), '../..')
@@ -353,11 +355,12 @@ export function createFullAppStageRunner({ repoRoot, scratchDir, emit = console.
 }
 export function parseArguments(args) {
   if (args.length === 1 && args[0] === '--help') return { help: true }
-  assert(args.length >= 1 && args.length <= 3 && args.every(arg => typeof arg === 'string')
+  assert(args.length >= 1 && args.length <= 4 && args.every(arg => typeof arg === 'string')
     && args.filter(arg => arg.startsWith('--pg-bin=')).length === 1
     && args.filter(arg => arg.startsWith('--automation-scenario=')).length <= 1
     && args.filter(arg => arg.startsWith('--browser-candidate=')).length <= 1
-    && args.every(arg => arg.startsWith('--pg-bin=') || arg.startsWith('--automation-scenario=') || arg.startsWith('--browser-candidate=')),
+    && args.filter(arg => arg.startsWith('--yida-case=')).length <= 1
+    && args.every(arg => arg.startsWith('--pg-bin=') || arg.startsWith('--automation-scenario=') || arg.startsWith('--browser-candidate=') || arg.startsWith('--yida-case=')),
     'PLM_FULL_APP_EXPLICIT_PG_BIN_REQUIRED')
   const pgBin = args.find(arg => arg.startsWith('--pg-bin=')).slice('--pg-bin='.length)
   assert(pgBin.length > 0, 'PLM_FULL_APP_EXPLICIT_PG_BIN_REQUIRED')
@@ -366,7 +369,9 @@ export function parseArguments(args) {
   assert(['manual', 'interval'].includes(automationScenario), 'PLM_FULL_APP_AUTOMATION_SCENARIO_INVALID')
   const browserCandidate = args.find(arg => arg.startsWith('--browser-candidate='))?.slice('--browser-candidate='.length)
   assert(browserCandidate === undefined || browserCandidate === 'upstream-1719529', 'PLM_FULL_APP_BROWSER_CANDIDATE_INVALID')
-  return { pgBin, automationScenario, ...(browserCandidate ? { browserCandidate } : {}) }
+  const yidaCase = args.find(arg => arg.startsWith('--yida-case='))?.slice('--yida-case='.length)
+  assert(yidaCase === undefined || yidaCase === 'remaining-unknown' && automationScenario === 'manual', 'PLM_FULL_APP_YIDA_CASE_INVALID')
+  return { pgBin, automationScenario, ...(browserCandidate ? { browserCandidate } : {}), ...(yidaCase ? { yidaCase } : {}) }
 }
 export function cleanEnvironment(source) {
   const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'COMSPEC', 'PATHEXT', 'HOME'])
@@ -836,6 +841,9 @@ export async function runAcceptance(options, namespaceScope) {
   assert.equal(options.browserCandidate, namespaceScope.owner.browserCandidate?.id, 'PLM_FULL_APP_BROWSER_CANDIDATE_SCOPE_MISMATCH')
   const automationScenario = options.automationScenario ?? 'manual'
   assert(['manual', 'interval'].includes(automationScenario), 'PLM_FULL_APP_AUTOMATION_SCENARIO_INVALID')
+  const yidaCase = options.yidaCase
+  assert(yidaCase === undefined || yidaCase === 'remaining-unknown' && automationScenario === 'manual', 'PLM_FULL_APP_YIDA_CASE_INVALID')
+  assert.equal(yidaCase, namespaceScope.owner.yidaCase, 'PLM_FULL_APP_NAMESPACE_YIDA_CASE_MISMATCH')
   const repoRoot = await fs.realpath(repository)
   const core = path.join(repoRoot, 'packages/core-backend')
   const requireCore = createRequire(path.join(core, 'package.json'))
@@ -983,7 +991,7 @@ export async function runAcceptance(options, namespaceScope) {
     assert.equal((replay.output.match(/was executed successfully/g) ?? []).length, 0, 'PLM_FULL_APP_MIGRATION_REPLAY_NOT_EMPTY')
     runtimeEnv.PLM_FULL_APP_MIGRATION_COUNT = String(migrationCount)
     const probe = await checked('configured-app', [...common, path.join(core, 'scripts/verify-stock-preparation-plm-full-app.mts'),
-      `--automation-scenario=${automationScenario}`],
+      `--automation-scenario=${automationScenario}`, ...(yidaCase ? [`--yida-case=${yidaCase}`] : [])],
       runtimeEnv, scratchDir, 300000)
     const records = probe.markers.filter(line => line.startsWith('PLM_FULL_APP_PROBE '))
       .map(line => JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)))
@@ -993,6 +1001,7 @@ export async function runAcceptance(options, namespaceScope) {
     validateYidaOwnerOffEvidence(records)
     validateYidaInitializationEvidence(records)
     validateAutomationEvidence(records, automationScenario)
+    validateYidaAutomationEvidence(records, automationScenario, yidaCase)
     yidaOwnerOffLogs = await verifyYidaOwnerOffRawLogs({ repoRoot, scratchDir, stage: probe, records })
     const nestedDiagnostics = validateBrowserProcessEvidence(records)
     await verifyStageLogs({ repoRoot, scratchDir, stages: nestedDiagnostics })
@@ -1053,7 +1062,7 @@ export async function runAcceptance(options, namespaceScope) {
     const receiptSummary = build => build && { receipt: build.receipt, receiptSha256: build.receiptSha256,
       inputs: build.inputs.length, outputs: build.emittedFiles.length }
     const evidence = { schemaVersion: 1, verification: 'PLM_FULL_APP_SYNTHETIC_ACCEPTANCE', baseline,
-      result: failure ? 'failed' : 'passed', failure, cleanup, stages, automationScenario,
+      result: failure ? 'failed' : 'passed', failure, cleanup, stages, automationScenario, ...(yidaCase ? { yidaCase } : {}),
       sourceInputs: sources, coreBuild: receiptSummary(coreBuild), webBuild: receiptSummary(webBuild), unobservedProcessLogs,
       webTypecheck: typecheck, migrationCount, migrationRuntime: 'original-source-cli', yidaOwnerOffLogs,
       nativeIsolation,
@@ -1080,7 +1089,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === filename) {
       authority.assertOwnedNamespaceScope(namespaceScope)
     }
     const options = parseArguments(process.argv.slice(2))
-    if (options.help) console.log('Usage: node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=<absolute PostgreSQL bin directory> [--automation-scenario=manual|interval]')
+    if (options.help) console.log('Usage: node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=<absolute PostgreSQL bin directory> [--automation-scenario=manual|interval] [--yida-case=remaining-unknown (manual only)]')
     else if (internal) await runAcceptance(options, namespaceScope)
     else {
       const { launchFullAppNamespace } = await import('./lib/stock-preparation-plm-namespace.mjs')

@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { enrichRequestContext, getRequestContext, type RequestContext } from '../../src/context/request-context'
 import { getLogContext, Logger, runWithLogContext, setLogContext } from '../../src/core/logger'
-import { isYidaOwnerHttpObservationPath, YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../../src/integration/yida-owner-http-observation'
+import { isYidaOwnerHttpObservationPath, YIDA_OWNER_HTTP_PREFIX as PREFIX,
+  YIDA_AUTOMATION_HTTP_PREFIX as AUTOMATION_PREFIX } from '../../src/integration/yida-owner-http-observation'
 import { correlationContextEnrichmentMiddleware, correlationErrorHandler, correlationIdMiddleware } from '../../src/middleware/correlation'
 import { methodOverrideMiddleware } from '../../src/middleware/method-override'
 
@@ -138,6 +139,11 @@ function unchangedRequest(req: Request): () => void {
 }
 
 const ownerPaths = [
+  ['POST', AUTOMATION_PREFIX],
+  ['GET', `${AUTOMATION_PREFIX}/${sentinels.path}`],
+  ['POST', `${AUTOMATION_PREFIX}/${sentinels.path}/revoke`],
+  ['POST', `${AUTOMATION_PREFIX}/${sentinels.path}/requests`],
+  ['POST', `${AUTOMATION_PREFIX}/unknown/%ZZ-${sentinels.path}`],
   ['GET', `${PREFIX}/initialization`],
   ['POST', `${PREFIX}/initialization`],
   ['POST', `${PREFIX}/initialization/%ZZ-${sentinels.path}`],
@@ -152,6 +158,8 @@ const ownerPaths = [
 ] as const
 
 const siblingPaths = [
+  `${AUTOMATION_PREFIX}-sibling/${sentinels.path}`,
+  `${AUTOMATION_PREFIX}%2f${sentinels.path}`,
   `${PREFIX}-sibling/${sentinels.path}`,
   `${PREFIX}ish/${sentinels.path}`,
   `${PREFIX}%2fapprovals/${sentinels.path}`,

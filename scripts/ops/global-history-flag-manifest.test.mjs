@@ -28,6 +28,38 @@ function violationIds(flags) {
   return evaluateFlagRules(flags).map((v) => v.id)
 }
 
+test('SA-06D delegated YiDa flag remains a separate default-OFF exact-literal high-risk gate', () => {
+  const key = 'INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/integration/yida-automation-execution-authority.ts#YIDA_AUTOMATION_SEND_FLAG')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1']) {
+    assert.equal(isActivated(spec, value), false)
+  }
+  // This operator-status helper stringifies typed inputs; it is NOT the live
+  // execution authority. Do not change its shared rendering contract here.
+  assert.equal(isActivated(spec, true), true)
+  const source = readFileSync(new URL('../../packages/core-backend/src/integration/yida-automation-execution-authority.ts', import.meta.url), 'utf8')
+  assert.match(source, /export const YIDA_AUTOMATION_SEND_FLAG = 'INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED'/u)
+  assert.notEqual(spec.key, 'INTEGRATION_YIDA_OWNER_SEND_ENABLED')
+})
+
+test('SA-06D operator description reflects the installed shared sender without granting remote execution', () => {
+  const purpose = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED.purpose
+  assert.match(purpose, /original shared worker reuse the existing native token\/form sender and delivery ledger/u)
+  assert.match(purpose, /known COMMIT before an instance-local ticket/u)
+  assert.match(purpose, /Token\/form IO rechecks this literal and the private execution authority/u)
+  assert.match(purpose, /Stop\/cancel cannot recall remote effects, clear unresolved CREATE or refund spent executions/u)
+  assert.match(purpose, /real token exchange, sending and deployment require separate authorization/u)
+  assert.doesNotMatch(purpose, /No token\/form sender is registered|Future token\/form IO/u)
+})
+
 test('watch-challenge manifest provenance names the canonical exported flag', () => {
   const key = 'ELEARNING_WATCH_CHALLENGE_ENABLED'
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]

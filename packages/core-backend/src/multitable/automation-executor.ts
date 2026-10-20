@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { AUTOMATION_READ_EXECUTION_UNAVAILABLE, containsAutomationReadAction } from '../integration/automation-read-authoring-policy'
+import { YIDA_AUTOMATION_ACTION_TYPE, YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, containsYidaAutomationAction } from '../integration/yida-automation-authoring-policy'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
@@ -959,6 +960,7 @@ function simulationDisposition(actionType: AutomationActionType): 'execute' | 's
     case 'parallel_branch':
     case 'record_click':
     case 'integration_read_preview':
+    case 'integration_yida_send_authorized':
       return 'execute'
     case 'update_record':
     case 'create_record':
@@ -1767,6 +1769,11 @@ function refusedReadExecution(rule: AutomationRule, id: string, dispatchMode: Au
   }
 }
 
+function refusedYidaExecution(rule: AutomationRule, id: string, dispatchMode: AutomationDispatchMode): AutomationExecution {
+  return { ...refusedReadExecution(rule, id, dispatchMode), error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE,
+    steps: [{ actionType: YIDA_AUTOMATION_ACTION_TYPE, status: 'failed', error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, durationMs: 0 }] }
+}
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -1831,6 +1838,7 @@ export class AutomationExecutor {
     ledgerKind: ExecutionLedgerKind = 'execution',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, executionId, dispatchMode)
     if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
       return refusedReadExecution(rule, executionId, dispatchMode)
     }
@@ -1938,6 +1946,7 @@ export class AutomationExecutor {
     jobLifecycle?: ActionJobLifecycle,
     settledStepResult?: AutomationStepResult,
   ): Promise<AutomationExecution> {
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, execution.id, context.dispatchMode ?? 'live')
     if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
       return refusedReadExecution(rule, execution.id, context.dispatchMode ?? 'live')
     }
@@ -2003,6 +2012,7 @@ export class AutomationExecutor {
     cursor: ConditionBranchResumeCursor,
     jobLifecycle: ActionJobLifecycle,
   ): Promise<AutomationExecution> {
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, execution.id, context.dispatchMode ?? 'live')
     if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
       return refusedReadExecution(rule, execution.id, context.dispatchMode ?? 'live')
     }
@@ -2735,6 +2745,9 @@ export class AutomationExecutor {
     // claim-then-skip-on-duplicate; every other action ignores it.
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
+    if (containsYidaAutomationAction(action.type, action.config, null)) {
+      return { actionType: YIDA_AUTOMATION_ACTION_TYPE, status: 'failed', error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, durationMs: 0 }
+    }
     if (containsAutomationReadAction(action.type, action.config, null)) {
       return { actionType: 'integration_read_preview', status: 'failed',
         error: AUTOMATION_READ_EXECUTION_UNAVAILABLE, durationMs: 0 }

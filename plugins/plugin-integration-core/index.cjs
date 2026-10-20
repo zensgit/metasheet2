@@ -118,6 +118,7 @@ let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
 let stopAutomationReadRuntime = null
+let stopYidaAutomationRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -646,6 +647,21 @@ module.exports = {
         if (!handle || typeof handle.stop !== 'function') throw new Error('AUTOMATION_READ_RUNTIME_UNAVAILABLE')
         stopAutomationReadRuntime = handle.stop.bind(handle)
       }
+      const yidaAutomationRuntime = context.services && context.services.yidaAutomationRuntime
+      if (yidaAutomationRuntime !== undefined) {
+        const security = context.services && context.services.security
+        if (!yidaAutomationRuntime || typeof yidaAutomationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_AUTOMATION_BINDING_UNAVAILABLE')
+        }
+        const { createYidaAutomationRuntimeBinding } = await import('./lib/yida-automation-runtime-factory.mjs')
+        const binding = createYidaAutomationRuntimeBinding({ db, security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) })
+        const handle = await yidaAutomationRuntime.activate(binding)
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_AUTOMATION_BINDING_UNAVAILABLE')
+        stopYidaAutomationRuntime = handle.stop.bind(handle)
+      }
     } catch (error) {
       // A later activation failure must withdraw the new private capability too.
       const stop = stopYidaInitializationRuntime
@@ -658,6 +674,13 @@ module.exports = {
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    let yidaAutomationDrain, automationStopFailed = false
+    if (stopYidaAutomationRuntime) {
+      const stop = stopYidaAutomationRuntime
+      stopYidaAutomationRuntime = null
+      try { yidaAutomationDrain = stop(); void yidaAutomationDrain.catch(() => {}) }
+      catch { automationStopFailed = true }
+    }
     // Latch the private runtimes before the legacy read drain's first await. A stopped
     // owner request retains actual pending work, so observe its rejection now
     // but await the original drain before any plugin DB is closed below.
@@ -691,6 +714,10 @@ module.exports = {
       } catch {
         if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] automation read runtime stop failed`)
       }
+    }
+    if (automationStopFailed) throw new Error('YIDA_AUTOMATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaAutomationDrain) {
+      try { await yidaAutomationDrain } catch { throw new Error('YIDA_AUTOMATION_RUNTIME_STOP_UNAVAILABLE') }
     }
     if (yidaOwnerDrain) await yidaOwnerDrain
     if (initializationStopFailed) throw new Error('YIDA_INITIALIZATION_RUNTIME_STOP_UNAVAILABLE')

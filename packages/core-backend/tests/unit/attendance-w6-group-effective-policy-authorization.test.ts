@@ -1131,12 +1131,14 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 68
-  const FROZEN_SAFE_HASH = 'd4f6c884e8417a75c8ce7ed410c5a9ba5ca308d0b3717e181f94dba92cec04cc'
+  const FROZEN_SAFE_COUNT = 69
+  const FROZEN_SAFE_HASH = 'edbacdccce6de03e63e49d86facf944405f6bddd722957258daa30bb251f1a47'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
   const FROZEN_SAFE_KEYS = new Set<string>([
+      // One owner-bound SA06D router port, mounted after global JWT. No name wildcard.
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yidaAutomationHost//#0",
       // Host-owned TCP bookkeeping only: register listener, add socket, remove socket.
       // Exact occurrences, not a property-name exemption or a live-derived allowlist.
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpServer//#0",

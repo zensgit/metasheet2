@@ -473,6 +473,10 @@ import { createIntegrationAutomationReadRouter, automationReadNoStoreMiddleware,
   automationReadParseErrorHandler } from './routes/integration-automation-read'
 import { createYidaOwnerRuntime } from './integration/yida-owner-runtime'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
+import { createYidaAutomationManagementHost } from './integration/yida-automation-management-host'
+import { YIDA_AUTOMATION_SEND_FLAG } from './integration/yida-automation-execution-authority'
+import { createIntegrationYidaAutomationRouter, YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore,
+  yidaAutomationJsonOnly, yidaAutomationParseError } from './routes/integration-yida-automation'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -674,6 +678,12 @@ export class MetaSheetServer {
       phase: diagnostic.phase, firstStop: diagnostic.firstStop, outcome: diagnostic.outcome,
       elapsedMs: diagnostic.elapsedMs, checkpointCount: diagnostic.checkpointCount, cleanupCount: diagnostic.cleanupCount,
     }),
+  })
+  private yidaAutomationHost = createYidaAutomationManagementHost({
+    database: { transaction: automationReadTransaction }, readRuntime: this.automationReadRuntime,
+    security: this.pluginRuntimeSecurityService, fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env[YIDA_AUTOMATION_SEND_FLAG],
+    deliveryReady: () => this.durableDeliveryLoop !== null,
   })
   private automationReadRecovery = createAutomationReadRecovery({
     transaction: automationReadTransaction,
@@ -1890,6 +1900,8 @@ export class MetaSheetServer {
     this.app.use('/api/integration/automation-read', automationReadNoStoreMiddleware)
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware, yidaOwnerJsonOnlyMiddleware,
       express.json({ limit: '2mb', strict: true }))
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore, yidaAutomationJsonOnly,
+      express.json({ limit: '16kb', strict: true }))
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
 
@@ -2139,6 +2151,8 @@ export class MetaSheetServer {
     this.app.use('/api/integration/automation-read', automationReadParseErrorHandler)
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, createIntegrationYidaAutomationRouter(this.yidaAutomationHost.port))
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationParseError)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
     //   A1 readiness (GET /ai/readiness, admin-only) +
@@ -3622,6 +3636,9 @@ export class MetaSheetServer {
         yidaInitializationRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaInitializationRuntime.createPluginCapability()
           : undefined,
+        yidaAutomationRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaAutomationHost.createPluginCapability()
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3660,7 +3677,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain])
+      const automationSendDrain = this.yidaAutomationHost.deactivate()
+      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3678,7 +3696,8 @@ export class MetaSheetServer {
       if (name === 'plugin-integration-core') {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
-        const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain])
+        const automationSendDrain = this.yidaAutomationHost.deactivate()
+        const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3701,7 +3720,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain])
+      const automationSendDrain = this.yidaAutomationHost.deactivate()
+      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3860,6 +3880,7 @@ export class MetaSheetServer {
     const automationReadDrain = this.observeShutdownTask(this.automationReadRuntime.stop())
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
+    const yidaAutomationDrain = this.observeShutdownTask(this.yidaAutomationHost.stop())
     const automationReadRecordDrain = this.observeShutdownTask(this.automationReadRuntime.stopRecordAdmissions())
     const automationReadScheduleDrain = this.observeShutdownTask(this.automationReadRuntime.stopScheduleAdmissions())
     const automationReadRecoveryDrain = this.observeShutdownTask(this.automationReadRecovery.stop())
@@ -3954,7 +3975,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, automationReadDrain, automationReadRecordDrain, automationReadScheduleDrain, automationReadRecoveryDrain, automationReadManagementDrain, automationRecordAfterImageRetentionDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaAutomationDrain, automationReadDrain, automationReadRecordDrain, automationReadScheduleDrain, automationReadRecoveryDrain, automationReadManagementDrain, automationRecordAfterImageRetentionDrain]
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4328,6 +4349,7 @@ export class MetaSheetServer {
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
         notificationService,
         { produce: (occurrence, signal) => this.automationReadRuntime.produceSchedule(occurrence, signal) },
+        { produce: (occurrence, signal) => this.yidaAutomationHost.produceSchedule(occurrence, signal) },
       )
       pendingAutomationService.init()
       await pendingAutomationService.loadAndRegisterAllScheduled()
@@ -4699,6 +4721,7 @@ export class MetaSheetServer {
             transaction: automationReadTransaction,
             execute: (requestId, signal) => this.automationReadRuntime.execute(requestId, signal),
           }),
+          integrationYidaAdapter: this.yidaAutomationHost.adapter,
           // Clock alignment (sink audit 2026-07-17): the OUTBOX consumer lease must outlive the SINK leases
           // (EVENT_DELIVERY_LEASE_MS / BRIDGE_COMPLETION_LEASE_MS, both 60s) — with the 30s default, a crash
           // redelivers while the dead worker's sink lease is still live, burning retries on 'busy'. 90s means

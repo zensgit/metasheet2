@@ -86,6 +86,7 @@ const CENSUS: Readonly<Record<string, CensusEntry>> = {
   // YiDa strict host-encrypted persistence; owner runtime forwards the captured host encrypt port.
   ['packages/core-backend/src/integration/yida-owner-runtime.ts :: encrypt']: { count: 1, stores: ['integration_yida_send_approvals'] },
   ['packages/core-backend/src/integration/yida-send-approval-service.ts :: encrypt']: { count: 1, stores: ['integration_yida_send_approvals'] },
+  ['packages/core-backend/src/integration/yida-automation-execution-authority.ts :: encrypt']: { count: 1, stores: ['integration_yida_auto_execution_snapshots'] },
   ['plugins/plugin-integration-core/lib/yida-credential-material-store.cjs :: encrypt']: { count: 1, stores: ['integration_yida_credential_materials'] },
   ['plugins/plugin-integration-core/lib/yida-draft-plan-store.mjs :: encrypt']: { count: 1, stores: ['integration_yida_draft_targets', 'integration_yida_draft_operations'] },
   ['plugins/plugin-integration-core/lib/yida-approved-target-store.mjs :: encrypt']: { count: 1, stores: ['integration_yida_approved_target'] },

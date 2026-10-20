@@ -7,6 +7,8 @@ export type AutomationActionType =
   // Authoring only. Ordinary live/simulate dispatch refuses this action; the
   // owner-bound private read runtime remains its sole execution authority.
   | 'integration_read_preview'
+  // Authoring only; ordinary live/simulate dispatch NEVER supplies a YiDa grant.
+  | 'integration_yida_send_authorized'
   | 'update_record'
   | 'create_record'
   | 'delete_record'
@@ -37,6 +39,7 @@ export type AutomationActionType =
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'integration_read_preview',
+  'integration_yida_send_authorized',
   'update_record',
   'create_record',
   'delete_record',

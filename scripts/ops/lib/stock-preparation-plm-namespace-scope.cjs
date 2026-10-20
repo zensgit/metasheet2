@@ -47,7 +47,8 @@ function scopeFromOwner({ repoRoot, nonce, ownerSha256, preloadSha256 }) {
   const owner = JSON.parse(bytes)
   assert.deepEqual(Object.keys(owner).sort(), ['automationScenario', 'node', 'nodeSha256', 'nonce', 'owner',
     'parentNamespace', 'pgBin', 'pid', 'repoRoot', 'sources', 'uid',
-    ...(Object.hasOwn(owner, 'browserCandidate') ? ['browserCandidate'] : [])].sort())
+    ...(Object.hasOwn(owner, 'browserCandidate') ? ['browserCandidate'] : []),
+    ...(Object.hasOwn(owner, 'yidaCase') ? ['yidaCase'] : [])].sort())
   if (Object.hasOwn(owner, 'browserCandidate')) {
     const candidate = require('./stock-preparation-yida-browser-candidate.cjs')
       .pinnedBrowserForRoot(repoRoot, owner.browserCandidate?.id)
@@ -61,6 +62,8 @@ function scopeFromOwner({ repoRoot, nonce, ownerSha256, preloadSha256 }) {
   assert(/^net:\[[1-9][0-9]*\]$/.test(owner.parentNamespace), 'PLM_FULL_APP_NAMESPACE_PARENT_INVALID')
   assert(['manual', 'interval'].includes(owner.automationScenario) && typeof owner.pgBin === 'string'
     && path.isAbsolute(owner.pgBin), 'PLM_FULL_APP_NAMESPACE_OPTIONS_INVALID')
+  assert(!Object.hasOwn(owner, 'yidaCase') || owner.yidaCase === 'remaining-unknown' && owner.automationScenario === 'manual',
+    'PLM_FULL_APP_NAMESPACE_YIDA_CASE_INVALID')
   assert(typeof owner.node === 'string' && path.isAbsolute(owner.node) && sha.test(owner.nodeSha256),
     'PLM_FULL_APP_NAMESPACE_NODE_INVALID')
   plain(owner.node)

@@ -5,6 +5,7 @@
  * the startup assertion catches BOTH failure directions with the exact offending keys named.
  */
 import { describe, expect, test } from 'vitest'
+import { YIDA_AUTOMATION_CONSUMER, YIDA_AUTOMATION_ROUTING_CANDIDATE } from '../../src/integration/yida-automation-outbox'
 
 import {
   APPROVAL_COMPLETION_CONSUMERS,
@@ -23,6 +24,14 @@ import {
 } from '../../src/multitable/automation-routing-manifest'
 
 const registryOf = (...keys: string[]) => ({ keys: () => [...keys] })
+test('the private v5 candidate requires its actual consumer and never changes the default v4 fan-out', () => {
+  expect(CURRENT_ROUTING_MANIFEST).toBe(ROUTING_MANIFEST_V4)
+  const legacy = manifestConsumerKeys(CURRENT_ROUTING_MANIFEST)
+  expect(legacy).not.toContain(YIDA_AUTOMATION_CONSUMER)
+  expect(() => assertManifestCompleteness(registryOf(...legacy), YIDA_AUTOMATION_ROUTING_CANDIDATE)).toThrow(/NO registered adapter/)
+  expect(() => assertManifestCompleteness(registryOf(...legacy, YIDA_AUTOMATION_CONSUMER), YIDA_AUTOMATION_ROUTING_CANDIDATE)).not.toThrow()
+  expect(() => assertManifestCompleteness(registryOf(...legacy, YIDA_AUTOMATION_CONSUMER), CURRENT_ROUTING_MANIFEST)).toThrow(/NOT routed/)
+})
 const FULL_V1_KEYS = [
   'approval-bridge',
   'approval-trigger',
@@ -157,7 +166,7 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
     for (const arr of Object.values(ROUTING_MANIFEST_V2.routes)) expect(Object.isFrozen(arr)).toBe(true)
     expect(Object.isFrozen(APPROVAL_COMPLETION_CONSUMERS_V2)).toBe(true)
     expect(() => (APPROVAL_COMPLETION_CONSUMERS_V2 as string[]).push('x')).toThrow(TypeError)
-    expect([...SUPPORTED_MANIFEST_VERSIONS].sort()).toEqual([1, 2, 3, 4])
+    expect([...SUPPORTED_MANIFEST_VERSIONS].sort()).toEqual([1, 2, 3, 4, 5])
   })
 
   test('SUPPORTED_MANIFEST_VERSIONS is ENFORCED, not prose: an undeclared manifest version fails the boot assertion', () => {
@@ -165,9 +174,9 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
     // dispatcher never compares manifest_version — the constant was read by nothing in src. It is now the
     // boot gate for the manifest THIS BUILD ships: stamping outbox rows with a version the fleet does not
     // declare must fail at startup, not at delivery time.
-    const v5 = { version: 5, routes: ROUTING_MANIFEST_V4.routes }
-    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS), v5)).toThrow(
-      /manifest v5 is not in SUPPORTED_MANIFEST_VERSIONS/,
+    const v6 = { version: 6, routes: ROUTING_MANIFEST_V4.routes }
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS), v6)).toThrow(
+      /manifest v6 is not in SUPPORTED_MANIFEST_VERSIONS/,
     )
     // all four DECLARED versions still pass with their own complete registries
     expect(() => assertManifestCompleteness(registryOf(...FULL_V1_KEYS), ROUTING_MANIFEST_V1)).not.toThrow()

@@ -1436,6 +1436,16 @@ jobs:
           node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --browser-candidate=upstream-1719529
           node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529
 
+      # Fresh owned fixture: UNKNOWN must retain the serial slot even when the
+      # finite grant still has an unused approved row and one remaining execution.
+      # Do not reuse the manual fixture, whose two original rows are already spent.
+      - name: Run synthetic YiDa remaining-budget UNKNOWN acceptance
+        id: stock-preparation-yida-remaining-unknown
+        if: matrix.node-version == '20.x'
+        timeout-minutes: 10
+        run: |
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --yida-case=remaining-unknown --browser-candidate=upstream-1719529
+
       # These files each import the real native AuthService/JWT and scoped pool.
       # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
       # Chromium comes from the hash-pinned candidate install step above; only YiDa responses

@@ -43,6 +43,7 @@ import {
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { AUTOMATION_READ_CONSUMER } from '../integration/automation-read-contracts'
+import { YIDA_AUTOMATION_CONSUMER, YIDA_AUTOMATION_ROUTING_CANDIDATE } from '../integration/yida-automation-outbox'
 
 /** Throw this from a handler to mark a DETERMINISTIC permanent failure (→ dead_letter, not retried). */
 export class PermanentDeliveryFailure extends Error {}
@@ -97,6 +98,7 @@ export async function produceAutomationEvent(
 export function buildConsumerAdapterRegistry(
   handlers: DurableConsumerHandlers,
   integrationReadAdapter: ConsumerAdapter,
+  integrationYidaAdapter?: ConsumerAdapter,
 ): ConsumerAdapterRegistry {
   const registry = new ConsumerAdapterRegistry()
   for (const key of DURABLE_CONSUMER_KEYS) {
@@ -122,6 +124,12 @@ export function buildConsumerAdapterRegistry(
     throw new RangeError('bootDurableDelivery: integration-read-preview adapter required')
   }
   registry.register(integrationReadAdapter)
+  if (integrationYidaAdapter !== undefined) {
+    if (integrationYidaAdapter?.key !== YIDA_AUTOMATION_CONSUMER || typeof integrationYidaAdapter.handle !== 'function') {
+      throw new RangeError('bootDurableDelivery: integration-yida-authorized-send adapter invalid')
+    }
+    registry.register(integrationYidaAdapter)
+  }
   return registry
 }
 
@@ -130,6 +138,8 @@ export interface BootOptions extends DispatchTickOptions {
   env?: NodeJS.ProcessEnv
   /** Required when durable delivery is enabled; flag-OFF boot remains a no-op. */
   integrationReadAdapter?: ConsumerAdapter
+  /** Explicit host-private adapter. Omitted => unchanged v4 registry. */
+  integrationYidaAdapter?: ConsumerAdapter
 }
 
 /**
@@ -187,7 +197,7 @@ export function bootDurableDelivery(
   const env = opts.env ?? process.env
   if (!isDurableDeliveryEnabled(env)) return null
   // Runtime validation also covers JS callers and a missing flag-ON dependency.
-  const registry = buildConsumerAdapterRegistry(handlers, opts.integrationReadAdapter as ConsumerAdapter)
-  assertManifestCompleteness(registry, CURRENT_ROUTING_MANIFEST)
+  const registry = buildConsumerAdapterRegistry(handlers, opts.integrationReadAdapter as ConsumerAdapter, opts.integrationYidaAdapter)
+  assertManifestCompleteness(registry, opts.integrationYidaAdapter === undefined ? CURRENT_ROUTING_MANIFEST : YIDA_AUTOMATION_ROUTING_CANDIDATE)
   return startDurableDispatchLoop(db, registry, observer, { ...opts, env })
 }

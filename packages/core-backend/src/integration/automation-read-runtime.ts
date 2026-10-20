@@ -14,6 +14,8 @@ import { AutomationReadLedgerError, type AutomationReadLedgerDependencies, type 
 import type { AutomationIntegrationActor } from './automation-live-authority'
 import type { DataSourceManager } from '../data-adapters/DataSourceManager'
 import { performance } from 'node:perf_hooks'
+import { createYidaAutomationInstalledBindingSource } from './yida-automation-installed-binding'
+import type { AutomationReadTargetMaterialCodec } from './automation-read-target-context'
 
 export class AutomationReadRuntimeInactive extends Error {
   readonly code = 'AUTOMATION_READ_RUNTIME_INACTIVE'
@@ -47,6 +49,7 @@ type State = {
   renewing?: Promise<void>
   stopping?: Promise<void>
   runs: Set<Promise<unknown>>
+  targetCodec?: AutomationReadTargetMaterialCodec
 }
 const LEASE_MS = 60000
 const RENEW_MS = 15000
@@ -199,6 +202,10 @@ export function createAutomationReadRuntime(deps: RuntimeDependencies) {
           // Copy function references before asynchronous profile persistence.
           const { codec, sourceStore, preview } = binding
           const state: State = { closed: false, controller: new AbortController(), runs: new Set() }
+          state.targetCodec = Object.freeze({
+            restoreStockPreparationAutomationProfileMaterial: codec.restoreStockPreparationAutomationProfileMaterial,
+            deriveAutomationReadTargetContract: codec.deriveAutomationReadTargetContract,
+          })
           active = state
           state.initializing = (async () => {
             lifetime(state, performance.now())
@@ -356,6 +363,40 @@ export function createAutomationReadRuntime(deps: RuntimeDependencies) {
         state.runs.delete(run)
       })
       state.runs.add(run)
+      return run
+    },
+    // Core server only. Not exported through the plugin communication API or a
+    // client selector, and never a permission derived from request JSON.
+    installedBindingSourceForYida() {
+      const candidate = active
+      if (!candidate || !live(candidate) || !candidate.producer || !candidate.targetCodec || !deps.enabled()) throw new AutomationReadRuntimeInactive()
+      const state: State = candidate
+      function track<T>(work: () => Promise<T>): Promise<T> {
+        if (state !== active || !live(state) || !deps.enabled()) return Promise.reject(new AutomationReadRuntimeInactive())
+        const run = Promise.resolve().then(() => {
+          if (state !== active || !live(state) || !deps.enabled()) throw new AutomationReadRuntimeInactive()
+          return work()
+        }).finally(() => { state.runs.delete(run) })
+        state.runs.add(run) // Installed YiDa metadata must drain before producer retirement.
+        return run
+      }
+      return createYidaAutomationInstalledBindingSource({ producer: candidate.producer, codec: candidate.targetCodec,
+        signal: state.controller.signal, isCurrent: () => state === active && live(state) && deps.enabled(), track })
+    },
+    /** Includes the caller-owned transaction/COMMIT response in the actual READ
+     * producer drain, not just metadata SQL. The host must assertCurrent at its
+     * final transaction callback boundary; no async check abandons COMMIT. */
+    withInstalledBindingSourceForYida<T>(work: (source: ReturnType<typeof createYidaAutomationInstalledBindingSource>) => Promise<T>): Promise<T> {
+      const state = active
+      if (!state || !live(state) || !deps.enabled() || typeof work !== 'function') return Promise.reject(new AutomationReadRuntimeInactive())
+      const source = this.installedBindingSourceForYida()
+      const run = Promise.resolve().then(async () => {
+        source.assertCurrent()
+        const result = await work(source)
+        source.assertCurrent()
+        return result
+      }).finally(() => { state.runs.delete(run) })
+      state.runs.add(run) // Includes the original host transaction response.
       return run
     },
     stop(): Promise<void> {

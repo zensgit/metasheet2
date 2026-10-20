@@ -7,6 +7,7 @@ import test from 'node:test'
 // This existing CI lane must exercise the native-isolation contract as well.
 import './stock-preparation-browser-network-isolation.test.mjs'
 import './stock-preparation-plm-namespace-contract.test.mjs'
+import './stock-preparation-yida-automation-evidence.test.mjs'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { createRequire } from 'node:module'
@@ -23,8 +24,62 @@ import { cleanEnvironment, parseArguments, validateProductionStopEvidence, valid
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const read = relative => readFileSync(path.join(repoRoot, relative), 'utf8')
+test('remaining-unknown is an explicit namespace-bound synthetic case, not a production flag or permissive scenario', () => {
+  const pgBin = path.resolve('synthetic-pg-bin')
+  assert.deepEqual(parseArguments([`--pg-bin=${pgBin}`, '--yida-case=remaining-unknown']),
+    { pgBin, automationScenario: 'manual', yidaCase: 'remaining-unknown' })
+  for (const extra of [['--yida-case='], ['--yida-case=other'], ['--yida-case=remaining-unknown', '--automation-scenario=interval'],
+    ['--yida-case=remaining-unknown', '--yida-case=remaining-unknown']]) assert.throws(() => parseArguments([`--pg-bin=${pgBin}`, ...extra]))
+  const runner = read('scripts/ops/run-stock-preparation-plm-full-app.mjs')
+  assert.match(runner, /assert\.equal\(yidaCase, namespaceScope\.owner\.yidaCase,/u)
+  assert.match(runner, /validateYidaAutomationEvidence\(records, automationScenario, yidaCase\)/u)
+  const scope = read('scripts/ops/lib/stock-preparation-plm-namespace-scope.cjs')
+  assert.match(scope, /owner\.yidaCase === 'remaining-unknown' && owner\.automationScenario === 'manual'/u)
+  const namespace = read('scripts/ops/lib/stock-preparation-plm-namespace.mjs')
+  assert.match(namespace, /yidaCase: options\.yidaCase/u)
+  assert.match(namespace, /`--yida-case=\$\{scope\.owner\.yidaCase\}`/u)
+  const probe = read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
+  assert.match(probe, /assert\.equal\(yidaCase, \(namespaceScope as \{ owner: \{ yidaCase\?: string \} \}\)\.owner\.yidaCase,/u)
+  assert.match(probe, /if \(yidaCase === 'remaining-unknown'\) \{[\s\S]*?await verifyYidaMainRemainingUnknown\(/u)
+  assert.match(probe, /\} else if \(automationScenario === 'manual'\) \{/u)
+  const helper = read('packages/core-backend/tests/utils/yida-automation-main-remaining-unknown.ts')
+  assert.match(helper, /ledgers: 0, admissions: 0, snapshots: 0/u)
+  assert.match(helper, /assert\.equal\(live\.usedExecutions, 1\); assert\.equal\(live\.maxExecutions, 2\)/u)
+  assert.match(helper, /isResolvedUnknownRetry\(state\)/u)
+  assert.doesNotMatch(helper, /produceSchedule\(|runDispatchTick\(|UPDATE integration_yida_auto_grants|DELETE FROM integration_yida/iu)
+})
+test('YiDa interval stop proof is fed by a real authored natural schedule, never a direct producer or manual enqueue', () => {
+  const source = read('packages/core-backend/tests/utils/yida-automation-main-inflight-stop.ts')
+  assert.match(source, /const naturalIntervalMs = 2000/u)
+  assert.match(source, /ruleResponse = await fetch\(input\.origin \+ '\/api\/multitable\/sheets\//u)
+  assert.match(source, /allowedTriggers: \['schedule\.interval'\]/u)
+  assert.match(source, /assert\.equal\(denied\.status, 403\)/u)
+  assert.match(source, /const deadline = performance\.now\(\) \+ 10000/u)
+  const begin = source.indexOf('    for (let ordinal = 0; ordinal < 2; ordinal++) {')
+  const end = source.indexOf('    assert.deepEqual(await state(query), [', begin)
+  assert(begin > 0 && end > begin)
+  assert.doesNotMatch(source.slice(begin, end), /http\('POST'|fetch\(|produceSchedule\(|runDispatchTick\(/u)
+  assert.doesNotMatch(source, /\.produceSchedule\(|runDispatchTick\(|\.runScheduledRule\(|SET[\s\S]{0,30}created_at/iu)
+  assert.match(source, /const phaseProof = verifyYidaNaturalOccurrences\(/u)
+  const probe = read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
+  const natural = probe.indexOf("stage('yida-automation-natural-interval-verified'")
+  assert(natural > 0 && probe.indexOf("stage('yida-automation-inflight-ready'") > natural)
+})
+test('fresh unknown-ledger observation installs before original clients capture methods and arms only for the new-consent negative', () => {
+  const probe = read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
+  const helper = read('packages/core-backend/tests/utils/yida-automation-main-fresh-consent-fence.ts')
+  const installed = probe.indexOf('freshQueryObservation = observeUnknownLedger(Client)')
+  const originalClients = probe.indexOf('automation = await ')
+  assert(installed > 0 && originalClients > installed)
+  assert(probe.indexOf('ownerOffQueryObservation = observeYidaOwnerOffQueries(Client)') > installed)
+  assert.match(probe, /queryObservation: freshQueryObservation, reportFreshFence:/u)
+  assert.match(helper, /observer = input\.queryObservation; observer\.arm\(input\)/u)
+  assert(!helper.includes('observer = observeUnknownLedger(input.'))
+  assert.match(helper, /scope\.run\('control', \(\) => query\(sql, expected\)\)/u)
+})
 const workflow = parseYamlDocument(read('.github/workflows/plugin-tests.yml'))
 const acceptanceId = 'stock-preparation-plm-full-app'
+const remainingUnknownId = 'stock-preparation-yida-remaining-unknown'
 const contractsId = 'stock-preparation-plm-full-app-contracts'
 // YiDa and PLM share the actual Chromium installation step after stack alignment.
 const browserId = 'stock-preparation-yida-owner-browser-install'
@@ -34,6 +89,7 @@ const acceptanceBaseCommand = 'node scripts/ops/run-stock-preparation-plm-full-a
 const acceptanceCommand = acceptanceBaseCommand + ' --browser-candidate=upstream-1719529'
 const intervalAcceptanceCommand = acceptanceBaseCommand + ' --automation-scenario=interval --browser-candidate=upstream-1719529'
 const acceptanceCommands = acceptanceCommand + '\n' + intervalAcceptanceCommand
+const remainingUnknownCommand = acceptanceBaseCommand + ' --yida-case=remaining-unknown --browser-candidate=upstream-1719529'
 const contractsCommand = 'node --test scripts/ops/stock-preparation-plm-full-app-contract.test.mjs scripts/ops/stock-preparation-plm-owned-pg.test.mjs scripts/ops/run-stock-preparation-yida-synthetic-trial.test.mjs'
 const dependencyInstallCommand = 'set -o pipefail\npnpm install --frozen-lockfile 2>&1 | tee install.log'
 const backendTypeCheckCommand = 'tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json'
@@ -943,11 +999,12 @@ function assertWorkflowContract(document) {
   }
   const steps = job.steps
   const acceptance = requiredStep(steps, acceptanceId)
+  const remainingUnknown = requiredStep(steps, remainingUnknownId)
   const contracts = requiredStep(steps, contractsId)
   const browser = requiredStep(steps, browserId)
   const dependencyInstall = requiredStep(steps, dependencyInstallId)
   assertWorkspaceDependencyInstall(dependencyInstall)
-  for (const step of [acceptance, contracts, browser]) {
+  for (const step of [acceptance, contracts, browser, remainingUnknown]) {
     assert.equal(step.if, node20, `${step.id} must execute on the required Node 20 leg`)
     assert.ok(step['continue-on-error'] === undefined || step['continue-on-error'] === false)
     assert.deepEqual(step.env ?? {}, {}, `${step.id} must not supply ambient DB/auth settings`)
@@ -956,6 +1013,14 @@ function assertWorkflowContract(document) {
   }
   assert.equal(acceptance.run.trim(), acceptanceCommands,
     'execute independent manual and interval owned-fixture runs in order with only explicit PG binaries and scenario')
+  assert.equal(remainingUnknown.run.trim(), remainingUnknownCommand,
+    'execute the explicit remaining-budget UNKNOWN case in a fresh owned fixture')
+  assert.equal(remainingUnknown.uses, undefined, 'remaining UNKNOWN must execute the actual command, not an action substitute')
+  assert.equal(remainingUnknown['timeout-minutes'], 10, 'one remaining UNKNOWN case has its own bounded ten-minute step')
+  assert.ok(steps.indexOf(remainingUnknown) > steps.indexOf(acceptance),
+    'remaining UNKNOWN must not replace or precede the original manual/interval proof')
+  assert.ok(steps.indexOf(remainingUnknown) < steps.indexOf(requiredStep(steps, 'stock-preparation-yida-owner-real-db')),
+    'remaining UNKNOWN must execute before the independent original owner YiDa proof')
   assert.equal(contracts.run.trim(), contractsCommand, 'all three no-DB suites must be executable whole-file arguments')
   assert.equal(browser.run.trim(), 'pnpm exec playwright install --with-deps chromium')
   assert.ok(Number.isInteger(acceptance['timeout-minutes'])
@@ -972,6 +1037,39 @@ function assertWorkflowContract(document) {
 
 test('formal synthetic acceptance and all three no-DB suites execute in the required CI lane', () => {
   assertWorkflowContract(workflow)
+})
+
+test('CI requires the explicit remaining UNKNOWN command without fallback, ambient auth or skip-green', () => {
+  const mutations = [
+    document => { document.jobs.test.steps = document.jobs.test.steps.filter(step => step.id !== remainingUnknownId) },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).run = acceptanceCommand },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).run += ' || true' },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).run = 'echo remaining-unknown' },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).uses = 'synthetic/action@v1' },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).if = "matrix.node-version == '18.x'" },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId)['continue-on-error'] = true },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId)['timeout-minutes'] = 20 },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).env = { INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED: 'true' } },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId).shell = 'bash {0}' },
+    document => { requiredStep(document.jobs.test.steps, remainingUnknownId)['working-directory'] = 'tmp' },
+  ]
+  for (const mutate of mutations) {
+    const candidate = structuredClone(workflow)
+    mutate(candidate)
+    assert.throws(() => assertWorkflowContract(candidate))
+  }
+})
+
+test('CI remaining UNKNOWN cannot replace the ordinary scenarios or run after owner-proof', () => {
+  for (const placement of ['before-manual', 'after-owner']) {
+    const candidate = structuredClone(workflow), steps = candidate.jobs.test.steps
+    const remaining = requiredStep(steps, remainingUnknownId)
+    steps.splice(steps.indexOf(remaining), 1)
+    const index = placement === 'before-manual' ? steps.indexOf(requiredStep(steps, acceptanceId))
+      : steps.indexOf(requiredStep(steps, 'stock-preparation-yida-owner-real-db')) + 1
+    steps.splice(index, 0, remaining)
+    assert.throws(() => assertWorkflowContract(candidate))
+  }
 })
 
 test('CI rejects browser acceptance masking the real-DB proof', () => {
@@ -1129,7 +1227,7 @@ test('dependency and whole-file wiring guard removals make the actual rejection 
     assert.throws(() => assert.throws(() => mutant(candidate)), assert.AssertionError)
   }
   const bindings = { assert, requiredStep, acceptanceId, contractsId, browserId, dependencyInstallId,
-    node20, acceptanceCommands, contractsCommand, assertWorkspaceDependencyInstall }
+    remainingUnknownId, remainingUnknownCommand, node20, acceptanceCommands, contractsCommand, assertWorkspaceDependencyInstall }
   const workflowGuards = [
     ["assert.ok(steps.indexOf(contracts) > steps.indexOf(dependencyInstall), 'source-derived contracts require successful dependency installation first')", document => {
       const steps = document.jobs.test.steps, contracts = requiredStep(steps, contractsId)
@@ -1230,23 +1328,29 @@ const productionStopRecords = () => [
     referencedTimers: 0, maintenanceTimers: 0 },
 ]
 
-async function executeActualStopFailurePath({ exitCode, rejectStop = false, source }) {
+async function executeActualStopFailurePath({ exitCode, rejectStop = false, probeFailure = false, source }) {
   source ??= read('packages/core-backend/scripts/verify-stock-preparation-plm-full-app.mts')
   const start = source.indexOf("  try {\n    assert(host, 'APP_CONFIGURED_HOST_REQUIRED')")
   const end = source.indexOf('  if (process.exitCode) {', start)
   assert(start >= 0 && end > start, 'actual stop/proof code anchors required')
   const records = []
   const processState = { exitCode }
-  let calls = 0
+  let calls = 0, probeCloses = 0
   const stopPromise = rejectStop ? Promise.reject(new Error('synthetic stop failure')) : Promise.resolve()
+  const ts = createRequire(path.join(repoRoot, 'packages/core-backend/package.json'))('typescript')
+  const compiled = ts.transpileModule('(async () => { let collaborationStopStarted = false, actualStopSucceeded = false, yidaStopCheck;\n'
+    + 'const yidaStopArmed = ' + String(probeFailure) + ';\n' + source.slice(start, end) + '\nreturn actualStopSucceeded; })()',
+  { fileName: 'actual-stop-proof.ts', reportDiagnostics: true,
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, moduleDetection: ts.ModuleDetectionKind.Legacy } })
+  assert.equal(compiled.diagnostics?.filter(value => value.category === ts.DiagnosticCategory.Error).length ?? 0, 0)
   // Exercise the original finally blocks, not a reimplementation of their guards.
-  await runInNewContext('(async () => { let collaborationStopStarted = false;\n'
-    + source.slice(start, end) + '\n})()', {
+  const actualStopSucceeded = await runInNewContext(compiled.outputText, {
     assert, Error, process: processState, collaborationCompletion: undefined,
+    yidaInFlight: probeFailure ? { async duringStop() { throw new Error('synthetic independent probe failure') }, close() { probeCloses++ } } : undefined,
     host: { stop() { calls += 1; return stopPromise } },
     stage: (stage, data = {}) => records.push({ stage, ...data }),
   })
-  return { records, exitCode: processState.exitCode, calls }
+  return { records, exitCode: processState.exitCode, calls, actualStopSucceeded, probeCloses }
 }
 
 test('actual stop still runs after browser failure and proof preserves that earlier failure', async () => {
@@ -1276,6 +1380,20 @@ test('actual stop rejection is distinct and missing collaboration remains fail c
   assert.equal(missing.records[0].stage, 'actual-stop-resolved')
   assert.equal(missing.records[1].diagnostic, 'APP_CONFIGURED_COLLAB_CHILD_REQUIRED')
   for (const result of [rejected, missing]) assert.throws(() => validateProductionStopEvidence(result.records))
+})
+
+test('a separate in-flight proof rejection cannot relabel resolved actual stop or bypass the earlier failure guard', async () => {
+  const actual = await executeActualStopFailurePath({ exitCode: 0, probeFailure: true })
+  assert.equal(actual.calls, 2)
+  assert.equal(actual.actualStopSucceeded, true)
+  assert.equal(actual.probeCloses, 1)
+  assert.equal(actual.exitCode, 1)
+  assert.deepEqual(actual.records, [
+    { stage: 'actual-stop-resolved' },
+    { stage: 'yida-automation-inflight-stop-failed', phase: 'VERIFY' },
+    { stage: 'production-stop-failed', diagnostic: 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF' },
+  ])
+  assert.throws(() => validateProductionStopEvidence(actual.records))
 })
 
 test('production stop evidence accepts one resolved stop followed by exact verified state without mutating input', () => {
@@ -1351,7 +1469,7 @@ test('production stop evidence rejects malformed records instead of treating the
 
 test('formal runner validates parsed stop records and no longer permits harness-cleanup success', () => {
   const source = read('scripts/ops/run-stock-preparation-plm-full-app.mjs')
-  assert.match(source, /const records = probe\.markers\.filter\(line => line\.startsWith\('PLM_FULL_APP_PROBE '\)\)\r?\n\s*\.map\(line => JSON\.parse\(line\.slice\('PLM_FULL_APP_PROBE '\.length\)\)\)\r?\n\s*validateProductionStopEvidence\(records\)\r?\n\s*validateK3Evidence\(records\)\r?\n\s*validateYidaEvidence\(records\)\r?\n\s*validateYidaOwnerOffEvidence\(records\)\r?\n\s*validateYidaInitializationEvidence\(records\)\r?\n\s*validateAutomationEvidence\(records, automationScenario\)\r?\n\s*yidaOwnerOffLogs = await verifyYidaOwnerOffRawLogs\(\{ repoRoot, scratchDir, stage: probe, records \}\)\r?\n\s*const nestedDiagnostics = validateBrowserProcessEvidence\(records\)\r?\n\s*await verifyStageLogs\(\{ repoRoot, scratchDir, stages: nestedDiagnostics \}\)\r?\n\s*const browser =/u)
+  assert.match(source, /const records = probe\.markers\.filter\(line => line\.startsWith\('PLM_FULL_APP_PROBE '\)\)\r?\n\s*\.map\(line => JSON\.parse\(line\.slice\('PLM_FULL_APP_PROBE '\.length\)\)\)\r?\n\s*validateProductionStopEvidence\(records\)\r?\n\s*validateK3Evidence\(records\)\r?\n\s*validateYidaEvidence\(records\)\r?\n\s*validateYidaOwnerOffEvidence\(records\)\r?\n\s*validateYidaInitializationEvidence\(records\)\r?\n\s*validateAutomationEvidence\(records, automationScenario\)\r?\n\s*validateYidaAutomationEvidence\(records, automationScenario, yidaCase\)\r?\n\s*yidaOwnerOffLogs = await verifyYidaOwnerOffRawLogs\(\{ repoRoot, scratchDir, stage: probe, records \}\)\r?\n\s*const nestedDiagnostics = validateBrowserProcessEvidence\(records\)\r?\n\s*await verifyStageLogs\(\{ repoRoot, scratchDir, stages: nestedDiagnostics \}\)\r?\n\s*const browser =/u)
   assert.match(source, /result: failure \? 'failed' : 'passed'/u)
   assert.doesNotMatch(source, /passed-with-explicit-harness-cleanup|Production stop needs explicit harness cleanup\./u)
   for (const limitation of ['Synthetic PostgreSQL/K3 HTTP and fixture principals only; not customer protocols.',
@@ -1473,7 +1591,7 @@ test('formal verifier wires the real K3 fixture before browser input and verifie
   assert.match(source, /k3: k3!\.browserInput/u)
   assert.match(source, /await k3\.verifyBrowserResultAndPermissions\(browserResult\.k3\)/u)
   assert.match(source, /await k3\.close\(\)[\s\S]*?k3\.stats\(\)\.closed/u)
-  assert.match(source, /finally \{\r?\n\s*try \{ ownerOffQueryObservation\?\.restore\(\) \}\r?\n\s*catch \{ stage\('yida-owner-query-observer-restore-failed'\); process\.exitCode = 1 \}\r?\n\s*try \{\r?\n\s*assert\(k3,/u)
+  assert.match(source, /finally \{\r?\n\s*try \{ ownerOffQueryObservation\?\.restore\(\) \}\r?\n\s*catch \{ stage\('yida-owner-query-observer-restore-failed'\); process\.exitCode = 1 \}\r?\n\s*try \{ freshQueryObservation\?\.restore\(\) \}\r?\n\s*catch \{ stage\('yida-fresh-query-observer-restore-failed'\); process\.exitCode = 1 \}\r?\n\s*try \{\r?\n\s*assert\(k3,/u)
   assert.doesNotMatch(source, /stage\([^\n]*browserResult\.k3\)/u)
 })
 
@@ -1606,7 +1724,7 @@ test('YiDa acceptance rejects false-green case totals and any local business or 
 test('formal runner executes YiDa validation on parsed records before accepting the configured browser', () => {
   const source = read('scripts/ops/run-stock-preparation-plm-full-app.mjs')
   const body = source.slice(source.indexOf('export async function runAcceptance'))
-  assert.match(body, /const records = probe\.markers\.filter\(line => line\.startsWith\('PLM_FULL_APP_PROBE '\)\)\r?\n\s*\.map\(line => JSON\.parse\(line\.slice\('PLM_FULL_APP_PROBE '\.length\)\)\)\r?\n\s*validateProductionStopEvidence\(records\)\r?\n\s*validateK3Evidence\(records\)\r?\n\s*validateYidaEvidence\(records\)\r?\n\s*validateYidaOwnerOffEvidence\(records\)\r?\n\s*validateYidaInitializationEvidence\(records\)\r?\n\s*validateAutomationEvidence\(records, automationScenario\)\r?\n\s*yidaOwnerOffLogs = await verifyYidaOwnerOffRawLogs\(\{ repoRoot, scratchDir, stage: probe, records \}\)\r?\n\s*const nestedDiagnostics = validateBrowserProcessEvidence\(records\)\r?\n\s*await verifyStageLogs\(\{ repoRoot, scratchDir, stages: nestedDiagnostics \}\)\r?\n\s*const browser =/u)
+  assert.match(body, /const records = probe\.markers\.filter\(line => line\.startsWith\('PLM_FULL_APP_PROBE '\)\)\r?\n\s*\.map\(line => JSON\.parse\(line\.slice\('PLM_FULL_APP_PROBE '\.length\)\)\)\r?\n\s*validateProductionStopEvidence\(records\)\r?\n\s*validateK3Evidence\(records\)\r?\n\s*validateYidaEvidence\(records\)\r?\n\s*validateYidaOwnerOffEvidence\(records\)\r?\n\s*validateYidaInitializationEvidence\(records\)\r?\n\s*validateAutomationEvidence\(records, automationScenario\)\r?\n\s*validateYidaAutomationEvidence\(records, automationScenario, yidaCase\)\r?\n\s*yidaOwnerOffLogs = await verifyYidaOwnerOffRawLogs\(\{ repoRoot, scratchDir, stage: probe, records \}\)\r?\n\s*const nestedDiagnostics = validateBrowserProcessEvidence\(records\)\r?\n\s*await verifyStageLogs\(\{ repoRoot, scratchDir, stages: nestedDiagnostics \}\)\r?\n\s*const browser =/u)
   assert.equal((body.match(/validateYidaEvidence\(records\)/gu) ?? []).length, 1)
   const browser = read('packages/core-backend/tests/utils/stock-preparation-plm-full-app-browser.ts')
   assert.match(browser, /const yida = await runConfiguredYidaBrowser\(page, input\.yida\.projectNo,/u)
@@ -2189,7 +2307,7 @@ test('formal runner forwards a closed scenario as verifier argv and records it w
   const body = source.slice(source.indexOf('export async function runAcceptance'))
   assert.match(body, /const automationScenario = options\.automationScenario \?\? 'manual'/u)
   assert.match(body, /assert\(\['manual', 'interval'\]\.includes\(automationScenario\)/u)
-  assert.match(body, /verify-stock-preparation-plm-full-app\.mts'\),\r?\n\s*`--automation-scenario=\$\{automationScenario\}`\]/u)
+  assert.match(body, /verify-stock-preparation-plm-full-app\.mts'\),\r?\n\s*`--automation-scenario=\$\{automationScenario\}`, \.\.\.\(yidaCase \? \[`--yida-case=\$\{yidaCase\}`\] : \[\]\)\]/u)
   assert.match(body, /validateAutomationEvidence\(records, automationScenario\)/u)
   assert.match(body, /failure, cleanup, stages, automationScenario,/u)
   assert.match(body, /const nonce = randomUUID\(\)/u)
