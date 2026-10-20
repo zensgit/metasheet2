@@ -26,6 +26,11 @@ on:
           - unselected
           - public
           - private
+      export_images:
+        description: 'Save candidate images as a CI artifact without publishing them'
+        required: false
+        type: boolean
+        default: false
       deploy_production:
         description: 'Explicit authorization required to deploy the built commit to production'
         required: true
@@ -90,6 +95,30 @@ jobs:
             -t ghcr.io/zensgit/metasheet2-web:latest \
             -t ghcr.io/zensgit/metasheet2-web:${{ github.sha }} \
             .
+
+      - name: Archive candidate images without publishing
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_images == true }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-images
+          for component in backend web; do
+            image="ghcr.io/zensgit/metasheet2-${component}:${GITHUB_SHA}"
+            revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+            test "$revision" = "$GITHUB_SHA"
+            docker image inspect --format '{{.Id}}' "$image" > "candidate-images/${component}.image-id"
+            docker save "$image" | gzip -1 > "candidate-images/${component}.tar.gz"
+          done
+          printf '%s\n' "$GITHUB_SHA" > candidate-images/source-commit.txt
+          (cd candidate-images && sha256sum *.tar.gz *.image-id source-commit.txt > SHA256SUMS)
+
+      - name: Upload candidate image archives
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_images == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-images-${{ github.sha }}
+          path: candidate-images/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify both package identities and visibility
         id: publish_preflight
