@@ -141,7 +141,7 @@ async function testBomHeadActiveStateContract() {
         // The heads facade ignores filters: the production consumer must apply membership first.
         const matches = input.object === readPlan.bomHead.object ? records : records.filter((row) =>
           Object.entries(input.filters).every(([key, expected]) => row[key] === expected))
-        return { records: matches.map((row) => ({ ...row })), done: true }
+        return { records: matches.map((row) => ({ ...row })), done: true, metadata: { filtersApplied: false } }
       },
     }
     return { result: await expandPlmProjectBom({ sourceAdapter, projectNo: 'P-001', readPlan }), calls }
@@ -178,32 +178,35 @@ async function testBomHeadActiveStateContract() {
 }
 
 async function testOrderSpecifiedBomVersionOverridesOnlyRootRead() {
-  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
-  plan.orderDetail.versionField = 'BomVersion'
-  const { adapter, calls } = createAdapter(baseData({
-    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: 'V1' }],
-    DN_PDM_PartLibraryInfo: [
-      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V2' },
-      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Subassembly', Material: 'Iron', SysVer: 'V3' },
-      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
-    ],
-    DN_PDM_BomHeadInfo: [
-      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
-      { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V3', bom_able: true },
-    ],
-    DN_PDM_BomDetailsInfo: [
-      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
-      { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4' },
-    ],
-  }))
-  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', readPlan: plan })
-  assert.equal(result.valid, true)
-  assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B', 'PART-C'])
-  assert.equal(result.rows[0].sourceVersion, 'V2')
-  assert.equal(result.rows[0].orderBomVersion, 'V1')
-  assert.equal(result.rows[2].totalQuantity, 24)
-  assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-A' && call.filters.SysVer === 'V1'))
-  assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B' && call.filters.SysVer === 'V3'))
+  for (const readConcurrency of [undefined, 1, 4, 8]) {
+    const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+    plan.orderDetail.versionField = 'BomVersion'
+    const { adapter, calls } = createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: 'V1' }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V2' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Subassembly', Material: 'Iron', SysVer: 'V3' },
+        { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+      ],
+      DN_PDM_BomHeadInfo: [
+        { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+        { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V3', bom_able: true },
+      ],
+      DN_PDM_BomDetailsInfo: [
+        { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
+        { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4' },
+      ],
+    }))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', readPlan: plan, readConcurrency })
+    assert.equal(result.valid, true)
+    assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B', 'PART-C'])
+    assert.equal(result.rows[0].sourceVersion, 'V2')
+    assert.equal(result.rows[0].orderBomVersion, 'V1')
+    assert.equal(result.rows[2].totalQuantity, 24)
+    assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-A' && call.filters.SysVer === 'V1'))
+    assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B' && call.filters.SysVer === 'V3'))
+    assert.equal(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-A' && call.filters.SysVer !== 'V1'), false, 'read-ahead must also use the approved order version')
+  }
 }
 
 async function testOrderBomVersionFailsClosed() {
@@ -266,7 +269,8 @@ async function testOrderBomVersionFailsClosed() {
       ? { records: [head], done: true, metadata: { filtersApplied: true } }
       : normal.read(input) }
     const result = await run(data, adapter)
-    assert.deepEqual(result.errors.map((error) => error.type), ['order_bom_version_no_active_match'])
+    assert.deepEqual(result.errors.map((error) => error.type), ['read_row_mismatch'])
+    assert.equal(result.valid, false)
   }
   const ambiguous = await run(baseData({
     DN_PDM_OrderDetailInfo: [detail('V1')],

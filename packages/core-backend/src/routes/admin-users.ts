@@ -437,7 +437,7 @@ type AttendanceOnboardingResponse = {
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
-  'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
+  'User is missing DingTalk openId and cannot enable DingTalk login grant yet: with the account bound to its DingTalk member and activated, have them sign in with DingTalk once, then refresh and enable DingTalk login'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DEFAULT_ATTENDANCE_ORG_ID = 'default'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -2266,6 +2266,13 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
   ACTIVATE_ORG_AMBIGUOUS: {
     status: 409,
     message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+  },
+  // 409 (DT-HARDEN-02): a state the caller can fix — activate without the DingTalk grant, let the
+  // now-active member sign in with DingTalk once (which records their openId), then grant. (A
+  // pending member's scan records nothing: the login activation gate runs before the backfill.)
+  ACTIVATE_DINGTALK_OPEN_ID_REQUIRED: {
+    status: 409,
+    message: 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login',
   },
 }
 

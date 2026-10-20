@@ -183,6 +183,10 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // DT-HARDEN-02 grant openId source (real DB): same corp+union linked openId, sync/bind keep or
+      // clear, login backfill. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it, and wired as a WHOLE FILE into the approval real-DB step (EXPECT_DB sentinel armed there).
+      'tests/integration/directory-dingtalk-openid-grant-path.db.test.ts',
       // O2-S1 register() whole-transaction atomicity goldens: DATABASE_URL-gated; excluded here so
       // the no-DB job cannot skip-green it; wired whole-file into the auth real-DB step in plugin-tests.yml.
       'tests/integration/auth-register-atomicity.db.test.ts',
@@ -1607,6 +1611,12 @@ export default defineConfig({
       // (zero assertions, reported green). Both points are now present.
       'tests/integration/multitable-webhook-retry-tick.test.ts',
       'tests/integration/multitable-webhook-durable-dedup.test.ts',
+      // Subscription webhook delivery-rule suites (floor, switch-on, permission matrix): DATABASE_URL-gated
+      // (describeIfDatabase) with an EXPECT_DB sentinel. Excluded from the no-DB default job so they cannot
+      // skip-green; they belong in the multitable real-DB integration step as WHOLE FILES.
+      'tests/integration/multitable-webhook-floor-realdb.test.ts',
+      'tests/integration/multitable-webhook-switch-on-realdb.test.ts',
+      'tests/integration/multitable-webhook-scoping-realdb.test.ts',
       // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where

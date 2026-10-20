@@ -78,6 +78,12 @@
 //           its tenant from `scope.tenantId` rather than from `resolveTenantId`, because the tenant
 //           chosen there is the tenant whose PLM binding is opened and whose part numbers therefore
 //           come back. Without the flag the handler is byte-for-byte the values-free route it was.
+//        5b. GET …/table-actions/:actionId/dry-run-jobs  `tableActionDryRunJobGet`
+//           R67 ④: the read-back of (5) run in the background — the stored result IS (5)'s response,
+//           missing-component list included when the job was enqueued with the opt-in. A value-bearing
+//           job is a separate record that only a poll carrying `includeMissingComponents=true` can
+//           address, and that poll resolves the scope here and takes its tenant from it, exactly as
+//           (5) does; without the flag it is the values-free job, on `resolveTenantId`, as (5) is.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
