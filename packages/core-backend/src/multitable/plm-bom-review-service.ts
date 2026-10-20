@@ -672,6 +672,9 @@ export class PlmBomReviewService {
       const prior = (await query('SELECT generation,cursor,status FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
       return { ...context,priorGeneration: prior?.generation,priorCursor: prior?.cursor,priorStatus: prior?.status }
     })
+    // A lost start response must not turn a retry into a new baseline that skips unread facts.
+    if (before.personal && before.priorStatus==='active') return { status:'active',generation:before.priorGeneration,
+      cursor:Number(before.priorCursor),bindingVersion:expectedVersion }
     if (!before.personal && !before.source.adapter.getPlmChangePage) throw new Failure(502,'SOURCE_UNAVAILABLE')
     const version = expectedVersion
     if (!Number.isSafeInteger(version)) throw new Failure(409,'VERSION_CONFLICT')

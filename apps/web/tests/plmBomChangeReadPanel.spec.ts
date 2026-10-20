@@ -23,7 +23,7 @@ it('requires target choice and explicit start after binding, preserving snapshot
   get('consent').click(); await flush(); expect(get('native').getAttribute('rel')).toBe('noopener noreferrer')
   await submit(); await flush(); expect((get('grant') as HTMLInputElement).value).toBe(''); expect(mocks.bindChangeRead).toHaveBeenCalledWith(target, secret); expect(mocks.startChangeRead).not.toHaveBeenCalled()
   mocks.startChangeRead.mockImplementationOnce(async () => { mocks.changeReadState.mockResolvedValue({ ...bound, status: 'active' }) })
-  get('start').click(); await flush(); expect(mocks.startChangeRead).toHaveBeenCalledWith(target); expect(get('state').textContent).toContain('监听中')
+  get('start').click(); await flush(); expect(mocks.startChangeRead).toHaveBeenCalledWith(target); expect(get('state').textContent).toContain('监听中'); expect((get('start') as HTMLButtonElement).disabled).toBe(true); get('start').click(); expect(mocks.startChangeRead).toHaveBeenCalledTimes(1)
   mocks.unbindChangeRead.mockImplementationOnce(async () => { mocks.changeReadState.mockResolvedValue({ ...bound, bound: false }); return { pending: 1, rejected: 0 } })
   get('unbind').click(); await flush(); expect(get('message').textContent).toContain('本地读取已停止'); expect(host.textContent).toContain('已导入的快照按目标权限保留')
 })

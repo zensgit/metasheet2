@@ -86,3 +86,24 @@ owned HTTP delivery and cross-process backup/restore still need their combined
 proof. Current installed images predate these changes. The whole W01–W23 goal
 remains active/incomplete. All publication remains held behind #363's valuable
 queued job; no merge, deployment, production activation or business notice.
+
+## Independent start-retry counterexample
+
+Actual Chromium visual inspection showed the active start control still enabled.
+A new real PostgreSQL counterexample confirmed the underlying server issue: after
+head5 started, retrying the same active personal start at head6 rotated generation
+and advanced the baseline to6, skipping the unread event. The retained red run
+is `/tmp/plm-change-read-start-retry-before-20261020.log`.
+
+The correction makes an already-active personal start idempotent under the same
+current standing-authority/Meta-tenant locks. It returns the existing generation
+and cursor without requesting another Native baseline; stopped/replaced authority
+still requires its normal explicit fresh start. Legacy non-personal start behavior
+is unchanged. The active UI button is disabled and says listening has started.
+The targeted PG test proves unchanged generation/cursor, no extra request, then
+normal polling commits the previously unread event. The updated Vue case proves
+an active button cannot dispatch a second start.
+
+The already-running valuable image build for source996f760586 is preserved; it
+qualifies only that earlier source. A corrected source/image must be built serially
+after it terminates. Neither image build is installation acceptance.

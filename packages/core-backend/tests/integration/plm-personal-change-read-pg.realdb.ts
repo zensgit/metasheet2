@@ -418,3 +418,12 @@ it('personal read UI discovery does not decrypt shared credentials or bypass sep
  await pool.query("UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id='meta-org'",[f.actor])
  await expect(f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).rejects.toMatchObject({status:403})
 })
+
+it('personal listener active start retry is idempotent and cannot skip newly unread changes',async()=>{
+ const f=await personalListenerFixture();const first:any=await f.start();const before=calls.length
+ f.setRead({head:6,include:true})
+ expect(await f.start()).toEqual(first)
+ expect(calls.length).toBe(before)
+ expect(await service.pollChanges(f.binding.id)).toEqual({state:'active',cursor:6})
+ expect((await pool.query('SELECT * FROM meta_plm_bom_change_inbox WHERE binding_id=$1',[f.binding.id])).rows).toHaveLength(1)
+})

@@ -18,7 +18,7 @@
       </form>
       <p v-if="current" data-testid="plm-change-read-state">{{ current.bound ? '已绑定个人授权' : '未绑定个人授权' }} · {{ current.status === 'active' ? '监听中' : '未启动' }}</p>
       <p v-if="current?.expiresAt">授权到期：{{ current.expiresAt }}</p>
-      <button type="button" :disabled="busy || !current?.bound" data-testid="plm-change-read-start" @click="start">从当前变更开始监听</button>
+      <button type="button" :disabled="busy || !current?.bound || current?.status === 'active'" data-testid="plm-change-read-start" @click="start">{{ current?.status === 'active' ? '监听已启动' : '从当前变更开始监听' }}</button>
       <button type="button" :disabled="busy || !current?.bound" data-testid="plm-change-read-unbind" @click="unbind">解除个人读取授权</button>
       <p>启动时跳过已有变更。解除授权停止后续监听；远程吊销结果不确定时会保留重试。</p>
     </template>
