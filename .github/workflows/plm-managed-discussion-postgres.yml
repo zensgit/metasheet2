@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: zensgit/yuantus-plm
+          token: ${{ secrets.PLM_NATIVE_READ_TOKEN }}
           ref: 'ee067d96a51c041aeee7154701db14d98180949a'
           path: .ci-native-discussion
           persist-credentials: false
