@@ -54,6 +54,10 @@ export async function lockManagedBomAuthority(q: PlmQuery, req: Request, sourceI
   if (reg.clientId !== row.client_id || reg.callback !== row.callback || reg.origin !== row.client_origin) {
     throw new Refusal(403, 'PLM_SNAPSHOT_SHARE_REGISTRATION_CHANGED')
   }
+  // now() is the transaction start, including time spent waiting for link/user/membership locks.
+  // All authority locks must be acquired before checking the actual admission time.
+  const fresh = await q('SELECT id FROM plm_managed_sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()', [store.sessionId])
+  if (!fresh.rows.length) throw new Refusal(403, 'PLM_SNAPSHOT_SHARE_SESSION_REQUIRED')
   return { row, reg, actor, source: { tenant_id: row.native_tenant_id as string, org_id: row.native_org_id as string,
     auth_user_id: row.native_auth_user_id as string, part_id: partId } }
 }

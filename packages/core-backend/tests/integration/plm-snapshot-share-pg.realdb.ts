@@ -17,6 +17,7 @@ import { PlmManagedSnapshotShareFlow } from '../../src/services/plm-managed-snap
 import { managedRequestContext } from '../../src/services/plm-managed-request-context'
 import { setManagedNativeFetchForTests } from '../../src/services/plm-managed-native-http'
 import { sourceFingerprint } from '../../src/services/plm-managed-companion'
+import { lockManagedBomAuthority } from '../../src/services/plm-managed-bom-authority'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { unlinkManagedSource } from '../../src/services/plm-managed-companion-flow'
 import { PlmBomReviewService } from '../../src/multitable/plm-bom-review-service'
@@ -279,4 +280,42 @@ describe('independent snapshot consent to existing BOM engine', () => {
       expect((await pool.query('SELECT expires_at<clock_timestamp() AS expired FROM plm_managed_sessions WHERE id=$1', [c.session])).rows[0].expired).toBe(true)
     } finally { await pool.query('DROP TRIGGER plm_snapshot_test_delay ON meta_records; DROP FUNCTION plm_snapshot_test_delay(); DROP TABLE plm_snapshot_test_delay') }
   })
+})
+
+
+it.each(['link', 'membership'] as const)('refuses a session that expires while awaiting the actual %s authority lock', async lockKind => {
+  const c = await prepared('meta-tenant', 2), holder = await pool.connect()
+  let pending: Promise<{ value?: unknown; error?: any }> | undefined
+  try {
+    await holder.query('BEGIN')
+    if (lockKind === 'link') await holder.query('SELECT id FROM plm_managed_identity_links WHERE id=$1 FOR UPDATE', [c.link])
+    else await holder.query("SELECT user_id FROM user_orgs WHERE user_id=$1 AND org_id='meta-org' FOR UPDATE", [c.actor])
+    let readerPid = 0
+    pending = c.run(() => tx.transaction(async ({ query }) => {
+      readerPid = (await query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      return lockManagedBomAuthority(query, c.req, c.source, 'P')
+    })).then(value => ({ value }), error => ({ error }))
+    const deadline = Date.now() + 5000
+    let blocked = false
+    while (Date.now() < deadline) {
+      blocked = readerPid > 0 && (await pool.query("SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=$1", [readerPid])).rows[0]?.waiting === true
+      if (blocked) break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    expect(blocked).toBe(true)
+    expect(readerPid).not.toBe((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+    let expired = false
+    while (Date.now() < deadline) {
+      expired = (await pool.query('SELECT expires_at<clock_timestamp() AS expired FROM plm_managed_sessions WHERE id=$1', [c.session])).rows[0].expired
+      if (expired) break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    expect(expired).toBe(true)
+    await holder.query('COMMIT')
+    expect((await pending).error).toMatchObject({ code: 'PLM_SNAPSHOT_SHARE_SESSION_REQUIRED' })
+    expect((await pool.query('SELECT count(*)::int AS n FROM meta_plm_bom_review_bindings WHERE data_source_id=$1', [c.source])).rows[0].n).toBe(0)
+  } finally {
+    await holder.query('ROLLBACK'); holder.release()
+    if (pending) await pending
+  }
 })

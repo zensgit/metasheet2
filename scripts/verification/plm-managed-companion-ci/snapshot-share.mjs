@@ -35,7 +35,7 @@ try {
     })
   } finally { closeSync(fd) }
   if (tests.status !== 0) throw new Error('snapshot PostgreSQL tests failed')
-  const checked = spawnSync(process.execPath, [path.join(repo, 'scripts/verification/plm-managed-companion-ci/assert-report.mjs'), report, '14'], { encoding: 'utf8', timeout: 10000 })
+  const checked = spawnSync(process.execPath, [path.join(repo, 'scripts/verification/plm-managed-companion-ci/assert-report.mjs'), report, '16'], { encoding: 'utf8', timeout: 10000 })
   if (checked.status !== 0) throw new Error('snapshot test count/zero-skip gate refused')
   proof.report = JSON.parse(checked.stdout)
   proof.reportSha256 = createHash('sha256').update(readFileSync(report)).digest('hex')
