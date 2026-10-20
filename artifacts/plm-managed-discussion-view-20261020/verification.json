@@ -1,0 +1,85 @@
+{
+  "source": "b6d241c0bf3595a48d3c23379f9205f606b3e2ca",
+  "state": "local source and one documentation closeout; publication held behind valuable parent CI",
+  "distinct_passed_assertions": 55,
+  "reports": [
+    {
+      "file": "plm-managed-discussion-view-third-20261020.json",
+      "passed": 53,
+      "excluded": 0
+    },
+    {
+      "file": "plm-managed-discussion-view-late-20261020.json",
+      "passed": 2,
+      "excluded": 10
+    },
+    {
+      "file": "plm-managed-discussion-view-initial-once-20261020.json",
+      "passed": 1,
+      "excluded": 6
+    },
+    {
+      "file": "plm-managed-discussion-view-all-ops-second-20261020.json",
+      "passed": 1,
+      "excluded": 4
+    }
+  ],
+  "production_spa": {
+    "purpose": "exact-managed-discussion-production-spa",
+    "owner": "6295db0f30ba468c888dcddf9f42c495",
+    "source": "b6d241c0bf3595a48d3c23379f9205f606b3e2ca",
+    "service_installed": false,
+    "source_archive_sha256": "c0301a67e6f48203590c3f78b445fc3c27ce77fef2eea2d5f426239fc9463f4a",
+    "source_before": {
+      "files": 1971,
+      "sha256": "c6acee641de97f0206b537713d5f7285e7a81edc55fc42035703c5cd48856f8d"
+    },
+    "source_after": {
+      "files": 1971,
+      "sha256": "c6acee641de97f0206b537713d5f7285e7a81edc55fc42035703c5cd48856f8d"
+    },
+    "static_dist": {
+      "files": 167,
+      "sha256": "46fbd4d866ad0fcf639576d7ba16bdbe942f06dca0ce994e50f335d495d2f868"
+    },
+    "passed": true,
+    "commands": [
+      [
+        "/Users/chouhua/.nvm/versions/node/v20.20.2/bin/node",
+        "/Users/chouhua/.nvm/versions/node/v20.20.2/lib/node_modules/corepack/dist/corepack.js",
+        "pnpm@10.16.1",
+        "--filter",
+        "@metasheet/web...",
+        "install",
+        "--offline",
+        "--frozen-lockfile"
+      ],
+      [
+        "/Users/chouhua/.nvm/versions/node/v20.20.2/bin/node",
+        "--max-old-space-size=4096",
+        "/tmp/plm-managed-discussion-view-production-20261020/apps/web/node_modules/vue-tsc/bin/vue-tsc.js",
+        "-b",
+        "--force"
+      ],
+      [
+        "/Users/chouhua/.nvm/versions/node/v20.20.2/bin/node",
+        "--max-old-space-size=4096",
+        "/tmp/plm-managed-discussion-view-production-20261020/apps/web/node_modules/vite/bin/vite.js",
+        "build"
+      ]
+    ],
+    "dependencies": "pnpm10.16.1 offline frozen-lockfile, Node20, vue-tsc and Vite production build"
+  },
+  "vue_types_exit": 0,
+  "installed": false,
+  "remote_ci_verified": false,
+  "private_archive": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/plm-managed-discussion-view-20261020",
+  "raw_sha256": {
+    "plm-managed-discussion-view-late-20261020.json": "bfba7571c8474a2997ed0f74705b16ec55602d7600ac47ce58f579cc0f9d60cc",
+    "plm-managed-discussion-view-all-ops-second-20261020.json": "f81e0681ad3099ffa3f6a4f5985e0830581bf8d0e456d543df9cf8db734df77c",
+    "plm-managed-discussion-view-production-20261020.json": "b036dbd9adf756bb08d61192e1ff77783ad18c73500c80872c75cca24cd70d69",
+    "plm-managed-discussion-view-third-20261020.json": "90b6a43134b6d321956017b3c42597610cbd9902ccf509da8f9590d32123ffb5",
+    "plm-managed-discussion-view-final-types-20261020.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "plm-managed-discussion-view-initial-once-20261020.json": "e3cd88d450cf8ee520d89b62d592f5342e4efa70848f47f6563e0b1a9daa55b2"
+  }
+}
