@@ -580,6 +580,114 @@ test('in-memory removal of initialization request and receipt guards makes their
   }
 })
 
+function dryRunStatusFixture(module, inputOverrides = {}) {
+  const input = { origin: 'http://127.0.0.1:43210', tenantId: 'synthetic-tenant', token: () => 'synthetic-token',
+    phase: () => 'YIDA_BOARD_NAVIGATION', projectNo: () => 'SYNTHETIC-PROJECT',
+    allowedPhases: ['YIDA_BOARD_NAVIGATION'], ...inputOverrides }
+  const url = flag => input.origin + '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run-jobs?'
+    + new URLSearchParams({ tenantId: input.tenantId, projectNo: input.projectNo(), includeMissingComponents: flag })
+  const request = (flag = 'true', overrides = {}) => ({
+    url: () => overrides.url ?? url(flag), method: () => overrides.method ?? 'GET',
+    postData: () => overrides.body ?? null,
+    headers: () => overrides.headers ?? { authorization: 'Bearer synthetic-token', 'x-tenant-id': input.tenantId },
+  })
+  return { window: module.createDryRunStatusWindow(input), request, url }
+}
+const dryRunStatusPayload = { ok: false, error: { code: 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND' } }
+const dryRunStatusConsole = 'Failed to load resource: the server responded with a status of 404 (Not Found)'
+test('dry-run status observer requires two real correlated scoped GET refusals and no job creation', () => {
+  const f = dryRunStatusFixture(loadMainMigrationContract())
+  assert.throws(() => f.window.verify())
+  for (const flag of ['true', 'false']) {
+    const request = f.request(flag)
+    assert(f.window.isCandidate(request))
+    f.window.accept(request)
+    assert.throws(() => f.window.verify())
+    f.window.response(request, 404, dryRunStatusPayload)
+    assert.throws(() => f.window.verify())
+    assert.equal(f.window.consoleRefusal(request.url(), dryRunStatusConsole), true)
+  }
+  f.window.verify()
+  assert.deepEqual(f.window.counts, { requests: 2, responses: 2, consoleErrors: 2 })
+  assert.throws(() => f.window.accept(f.request()))
+})
+test('dry-run status observer rejects foreign or widened requests and uncorrelated responses', () => {
+  const module = loadMainMigrationContract()
+  const seed = dryRunStatusFixture(module)
+  const headers = { authorization: 'Bearer synthetic-token', 'x-tenant-id': 'synthetic-tenant' }
+  for (const overrides of [
+    { method: 'POST' }, { body: '{}' }, { url: seed.url('true').replace('127.0.0.1:43210', 'foreign.invalid') },
+    { url: seed.url('true').replace('dry-run-jobs?', 'dry-run?') },
+    { url: seed.url('true') + '&workspaceId=foreign' }, { url: seed.url('true') + '&tenantId=synthetic-tenant' },
+    { url: seed.url('true').replace('SYNTHETIC-PROJECT', 'FOREIGN') },
+    { url: seed.url('true').replace('tenantId=synthetic-tenant', 'tenantId=foreign') },
+    { url: seed.url('true') + '#fragment' }, { url: seed.url('1') },
+    { headers: { ...headers, authorization: 'Bearer foreign' } },
+    { headers: { ...headers, 'x-tenant-id': 'foreign' } },
+    { headers: { ...headers, 'x-workspace-id': 'foreign' } },
+    { headers: { ...headers, 'x-user-role': 'admin' } },
+    { headers: { ...headers, 'x-permissions': 'integration:admin' } },
+  ]) {
+    const f = dryRunStatusFixture(module)
+    assert.throws(() => f.window.accept(f.request('true', overrides)))
+  }
+  const off = dryRunStatusFixture(module, { phase: () => 'YIDA_STATIC_PREVIEW' })
+  assert.throws(() => off.window.accept(off.request()))
+  const order = dryRunStatusFixture(module)
+  assert.throws(() => order.window.accept(order.request('false')))
+  for (const [status, payload] of [[200, dryRunStatusPayload], [503, dryRunStatusPayload],
+    [404, null], [404, { ok: true, error: dryRunStatusPayload.error }],
+    [404, { ok: false, error: { code: 'OTHER_NOT_FOUND' } }]]) {
+    const f = dryRunStatusFixture(module), request = f.request()
+    f.window.accept(request)
+    assert.throws(() => f.window.response(request, status, payload))
+  }
+  const f = dryRunStatusFixture(module), request = f.request()
+  assert.throws(() => f.window.response(request, 404, dryRunStatusPayload))
+  f.window.accept(request)
+  assert.throws(() => f.window.response(f.request(), 404, dryRunStatusPayload))
+  assert.throws(() => f.window.consoleRefusal(request.url(), dryRunStatusConsole + ' other'))
+})
+test('dry-run status guard removals are detected by independently matching negatives', () => {
+  const cases = [
+    ["assert(input.allowedPhases.includes(phase), 'APP_BROWSER_DRY_RUN_STATUS_PHASE_DENIED')", { phase: () => 'SEND' }, {}, 'accept'],
+    ["assert(request.method() === 'GET' && request.postData() === null, 'APP_BROWSER_DRY_RUN_STATUS_READ_ONLY')", {}, { method: 'POST' }, 'accept'],
+    ["assert(input.token() && headers.authorization === 'Bearer ' + input.token(), 'APP_BROWSER_DRY_RUN_STATUS_SESSION_REQUIRED')",
+      {}, { headers: { authorization: 'Bearer foreign', 'x-tenant-id': 'synthetic-tenant' } }, 'accept'],
+    ["assert(input.projectNo() && url.search === '?' + new URLSearchParams({\n      tenantId: input.tenantId, projectNo: input.projectNo(), includeMissingComponents: flag,\n    }), 'APP_BROWSER_DRY_RUN_STATUS_SCOPE_DENIED')", {}, { foreignProject: true }, 'accept'],
+    ["assert.equal(status, 404, 'APP_BROWSER_DRY_RUN_STATUS_STATUS_REQUIRED')", {}, {}, 'status'],
+    ["assert(envelope.ok === false && envelope.error?.code === 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND',\n      'APP_BROWSER_DRY_RUN_STATUS_CODE_REQUIRED')", {}, {}, 'code'],
+  ]
+  for (const [guard, input, options, operation] of cases) {
+    const probe = module => {
+      const f = dryRunStatusFixture(module, input)
+      const request = f.request('true', options.foreignProject
+        ? { url: f.url('true').replace('SYNTHETIC-PROJECT', 'FOREIGN') } : options)
+      if (operation === 'accept') return f.window.accept(request)
+      f.window.accept(request)
+      return f.window.response(request, operation === 'status' ? 200 : 404,
+        operation === 'code' ? { ok: false, error: { code: 'OTHER_NOT_FOUND' } } : dryRunStatusPayload)
+    }
+    assert.throws(() => probe(loadMainMigrationContract()))
+    const mutated = removeMainContractGuard(guard)
+    assert.throws(() => assert.throws(() => probe(mutated)), { code: 'ERR_ASSERTION' })
+  }
+})
+test('dry-run status observer is wired to the actual browser request, response, console and final verification', () => {
+  const source = read('packages/core-backend/tests/utils/stock-preparation-plm-full-app-browser.ts')
+  for (const token of ['createDryRunStatusWindow({', 'dryRunStatus.accept(request)',
+    'dryRunStatus.response(response.request(), response.status(), await response.json())',
+    'dryRunStatus.consoleRefusal(message.location().url, message.text())', 'dryRunStatus.verify()']) {
+    assert.equal(source.split(token).length - 1, 1)
+  }
+  const start = source.indexOf('if (dryRunStatus.isCandidate(request)) {')
+  const end = source.indexOf('if (membersOff.isCandidate(request)) {', start)
+  const block = source.slice(start, end)
+  assert.match(block, /await route\.continue\(\); return/)
+  assert.match(block, /counts\.forbiddenRequests \+= 1; note\('DRY_RUN_STATUS_REQUEST_DENIED'\); await route\.abort\('blockedbyclient'\); return/)
+  assert.equal(block.includes('fulfill('), false)
+})
+
 function membersOffFixture(module, inputOverrides = {}) {
   const input = { origin: 'http://127.0.0.1:43210', tenantId: 'synthetic-tenant', token: () => 'synthetic-token',
     phase: () => 'TOPBAR', allowedPhases: ['TOPBAR'], ...inputOverrides }

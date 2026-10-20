@@ -62,6 +62,73 @@ interface ProjectSheetsOffRequest {
   headers(): Record<string, string>
 }
 
+/** Main's real seeded panel probes for its caller's existing job on mount.
+ * This acceptance fixture has no durable job: observe both exact 404s, never
+ * enqueue a job, synthesize a response, or tolerate an unrelated API failure. */
+export function createDryRunStatusWindow(input: { origin: string; tenantId: string; token(): string;
+  phase(): string; projectNo(): string; allowedPhases: readonly string[] }) {
+  const endpoint = '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run-jobs'
+  const records = new Map<ProjectSheetsOffRequest, { url: string; response: boolean; console: boolean }>()
+  const seen = new Set<string>()
+  const counts = { requests: 0, responses: 0, consoleErrors: 0 }
+  const isCandidate = (request: ProjectSheetsOffRequest) => new URL(request.url()).pathname === endpoint
+  const accept = (request: ProjectSheetsOffRequest) => {
+    const url = new URL(request.url()), headers = request.headers(), phase = input.phase()
+    assert(input.allowedPhases.includes(phase), 'APP_BROWSER_DRY_RUN_STATUS_PHASE_DENIED')
+    assert(url.origin === input.origin && !url.username && !url.password && !url.hash,
+      'APP_BROWSER_DRY_RUN_STATUS_ORIGIN_DENIED')
+    assert(url.pathname === endpoint, 'APP_BROWSER_DRY_RUN_STATUS_PATH_DENIED')
+    assert(request.method() === 'GET' && request.postData() === null, 'APP_BROWSER_DRY_RUN_STATUS_READ_ONLY')
+    assert(input.token() && headers.authorization === 'Bearer ' + input.token(), 'APP_BROWSER_DRY_RUN_STATUS_SESSION_REQUIRED')
+    assert(headers['x-tenant-id'] === input.tenantId && !('x-workspace-id' in headers)
+      && !('x-user-role' in headers) && !('x-permissions' in headers), 'APP_BROWSER_DRY_RUN_STATUS_HEADERS_DENIED')
+    const flag = url.searchParams.get('includeMissingComponents')
+    assert(flag === 'true' || flag === 'false', 'APP_BROWSER_DRY_RUN_STATUS_FLAG_DENIED')
+    assert(input.projectNo() && url.search === '?' + new URLSearchParams({
+      tenantId: input.tenantId, projectNo: input.projectNo(), includeMissingComponents: flag,
+    }), 'APP_BROWSER_DRY_RUN_STATUS_SCOPE_DENIED')
+    const key = JSON.stringify([phase, input.projectNo(), flag])
+    assert(!seen.has(key) && !records.has(request) && counts.requests < input.allowedPhases.length * 2,
+      'APP_BROWSER_DRY_RUN_STATUS_REQUEST_LIMIT')
+    if (flag === 'false') assert(seen.has(JSON.stringify([phase, input.projectNo(), 'true'])),
+      'APP_BROWSER_DRY_RUN_STATUS_ORDER_REQUIRED')
+    seen.add(key)
+    records.set(request, { url: request.url(), response: false, console: false })
+    counts.requests += 1
+  }
+  const response = (request: ProjectSheetsOffRequest, status: number, payload: unknown) => {
+    const record = records.get(request)
+    assert(record && !record.response && record.url === request.url(), 'APP_BROWSER_DRY_RUN_STATUS_RESPONSE_UNCORRELATED')
+    assert.equal(status, 404, 'APP_BROWSER_DRY_RUN_STATUS_STATUS_REQUIRED')
+    assert(payload && typeof payload === 'object' && !Array.isArray(payload), 'APP_BROWSER_DRY_RUN_STATUS_ENVELOPE_REQUIRED')
+    const envelope = payload as { ok?: unknown; error?: { code?: unknown } }
+    assert(envelope.ok === false && envelope.error?.code === 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND',
+      'APP_BROWSER_DRY_RUN_STATUS_CODE_REQUIRED')
+    record.response = true; counts.responses += 1
+  }
+  const consoleRefusal = (url: string, text: string) => {
+    const matching = [...records.values()].filter(record => record.url === url)
+    if (!matching.length) return false
+    assert.equal(text, 'Failed to load resource: the server responded with a status of 404 (Not Found)',
+      'APP_BROWSER_DRY_RUN_STATUS_CONSOLE_INVALID')
+    const record = matching.find(value => !value.console)
+    assert(record, 'APP_BROWSER_DRY_RUN_STATUS_DUPLICATE_CONSOLE')
+    record.console = true; counts.consoleErrors += 1
+    return true
+  }
+  const verify = () => {
+    assert(counts.requests >= 2 && counts.requests % 2 === 0, 'APP_BROWSER_DRY_RUN_STATUS_REAL_PAIR_REQUIRED')
+    for (const key of seen) {
+      const [phase, project, flag] = JSON.parse(key) as string[]
+      assert(seen.has(JSON.stringify([phase, project, flag === 'true' ? 'false' : 'true'])),
+        'APP_BROWSER_DRY_RUN_STATUS_PAIR_REQUIRED')
+    }
+    assert.equal(counts.responses, counts.requests, 'APP_BROWSER_DRY_RUN_STATUS_RESPONSES_REQUIRED')
+    assert.equal(counts.consoleErrors, counts.requests, 'APP_BROWSER_DRY_RUN_STATUS_CONSOLES_REQUIRED')
+  }
+  return { isCandidate, accept, response, consoleRefusal, verify, counts }
+}
+
 /** The aligned main UI really probes these two OFF routes. Preserve those
  * original requests and refusals; do not stub a response or admit arbitrary 404s. */
 export function createProjectSheetsOffWindow(input: { origin: string; tenantId: string; token(): string;

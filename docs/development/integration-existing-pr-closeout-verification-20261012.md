@@ -2,6 +2,8 @@
 
 ## 2026-10-20 解除本地对齐阻断：冻结 main 的四层候选，尚未发布
 
+既有状态读取的最小验收适配：真实 SFC→默认 client 的新用例证明 seeded mount 发出按序 `includeMissingComponents=true/false` 两次精确 scoped GET，无 init/body/POST，三文件326/326。测试观察器只接既有固定 action 的状态 GET，约束当前 phase、origin、JWT、tenant header、无角色/workspace提示、完整 query/project/flag、每阶段成对有界次数，并逐请求关联原真实 404/code/console，拒绝 response stub 和不相关404；原写计数、宜搭静态窗口零业务请求断言不改变。四个定向合同通过（其余358项在该次定向运行未执行，不冒称整文件）；phase、只读方法、session、项目query、HTTP状态、错误码六个单点变异各失去原负例拒绝，测试致红，唯一needle先独立检查。首次定向变异在 CRLF 工作副本因多行needle未命中失败，三个任务文件机械转LF后才取得上述结果；待原生完整整文件/应用验证。
+
 `87ee539` 完整 manual 的类型/两构建已通过，configured-app 在 `YIDA_BOARD_NAVIGATION` 失败：闭合帧为 GET / OTHER_API 被拒、BROWSER_PROCESS_FAILED；actual-stop-resolved=1、actual-stop-failed=0，production-stop-failed 原因为 EARLIER_PROBE_FAILED，最终 cleanup=`stopped-and-owned-database-removed`。不是 host.stop 失败或 ABORTED 根因证明。结果 SHA256 `80d8d80ab37e76e27d74ad37ab8295339f6a7c74d3f2b61dd8e1f71f4a0dd3ae`，stdout SHA256 `a21ef621add94a9426e4c02b1ee465df6f4146ec03a4ff8a26011454c296dced`。源码核对：main 的面板新增 onMounted→watchRunningDryRun→dryRunJobStatus GET；旧浏览器白名单不含它。下一步精确验证/登记该既有只读状态读取，不开放 job POST 或任意查询，完整对照未通过前不签唯一根因。
 
 阶段更新：首个对齐 Automation 提交为 `99af64e916183102b3e28faab41486ee368c7091`。原生 LF 副本的 14077 个已检出文件逐一按 Git blob 验证，sourceSet SHA256 `883eae9f635ece1f33a9966db7ca9de1a19db0d5cd08d07fb1b11380ebbf395e`；不带环境文件，离线依赖安装禁 lifecycle/配置脚本，固定浏览器通过原模块哈希，不下载。

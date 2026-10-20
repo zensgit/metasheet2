@@ -20,7 +20,7 @@ import { runConfiguredAutomationBrowser } from './stock-preparation-automation-f
 import { authorConfiguredIntervalRule, runConfiguredIntervalBrowser } from './stock-preparation-automation-interval-full-app-browser'
 import type { AutomationApiKey, AutomationCheckpoint, AutomationCheckpointReply, AutomationScenario, ConfiguredAutomationBrowserResult } from './stock-preparation-automation-full-app-browser'
 import { automationTransportKey, browserSdkDiagnosticScript, observeAutomationProxy, transportDiagnostic, transportError } from './stock-preparation-plm-full-app-transport-diagnostics'
-import { createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
+import { createDryRunStatusWindow, createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
 
 export interface ConfiguredAppBrowserInput {
   apiOrigin: string
@@ -338,6 +338,9 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     const projectSheetsOff = createProjectSheetsOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
       token: () => loginToken, phase: () => phase, projectNo: () => boardProject,
       allowedPhases: ['YIDA_BOARD_NAVIGATION', 'AUTOMATION_INTERVAL_EDITOR', 'AUTOMATION_MANUAL', 'AUTOMATION_INTERVAL'] })
+    const dryRunStatus = createDryRunStatusWindow({ origin: uiOrigin, tenantId: input.tenantId,
+      token: () => loginToken, phase: () => phase, projectNo: () => boardProject,
+      allowedPhases: ['YIDA_BOARD_NAVIGATION', 'AUTOMATION_INTERVAL_EDITOR', 'AUTOMATION_MANUAL', 'AUTOMATION_INTERVAL'] })
     const wsOrigin = uiOrigin.replace(/^http:/, 'ws:')
     const membersOff = createMembersOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
       token: () => loginToken, phase: () => phase,
@@ -459,6 +462,12 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     await context.route('**/*', async route => {
       const request = route.request()
       const target = new URL(request.url())
+      if (dryRunStatus.isCandidate(request)) {
+        try { dryRunStatus.accept(request) }
+        catch { counts.forbiddenRequests += 1; note('DRY_RUN_STATUS_REQUEST_DENIED'); await route.abort('blockedbyclient'); return }
+        counts.apiRequests += 1
+        await route.continue(); return
+      }
       if (membersOff.isCandidate(request)) {
         try { membersOff.accept(request) }
         catch { counts.forbiddenRequests += 1; note('MEMBERS_OFF_REQUEST_DENIED'); await route.abort('blockedbyclient'); return }
@@ -659,6 +668,14 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     context.on('response', response => {
       monitorTransport(response.request(), 'HEADERS', response.status())
       const target = new URL(response.url())
+      if (dryRunStatus.isCandidate(response.request())) {
+        counts.apiResponses += 1
+        const task = (async () => {
+          dryRunStatus.response(response.request(), response.status(), await response.json())
+        })().catch(() => note('DRY_RUN_STATUS_RESPONSE_INVALID'))
+        pendingChecks.add(task); void task.finally(() => pendingChecks.delete(task))
+        return
+      }
       if (membersOff.isCandidate(response.request())) {
         counts.apiResponses += 1
         const task = (async () => {
@@ -801,6 +818,8 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     page.on('pageerror', () => { counts.pageErrors += 1; note('PAGE_ERROR') })
     page.on('console', message => {
       if (message.type() !== 'error') return
+      try { if (dryRunStatus.consoleRefusal(message.location().url, message.text())) return }
+      catch { counts.consoleErrors += 1; note('DRY_RUN_STATUS_CONSOLE_INVALID'); return }
       try { if (membersOff.consoleRefusal(message.location().url, message.text())) return }
       catch { counts.consoleErrors += 1; note('MEMBERS_OFF_CONSOLE_INVALID'); return }
       try { if (projectSheetsOff.consoleRefusal(message.location().url, message.text())) return }
@@ -1343,6 +1362,7 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     check(counts.apiRequests === counts.apiResponses && counts.viteErrors === 0 && faults.length === 0, 'FINAL_NETWORK_FAILURE')
     projectSheetsOff.verify()
     membersOff.verify()
+    dryRunStatus.verify()
     check(bundleDocumentResponses >= 3 && counts.viteHmrConnections === 0
       && [...bundleServedFiles].filter(file => file.endsWith('.js')).length >= 2
       && [...bundleServedFiles].some(file => file.endsWith('.css')), 'REAL_PRODUCTION_BUNDLE_NOT_EXERCISED')
@@ -1362,6 +1382,7 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
         sourceIoPostCount: 2, forbiddenBusinessWriteRequests: 0 },
       counts: { ...counts, apiSuccesses: successes, writes: writeCounts, canceledActions,
         membersOff: membersOff.counts,
+        dryRunStatus: dryRunStatus.counts,
         bundleDocumentResponses, bundleServedFileCount: bundleServedFiles.size,
         scopeObservations: observedScopes.length,
         shellWorkspaceNull: observedScopes.every(scope => scope.workspaceNull),
