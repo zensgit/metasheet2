@@ -1024,6 +1024,47 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
     expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
     expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
   })
+  it('OFF: a same-zone pre-companion record keeps its pre-upgrade path, unfrozen, for checkout and a correction',async()=>{
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-03','UTC','2026-02-03T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
+    const companions=async()=>(await fixture.pool.query('SELECT record_id FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows
+    expect(await targetContext(actor,'2026-02-03')).toMatchObject({timezone:'UTC',frozen:false,workDate:'2026-02-03'})
+    const closed=await punch(actor,'check_out','2026-02-03T18:00:00Z')
+    expect(closed.status,JSON.stringify(closed.body)).toBe(200)
+    expect((await fixture.pool.query('SELECT work_date::text,timezone,first_in_at,last_out_at FROM attendance_records WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows)
+      .toEqual([{work_date:'2026-02-03',timezone:'UTC',first_in_at:new Date('2026-02-03T09:00:00Z'),last_out_at:new Date('2026-02-03T18:00:00Z')}])
+    expect(await companions()).toEqual([])
+    const corrected=await fixture.request('/api/attendance/requests',actor.token,{
+      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-03',operationId:randomUUID(),
+      requestedInAt:'2026-02-03T08:30:00Z',
+    })
+    expect(corrected.status,JSON.stringify(corrected.body)).toBe(201)
+    expect(await companions()).toEqual([])
+  })
+  it('ON still refuses a same-zone pre-companion record with zero DML',async()=>{
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-04','UTC','2026-02-04T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
+    await policy(true)
+    try {
+      const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+      await expect(targetContext(actor,'2026-02-04')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      const refused=await punch(actor,'check_out','2026-02-04T18:00:00Z')
+      expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
+      expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
+    } finally {
+      await resetSources()
+      await fixture.pool.query("UPDATE attendance_records SET last_out_at='2026-02-04T18:00:00Z' WHERE id=$1",[id])
+    }
+  })
   it('a real holiday published punch freezes one calculation definition in identity and persisted issuance',async()=>{
     await resetSources()
     const prior = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
