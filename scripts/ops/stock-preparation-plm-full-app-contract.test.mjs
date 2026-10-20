@@ -2783,13 +2783,14 @@ function browserDispatchWindows(source) {
       node => ts.isIfStatement(node) && text(node.expression) === condition, kind + ' branch must be unique: ' + condition)
     const precise = branch(candidate), owner = branch(ownerCondition)
     const members = branch(kind === 'request' ? 'membersOff.isCandidate(request)' : 'membersOff.isCandidate(response.request())')
+    const dryRunStatus = branch(kind === 'request' ? 'dryRunStatus.isCandidate(request)' : 'dryRunStatus.isCandidate(response.request())')
     const business = kind === 'request'
       ? unique(statements, node => ts.isIfStatement(node) && text(node.expression) === "target.pathname.startsWith('/api/')"
         && node.thenStatement.statements?.[0] && text(node.thenStatement.statements[0]) === counter,
       'the original business request counter must be anchored to its actual API branch')
       : unique(statements, node => ts.isExpressionStatement(node) && text(node) === counter,
         'the original business response counter must be a unique listener-level statement')
-    for (const [label, node] of [['precise', precise], ['members', members], ['owner', owner]]) {
+    for (const [label, node] of [['precise', precise], ['members', members], ['dryRunStatus', dryRunStatus], ['owner', owner]]) {
       assert(ts.isBlock(node.thenStatement) && !node.elseStatement, kind + ' ' + label + ' must be a separate closed branch')
       assert(ts.isReturnStatement(node.thenStatement.statements.at(-1)), kind + ' ' + label + ' must return before business dispatch')
       assert(node.end < business.pos, kind + ' ' + label + ' must precede the original business counter')
@@ -2797,19 +2798,74 @@ function browserDispatchWindows(source) {
     assert.doesNotMatch(text(owner), /counts\.api(?:Requests|Responses)\s*\+=/u)
     assert.equal((text(precise).match(new RegExp(counter.replaceAll('.', '\\.').replaceAll('+', '\\+'), 'gu')) ?? []).length, 1)
     assert.equal((text(members).match(new RegExp(counter.replaceAll('.', '\\.').replaceAll('+', '\\+'), 'gu')) ?? []).length, 1)
-    windows[kind] = { precise, members, owner, business, statements }
+    assert.equal((text(dryRunStatus).match(new RegExp(counter.replaceAll('.', '\\.').replaceAll('+', '\\+'), 'gu')) ?? []).length, 1)
+    windows[kind] = { precise, members, dryRunStatus, owner, business, statements }
   }
   const responseStatements = windows.response.statements
   const beforeBusiness = responseStatements.slice(0, responseStatements.indexOf(windows.response.business))
-    .filter(node => node !== windows.response.precise && node !== windows.response.members).map(text).join('\n')
+    .filter(node => node !== windows.response.precise && node !== windows.response.members
+      && node !== windows.response.dryRunStatus).map(text).join('\n')
   assert.equal((text(windows.response.precise).match(/response\.json\(\)/gu) ?? []).length, 1,
     'only the precise project-sheets OFF branch may read its correlated refusal body')
   assert.equal((text(windows.response.members).match(/response\.json\(\)/gu) ?? []).length, 1,
     'only the precise members OFF branch may read its correlated refusal body')
+  assert.equal((text(windows.response.dryRunStatus).match(/response\.json\(\)/gu) ?? []).length, 1,
+    'only the precise dry-run status branch may read its correlated refusal body')
   assert.doesNotMatch(beforeBusiness, /response\.json\(\)/u, 'other pre-business branches must not reread API JSON')
   return { ...nodes, ...windows, responses: text(nodes.response),
     apiResponses: responseStatements.slice(responseStatements.indexOf(windows.response.business)).map(text).join('\n') }
 }
+
+async function assertInitializationDryRunDispatch(source) {
+  const { ts, file, route, response } = browserDispatchNodes(source)
+  const compile = node => ts.transpileModule('(' + node.getText(file) + ')', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  let phase = 'BOARD'
+  const fixture = dryRunStatusFixture(loadMainMigrationContract(), {
+    phase: () => phase, allowedPhases: ['BOARD', 'RELOAD'],
+  })
+  const counts = { externalRequests: 0, forbiddenRequests: 0, initializationGets: 0, initializationPosts: 0 }
+  const faults = [], pending = new Set()
+  const absent = { candidate: () => false, isCandidate: () => false }
+  const bindings = { assert, URL, uiOrigin: 'http://127.0.0.1:43210', counts, automaticOn: undefined,
+    automaticOff: absent, membersOff: absent, projectSheetsOff: absent, dryRunStatus: fixture.window,
+    verifiedLogin: Promise.resolve(), initializationEndpoint: '/api/integration/yida-owner-send/initialization',
+    token: 'synthetic-token', ordinaryReads: new Set(), boardPath: '/synthetic-unmatched-board', scopeQuery: '',
+    input: { tenantId: 'synthetic-tenant', projectNo: 'SYNTHETIC-PROJECT' }, pending,
+    note: code => faults.push(code) }
+  const instantiate = node => Function(...Object.keys(bindings), 'return ' + compile(node))(...Object.values(bindings))
+  const requestHandler = instantiate(route), responseListener = instantiate(response)
+  for (const current of ['BOARD', 'RELOAD']) {
+    phase = current
+    for (const flag of ['true', 'false']) {
+      const request = fixture.request(flag)
+      let continued = 0, aborted = 0, reads = 0
+      await requestHandler({ request: () => request, continue: async () => { continued++ }, abort: async () => { aborted++ } })
+      assert.equal(continued, 1); assert.equal(aborted, 0)
+      responseListener({ url: request.url, request: () => request, status: () => 404,
+        json: async () => { reads++; return dryRunStatusPayload } })
+      await Promise.all([...pending])
+      assert.equal(reads, 1); assert.deepEqual(faults, [])
+      assert(fixture.window.consoleRefusal(request.url(), dryRunStatusConsole))
+    }
+  }
+  fixture.window.verify()
+  assert.deepEqual(counts, { externalRequests: 0, forbiddenRequests: 0, initializationGets: 0, initializationPosts: 0 })
+}
+
+test('initialization actual callbacks admit only the correlated dry-run status pair and keep owner IO quiet', async () => {
+  const source = read('packages/core-backend/tests/utils/stock-preparation-yida-initialization-full-app.ts')
+  await assertInitializationDryRunDispatch(source)
+  for (const expression of ['dryRunStatus.isCandidate(request)', 'dryRunStatus.isCandidate(response.request())']) {
+    assert.equal(source.split(expression).length, 2)
+    await assert.rejects(assertInitializationDryRunDispatch(source.replace(expression, 'false')), assert.AssertionError)
+  }
+  for (const call of ['dryRunStatus.consoleRefusal(event.location().url, event.text())', 'dryRunStatus.verify()']) {
+    assert(source.includes(call))
+  }
+  assert(!source.includes('route.fulfill('))
+})
 
 test('browser diagnostic wiring retains exact status gates, correlation, fatal counters and existing timeouts', () => {
   const source = read('packages/core-backend/tests/utils/stock-preparation-plm-full-app-browser.ts')
@@ -2851,16 +2907,18 @@ async function assertActualBrowserOffDispatch(source) {
   assert.equal(catalogs.length, 1)
   const apiPaths = Function('return ' + compileText(catalogs[0].initializer.getText(file)))()
   const ownerHelper = loadOwnerOffHelper()
-  for (const mode of ['project', 'owner', 'members']) {
-    const owner = mode === 'owner', members = mode === 'members'
+  for (const mode of ['project', 'owner', 'members', 'dryRunStatus']) {
+    const owner = mode === 'owner', members = mode === 'members', status = mode === 'dryRunStatus'
     const phase = owner ? 'YIDA_OWNER_DEFAULT_OFF' : members ? 'TOPBAR' : 'YIDA_BOARD_NAVIGATION'
     const fixture = mainOffWindow(loadMainMigrationContract(), { origin: 'http://127.0.0.1:8910',
       phase: () => phase, allowedPhases: ['YIDA_BOARD_NAVIGATION'] })
     const counts = { apiRequests: 0, apiResponses: 0, forbiddenRequests: 0 }, notes = [], pendingChecks = new Set()
     const ownerWindow = freshOwnerOffWindow(ownerHelper), successes = { operatorProjects: 0 }
     const memberFixture = membersOffFixture(loadMainMigrationContract(), { origin: fixture.input.origin })
+    const statusFixture = dryRunStatusFixture(loadMainMigrationContract(), { origin: fixture.input.origin })
     const bindings = { URL, phase, counts, pendingChecks, successes, apiPaths, projectSheetsOff: fixture.window,
       membersOff: memberFixture.window,
+      dryRunStatus: statusFixture.window,
       ownerOffPrefix: ownerHelper.ownerOffPrefix, yidaOwnerOffWindow: ownerWindow, uiOrigin: fixture.input.origin,
       yidaLocalWindow: false, classify: () => 'operatorProjects', allowedApi: () => true,
       note: code => notes.push(code), check: (ok, code) => assert(ok, code), monitorTransport: () => {},
@@ -2886,7 +2944,15 @@ async function assertActualBrowserOffDispatch(source) {
       assert.equal(reads, 1, 'the actual dispatched response must have exactly one body reader')
       assert.deepEqual(notes, [], 'an admitted closed window must not fall into ordinary business diagnostics')
     }
-    if (members) {
+    if (status) {
+      for (const flag of ['true', 'false']) {
+        const request = statusFixture.request(flag)
+        await observe(request, 404, dryRunStatusPayload)
+        assert(statusFixture.window.consoleRefusal(request.url(), dryRunStatusConsole))
+      }
+      statusFixture.window.verify()
+      assert.deepEqual(counts, { apiRequests: 2, apiResponses: 2, forbiddenRequests: 0 })
+    } else if (members) {
       const request = memberFixture.request()
       await observe(request, 404, membersOffPayload)
       assert(memberFixture.window.consoleRefusal(request.url(), membersOffConsole))
@@ -2919,6 +2985,7 @@ test('actual browser callbacks keep precise 404 and owner OFF windows separate f
   await assertActualBrowserOffDispatch(source)
   const nodes = browserDispatchWindows(source)
   for (const branch of [nodes.request.precise, nodes.response.precise, nodes.request.members, nodes.response.members,
+    nodes.request.dryRunStatus, nodes.response.dryRunStatus,
     nodes.request.owner, nodes.response.owner]) {
     const terminal = branch.thenStatement.statements.at(-1)
     const mutant = source.slice(0, terminal.getStart(nodes.file)) + source.slice(terminal.end)

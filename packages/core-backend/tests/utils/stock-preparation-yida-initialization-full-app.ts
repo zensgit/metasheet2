@@ -10,7 +10,7 @@ import type { Browser, Request, Response } from '@playwright/test'
 import type { Logger, PreviewServer } from '../../../../apps/web/node_modules/vite'
 import type { YidaInitializationState } from '../../../../apps/web/src/services/integration/yidaInitialization'
 import { ownerOffDraftBody } from './stock-preparation-yida-owner-off-full-app'
-import { createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
+import { createDryRunStatusWindow, createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
 import { createYidaAutomationDefaultOffBrowserWindow, runYidaAutomationDefaultOffBrowser } from './yida-automation-default-off-browser'
 import { createYidaAuthorizedBrowserWindow, runYidaAuthorizedBrowser, type YidaAuthorizedBrowserInput } from './yida-automation-authorized-browser'
 
@@ -236,6 +236,9 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
       allowedPhases: ['LOGIN', 'BOARD', 'RELOAD'] })
     const membersOff = createMembersOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
       token: () => token, phase: () => projectProbePhase, allowedPhases: ['LOGIN', 'BOARD', 'RELOAD'] })
+    const dryRunStatus = createDryRunStatusWindow({ origin: uiOrigin, tenantId: input.tenantId,
+      token: () => token, phase: () => projectProbePhase, projectNo: () => input.projectNo,
+      allowedPhases: ['BOARD', 'RELOAD'] })
     const native = createRequire(import.meta.url)(path.join(root, 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs')) as
       { assertBrowserNetworkIsolation(): unknown }
     native.assertBrowserNetworkIsolation()
@@ -272,6 +275,9 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
         } else if (projectSheetsOff.isCandidate(request)) {
           await verifiedLogin
           projectSheetsOff.accept(request)
+        } else if (dryRunStatus.isCandidate(request)) {
+          await verifiedLogin
+          dryRunStatus.accept(request)
         } else if (url.pathname === initializationEndpoint) {
           window.accept(request)
           if (method === 'GET') counts.initializationGets += 1; else counts.initializationPosts += 1
@@ -344,6 +350,10 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
           projectSheetsOff.response(response.request(), response.status(), await response.json())
           return
         }
+        if (dryRunStatus.isCandidate(response.request())) {
+          dryRunStatus.response(response.request(), response.status(), await response.json())
+          return
+        }
         assert.equal(response.status(), 200 + (url.pathname === initializationEndpoint && response.request().method() === 'POST' ? 1 : 0),
           'APP_BROWSER_YIDA_INIT_HTTP_STATUS_INVALID')
         if (!url.pathname.startsWith('/api/') && url.pathname !== '/socket.io/') {
@@ -367,6 +377,8 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
       catch { note('MEMBERS_OFF_CONSOLE_INVALID'); return }
       try { if (projectSheetsOff.consoleRefusal(event.location().url, event.text())) return }
       catch { note('PROJECT_SHEETS_OFF_CONSOLE_INVALID'); return }
+      try { if (dryRunStatus.consoleRefusal(event.location().url, event.text())) return }
+      catch { note('DRY_RUN_STATUS_CONSOLE_INVALID'); return }
       note('CONSOLE_ERROR')
     })
     const settled = async () => { await page.waitForLoadState('networkidle'); while (pending.size) await Promise.all([...pending]); assert.equal(faults.length, 0, 'APP_BROWSER_YIDA_INIT_TRANSPORT_FAILED') }
@@ -406,7 +418,7 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
     if (authorized && automaticOn) {
       assert.equal(data(boardData.fillTarget).sheetId, authorized.rule.sheetId)
       const authorization = await runYidaAuthorizedBrowser(page, automaticOn, authorized, uiOrigin, settled)
-      projectSheetsOff.verify(); membersOff.verify(); await settled()
+      projectSheetsOff.verify(); membersOff.verify(); dryRunStatus.verify(); await settled()
       assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.bundleDocuments === 1
         && counts.initializationGets === 0 && counts.initializationPosts === 0 && counts.reloads === 0)
       return { kind: 'authorized' as const, status: 'passed' as const, authorization, counts, evidence: { realPasswordLogin: true,
@@ -463,6 +475,7 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
     failureScope.enter('FINISH'); window.verify(); await settled()
     projectSheetsOff.verify()
     membersOff.verify()
+    dryRunStatus.verify()
     assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.initializationResponses === 4
       && counts.boardResponses >= 2 && counts.bundleDocuments === 2 && [...served].filter(key => key.endsWith('.js')).length >= 2
       && [...served].some(key => key.endsWith('.css')), 'APP_BROWSER_YIDA_INIT_FULL_JOURNEY_REQUIRED')

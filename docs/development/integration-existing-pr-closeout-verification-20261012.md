@@ -2,6 +2,10 @@
 
 ## 2026-10-20 解除本地对齐阻断：冻结 main 的四层候选，尚未发布
 
+追加本地证据（不代签 CI）：`0ebee5f4b927feddc419c1431f3d5397ef538643` 的完整 manual 已越过主浏览器，失败移至独立宜搭初始化子浏览器 PANEL，封闭诊断 `APP_CONFIGURED_YIDA_INIT_CHILD_FAILED`。actual-stop-resolved=1、actual-stop-failed=0；production-stop-failed 仍为前序失败拒绝签发停止证明，临时 PG 已实际停止删除。结果 SHA256 `1db620d057f636a7878438dd87c4de8f8d2667be1331b7a63710ed27502427f7`，stdout SHA256 `e8283cfad118ea697e1a08c63839ef76f0808532883eb507ac73bb83aa030916`。初始化浏览器也遗漏了新主线既有状态 GET；候选复用同一精确观察器，仅 BOARD/RELOAD 两阶段，不扩大 owner 写入口或通用 API 白名单。完整应用对照尚待执行，不把静态发现当唯一根因证明。
+
+该提交三合同整文件为 **433 项、429 通过、4 失败**：三项是实际回调/AST夹具未登记新增观察器，一项 attendance 清理 shell 用例超时（同时有完整应用在运行，尚不能宣称资源唯一根因）。现候选补精确夹具，并直接抽取初始化浏览器真实注册回调执行 BOARD/RELOAD 各两次原 GET→404 body，确认解析一次、初始化 GET/POST 计数仍零；去掉 request 或 response 登记的两变异均致红。定向运行 **16 通过、347 未选、0失败**，stdout SHA256 `18fd34358dc41111cb295599b7eabe71bae02d6e7e00dcb1f637f5fd2c670616`。原预算、全部安全断言不变；待无并行负载的三整文件及完整应用验证，保留上述四失败。
+
 既有状态读取的最小验收适配：真实 SFC→默认 client 的新用例证明 seeded mount 发出按序 `includeMissingComponents=true/false` 两次精确 scoped GET，无 init/body/POST，三文件326/326。测试观察器只接既有固定 action 的状态 GET，约束当前 phase、origin、JWT、tenant header、无角色/workspace提示、完整 query/project/flag、每阶段成对有界次数，并逐请求关联原真实 404/code/console，拒绝 response stub 和不相关404；原写计数、宜搭静态窗口零业务请求断言不改变。四个定向合同通过（其余358项在该次定向运行未执行，不冒称整文件）；phase、只读方法、session、项目query、HTTP状态、错误码六个单点变异各失去原负例拒绝，测试致红，唯一needle先独立检查。首次定向变异在 CRLF 工作副本因多行needle未命中失败，三个任务文件机械转LF后才取得上述结果；待原生完整整文件/应用验证。
 
 `87ee539` 完整 manual 的类型/两构建已通过，configured-app 在 `YIDA_BOARD_NAVIGATION` 失败：闭合帧为 GET / OTHER_API 被拒、BROWSER_PROCESS_FAILED；actual-stop-resolved=1、actual-stop-failed=0，production-stop-failed 原因为 EARLIER_PROBE_FAILED，最终 cleanup=`stopped-and-owned-database-removed`。不是 host.stop 失败或 ABORTED 根因证明。结果 SHA256 `80d8d80ab37e76e27d74ad37ab8295339f6a7c74d3f2b61dd8e1f71f4a0dd3ae`，stdout SHA256 `a21ef621add94a9426e4c02b1ee465df6f4146ec03a4ff8a26011454c296dced`。源码核对：main 的面板新增 onMounted→watchRunningDryRun→dryRunJobStatus GET；旧浏览器白名单不含它。下一步精确验证/登记该既有只读状态读取，不开放 job POST 或任意查询，完整对照未通过前不签唯一根因。
