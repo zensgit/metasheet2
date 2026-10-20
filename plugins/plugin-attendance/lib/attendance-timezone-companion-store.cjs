@@ -12,6 +12,11 @@ function isPreCompanionLegacyTarget(frame, prior) {
     && frame.identity?.source !== 'legacy_repair' && frame.identity?.source !== 'frozen_v2'
 }
 
+// The fingerprint carries no org or user; key the unfrozen marker by the full target.
+function targetKey(frame) {
+  return JSON.stringify([frame.orgId,frame.userId,frame.workDate,frame.fingerprint])
+}
+
 function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenContext, validateFrozenAttribution }) {
   function fail(code, status = 409) { throw new HttpError(status, code, code) }
   function restore(row) {
@@ -162,12 +167,12 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
       }
     }
     verifiedTargets.set(trx,frame.fingerprint)
-    if (unbound) unboundTargets.set(trx,frame.fingerprint)
+    if (unbound) unboundTargets.set(trx,targetKey(frame))
     else unboundTargets.delete(trx)
   }
   async function bindFirst(trx, frame, { calculationId = null } = {}) {
     if (verifiedTargets.get(trx) !== frame.fingerprint) fail('ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED',503)
-    if (unboundTargets.get(trx) === frame.fingerprint) return
+    if (unboundTargets.get(trx) === targetKey(frame)) return
     const existing = await trx.query(
       'SELECT record_id FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3',
       [frame.orgId,frame.userId,frame.workDate],

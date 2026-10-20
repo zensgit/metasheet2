@@ -93,7 +93,7 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
     expect(current.body.data).toMatchObject({timezone:'Asia/Tokyo',frozen:false})
   })
 
-  it.each(['shift','rotation'])('restores with a near-date %s that never started (no frozen parent), leaving schedules and history unchanged',async kind => {
+  it.each(['shift','rotation'])('restores with a near-date %s that has no frozen parent, leaving schedules and history unchanged',async kind => {
     const actor = await live.user()
     const scheduled = await shift(actor,workDate)
     if (kind === 'rotation') {

@@ -40,9 +40,12 @@ async function prepareAttendanceTimezoneDefaultRecovery(trx, {
   }
 
   // A missing default provides no trustworthy old wall zone. UTC -2..+1
-  // conservatively covers possibly started overnight published dates. Without
-  // a default, punches were refused, so a nearby date without a freeze has no
-  // started reading to protect; one with a freeze must match its own slot.
+  // conservatively covers possibly started overnight published dates. Only a
+  // frozen reading is protected: a nearby date with a freeze must match its own
+  // slot. A date without one may still hold records written by paths that skip
+  // the strict default (old pending approvals, import); those stay unfrozen and
+  // follow the companion store's same-zone rule, so a different new zone makes
+  // them refuse later writes rather than be reinterpreted.
   const day = now.toISOString().slice(0,10)
   const groups = await trx.query(`SELECT EXISTS(SELECT 1 FROM attendance_calculation_group_memberships
     WHERE org_id=$1 AND effective_from <= $2::date+1

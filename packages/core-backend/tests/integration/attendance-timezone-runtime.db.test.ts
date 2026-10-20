@@ -1044,6 +1044,11 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
     })
     expect(corrected.status,JSON.stringify(corrected.body)).toBe(201)
     expect(await companions()).toEqual([])
+    const approved=await fixture.request('/api/attendance/requests/'+corrected.body.data.request.id+'/approve',admin.token,{})
+    expect(approved.status,JSON.stringify(approved.body)).toBe(200)
+    expect((await fixture.pool.query('SELECT first_in_at FROM attendance_records WHERE id=$1',[id])).rows)
+      .toEqual([{first_in_at:new Date('2026-02-03T08:30:00Z')}])
+    expect(await companions()).toEqual([])
   })
   it('ON still refuses a same-zone pre-companion record with zero DML',async()=>{
     await resetSources()
