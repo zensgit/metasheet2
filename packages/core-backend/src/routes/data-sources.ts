@@ -36,6 +36,7 @@ import {
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 import { assertLegacySharedTransportAllowed, noteSharedTransportCall } from '../services/plm-managed-companion'
+import { personalChangeReadConnectionIdSchema } from '../services/plm-personal-bom-change-read-wire'
 
 const logger = new Logger('DataSourcesRouter')
 
@@ -248,6 +249,7 @@ const DataSourceCreateSchema = z.object({
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
+    personalChangeReadConnectionId: personalChangeReadConnectionIdSchema.optional(),
     itemType: z.string().optional()
   }).optional(),
   credentials: z.object({
@@ -309,6 +311,7 @@ const DataSourceUpdateSchema = z.object({
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
+    personalChangeReadConnectionId: personalChangeReadConnectionIdSchema.optional(),
     itemType: z.string().optional()
   }).optional(),
   poolConfig: z.object({

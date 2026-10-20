@@ -1460,7 +1460,7 @@ export class DataSourceManager extends EventEmitter {
     }
   ): Promise<DataSourceConfig> {
     if (!this.db) return config
-    const record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
+    let record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
     const stale = () => Object.assign(new Error('Data source changed; reload before retrying'), {
       status: 409, code: 'DATA_SOURCE_CONFIGURATION_CONFLICT',
     })
@@ -1471,6 +1471,17 @@ export class DataSourceManager extends EventEmitter {
         const current = rows[0]
         if (!context.previousConfig && current?.is_active && current.deleted_at == null) throw stale()
         if (context.previousConfig && (!current || !current.is_active || current.deleted_at != null)) throw stale()
+        // A managed-link handoff may seed this after the adapter loaded. An unrelated
+        // cached edit must retain that persisted Native identity; explicit edits remain explicit.
+        const readKey='personalChangeReadConnectionId'
+        const storedOptions=(current?.config as {options?:Record<string,unknown>} | undefined)?.options
+        if (current?.type==='plm' && config.type==='plm' && storedOptions && Object.hasOwn(storedOptions,readKey)
+          && !Object.hasOwn(config.options ?? {},readKey)) {
+          const connectionId=storedOptions[readKey]
+          if (typeof connectionId!=='string') throw stale()
+          config={...config,options:{...config.options,[readKey]:connectionId}}
+          record=this.configToRecord(config,ownerId,workspaceId,tenantId,scopeKind)
+        }
         const currentVisual = (current?.config as { options?: AdapterOptions } | undefined)?.options?.visualReviewEnabled === true
         if (normalizeActor(context.actor).platformAdmin !== true &&
             (currentVisual || config.options?.visualReviewEnabled === true || context.previousConfig?.options?.visualReviewEnabled === true)) {

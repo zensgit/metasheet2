@@ -1,6 +1,9 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
+const handoffPg = vi.hoisted(() => ({ query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ query: handoffPg.query, pool: {} }))
+import { beginDurableUnboundClassification, finishDurableUnboundClassification, type DurableUnboundCall } from '../utils/plm-managed-unbound-classification'
 
 // auditLog writes to the DB; in these in-memory tests it must be a no-op so the
 // create/update/delete handlers don't fail on a missing connection.
@@ -348,6 +351,16 @@ describe('data-sources route ownership scope (A0.1)', () => {
     permissions: ['data_sources:read', 'data_sources:write', 'data_sources:execute'],
   })
 
+  it('existing owner source API persists personal read configuration and rejects credentials in its identifier field',async()=>{
+    currentUser=member('alice-read-handoff');pinned.setApp(app)
+    const config={id:'owned-personal-read-api',name:'Owned read',type:'plm',connection:{url:'https://native.example'},options:{autoConnect:false,apiMode:'yuantus',tenantId:'native-tenant',orgId:'native-org',personalChangeReadConnectionId:'native-read-one'}}
+    const created=await request(pinned.url()).post('/api/data-sources').send(config);expect(created.status).toBe(201);expect(created.body.data.options.personalChangeReadConnectionId).toBe('native-read-one')
+    const changed=await request(pinned.url()).put('/api/data-sources/'+config.id).send({options:{personalChangeReadConnectionId:'native-read-two'}});expect(changed.status).toBe(200)
+    const read=await request(pinned.url()).get('/api/data-sources/'+config.id);expect(read.body.data.options.personalChangeReadConnectionId).toBe('native-read-two');expect(read.body.data.options.tenantId).toBe('native-tenant')
+    await request(pinned.url()).put('/api/data-sources/'+config.id).send({options:{personalChangeReadConnectionId:'yue_'+'a'.repeat(32)+'_'+'b'.repeat(43)}}).expect(400)
+    currentUser=member('foreign-read-handoff');await request(pinned.url()).put('/api/data-sources/'+config.id).send({options:{personalChangeReadConnectionId:'not-owned'}}).expect(404)
+  })
+
   it('a non-owner gets 404 on another user’s data source; the owner gets 200', async () => {
     currentUser = member('alice')
     pinned.setApp(app)
@@ -511,9 +524,13 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
     expect(typeof adapter.getBomMultitableContext).toBe('function')
     expect(typeof adapter.getEffectiveTenantId).toBe('function')
 
-    await adapter.connect()
-    expect(adapter.getEffectiveTenantId?.()).toBe('tenant-demo')
-    expect(adapter.getConfig().type).toBe('plm')
+    const calls:DurableUnboundCall[]=[]
+    beginDurableUnboundClassification(handoffPg.query,calls)
+    try {
+      await adapter.connect()
+      expect(adapter.getEffectiveTenantId?.()).toBe('tenant-demo')
+      expect(adapter.getConfig().type).toBe('plm')
+    } finally { finishDurableUnboundClassification(calls,'plm-v12-staging') }
   })
 
   it('a source recreated with the same id after deletion still loads after a restart', async () => {
@@ -586,4 +603,16 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
     await m1.addDataSource({ ...pgConfig('ds-y'), options: { autoConnect: true } }, { ownerId: 'alice' })
     expect(rows.get('ds-y')?.auto_connect).toBe(true)
   })
+})
+
+
+it('preserves the persisted personal read handoff when an older PLM adapter cache saves a name edit',async()=>{
+ const {db,rows}=statefulFakeDb();const m=new DataSourceManager({db:db as never})
+ const config:DataSourceConfig={id:'owned-read-handoff',name:'old',type:'plm',connection:{url:'https://native.example'},options:{autoConnect:false,apiMode:'yuantus',tenantId:'native-tenant',orgId:'native-org'}}
+ await m.addDataSource(config,{ownerId:'alice'})
+ const stored=rows.get(config.id)!;rows.set(config.id,{...stored,config:{...stored.config,options:{...stored.config.options,personalChangeReadConnectionId:'persisted-native-id'}}})
+ expect(m.getDataSource(config.id).getConfig().options?.personalChangeReadConnectionId).toBeUndefined()
+ await m.updateDataSource(config.id,{...m.getDataSource(config.id).getConfig(),name:'new'},{ownerId:'alice'})
+ expect(rows.get(config.id)!.config.options.personalChangeReadConnectionId).toBe('persisted-native-id')
+ expect(m.getDataSource(config.id).getConfig().options?.personalChangeReadConnectionId).toBe('persisted-native-id')
 })

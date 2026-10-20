@@ -25,6 +25,7 @@ const callSchema = z.discriminatedUnion('operation', [
 ])
 export type PersonalChangeReadCall = z.infer<typeof callSchema>
 export const YUE_GRANT = /^yue_([0-9a-f]{32})_([A-Za-z0-9_-]{43})$/
+export const personalChangeReadConnectionIdSchema = id.refine(value => !/^(?:yua|yuw|yur|yue)_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/.test(value))
 const bindingSchema = z.object({
   schema: z.literal('yuantus.plm-bom-change-read-binding.v1'),
   grant_id: z.string().regex(/^[0-9a-f]{32}$/), connection_id: id, tenant_id: id, org_id: id,
