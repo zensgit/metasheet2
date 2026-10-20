@@ -1,0 +1,58 @@
+{
+  "source": "0dfe9ed675e9c35e7f53306be1f682828ccd56e9",
+  "base": "df4a2d79e640d07faca27198a1e71461764977a2",
+  "unit": 174,
+  "new_unit": 3,
+  "real_pg_native_two_meta_process_checks": 25,
+  "new_http_context_cases": 3,
+  "all_individual_assertions": "passed",
+  "skips": 0,
+  "meta_workers": [
+    {
+      "pid": 49951,
+      "exit": 0,
+      "stopped": true
+    },
+    {
+      "pid": 50046,
+      "exit": 0,
+      "stopped": true
+    }
+  ],
+  "source_before": {
+    "files": 1438,
+    "sha256": "10a84df911730c93dd8fe6c6714d6bf8d46ff1cf1d617c683e979f90d06aed64"
+  },
+  "source_after": {
+    "files": 1438,
+    "sha256": "10a84df911730c93dd8fe6c6714d6bf8d46ff1cf1d617c683e979f90d06aed64"
+  },
+  "critical_git_blob_hashes_verified": {
+    "packages/core-backend/src/services/plm-managed-discussion.ts": "dbcf105d94e90d32c3256a36013d6747199f710df5481993b88d0d259882f21a",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "e64a300dd17bae944ce26bb745be710bacef229825a1e9f51129f84816e216ff",
+    "packages/core-backend/src/services/plm-managed-bom-authority.ts": "5b5e1a3c4074cb363024b18c31def782613d49ddd6d5f737412524180fe61b7d",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "8149f3a8986d9bb70f698fc5f67b05b2bfd4223650db2cac4916c2ad1ce01ab7",
+    "packages/core-backend/src/auth/visual-review-markup.ts": "0f4bd46fcb5b0b7274c1db069770cb9a2891fbcefbab9496fecb91f58ca54d42",
+    "packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts": "26cbb26394370484208b3aed0542634a770a3bc6c58a9700fcdae1141b3a40fc",
+    "packages/core-backend/vitest.plm-managed-discussion.config.ts": "b63c678ed1be44ac8fd9df33abe865c645e024fd7cde2dacae3b61ad097042c5",
+    "packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs": "8356be77ee49f1a0ddf5dc655dc90bfb011461b5b7d217ea5245a0c3ebd142a1",
+    "scripts/verification/plm-managed-discussion/verify.py": "2130b62e95bb443482854268daced9b3c0a48db59dd0ba7cd2b6621bd97f54d6"
+  },
+  "native_executed_head": "e8177732b514c3e0554e320e4aca92b57a2a0d74",
+  "native_api_pin": "f87e019b2f01ae97dca2b2a13aa426c269e31a6b",
+  "native_api_paths_match": true,
+  "typecheck_exit": 0,
+  "actionlint_exit": 0,
+  "owned_directory_removed": true,
+  "cleanup_errors": [],
+  "private_raw_archive": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/plm-managed-discussion-context-20261020",
+  "scope": "New metadata bootstrap behind actual global managed-cookie JWT plus fresh Native signature/current source locks/parent Origin and shared JTI. No Discussion credential is exchanged for context; no write or read grant is returned.",
+  "failure_accounting": "Sparse checkout omitted workflow/coordinator after switching preserved branches. Exact HEAD blobs were materialized; first missing-file invocation started no resources. Actual second coordinator passed25. Initial32 focused unit and final174 unit passed.",
+  "limits": [
+    "Frontend frame/view, parent broker mount and rendered browser acceptance remain missing",
+    "Meta session rows are fixtures against actual Native delegation, not callback persistence",
+    "Current keyhandoff e817 and source917 package71 proof are separate; this new Meta product source is not yet packaged/installed",
+    "No new remote CI/publication while valuable363 job queued"
+  ]
+}
