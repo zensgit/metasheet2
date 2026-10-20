@@ -4,7 +4,7 @@
 import { beforeAll, afterAll, it, expect } from 'vitest'
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { fork, type ChildProcess } from 'node:child_process'
+import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import express, { type Request } from 'express'
@@ -75,7 +75,8 @@ beforeAll(async () => {
           ...(typeof req.headers['x-tenant-id'] === 'string' ? { 'x-tenant-id': req.headers['x-tenant-id'] } : {}),
           ...(typeof req.headers['x-org-id'] === 'string' ? { 'x-org-id': req.headers['x-org-id'] } : {}) },
         ...(['GET', 'HEAD'].includes(req.method!) ? {} : { body }), signal: AbortSignal.timeout(10000) })
-      res.statusCode = response.status; res.setHeader('Content-Type', 'application/json'); res.end(await response.text())
+      res.statusCode = response.status; res.setHeader('Content-Type', response.headers.get('content-type') ?? 'application/json')
+      res.end(Buffer.from(await response.arrayBuffer()))
     } catch { res.statusCode = 502; res.end('{}') }
   })
   await new Promise<void>(resolve => server.listen(Number(process.env.PLM_MANAGED_DISCUSSION_PROXY_PORT ?? 0), '127.0.0.1', resolve))
@@ -443,4 +444,88 @@ it('managed frame discovery resolves each current cookie source rather than the 
     expect(response.status).toBe(200)
     expect((await response.json() as { data: { sourceId: string } }).data.sourceId).toBe(f.source)
   }
+})
+
+
+function ownedNativeVisual(command: string) {
+  const python = process.env.PLM_MANAGED_VISUAL_PYTHON, nativeTree = process.env.PLM_MANAGED_VISUAL_NATIVE_TREE
+  if (!python || !nativeTree || !process.env.PLM_MANAGED_VISUAL_FIXTURE_ROOT) throw new Error('Owned Native Visual fixture required')
+  const result = spawnSync(python, [resolve('tests/integration/fixtures/seed-managed-visual-native.py'), command], {
+    cwd: nativeTree, env: process.env, encoding: 'utf8', timeout: 20000,
+  })
+  expect(result.status, result.stderr).toBe(0)
+}
+async function visualFixture() {
+  const f = await delegatedFixture()
+  await pool.query("UPDATE data_sources SET config=jsonb_set(config,'{options,managedVisualReviewEnabled}','true') WHERE id=$1", [f.source])
+  return f
+}
+async function actualVisualImage(f: Awaited<ReturnType<typeof delegatedFixture>>, worker = metaUrl) {
+  const request = await f.req({ operation: 'preview-image', fileId: 'managed-visual-file', versionId: 'managed-visual-v1' })
+  const response = await httpManaged(f, request, f.cookie, worker)
+  expect(response.status).toBe(200)
+  expect(response.headers.get('content-type')).toMatch(/^image\/png/)
+  const descriptor = JSON.parse(Buffer.from(response.headers.get('X-PLM-Preview-Descriptor')!, 'base64url').toString())
+  const bytes = Buffer.from(await response.arrayBuffer())
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe(descriptor.preview_checksum)
+  expect(descriptor).toMatchObject({ part_id: 'part', file_id: 'managed-visual-file', file_version: 'managed-visual-v1',
+    version_is_current: true, preview_width: 4, preview_height: 5 })
+  return descriptor
+}
+function visualBody(descriptor: Record<string, any>) {
+  return { target_type: 'item', target_id: 'part', body: 'Actual managed Visual pin',
+    anchor: { kind: 'cad_2d_markup', file_id: descriptor.file_id, file_version: descriptor.file_version,
+      content_checksum: descriptor.content_checksum, preview_checksum: descriptor.preview_checksum, page: 0 },
+    markup: { schema_version: 1, markup_type: 'pin', file_id: descriptor.file_id,
+      geometry: { x: 0.25, y: 0.5 }, viewport: { width: descriptor.preview_width, height: descriptor.preview_height, rotation: 0 } } }
+}
+it('managed Visual actual provider raster and bound markup survive independent Meta workers', async () => {
+  const f = await visualFixture()
+  const list = await httpManaged(f, await f.req({ operation: 'preview-files' }), f.cookie, workers[0].url)
+  expect(list.status).toBe(200)
+  expect((await list.json() as any).data.files).toContainEqual({ file_id: 'managed-visual-file', version_id: 'managed-visual-v1', filename: 'owned.png', version_is_current: true })
+  const descriptor = await actualVisualImage(f, workers[1].url)
+  const created = await httpManaged(f, await f.req({ operation: 'create', body: visualBody(descriptor) }), f.cookie, workers[0].url)
+  expect(created.status).toBe(200)
+  const thread = (await created.json() as any).data
+  expect(thread.comments[0]).toMatchObject({ author_user_id: 42, markup: { binding_state: 'bound', file_id: 'managed-visual-file', file_version: 'managed-visual-v1' } })
+  const reread = await httpManaged(f, await f.req({ operation: 'thread', threadId: thread.id }), f.cookie, workers[1].url)
+  expect(reread.status).toBe(200)
+  const comments = (await reread.json() as any).data.comments
+  // PostgreSQL reload may serialize the same instant in its configured timezone.
+  const normalizedTimes = (values: any[]) => values.map(value => ({ ...value, created_at: new Date(value.created_at).toISOString() }))
+  expect(normalizedTimes(comments)).toEqual(normalizedTimes(thread.comments))
+})
+it('managed Visual actual Native rejects a forged checksum and stale version while current descriptor succeeds', async () => {
+  const f = await visualFixture(), descriptor = await actualVisualImage(f)
+  const bad = visualBody({ ...descriptor, preview_checksum: '0'.repeat(64) })
+  const refused = await httpManaged(f, await f.req({ operation: 'create', body: bad }), f.cookie)
+  expect(refused.status).toBe(422)
+  ownedNativeVisual('stale-version')
+  try {
+    const stale = await httpManaged(f, await f.req({ operation: 'create', body: visualBody(descriptor) }), f.cookie)
+    expect(stale.status).toBe(422)
+  } finally { ownedNativeVisual('restore-version') }
+  const accepted = await httpManaged(f, await f.req({ operation: 'create', body: visualBody(descriptor) }), f.cookie)
+  expect(accepted.status).toBe(200)
+})
+it('managed Visual actual Native entitlement fails closed and resumes only after restoration', async () => {
+  const f = await visualFixture()
+  ownedNativeVisual('disable-license')
+  try {
+    const refused = await httpManaged(f, await f.req({ operation: 'preview-files' }), f.cookie)
+    expect(refused.status).toBe(503)
+  } finally { ownedNativeVisual('restore-license') }
+  expect((await httpManaged(f, await f.req({ operation: 'preview-files' }), f.cookie)).status).toBe(200)
+})
+it('managed Visual actual delegation revocation stops preview before new Native capability calls', async () => {
+  const f = await visualFixture()
+  await actualVisualImage(f)
+  const revoked = await fetch(native + '/api/v1/auth/managed-login/revoke', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'default', 'x-org-id': 'fixture-org' },
+    body: JSON.stringify({ client_id: 'discussion-client', client_secret: 'owned-client-secret', delegation_id: f.delegation }) })
+  expect(revoked.status).toBe(204)
+  const before = exchangeCalls
+  expect((await httpManaged(f, await f.req({ operation: 'preview-files' }), f.cookie)).status).toBe(401)
+  expect(exchangeCalls).toBe(before)
 })
