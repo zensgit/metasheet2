@@ -1,0 +1,115 @@
+{
+  "source_commit": "1895fbe2b0ff424ad1fd765f83ca449b5cac639b",
+  "base": "f0eeb415f59a6d058650dab82e05b042ee95d92b",
+  "scope": "Shared managed browser authority session expiry after all locks; independent of uncommitted managed Discussion feature",
+  "source_files": {
+    "packages/core-backend/src/services/plm-managed-bom-authority.ts": "5b5e1a3c4074cb363024b18c31def782613d49ddd6d5f737412524180fe61b7d",
+    "packages/core-backend/tests/integration/plm-snapshot-share-pg.realdb.ts": "5c3e41a424bb45d2dc9cd29fe0f403de008ce3407315f692e0fade401be64c53",
+    "scripts/verification/plm-managed-companion-ci/snapshot-share.mjs": "f03305111c410b4c1aeff05ee233fe2ecc6f01801b5af54d54c6ff7bb503e8a7"
+  },
+  "red_real_native": {
+    "expires_at": "2026-10-20T04:28:52.466Z",
+    "checked_at": "2026-10-20T04:28:52.544Z",
+    "expired": true,
+    "accepted": true,
+    "exchange_before": 0,
+    "exchange_after": 1,
+    "native_thread": "a5a1d5d4-e406-4dc8-b2d8-7001515f58ea"
+  },
+  "green_real_native": {
+    "link": {
+      "expires_at": "2026-10-20T04:29:59.472Z",
+      "checked_at": "2026-10-20T04:29:59.496Z",
+      "expired": true,
+      "accepted": false,
+      "exchange_before": 5,
+      "exchange_after": 5,
+      "status": 403
+    },
+    "membership": {
+      "expires_at": "2026-10-20T04:30:00.500Z",
+      "checked_at": "2026-10-20T04:30:00.504Z",
+      "expired": true,
+      "accepted": false,
+      "exchange_before": 5,
+      "exchange_after": 5,
+      "status": 403
+    }
+  },
+  "actual_test_statuses": {
+    "managed_real_native_pg": {
+      "passed": 12
+    },
+    "change_read_pg": {
+      "passed": 48
+    },
+    "snapshot_pg": {
+      "passed": 16
+    },
+    "clean_source_focused_pg": {
+      "skipped": 14,
+      "passed": 2
+    }
+  },
+  "clean_source_head": "1895fbe2b0ff424ad1fd765f83ca449b5cac639b",
+  "clean_focused_scope": "2 new tests executed,14 old tests intentionally excluded. Top-level Vitest counters are misleading; only individual assertion statuses counted. This focused report is not CI acceptance.",
+  "ci_gate": {
+    "prior": 14,
+    "now": 16,
+    "real_full_report_accepted": true,
+    "focused_report_rejected_for_skips": true,
+    "checker": "existing assert-report.mjs, unchanged",
+    "remote_run": false
+  },
+  "types_exit": 0,
+  "cleanup": {
+    "managed_pg_real_native": true,
+    "affected_change_read": true,
+    "affected_snapshot": true,
+    "clean_focused_snapshot": true,
+    "failed_runs_processes_stopped": true
+  },
+  "raw_sha256": {
+    "plm-managed-authority-expiry-clean-snapshot-20261020.json": "0b8f2d7b1a6fb8292bc6d4595b057ac03f496dd8784134acc2b9bd881100e22f",
+    "plm-managed-authority-expiry-clean-snapshot-20261020.log": "ed2292b3a14425386ff35a0322c5da4df76aa00a0bdf96f8341d64f144d1ab9a",
+    "plm-managed-authority-expiry-clean-snapshot-tests-20261020.json": "fa2252bfe269add1a3df31174a12a40918fc1db5d85811d5b6fcc79f79e3a59f",
+    "plm-managed-authority-expiry-types-20261020.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "plm-managed-discussion-authority-change-read-20261020.json": "3979a435edd4b077c5caa403e1e4012525c1cb89b9a6ddfc440c22ecafbe270c",
+    "plm-managed-discussion-authority-change-read-20261020.log": "e6a86c5149e808c5ac172cd5942dcab41903d1b67b394a1e289b70334242ffb7",
+    "plm-managed-discussion-authority-change-read-tests-20261020.json": "215757ce71190145f785b0093d354281eb9cd9b6eec1c5152e09c9bb575a559f",
+    "plm-managed-discussion-authority-snapshot-20261020.json": "0d32d5b011d05a0f6a585ab8f039f8e57ec885d6bef6f93323fee705996d0d01",
+    "plm-managed-discussion-authority-snapshot-20261020.log": "057384540a08e62e39103a7d76125ad7a3514784361b926f06e55fbbac7e5e92",
+    "plm-managed-discussion-authority-snapshot-tests-20261020.json": "bfe65f83e89eaff7dcbf32044c41a46025e9fc31b140d50973a117be3e867803",
+    "plm-managed-discussion-pg-first-20261020.json": "095e664e3bf9c706ff37e9d31ac8219b102f24039634d0298d36eded43b3afad",
+    "plm-managed-discussion-pg-first-20261020.log": "0e1a12e42d63ed9bb942be051809489d6d38e2d3acf771cf70f526e4969a765d",
+    "plm-managed-discussion-pg-first-driver-20261020.py": "e6887d3957ce6815201b070095ac0a986b36fb1d45117d1d8515be602b585442",
+    "plm-managed-discussion-pg-first-tests-20261020.json": "be65259eeac82075f9eb8d3af8de52d544281f693b05ba6c1932873e12cb35f2",
+    "plm-managed-discussion-pg-fourth-20261020.json": "bac661681b89f415f6a26a6c40327008c20a508f72125600bd2481715e1f014f",
+    "plm-managed-discussion-pg-fourth-20261020.log": "374092bfa325d8502314ad521bf5a9c1f7175efbc754b8ca8a74770c45430e1f",
+    "plm-managed-discussion-pg-fourth-driver-20261020.py": "3a25c72e3b52ca4c6e7c0e6b576e67eb316ca89d89338bf631a87f0891915377",
+    "plm-managed-discussion-pg-fourth-expiry-20261020-link.json": "a96befe6d0cc0576af9d3e7dd7b31a6efdc4be21f2d3cb864f7bee6688eb4a80",
+    "plm-managed-discussion-pg-fourth-expiry-20261020-membership.json": "d478a031637b1a1cc26d807b39e3b7f80d6a9fc611dcc4709534941dd63b02e9",
+    "plm-managed-discussion-pg-fourth-tests-20261020.json": "f9a5b6e00e6aa08c4606dd79505604d5bd8bc4f977ef6c956ce8d25f8d3531dd",
+    "plm-managed-discussion-pg-second-20261020.json": "b83fb6338ce099577cf0f02419a6502934a32cfc9e0ba6392a44b2bcca6b6621",
+    "plm-managed-discussion-pg-second-20261020.log": "afacc0ea8ae29fc18236867851f18dd852dd7c6c5251db3be458f8d1e017fc02",
+    "plm-managed-discussion-pg-second-driver-20261020.py": "75a3d4b757fa5c58cc13eb147bd477de0b3ddf840c463a697d98a41915c1414a",
+    "plm-managed-discussion-pg-second-tests-20261020.json": "febfb9f3c1b32f34e827b5c464207dbe2506736c0e31454389f1cbe73fc865f6",
+    "plm-managed-discussion-pg-third-20261020.json": "373dedad76ad22ef7f8ab9678832189f25b50c99f80ef77fe6b7e684774b0619",
+    "plm-managed-discussion-pg-third-20261020.log": "54c65bebd90557601fbed968b31ec61aa8d059487dab8181233ee2183e07f725",
+    "plm-managed-discussion-pg-third-driver-20261020.py": "4fe6946ef9ab29bfd4e232d05020feec9c9fd2fff0b69364d1efef0dd68bb1ac",
+    "plm-managed-discussion-pg-third-expiry-20261020.json": "95b6137643ed62adadcdd9a8694eb61b7d46fa22ade112dbe6353ccd374af1dd",
+    "plm-managed-discussion-pg-third-tests-20261020.json": "8080e5c5f074d29b4812f0e3a6743b459dc7eb6615b76bf609ec23f9ab5583d5"
+  },
+  "failed_roots_retained": [
+    "/tmp/plm-mdpg-s-zqt26yfi",
+    "/tmp/plm-mdpg-s-8sdec_8w",
+    "/tmp/plm-mdpg-s-44j3i_44"
+  ],
+  "whole_goal_complete": false,
+  "pushed": false,
+  "remaining": [
+    "Current managed Discussion feature uncommitted: actual global JWT/cookie, UI/token broker, key handoff andVisual/installed package remain separate",
+    "Updated exact-source packages/images and remote CI not qualified",
+    "Production/customer/long-running qualification and full W01-W23"
+  ]
+}
