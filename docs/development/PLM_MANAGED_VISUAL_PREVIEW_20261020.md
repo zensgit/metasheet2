@@ -49,8 +49,22 @@ The existing 4GiB preflight refused one attempt. Three stopped, explicitly owned
 
 Additional compact receipt: `artifacts/plm-managed-visual-preview-20261020/native-postgres-verification.json`; private manifest SHA256 `583e7ec3e5734bb00f3bd13e572a32356cd48c8f3324ab919db2f8e231feb1e8`. These are actual Native provider/route/process results, not a real-browser or service installation proof.
 
+## Native object ACL and fresh business-domain restore
+
+The next test-only source `af724799c8cfc956716376ccc05ef8ab5d96f1ab` adds Native object-ACL and actual fresh-restore controls. The strengthened repository verifier again passed all 31 cases without skips. Runtime began at checkout `7c27a098b59946976abebe26ea64ad9d9e907eed` with the three test/verifier changes present; a separate `git show` check subsequently bound **all 1,441 executed source-file bytes and every critical hash** to commit af7247. The identical before/after/committed fingerprint is `48ed9b090d30b643f66da57e01dcbab20aceb2e51afe03a2c02570c4077a2ded`. The raw checkout label is preserved rather than relabelled.
+
+A fresh embed JWT is minted before the actual Native object's `can_get` ACL is revoked. Native's preview endpoint then returns 401; the Meta relay returns its existing generic 503. The initial test incorrectly expected Meta 401; the correction explicitly asserts **both** observed boundaries and the subsequent Native 200/200 mint/redeem after restoring the ACL through the other Meta worker. No product status handling, authentication gate or privilege was changed.
+
+The fixture performs a real custom-format PostgreSQL dump and single-transaction restore into a fresh tenant-business database. Complete JSON rows for the thread, comments, markup, file, version and root item match. Raster bytes are copied into a separate owned storage directory and checked against the authenticated preview checksum. A separate Native HTTP process opens that fresh database and storage, returns the saved thread/author/geometry and actually mints and redeems the restored PNG. Its database template retains **both tenant and organization placeholders**; no isolation check is bypassed.
+
+The restored thread and raster APIs both returned 200. Domain SHA256: `0cc7a06fd0e63c2716d50cd4d285d0e0de65c791ddb71f195911b9b826e251d8`; dump SHA256: `0d9452febf87f7bbabe9b494a9134a1dbf664eec381fad9cc149c5911b7c6ae3`; source/restored raster SHA256: `8dfc1b8f21dba791473d4817294fd384cbdc2d88928f70989fc6d4f209b9b301`. Restored worker 39937 completed application shutdown under SIGTERM. Meta workers 39785/39802 acknowledged shutdown and exited 0; original Native/Redis/PostgreSQL cleanup passed and the generated root was removed.
+
+This restores **Native business data and one raster asset**, while retaining the original live identity/RBAC stores and private fixture configuration. It does not qualify full authority/configuration recovery, Meta recovery, installed service images or a browser journey. The failed fixture's complete 8,171-file raw root was archived and each entry size/hash verified before exact owned-root cleanup; archive SHA256 `cd7d1f33200b8708ec0557f83d7b97b2027af8e86f17f444ccf84c5504f1886c` remains private. No unknown storage was removed.
+
+Receipt: `artifacts/plm-managed-visual-preview-20261020/restore-acl-verification.json`; private successful evidence manifest SHA256 `76c3408a29beb58f5851abac4490adab60bdd0aab93ff6a0d075a660c8fe8e5c`.
+
 ## Remaining acceptance and publication
 
-Complete actual browser canvas/Discussion markup interaction and Native ACL-change controls, then verify fresh restored databases and installed runtime-package enable/disable/recovery with explicit configuration handoff. Existing successful plain-Discussion installed74 evidence does not qualify these new Visual changes. Original image-build space floors remain unchanged.
+Complete actual browser canvas/Discussion markup interaction, full authority/configuration and Meta restoration, and installed runtime-package enable/disable/recovery with explicit configuration handoff. Existing successful plain-Discussion installed74 evidence does not qualify these new Visual changes. Original image-build space floors remain unchanged.
 
 This branch remains a separate candidate. Publication waits for valuable parent jobs to finish and follows the dependency queue; no active useful job is cancelled. Keep its future PR Draft. Native #366 source pin remains `ba07fa952083179c58b5e423b1212eabb2d0c170`; no repinning, merge, deployment, production enablement or issue closure is authorized by this result.
