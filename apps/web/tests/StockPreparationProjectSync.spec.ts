@@ -117,6 +117,21 @@ function assertValuesFree(report: StockPreparationProjectSyncReport): void {
 
 describe('preview change plan only', () => {
   it.each([
+    [STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE, 'PLAN_DRY_RUN_BUSY'],
+    [STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE, 'PLAN_DRY_RUN_INTERRUPTED'],
+  ])('preserves closed dry-run refusal %s without entering the job lane', async (code, reason) => {
+    previewHttp.fetch.mockReset().mockResolvedValue(new Response(JSON.stringify({
+      ok: false, error: { code, message: PLANTED_SECRET },
+    }), { status: 409 }))
+    const report = await runStockPreparationProjectPreview(
+      createStockPreparationProjectSyncApi({}, undefined, { strictPreview: true }), PROJECT_NO,
+    )
+    expect(report.reason).toBe(reason)
+    expect(JSON.stringify(report)).not.toContain(PLANTED_SECRET)
+    expect(previewHttp.fetch).toHaveBeenCalledTimes(1)
+    expect(String(previewHttp.fetch.mock.calls[0][0])).toMatch(/\/dry-run$/)
+  })
+  it.each([
     ['ready', true, 0, 'PLAN_READY'],
     ['manual_confirm_required', true, 2, 'PLAN_HELD_FOR_CONFIRMATION'],
     ['not_found', false, 0, 'PLAN_PROJECT_NOT_FOUND'],
