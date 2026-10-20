@@ -69,7 +69,7 @@ def verify(args):
         'PLM_RECORD_PUSH_ENABLED': 'false', 'PLM_CHANGE_EVENTS_ENABLED': 'false', 'PLM_MANAGED_LOGIN_ENABLED': 'true',
         'PLM_BOM_READ_SESSION_ENABLED': 'true', 'PLM_BOM_READ_CLIENTS_JSON': json.dumps([{'client_id': 'discussion-client',
             'tenant_id': 'default', 'org_id': 'fixture-org', 'origin': 'https://meta.example.test'}]),
-        'PLM_MANAGED_LOGIN_CLIENTS_JSON': json.dumps([{'issuer': proxy_url, 'client_id': 'discussion-client',
+        'PLM_MANAGED_LOGIN_CLIENTS_JSON': json.dumps([{'issuer': proxy_url + '/installation', 'client_id': 'discussion-client',
             'callback': 'https://meta.example.test/api/plm/managed-login/callback', 'tenant_id': 'default', 'org_id': 'fixture-org',
             'origin': 'https://meta.example.test', 'secret_sha256': hashlib.sha256(b'owned-client-secret').hexdigest()}])}
     env.update({'YUANTUS_' + k: v for k, v in config.items()})

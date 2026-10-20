@@ -62,7 +62,7 @@ beforeEach(() => {
   mocks.lock.mockResolvedValue({ row: { config: { connection: { url: base },
     options: { apiMode: 'yuantus', tenantId: 'native-tenant', orgId: 'native-org' } }, frozen_origin: base },
     source: { auth_user_id: '42', tenant_id: 'native-tenant', org_id: 'native-org' },
-    reg: { origin: 'https://meta.example.test', issuer: base } })
+    reg: { origin: 'https://meta.example.test', issuer: base, nativeBaseUrl: base } })
 })
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks() })
 
@@ -144,8 +144,14 @@ it('refuses persisted URL aliases that would redirect the current source', async
   await expect(relayManagedDiscussion(request(), 'source')).rejects.toMatchObject({ status: 403, code: 'PLM_MANAGED_DISCUSSION_SOURCE_CHANGED' })
   expect(mocks.consume).not.toHaveBeenCalled(); expect(seen).toEqual([])
 })
+it('keeps an independent installation issuer separate from the registered Native API URL', async () => {
+  const value = await mocks.lock(); value.reg.issuer = 'https://installation.example.test/plm'
+  mocks.lock.mockResolvedValue(value)
+  expect(await relayManagedDiscussion(request(), 'source')).toMatchObject({ id: 'native-thread' })
+  expect(seen.length).toBe(2)
+})
 it('refuses a changed Native registration before consuming the token', async () => {
-  const value = await mocks.lock(); value.reg.issuer = base + '/other-installation'
+  const value = await mocks.lock(); value.reg.nativeBaseUrl = base + '/other-installation'
   mocks.lock.mockResolvedValue(value)
   await expect(relayManagedDiscussion(request(), 'source')).rejects.toMatchObject({ status: 403 })
   expect(mocks.consume).not.toHaveBeenCalled(); expect(seen).toEqual([])

@@ -77,7 +77,7 @@ export async function relayManagedDiscussion(req: Request, sourceId?: string): P
     let source: ReturnType<typeof resolvePersistedPlmSource>
     try { source = resolvePersistedPlmSource({ ...(current.row.config as object), type: 'plm' }) }
     catch { throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_SOURCE_CHANGED') }
-    if (source.origin.href !== new URL(current.reg.issuer).href
+    if (source.origin.href !== new URL(current.reg.nativeBaseUrl).href
       || source.origin.origin !== current.row.frozen_origin
       || source.tenantId !== current.source.tenant_id || source.orgId !== current.source.org_id) {
       throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_SOURCE_CHANGED')

@@ -32,7 +32,7 @@ const native = process.env.PLM_MANAGED_DISCUSSION_NATIVE_URL!
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(native)) throw new Error('Owned Native child required')
 const pool = new Pool({ connectionString: url, max: 8 })
 const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
-let server: Server, metaServer: Server, metaUrl: string, proxy: string, bearer: string, uiCookie: string
+let server: Server, metaServer: Server, metaUrl: string, proxy: string, installationIssuer: string, bearer: string, uiCookie: string
 let entered: (() => void) | undefined, release: Promise<void> | undefined
 let exchangeCalls = 0
 const workers: { child: ChildProcess; url: string; exit: Promise<number | null>; stopped: () => boolean }[] = []
@@ -81,7 +81,8 @@ beforeAll(async () => {
   await new Promise<void>(resolve => server.listen(Number(process.env.PLM_MANAGED_DISCUSSION_PROXY_PORT ?? 0), '127.0.0.1', resolve))
   proxy = 'http://127.0.0.1:' + (server.address() as { port: number }).port
   process.env.PLM_MANAGED_COMPANION_ENABLED = 'true'
-  process.env.PLM_MANAGED_COMPANION_CLIENTS_JSON = JSON.stringify([{ issuer: proxy,
+  installationIssuer = proxy + '/installation'
+  process.env.PLM_MANAGED_COMPANION_CLIENTS_JSON = JSON.stringify([{ issuer: installationIssuer,
     clientId: 'discussion-client', clientSecret: 'owned-client-secret', callback: 'https://meta.example.test/api/plm/managed-login/callback',
     origin: 'https://meta.example.test', nativeTenantId: 'default', nativeOrgId: 'fixture-org', nativeBaseUrl: proxy }])
   await bootstrapPlmBomReviewTestDb(pool)
@@ -126,14 +127,14 @@ async function fixture(seconds = 300, issued?: { delegation_id: string; credenti
   const fp = sourceFingerprint({ type: 'plm', origin: proxy, ownerId: actor, rootPartId: 'part', tenantId: 'meta-tenant', workspaceId: 'meta-org', scopeKind: 'user' })
   await pool.query(`INSERT INTO plm_managed_identity_links(id,installation_issuer,native_auth_user_id,native_tenant_id,native_org_id,client_id,callback,meta_user_id,meta_tenant_id,meta_org_id,data_source_id,root_part_id,client_origin,generation,status,owner_user_id,created_by,source_fingerprint)
     VALUES($1,$2,'42','default','fixture-org','discussion-client',$3,$4,'meta-tenant','meta-org',$5,'part','https://meta.example.test',1,'active',$4,$4,$6)`,
-    [link, proxy, 'https://meta.example.test/api/plm/managed-login/callback', actor, source, fp])
+    [link, installationIssuer, 'https://meta.example.test/api/plm/managed-login/callback', actor, source, fp])
   await pool.query(`INSERT INTO plm_managed_browser_intents(id,link_id,generation,meta_user_id,meta_tenant_id,meta_org_id,data_source_id,root_part_id,client_origin,installation_issuer,native_tenant_id,native_org_id,callback,client_id,state_hash,nonce_hash,code_challenge,code_verifier_ciphertext,return_path,status,expires_at,consumed_at,delegation_id,credential_ciphertext)
     VALUES($1,$2,1,$3,'meta-tenant','meta-org',$4,'part','https://meta.example.test',$5,'default','fixture-org',$6,'discussion-client',$7,$7,$8,'enc:fixture','/plm/bom-review','consumed',now()+interval '5 minutes',now(),$9,'enc:read-fixture')`,
-    [intent, link, actor, source, proxy, 'https://meta.example.test/api/plm/managed-login/callback', 'a'.repeat(64), 'a'.repeat(43), delegation])
+    [intent, link, actor, source, installationIssuer, 'https://meta.example.test/api/plm/managed-login/callback', 'a'.repeat(64), 'a'.repeat(43), delegation])
   await pool.query("INSERT INTO plm_managed_source_bindings(data_source_id,link_id,generation,source_fingerprint,status,frozen_origin,frozen_root_part_id)VALUES($1,$2,1,$3,'active',$4,'part')", [source, link, fp, proxy])
   await pool.query(`INSERT INTO plm_managed_sessions(id,intent_id,link_id,data_source_id,generation,delegation_id,credential_ciphertext,expires_at,scope,native_subject,native_tenant_id,native_org_id,meta_user_id,meta_tenant_id,meta_org_id,root_part_id,client_origin,installation_issuer,client_id)
     VALUES($1,$2,$3,$4,1,$5,$9,now()+make_interval(secs=>$8),'bom_review_read','42','default','fixture-org',$6,'meta-tenant','meta-org','part','https://meta.example.test',$7,'discussion-client')`,
-    [session, intent, link, source, delegation, actor, proxy, seconds, ciphertext])
+    [session, intent, link, source, delegation, actor, installationIssuer, seconds, ciphertext])
   async function req(body: unknown = { operation: 'create', body: { target_type: 'item', target_id: 'part', body: 'Managed real Native comment' } }) {
     const response = await firstPartyMint()
     expect(response.status).toBe(200)
@@ -256,7 +257,7 @@ async function delegatedFixture() {
   const response = await fetch(native + '/api/v1/auth/managed-login/authorize', { method: 'POST',
     headers: { 'Content-Type': 'application/json', origin: native, Cookie: uiCookie, 'x-yuantus-ui-request': 'managed-login' },
     body: JSON.stringify({ client_id: 'discussion-client', callback: 'https://meta.example.test/api/plm/managed-login/callback',
-      origin: 'https://meta.example.test', tenant_id: 'default', org_id: 'fixture-org', issuer: proxy, root_part_id: 'part',
+      origin: 'https://meta.example.test', tenant_id: 'default', org_id: 'fixture-org', issuer: installationIssuer, root_part_id: 'part',
       state: randomUUID(), code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }) })
   expect(response.status).toBe(200)
   const callback = new URL((await response.json() as { redirect_url: string }).redirect_url)

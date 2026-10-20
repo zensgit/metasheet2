@@ -98,7 +98,7 @@ jobs:
             tests/unit/plm-managed-capability-read-transport.test.ts \
             tests/unit/plm-managed-adapter-startup.test.ts \
             tests/unit/plm-managed-discussion.test.ts
-          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 174
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 175
 
       - name: Managed Discussion frame and existing token client regressions
         run: |
