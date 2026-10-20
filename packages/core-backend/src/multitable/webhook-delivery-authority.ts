@@ -7,12 +7,9 @@
  * owner can see. Every decision is re-made from the database (no request claims, no process cache) both
  * before a delivery row is written and before every HTTP attempt, including retries.
  *
- * Two layers:
- *   - `webhookDeliveryFloor` — binding present, event sheet = bound sheet, owner passes request admission
- *     (account live, login gate, no forced password change), owner can read the bound sheet and manage its
- *     automation, the sheet is live and is not a hidden system sheet.
- *   - `authorizeWebhookDeliveryWithQuery` — the floor plus row-level read deny (with record liveness from
- *     the same snapshot), the field mask (same chain as the record read path) and the envelope allow-list.
+ * `webhookDeliveryFloor` — binding present, event sheet = bound sheet, owner passes request admission
+ * (account live, login gate, no forced password change), owner can read the bound sheet and manage its
+ * automation, the sheet is live and is not a hidden system sheet.
  *
  * Any failed check refuses. A refusal is logged with its enum reason only (no ids, no values).
  */
@@ -22,8 +19,6 @@ import type { Database } from '../db/types'
 import { ACCOUNT_INACTIVE_CODE, evaluateUserAuthenticationGate } from '../auth/user-activation'
 import type { MultitableCapabilities, ResolvedRequestAccess } from './access'
 import {
-  isRecordReadDeniedForUserStrict,
-  loadRowLevelReadDenyEnabledStrict,
   resolveSheetCapabilitiesForAccess,
   type QueryFn,
 } from './permission-service'
@@ -169,78 +164,7 @@ async function webhookDeliveryFloor(
   })
 }
 
-// ─── Full layer ───────────────────────────────────────────────────────────────────────────
-
-/** Events whose delivery requires the record to be live (and not denied) at check time on row-level-deny sheets. */
-const LIVE_RECORD_REQUIRED_EVENTS: ReadonlySet<string> = new Set([
-  'record.created',
-  'record.updated',
-  'comment.created',
-  'record.deleted',
-])
-
-/** Envelope allow-list: id keys kept when they are strings; value maps filtered by readable fields. */
-const ENVELOPE_ID_KEYS = ['sheetId', 'recordId'] as const
-const VALUE_MAP_KEYS = ['data', 'changes'] as const
-/** Known keys that are never delivered. */
-const NOT_DELIVERED_KEYS: ReadonlySet<string> = new Set(['actorId', '_eventId', '_automationDepth', 'nodeKey', 'entryEpoch'])
-
-type MaskedPayload = {
-  payload: Record<string, unknown>
-  hadValueMap: boolean
-  removedKeys: number
-  remainingKeys: number
-}
-
-async function loadReadableFieldIds(
-  query: QueryFn,
-  sheetId: string,
-  access: ResolvedRequestAccess,
-  capabilities: MultitableCapabilities,
-): Promise<{
-  readableFieldIds: Set<string>
-  filterRecordDataByFieldIds: (data: unknown, allowedFieldIds: Set<string>) => Record<string, unknown>
-}> {
-  // Loaded on first use: the record read-path field chain lives in the multitable route module.
-  const readPath = await import('../routes/univer-meta')
-  const readableFieldIds = await readPath.loadReadableRecordFieldIdsForAccess(query, sheetId, access, capabilities)
-  return { readableFieldIds, filterRecordDataByFieldIds: readPath.filterRecordDataByFieldIds }
-}
-
-async function maskWebhookPayload(
-  query: QueryFn,
-  sheetId: string,
-  access: ResolvedRequestAccess,
-  capabilities: MultitableCapabilities,
-  payload: Record<string, unknown>,
-): Promise<MaskedPayload> {
-  const masked: Record<string, unknown> = {}
-  for (const key of ENVELOPE_ID_KEYS) {
-    if (typeof payload[key] === 'string') masked[key] = payload[key]
-  }
-  const valueMapKeys = VALUE_MAP_KEYS.filter((key) => isPlainObject(payload[key]))
-  let removedKeys = 0
-  let remainingKeys = 0
-  if (valueMapKeys.length > 0) {
-    const { readableFieldIds, filterRecordDataByFieldIds } = await loadReadableFieldIds(query, sheetId, access, capabilities)
-    for (const key of valueMapKeys) {
-      const valueMap = payload[key] as Record<string, unknown>
-      const filtered = filterRecordDataByFieldIds(valueMap, readableFieldIds)
-      removedKeys += Object.keys(valueMap).length - Object.keys(filtered).length
-      remainingKeys += Object.keys(filtered).length
-      masked[key] = filtered
-    }
-  }
-  let unknownKeys = 0
-  for (const key of Object.keys(payload)) {
-    if ((ENVELOPE_ID_KEYS as readonly string[]).includes(key)) continue
-    if ((VALUE_MAP_KEYS as readonly string[]).includes(key)) continue
-    if (NOT_DELIVERED_KEYS.has(key)) continue
-    unknownKeys += 1
-  }
-  if (unknownKeys > 0) logger.info(`webhook payload unknown keys dropped: count=${unknownKeys}`)
-  return { payload: masked, hadValueMap: valueMapKeys.length > 0, removedKeys, remainingKeys }
-}
+// ─── Delivery decision ────────────────────────────────────────────────────────────────────
 
 export async function authorizeWebhookDeliveryWithQuery(
   query: QueryFn,
@@ -250,29 +174,7 @@ export async function authorizeWebhookDeliveryWithQuery(
 ): Promise<WebhookDeliveryDecision> {
   const floor = await webhookDeliveryFloor(query, webhook, event, payload)
   if (floor.ok === false) return refuse(floor.reason)
-  const sheetId = webhook.sheetId as string
-  const body = payload as Record<string, unknown>
-
-  // Row-level read deny (admin owners follow the read path's admin exception).
-  if (!floor.access.isAdminRole && (await loadRowLevelReadDenyEnabledStrict(query, sheetId))) {
-    const recordId = typeof body.recordId === 'string' ? body.recordId : ''
-    if (!recordId) return refuse('record_not_live')
-    if (LIVE_RECORD_REQUIRED_EVENTS.has(event)) {
-      const live = await query('SELECT 1 FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
-      if (live.rows.length === 0) return refuse('record_not_live')
-    }
-    if (await isRecordReadDeniedForUserStrict(query, sheetId, recordId, webhook.createdBy)) {
-      return refuse('record_read_denied')
-    }
-  }
-
-  const masked = await maskWebhookPayload(query, sheetId, floor.access, floor.capabilities, body)
-  // An update whose every carried value was removed by the mask is not delivered (the fact that a hidden
-  // field changed is itself information). Updates that carry no value map are delivered as id-only.
-  if (event === 'record.updated' && masked.hadValueMap && masked.removedKeys > 0 && masked.remainingKeys === 0) {
-    return refuse('all_values_masked')
-  }
-  return { deliver: true, payload: masked.payload }
+  return { deliver: true, payload: { ...(payload as Record<string, unknown>) } }
 }
 
 // ─── Entry points (own read transaction each) ─────────────────────────────────────────────
