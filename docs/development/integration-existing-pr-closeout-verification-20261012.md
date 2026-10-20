@@ -1,6 +1,29 @@
 # 既有 #6337 收口验证
 
+## 2026-10-21 本地 blocked 收尾结论：验证通过，远端尚未更新
+
+本轮验证冻结 `207ced018a714a8179df542e89fa7689a2f9ab31`，不是旧 CI head。四层已按冻结 main `8a89e8352f399340f5e17935edd3c13814eaf355` 在独立工作树完成追加式对齐，各原 PR head 仍为本地候选祖先；没有强推或覆盖旧 dirty 工作树。修复包括对齐冲突、保留 BOM 并发/版本及失配拒绝语义、补齐既有返回类型，以及将主浏览器与独立初始化浏览器遗漏的精确只读状态查询纳入原验收观察器。未新增生产端点或功能切片，原预算和安全断言保留。
+
+- 三合同整文件 **434/434**（零失败/跳过/未完成），含真实注册回调及删除登记的变异验证。
+- 完整应用 **manual、interval、remaining-unknown 三套全部通过**；各自 ABORTED=0、实际 host.stop 成功、停止证明通过、临时PG停止删除、紧急清理未用。分别验证初始化、默认OFF及各场景对应的有限授权/自然调度/未知结果处理，不混用场景证据。
+- 独立宜搭原 CLI **71/71=66业务+5哨兵**，原报告函数先校验 `stopped-owned-pg-removed` 再签 passed。stdout SHA256 `77f33b48143d6b1249b9534ae1e88907a582b22ee4b733234fa3ba24541a9336`。
+- 前端 **8整文件830/830**，stdout SHA256 `e6916b62e9701dba79befec1f3104c4f21dbb5afdba194696451ca361ed11ee2`；完整 provenance 通过，stdout SHA256 `f100c276587a34f70f4ea13506812da8b9ad5788bdb3ca0c655dc4f92f088a04`。
+- 最终独立核对7份阶段回执及其stdout/stderr哈希、14077源文件前后字节一致；sourceSet SHA256 `48ddfaaf1ad6f372c76c2125dcc1a088bc26f06b7134a3a0859e31adbad1210e`，本次原生候选残留活动进程 **0**。合同负例中出现的停止失败文字不作为实际应用停止失败计数。
+
+本地代码/合成验收阻断已解除；**尚非远端CI全绿或已交付上线**。远端四支PR未更新，不据本地结果宣称 GitHub MERGEABLE。下一外部步骤须 owner 另行授权：复核当时 head/base 后，将本轮已验证对齐结果普通追加至既有 #6315/#6323/#6324/#6337，运行既有合成CI；不需要强推、新PR或新切片。合并、部署、客户读取、真实宜搭发送仍不在授权内。下文所有失败/待验证措辞为对应历史快照，保留而不删除；包括旧CI、时序、WSL时钟、SQL及版本断言风险，不能因本轮绿灯宣称全部历史根因已修。
+
 ## 2026-10-20 解除本地对齐阻断：冻结 main 的四层候选，尚未发布
+
+最新冻结候选 `207ced018a714a8179df542e89fa7689a2f9ab31`，原生 LF 的 14077 个文件逐 Git blob 验证，sourceSet SHA256 `48ddfaaf1ad6f372c76c2125dcc1a088bc26f06b7134a3a0859e31adbad1210e`。三合同整文件顺序运行 **434/434、0失败/跳过/未完成**，包括此前 attendance 清理超时用例；stdout SHA256 `6609fafe2f0c3d3d2784d445ff1953756aa034833074f5c1a2a70abfc79a186e`，保留旧超时，不据单次绿签资源唯一根因。
+
+同候选完整 **manual 应用通过**：harness/web 类型、core/web 构建、原迁移合同、主浏览器、manual authority、宜搭初始化 browser+authority、静态预览、默认OFF、有限授权UI及合成执行均通过；闭合请求失败帧 ABORTED=0。actual-stop-resolved=1、actual-stop-failed=0、production-stop-verified=1、production-stop-failed=0、harness-emergency-cleanup=0，原 CLI 确认临时PG停止删除。结果 SHA256 `5cafb0139caaa7ab3c9f2557828f9851123600ce730e06917387aac97d2f3d8a`，stdout SHA256 `2d89ee7ea91cba4788c1870507246242cc9f611948f27e242f2213d8110916c9`，源前后未变。不是远端CI，不代签 interval / remaining-unknown / 本候选71项，后续补验中；未真实发送。
+
+随后同候选顺序完成另外两套完整应用（各从原 CLI 开始，未复用或跳过类型/构建/数据库/浏览器门）：
+
+- **interval 通过**：interval browser+authority、宜搭初始化、自然定时执行及 inflight-stop 验证各1；结果 SHA256 `0f6f97da2ec8879fe9cf4ec9b929b872dbcdd5df36c47d42559a5cdcb0a1d512`，stdout SHA256 `43ac96cd31611c3cacaca80c049ff706084231ec5c9d00429c7934d3593f2bae`。
+- **remaining-unknown 通过**：manual browser+authority、宜搭初始化及未知结果余量验证各1；结果 SHA256 `821dbeff86cf0b422be777c3f82ccdbd87c296d7b36d08b57d0a02e3aa45fb7a`，stdout SHA256 `a8a8dd0865bb15f6bbea06147f61d0cf23761904049d4bd0dbac65750d7e96ae`。
+
+两套分别 ABORTED=0、actual-stop-resolved=1、actual-stop-failed=0、production-stop-verified=1、production-stop-failed=0、紧急清理=0；各自原 CLI 确认临时 PG 停止并删除，源码前后未变。不把 interval 没执行的有限授权UI计为通过，也不把 remaining 没执行的自然定时部分计为通过；各场景覆盖分别归属上述回执。独立71项仍另验。
 
 追加本地证据（不代签 CI）：`0ebee5f4b927feddc419c1431f3d5397ef538643` 的完整 manual 已越过主浏览器，失败移至独立宜搭初始化子浏览器 PANEL，封闭诊断 `APP_CONFIGURED_YIDA_INIT_CHILD_FAILED`。actual-stop-resolved=1、actual-stop-failed=0；production-stop-failed 仍为前序失败拒绝签发停止证明，临时 PG 已实际停止删除。结果 SHA256 `1db620d057f636a7878438dd87c4de8f8d2667be1331b7a63710ed27502427f7`，stdout SHA256 `e8283cfad118ea697e1a08c63839ef76f0808532883eb507ac73bb83aa030916`。初始化浏览器也遗漏了新主线既有状态 GET；候选复用同一精确观察器，仅 BOARD/RELOAD 两阶段，不扩大 owner 写入口或通用 API 白名单。完整应用对照尚待执行，不把静态发现当唯一根因证明。
 
