@@ -648,7 +648,7 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
   // moves time (so the 30 s boundary is reached without waiting 30 s), while every connection, S1 / S2
   // and COMMIT goes to the server. "Borrows nothing" is read from the pool itself (cumulative 'acquire'
   // events, connections checked out, the pool's own queue) and from the server (the backends this pool
-  // opened, found by a per-leg application_name), and those facts are asserted before any counter
+  // opened, found by their pids), and those facts are asserted before any counter
   // object. Quota snapshots are only used to know when a waiter has queued, and then pinned as a whole.
   // The units do not need class-00, so the only lock a unit takes is its own org's dedicated key: the
   // orgs never contend with each other, and nothing but quota can hold a unit up.
@@ -692,6 +692,13 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
   function a08Setup(max: number) {
     const application = `p11_a08_${crypto.randomUUID().slice(0, 8)}`
     const pool = new Pool({ connectionString: dbUrl, max, application_name: application })
+    // The server-side backends of this pool, by pid. Not by application_name: S2 retags the session
+    // (`set_config('application_name', 'ms2-coord:<label>', true)`) for the life of the transaction, so a
+    // name filter loses a backend exactly while it holds a coordinated transaction.
+    const pids = new Set<number>()
+    pool.on('connect', (client) => {
+      pids.add((client as unknown as { processID: number }).processID)
+    })
     const clock = new ManualCoordinationClock()
     const capacity = deriveSettlementCoordinationCapacityV1({ poolMax: 20 })
     const records: SettlementCoordinationAttemptRecordV1[] = []
@@ -732,7 +739,7 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
     }
     /** The server's view: the state of every backend this pool opened, sorted. */
     const backends = async (): Promise<string[]> => {
-      const { rows } = await observer.query('SELECT state FROM pg_stat_activity WHERE application_name = $1 ORDER BY state', [application])
+      const { rows } = await observer.query('SELECT state FROM pg_stat_activity WHERE pid = ANY($1::int[]) ORDER BY state', [[...pids]])
       return rows.map((row) => String(row.state))
     }
     /** What the pool and the server show: cumulative checkouts, checked out now, the pool's queue, backend states. */
@@ -754,9 +761,8 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
       expect(recorder.borrows.map((borrow) => borrow.releases)).toEqual(recorder.borrows.map(() => [false]))
       expect(await backends()).toEqual(Array.from({ length: pool.totalCount }, () => 'idle'))
       const locks = await observer.query(
-        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-          WHERE a.application_name = $1 AND l.locktype = 'advisory'`,
-        [application],
+        "SELECT count(*)::int AS n FROM pg_locks WHERE pid = ANY($1::int[]) AND locktype = 'advisory'",
+        [[...pids]],
       )
       expect(locks.rows[0].n).toBe(0)
       expectBaseline(coordinator)
