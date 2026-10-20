@@ -2440,3 +2440,86 @@ describe('live advisory through real persistent managed sessions', () => {
     expect(readSharedTransportAudit().calls).toBe(0)
   })
 })
+
+
+async function personalReadHandoff(run:()=>Promise<void>, options:Record<string,unknown>={}) {
+  const keys=['PLM_PERSONAL_BOM_CHANGE_READ_ENABLED','PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID','PLM_APPROVAL_CARD_CONNECTION_ID']
+  const saved=Object.fromEntries(keys.map(key=>[key,process.env[key]]))
+  const original=(await query('SELECT config FROM data_sources WHERE id=$1',[SOURCE])).rows[0].config
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='true'
+  delete process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID
+  const config={connection:{url:ORIGIN},credentials:{token:'enc:owned-unusable-shared'},options:{apiMode:'yuantus',tenantId:'default',orgId:'fixture-org',kept:'unchanged',...options}}
+  try {await query('UPDATE data_sources SET config=$2::jsonb WHERE id=$1',[SOURCE,JSON.stringify(config)]);await run()}
+  finally {await query('UPDATE data_sources SET config=$2::jsonb WHERE id=$1',[SOURCE,JSON.stringify(original)]);for(const key of keys){if(saved[key]===undefined)delete process.env[key];else process.env[key]=saved[key]}}
+}
+const provisionPersonalRead=()=>provisionManagedLink({id:OWNER,authenticatedTenantId:TENANT},provisionBody())
+const personalReadSource=async()=>(await query('SELECT config FROM data_sources WHERE id=$1',[SOURCE])).rows[0].config
+it('personal read handoff seeds only the explicit Native connection in the actual link transaction',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='native-personal-read'
+  const before=await personalReadSource();expect(await provisionPersonalRead()).toMatchObject({generation:1})
+  expect(await personalReadSource()).toEqual({...before,options:{...before.options,personalChangeReadConnectionId:'native-personal-read'}})
+  expect(nativeCalls).toHaveLength(0)
+  const link=(await query('SELECT native_auth_user_id,meta_user_id FROM plm_managed_identity_links')).rows[0]
+  expect(link).toEqual({native_auth_user_id:'42',meta_user_id:OWNER})
+ })
+})
+it('personal read handoff keeps existing persisted connection without an environment fallback',async()=>{
+ await personalReadHandoff(async()=>{
+  const before=await personalReadSource();expect(await provisionPersonalRead()).toMatchObject({generation:1});expect(await personalReadSource()).toEqual(before)
+ },{personalChangeReadConnectionId:'persisted-native-id'})
+})
+it('personal read handoff refuses using the approval connection setting when dedicated source identity is missing',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_APPROVAL_CARD_CONNECTION_ID='approval-setting-is-not-read-config'
+  const before=await personalReadSource();await expect(provisionPersonalRead()).rejects.toMatchObject({code:'PLM_CHANGE_READ_CONFIGURATION_REQUIRED'})
+  expect(await personalReadSource()).toEqual(before);expect((await query('SELECT * FROM plm_managed_identity_links')).rows).toHaveLength(0)
+ })
+})
+it('personal read handoff refuses replacing a persisted connection from install settings',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='different-native-id'
+  const before=await personalReadSource();await expect(provisionPersonalRead()).rejects.toMatchObject({code:'PLM_CHANGE_READ_CONFIGURATION_REQUIRED'});expect(await personalReadSource()).toEqual(before)
+ },{personalChangeReadConnectionId:'original-native-id'})
+})
+it.each(['false','TRUE','1',''])('personal read handoff flag %s preserves legacy provisioning bytes',async flag=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED=flag;process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='not-copied'
+  const before=await personalReadSource();expect(await provisionPersonalRead()).toMatchObject({generation:1});expect(await personalReadSource()).toEqual(before)
+ })
+})
+it.each([{tenantId:'meta-tenant'},{orgId:'meta-org'}])('personal read handoff checks Native scope separately from Meta scope %#',async options=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='native-id';await expect(provisionPersonalRead()).rejects.toMatchObject({code:'PLM_CHANGE_READ_CONFIGURATION_REQUIRED'})
+  expect((await query('SELECT * FROM plm_managed_identity_links')).rows).toHaveLength(0)
+ },options)
+})
+it('personal read handoff rejects an opaque grant pasted as a connection identifier',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='yue_'+'a'.repeat(32)+'_'+'b'.repeat(43)
+  const before=await personalReadSource();await expect(provisionPersonalRead()).rejects.toMatchObject({code:'PLM_CHANGE_READ_CONFIGURATION_REQUIRED'});expect(await personalReadSource()).toEqual(before)
+ })
+})
+it('personal read handoff serializes concurrent provisioning without overwriting source options',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='native-id'
+  const results=await Promise.allSettled([provisionPersonalRead(),provisionPersonalRead()])
+  expect(results.filter(x=>x.status==='fulfilled')).toHaveLength(1);expect((results.find(x=>x.status==='rejected')as PromiseRejectedResult).reason.status).toBe(409)
+  expect((await personalReadSource()).options).toEqual({apiMode:'yuantus',tenantId:'default',orgId:'fixture-org',kept:'unchanged',personalChangeReadConnectionId:'native-id'})
+ })
+})
+it('personal read handoff rolls its seed back when the actual link insert fails',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='native-id';const before=await personalReadSource()
+  await query("CREATE FUNCTION owned_read_handoff_abort() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned_link_insert_fault'; END $$;CREATE TRIGGER owned_read_handoff_abort BEFORE INSERT ON plm_managed_identity_links FOR EACH ROW EXECUTE FUNCTION owned_read_handoff_abort()")
+  try {await expect(provisionPersonalRead()).rejects.toThrow('owned_link_insert_fault');expect(await personalReadSource()).toEqual(before)}
+  finally {await query('DROP TRIGGER owned_read_handoff_abort ON plm_managed_identity_links;DROP FUNCTION owned_read_handoff_abort()')}
+ })
+})
+
+it('personal read handoff preserves the Visual source platform-admin configuration boundary',async()=>{
+ await personalReadHandoff(async()=>{
+  process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID='native-id';const before=await personalReadSource()
+  await expect(provisionPersonalRead()).rejects.toMatchObject({code:'PLM_CHANGE_READ_CONFIGURATION_REQUIRED'});expect(await personalReadSource()).toEqual(before)
+ },{visualReviewEnabled:true})
+})

@@ -1,0 +1,128 @@
+{
+  "source_commit": "059b06b595abf2bd4834541ce0b2db3aaaf72493",
+  "recorded_utc": "2026-10-20T00:56:21.313591+00:00",
+  "scope": "Meta backend persisted-source configuration handoff; NOT Native package emission or installed/authentication/authorization runtime acceptance",
+  "actual_pg_new_controls_cumulative": 14,
+  "pg_entry": "actual provisionManagedLink transaction, controlled Native peer; no Native request needed for settings",
+  "new_source_http_api_case": 1,
+  "cache_loss": "actual manager/stateful store red then green; persisted and resulting adapter options preserved",
+  "selected_manager_ownership_cases_cumulative_passed": 8,
+  "optional_adapter_startup_case": 1,
+  "final_backend_tsc_exit": 0,
+  "git_cached_diff_check": "passed",
+  "legacy_fixture_failure": "unknown durable binding correctly failed closed; only selected failed adapter fixture repaired with real classification SELECT against narrow query double, not a reader override. Limited fake load store still warns on status update; no status persistence proof.",
+  "compiler_failure": "unknown ConfigValue caught; string narrowing refuses malformed values, unchanged compiler options",
+  "local_evidence": [
+    {
+      "path": "/tmp/plm-change-read-handoff-pg-first-20261020.log",
+      "sha256": "7ac161548d19e62c5efc8057910899c9a2803640cf664a0e711f70434fda3221",
+      "bytes": 528,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  13 passed | 38 skipped (51)",
+        "   Duration  1.31s (transform 497ms, setup 0ms, collect 1.10s, tests 78ms, environment 0ms, prepare 49ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-pg-visual-boundary-20261020.log",
+      "sha256": "71e170652e1679fde585a836ea72e031a144a569de373db5a0a805453600dc8e",
+      "bytes": 527,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 51 skipped (52)",
+        "   Duration  1.33s (transform 599ms, setup 0ms, collect 1.17s, tests 45ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-cache-before-20261020.log",
+      "sha256": "d1c7f85fc6fff9cd301f9b77468816f43eed09560d10791cf3a6ec4698ee010b",
+      "bytes": 1776,
+      "summary": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 25 skipped (26)",
+        "   Duration  1.09s (transform 229ms, setup 45ms, collect 787ms, tests 6ms, environment 0ms, prepare 50ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-cache-after-20261020.log",
+      "sha256": "e29d4f19cb0e81225eea1e22890d858fd1b6e10eb88687fe61c4a407d22257d1",
+      "bytes": 790,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 25 skipped (26)",
+        "   Duration  1.00s (transform 222ms, setup 46ms, collect 712ms, tests 2ms, environment 0ms, prepare 48ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-source-api-20261020.log",
+      "sha256": "15516fa8483af32a7c8549e86509031c680f0ed8d1f33bff6fa71c70fd326792",
+      "bytes": 850,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 26 skipped (27)",
+        "   Duration  975ms (transform 219ms, setup 48ms, collect 636ms, tests 29ms, environment 0ms, prepare 48ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-manager-compat-20261020.log",
+      "sha256": "6d44a63888af219edffd480c4bb8370056733bdc1278507445e8e3dfbd03e98c",
+      "bytes": 3670,
+      "summary": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 7 passed | 19 skipped (27)",
+        "   Duration  1.21s (transform 230ms, setup 54ms, collect 776ms, tests 28ms, environment 0ms, prepare 49ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-legacy-failed-only-20261020.log",
+      "sha256": "999743e879d9ba0f7a69e6cd6de26b136b3b94a80eb10c7e8d3d4e14ee0b8f7e",
+      "bytes": 2858,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 26 skipped (27)",
+        "   Duration  985ms (transform 225ms, setup 42ms, collect 662ms, tests 11ms, environment 0ms, prepare 57ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-optional-startup-20261020.log",
+      "sha256": "1a376f1117ad7fc2a5178853d1cb970559fd7522afc999e6358672d388836bd4",
+      "bytes": 555,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed (1)",
+        "   Duration  466ms (transform 142ms, setup 40ms, collect 4ms, tests 204ms, environment 0ms, prepare 36ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-tsc-final-20261020.log",
+      "sha256": "8e956339315c49b290f2041b601b244427f6d675dd28466cd826686637271309",
+      "bytes": 180,
+      "summary": [
+        "packages/core-backend/src/data-adapters/DataSourceManager.ts(1480,56): error TS2418: Type of computed property's value is 'unknown', which is not assignable to type 'ConfigValue'."
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-handoff-tsc-corrected-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    }
+  ],
+  "owned_pg": {
+    "root": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-change-read-pg16-20261020-jscluw0c",
+    "postmaster_pid": 1590,
+    "status": "exact owned Unix-only QA postmaster stopped cleanly; retained data/logs",
+    "new_database": "meta_read_handoff_20261020_6e70",
+    "guarded_dsn_receipt": "/tmp/plm-change-read-handoff-pg-20261020.json",
+    "setup_teardown": "existing destructive companion fixture ONLY in this newly created disposable database; existing evidence/business databases untouched"
+  },
+  "remaining": [
+    "Native renderer/export independent read flag/connection setting and retention defaultoff",
+    "actual Native-issued yue + real Meta managed auth/browser/delivery/crossprocess restore combined proof",
+    "new Native/backend and source-matched frontend images/fullpackage lifecycle",
+    "whole W01-W23 master goal"
+  ],
+  "publication": "held while exact363 valuable job118040891880 queued; Draft only/no merge/deploy/production enable/business notification"
+}

@@ -269,6 +269,13 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Snapshot share return', titleZh: '快照分享返回', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
   },
   {
+    path: '/plm/managed-discussion',
+    name: 'plm-managed-discussion',
+    component: () => import('../views/PlmManagedDiscussionView.vue'),
+    // The bare frame still uses the actual managed-cookie JWT gate for every backend call.
+    meta: { title: 'Managed Discussion', titleZh: '元图讨论', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
+  },
+  {
     // PLM-COLLAB P3-D2: token-bound BOM-review embed. Bare page (no shell, no metasheet session) --
     // it is authed by a PLM-minted embed token delivered via postMessage from an allowlisted parent,
     // NOT by a metasheet session. Mirrors the public-form route's no-session meta.

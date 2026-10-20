@@ -7,11 +7,15 @@ import { BomReviewError, parseManagedSnapshot, type ShareSnapshot } from '../mul
 function clean(value: string): boolean {
   return value === value.trim() && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
 }
-const id = z.string().min(1).max(128).refine(clean)
+// Match Native Pydantic's code-point limits, including astral UTF-8 identifiers.
+function nativeText(value: string, maximum: number): boolean {
+  return clean(value) && [...value].length > 0 && [...value].length <= maximum && !/[\ud800-\udfff]/u.test(value)
+}
+const id = z.string().refine(value => nativeText(value, 128))
 export const snapshotShareTargetSchema = z.object({
   tenant_id: id, org_id: id, user_id: id, base_id: id, sheet_id: id,
   source_id: id, binding_id: id, binding_generation: z.number().int().positive().safe(), session_id: id,
-  audience: z.string().min(1).max(1000).refine(clean),
+  audience: z.string().refine(value => nativeText(value, 1000)),
 }).strict()
 export type SnapshotShareTarget = z.infer<typeof snapshotShareTargetSchema>
 const authoritySchema = z.object({

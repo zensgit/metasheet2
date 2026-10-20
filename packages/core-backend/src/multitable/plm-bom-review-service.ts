@@ -2,6 +2,12 @@ import { parsePlmChangePage, type PlmChangePageRequest, type PlmChangePage, pars
 import { bomReviewSourceFingerprint } from './plm-bom-source-navigation'
 import { isElearningProjectionBaseIdCandidate } from './elearning-projection-constants'
 import { randomUUID } from 'crypto'
+import type { Request } from 'express'
+import { lockManagedBomAuthority, lockStandingBomAuthority } from '../services/plm-managed-bom-authority'
+import { resolvePersistedPlmSource } from '../services/plm-personal-bom-write-wire'
+import { personalChangeReadManagementUrl, personalChangeReadAuthoritySchema, preparePersonalChangeRead, parsePersonalChangeRead, requirePersonalChangeRead, PlmPersonalChangeReadError, YUE_GRANT, type PersonalChangeReadAuthority, type PersonalChangeReadCall } from '../services/plm-personal-bom-change-read-wire'
+import { encryptStoredSecretValue } from '../security/encrypted-secrets'
+import { z } from 'zod'
 import type { DataSourceConfig } from '../data-adapters/BaseAdapter'
 import type { DataSourceManager } from '../data-adapters/DataSourceManager'
 import {
@@ -62,6 +68,7 @@ export type BomReviewPool = PlmPool & { query: PlmQuery }
 export type BomReviewDependencies = {
   pool: BomReviewPool
   dataSourceManager: Pick<DataSourceManager, 'getDataSource'>
+  personalChangeReadProvider?: () => Pick<Adapter, 'personalBomChangeReadManagementUrl' | 'personalBomChangeReadRequest'>
 }
 type Binding = {
   id: string
@@ -99,6 +106,8 @@ type SourceRow = {
 }
 type ChangeCursor = { generation: string; cursor: number; sequence: number }
 type Adapter = {
+  personalBomChangeReadManagementUrl?(config: unknown, authority: PersonalChangeReadAuthority): string
+  personalBomChangeReadRequest?(call: PersonalChangeReadCall, grant: string, authority: PersonalChangeReadAuthority): Promise<unknown>
   getPlmChangePage?(input: PlmChangePageRequest, config: DataSourceConfig): Promise<PlmChangePage>
   verifyPlmChangeEvent?(input: unknown, config: DataSourceConfig): Promise<PlmChangeEvent>
   getBomShareContext(partId: string, config: DataSourceConfig): Promise<unknown>
@@ -186,7 +195,25 @@ export class PlmBomReviewService {
     )
       throw new Failure(403, 'FORBIDDEN')
   }
-  private async source(
+  private async source(query: PlmQuery, actor: string, id: string, lock = false) {
+    const source = await this.sourceMetadata(query, actor, id, lock)
+    let adapter: Adapter
+    try {
+      adapter = this.deps.dataSourceManager.getDataSource(
+        id,
+      ) as unknown as Adapter
+    } catch {
+      throw new Failure(502, 'SOURCE_UNAVAILABLE')
+    }
+    if (typeof adapter.getBomShareContext !== 'function')
+      throw new Failure(502, 'SOURCE_UNAVAILABLE')
+    const credentials = source.row.config.credentials ? { ...source.row.config.credentials } : undefined
+    if (credentials)
+      for (const key of ['password', 'apiKey', 'token'])
+        if (isEncryptedSecretValue(credentials[key])) credentials[key] = decryptStoredSecretValue(credentials[key])
+    return { ...source, adapter, config: { ...source.config, credentials } }
+  }
+  private async sourceMetadata(
     query: PlmQuery,
     actor: string,
     id: string,
@@ -194,7 +221,6 @@ export class PlmBomReviewService {
   ): Promise<{
     row: SourceRow
     fingerprint: string
-    adapter: Adapter
     config: DataSourceConfig
   }> {
     const row = (
@@ -211,35 +237,16 @@ export class PlmBomReviewService {
       row.type !== 'plm'
     )
       throw new Failure(403, 'SOURCE_FORBIDDEN')
-    let adapter: Adapter
-    try {
-      adapter = this.deps.dataSourceManager.getDataSource(
-        id,
-      ) as unknown as Adapter
-    } catch {
-      throw new Failure(502, 'SOURCE_UNAVAILABLE')
-    }
-    if (typeof adapter.getBomShareContext !== 'function')
-      throw new Failure(502, 'SOURCE_UNAVAILABLE')
-    const credentials = row.config.credentials
-      ? { ...row.config.credentials }
-      : undefined
-    if (credentials)
-      for (const key of ['password', 'apiKey', 'token'])
-        if (isEncryptedSecretValue(credentials[key]))
-          credentials[key] = decryptStoredSecretValue(credentials[key])
     const currentConfig = {
       id: row.id,
       name: row.name,
       type: row.type,
       connection: row.config.connection || {},
-      credentials,
       options: row.config.options,
       poolConfig: row.config.poolConfig,
     }
     return {
       row,
-      adapter,
       config: currentConfig as DataSourceConfig,
       fingerprint: bomReviewSourceFingerprint(row),
     }
@@ -280,17 +287,23 @@ export class PlmBomReviewService {
     projectBomRows(snapshot) // Validate repeated relationship occurrences before exposing a preview.
     return { snapshot, fingerprint: after.fingerprint }
   }
-  async receiveChange(actor: string, input: unknown, cursor?: ChangeCursor) {
+  async receiveChange(actor: string, input: unknown, cursor?: ChangeCursor, authenticatedTenantId?: string | null) {
     const event = parsePlmChangeEvent(input)
     const context = async (query: PlmQuery) => {
-      const b = await this.completionAccess(query, actor, event.binding_id)
+      await this.runtime(query)
+      const enrolled=(await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[event.binding_id])).rows[0]
+      const personalContext=enrolled?.personal_read_authority ? await this.listenerContext(query,actor,event.binding_id) : null
+      if (personalContext && authenticatedTenantId!==undefined
+        && personalContext.personal?.authority.target.tenant_id!==authenticatedTenantId) throw new Failure(403,'FORBIDDEN')
+      if (personalContext && personalContext.personal?.row.status!=='active') throw new Failure(403,'LISTENER_STOPPED')
+      const b = personalContext?.b ?? await this.completionAccess(query, actor, event.binding_id)
       if (!(await query("SELECT to_regclass('meta_plm_bom_change_inbox') IS NOT NULL AS ready")).rows[0]?.ready)
         throw new Failure(503, 'RUNTIME_UNAVAILABLE')
       if (b.status !== 'active' || Number(b.version) !== event.binding_version ||
         event.source.connection_id !== b.data_source_id || event.source.part_id !== b.part_id ||
         event.source.tenant_id !== b.source.tenant_id || event.source.org_id !== b.source.org_id)
         throw new Failure(409, 'SOURCE_CHANGED')
-      const source = await this.source(query, actor, b.data_source_id, true)
+      const source = personalContext?.source ?? await this.source(query, actor, b.data_source_id, true)
       const captured = (await query('SELECT listener_generation FROM meta_plm_bom_change_inbox WHERE binding_id=$1 AND event_id=$2',[b.id,event.event_id])).rows[0]
       const generation = cursor?.generation ?? captured?.listener_generation
       if (generation) await this.listenerAuthority(query,b,actor,source.fingerprint,generation)
@@ -312,17 +325,19 @@ export class PlmBomReviewService {
       if (!rule?.enabled || rule.source !== event.change.kind || !rule.webhookId)
         throw new Failure(409, 'RULE_DISABLED')
       if (cursor) await this.checkChangeCursor(query,b.id,cursor)
-      return { b,source,policy,rule }
+      return { b,source,policy,rule,personalContext }
     }
     const before = await this.deps.pool.transaction(({ query }) => context(query))
-    if (typeof before.source.adapter.verifyPlmChangeEvent !== 'function') throw new Failure(502, 'SOURCE_UNAVAILABLE')
+    if (!before.personalContext && typeof before.source.adapter.verifyPlmChangeEvent !== 'function') throw new Failure(502, 'SOURCE_UNAVAILABLE')
     let verified: PlmChangeEvent
     try {
-      verified = parsePlmChangeEvent(await before.source.adapter.verifyPlmChangeEvent(event,before.source.config))
+      verified = parsePlmChangeEvent(before.personalContext
+        ? await this.personalReadCall(before.personalContext,{operation:'fact',eventId:event.event_id})
+        : await before.source.adapter.verifyPlmChangeEvent!(event,before.source.config))
       if (hashPlmChangeEvent(verified) !== hashPlmChangeEvent(event)) throw new Failure(409, 'SOURCE_CHANGED')
     } catch (error) {
       if (error instanceof Failure) throw error
-      const status = (error as { response?: { status?: number } })?.response?.status
+      const status = error instanceof PlmPersonalChangeReadError ? error.status : (error as { response?: { status?: number } })?.response?.status
       if (status === 404 || status === 409) throw new Failure(409, 'SOURCE_CHANGED')
       throw new Failure(status === 401 || status === 403 ? 403 : 502,
         status === 401 || status === 403 ? 'SOURCE_FORBIDDEN' : 'SOURCE_UNAVAILABLE')
@@ -330,7 +345,9 @@ export class PlmBomReviewService {
     return this.deps.pool.transaction(async ({ query }) => {
       const after = await context(query)
       if (after.source.fingerprint !== before.source.fingerprint || after.source.adapter !== before.source.adapter ||
-        after.policy.revision_id !== before.policy.revision_id) throw new Failure(409, 'SOURCE_CHANGED')
+        after.policy.revision_id !== before.policy.revision_id
+        || after.personalContext?.personal?.row.personal_read_revision !== before.personalContext?.personal?.row.personal_read_revision
+        || after.personalContext?.personal?.row.generation !== before.personalContext?.personal?.row.generation) throw new Failure(409, 'SOURCE_CHANGED')
       const digest = hashPlmChangeEvent(verified)
       const existing = (await query('SELECT payload_hash,receipt FROM meta_plm_bom_change_inbox WHERE binding_id=$1 AND event_id=$2',
         [event.binding_id,event.event_id])).rows[0]
@@ -356,12 +373,25 @@ export class PlmBomReviewService {
     if (!listener) throw new Failure(403,'LISTENER_STOPPED')
   }
   private async listenerContext(query: PlmQuery, actor: string, id: string) {
+    await this.runtime(query)
+    const observed=(await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
+    const frame=observed?.personal_read_authority
+    const personalScope=frame ? personalChangeReadAuthoritySchema.parse(frame.authority) : null
+    const standing=personalScope ? await (async () => {
+      requirePersonalChangeRead()
+      if (!(await query("SELECT to_regprocedure('meta_plm_change_read_link_stopped()') IS NOT NULL AS ready")).rows[0]?.ready)
+        throw new Failure(503,'RUNTIME_UNAVAILABLE')
+      if (!observed.encrypted_personal_read_grant || Date.parse(observed.personal_read_expires_at)<=Date.now())
+        throw new Failure(403,'PLM_CHANGE_READ_GRANT_UNAVAILABLE')
+      return lockStandingBomAuthority(query,actor,personalScope)
+    })() : null
     const b = await this.completionAccess(query,actor,id)
     if (!(await query("SELECT to_regclass('meta_plm_bom_change_listeners') IS NOT NULL AS ready")).rows[0]?.ready)
       throw new Failure(503,'RUNTIME_UNAVAILABLE')
     if (b.status !== 'active') throw new Failure(409,'SOURCE_CHANGED')
-    const source = await this.source(query,actor,b.data_source_id,true)
-    const owner = (await query('SELECT * FROM users WHERE id=$1',[actor])).rows[0]
+    const source = personalScope ? { ...await this.sourceMetadata(query,actor,b.data_source_id,true),
+      adapter:this.deps.personalChangeReadProvider?.() as Adapter } : await this.source(query,actor,b.data_source_id,true)
+    const owner = (await query('SELECT * FROM users WHERE id=$1 FOR SHARE',[actor])).rows[0]
     if (!source.row.plm_bom_listener_authority_version || !owner?.plm_bom_listener_authority_version)
       throw new Failure(503,'RUNTIME_UNAVAILABLE')
     const policy = (await query(`SELECT c.* FROM meta_plm_bom_review_completion_config c
@@ -370,14 +400,40 @@ export class PlmBomReviewService {
       AND lower(a.entity_id)='plm-bom-review:'||c.binding_id::text||':completion-webhooks'
       AND a.after->'webhooks'=c.webhooks FOR SHARE OF c,a`,[id,b.sheet_id])).rows[0]
     if (!policy?.webhooks?.plmChangeApplied?.enabled) throw new Failure(409,'RULE_DISABLED')
-    return { b,source,policy,ownerAuthorityVersion: String(owner.plm_bom_listener_authority_version) }
+    let personal: { row:any; authority:PersonalChangeReadAuthority; grant:string } | null=null
+    if (personalScope && standing) {
+      const resolved=resolvePersistedPlmSource(source.config)
+      if (!source.adapter?.personalBomChangeReadRequest || personalScope.reviewBindingId!==id
+        || personalScope.reviewBindingVersion!==Number(b.version) || personalScope.rootPartId!==b.part_id
+        || personalScope.target.base_id!==b.base_id || personalScope.target.sheet_id!==b.sheet_id
+        || personalScope.target.source_id!==b.data_source_id || b.source.tenant_id!==personalScope.tenantId
+        || b.source.org_id!==personalScope.orgId || resolved.origin.origin!==personalScope.origin
+        || resolved.tenantId!==personalScope.tenantId || resolved.orgId!==personalScope.orgId
+        || source.row.config.options?.personalChangeReadConnectionId!==personalScope.connectionId
+        || frame.provenance.sourceFingerprint!==source.fingerprint
+        || frame.provenance.sourceAuthority!==source.row.plm_bom_listener_authority_version
+        || frame.provenance.ownerAuthority!==owner.plm_bom_listener_authority_version
+        || frame.provenance.policyRevision!==policy.revision_id
+        || frame.provenance.registrationHash!==hash(standing.reg)
+        || frame.provenance.linkId!==standing.row.link_id
+        || frame.provenance.linkGeneration!==standing.row.link_generation)
+        throw new Failure(403,'PLM_CHANGE_READ_AUTHORITY_CHANGED')
+      const row=(await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
+      if (!row || row.owner_id!==actor || row.personal_read_revision!==observed.personal_read_revision
+        || row.generation!==observed.generation || row.encrypted_personal_read_grant!==observed.encrypted_personal_read_grant)
+        throw new Failure(409,'LISTENER_CHANGED')
+      personal={row,authority:personalScope,grant:decryptStoredSecretValue(row.encrypted_personal_read_grant)}
+    }
+    return { b,source,policy,personal,ownerAuthorityVersion: String(owner.plm_bom_listener_authority_version) }
   }
   private async checkChangeCursor(query: PlmQuery, id: string, cursor: ChangeCursor) {
+    const owner = (await query('SELECT owner_id FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
+    if (!owner) throw new Failure(409,'LISTENER_CHANGED')
+    const current = await this.listenerContext(query,owner.owner_id,id)
     const row = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
     if (!row || row.status !== 'active' || row.generation !== cursor.generation ||
       Number(row.cursor) !== cursor.cursor || cursor.sequence !== cursor.cursor+1)
       throw new Failure(409,'LISTENER_CHANGED')
-    const current = await this.listenerContext(query,row.owner_id,id)
     if (row.source_fingerprint !== current.source.fingerprint ||
       Number(row.binding_version) !== Number(current.b.version) || row.configuration_revision_id !== current.policy.revision_id)
       throw new Failure(409,'SOURCE_CHANGED')
@@ -386,30 +442,250 @@ export class PlmBomReviewService {
     await query(`UPDATE meta_plm_bom_change_listeners SET cursor=$3,updated_at=clock_timestamp()
       WHERE binding_id=$1 AND generation=$2`,[id,cursor.generation,cursor.sequence])
   }
-  async changeListener(actor: string, id: string, input?: unknown) {
+  private async personalReadCall(context: Awaited<ReturnType<PlmBomReviewService['listenerContext']>>, call: PersonalChangeReadCall) {
+    const p=context.personal
+    if (!p || !context.source.adapter.personalBomChangeReadRequest) throw new Failure(403,'PLM_CHANGE_READ_GRANT_REQUIRED')
+    const prepared=preparePersonalChangeRead(call,p.grant,p.authority)
+    const result=await context.source.adapter.personalBomChangeReadRequest(call,p.grant,p.authority)
+    return parsePersonalChangeRead(prepared,200,JSON.stringify(result))
+  }
+  private personalReadMetadata(row: any) {
+    return row ? { bound: Boolean(row.encrypted_personal_read_grant), grantId: row.personal_read_grant_id,
+      expiresAt: row.personal_read_expires_at, revision: row.personal_read_revision,
+      purpose: 'bom_change_read', status: row.status } : { bound: false, purpose: 'bom_change_read' }
+  }
+  private async personalReadContext(query: PlmQuery, req: Request, id: string) {
+    requirePersonalChangeRead()
+    if (req.apiTokenId || !req.user?.id) throw new Failure(401,'UNAUTHORIZED')
+    const initial = (await query('SELECT data_source_id,part_id FROM meta_plm_bom_review_bindings WHERE id=$1',[id])).rows[0]
+    if (!initial) throw new Failure(404,'NOT_FOUND')
+    // Match unlink's link-before-source/session/binding lock order.
+    const managed = await lockManagedBomAuthority(query,req,initial.data_source_id,initial.part_id)
+    const b = await this.completionAccess(query,managed.actor,id)
+    if (b.status !== 'active' || b.data_source_id !== initial.data_source_id || b.part_id !== initial.part_id
+      || b.source.tenant_id !== managed.source.tenant_id || b.source.org_id !== managed.source.org_id)
+      throw new Failure(409,'SOURCE_CHANGED')
+    const metadata = await this.sourceMetadata(query,managed.actor,b.data_source_id,true)
+    const adapter = this.deps.personalChangeReadProvider?.()
+    if (!adapter?.personalBomChangeReadRequest)
+      throw new Failure(503,'SOURCE_UNAVAILABLE')
+    const source = { ...metadata, adapter }
+    const owner = (await query('SELECT plm_bom_listener_authority_version FROM users WHERE id=$1 FOR SHARE',[managed.actor])).rows[0]
+    if (!source.row.plm_bom_listener_authority_version || !owner?.plm_bom_listener_authority_version)
+      throw new Failure(503,'RUNTIME_UNAVAILABLE')
+    const policy = (await query(`SELECT c.* FROM meta_plm_bom_review_completion_config c
+      JOIN meta_config_revisions a ON a.id=c.revision_id WHERE c.binding_id=$1 AND a.actor_id=c.updated_by
+      AND a.sheet_id=$2 AND a.entity_type='sheet_config'
+      AND lower(a.entity_id)='plm-bom-review:'||c.binding_id::text||':completion-webhooks'
+      AND a.after->'webhooks'=c.webhooks FOR SHARE OF c,a`,[id,b.sheet_id])).rows[0]
+    if (!policy?.webhooks?.plmChangeApplied?.enabled) throw new Failure(409,'RULE_DISABLED')
+    const resolved = resolvePersistedPlmSource(source.config)
+    if (resolved.origin.origin !== new URL(managed.reg.nativeBaseUrl).origin
+      || resolved.tenantId !== managed.source.tenant_id || resolved.orgId !== managed.source.org_id)
+      throw new Failure(403,'SOURCE_FORBIDDEN')
+    const base = (await query('SELECT name FROM meta_bases WHERE id=$1',[b.base_id])).rows[0]
+    const parsed = personalChangeReadAuthoritySchema.safeParse({ origin: resolved.origin.origin,
+      connectionId: source.row.config.options?.personalChangeReadConnectionId,
+      tenantId: resolved.tenantId, orgId: resolved.orgId, authUserId: managed.source.auth_user_id,
+      rootPartId: b.part_id, reviewBindingId: b.id, reviewBindingVersion: Number(b.version),
+      target: { tenant_id: managed.row.meta_tenant_id, org_id: managed.row.meta_org_id, user_id: managed.actor,
+        base_id: b.base_id, sheet_id: b.sheet_id, source_id: b.data_source_id,
+        binding_id: managed.row.link_id, binding_generation: Number(managed.row.generation), session_id: managed.row.session_id,
+        audience: `MetaSheet 空间 ${JSON.stringify(String(base?.name).slice(0,100))} (${b.base_id}) 的指定 BOM 协作表：按目标权限访问，包括当前及后续获授权成员和系统管理员。撤权停止后续读取，已有快照按目标权限保留。` } })
+    if (!parsed.success) throw new Failure(503,'PLM_CHANGE_READ_CONFIGURATION_REQUIRED')
+    if (!source.adapter.personalBomChangeReadRequest)
+      throw new Failure(503,'SOURCE_UNAVAILABLE')
+    const frame = { authority: parsed.data, provenance: { metaOrigin: managed.reg.origin,
+      issuer: managed.reg.issuer, linkId: managed.row.link_id, linkGeneration: managed.row.link_generation,
+      sourceFingerprint: source.fingerprint, sourceAuthority: source.row.plm_bom_listener_authority_version,
+      ownerAuthority: owner.plm_bom_listener_authority_version, registrationHash: hash(managed.reg),
+      policyRevision: policy.revision_id } }
+    const row = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
+    return { b,source,policy,frame,row,actor:managed.actor }
+  }
+  private personalReadMutation(req: Request, origin: string, action: string) {
+    if (req.get('origin') !== origin || req.get('x-plm-change-read') !== action
+      || req.get('content-type')?.split(';')[0].trim() !== 'application/json')
+      throw new Failure(403,'PLM_CHANGE_READ_BROWSER_REFUSED')
+  }
+  async personalChangeReadTargets(req: Request, dataSourceId: string, partId: string) {
+    if (req.apiTokenId || !req.user?.id) throw new Failure(401,'UNAUTHORIZED')
+    return this.deps.pool.transaction(async ({query}) => {
+      await this.runtime(query)
+      const managed=await lockManagedBomAuthority(query,req,dataSourceId,partId)
+      const bindings=(await query(`SELECT * FROM meta_plm_bom_review_bindings
+        WHERE data_source_id=$1 AND part_id=$2 AND status='active' ORDER BY id`,[dataSourceId,partId])).rows as Binding[]
+      const items=[]
+      for (const b of bindings) {
+        if (b.source.tenant_id!==managed.source.tenant_id || b.source.org_id!==managed.source.org_id) continue
+        try { await this.sheet(query,managed.actor,b,true) }
+        catch (error) { if (error instanceof Failure && error.status===403) continue; throw error }
+        items.push({id:b.id,name:b.name,version:Number(b.version),baseId:b.base_id,sheetId:b.sheet_id})
+      }
+      return {items}
+    })
+  }
+  async personalChangeReadManagement(req: Request, id: string) {
+    return this.deps.pool.transaction(async ({query}) => {
+      const current = await this.personalReadContext(query,req,id)
+      return { url: personalChangeReadManagementUrl(current.source.config,current.frame.authority),
+        expectedVersion: Number(current.b.version) }
+    })
+  }
+  async bindPersonalChangeRead(req: Request, id: string, input: unknown) {
+    const body = z.object({ grant:z.string().regex(YUE_GRANT),expectedVersion:z.number().int().positive().safe() }).strict().parse(input)
+    const before = await this.deps.pool.transaction(async ({query}) => {
+      const current = await this.personalReadContext(query,req,id)
+      this.personalReadMutation(req,current.frame.provenance.metaOrigin,'bind')
+      if (Number(current.b.version) !== body.expectedVersion) throw new Failure(409,'VERSION_CONFLICT')
+      return current
+    })
+    const raw = await before.source.adapter.personalBomChangeReadRequest!({operation:'verify'},body.grant,before.frame.authority)
+    // Independently parse even an adapter implementation supplied by a plugin.
+    const verified = parsePersonalChangeRead(preparePersonalChangeRead({operation:'verify'},body.grant,before.frame.authority),200,JSON.stringify(raw)) as {grant_id:string;expires_at:string}
+    const encrypted = encryptStoredSecretValue(body.grant)
+    if (!isEncryptedSecretValue(encrypted)) throw new Failure(503,'PLM_CHANGE_READ_SECRET_UNAVAILABLE')
+    const result = await this.deps.pool.transaction(async ({query}) => {
+      const after = await this.personalReadContext(query,req,id)
+      if (Number(after.b.version) !== body.expectedVersion || canonical(after.frame) !== canonical(before.frame)
+        || after.source.adapter !== before.source.adapter || after.row?.personal_read_revision !== before.row?.personal_read_revision
+        || after.row?.generation !== before.row?.generation) throw new Failure(409,'SOURCE_CHANGED')
+      const row = after.row
+      const sameCredential = row?.personal_read_grant_id === verified.grant_id
+        && canonical(row.personal_read_authority?.authority) === canonical(after.frame.authority)
+      if (row?.encrypted_personal_read_grant && sameCredential
+        && canonical(row.personal_read_authority) === canonical(after.frame)) return this.personalReadMetadata(row)
+      if ((await query(`SELECT id FROM meta_plm_bom_change_read_retired_grants
+        WHERE binding_id=$1 AND grant_id=$2 AND authority->'authority'=$3::jsonb LIMIT 1`,[id,verified.grant_id,JSON.stringify(after.frame.authority)])).rows.length)
+        throw new Failure(409,'PLM_CHANGE_READ_RETIRED_GRANT')
+      // Provenance renewal must not retire and remotely revoke the credential still being installed.
+      if (row?.encrypted_personal_read_grant && !sameCredential) await this.retirePersonalRead(query,row)
+      const saved = (await query(`INSERT INTO meta_plm_bom_change_listeners(binding_id,generation,owner_id,source_fingerprint,
+        binding_version,configuration_revision_id,cursor,status,stop_reason,personal_read_authority,
+        personal_read_grant_id,personal_read_expires_at,encrypted_personal_read_grant,personal_read_revision)
+        VALUES($1,$2,$3,$4,$5,$6,0,'stopped','GRANT_ENROLLED',$7::jsonb,$8,$9,$10,$11)
+        ON CONFLICT(binding_id) DO UPDATE SET generation=EXCLUDED.generation,owner_id=EXCLUDED.owner_id,
+          source_fingerprint=EXCLUDED.source_fingerprint,binding_version=EXCLUDED.binding_version,
+          configuration_revision_id=EXCLUDED.configuration_revision_id,status='stopped',stop_reason='GRANT_ENROLLED',
+          personal_read_authority=EXCLUDED.personal_read_authority,personal_read_grant_id=EXCLUDED.personal_read_grant_id,
+          personal_read_expires_at=EXCLUDED.personal_read_expires_at,encrypted_personal_read_grant=EXCLUDED.encrypted_personal_read_grant,
+          personal_read_revision=EXCLUDED.personal_read_revision,updated_at=clock_timestamp() RETURNING *`,
+        [id,randomUUID(),after.actor,after.source.fingerprint,after.b.version,after.policy.revision_id,
+          JSON.stringify(after.frame),verified.grant_id,verified.expires_at,encrypted,randomUUID()])).rows[0]
+      await recordConfigRevision(query,{sheetId:after.b.sheet_id,entityType:'sheet_config',entityId:`plm-bom-review:${id}:personal-change-read`,
+        action:row?'update':'create',before:row?this.personalReadMetadata(row):null,after:this.personalReadMetadata(saved),
+        changedKeys:['personalChangeRead'],batchId:randomUUID(),actorId:after.actor,id:randomUUID()})
+      return this.personalReadMetadata(saved)
+    })
+    return { ...result, ...await this.retryPersonalReadRevocations(String(req.user!.id),id) }
+  }
+  private async retirePersonalRead(query: PlmQuery, row: any) {
+    await query(`INSERT INTO meta_plm_bom_change_read_retired_grants(id,binding_id,owner_id,grant_id,authority,encrypted_grant,state)
+      VALUES($1,$2,$3,$4,$5::jsonb,$6,'pending')`,[randomUUID(),row.binding_id,row.owner_id,row.personal_read_grant_id,
+      JSON.stringify(row.personal_read_authority),row.encrypted_personal_read_grant])
+  }
+  async personalChangeReadState(req: Request, id: string) {
+    if (req.apiTokenId || !req.user?.id) throw new Failure(401,'UNAUTHORIZED')
+    return this.deps.pool.transaction(async ({query}) => {
+      await this.active(query,String(req.user!.id))
+      const row = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
+      if (!row?.personal_read_authority) return {bound:false,purpose:'bom_change_read'}
+      if (row.owner_id !== req.user!.id || row.personal_read_authority.authority.target.tenant_id !== req.authenticatedTenantId)
+        throw new Failure(403,'FORBIDDEN')
+      return this.personalReadMetadata(row)
+    })
+  }
+  async unbindPersonalChangeRead(req: Request, id: string) {
+    if (req.apiTokenId || !req.user?.id) throw new Failure(401,'UNAUTHORIZED')
+    await this.deps.pool.transaction(async ({query}) => {
+      await this.active(query,String(req.user!.id))
+      const row = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
+      if (!row?.personal_read_authority) throw new Failure(404,'NOT_FOUND')
+      if (row.owner_id !== req.user!.id || row.personal_read_authority.authority.target.tenant_id !== req.authenticatedTenantId)
+        throw new Failure(403,'FORBIDDEN')
+      this.personalReadMutation(req,row.personal_read_authority.provenance.metaOrigin,'unbind')
+      if (!row.encrypted_personal_read_grant) return
+      await this.retirePersonalRead(query,row)
+      await query(`UPDATE meta_plm_bom_change_listeners SET encrypted_personal_read_grant=NULL,
+        personal_read_revision=$2,generation=$3,status='stopped',stop_reason='GRANT_UNBOUND',updated_at=clock_timestamp()
+        WHERE binding_id=$1`,[id,randomUUID(),randomUUID()])
+    })
+    return this.retryPersonalReadRevocations(String(req.user!.id),id)
+  }
+  async drainPersonalReadRevocations() {
+    const ready=(await this.query("SELECT to_regclass('meta_plm_bom_change_read_retired_grants') IS NOT NULL AS ready")).rows[0]?.ready
+    if (!ready) return
+    const pending=(await this.query(`SELECT owner_id,binding_id FROM meta_plm_bom_change_read_retired_grants
+      WHERE state IN ('pending','unknown') GROUP BY owner_id,binding_id ORDER BY min(updated_at),binding_id LIMIT 50`)).rows
+    for (const row of pending) await this.retryPersonalReadRevocations(row.owner_id,row.binding_id)
+  }
+  async retryPersonalReadRevocations(owner: string, id: string) {
+    const rows = (await this.query(`SELECT * FROM meta_plm_bom_change_read_retired_grants
+      WHERE owner_id=$1 AND binding_id=$2 AND state IN ('pending','unknown') ORDER BY updated_at,id LIMIT 50`,[owner,id])).rows
+    for (const row of rows) {
+      let state = 'unknown'
+      try {
+        const frame = row.authority
+        const current = this.deps.personalChangeReadProvider?.()
+        if (!current?.personalBomChangeReadRequest) throw new Failure(503,'SOURCE_UNAVAILABLE')
+        const secret = decryptStoredSecretValue(row.encrypted_grant)
+        const acknowledged = await current.personalBomChangeReadRequest({operation:'revoke'},secret,frame.authority)
+        if (acknowledged !== null) throw new Failure(503,'PLM_CHANGE_READ_REVOKE_UNCONFIRMED')
+        state = 'revoked'
+      } catch (error) {
+        const status = (error as {status?:number}).status
+        if (error instanceof PlmPersonalChangeReadError && error.responseReceived
+          && status && status >= 400 && status < 500 && status !== 429) state = 'rejected'
+      }
+      await this.query(`UPDATE meta_plm_bom_change_read_retired_grants SET state=$3,
+        encrypted_grant=CASE WHEN $3 IN ('revoked','rejected') THEN NULL ELSE encrypted_grant END,updated_at=clock_timestamp()
+        WHERE id=$1 AND owner_id=$2 AND encrypted_grant=$4 AND state IN ('pending','unknown')`,
+        [row.id,owner,state,row.encrypted_grant])
+    }
+    const counts = (await this.query(`SELECT state,count(*)::int AS n FROM meta_plm_bom_change_read_retired_grants
+      WHERE owner_id=$1 AND binding_id=$2 GROUP BY state`,[owner,id])).rows
+    return { pending: counts.filter(row => ['pending','unknown'].includes(row.state)).reduce((sum,row) => sum + Number(row.n),0),
+      rejected: counts.filter(row => row.state === 'rejected').reduce((sum,row) => sum + Number(row.n),0) }
+  }
+
+  async startPersonalChangeRead(req: Request, id: string, input: unknown) {
+    await this.deps.pool.transaction(async ({query}) => {
+      const current=await this.personalReadContext(query,req,id)
+      this.personalReadMutation(req,current.frame.provenance.metaOrigin,'start')
+      if (!current.row?.encrypted_personal_read_grant) throw new Failure(403,'PLM_CHANGE_READ_GRANT_REQUIRED')
+    })
+    return this.changeListener(String(req.user!.id),id,input,req.authenticatedTenantId ?? null)
+  }
+  async changeListener(actor: string, id: string, input?: unknown, authenticatedTenantId?: string | null) {
     // GET exposes only status to current sheet managers; it cannot start a listener.
     if (input === undefined) return this.deps.pool.transaction(async ({ query }) => {
       await this.completionAccess(query,actor,id)
-      const row = (await query('SELECT generation,cursor,status,stop_reason FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
-      return row ? { ...row,cursor: Number(row.cursor) } : { status: 'not_started' }
+      const row = (await query("SELECT generation,cursor,status,stop_reason,to_jsonb(meta_plm_bom_change_listeners)->'personal_read_authority'->'authority'->'target'->>'tenant_id' AS personal_tenant FROM meta_plm_bom_change_listeners WHERE binding_id=$1",[id])).rows[0]
+      if (row?.personal_tenant && row.personal_tenant!==authenticatedTenantId) throw new Failure(403,'FORBIDDEN')
+      return row ? { generation:row.generation,cursor:Number(row.cursor),status:row.status,stop_reason:row.stop_reason } : { status: 'not_started' }
     })
     const { expectedVersion } = versionInput.parse(input)
     const before = await this.deps.pool.transaction(async ({ query }) => {
       const context = await this.listenerContext(query,actor,id)
+      if (context.personal && context.personal.authority.target.tenant_id!==authenticatedTenantId) throw new Failure(403,'FORBIDDEN')
       if (Number(context.b.version) !== expectedVersion) throw new Failure(409,'VERSION_CONFLICT')
       const prior = (await query('SELECT generation,cursor,status FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[id])).rows[0]
       return { ...context,priorGeneration: prior?.generation,priorCursor: prior?.cursor,priorStatus: prior?.status }
     })
-    if (!before.source.adapter.getPlmChangePage) throw new Failure(502,'SOURCE_UNAVAILABLE')
+    // A lost start response must not turn a retry into a new baseline that skips unread facts.
+    if (before.personal && before.priorStatus==='active') return { status:'active',generation:before.priorGeneration,
+      cursor:Number(before.priorCursor),bindingVersion:expectedVersion }
+    if (!before.personal && !before.source.adapter.getPlmChangePage) throw new Failure(502,'SOURCE_UNAVAILABLE')
     const version = expectedVersion
     if (!Number.isSafeInteger(version)) throw new Failure(409,'VERSION_CONFLICT')
     const request = { binding_id: id,binding_version: version,source: {
       connection_id: before.b.data_source_id,tenant_id: before.b.source.tenant_id,
       org_id: before.b.source.org_id,part_id: before.b.part_id } }
     let baseline: PlmChangePage
-    try { baseline = parsePlmChangePage(await before.source.adapter.getPlmChangePage(request,before.source.config),request) }
+    try { baseline = parsePlmChangePage(before.personal ? await this.personalReadCall(before,{operation:'page'})
+      : await before.source.adapter.getPlmChangePage!(request,before.source.config),request) }
     catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status
+      const status = error instanceof PlmPersonalChangeReadError ? error.status : (error as { response?: { status?: number } })?.response?.status
       throw new Failure(status === 401 || status === 403 ? 403 : 502,'SOURCE_UNAVAILABLE')
     }
     return this.deps.pool.transaction(async ({ query }) => {
@@ -417,7 +693,8 @@ export class PlmBomReviewService {
       if (Number(after.b.version) !== expectedVersion || after.source.fingerprint !== before.source.fingerprint ||
         after.source.row.plm_bom_listener_authority_version !== before.source.row.plm_bom_listener_authority_version ||
         after.ownerAuthorityVersion !== before.ownerAuthorityVersion ||
-        after.source.adapter !== before.source.adapter || after.policy.revision_id !== before.policy.revision_id)
+        after.source.adapter !== before.source.adapter || after.policy.revision_id !== before.policy.revision_id
+        || after.personal?.row.personal_read_revision !== before.personal?.row.personal_read_revision)
         throw new Failure(409,'SOURCE_CHANGED')
       const previous = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
       if (previous?.generation !== before.priorGeneration || previous?.cursor !== before.priorCursor ||
@@ -449,11 +726,13 @@ export class PlmBomReviewService {
         await this.checkChangeCursor(query,id,{ generation: listener.generation,cursor: Number(listener.cursor),sequence: Number(listener.cursor)+1 })
         return context
       })
-      if (!before.source.adapter.getPlmChangePage) throw new Failure(502,'SOURCE_UNAVAILABLE')
+      if (!before.personal && !before.source.adapter.getPlmChangePage) throw new Failure(502,'SOURCE_UNAVAILABLE')
       const request = { binding_id: id,binding_version: Number(before.b.version),after_sequence: Number(listener.cursor),
         source: { connection_id: before.b.data_source_id,tenant_id: before.b.source.tenant_id,
           org_id: before.b.source.org_id,part_id: before.b.part_id } }
-      const page = parsePlmChangePage(await before.source.adapter.getPlmChangePage(request,before.source.config),request)
+      const page = parsePlmChangePage(before.personal
+        ? await this.personalReadCall(before,{operation:'page',afterSequence:Number(listener.cursor)})
+        : await before.source.adapter.getPlmChangePage!(request,before.source.config),request)
       let cursor = Number(listener.cursor)
       for (const entry of page.events) {
         const progress = { generation: listener.generation,cursor,sequence: entry.sequence }
@@ -474,7 +753,9 @@ export class PlmBomReviewService {
       return { state: 'active',cursor }
     } catch (error) {
       if (error instanceof Failure && error.code === 'LISTENER_CHANGED') return { state: 'superseded' }
-      const status = error instanceof Failure ? error.status : (error as { response?: { status?: number } })?.response?.status
+      const status = error instanceof Failure || error instanceof PlmPersonalChangeReadError
+        ? error.status : (error as { status?:number; response?: { status?: number } })?.status
+          ?? (error as { response?: { status?: number } })?.response?.status
       if (status && [401,403,404,409].includes(status)) {
         await this.query(`UPDATE meta_plm_bom_change_listeners SET status='stopped',stop_reason='AUTHORITY_CHANGED',
           updated_at=clock_timestamp() WHERE binding_id=$1 AND generation=$2 AND status='active'`,[id,listener.generation])
@@ -1146,7 +1427,16 @@ export class PlmBomReviewService {
     })
   }
   private async completionEventContext(query: PlmQuery, event: Record<string,unknown>) {
-    const b = (await query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1 FOR SHARE',[event.binding_id])).rows[0] as Binding
+    let personalContext: Awaited<ReturnType<PlmBomReviewService['listenerContext']>> | null=null
+    if (event.event_type==='bom.plm_change.applied') {
+      const enrolled=(await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[event.binding_id])).rows[0]
+      if (enrolled?.personal_read_authority) {
+        try { personalContext=await this.listenerContext(query,enrolled.owner_id,String(event.binding_id)) }
+        catch (error) { if ([401,403,404,409].includes((error as {status:number}).status)) return null; throw error }
+        if (personalContext.personal?.row.status!=='active') return null
+      }
+    }
+    const b = personalContext?.b ?? (await query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1 FOR SHARE',[event.binding_id])).rows[0] as Binding
     const config = (await query(`SELECT c.*,a.after AS audited FROM meta_plm_bom_review_completion_config c
       JOIN meta_config_revisions a ON a.id=c.revision_id AND a.sheet_id=$2 AND a.actor_id=c.updated_by
       AND a.entity_type='sheet_config' AND lower(a.entity_id)=$3
@@ -1174,7 +1464,7 @@ export class PlmBomReviewService {
         Number(fact.payload.binding_version) !== Number(b.version)) return null
       try {
         await this.sheet(query,fact.verified_by,b,true)
-        const source = await this.source(query,fact.verified_by,b.data_source_id,true)
+        const source = personalContext?.source ?? await this.source(query,fact.verified_by,b.data_source_id,true)
         if (source.fingerprint !== fact.source_fingerprint) return null
         if (fact.listener_generation) await this.listenerAuthority(query,b,fact.verified_by,source.fingerprint,fact.listener_generation)
         else if (source.fingerprint !== b.source_fingerprint) return null

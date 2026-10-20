@@ -1,0 +1,60 @@
+{
+  "source": "70cccf2d5971dd237e5b8b3a15dc51989a19688c",
+  "base": "917564f649436b15097a540f9f16abfc2ba2cabd",
+  "product_paths_unchanged": [
+    "packages/core-backend/src",
+    "apps/web",
+    "package.json",
+    "pnpm-lock.yaml"
+  ],
+  "actual_assertions": 22,
+  "skips": 0,
+  "two_actual_meta_workers": [
+    {
+      "pid": 82003,
+      "exit": 0,
+      "stopped": true
+    },
+    {
+      "pid": 82025,
+      "exit": 0,
+      "stopped": true
+    }
+  ],
+  "source_before": {
+    "files": 1438,
+    "sha256": "686c053081914e449f3d765b030214534d381e499a4403322b7801674cbda88e"
+  },
+  "source_after": {
+    "files": 1438,
+    "sha256": "686c053081914e449f3d765b030214534d381e499a4403322b7801674cbda88e"
+  },
+  "critical_git_blob_hashes_verified": {
+    "packages/core-backend/src/services/plm-managed-discussion.ts": "581db09c2dcc8b1239df99716bf90fd347ad058ea53f88f31f04274686d9a5a8",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "2e9d2149cbc01186f30e6b6f32da592c7c5b0172369e91d42e41f5208340d648",
+    "packages/core-backend/src/services/plm-managed-bom-authority.ts": "5b5e1a3c4074cb363024b18c31def782613d49ddd6d5f737412524180fe61b7d",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+    "packages/core-backend/src/auth/plm-managed-session.ts": "8149f3a8986d9bb70f698fc5f67b05b2bfd4223650db2cac4916c2ad1ce01ab7",
+    "packages/core-backend/src/auth/visual-review-markup.ts": "0f4bd46fcb5b0b7274c1db069770cb9a2891fbcefbab9496fecb91f58ca54d42",
+    "packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts": "f3d43c30e3c3799e0581128defb17d33885b34f22e4cba9166eb39dcfedfefdb",
+    "packages/core-backend/vitest.plm-managed-discussion.config.ts": "b63c678ed1be44ac8fd9df33abe865c645e024fd7cde2dacae3b61ad097042c5",
+    "packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs": "8356be77ee49f1a0ddf5dc655dc90bfb011461b5b7d217ea5245a0c3ebd142a1",
+    "scripts/verification/plm-managed-discussion/verify.py": "97104040a898162ea319aeb805d2a94f7196d1793695f673f30b10dfd79538d1"
+  },
+  "native_api_pin": "f87e019b2f01ae97dca2b2a13aa426c269e31a6b",
+  "native_executed_head": "293765ad2eea75d7a626c65fe243af2ea57b78ae",
+  "native_api_paths_identical": true,
+  "directory_removed": true,
+  "cleanup_errors": [],
+  "typecheck_exit": 0,
+  "actionlint_exit": 0,
+  "raw_private_archive": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/plm-managed-discussion-processes-20261020",
+  "earlier_failure": "21 passed/1 wrong unlink URL in new fixture; corrected to existing POST /api/plm/managed-login/unlink with dataSourceId. Not a product defect. Failed root retained after owned process shutdown.",
+  "limits": [
+    "Meta session rows provisioned against real Native delegation; no complete callback persistence",
+    "Two actual Meta Node processes use actual JWT/router/PG/Redis and Native API; not two full deployed applications",
+    "No browser/Visual/key handoff acceptance; installed91771-check source proof remains separate",
+    "No product code change; existing171unit not rerun; no package SHA loop",
+    "Remote CI not executed until dependency publication after valuable363 job terminal"
+  ]
+}

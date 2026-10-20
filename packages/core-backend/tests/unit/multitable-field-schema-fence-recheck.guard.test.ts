@@ -115,6 +115,11 @@ const W4C0_REASON =
  * of sites under that key. Verdicts follow ADR §3.11 (必接 / 免检 / 非数据写入者).
  */
 const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
+  NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.bindPersonalChangeRead :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 2),
+  NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.personalChangeReadManagement :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 1),
+  NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.startPersonalChangeRead :: personalReadContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 1),
+  NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.prepareCompletion :: completionEventContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 1),
+  NONWRITER("multitable/plm-bom-review-service.ts :: PlmBomReviewService.deliverCompletion :: completionEventContext", 'PLM personal listener', 'Rechecks managed source, sheet and listener authority; writes only listener credentials or completion intents, never record data.', 2),
   NONWRITER("multitable/plm-record-ingress-binding.ts :: disablePlmRecordBinding :: fenceWriterEntry", 'PLM record ingress', 'Disables the fixed binding only; no record data writes.', 1),
   NONWRITER("multitable/plm-record-ingress-binding.ts :: provisionPlmRecordBinding :: fenceWriterEntry", 'PLM record ingress', 'Validates token/field authority and persists fixed binding metadata only; no record data writes.', 1),
   EXEMPT("multitable/plm-record-ingress-service.ts :: receivePlmRecordEvent :: fenceWriterEntry", 'PLM record ingress', 'Writes only four fixed string fields validated and locked FOR SHARE by verifyPlmBindingAuthority; the database guard prevents retyping. Local fields are never patched.', 1),

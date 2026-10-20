@@ -2037,6 +2037,7 @@ export class MetaSheetServer {
         this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
           pool: poolManager.get(),
           dataSourceManager: getDataSourceManager(),
+          personalChangeReadProvider: () => this.injector.get(IPLMAdapter) as PLMAdapter,
         }))
       }
       this.app.use(plmEmbedRouter())
@@ -4376,7 +4377,8 @@ export class MetaSheetServer {
         const { PlmBomReviewService } = await import('./multitable/plm-bom-review-service')
         const pool = poolManager.get()
         this.plmBomNotificationWorker = new PlmBomNotificationWorker(pool,
-          new PlmBomReviewService({ pool,dataSourceManager: getDataSourceManager() }),
+          new PlmBomReviewService({ pool,dataSourceManager: getDataSourceManager(),
+            personalChangeReadProvider: () => this.injector.get(IPLMAdapter) as PLMAdapter }),
           () => this.logger.warn('PLM BOM notification worker operation failed; pending work retained'))
         await this.plmBomNotificationWorker.start()
       }

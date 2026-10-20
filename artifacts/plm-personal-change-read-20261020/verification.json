@@ -1,0 +1,62 @@
+{
+  "source_process_only": true,
+  "phases": [
+    {
+      "passed": true,
+      "phase": "reads",
+      "calls": 7,
+      "personalOnly": true,
+      "baselineNoHistory": true,
+      "committedFact": true,
+      "frozenNativeIdentity": true,
+      "exactMetaTarget": true,
+      "noCrossPurposeNetwork": true,
+      "interceptedResponses": false
+    },
+    {
+      "passed": true,
+      "phase": "revoke",
+      "calls": 2,
+      "personalOnly": true,
+      "redirectOrRetry": false
+    }
+  ],
+  "database_verified": true,
+  "passed": true,
+  "owned_server_stopped": true,
+  "owned_runtime_removed": true,
+  "source_commit": "7b83aabd7341a60cf1ebd2e9b665a5f8c8c08711",
+  "native_tree": "/tmp/codex-plm-change-read-consent-20261020",
+  "native_head": "f87e019b2f01ae97dca2b2a13aa426c269e31a6b",
+  "unit": {
+    "passed": 10,
+    "skipped": 0,
+    "seconds": 0.607
+  },
+  "affected_snapshot_wire": {
+    "passed": 29,
+    "skipped": 0,
+    "seconds": 0.298
+  },
+  "backend_tsc": {
+    "exit": 0,
+    "diagnostics": 0,
+    "command": "node20 tsc --noEmit --pretty false -p packages/core-backend/tsconfig.json"
+  },
+  "source_hashes": {
+    "packages/core-backend/src/services/plm-personal-bom-change-read-wire.ts": "20657cb5c78a3c92fbcfb81b3b04672aea4c6a661755467661cc23168a52ded9",
+    "packages/core-backend/src/services/plm-managed-snapshot-share-wire.ts": "5974a2b61a08f6b1a22757a067bae48b5ff6e9cab90ecb19e28bc2b5989e66c4",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "9295d1113024fa64019a4f946f53cf149bdb0ce7151311044939b6d49b5906ce",
+    "packages/core-backend/tests/helpers/personal-change-read-native.ts": "00a41e52246bf1cac80d4c63717a53aac8b3f1d1f53e100884b0427497e9a219",
+    "scripts/verify-plm-personal-change-read-native.py": "81279bc0b0db0e3b6bfcab65180d7c4e9a699cf0ffdfe5a8e3dfd149d9b3c14f"
+  },
+  "failed_harness_receipt": "/tmp/plm-personal-change-read-native-20261020/verification.json",
+  "publication": "HELD behind #363 valuable queued performance job; Draft only, no push/merge/deploy/production enablement",
+  "remaining": [
+    "Actual Meta target ACL enrollment and persistence",
+    "Existing listener integration and encrypted credential/revocation/cursor lifecycle",
+    "PostgreSQL/cross-process durable recovery of new Meta binding",
+    "Installed runtime image containing new Native and Meta slices",
+    "Whole W01-W23 master goal"
+  ]
+}

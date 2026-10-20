@@ -1,0 +1,16 @@
+# Package upgrade waits for backend readiness
+
+The existing package upgrader restarted PM2 and immediately ran the full healthcheck. An actual owned installed-package recovery returned nonzero because PM2 reported an online PID before the API socket bound. This made a restored, valid package fail upgrade verification. The original runtime failure remains preserved in the Native verifier's private evidence.
+
+Source `aa69ff67a5ba0ba7eebbaa9835712950ce8662bb` waits for the configured backend health URL after a requested service restart, then runs the unchanged full healthcheck. Curl uses 30 retries, one-second delay and a 60-second retry budget, retaining the existing per-request timeout. Connection refusal and retryable HTTP startup failures can settle; a permanently unavailable backend still fails. The final service, plugins and optional authenticated product checks remain mandatory. Explicit `RUN_HEALTHCHECK=0` retains the existing no-probe behavior. No grants, credentials, API permissions, migration thresholds or rollback policies change.
+
+The focused tests execute the actual upgrade script and actual healthcheck against owned loopback HTTP servers using real curl. The updater stub isolates this readiness test from real migrations; the separate installed runtime exercises the real migration/update/PM2 engines. A real-curl invocation barrier makes delayed socket binding deterministic. An earlier fixed-delay negative control was unexpectedly green because process startup consumed its delay; it was replaced, and the original script then failed the delayed-binding test before the fix.
+
+Verification:
+
+- Four real HTTP tests pass, zero skips: delayed socket binding succeeds; permanent 503 fails within the bound; backend readiness cannot bypass the final plugins failure; explicit healthcheck disable sends no probe.
+- Bash syntax and actionlint pass. The new focused PR workflow enforces four passes, zero failures and zero skips.
+- Native verifier source `8d32889512014653d41412c4da39d145df8d7f65` passes 71 actual installed-host checks with this exact provider script composed in its private copy. A deliberately failing candidate commits its QA migration and publishes candidate web bytes, exits 1, then full SQL backup/application recovery and the existing upgrade/health path exit 0. Frozen pending revocation identity survives subsequent coupled restore and acknowledges once. Cleanup succeeds and preexisting Docker IDs remain.
+- Exact script SHA256: `55deea7810e3eca96e4c06f0d9ab543f0af1bbd7c9d4a459bcd14989975fb801`. The verified base API/package source stays `059b06b595abf2bd4834541ce0b2db3aaaf72493`; the separate shell provider is declared explicitly. The frozen original workspace is not overwritten.
+
+Receipt: `docs/development/plm-onprem-upgrade-readiness-verification-20261020.json`. Private raw logs and SQL backups are not committed. This slice does not claim automatic rollback, new distribution/image qualification or production/customer acceptance. Actual deliverable incorporation with explicit source/package provenance and exact-head CI remains required. Keep the independent provider PR Draft; publication waits until #363's valuable queued work is terminal.

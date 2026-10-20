@@ -16,7 +16,7 @@ export class PlmBomNotificationWorker {
   private bindingCursor: string | null = null
   private readonly eventCursors = new Map<string,string>()
   constructor(private readonly pool: BomReviewPool,
-    private readonly service: Pick<PlmBomReviewService,'pollChanges' | 'scanNotifications' | 'prepareNotification' | 'deliverNotification' | 'prepareCompletion' | 'deliverCompletion'>,
+    private readonly service: Pick<PlmBomReviewService,'pollChanges' | 'scanNotifications' | 'prepareNotification' | 'deliverNotification' | 'prepareCompletion' | 'deliverCompletion'> & Partial<Pick<PlmBomReviewService,'drainPersonalReadRevocations'>>,
     private readonly warn: () => void) {}
 
   async start(): Promise<void> {
@@ -42,6 +42,8 @@ export class PlmBomNotificationWorker {
     return this.running
   }
   private async run(): Promise<void> {
+    try { await this.service.drainPersonalReadRevocations?.() } catch { this.warn() }
+    if (this.stopped || !isBomNotificationWorkerEnabled()) return
     const sql = `SELECT b.id FROM meta_plm_bom_review_bindings b WHERE ($1::uuid IS NULL OR b.id>$1::uuid)
       AND (EXISTS(SELECT 1 FROM meta_plm_bom_change_listeners l WHERE l.binding_id=b.id AND l.status='active')
        OR EXISTS(SELECT 1 FROM meta_plm_bom_review_notification_config c WHERE c.binding_id=b.id

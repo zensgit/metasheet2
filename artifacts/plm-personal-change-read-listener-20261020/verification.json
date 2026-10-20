@@ -1,0 +1,182 @@
+{
+  "scope": "source-process personal listener/cursor/inbox/completion and managed unlink; NOT installed acceptance or actual Meta-auth/Native paired proof",
+  "source_commit": "1ddad77b048b6afc987de72f23b9150f6e03d568",
+  "recorded_utc": "2026-10-20T00:18:10.917770+00:00",
+  "new_pg_distinct_cases_cumulatively_qualified": 24,
+  "old_enrollment_cases_not_repeated": 21,
+  "legacy_changed_pg_selected_passed": 11,
+  "legacy_unrelated_deselected": 121,
+  "affected_worker_service_units_passed": 29,
+  "route_source_units_passed": 12,
+  "changed_tenant_route_selected_passed": 1,
+  "new_managed_start_route_selected_passed": 1,
+  "final_backend_tsc_exit": 0,
+  "staged_diff_check": "passed",
+  "real_pg_crossprocess": [
+    "two Node poll processes: one active / one superseded, one inbox and one completion",
+    "fresh Node process persistent poll recovery",
+    "late child page versus committed parent unlink",
+    "cursor-fault atomic rollback and recovery"
+  ],
+  "independent_counterexample": "wrong authenticated Meta tenant activated a personal listener before repair; retained real PG red then repaired negative/browser positive",
+  "fixture_failures_retained": [
+    "immutable-session expiry edit refused; test changed to natural short expiry",
+    "Native subject mutation refused by immutable link guard; actual legal revoke used"
+  ],
+  "native_provider_in_pg": "controlled replies, not real Native grant/auth runtime proof",
+  "owned_pg": {
+    "root": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-change-read-pg16-20261020-jscluw0c",
+    "socket": "/tmp/plm-crpg-s-q8qpjv8x",
+    "postmaster_pid": 37025,
+    "status": "stopped exact owned Unix-only QA server cleanly after tests; data/logs/named QA DBs retained",
+    "enrollment_database": "meta_change_read_99503e8e",
+    "fresh_legacy_database": "meta_listener_compat_20261020_a947",
+    "old_snapshot_compat_database": "meta_read_share_compat_62bba46b"
+  },
+  "local_evidence": [
+    {
+      "path": "/tmp/plm-personal-listener-pg-first-20261020.log",
+      "sha256": "73fde93d66c7f2aea6501dd3fcff75f310d15e38e6cad39896affa5cc3ad1007",
+      "bytes": 3777,
+      "summary": [
+        " Test Files  1 failed (1)",
+        "      Tests  2 failed | 9 passed | 21 skipped (32)",
+        "   Duration  1.49s (transform 242ms, setup 0ms, collect 477ms, tests 903ms, environment 0ms, prepare 40ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-pg-failed-only-20261020.log",
+      "sha256": "6d2ebe6f50d27cb3eecfa397a8b4769eab18d48a11d0981f3320633cb067f59b",
+      "bytes": 533,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  2 passed | 30 skipped (32)",
+        "   Duration  3.18s (transform 236ms, setup 1ms, collect 454ms, tests 2.61s, environment 0ms, prepare 34ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-pg-new-controls-20261020.log",
+      "sha256": "56e0a888218021d35606d8a91f7714346d8bf6388974f610f9c9007236d950b8",
+      "bytes": 533,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  5 passed | 31 skipped (36)",
+        "   Duration  1.67s (transform 232ms, setup 0ms, collect 449ms, tests 1.12s, environment 0ms, prepare 36ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-pg-atomic-egress-20261020.log",
+      "sha256": "ec91abf784a7b23ab1850cb70edd95b170b9d38e2a9308a70f9a6e6a69844694",
+      "bytes": 533,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  4 passed | 36 skipped (40)",
+        "   Duration  2.03s (transform 266ms, setup 0ms, collect 493ms, tests 1.43s, environment 0ms, prepare 38ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-pg-final-controls-20261020.log",
+      "sha256": "66eedefc179f075d43ee0b15b3731f30da3e473d43f3af4bf9f95edb7f952ed2",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  2 passed | 40 skipped (42)",
+        "   Duration  1.01s (transform 224ms, setup 0ms, collect 392ms, tests 517ms, environment 0ms, prepare 30ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-meta-tenant-before-20261020.log",
+      "sha256": "839026f1f3485f87ac093d2e42370910086ec3d86ca22ba3fca42e99c8301cc5",
+      "bytes": 1860,
+      "summary": [
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 42 skipped (43)",
+        "   Duration  671ms (transform 238ms, setup 0ms, collect 427ms, tests 113ms, environment 0ms, prepare 31ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-meta-tenant-after-20261020.log",
+      "sha256": "16531cda5b64a051ec3f673f3f33890283ae62151268c2449ea50f98b2950c44",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  2 passed | 42 skipped (44)",
+        "   Duration  775ms (transform 247ms, setup 0ms, collect 461ms, tests 197ms, environment 0ms, prepare 38ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-pg-drain-20261020.log",
+      "sha256": "c958395e23856a86742655c7a4fd5001350e765f58a2541db0d89f95410c2968",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 44 skipped (45)",
+        "   Duration  745ms (transform 234ms, setup 0ms, collect 445ms, tests 198ms, environment 0ms, prepare 33ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-legacy-pg-20261020.log",
+      "sha256": "0f0797dcdd8a6417e84a41c5e69e75109ac6266ef33106c4a34c4160bedf6eba",
+      "bytes": 530,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  11 passed | 121 skipped (132)",
+        "   Duration  2.08s (transform 434ms, setup 0ms, collect 850ms, tests 1.13s, environment 0ms, prepare 29ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-affected-unit-20261020.log",
+      "sha256": "f92b54307f0bfcd0024e28407626f069f1b41f2392bb1daad0447df99e561be2",
+      "bytes": 4844,
+      "summary": [
+        " Test Files  2 passed (2)",
+        "      Tests  29 passed (29)",
+        "   Duration  847ms (transform 297ms, setup 98ms, collect 549ms, tests 20ms, environment 0ms, prepare 93ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-intake-unit-20261020.log",
+      "sha256": "9e7cf2e3fc6add9ddeebc27c896447589782c2e0a51ab7aa932b2f891889c0f5",
+      "bytes": 2585,
+      "summary": [
+        " Test Files  2 passed (2)",
+        "      Tests  12 passed (12)",
+        "   Duration  770ms (transform 348ms, setup 78ms, collect 668ms, tests 70ms, environment 0ms, prepare 95ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-route-tenant-20261020.log",
+      "sha256": "c94e6caac62d1253ba5c4774bfbbc4faa17fde6c721d544f8a8f9bbb7d446c24",
+      "bytes": 815,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 9 skipped (10)",
+        "   Duration  962ms (transform 259ms, setup 50ms, collect 626ms, tests 20ms, environment 0ms, prepare 51ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-managed-start-route-20261020.log",
+      "sha256": "9fc95ee04e0e10c9a231ae89d081a853566cfb0108a236c699eb6073b9585d12",
+      "bytes": 983,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 2 skipped (3)",
+        "   Duration  801ms (transform 235ms, setup 43ms, collect 540ms, tests 14ms, environment 0ms, prepare 35ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-personal-listener-tsc-closeout-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    }
+  ],
+  "open": [
+    "real Native-issued yue + real Meta managed auth + browser enrollment/start + delivery + restore combined proof",
+    "frontend grant/status/start and persisted Native connection configuration",
+    "capability reporting",
+    "updated installed images/package upgrade-failure/disable/backup/restore",
+    "remaining whole W01-W23 requirements"
+  ],
+  "publication": "held behind #363 exact74fcf61 queued valuable job118040891880; Draft only, no merge/deploy/production enable/business notice"
+}

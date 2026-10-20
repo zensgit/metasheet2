@@ -1,0 +1,197 @@
+{
+  "source_commit": "996f760586fc1e06e762b6e3e246ad81cc0205a3",
+  "correction_source_commit": "8f3816cb092a5ddbf15292dfd25a15344e4721a0",
+  "recorded_utc": "2026-10-20T00:40:15.424589+00:00",
+  "scope": "source UI, real Meta PG discovery/start retry and immutable production frontend compilation/static image audit; NOT real Meta/Native auth pairing or installed package acceptance",
+  "client_tests_passed": 21,
+  "vue_dom_distinct_cases_cumulatively_passed": 4,
+  "changed_active_control_case_passed": 1,
+  "actual_meta_pg_discovery_cases_passed": 2,
+  "actual_meta_pg_start_retry_red_then_green": true,
+  "route_case_passed": 1,
+  "backend_project_tsc_exit": 0,
+  "frontend_project_vue_tsc_exit": 0,
+  "backend_tsc_after_fix_exit": 0,
+  "chromium_version": "143.0.7499.4",
+  "chromium_scope": "controlled API replies; original5controls then corrected active-control only; screenshot visual inspection passed; owned servers and HTML removed",
+  "counterexample": "Active personal start retry skipped an unread fact by resetting head5->6. Fixed retry returns existing generation/cursor with no new baseline; normal poll still commits unread fact. Active UI control disabled.",
+  "production_frontend_image": {
+    "source": "8f3816cb092a5ddbf15292dfd25a15344e4721a0",
+    "image": {
+      "Id": "sha256:1b9aa0efdd984755634e96dac6aa7c1427f2464ddcfa3b89d46090197d4e0506",
+      "Architecture": "arm64",
+      "Os": "linux",
+      "Size": 25920051,
+      "RepoDigests": [
+        "plm-owned-personal-read-fixed-web@sha256:1b9aa0efdd984755634e96dac6aa7c1427f2464ddcfa3b89d46090197d4e0506"
+      ]
+    },
+    "owner": "6a2437067e61427589cdb616656f1cdd",
+    "build_receipt": "/tmp/plm-change-read-ui-fixed-image-build-20261020.json",
+    "build_log": "/tmp/plm-change-read-ui-fixed-owned-image-build-20261020.log",
+    "source_archive_sha256": "3fe1da49aa6649b04ac0b521b7b5d2292b464e9262d9d211e97f7b7f7f2e2a35",
+    "recipe_sha256": "8205c611e1d9c1b2755db5423785b125e1ac1703cfdb7df30922011538a41f28",
+    "original_recipe_sha256": "99d3fd2cb7399cbf6cc68d4e157081f3d3fd361c28f1c7576213b7731b98d2d9",
+    "build_created": "2026-10-20T00:36:46.808135+00:00",
+    "gates": "Actual original PNPM10.16.1 frozen-lockfile, heap4096, vue-tsc -b and Vite build, immutable Node20/Nginx1.27 FROM pins; product YJS/range flags remain false. Dependency fetch used original locked install; no offline claim.",
+    "static_audit_receipt": "/tmp/plm-change-read-ui-fixed-image-audit-20261020.json",
+    "static_file_count": 165,
+    "static_manifest_sha256": "732e8445e116f8c7f4e3e73a3e37d1439ed299b3a8bd96cd8cdbc4431ac4f61e",
+    "build_info_matches_all_args": true,
+    "nginx_exact_source": true,
+    "index_assets_present": true,
+    "new_read_module_and_corrected_control_present": true,
+    "synthetic_test_grant_absent": true,
+    "owned_audit_container_removed": true,
+    "installation_qualified": false
+  },
+  "prior_996_image": "sha256:28be7f9cd969e3f8258b85cbb39f82d2a92ace456c005264fe7dab20ac8bbe0a; valuable build preserved to terminal0 then corrected8f build ran serially; old image not final acceptance",
+  "retained_harness_failures": [
+    "wrong client test authoring working directory fixed without product changes",
+    "one DOM expected literal differed from actual policy text; only failed case reran",
+    "macOS /var canonical context assertion fixed while retaining same-root extraction guard",
+    "systemPython3.9 lacked safe tar datafilter; pinned actual3.11.15 retained datafilter; both failures before Docker invocation",
+    "first Vite HTML proxy root canonical mismatch; harness-only correction, failed receipt retained"
+  ],
+  "local_evidence": [
+    {
+      "path": "/tmp/plm-change-read-ui-client-first-20261020.log",
+      "sha256": "16aead45539d8c42d93e97a9893efc53159d378549442e0090176458d571e3f2",
+      "bytes": 2378,
+      "summary": [
+        " Test Files  1 failed (1)",
+        "      Tests  no tests",
+        "   Duration  488ms (transform 22ms, setup 11ms, collect 0ms, tests 0ms, environment 335ms, prepare 44ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-client-correct-cwd-20261020.log",
+      "sha256": "b597eb8d3de1c5e7c13e0120d124a88b914d1a3cebf6eb7fd00c08ea050914ee",
+      "bytes": 315,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  21 passed (21)",
+        "   Duration  368ms (transform 35ms, setup 10ms, collect 28ms, tests 13ms, environment 183ms, prepare 40ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-panel-first-20261020.log",
+      "sha256": "5fb2da7c942b16a44ad1c23be4fb0beebb04e1ccbce080f8013291b58a3ded33",
+      "bytes": 2322,
+      "summary": [
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 3 passed (4)",
+        "   Duration  597ms (transform 123ms, setup 12ms, collect 133ms, tests 31ms, environment 291ms, prepare 48ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-panel-failed-only-20261020.log",
+      "sha256": "5624e680925a1d76729f85b2c9bb89f3ce92715faaed786a87f616241c449422",
+      "bytes": 341,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 3 skipped (4)",
+        "   Duration  406ms (transform 64ms, setup 10ms, collect 82ms, tests 20ms, environment 172ms, prepare 46ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-active-start-control-20261020.log",
+      "sha256": "5d4d73b077179d788970e818176e7b836615bae10ba7aa398b9c71551f71ecca",
+      "bytes": 390,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 3 skipped (4)",
+        "   Duration  644ms (transform 105ms, setup 12ms, collect 125ms, tests 22ms, environment 331ms, prepare 38ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-targets-pg-20261020.log",
+      "sha256": "ad2d89aab341841df47349decf62a5a795b7c6ebfbf2668eb57a4bf8156ca661",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  2 passed | 45 skipped (47)",
+        "   Duration  704ms (transform 232ms, setup 0ms, collect 466ms, tests 134ms, environment 0ms, prepare 31ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-targets-route-20261020.log",
+      "sha256": "5d43f5040d4477708adbc4465770515e8826bc459fd31f76ea7db0a25152a7d2",
+      "bytes": 1010,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 3 skipped (4)",
+        "   Duration  902ms (transform 262ms, setup 43ms, collect 623ms, tests 14ms, environment 0ms, prepare 47ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-backend-tsc-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-vue-tsc-closeout-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-start-retry-before-20261020.log",
+      "sha256": "49d971cc36fba220904acaa1e5e72dbb102513c0c1248d7e0785b5b95a117f89",
+      "bytes": 1828,
+      "summary": [
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 47 skipped (48)",
+        "   Duration  904ms (transform 268ms, setup 0ms, collect 553ms, tests 227ms, environment 0ms, prepare 46ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-start-retry-after-20261020.log",
+      "sha256": "f1425781b3e38ff072f7f1c34436f8dd80a78461ec44f759e888728bea7b4a3e",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 47 skipped (48)",
+        "   Duration  996ms (transform 274ms, setup 0ms, collect 536ms, tests 333ms, environment 0ms, prepare 42ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-start-retry-tsc-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-visual-20261020/attempt1.json",
+      "sha256": "dab84081b5138663001d477d2730885f4d5bcc74f830e22161d547b16651e57e",
+      "bytes": 236,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-visual-20261020/receipt.json",
+      "sha256": "1306e790281d70a86e8583f059282975523cfb693e18699c604981d22ead8aec",
+      "bytes": 1900,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-fixed-visual-20261020/receipt.json",
+      "sha256": "65425e493c351ab819c6cd43dad75ca6fa633b6fdd5a616e96aa9098e8372a72",
+      "bytes": 1438,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-change-read-ui-image-context-first-failure-20261020.json",
+      "sha256": "13945daf72490e51611964d3d7ac905dff53a5a995475a6e9b17790a8d38862d",
+      "bytes": 310,
+      "summary": []
+    }
+  ],
+  "remaining": [
+    "real Native-issued yue and actual Meta managed auth/browser plus owned HTTP event delivery and crossprocess restore combined proof",
+    "existing Native connection configuration/install handoff and capability reporting",
+    "updated Native/backend immutable images and complete package installation/upgrade-failure/disable/backup/restore",
+    "whole W01-W23 remaining acceptance"
+  ],
+  "publication": "held behind #363 exact74fcf61f8669a9cd3af91457347d09bc647a97f6 valuablequeued job118040891880; all Draft; no merge/deploy/production enable/business notice"
+}

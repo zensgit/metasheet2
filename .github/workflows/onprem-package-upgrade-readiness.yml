@@ -1,0 +1,37 @@
+name: On-Prem Package Upgrade Readiness
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/onprem-package-upgrade-readiness.yml'
+      - 'scripts/ops/attendance-onprem-package-upgrade.sh'
+      - 'scripts/ops/attendance-onprem-healthcheck.sh'
+      - 'scripts/ops/attendance-onprem-package-upgrade-readiness.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/onprem-package-upgrade-readiness.yml'
+      - 'scripts/ops/attendance-onprem-package-upgrade.sh'
+      - 'scripts/ops/attendance-onprem-healthcheck.sh'
+      - 'scripts/ops/attendance-onprem-package-upgrade-readiness.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify delayed readiness and unchanged health gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test --test-concurrency=1 scripts/ops/attendance-onprem-package-upgrade-readiness.test.mjs | tee upgrade-readiness.tap
+          grep -Fx '# pass 4' upgrade-readiness.tap
+          grep -Fx '# fail 0' upgrade-readiness.tap
+          grep -Fx '# skipped 0' upgrade-readiness.tap

@@ -1,0 +1,117 @@
+name: PLM managed Discussion PostgreSQL
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  discussion-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - uses: actions/checkout@v6
+        with:
+          repository: zensgit/yuantus-plm
+          token: ${{ secrets.PLM_NATIVE_READ_TOKEN }}
+          ref: 'ee067d96a51c041aeee7154701db14d98180949a'
+          path: .ci-native-discussion
+          persist-credentials: false
+      - name: Prepare locked consumers and owned database tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYTHON'
+          import os, shutil
+          for directory in (os.environ['RUNNER_TEMP'], '/tmp'):
+              assert shutil.disk_usage(directory).free >= 4 * 1024**3, 'existing 4GiB floor'
+          PYTHON
+          python -m pip install -r .ci-native-discussion/requirements.lock
+          NPM_CONFIG_USERCONFIG=/dev/null pnpm install --frozen-lockfile --ignore-scripts --filter '@metasheet/core-backend...'
+          bash .ci-native-discussion/scripts/ci/setup_standalone_postgres.sh
+      - name: Build the immutable Redis prerequisite without host installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          owned_root="$(mktemp -d "$RUNNER_TEMP/plm-discussion-redis.XXXXXXXX")"
+          printf 'discussion-redis-tools\n' > "$owned_root/.owner"
+          echo "PLM_DISCUSSION_REDIS_ROOT=$owned_root" >> "$GITHUB_ENV"
+          curl --fail --location --retry 2 --max-time 180 \
+            https://codeload.github.com/redis/redis/tar.gz/f103d127b9747965e28f20615ef790332661fc68 \
+            --output "$owned_root/source.tgz"
+          echo "3efe030b70acb325b5c6da19e2af5ee5c55a21975c62710d360a7b051cec5cf9  $owned_root/source.tgz" | sha256sum --check
+          tar -xzf "$owned_root/source.tgz" -C "$owned_root"
+          make -C "$owned_root/redis-f103d127b9747965e28f20615ef790332661fc68" -j2 MALLOC=libc BUILD_TLS=no CFLAGS='-O2 -g0' LDFLAGS=
+          binary="$owned_root/redis-f103d127b9747965e28f20615ef790332661fc68/src/redis-server"
+          "$binary" --version | tee "$owned_root/version.txt"
+          grep -F 'v=7.4.10 ' "$owned_root/version.txt"
+          echo "PLM_DISCUSSION_REDIS_BINARY=$binary" >> "$GITHUB_ENV"
+          echo "PLM_DISCUSSION_REDIS_SHA256=$(sha256sum "$binary" | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
+      - name: Verify managed identity and Native PostgreSQL transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verification/plm-managed-discussion/verify.py \
+            --native-repo "$GITHUB_WORKSPACE/.ci-native-discussion" \
+            --python "$(command -v python)" --node "$(command -v node)" \
+            --pg-bin "$PLM_STANDALONE_PG_BIN" --redis-server "$PLM_DISCUSSION_REDIS_BINARY" \
+            --redis-sha256 "$PLM_DISCUSSION_REDIS_SHA256" \
+            --out artifacts/plm-managed-discussion-20261020/ci-runtime.json
+          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 27
+          python - <<'PYTHON'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('artifacts/plm-managed-discussion-20261020/ci-runtime.json').read_text())
+          assert report['passed'] and report['directory_removed'] and report['cleanup_errors'] == []
+          assert report['checks'] == 27 and report['test_exit'] == 0
+          assert report['source_before'] == report['source_after']
+          assert report['native_api_ref'] == report['native_checkout_head'] == 'ee067d96a51c041aeee7154701db14d98180949a'
+          PYTHON
+      - name: Retain compact runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: plm-managed-discussion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/plm-managed-discussion-20261020/ci-runtime.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove only verified owned tools after successful process cleanup
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          report_path = Path('artifacts/plm-managed-discussion-20261020/ci-runtime.json')
+          report = json.loads(report_path.read_text()) if report_path.exists() else {}
+          if report.get('directory_removed') is True and report.get('cleanup_errors') == []:
+              for variable, prefix, marker in (
+                  ('PLM_DISCUSSION_REDIS_ROOT', 'plm-discussion-redis.', 'discussion-redis-tools\n'),
+                  ('PLM_STANDALONE_PG_ROOT', 'plm-pg-tools.', 'standalone-postgres-tools\n'),
+              ):
+                  value = os.environ.get(variable)
+                  if not value:
+                      continue
+                  root = Path(value)
+                  assert root.parent.resolve() == Path(os.environ['RUNNER_TEMP']).resolve()
+                  assert root.name.startswith(prefix) and not root.is_symlink()
+                  assert (root / '.owner').read_text() == marker
+                  shutil.rmtree(root)
+          else:
+              print('Keeping owned tools: runtime process cleanup was not verified')
+          PY

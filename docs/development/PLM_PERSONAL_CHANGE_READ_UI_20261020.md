@@ -1,0 +1,152 @@
+# Personal BOM change-read workspace UI — 2026-10-20
+
+The existing managed BOM workspace now includes personal change-read management
+for already imported collaboration sheets. The workflow lists actual eligible
+Meta targets, requires an explicit selection, prepares the existing Native
+purpose-specific consent link, accepts only the separately issued `yue_` grant,
+and requires a separate explicit start. Binding does not start reading.
+It reuses the existing personal/listener/approval/installation engines.
+
+## Authority and browser behavior
+
+The new cookie-authenticated discovery route is outside the normal bearer-only
+route gate, like the existing managed consent routes. Its server transaction locks
+the current managed identity/source and validates both Meta memberships and current
+sheet-management ACL. It returns only target ID/name/version/base/sheet metadata.
+Listing a retained Meta snapshot is not Native read authority and calls no Native
+provider. Discovery remains possible when personal reads are off, so existing
+personal authority can still be reduced. Wrong Meta tenant, API keys, lost target
+permission and lost Meta membership are refused or omitted appropriately.
+
+The client uses current-origin cookies, no-store and no-referrer, coordinated by
+the existing browser identity lock. A stored normal bearer refuses the managed
+operation instead of becoming a fallback. It validates the Native purpose page,
+unique frozen fragment, source/root, review ID/version and exact Meta base/sheet.
+The actual Native page remains responsible for the separate explicit confirmation
+and Native object ACL. No editable source authority or Meta-as-Native subject is
+introduced in the form.
+
+Credentials live only in the password field and the one frozen request. Submit
+clears the field immediately. They are never copied to local/session storage,
+returned as metadata, logged or included in management links. Another-purpose
+credential is refused before network I/O. Unknown request outcomes are not retried
+automatically. A fresh state read can recover the server-side bound result.
+
+Source/root changes, identity changes and late target-selection responses clear
+or invalidate UI state. An old response cannot install a link or status into a new
+context. The Native consent link opens only on user action with noopener/noreferrer.
+The UI distinguishes bound from active, uses the existing start action/version,
+and reports pending or rejected remote cleanup without claiming remote revocation.
+Unbind text preserves the authorized-snapshot policy: existing imported data remain
+under Meta target ACL; new reads stop.
+
+## Existing configuration prerequisites
+
+The data-source owner's existing persisted configuration must explicitly set
+`config.options.personalChangeReadConnectionId` to the registered Native connection
+ID. It is not the OAuth client ID or the Meta source ID. Native origin/tenant/org,
+managed registration/mapping, Native grant feature/entitlement and the audited
+Meta change-event destination policy must also be configured through their
+existing engines. No approval grant or shared credential substitutes for the new
+purpose. Installation-package handoff and combined installed acceptance of these
+new settings remain open; this UI does not silently manufacture configuration.
+
+## Verification
+
+- Client transport/response/scope tests:21 passed. They cover frozen consent scope,
+  purpose and ambiguous fragment refusals, cookie-only transport, no shared bearer,
+  independent grant prefixes, no secret persistence, explicit versioned start,
+  cleanup outcomes, malformed metadata and Native Unicode code-point limits.
+- Actual Vue DOM tests:4 distinct cases qualified cumulatively. They verify explicit
+  target/bind/start sequencing, immediate field clearing, snapshot retention text,
+  identity/source/target switches and stale responses. The first run passed3 and
+  failed one test's text expectation (`已有` versus actual `已导入的`); only that
+  literal fixture was corrected, and only the failed case reran.
+- Actual Meta PostgreSQL:2 new target-discovery cases passed,45 previously accepted
+  cases deselected. Current sheet ACL, separate Meta tenant/org membership and API
+  key refusals were exercised. A deliberately unusable stored shared credential
+  is neither decrypted nor used; no Native request occurs on discovery.
+- A focused HTTP route case passed, with authentication/service stubbed. It proves
+  discovery precedes the normal bearer gate, rejects duplicate root parameters,
+  and preserves no-store on authentication denial. It is not real managed-login
+  authentication proof.
+- Full backend TypeScript and frontend Vue TypeScript project checks pass with
+  unchanged options. Frontend test dependencies are read-only package links in a
+  newly owned local node_modules directory; caches/build-info stay in that owned
+  directory. No dependency files or lockfile were changed.
+- One client test command initially created its file in an extra nested directory
+  because of the working directory; the exact owned file was moved to the intended
+  location and the empty owned directories removed. Its import-resolution failure
+  is retained, not counted as a product or passing test.
+
+Production frontend/image compilation and actual Chromium visual QA now pass
+within the boundaries below. Source/image tests are not installed package or
+production acceptance. Real Native-issued grant plus real Meta authentication,
+owned HTTP delivery and cross-process backup/restore still need their combined
+proof. Current installed images predate these changes. The whole W01–W23 goal
+remains active/incomplete. All publication remains held behind #363's valuable
+queued job; no merge, deployment, production activation or business notice.
+
+## Independent start-retry counterexample
+
+Actual Chromium visual inspection showed the active start control still enabled.
+A new real PostgreSQL counterexample confirmed the underlying server issue: after
+head5 started, retrying the same active personal start at head6 rotated generation
+and advanced the baseline to6, skipping the unread event. The retained red run
+is `/tmp/plm-change-read-start-retry-before-20261020.log`.
+
+The correction makes an already-active personal start idempotent under the same
+current standing-authority/Meta-tenant locks. It returns the existing generation
+and cursor without requesting another Native baseline; stopped/replaced authority
+still requires its normal explicit fresh start. Legacy non-personal start behavior
+is unchanged. The active UI button is disabled and says listening has started.
+The targeted PG test proves unchanged generation/cursor, no extra request, then
+normal polling commits the previously unread event. The updated Vue case proves
+an active button cannot dispatch a second start.
+
+The already-running valuable image build for source996f760586 is preserved; it
+qualifies only that earlier source. A corrected source/image must be built serially
+after it terminates. Neither image build is installation acceptance.
+
+## Production frontend build and visual closeout
+
+The original996 source image completed successfully and was retained. Only after
+that valuable build terminated did the corrected8f source build run. Both use the
+original tracked frontend recipe with only immutable Node20/Nginx1.27 base pins;
+PNPM10.16.1, frozen-lockfile, heap4096, full Vue project build and Vite production
+compilation remain unchanged. The original install fetched integrity-locked
+packages; this is not an additional offline-build claim. Existing product flags
+for YJS collaboration and range fill remain explicitly false.
+
+Corrected source `8f3816cb092a5ddbf15292dfd25a15344e4721a0` produced immutable
+frontend image `sha256:1b9aa0efdd984755634e96dac6aa7c1427f2464ddcfa3b89d46090197d4e0506`.
+Independent stopped/read-only/network-none image extraction checked165 static
+files, every referenced index asset, all explicit build-info fields, exact source
+Nginx config and the new personal module/corrected control. The synthetic test
+grant is absent from the bundle. Each owned audit container was verified then
+removed. This does not qualify running installation, API/browser security or
+full package acceptance. The image contains the frozen PNPM-resolved dependency
+versions; local test dependency links are not substituted for this production
+compilation.
+
+Actual Chromium143.0.7499.4 exercised the Vue UI with controlled API responses:
+explicit target/consent, immediate secret clearing/no automatic start, explicit
+start, local unbind with pending revoke and no grant in browser storage. Active
+and unbound screenshots were inspected. After the independent retry correction,
+only the changed active-control phase was requalified; its disabled control and
+`监听已启动` label were inspected. These are real browser layout/action checks,
+not real Native/Meta authentication or installed-image runtime proof. All owned
+Vite servers and exact temporary HTML files were cleaned.
+
+The macOS path-canonicalization and system-Python safe-tar-filter prebuild errors
+were terminal before any Docker build. The path boundary remains strict and the
+actual pinned Python3.11.15 supports the safe data filter. An initial Vite HTML
+proxy canonical-path error was corrected only in the disposable harness. Raw
+failed attempts are retained in the compact evidence index. No product policy,
+permission check, baseline or build threshold was relaxed.
+
+Source commit `996f760586fc1e06e762b6e3e246ad81cc0205a3` plus correction source
+`8f3816cb092a5ddbf15292dfd25a15344e4721a0` are separate from this single UI
+closeout document commit. Compact receipt:
+`artifacts/plm-personal-change-read-ui-20261020/verification.json`. Current remote
+head CI/Draft publication remain held behind the valuable parent job.

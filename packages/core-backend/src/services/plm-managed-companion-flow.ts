@@ -16,6 +16,8 @@ import {
   signManagedSessionToken,
 } from '../auth/plm-managed-session'
 import { BomReviewError, parseManagedSnapshot, type ManagedSnapshot } from '../multitable/plm-bom-review-wire'
+import { personalChangeReadConnectionIdSchema } from './plm-personal-bom-change-read-wire'
+import { resolvePersistedPlmSource } from './plm-personal-bom-write-wire'
 import { currentManagedRequest } from './plm-managed-request-context'
 import { queueSnapshotShareCancellationOnQuery, drainSnapshotShareCancellation, pendingSnapshotShareCancellations } from './plm-managed-snapshot-share-flow'
 import {
@@ -238,6 +240,37 @@ async function loadSource(client: SqlClient, dataSourceId: string, ownerId: stri
   })
 }
 
+/** Install settings seed a source once; subsequent requests use its persisted authority. */
+async function handoffPersonalReadConnection(client: SqlClient, dataSourceId: string, ownerId: string,
+  registration: {nativeBaseUrl:string; nativeTenantId:string; nativeOrgId:string}, metaTenantId: string) {
+  if (process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED!=='true') return
+  const row=(await client.query('SELECT * FROM data_sources WHERE id=$1 FOR UPDATE',[dataSourceId])).rows[0]
+  const fail=():never=>{throw new ManagedCompanionRefusal(503,'PLM_CHANGE_READ_CONFIGURATION_REQUIRED')}
+  if (!row || row.type!=='plm' || row.owner_id!==ownerId || row.is_active!==true || row.deleted_at
+    || row.tenant_id!=null && row.tenant_id!==metaTenantId) fail()
+  const config=row.config as Record<string,unknown>
+  if (!config || typeof config!=='object' || Array.isArray(config)) fail()
+  let resolved
+  try { resolved=resolvePersistedPlmSource({...config,type:'plm'}) } catch { fail() }
+  if (resolved.origin.origin!==registeredPlmOrigin(registration) || resolved.tenantId!==registration.nativeTenantId
+    || resolved.orgId!==registration.nativeOrgId) fail()
+  const options=config.options as Record<string,unknown>
+  const present=Object.hasOwn(options,'personalChangeReadConnectionId')
+  const existing=present ? options.personalChangeReadConnectionId : undefined
+  const installation=process.env.PLM_PERSONAL_BOM_CHANGE_READ_CONNECTION_ID
+  const supplied=installation!==undefined && installation!==''
+  const valid=(value:unknown)=>personalChangeReadConnectionIdSchema.safeParse(value).success
+  if (present && !valid(existing) || supplied && !valid(installation) || present && supplied && existing!==installation) fail()
+  if (present) return
+  // Visual source binding remains an explicit platform-admin configuration operation.
+  if (options.visualReviewEnabled===true) fail()
+  if (!supplied) fail()
+  const changed=await client.query(`UPDATE data_sources SET config=$2::jsonb WHERE id=$1 AND owner_id=$3
+    AND is_active=true AND deleted_at IS NULL RETURNING id`,[dataSourceId,JSON.stringify({...config,
+      options:{...options,personalChangeReadConnectionId:installation}}),ownerId])
+  if (changed.rows.length!==1) fail()
+}
+
 function isAdmin(actor: ManagedActor): boolean {
   return actor.role === 'admin'
 }
@@ -273,7 +306,7 @@ export async function provisionManagedLink(actor: ManagedActor, body: unknown): 
     await requireMembership(client, metaUserId, metaTenantId)
     await requireMembership(client, metaUserId, metaOrgId)
     const plmOrigin = registeredPlmOrigin(registration)
-    const fingerprint = await loadSource(client, dataSourceId, metaUserId, plmOrigin, rootPartId)
+    let fingerprint = await loadSource(client, dataSourceId, metaUserId, plmOrigin, rootPartId)
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [dataSourceId])
     const existing = await client.query(
       `SELECT generation, status FROM plm_managed_identity_links
@@ -298,6 +331,10 @@ export async function provisionManagedLink(actor: ManagedActor, body: unknown): 
     if (sourceGeneration > 0 && actor.id !== metaUserId) {
       throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REBIND_OWNER_REQUIRED')
     }
+    await handoffPersonalReadConnection(client,dataSourceId,metaUserId,registration,metaTenantId)
+    // The seed and link commit share the source lock and transaction; no runtime env fallback.
+    if (process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED==='true')
+      fingerprint=await loadSource(client,dataSourceId,metaUserId,plmOrigin,rootPartId)
     const linkId = randomUUID()
     const generation = sourceGeneration + 1
     try {

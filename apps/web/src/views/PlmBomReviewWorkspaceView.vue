@@ -36,6 +36,7 @@
         :eco-intent-enabled="ecoIntentEnabled"
       />
       <PlmSnapshotSharePanel :data-source-id="readySource" :part-id="readyPart ?? ''" />
+      <PlmBomChangeReadPanel :data-source-id="readySource" :part-id="readyPart ?? ''" />
     </template>
   </section>
 </template>
@@ -57,6 +58,7 @@ import {
 } from '../services/integration/workbench'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 import PlmSnapshotSharePanel from '../components/plm/PlmSnapshotSharePanel.vue'
+import PlmBomChangeReadPanel from '../components/plm/PlmBomChangeReadPanel.vue'
 
 type QueryHint =
   | { status: 'missing' | 'blank' | 'array' | 'ambiguous' }
