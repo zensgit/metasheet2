@@ -129,3 +129,8 @@ the full W01–W23 census, including Native standalone and the remaining
 Visual/Discussion/SSO/revocation/DP1/Stage A/RG/version requirements. Current
 source-process evidence does not qualify the previously built images, installation
 or production/long-term acceptance.
+
+Source commit: `1ddad77b048b6afc987de72f23b9150f6e03d568`. Compact receipt:
+`artifacts/plm-personal-change-read-listener-20261020/verification.json`.
+This is the single source-closeout document commit. Exact remote head CI and
+Draft publication remain pending the valuable parent job.
