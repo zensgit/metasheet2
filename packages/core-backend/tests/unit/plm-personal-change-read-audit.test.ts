@@ -38,3 +38,13 @@ it('routes explicit personal start through managed authentication before the nor
  expect(response.status).toBe(200);expect(response.headers['cache-control']).toBe('no-store');expect(response.headers['referrer-policy']).toBe('no-referrer')
  expect(spy).toHaveBeenCalledWith(expect.objectContaining({user:{id:'owner'}}),id,{expectedVersion:1})
 })
+
+it('routes personal target discovery before the bearer gate, validates unique source/root and preserves no-store on denial',async()=>{
+ const spy=vi.spyOn(PlmBomReviewService.prototype,'personalChangeReadTargets').mockResolvedValue({items:[]}as never)
+ const app=express();app.use(express.json());app.use('/api/plm-bom-reviews',createPlmBomReviewsRouter({pool:{query:vi.fn(),transaction:vi.fn()},dataSourceManager:{}as never}));pinned.setApp(app)
+ const path='/api/plm-bom-reviews/managed-change-read/targets?dataSourceId=source&partId=P'
+ const response=await request(pinned.url()).get(path)
+ expect(response.status).toBe(200);expect(response.headers['cache-control']).toBe('no-store');expect(spy).toHaveBeenCalledWith(expect.objectContaining({user:{id:'owner'}}),'source','P')
+ spy.mockClear();await request(pinned.url()).get(path+'&partId=Q').expect(400);expect(spy).not.toHaveBeenCalled()
+ const denied=await request(pinned.url()).get(path).set('Authorization','deny');expect(denied.status).toBe(401);expect(denied.headers['cache-control']).toBe('no-store')
+})

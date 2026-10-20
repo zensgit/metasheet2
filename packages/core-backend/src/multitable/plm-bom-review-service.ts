@@ -508,6 +508,23 @@ export class PlmBomReviewService {
       || req.get('content-type')?.split(';')[0].trim() !== 'application/json')
       throw new Failure(403,'PLM_CHANGE_READ_BROWSER_REFUSED')
   }
+  async personalChangeReadTargets(req: Request, dataSourceId: string, partId: string) {
+    if (req.apiTokenId || !req.user?.id) throw new Failure(401,'UNAUTHORIZED')
+    return this.deps.pool.transaction(async ({query}) => {
+      await this.runtime(query)
+      const managed=await lockManagedBomAuthority(query,req,dataSourceId,partId)
+      const bindings=(await query(`SELECT * FROM meta_plm_bom_review_bindings
+        WHERE data_source_id=$1 AND part_id=$2 AND status='active' ORDER BY id`,[dataSourceId,partId])).rows as Binding[]
+      const items=[]
+      for (const b of bindings) {
+        if (b.source.tenant_id!==managed.source.tenant_id || b.source.org_id!==managed.source.org_id) continue
+        try { await this.sheet(query,managed.actor,b,true) }
+        catch (error) { if (error instanceof Failure && error.status===403) continue; throw error }
+        items.push({id:b.id,name:b.name,version:Number(b.version),baseId:b.base_id,sheetId:b.sheet_id})
+      }
+      return {items}
+    })
+  }
   async personalChangeReadManagement(req: Request, id: string) {
     return this.deps.pool.transaction(async ({query}) => {
       const current = await this.personalReadContext(query,req,id)

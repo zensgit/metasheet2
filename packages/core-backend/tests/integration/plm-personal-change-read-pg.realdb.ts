@@ -397,3 +397,24 @@ it('personal listener drains the durable retired queue through the existing work
  for(let i=0;i<Math.ceil(groups/50)+1;i++)await service.drainPersonalReadRevocations()
  expect((await pool.query('SELECT state,encrypted_grant FROM meta_plm_bom_change_read_retired_grants WHERE binding_id=$1',[f.binding.id])).rows).toEqual([{state:'revoked',encrypted_grant:null}])
 })
+
+it('personal read UI discovery uses current Meta target ACL without granting Native access',async()=>{
+ const f=await fixture(),before=calls.length
+ process.env.PLM_PERSONAL_BOM_CHANGE_READ_ENABLED='false'
+ expect(await f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).toEqual({items:[{id:f.binding.id,name:f.binding.name,version:f.binding.version,baseId:f.base,sheetId:f.binding.sheetId}]})
+ expect(calls.length).toBe(before)
+ await pool.query("UPDATE spreadsheet_permissions SET perm_code='spreadsheet:read' WHERE sheet_id=$1 AND subject_id=$2",[f.binding.sheetId,f.actor])
+ expect(await f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).toEqual({items:[]})
+ ;(f.req as any).authenticatedTenantId='foreign-meta-tenant'
+ await expect(f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).rejects.toMatchObject({status:403})
+ ;(f.req as any).apiTokenId='api-key'
+ await expect(f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).rejects.toMatchObject({status:401})
+ expect(calls.length).toBe(before)
+})
+it('personal read UI discovery does not decrypt shared credentials or bypass separate Meta memberships',async()=>{
+ const f=await fixture()
+ await pool.query(`UPDATE data_sources SET config=jsonb_set(config,'{credentials}','{"token":"enc:owned-unusable-shared-credential"}'::jsonb) WHERE id=$1`,[f.source])
+ expect((await f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).items).toHaveLength(1)
+ await pool.query("UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id='meta-org'",[f.actor])
+ await expect(f.run(()=>service.personalChangeReadTargets(f.req,f.source,'P'))).rejects.toMatchObject({status:403})
+})

@@ -29,6 +29,15 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
     res.set('Cache-Control', 'no-store').set('Referrer-Policy', 'no-referrer')
     try { res.json(await shares.complete(req)) } catch (error) { next(error) }
   })
+  router.get('/managed-change-read/targets', (_req,res,next) => {
+    res.set('Cache-Control','no-store').set('Referrer-Policy','no-referrer');next()
+  }, authenticate, async (req,res,next) => {
+    try {
+      const text=z.string().min(1).refine(value=>[...value].length<=128 && value===value.trim() && !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value))
+      const q=z.object({dataSourceId:text,partId:text}).strict().parse(req.query)
+      res.json({ok:true,data:await service.personalChangeReadTargets(req,q.dataSourceId,q.partId)})
+    } catch (error) { next(error) }
+  })
   router.use('/:id/personal-change-read', (_req,res,next) => {
     res.set('Cache-Control','no-store').set('Referrer-Policy','no-referrer')
     next()
