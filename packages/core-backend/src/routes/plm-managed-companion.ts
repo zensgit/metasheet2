@@ -103,6 +103,14 @@ function actorFrom(req: Request): ManagedActor {
   }
 }
 
+router.post('/discussion-context', async (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  try {
+    res.json({ ok: true, data: await relayManagedDiscussion(req) })
+  } catch (error) { sendRefusal(res, error) }
+})
+
 router.post('/sources/:sourceId/discussion', async (req: Request, res: Response) => {
   res.set('Cache-Control', 'no-store')
   res.set('Referrer-Policy', 'no-referrer')

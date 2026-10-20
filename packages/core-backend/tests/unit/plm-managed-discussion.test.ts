@@ -3,10 +3,11 @@ import { createServer, type Server } from 'node:http'
 import { generateKeyPairSync, sign, randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 
-const mocks = vi.hoisted(() => ({ lock: vi.fn(), consume: vi.fn() }))
-vi.mock('../../src/db/pg', () => ({ transaction: async (fn: (client: unknown) => unknown) => fn({ query: vi.fn() }) }))
+const mocks = vi.hoisted(() => ({ lock: vi.fn(), consume: vi.fn(), query: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ transaction: async (fn: (client: unknown) => unknown) => fn({ query: mocks.query }) }))
 vi.mock('../../src/services/plm-managed-bom-authority', () => ({ lockManagedBomAuthority: mocks.lock }))
 vi.mock('../../src/auth/embed-jti-store', () => ({ consumeEmbedJti: mocks.consume, embedJtiKey: () => 'owned-jti' }))
+import { managedRequestContext } from '../../src/services/plm-managed-request-context'
 import { relayManagedDiscussion } from '../../src/services/plm-managed-discussion'
 
 const keys = generateKeyPairSync('ed25519')
@@ -165,4 +166,24 @@ it.each(['false', 'true', 'TRUE', '1', ''])('redacts visual metadata in the plai
   const reply = await relayManagedDiscussion(request({ operation: 'thread', threadId: 'native-thread' }), 'source')
   expect(reply).toMatchObject({ comments: [{ author_user_id: 42, body: 'text', markup: null }] })
   expect(JSON.stringify(reply)).not.toContain('private-visual-marker')
+})
+
+
+it('discovers only the current managed session source, with a separately verified Native parent', async () => {
+  mocks.query.mockResolvedValue({ rows: [{ data_source_id: 'current-owned-source' }] })
+  const req = request({ operation: 'context', parentOrigin: base }); req.user = { id: 'meta-owner' } as Request['user']
+  const result = await managedRequestContext.run({ sessionId: 'current-session', userId: 'meta-owner', conflict: false }, () => relayManagedDiscussion(req))
+  expect(result).toEqual({ sourceId: 'current-owned-source', partId: 'part', parentOrigin: base })
+  expect(mocks.query).toHaveBeenCalledWith('SELECT data_source_id FROM plm_managed_sessions WHERE id=$1 AND meta_user_id=$2', ['current-session', 'meta-owner'])
+  expect(mocks.lock.mock.calls[0][2]).toBe('current-owned-source')
+  expect(mocks.consume).toHaveBeenCalledOnce(); expect(seen).toHaveLength(0)
+})
+it('rejects a forged frame parent before spending the token or touching Native', async () => {
+  await expect(relayManagedDiscussion(request({ operation: 'context', parentOrigin: 'https://forged.example.test' }), 'owned-source')).rejects.toMatchObject({ status: 403 })
+  expect(mocks.consume).not.toHaveBeenCalled(); expect(seen).toHaveLength(0)
+})
+it('does not accept a caller source selector or implicit non-context fallback', async () => {
+  await expect(relayManagedDiscussion(request({ operation: 'context', parentOrigin: base, sourceId: 'other' }))).rejects.toMatchObject({ status: 422 })
+  await expect(relayManagedDiscussion(request())).rejects.toMatchObject({ status: 422 })
+  expect(mocks.lock).not.toHaveBeenCalled(); expect(mocks.query).not.toHaveBeenCalled(); expect(mocks.consume).not.toHaveBeenCalled()
 })

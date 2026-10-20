@@ -150,14 +150,14 @@ def verify(args):
                 raise RuntimeError('Owned Vitest process group exceeded its deadline; evidence retained')
         report = json.loads(tests.read_text())
         assertions = [a for suite in report['testResults'] for a in suite.get('assertionResults', [])]
-        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 22
+        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 25
         assert all(a['status'] == 'passed' for a in assertions), 'No skips/todo/failed tests permitted'
         worker_proof = json.loads(out.with_suffix('.workers.json').read_text())
         workers = worker_proof['workers']
         assert len(workers) == 2 and len({w['pid'] for w in workers}) == 2
         assert all(w['exit'] == 0 and w['stopped'] is True for w in workers)
         result['meta_workers'] = workers
-        result['checks'] = 22
+        result['checks'] = 25
         after = hashes()
         result['source_after'] = digest(after)
         assert after == before

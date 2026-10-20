@@ -382,3 +382,40 @@ it('unlink in another Meta process waits for the admitted Native operation and s
     expect((await httpManaged(fresh, await fresh.req(), fresh.cookie, workers[1].url)).status).toBe(200)
   } finally { unblock(); entered = undefined; release = undefined; await Promise.allSettled([write, unlink]) }
 })
+
+
+async function contextRequest(f: Awaited<ReturnType<typeof delegatedFixture>>, parentOrigin = proxy) {
+  return f.req({ operation: 'context', parentOrigin })
+}
+async function contextResponse(request: Request, cookie?: string) {
+  return fetch(metaUrl + '/api/plm/managed-login/discussion-context', { method: 'POST',
+    headers: { ...(request.headers as Record<string, string>), ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(request.body) })
+}
+it('managed frame context requires the actual managed cookie and fresh Native token, then spends it without a Discussion exchange', async () => {
+  const f = await delegatedFixture(), request = await contextRequest(f), before = exchangeCalls
+  expect(isWhitelisted('/api/plm/managed-login/discussion-context')).toBe(false)
+  expect((await contextResponse(request)).status).toBe(401)
+  const response = await contextResponse(request, f.cookie)
+  expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store')
+  expect(await response.json()).toEqual({ ok: true, data: { sourceId: f.source, partId: 'part', parentOrigin: proxy } })
+  expect((await contextResponse(request, f.cookie)).status).toBe(401)
+  expect(exchangeCalls).toBe(before)
+})
+it('managed frame context refuses forged parent and caller-selected source before token consumption', async () => {
+  const f = await delegatedFixture(), request = await contextRequest(f, native), before = exchangeCalls
+  expect((await contextResponse(request, f.cookie)).status).toBe(403)
+  request.body = { operation: 'context', parentOrigin: proxy, sourceId: randomUUID() }
+  expect((await contextResponse(request, f.cookie)).status).toBe(422)
+  request.body = { operation: 'context', parentOrigin: proxy }
+  expect((await contextResponse(request, f.cookie)).status).toBe(200)
+  expect(exchangeCalls).toBe(before)
+})
+it('managed frame discovery resolves each current cookie source rather than the latest or a global source', async () => {
+  const a = await delegatedFixture(), b = await delegatedFixture()
+  expect(a.source).not.toBe(b.source)
+  for (const f of [a, b]) {
+    const response = await contextResponse(await contextRequest(f), f.cookie)
+    expect(response.status).toBe(200)
+    expect((await response.json() as { data: { sourceId: string } }).data.sourceId).toBe(f.source)
+  }
+})

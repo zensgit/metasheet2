@@ -9,6 +9,7 @@ import { verifyEmbedToken } from '../auth/embed-token-verify'
 import { embedAudience, embedPublicKeysByKid } from '../auth/embed-config'
 import { projectVisualMarkups } from '../auth/visual-review-markup'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
+import { currentManagedRequest } from './plm-managed-request-context'
 import { lockManagedBomAuthority } from './plm-managed-bom-authority'
 import { assertManagedOrigin } from './plm-managed-companion-flow'
 import { ManagedCompanionRefusal as Refusal } from './plm-managed-companion'
@@ -19,6 +20,7 @@ const mentions = z.array(z.number().int()).optional()
 const comment = z.object({ body: text, parent_comment_id: text.optional(), mentioned_user_ids: mentions }).strict()
 const transition = z.object({ comment: z.string().optional(), mentioned_user_ids: mentions }).strict()
 export const managedDiscussionInput = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('context'), parentOrigin: text }).strict(),
   z.object({ operation: z.literal('list') }).strict(),
   z.object({ operation: z.literal('thread'), threadId: text }).strict(),
   z.object({ operation: z.literal('create'), body: z.object({
@@ -36,10 +38,11 @@ const credentialSchema = z.object({ access_token: text, token_type: z.literal('b
   expires_in: z.number().finite().positive(), aud: z.literal('discussion') })
 const nativeStatuses = new Set([400, 401, 403, 404, 409, 422])
 
-export async function relayManagedDiscussion(req: Request, sourceId: string): Promise<unknown> {
+export async function relayManagedDiscussion(req: Request, sourceId?: string): Promise<unknown> {
   const parsed = managedDiscussionInput.safeParse(req.body)
   if (!parsed.success) throw new Refusal(422, 'PLM_MANAGED_DISCUSSION_BODY_REFUSED')
   const input = parsed.data
+  if (sourceId === undefined && input.operation !== 'context') throw new Refusal(422, 'PLM_MANAGED_DISCUSSION_BODY_REFUSED')
   const raw = req.headers['x-plm-embed-token']
   if (typeof raw !== 'string' || !raw) throw new Refusal(401, 'PLM_MANAGED_DISCUSSION_TOKEN_REQUIRED')
   const publicKeysByKid = embedPublicKeysByKid()
@@ -51,7 +54,20 @@ export async function relayManagedDiscussion(req: Request, sourceId: string): Pr
     throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_SCOPE_REFUSED')
   }
   return transaction(async client => {
-    const current = await lockManagedBomAuthority(client.query.bind(client), req, sourceId, claims.part_id)
+    let resolvedSourceId = sourceId
+    if (resolvedSourceId === undefined) {
+      const store = currentManagedRequest()
+      if (!store?.sessionId || store.conflict || store.userId !== req.user?.id) {
+        throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_CONTEXT_REFUSED')
+      }
+      const session = (await client.query('SELECT data_source_id FROM plm_managed_sessions WHERE id=$1 AND meta_user_id=$2',
+        [store.sessionId, store.userId])).rows[0]
+      if (typeof session?.data_source_id !== 'string' || !session.data_source_id) {
+        throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_CONTEXT_REFUSED')
+      }
+      resolvedSourceId = session.data_source_id
+    }
+    const current = await lockManagedBomAuthority(client.query.bind(client), req, resolvedSourceId, claims.part_id)
     assertManagedOrigin(req, current.reg.origin)
     if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json'
       || claims.sub !== current.source.auth_user_id || claims.tenant_id !== current.source.tenant_id
@@ -66,6 +82,9 @@ export async function relayManagedDiscussion(req: Request, sourceId: string): Pr
       || source.tenantId !== current.source.tenant_id || source.orgId !== current.source.org_id) {
       throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_SOURCE_CHANGED')
     }
+    if (input.operation === 'context' && input.parentOrigin !== source.origin.origin) {
+      throw new Refusal(403, 'PLM_MANAGED_DISCUSSION_CONTEXT_REFUSED')
+    }
     const ttl = Math.min(claims.exp! - Math.floor(Date.now() / 1000), 600)
     if (ttl < 1) throw new Refusal(401, 'PLM_MANAGED_DISCUSSION_TOKEN_REFUSED')
     let first: boolean
@@ -73,6 +92,7 @@ export async function relayManagedDiscussion(req: Request, sourceId: string): Pr
       tenant_id: claims.tenant_id ?? '', part_id: claims.part_id, jti: claims.jti as string }), ttl) }
     catch { throw new Refusal(503, 'PLM_MANAGED_DISCUSSION_UNAVAILABLE') }
     if (!first) throw new Refusal(401, 'PLM_MANAGED_DISCUSSION_TOKEN_REPLAYED')
+    if (input.operation === 'context') return { sourceId: resolvedSourceId, partId: claims.part_id, parentOrigin: source.origin.origin }
 
     async function call(path: string, method: string, body?: unknown, bearer?: string): Promise<unknown> {
       let response: Response
