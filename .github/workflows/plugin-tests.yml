@@ -2126,6 +2126,7 @@ jobs:
           pnpm exec playwright install --with-deps chromium
 
       - name: Create isolated attendance timezone database
+        id: attendance-timezone-db-create
         run: createdb --host=localhost --username=postgres attendance_timezone_ci
 
       - name: Run attendance integration tests
@@ -2298,7 +2299,9 @@ jobs:
             --reporter=dot
 
       - name: Remove isolated attendance timezone database
-        if: always()
+        # A preceding unit failure never started PG or attempted this database.
+        # Still clean up after a failed/cancelled create (which may have created it).
+        if: always() && steps.attendance-timezone-db-create.outcome != 'skipped' && steps.attendance-timezone-db-create.outcome != ''
         run: dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci
 
       - name: Upload test results

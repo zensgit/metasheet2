@@ -7,6 +7,9 @@ import { AutomationExecutor, type AutomationRule, type ExecutionContext } from '
 import type { AutomationAction } from '../../../src/multitable/automation-actions'
 import { EventBus } from '../../../src/integration/events/event-bus'
 import * as policy from '../../../src/integration/yida-automation-authoring-policy'
+import { ALL_ACTION_TYPES } from '../../../src/multitable/automation-actions'
+import { AUTOMATION_ACTION_TYPES_WITH_AUTHORIZED_YIDA } from '../../../src/db/migrations/zzzz20261019120000_add_yida_authorized_automation_action'
+import { AUTOMATION_ACTION_TYPES_WITH_INTEGRATION_READ_PREVIEW } from '../../../src/db/migrations/zzzz20261001133000_add_automation_read_preview_action'
 
 const action = (): AutomationAction => ({ type: TYPE, config: { authorizationSlot: 'synthetic-slot' } })
 const shape = () => ({ actionType: TYPE, actionConfig: action().config, actions: null, executionMode: null,
@@ -34,6 +37,16 @@ function rule(actions: AutomationAction[]): AutomationRule {
     createdAt: '2026-10-19T00:00:00Z', trigger: { type: 'schedule.interval', config: { intervalMs: 60000 } }, actions }
 }
 describe('SA06D authoring is inert and never an execution authorization', () => {
+  it('keeps the latest database action enum equal to the app enum plus the two historical aliases, with only the authorized YiDa widening', () => {
+    // Historical migrations retain these two database values; they are not
+    // authorable application actions. Pin the complete set, not a subset.
+    expect([...AUTOMATION_ACTION_TYPES_WITH_AUTHORIZED_YIDA].sort())
+      .toEqual([...ALL_ACTION_TYPES, 'notify', 'update_field'].sort())
+    expect(AUTOMATION_ACTION_TYPES_WITH_INTEGRATION_READ_PREVIEW).not.toContain(TYPE)
+    expect(AUTOMATION_ACTION_TYPES_WITH_AUTHORIZED_YIDA.filter(type => type !== TYPE))
+      .toEqual([...AUTOMATION_ACTION_TYPES_WITH_INTEGRATION_READ_PREVIEW])
+    expect(AUTOMATION_ACTION_TYPES_WITH_AUTHORIZED_YIDA.filter(type => type === TYPE)).toHaveLength(1)
+  })
   it.each([undefined, null, [], [action()]])('accepts only one stable slot representation %j', actions => {
     expect(validYidaAutomationAuthoringShape({ ...shape(), actions })).toBe(true)
     const { actions: _oldActions, ...raw } = shape()

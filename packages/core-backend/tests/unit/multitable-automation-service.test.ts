@@ -1092,16 +1092,27 @@ describe('M5 — Automation route helpers', () => {
       ).toThrow(AutomationRuleValidationError)
     })
 
-    it('accepts every canonical automation action type (drift guard)', () => {
+    it('accepts every canonical automation action type with its valid authoring shape (drift guard)', () => {
       for (const actionType of ALL_ACTION_TYPES) {
         expect(
           parseCreateRuleInput({ triggerType: 'record.created', actionType,
             ...(actionType === 'integration_read_preview' ? { actionConfig: {
               operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false,
             } } : {}),
+            ...(actionType === 'integration_yida_send_authorized' ? {
+              triggerType: 'schedule.interval', triggerConfig: { intervalMs: 60000 },
+              actionConfig: { authorizationSlot: 'synthetic-slot' },
+            } : {}),
           }, null).actionType,
         ).toBe(actionType)
       }
+    })
+
+    it('does not admit the private YiDa action through the ordinary record-trigger shape', () => {
+      expect(() => parseCreateRuleInput({
+        triggerType: 'record.created', actionType: 'integration_yida_send_authorized',
+        actionConfig: { authorizationSlot: 'synthetic-slot' },
+      }, null)).toThrow(AutomationRuleValidationError)
     })
 
     it('throws AutomationRuleValidationError for malformed condition payloads', () => {

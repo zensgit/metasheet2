@@ -664,7 +664,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     ])
   })
 
-  it('A5 — pre-gate prefix: the 18 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 19 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
@@ -682,6 +682,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { verb: 'use', unconditional: false, args: ['elearningPilotRuntime.router'] },
       { verb: 'use', unconditional: true, args: ['"/api/integration/automation-read"', 'automationReadNoStoreMiddleware'] },
       { verb: 'use', unconditional: true, args: ['YIDA_OWNER_HTTP_PREFIX', 'yidaOwnerNoStoreMiddleware', 'yidaOwnerJsonOnlyMiddleware', 'express.json()'] },
+      { verb: 'use', unconditional: true, args: ['YIDA_AUTOMATION_HTTP_PREFIX', 'yidaAutomationNoStore', 'yidaAutomationJsonOnly', 'express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
       { verb: 'use', unconditional: true, args: ['requestMetricsMiddleware'] },
@@ -718,6 +719,22 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     expect(headers).toBeLessThan(jwt)
     expect(owner).toBeGreaterThan(jwt)
     expect(errors).toBeGreaterThan(owner)
+  })
+
+  it('A8 — authorized YiDa pre-gate middleware only parses; its management router and errors remain after JWT', () => {
+    const ordinal = (subject: string) => {
+      const state = subjectState(model, subject)
+      expect(state.state).toBe('UNCONDITIONAL_SITE')
+      expect(state.sites).toHaveLength(1)
+      expect(state.sites[0].enclosingMethod).toBe('setupMiddleware')
+      return inSetup.findIndex(site => site.start === state.sites[0].start)
+    }
+    const jwt = ordinal('jwtAuthMiddleware')
+    expect(ordinal('yidaAutomationNoStore')).toBeLessThan(jwt)
+    expect(ordinal('yidaAutomationJsonOnly')).toBeLessThan(jwt)
+    const owner = ordinal('createIntegrationYidaAutomationRouter')
+    expect(owner).toBeGreaterThan(jwt)
+    expect(ordinal('yidaAutomationParseError')).toBeGreaterThan(owner)
   })
 
   it('positive control (real code, no mutation): the approval-attachments pre-gate parser is the live CONDITIONAL witness — its own IfStatement guard is isApprovalAttachmentsEnabled(), proving the CONDITIONAL_SITE branch of the classifier actually discriminates on production source, not merely on a synthetic fixture', () => {

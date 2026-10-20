@@ -100,13 +100,19 @@ describe('Automation Read owner host AST wiring (not full boot or authorization 
 
   it('wires the eighth actual AutomationService constructor argument to the host-private schedule producer', () => {
     const constructor = one(collect(server, ts.isNewExpression).filter(item => chain(item.expression) === 'AutomationService'))
-    expect(constructor.arguments).toHaveLength(8)
+    expect(constructor.arguments).toHaveLength(9)
     const producer = one(object(constructor.arguments![7]).properties.map(assignment))
     expect(name(producer.name)).toBe('produce')
     expect(ts.isArrowFunction(producer.initializer)).toBe(true)
     const forward = producer.initializer as ts.ArrowFunction
     expect(forward.parameters.map(item => name(item.name))).toEqual(['occurrence', 'signal'])
     expect(call(forward.body, 'this.automationReadRuntime.produceSchedule').arguments.map(chain)).toEqual(['occurrence', 'signal'])
+    const yidaProducer = one(object(constructor.arguments![8]).properties.map(assignment))
+    expect(name(yidaProducer.name)).toBe('produce')
+    expect(ts.isArrowFunction(yidaProducer.initializer)).toBe(true)
+    const yidaForward = yidaProducer.initializer as ts.ArrowFunction
+    expect(yidaForward.parameters.map(item => name(item.name))).toEqual(['occurrence', 'signal'])
+    expect(call(yidaForward.body, 'this.yidaAutomationHost.produceSchedule').arguments.map(chain)).toEqual(['occurrence', 'signal'])
   })
 
   it.each(['Record', 'Schedule'])('separately closes and drains metadata %s admission before pool shutdown', kind => {

@@ -326,6 +326,9 @@ describe('host-private Automation runtime lifecycle', () => {
       if (id === './automation-read-ledger') return { createAutomationReadLedger: () => ({}) }
       if (id === './automation-read-discovery') return { createAutomationReadDiscovery: () => ({}) }
       if (id === './automation-read-source-execution') return { createAutomationReadSourceExecution: () => uncalled }
+      // Loading the current runtime must not fabricate an installed YiDa binding.
+      // This lifecycle-only probe never requests one; an invocation is a failure.
+      if (id === './yida-automation-installed-binding') return { createYidaAutomationInstalledBindingSource: uncalled }
       if (id === './automation-read-record-activation' || id === './automation-read-schedule-activation') return {}
       if (id === './automation-live-authority') return { AutomationActorAuthorityError }
       if (id === './automation-read-contracts') return { AutomationReadLedgerError }
@@ -356,7 +359,8 @@ describe('host-private Automation runtime lifecycle', () => {
       } finally { release(); await stopping }
     }
     await prove(createAutomationReadRuntime)
-    await expect(prove(compiledModule.exports.createAutomationReadRuntime)).rejects.toThrow()
+    await expect(prove(compiledModule.exports.createAutomationReadRuntime))
+      .rejects.toMatchObject({ name: 'AssertionError', actual: true, expected: false })
   })
   it('a hung renewal cannot overlap or keep admission beyond the last proved lifetime', async () => {
     const f = fixture(); await f.runtime.createPluginCapability({}).activate(binding())

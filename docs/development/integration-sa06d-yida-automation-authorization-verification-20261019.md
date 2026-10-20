@@ -1,5 +1,66 @@
 # SA-06D 有限委托授权：本地实施与验证记录
 
+## 2026-10-20 本轮前置修复获准追加至既有草稿
+
+Owner 已另行明确授权：将下节 **13 个修复文件及本 MD** 普通追加至现有草稿 #6337，并运行既有合成 CI。推送前核得远端仍为 `8f12ba5757f066b6e76693f8d895f4d3f5eaa1c1`，与本地父提交相同；不更换叠层 base、不强推、不新开 PR/切片。本次授权只覆盖这个已验补丁和既有合成 CI，不含合并、部署、客户数据读取或真实发送。下文“尚未获准/未推送”等表述保留为各次验证时点记录，不能误读为本轮状态。
+
+本地通过仍分别是后端 328/328、浏览器登记 6/6、workflow 合同 35/35、provenance 1/1 及四组变异，不代签正式 CI。新 head 必须逐项核对前置测试、正式 Chromium/PLM、POST202/ABORTED、实际停止和清理、宜搭 71 项及后置 SQL；pending/skipped 不算通过，旧失败与风险全部保留。实际提交、run/head 与结果在后续本地续记，不预填成功。
+
+## 2026-10-20 本轮 CI 前置失败：本地最小修复，不发布
+
+本节对应 owner 最新授权：只在现有 #6337 内诊断、最小修复、本地合成与 MD；**不提交/推送、不重跑 CI、不合并/部署、不读取客户数据、不真实发送**。活动修复工作树为 `C:/Users/zen08/.codex/worktrees/sa06d-publish-20261020/metasheet`，代码基线/远端 head 均为 `8f12ba5757f066b6e76693f8d895f4d3f5eaa1c1`。下方发布授权与成功记录均为历史事件，不能作为本轮再发布授权或当前正式 CI 通过证据。
+
+### 远端实际失败与边界
+
+- Plugin System Tests `39364116468` attempt 1，按名字定位 `test (20.x)` job `118436849341`：core 前置 9 文件/9 测试失败，1200 文件/23936 测试通过，172 文件/1755 测试跳过。此计数属于原正式 CI，不与本地定向计数合并。PLM manual/interval、remaining-unknown、宜搭 71 项、checkpoint 与后置 SQL 均未执行，不能借历史成功解除正式门。
+- 浏览器工作流 `39364014071` 的 ownership/collection 检查 6 项中 1 项失败：新增 `apps/web/src/services/integration/yidaAutomation.ts` 未进入该工作流的精确路径分类器。浏览器尚未运行，不是本轮捕获到 ABORTED。
+- attendance 清理步骤实际是连接拒绝：前置 core 失败发生在 `Start Postgres` 之前，创建隔离 attendance 数据库的步骤也被跳过，但清理原为无条件 `always()`。它不是 PLM `host.stop` 失败。
+- 公开失败日志仅按固定标签/计数/哈希读取。core 失败日志 SHA `e072e2a42686dd4e1a6f4299ddf303f2fd85cb31bbd56f8ed621c8dcd90d1869`；独立清理段 13 行，SHA `1bec59bdd4497630879104f827281610d396f8a01e1719623315ddcbb44ac85f`，固定分类 `connectionRefused=true`、`dropdbFailure=true`、exit 1。未读取私有 CI 产物或输出响应、参数、凭据及堆栈。
+
+### 13 文件最小改动
+
+本轮不改生产运行时、数据库迁移、权限默认值、超时预算或既有安全断言。改动仅为 10 个后端测试文件、两个已有 workflow 和一个已接入 CI 的 workflow 合同测试文件：
+
+1. 五个历史迁移测试显式承认后来加入的 `integration_yida_send_authorized`，仍检查各自历史增量/回滚。现行完整枚举另在原 authoring suite 中检查：精确等于应用枚举加数据库既有 `notify` / `update_field` 两个历史值；并检查本次只比前序迁移增加一个 YiDa action、不得重复。不是给所有未来 action 开白名单。
+2. 原 action drift guard 继续覆盖每个 action；仅 YiDa 使用已批准的 interval/slot 合法形状，另加 record-trigger 拒绝负例。
+3. host AST 构造参数精确检查由 8 项更新为 9 项；原第八项读取 producer 断言保留，第九项必须逐参数转发给真正的 YiDa producer。
+4. 生命周期变异 harness 显式处理新增 installed-binding 导入，工厂若被调用立即抛错；变异必须命中“提前停止”布尔断言，缺依赖等任意异常不再被算作成功杀死变异。
+5. pre-JWT 清单精确补入 YiDa 的 no-store/JSON parser，另钉住管理 router 在 JWT 之后、错误处理中间件在 router 之后。没有把业务路由移到匿名面。
+6. 浏览器分类器只增加上述一个具体服务文件，不使用宽泛匹配或跳过 ownership 检查。
+7. attendance 创建步骤增加稳定 `id`；清理只排除 create outcome 为 absent/skipped，success/failure/cancelled 均仍清理，原 `dropdb` 命令和失败传播不变。合同测试读取实际 YAML，检查五类状态，并用 PATH 桩执行实际 bash 命令验证 argv/exit；**这不是一次真实 PG 删除或 GitHub Actions 调度器实跑**。
+
+### 本地合成结果与证据归属
+
+新建非 root 原生隔离候选目录，源自既有 `0353c681c75b73880689e537a47fe7eb44b9e8c7b21b8bc0f6c1f26f065381b7` 的 6781 文件冻结集合；补充测试所需 attendance 插件源码及 provenance 的三个原始输入，均不含 `.env`。生产源不改，13 个修复文件以 LF 精确投影。Node 网络/凭据读取守卫在父进程及每个 Vitest worker 加载，10 个 worker 回执齐全；仅实际测试自建的 localhost HTTP 连接 26 次，禁止连接/凭据读取均 0。**本次不是 Linux network namespace 证明，也不是宜搭完整应用重新验收。**
+
+| 范围 | 修前/修后实际结果 | 说明 |
+| --- | --- | --- |
+| 后端 10 个整文件 | 325 项中 9 失败 → 328/328 通过 | 新增 3 项，0 pending/收集失败；原 30 秒 test /15 秒 hook，单 worker、0 retry |
+| 浏览器 ownership/collection 原整文件 | 5/6 → 6/6 | 只验证 CI 分类/收集，不声称执行了页面或捕获 POST202 |
+| 宜搭 workflow 原整文件 | 35/35 | 包含新增 2 项清理合同；0 skip/cancel |
+| 原 package provenance | 1/1 | 补齐原始输入后通过；未重打 pin、未修改运行时字节 |
+
+后端修前 stdout SHA `68e9cd289551ecbd509cd82d301f1e795314e3ac63ca215e7b923713085c4e62`，修后 `eedc70fde5e04ee2e4dbc447206f58e2401532b93794b15bf30c15070efc059d`；stderr 均 `5a80dd2a9d3a2979e5a118545211998186766ae7bdb74a2429d461e408affee2`。浏览器修后 stdout `aaaaf98615ed3e18e0ef7ca24eb3a322acfd56b11df671514c94f32732157248`，workflow `af47e1b36a9a76208ca541eddee8eb92a68c5b1af2a0bf42c84eded20e82bc77`，provenance `a2719a9714372ad3d4813763a31e28b3b66dd59617fc5bb30382993b51d62d1c`。
+
+保留准备/候选失败：最初候选缺 attendance 插件源码、浏览器收集 harness 缺 pnpm PATH、provenance 候选缺三个原输入；补齐后分别重验，不把收集失败算业务失败或通过。新增枚举断言首次漏考虑两个数据库历史值，导致 327/328，已显式修正为完整集合；该失败回执亦保留。首次汇总脚本因 runner 路径错误在测试前退出，未产生有效验收结果，修正工具路径后才取得上述通过。早期只有父进程守卫的基线不能冒充逐 worker 隔离证明，最终基线/候选均补足 10 个 worker 回执。
+
+四组整文件变异实跑完成，均在独立 owned 候选中精确改一个唯一命中点，`finally` 还原并校验原字节；没有改 Windows 工作树的生产文件：
+
+| 变异 | 实际致红 | stdout SHA |
+| --- | --- | --- |
+| 删除最新迁移的 YiDa action | 328 项中仅新增完整枚举断言失败 | `38f8b227902a01a92902f00b7593924b121dbd35191df10b0de2c5a78c0f01f0` |
+| 第九 producer 错接读取 producer | 328 项中仅 host 装配断言失败；第八项不动 | `a9e89db2afa034b008e16a55c793b00ce2454341d1798066bba108dc49323978` |
+| 撤掉浏览器精确路径登记 | 6 项中 1 项失败，真实分类器未触发 | `1ad61f47f34a0f3e7ccf1aaff077e2f14bb62e3a2ed144a32ec750e3115a7497` |
+| 清理恢复无条件 always | 35 项中 2 项失败，命中 create-outcome 合同 | `c59320d01ed179df2cd60686e520027dca2375831c789aa67e866e10b1acb67b` |
+
+workflow 正控中另含“只在 create success 才清理”的内存变异，必须因 failure/cancelled 漏清理而致红。停止生命周期原变异也已随 328 项执行，其严格 `AssertionError/actual=true/expected=false` 断言通过；不把缺依赖或普通异常当变异证据。
+
+最终独立回读结果：6781 个冻结文件中 6769 个未改、12 个为本轮测试/接线文件，另外一个浏览器 workflow 在冻结集合外；全部 13 个修复文件与 Windows 候选的 LF 字节一致，集合 SHA `46a262a1879dcca8617e028c60df9b1dd78c713cde882290f70eab2e5af36036`。运行时和迁移与原冻结源一致，变异目标全部还原；四个通过套件 stdout/stderr 共 8 个哈希与各自原日志相符。本地辅助工具及脱敏回执位于本次 owned 候选 `tmp/`，未提交；MD 不冒称这些工具已进入 CI。
+
+续轮只读收口：再次核对 HEAD 和 13 个候选文件未漂移，实际解析原 `vitest.config.ts` 的默认 include / 完整 exclude（使用当前安装 Vitest defaults 与 glob matcher），10 个相关单元测试文件全部属于原默认收集集、0 被排除；核对 core package 的 `test: vitest` 与现有 core、宜搭 workflow 合同、浏览器 ownership 三处真实工作流命令，新增断言仍由原文件/原命令承载，无另建泳道或依赖临时 harness 才收集的问题。工具仅解析配置/命令，没有执行 GitHub Actions；Node 守卫禁止连接/凭据读取/允许连接均 0。这是收集与接线的静态补证，不代替整仓测试、实际 Actions 条件求值或正式 CI 成功。原始目标 MD 位于独立 `integration-goals` 工作树，未复制到本补丁、未缩减其目标，也未标整线完成。
+
+本轮本地收尾通过，但整轮正式 CI 仍失败，未重跑或改变远端状态；ABORTED、实际 host.stop/PG 清理、宜搭 71 与后置 SQL 的正式同 head 证据仍未取得。这次没有重启完整应用或人工 Chrome 试用，没有启动数据库，更没有访问真实宜搭。原 90 秒 host 验收预算及所有生产安全断言均未修改，既有真实路径证明仍属于原冻结候选/历史运行。旧 SQL57014、250ms lease、WSL 回拨、90 秒窄裕量等风险不因本次前置修复被销账。下一道发布门需要另行获准后，把此本地补丁带入既有 #6337 并取得同 head 正式 CI 结果；当前不执行该动作。
+
 ## 2026-10-20 已获发布到草稿与既有合成 CI 的授权
 
 Owner 已明确批准：先独立提交、推送 GOV-08 决策并开文档 PR，再将已验证补丁及 MD 以普通追加提交更新至现有草稿 #6337，运行既有合成 CI。独立决策已发布为 [PR #6462](https://github.com/zensgit/metasheet2/pull/6462)，文档提交 `0da3ee27f`；尚未合并。本代码提交仍以 #6337 当前远端 `e7305e65167bd512d814a88036cffd3462855c36` 为父提交，不改叠层 base、不强推、不新开功能 PR。

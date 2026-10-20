@@ -6,10 +6,10 @@ import {
 } from '../../src/db/migrations/zzzz20260720120000_add_write_approval_form_values_automation_action'
 
 describe('write_approval_form_values automation action migration (FWB activation)', () => {
-  it('keeps the historical constraint in sync except the later read-preview migration', () => {
-    // The new read-preview migration owns the latest complete-enum drift guard.
+  it('keeps the historical constraint in sync except the later explicit integration migrations', () => {
+    // The authorized-YiDa migration owns the latest complete-enum drift guard.
     for (const actionType of ALL_ACTION_TYPES) {
-      if (actionType === 'integration_read_preview') continue
+      if (actionType === 'integration_read_preview' || actionType === 'integration_yida_send_authorized') continue
       expect(AUTOMATION_ACTION_TYPES_WITH_FWB).toContain(actionType)
     }
   })
