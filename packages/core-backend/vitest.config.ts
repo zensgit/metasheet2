@@ -1595,6 +1595,12 @@ export default defineConfig({
       // (zero assertions, reported green). Both points are now present.
       'tests/integration/multitable-webhook-retry-tick.test.ts',
       'tests/integration/multitable-webhook-durable-dedup.test.ts',
+      // Subscription webhook delivery-rule suites (floor, switch-on, permission matrix): DATABASE_URL-gated
+      // (describeIfDatabase) with an EXPECT_DB sentinel. Excluded from the no-DB default job so they cannot
+      // skip-green; they belong in the multitable real-DB integration step as WHOLE FILES.
+      'tests/integration/multitable-webhook-floor-realdb.test.ts',
+      'tests/integration/multitable-webhook-switch-on-realdb.test.ts',
+      'tests/integration/multitable-webhook-scoping-realdb.test.ts',
       // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
