@@ -15,7 +15,12 @@
  *    on the same backend, which goes back to the pool idle;
  *  - a restart that calls a still-open transaction "ended" destroys the backend; a backend terminated
  *    behind a handed-over transaction is destroyed by `end(err)`; real class-00 contention holds up
- *    only the units that need class-00; a single uncontended handover is counted, not logged.
+ *    only the units that need class-00; a single uncontended handover is counted, not logged;
+ *  - A08 resource legs (Codex A14-P2-02), on a hand-driven coordination clock and a real pool: a long
+ *    unit queued on its org's long quota or on the global long quota borrows nothing while it waits,
+ *    another org gets through on the remaining global capacity, the short class keeps working while the
+ *    long class is saturated, and a background unit's quota wait ends exactly at the 30 s boundary as
+ *    capacity busy without borrowing. Each leg ends with pool, server, quota and ledger at baseline.
  *
  * Observations go through a separate pool; every borrowed connection is destroyed at the end.
  */
@@ -23,6 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 
+import { SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS } from '../../src/attendance/coordination/settlement-coordination-budget'
 import { deriveSettlementCoordinationCapacityV1 } from '../../src/attendance/coordination/settlement-coordination-capacity'
 import {
   AttendanceCoordinationConnectionUncertainError,
@@ -33,15 +39,19 @@ import { SETTLEMENT_COORDINATION_KEY1, buildSettlementCoordinationKeyV1 } from '
 import { coordinatedTransactionV1 } from '../../src/attendance/coordination/settlement-coordination-port'
 import { buildSettlementCoordinationS1Sql, buildSettlementCoordinationS2Sql } from '../../src/attendance/coordination/settlement-coordination-statements'
 import {
+  SETTLEMENT_COORDINATION_CAPACITY_BUSY,
   SettlementCoordinationAcquireError,
   createSettlementCoordinatorV1,
   shouldLogSettlementCoordinationAttemptV1,
   type SettlementCoordinationAttemptRecordV1,
+  type SettlementCoordinationHandleV1,
   type SettlementCoordinationPoolV1,
   type SettlementCoordinationUnitRequestV1,
+  type SettlementCoordinationUnitV1,
   type SettlementCoordinatorV1,
 } from '../../src/attendance/coordination/settlement-coordinator'
 import { advisoryLocksOf, backendPid, isBigintLock, isDedicatedLock, waitForBackendGone } from '../helpers/settlement-coordination-db'
+import { ManualCoordinationClock } from '../helpers/settlement-coordination-manual-clock'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -629,6 +639,426 @@ describeIfDatabase('attendance settlement coordination — coordinator on a real
     } finally {
       holder.release(DESTROY)
       await pool.end()
+    }
+  })
+
+  // ── A14-P2-02 (A08): long / org / global quotas and the background boundary on a real pool ──
+  //
+  // The coordinator runs on a hand-driven clock and a real pool: a quota wait ends only when the test
+  // moves time (so the 30 s boundary is reached without waiting 30 s), while every connection, S1 / S2
+  // and COMMIT goes to the server. "Borrows nothing" is read from the pool itself (cumulative 'acquire'
+  // events, connections checked out, the pool's own queue) and from the server (the backends this pool
+  // opened, found by a per-leg application_name), and those facts are asserted before any counter
+  // object. Quota snapshots are only used to know when a waiter has queued, and then pinned as a whole.
+  // The units do not need class-00, so the only lock a unit takes is its own org's dedicated key: the
+  // orgs never contend with each other, and nothing but quota can hold a unit up.
+
+  const A08_LONG: SettlementCoordinationUnitRequestV1 = {
+    needsClassZero: false,
+    quotaClass: 'long',
+    handover: { isolation: 'SERIALIZABLE', timeouts: { kind: 'none' }, entryLabel: 'test.a08.long' },
+  }
+
+  function a08Request(entryLabel: string, extra: Partial<SettlementCoordinationUnitRequestV1> = {}): SettlementCoordinationUnitRequestV1 {
+    return { ...A08_LONG, ...extra, handover: { ...A08_LONG.handover, entryLabel } }
+  }
+
+  function a08Track<T>(promise: Promise<T>): { done: boolean; value?: T; error?: unknown } {
+    const box: { done: boolean; value?: T; error?: unknown } = { done: false }
+    promise.then(
+      (value) => {
+        box.done = true
+        box.value = value
+      },
+      (error) => {
+        box.done = true
+        box.error = error
+      },
+    )
+    return box
+  }
+
+  /** Real-time poll; falls through on timeout so the assertion that follows names what is wrong. */
+  async function a08WaitUntil(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
+  /** Real time for a waiter to misbehave (borrow, try, give up) if it were going to. */
+  function a08Pause(ms = 100): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  function a08Setup(max: number) {
+    const application = `p11_a08_${crypto.randomUUID().slice(0, 8)}`
+    const pool = new Pool({ connectionString: dbUrl, max, application_name: application })
+    const clock = new ManualCoordinationClock()
+    const capacity = deriveSettlementCoordinationCapacityV1({ poolMax: 20 })
+    const records: SettlementCoordinationAttemptRecordV1[] = []
+    const coordinator = createSettlementCoordinatorV1({
+      pool: asCoordinationPool(pool),
+      capacity,
+      connectTimeoutMs: 10_000,
+      clock,
+      onAttempt: (record) => records.push(record),
+    })
+    const recorder = recordBorrows(pool)
+    const units: SettlementCoordinationUnitV1[] = []
+    const live = new Set<SettlementCoordinationHandleV1>()
+
+    const open = (request: SettlementCoordinationUnitRequestV1): SettlementCoordinationUnitV1 => {
+      const unit = coordinator.openUnit(request)
+      units.push(unit)
+      return unit
+    }
+    const start = (unit: SettlementCoordinationUnitV1, org: string) =>
+      a08Track(
+        unit.acquire(org).then((handle) => {
+          live.add(handle)
+          return handle
+        }),
+      )
+    /** An acquisition that must go through without anyone moving the clock. */
+    const acquireNow = async (unit: SettlementCoordinationUnitV1, org: string): Promise<SettlementCoordinationHandleV1> => {
+      const box = start(unit, org)
+      await a08WaitUntil(() => box.done)
+      expect({ done: box.done, error: box.error }).toEqual({ done: true, error: undefined })
+      return box.value as SettlementCoordinationHandleV1
+    }
+    const commitAndEnd = async (handle: SettlementCoordinationHandleV1): Promise<void> => {
+      expect(await commitSettlementCoordinationTransactionV1(handle.client, handle.credential)).toEqual({ kind: 'committed' })
+      live.delete(handle)
+      handle.end()
+    }
+    /** The server's view: the state of every backend this pool opened, sorted. */
+    const backends = async (): Promise<string[]> => {
+      const { rows } = await observer.query('SELECT state FROM pg_stat_activity WHERE application_name = $1 ORDER BY state', [application])
+      return rows.map((row) => String(row.state))
+    }
+    /** What the pool and the server show: cumulative checkouts, checked out now, the pool's queue, backend states. */
+    const poolFacts = async () => ({
+      borrows: recorder.borrows.length,
+      checkedOut: pool.totalCount - pool.idleCount,
+      poolWaiting: pool.waitingCount,
+      backends: await backends(),
+    })
+    const quotaSnapshot = () => coordinator.deps.quota.snapshot()
+    const orgWaiting = (org: string, quotaClass: 'short' | 'long'): number =>
+      quotaSnapshot().orgs.find((entry) => entry.org === org && entry.quotaClass === quotaClass)?.waiting ?? 0
+    const recordsOf = (entryLabel: string) => records.filter((record) => record.entryLabel === entryLabel)
+
+    /** Leg 4: pool, server and accounting are back where they started. */
+    const expectA08Baseline = async (): Promise<void> => {
+      expect({ checkedOut: pool.totalCount - pool.idleCount, poolWaiting: pool.waitingCount }).toEqual({ checkedOut: 0, poolWaiting: 0 })
+      // Every checkout went back exactly once, and none of them had to be destroyed.
+      expect(recorder.borrows.map((borrow) => borrow.releases)).toEqual(recorder.borrows.map(() => [false]))
+      expect(await backends()).toEqual(Array.from({ length: pool.totalCount }, () => 'idle'))
+      const locks = await observer.query(
+        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE a.application_name = $1 AND l.locktype = 'advisory'`,
+        [application],
+      )
+      expect(locks.rows[0].n).toBe(0)
+      expectBaseline(coordinator)
+      expect(coordinator.deps.ledger.snapshot()).toEqual({ inFlight: { short: 0, long: 0 }, abandoned: { short: 0, long: 0 }, holding: [] })
+      expect(coordinator.deps.prober.snapshot()).toEqual([])
+      expect(clock.pendingTimers).toBe(0)
+    }
+
+    /** Whatever a failing leg left: handles destroyed, units closed (which ends their waits), pool ended. */
+    const cleanup = async (): Promise<void> => {
+      for (const handle of live) {
+        try {
+          handle.end(DESTROY)
+        } catch {
+          // already ended
+        }
+      }
+      live.clear()
+      for (const unit of units) {
+        try {
+          unit.close()
+        } catch {
+          // closing a unit that held an attempt destroys it and throws; nothing more to do here
+        }
+      }
+      recorder.stop()
+      await pool.end()
+    }
+
+    return {
+      pool,
+      clock,
+      capacity,
+      coordinator,
+      recorder,
+      open,
+      start,
+      acquireNow,
+      commitAndEnd,
+      poolFacts,
+      quotaSnapshot,
+      orgWaiting,
+      recordsOf,
+      expectA08Baseline,
+      cleanup,
+    }
+  }
+
+  const IDLE_ZERO = { held: 0, waiting: 0 }
+  const NO_WAITS = { 'class-00': 0, dedicated: 0, quota: 0, connect: 0, cleaning: 0 }
+
+  it('A08 long class, org quota saturated: a second long unit of the org waits without borrowing a connection, while another org gets through on the remaining global capacity', async () => {
+    const s = a08Setup(4)
+    const orgA = crypto.randomUUID()
+    const orgB = crypto.randomUUID()
+    try {
+      // The contract under test: one long unit per org, two globally (pool 20).
+      expect({ longTxnSlots: s.capacity.longTxnSlots, orgLongTxnSlots: s.capacity.orgLongTxnSlots }).toEqual({ longTxnSlots: 2, orgLongTxnSlots: 1 })
+
+      const holderA = s.open(a08Request('test.a08.holder-a'))
+      const heldA = await s.acquireNow(holderA, orgA)
+      expect(await s.poolFacts()).toEqual({ borrows: 1, checkedOut: 1, poolWaiting: 0, backends: ['idle in transaction'] })
+
+      // A second long unit of the same org queues on the org's long quota and borrows nothing.
+      const waiterA = s.open(a08Request('test.a08.waiter-a'))
+      const waiting = s.start(waiterA, orgA)
+      await a08WaitUntil(() => waiting.done || s.orgWaiting(orgA, 'long') === 1)
+      await a08Pause()
+      expect(await s.poolFacts()).toEqual({ borrows: 1, checkedOut: 1, poolWaiting: 0, backends: ['idle in transaction'] })
+      expect(waiting.done).toBe(false)
+      expect(s.coordinator.deps.prober.snapshot()).toEqual([])
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 1, waiting: 0 } },
+        orgs: [{ org: orgA, quotaClass: 'long', held: 1, waiting: 1 }],
+      })
+
+      // Another org goes through on the global capacity that is left, and that saturates it.
+      const holderB = s.open(a08Request('test.a08.holder-b'))
+      const heldB = await s.acquireNow(holderB, orgB)
+      expect(await s.poolFacts()).toEqual({ borrows: 2, checkedOut: 2, poolWaiting: 0, backends: ['idle in transaction', 'idle in transaction'] })
+      expect(waiting.done).toBe(false)
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 2, waiting: 0 } },
+        orgs: [
+          { org: orgA, quotaClass: 'long', held: 1, waiting: 1 },
+          { org: orgB, quotaClass: 'long', held: 1, waiting: 0 },
+        ],
+      })
+
+      // Global capacity comes back, but the waiter is held by its org's quota, not by the global one.
+      await s.commitAndEnd(heldB)
+      await a08Pause()
+      expect(await s.poolFacts()).toEqual({ borrows: 2, checkedOut: 1, poolWaiting: 0, backends: ['idle', 'idle in transaction'] })
+      expect(waiting.done).toBe(false)
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 1, waiting: 0 } },
+        orgs: [{ org: orgA, quotaClass: 'long', held: 1, waiting: 1 }],
+      })
+
+      // The org's holder ends: the waiter takes the permit, borrows once and is handed a transaction.
+      await s.commitAndEnd(heldA)
+      await a08WaitUntil(() => waiting.done)
+      expect({ done: waiting.done, error: waiting.error }).toEqual({ done: true, error: undefined })
+      expect(await s.poolFacts()).toEqual({ borrows: 3, checkedOut: 1, poolWaiting: 0, backends: ['idle', 'idle in transaction'] })
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 1, waiting: 0 } },
+        orgs: [{ org: orgA, quotaClass: 'long', held: 1, waiting: 0 }],
+      })
+      await s.commitAndEnd(waiting.value as SettlementCoordinationHandleV1)
+      const [waiterRecord] = s.recordsOf('test.a08.waiter-a')
+      expect(waiterRecord.events.map((event) => event.kind)).toEqual(['quota', 'connect', 's1', 'handover'])
+      expect(waiterRecord.events[0].detail).toEqual({ waitedMs: 0, queued: true })
+      expect(s.recordsOf('test.a08.waiter-a')).toHaveLength(1)
+
+      for (const unit of [holderA, waiterA, holderB]) unit.close()
+      await s.expectA08Baseline()
+    } finally {
+      await s.cleanup()
+    }
+  })
+
+  it('A08 long class, global quota saturated: a long unit of a third org waits without borrowing a connection, while a short unit of that same org runs a real transaction on its own quota', async () => {
+    const s = a08Setup(5)
+    const orgX = crypto.randomUUID()
+    const orgY = crypto.randomUUID()
+    const orgZ = crypto.randomUUID()
+    try {
+      const holderX = s.open(a08Request('test.a08.holder-x'))
+      const holderY = s.open(a08Request('test.a08.holder-y'))
+      const heldX = await s.acquireNow(holderX, orgX)
+      const heldY = await s.acquireNow(holderY, orgY)
+      expect(await s.poolFacts()).toEqual({ borrows: 2, checkedOut: 2, poolWaiting: 0, backends: ['idle in transaction', 'idle in transaction'] })
+
+      // A third org's long unit gets its org permit and queues on the saturated global long quota.
+      const longZ = s.open(a08Request('test.a08.long-z'))
+      const waiting = s.start(longZ, orgZ)
+      await a08WaitUntil(() => waiting.done || s.quotaSnapshot().global.long.waiting === 1)
+      await a08Pause()
+      expect(await s.poolFacts()).toEqual({ borrows: 2, checkedOut: 2, poolWaiting: 0, backends: ['idle in transaction', 'idle in transaction'] })
+      expect(waiting.done).toBe(false)
+      expect(s.coordinator.deps.prober.snapshot()).toEqual([])
+      // While it waits for the global quota it holds only its org quota (quota module, §3.2 step 1).
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 2, waiting: 1 } },
+        orgs: [
+          { org: orgX, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgY, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgZ, quotaClass: 'long', held: 1, waiting: 0 },
+        ],
+      })
+
+      // Short and long are separate quotas (TXN / ORG_TXN vs LONG / 1 per org): a short unit of the
+      // very org whose long unit is queued borrows, runs and commits a real transaction meanwhile.
+      const shortZ = s.open(a08Request('test.a08.short-z', { quotaClass: 'short' }))
+      const heldShort = await s.acquireNow(shortZ, orgZ)
+      const level = await heldShort.client.query("SELECT current_setting('transaction_isolation') AS level")
+      expect(level.rows[0]).toEqual({ level: 'serializable' })
+      expect(await s.poolFacts()).toEqual({
+        borrows: 3,
+        checkedOut: 3,
+        poolWaiting: 0,
+        backends: ['idle in transaction', 'idle in transaction', 'idle in transaction'],
+      })
+      expect(waiting.done).toBe(false)
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: { held: 1, waiting: 0 }, long: { held: 2, waiting: 1 } },
+        orgs: [
+          { org: orgX, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgY, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgZ, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgZ, quotaClass: 'short', held: 1, waiting: 0 },
+        ],
+      })
+      await s.commitAndEnd(heldShort)
+      await a08Pause()
+      expect(await s.poolFacts()).toEqual({ borrows: 3, checkedOut: 2, poolWaiting: 0, backends: ['idle', 'idle in transaction', 'idle in transaction'] })
+      expect(waiting.done).toBe(false)
+
+      // A global long permit comes back: the queued unit borrows once and is handed a transaction.
+      await s.commitAndEnd(heldY)
+      await a08WaitUntil(() => waiting.done)
+      expect({ done: waiting.done, error: waiting.error }).toEqual({ done: true, error: undefined })
+      expect(await s.poolFacts()).toEqual({ borrows: 4, checkedOut: 2, poolWaiting: 0, backends: ['idle', 'idle in transaction', 'idle in transaction'] })
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 2, waiting: 0 } },
+        orgs: [
+          { org: orgX, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgZ, quotaClass: 'long', held: 1, waiting: 0 },
+        ],
+      })
+      await s.commitAndEnd(waiting.value as SettlementCoordinationHandleV1)
+      await s.commitAndEnd(heldX)
+      expect(s.recordsOf('test.a08.long-z').map((record) => record.events.map((event) => event.kind))).toEqual([['quota', 'connect', 's1', 'handover']])
+      expect(s.recordsOf('test.a08.short-z').map((record) => record.events.map((event) => event.kind))).toEqual([['quota', 'connect', 's1', 'handover']])
+
+      for (const unit of [holderX, holderY, longZ, shortZ]) unit.close()
+      await s.expectA08Baseline()
+    } finally {
+      await s.cleanup()
+    }
+  })
+
+  it('A08 background unit: a quota wait lasts exactly the 30 s boundary on the coordination clock, borrows no connection, then fails as capacity busy and leaves no quota, connection or in-flight unit behind', async () => {
+    const s = a08Setup(4)
+    const orgX = crypto.randomUUID()
+    const orgY = crypto.randomUUID()
+    const orgZ = crypto.randomUUID()
+    try {
+      expect(SETTLEMENT_COORDINATION_BACKGROUND_QUOTA_WAIT_MS).toBe(30_000)
+      const holderX = s.open(a08Request('test.a08.bg-holder-x'))
+      const holderY = s.open(a08Request('test.a08.bg-holder-y'))
+      const heldX = await s.acquireNow(holderX, orgX)
+      const heldY = await s.acquireNow(holderY, orgY)
+
+      // One background unit queues on its org's long quota, the other on the global long quota
+      // (holding its own org permit while it waits).
+      const onOrg = s.open(a08Request('test.a08.bg-on-org', { background: true }))
+      const onGlobal = s.open(a08Request('test.a08.bg-on-global', { background: true }))
+      const waitingOnOrg = s.start(onOrg, orgX)
+      const waitingOnGlobal = s.start(onGlobal, orgZ)
+      await a08WaitUntil(
+        () => (waitingOnOrg.done || s.orgWaiting(orgX, 'long') === 1) && (waitingOnGlobal.done || s.quotaSnapshot().global.long.waiting === 1),
+      )
+      await a08Pause()
+      const queuedFacts = { borrows: 2, checkedOut: 2, poolWaiting: 0, backends: ['idle in transaction', 'idle in transaction'] }
+      const queuedQuota = {
+        global: { short: IDLE_ZERO, long: { held: 2, waiting: 1 } },
+        orgs: [
+          { org: orgX, quotaClass: 'long', held: 1, waiting: 1 },
+          { org: orgY, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgZ, quotaClass: 'long', held: 1, waiting: 0 },
+        ],
+      }
+      expect(await s.poolFacts()).toEqual(queuedFacts)
+      expect({ onOrg: waitingOnOrg.done, onGlobal: waitingOnGlobal.done }).toEqual({ onOrg: false, onGlobal: false })
+      expect(s.quotaSnapshot()).toEqual(queuedQuota)
+
+      // One millisecond before the boundary (far beyond the 5 s request budget) both still wait, empty-handed.
+      await s.clock.advance(29_999)
+      await a08Pause()
+      expect(await s.poolFacts()).toEqual(queuedFacts)
+      expect({ onOrg: waitingOnOrg.done, onGlobal: waitingOnGlobal.done }).toEqual({ onOrg: false, onGlobal: false })
+      expect(s.quotaSnapshot()).toEqual(queuedQuota)
+
+      // At the boundary both fail with the defined capacity-busy code; the quota wait spent no budget.
+      await s.clock.advance(1)
+      await a08WaitUntil(() => waitingOnOrg.done && waitingOnGlobal.done)
+      expect(s.clock.now()).toBe(30_000)
+      for (const [unit, waiting] of [
+        [onOrg, waitingOnOrg],
+        [onGlobal, waitingOnGlobal],
+      ] as const) {
+        expect(waiting.done).toBe(true)
+        expect(waiting.error).toBeInstanceOf(SettlementCoordinationAcquireError)
+        const error = waiting.error as SettlementCoordinationAcquireError
+        expect({ code: error.code, waits: error.waits }).toEqual({ code: 'ATTENDANCE_COORDINATION_CAPACITY_BUSY', waits: NO_WAITS })
+        expect(error.code).toBe(SETTLEMENT_COORDINATION_CAPACITY_BUSY)
+        expect({ spentMs: unit.budget.spentMs, remaining: unit.budget.remaining(), waits: unit.budget.waits() }).toEqual({ spentMs: 0, remaining: 5000, waits: NO_WAITS })
+      }
+      for (const entryLabel of ['test.a08.bg-on-org', 'test.a08.bg-on-global']) {
+        expect(
+          s.recordsOf(entryLabel).map((record) => ({
+            outcome: record.outcome,
+            code: record.code,
+            events: record.events.map((event) => ({ kind: event.kind, detail: event.detail })),
+          })),
+        ).toEqual([
+          {
+            outcome: 'failed',
+            code: 'ATTENDANCE_COORDINATION_CAPACITY_BUSY',
+            events: [{ kind: 'quota', detail: { waitedMs: 30_000, queued: true, ended: 'deadline' } }],
+          },
+        ])
+      }
+      // Nothing was borrowed, and the org permit of the unit that waited on the global quota came back.
+      expect(await s.poolFacts()).toEqual(queuedFacts)
+      expect(s.quotaSnapshot()).toEqual({
+        global: { short: IDLE_ZERO, long: { held: 2, waiting: 0 } },
+        orgs: [
+          { org: orgX, quotaClass: 'long', held: 1, waiting: 0 },
+          { org: orgY, quotaClass: 'long', held: 1, waiting: 0 },
+        ],
+      })
+      expect(s.coordinator.deps.ledger.snapshot()).toEqual({
+        inFlight: { short: 0, long: 4 },
+        abandoned: { short: 0, long: 0 },
+        holding: [
+          { quotaClass: 'long', lease: true, client: true },
+          { quotaClass: 'long', lease: true, client: true },
+        ],
+      })
+      onOrg.close()
+      onGlobal.close()
+      expect(s.coordinator.deps.ledger.snapshot().inFlight).toEqual({ short: 0, long: 2 })
+
+      await s.commitAndEnd(heldX)
+      await s.commitAndEnd(heldY)
+      holderX.close()
+      holderY.close()
+      await s.expectA08Baseline()
+    } finally {
+      await s.cleanup()
     }
   })
 })
