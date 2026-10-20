@@ -89,5 +89,6 @@
     "Fresh signed embed JWT and Native existing purpose/JTI/entitlement/file/version/checksum protocol; no service account or personal read/approval grant",
     "No images, deployment, production enablement, merge, issue closure or external business notifications"
   ],
-  "private_manifest_sha256": "688003ba9c40d9e9541ec99756a3752246cacfffa1b403a2646fbaead318d82e"
+  "private_manifest_sha256": "688003ba9c40d9e9541ec99756a3752246cacfffa1b403a2646fbaead318d82e",
+  "native_postgres_followup": "native-postgres-verification.json"
 }

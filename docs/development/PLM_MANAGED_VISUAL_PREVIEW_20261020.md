@@ -1,6 +1,6 @@
 # Managed Visual preview: source and component verification
 
-Source: `3f33e36fd7294fbc0e2739d179da5d9f6e592730`; base: `595acaaea2bd5ce72c365809613084595fa4c4a7`.
+Product source: `3f33e36fd7294fbc0e2739d179da5d9f6e592730`; actual Native/PostgreSQL verification source: `163016141a6101a60cd23119f5cb305585f357a3`; base: `595acaaea2bd5ce72c365809613084595fa4c4a7`.
 
 This slice implements the managed entry’s preview and bound-markup path using the existing Native capability provider, Discussion engine and Meta canvas. It is **not full feature, installed-image, backup/restore or total-window acceptance**. The frozen BD6 product consumed by Native #366 is unchanged.
 
@@ -35,8 +35,22 @@ Intermediate failures are retained: the ordinary Vitest config intentionally exc
 
 Compact evidence: `artifacts/plm-managed-visual-preview-20261020/verification.json`. Private immutable receipt manifest SHA256: `688003ba9c40d9e9541ec99756a3752246cacfffa1b403a2646fbaead318d82e`.
 
+## Actual Native PostgreSQL and independent-worker follow-up
+
+The committed repository verifier then passed **all 31 cases, zero skipped/failed/error cases** at `163016141a6101a60cd23119f5cb305585f357a3`. Its existing 27-case gate was increased to 31; the four new cases are mandatory in the same workflow and runtime verifier. It starts the actual Native HTTP application with separate PostgreSQL identity, RBAC and tenant-business stores, real Redis and two independent Meta Node processes. Actual Native authorize/exchange/status/revoke issues the delegation; Meta session rows remain a test fixture. No authentication dependency override or Native test endpoint is installed.
+
+The new cases prove an actual Native PNG and signed public descriptor, bound pin markup created by Native user 42 and read back through another Meta worker, forged checksum/stale-version rejection with valid-current recovery, Visual entitlement disable/restore and delegation revocation stopping preview before another Native capability request. The existing first-party cookie, current Meta/source locks, replay, expiry, root and unlink cases also passed.
+
+The executed Native checkout was `0b013740398690753e761a703cfa0f7dd485c85b`; its entire `src`, locked requirements and Native fixture match the declared `ba07fa952083179c58b5e423b1212eabb2d0c170` source pin. Workflow checkout and report assertions pin ba07 exactly. Before/after fingerprints match for 1,441 source files: `8c2e0510fda8ce3520a1ed8dc6b664b1475e270e327a8273a6d3f134b247d1e2`. Both Meta workers exited 0 with acknowledged shutdown; Native, PostgreSQL and Redis cleanup passed and the owned root was removed. Actionlint passed for the expanded workflow.
+
+The first new fixture run correctly refused a Native registration whose issuer omitted `/installation`; only the disposable coordinator registration was corrected. A subsequent cross-worker comparison exposed UTC versus PostgreSQL `+08:00` timestamp serialization for the same instant. The test now normalizes that timestamp to ISO UTC while comparing the complete remaining comment/markup object. No payload field is discarded, and product timestamp behavior was unchanged. Only the failed case was rerun while diagnosing this; the complete strengthened repository verifier subsequently passed all 31 cases.
+
+The existing 4GiB preflight refused one attempt. Three stopped, explicitly owned synthetic failure roots were fully archived; all 7,030 files in each were size/hash verified from the archive before removing those exact roots. Archives and manifests remain private; no unknown Docker cache, volume, image or business directory was deleted. This own-fixture cleanup is not proof of the separate 8GiB image-build requirement.
+
+Additional compact receipt: `artifacts/plm-managed-visual-preview-20261020/native-postgres-verification.json`; private manifest SHA256 `583e7ec3e5734bb00f3bd13e572a32356cd48c8f3324ab919db2f8e231feb1e8`. These are actual Native provider/route/process results, not a real-browser or service installation proof.
+
 ## Remaining acceptance and publication
 
-Run the managed path against the actual Native Visual provider, actual browser canvas/Discussion markup persistence, current Native RBAC/entitlement/revocation and stale-version/checksum negatives. Verify fresh restored databases and installed runtime-package enable/disable/recovery with explicit configuration handoff. Existing successful plain-Discussion installed74 evidence does not qualify these new Visual changes. Original image-build space floors remain unchanged.
+Complete actual browser canvas/Discussion markup interaction and Native ACL-change controls, then verify fresh restored databases and installed runtime-package enable/disable/recovery with explicit configuration handoff. Existing successful plain-Discussion installed74 evidence does not qualify these new Visual changes. Original image-build space floors remain unchanged.
 
 This branch remains a separate candidate. Publication waits for valuable parent jobs to finish and follows the dependency queue; no active useful job is cancelled. Keep its future PR Draft. Native #366 source pin remains `ba07fa952083179c58b5e423b1212eabb2d0c170`; no repinning, merge, deployment, production enablement or issue closure is authorized by this result.
