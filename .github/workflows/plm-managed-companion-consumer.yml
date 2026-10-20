@@ -100,6 +100,15 @@ jobs:
             tests/unit/plm-managed-discussion.test.ts
           node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-unit.json 174
 
+      - name: Managed Discussion frame and existing token client regressions
+        run: |
+          set -euo pipefail
+          pnpm --filter @metasheet/web exec vitest run --watch=false \
+            tests/plm-managed-discussion.spec.ts tests/plm-managed-discussion-view.spec.ts \
+            tests/plm-embed-discussion-panel.spec.ts tests/plm-embed-read-token.spec.ts tests/plm-embed-write-token.spec.ts \
+            --reporter=json --outputFile=/tmp/plm-managed-discussion-web.json
+          node "$GITHUB_WORKSPACE/scripts/verification/plm-managed-companion-ci/assert-report.mjs" /tmp/plm-managed-discussion-web.json 55
+
       - name: Start owned socket PostgreSQL 16
         run: |
           set -euo pipefail

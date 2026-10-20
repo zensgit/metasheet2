@@ -109,6 +109,7 @@
 // keeps reply disabled forever for that thread and the reply handler returns early -- there is no
 // code path that falls back to sending a bare top-level `{ body }` comment.
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { managedDiscussion } from '../../services/plm/plmManagedDiscussion'
 import {
   createPlmEmbedWriteTokenClient,
   createPlmEmbedReadTokenClient,
@@ -144,6 +145,7 @@ interface ThreadSummary { id: string; status: string }
 
 const props = defineProps<{
   parentOrigin: string | null
+  managedSourceId?: string
   target: { target_type: CreateThreadInput['target_type']; target_id: string }
   visualDraft?: VisualMarkupDraft | null
   selectedCommentId?: string | null
@@ -195,6 +197,17 @@ watch(() => props.parentOrigin, (o) => {
     disposeClient()
     disposeReadClient()
   }
+})
+watch(() => props.managedSourceId, (next, previous) => {
+  if (next === previous) return
+  generation += 1
+  threads.value = []; draft.value = ''; busy.value = false; error.value = null
+  for (const map of [replyDraft, detailLoaded, detailBusy]) for (const key of Object.keys(map)) delete map[key]
+  emit('visual-comments', [])
+  disposeClient(); disposeReadClient()
+  client = createPlmEmbedWriteTokenClient(() => props.parentOrigin)
+  readClient = createPlmEmbedReadTokenClient(() => props.parentOrigin)
+  if (props.parentOrigin) void loadThreads()
 })
 // Real list on mount (and again if the pinned origin transitions to a new truthy value, e.g. the
 // handshake finishes after an initial null render).
@@ -279,7 +292,8 @@ async function loadThreads(): Promise<void> {
   try {
     const token = await freshReadToken(current)
     if (!token || disposed || current !== generation) return
-    const result: PlmDiscussionReadResult = await listDiscussionThreads(token)
+    const result: PlmDiscussionReadResult = await (props.managedSourceId !== undefined
+      ? managedDiscussion(token, props.managedSourceId, { operation: 'list' }) : listDiscussionThreads(token))
     if (disposed || current !== generation) return
     if (result.ok) {
       const data = result.data as { threads?: unknown[] } | null
@@ -304,7 +318,8 @@ async function loadDetail(threadId: string): Promise<void> {
   try {
     const token = await freshReadToken(current)
     if (!token || disposed || current !== generation) return
-    const result: PlmDiscussionReadResult = await getDiscussionThread(token, threadId)
+    const result: PlmDiscussionReadResult = await (props.managedSourceId !== undefined
+      ? managedDiscussion(token, props.managedSourceId, { operation: 'thread', threadId }) : getDiscussionThread(token, threadId))
     if (disposed || current !== generation) return
     if (result.ok) {
       const t = asThread(result.data)
@@ -360,7 +375,9 @@ async function create(): Promise<void> {
   if (!visual) { emit('visual-rejected', 'stale'); return }
   const target = { ...props.target }
   await run(
-    (token) => createDiscussionThread(token, { target_type: target.target_type, target_id: target.target_id, body, ...visual }),
+    (token) => props.managedSourceId !== undefined
+      ? managedDiscussion(token, props.managedSourceId, { operation: 'create', body: { target_type: target.target_type, target_id: target.target_id, body, ...visual } })
+      : createDiscussionThread(token, { target_type: target.target_type, target_id: target.target_id, body, ...visual }),
     (t) => { upsert(t); draft.value = ''; emit('clear-visual-draft') },
     Boolean(props.visualDraft),
   )
@@ -378,7 +395,9 @@ async function reply(threadId: string): Promise<void> {
   const parentId = thread?.comments[0]?.id
   if (typeof parentId !== 'string' || !parentId) return // never send without a real root id
   await run(
-    (token) => addDiscussionComment(token, threadId, { body, parent_comment_id: parentId, ...visual }),
+    (token) => props.managedSourceId !== undefined
+      ? managedDiscussion(token, props.managedSourceId, { operation: 'comment', threadId, body: { body, parent_comment_id: parentId, ...visual } })
+      : addDiscussionComment(token, threadId, { body, parent_comment_id: parentId, ...visual }),
     (t) => { upsert(t); replyDraft[threadId] = ''; emit('clear-visual-draft') },
     Boolean(props.visualDraft),
   )
@@ -386,7 +405,9 @@ async function reply(threadId: string): Promise<void> {
 
 async function transition(threadId: string, kind: 'resolve' | 'reopen'): Promise<void> {
   await run(
-    (token) => (kind === 'resolve' ? resolveDiscussionThread : reopenDiscussionThread)(token, threadId),
+    (token) => props.managedSourceId !== undefined
+      ? managedDiscussion(token, props.managedSourceId, { operation: kind, threadId, body: {} })
+      : (kind === 'resolve' ? resolveDiscussionThread : reopenDiscussionThread)(token, threadId),
     upsert,
   )
 }
