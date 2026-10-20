@@ -1,10 +1,114 @@
 # SA-06D 有限委托授权：本地实施与验证记录
 
+## 2026-10-20 普查夹具补丁获准普通追加与既有合成 CI
+
+Owner 已明确授权将本轮测试补丁和本 MD 普通追加至现有草稿 #6337，并运行既有合成 CI；不强推、不扩切片、不合并、不部署、不读取客户数据、不真实发送。发布前重新只读核对 PR 为 OPEN/draft，远端 head 与本地父提交同为 `78de931cb8a4f4fa7203fe522a2a00d7a5292c5a`，叠层 base 未变。此次仅两文件，不夹带 tmp 验证脚本或其他改动。
+
+下文“尚未获得推送/CI 授权”保留为历史时点记录，由本节授权覆盖。待发布候选仍为整文件两轮 11/11、三组变异各杀死两个目标用例、完整 provenance 1/1；这些本地结果不代签新 head 的正式 CI。必须重新核对后置普查、POST202/ABORTED、实际 host.stop/清理、宜搭 71 项及其后置步骤，pending/skipped 不算通过。旧 run `39376122557` 的两条失败及更早风险原样保留。实际提交、run/head 和状态只在取得结果后续记，不预填成功。
+
+## 2026-10-20 普查夹具修复：本地整文件与三组变异完成，未发布
+
+Owner 本轮授权仅限 #6337 内补齐夹具、精确断言、变异验证及本 MD；明确不推送、不重跑 CI。下节“尚未获准”的表述保留为上一时点记录。本轮基线仍为 `78de931cb8a4f4fa7203fe522a2a00d7a5292c5a`，没有新增提交、推送、CI、PR、部署、客户读取或真实宜搭发送。
+
+### 最小改动与证明范围
+
+仅改 `packages/core-backend/tests/integration/data-source-reseal-load-failed-realdb.test.ts` 和本 MD：
+
+- TABLES 与 row fingerprint 纳入 `integration_yida_auto_execution_snapshots`；采用 099 的实际 `admission_id` / `snapshot_encrypted` 列名、类型、NOT NULL 和 `enc:` 前缀/长度 CHECK，加入当前/旧加密材料各一条合成记录。
+- 手写完整 observed 集合新增该字段的 `ok / rows=2 / encrypted=2 / undecryptable=1 / plaintext=0`，没有从生产目录生成期望，没有过滤 missing。正常 totals 为 encrypted 33、undecryptable `16 + singleton`；degraded 为 encrypted 29、undecryptable `14 + singleton`，missing 仍为 2。
+- 保留原 READ ONLY 查询池、完整逐字段集合、SELECT 数量/形态、零拒绝 SQL、前后行指纹、退化分类和脱敏断言。没有改生产普查目录、加密函数、迁移、超时预算或安全守卫。
+- 这是实际 PostgreSQL 上的 probe-only 列子集验证，不声称本次重新证明了 099 的全部业务外键和 immutable/identity 触发器。
+
+### 本地真实路径验证
+
+在既有隔离原生源码副本运行整文件，逐次新建 owner-bound PostgreSQL 14；不使用现成数据库或环境文件。调用生产 `probeEncryptedStores` 和真实加解密实现，不替换普查返回值。保留 integration 配置的 testTimeout 30000 / hookTimeout 15000、原 setup/teardown，retry=0，无 testNamePattern；只缩小 include 到目标整文件。额外进程级 180 秒保护不改变单用例/钩子预算。
+
+| 运行 | 结果（11 项，均零跳过） | 意义 |
+| --- | --- | --- |
+| 原 HEAD 夹具，隔离适配就绪后 | 9 通过、2 失败 | 失败恰为 current/previous 两个普查用例的完整 observed 数组断言，复现 CI |
+| 修复候选 | 11/11 通过 | 新表、两种材料、正常/退化总计、只读及脱敏断言全部走到 |
+| M1：先记录 fingerprint，再在普查前移除新表 | 9 通过、2 失败 | 两个普查用例拒绝漏表；不是 seed/fingerprint 初始化失败 |
+| M2：把新表旧材料改用当前材料 | 9 通过、2 失败 | 两个普查用例拒绝 undecryptable 漏计 |
+| M3：仅在隔离副本删去生产目录该 entry | 9 通过、2 失败 | 两个普查用例拒绝生产登记缺失，不能靠夹具自身过绿 |
+| 全部变异恢复后再次整文件 | 11/11 通过 | 字节恢复后正控制仍绿 |
+
+所有运行均 collectionFailures=0、pending=0、timedOut=false；结束后分别核得 ownedPgStoppedAndRemoved=true。父进程和测试 worker 均加载网络/环境文件守卫，forbiddenConnections=0、forbiddenEnvReads=0。只准自建 PG 精确目标和本进程临时 HTTP，未读取客户系统或真实凭据；不是 Linux network namespace 隔离的宣称。临时 PG 数据已移除，诊断目录中的仅本次合成私有日志/脱敏回执保留在本机 tmp，没有上传。
+
+如实保留验证脚手架问题：最初 baseline 为 8 通过、3 失败，额外一条是 Supertest 在异步 loopback listen 尚未就绪时读取空 address 的端口，不能签成业务失败。仅在 tmp 预加载器中将 Supertest 的默认 ephemeral listener 限定为 loopback，并对该调用栈内的数字 loopback 地址使用同步固定解析，仍经过原网络守卫；不改测试、运行时代码或预算。随后 baseline-isolated 为上述 9/2。另，早期回执分类器错误期待 JSON 提供断言源码行/完整数组长度，导致 `expectedResult=false`；原回执保留。独立核验原日志哈希后按 Vitest 实际压缩格式识别两组七字段 observed 数组断言，确认 baseline-isolated、M1/M2/M3 均只有目标两例断言失败。没有把解析失败、初始化失败或超时当作有效变异。
+
+### 可复核证据
+
+- 目标测试原 HEAD blob SHA256：`b602f485d26207160ef219f29a09073d8c6f2ad0cc91630615e1f26890b70c16`。
+- 候选及恢复后 LF 源码 SHA256：`1d9a9190a7fcf76624a3abb3e5d09c70de2cc2e1080bb5a90de62cd77b248f00`。
+- 未变的生产普查文件 SHA256：`d23a2e940553393603c3350bfc9664c6c87c58bbaa78df64ed8d7cf46cf997b0`；M3 恢复后逐字节相同。
+- 首轮候选 JSON 输出 SHA256：`b36f7681873569a848a8e4be916f92d27bfe01c24f6b5e754b803b5c9c3ac4f5`；恢复后正控制：`9d4d253f1240a67bc51374fdfdcf606913371e761d69b65ca187e2e10c84afd4`。
+- M1/M2/M3 输出 SHA256 分别为 `9fdc9bb992739b3459056efd1b856387616d3bce69e00911880023e4cdd26d05` / `00b8a4b694b3954563f0d0abeae937a4808f0c48294b849b4cf34306d8dd4850` / `ce72285250a22a616ce5d933b3c26ccb34b301b65ca5f05908bdf69d8ec5b399`。
+- 本机 tmp 辅助脚本：`prepare-probe-fixture.cjs`、`probe-fixture.config.mjs`、`probe-fixture-guard.cjs`、`run-probe-fixture.mjs`、`audit-probe-fixture.cjs`。测试及变异在受控原生副本内执行，变异不写回发布 worktree；不将这些本地辅助工具纳入功能切片或本次待发布补丁。
+
+**收尾判定：本轮已知两条 CI 断言失败有最小本地修复及正/反控制证据；仍不是正式全链通过。** 原 run `39376122557` 保持 failure，未重跑。其同 head 宜搭 71 项、ABORTED=0、实际停止清理成功是既有正式证据，不冒充本次未发布候选的新 CI。approval/attendance 被跳过的后置步骤也仍未补正式证据。下一阶段须另获发布/运行既有 CI 授权后，才能确认新 head 的全链验收；目前没有保证完成时间或启动新的浏览器/真实发送试用。
+
+本地收口追加核验：在同一 LF 原生候选树运行完整 `sealed-export-package-provenance.test.cjs`，**1/1 通过、零 skipped/cancelled、隔离守卫两帧零禁止 IO**；stdout SHA256 `ad635589b277fdbf1273f4c778d4312508a450ae564b77e47c1b2d27b2dd2727`。未修改或重打任何 pin。辅助命令最初一次路径不存在、一次 label 不符白名单，都在测试启动前退出；修正调用路径/合法 label 后才得到本条通过结果，不把前两次当执行证据。`git diff --check` 通过，index 为空，HEAD 未变，tracked 改动仍仅测试与本 MD。工作副本测试的 LF 投影哈希与受验字节相同；没有以 Windows 原始混合行尾冒充 LF 候选字节。总目标文档当前位于独立 `integration-goals` 检出，现有发布检出不含该文件；本轮只据其既有范围复核，没有修改目标、扩切片或将局部通过标成完整目标完成。
+
+## 2026-10-20 本轮正式 CI 终态：宜搭通过，后置普查夹具两断言失败
+
+仅本地脱敏续记，未提交或推送。PR #6337 仍 OPEN/draft、head `78de931cb8a4f4fa7203fe522a2a00d7a5292c5a`；Plugin run `39376122557` attempt 1 / `test (20.x)` job `118474553644` 已终结 **failure**。同 head 全分页 53 个 check-runs 全部终结：51 success、1 failure、1 skipped；不是全绿。Stock-prep Browser Verify `39376099864` 与 Integration Guard `39376099690` 均 success。
+
+### 本轮已取得的正式应用证据
+
+- core、checkpoint、固定官方 Chromium、锁协议、第 103 步 PLM manual/interval、第 104 步 remaining-budget UNKNOWN、第 105 步 owner YiDa JWT HTTP/browser 均 success。
+- 公开 `YIDA_BROWSER_CI_RESULT` 精确为 **passed=true / tests=71 / business=66 / sentinels=5**。该结果的真实调用方在 `scripts/ops/run-stock-preparation-yida-browser-ci.mjs:476` 先校验 worker cleanup 为 `stopped-owned-pg-removed`，第 482 行才输出结果；未读取私有 receipt/日志。
+- 公开 `PLM_FULL_APP_RESULT` 共三条，均 passed，cleanup 均为 `stopped-and-owned-database-removed`。结果证据 SHA 分别为 `8c385b6a1d3d2ad0f664b30e65d77caf3cd60b7b98e58741985c9df7d3b85a22`、`ba19793f3b9554efda14e3cde465d7b317465a8714dcc48124c0ad2d8cc5c897`、`06dddfff9149924a6e8326a8e3c2a04d7a31c76db4a0e50c04f79253ec247f04`。成功路径的 `failure` 是未赋值字段、JSON 省略，不应以 `failure===null` 误判失败。
+- 闭合公开 browser-transport-diagnostic 共 588 帧：failure=ABORTED **0**，signalAborted=true **0**；POST 202 的 SDK BODY_DONE **2**、PROXY UPSTREAM_COMPLETE 且 complete=true **2**、PLAYWRIGHT BODY_DONE **2**。不是用 REQUEST_FINISHED/status0 冒充 body 完成。
+- actual-stop-resolved **3**、actual-stop-failed **0**、production-stop-failed **0**、configured-app-failed **0**。独立实际停止与最终 owned PG 移除均有证据；本轮没有新建交互式 trial，所以不声称有新 trial 交接文件清理证明，也未重复 Chrome 试用。
+- 上述仅属于当前 head 本次 CI，不撤销旧 ABORTED、250ms lease、WSL 回拨、SQL57014、版本断言及预算风险。
+
+### 唯一已观察到的失败及修复边界
+
+失败是第 **113** 步 `Run multitable real-DB integration (...)`，不是 checkpoint（只读辅助脚本因该长标题含 checkpoint 子串误分类，已以 GitHub 精确步骤名纠正证据解释）。该步骤 **265 文件通过 /1 文件失败；3103 测试通过 /2 失败 /2 skipped**。
+
+两个失败均在 `packages/core-backend/tests/integration/data-source-reseal-load-failed-realdb.test.ts` 的 encrypted-store probe current/previous 两个变体。生产普查目录已在 `packages/core-backend/src/security/encrypted-store-probe.ts:261` 注册 `integration_yida_auto_execution_snapshots.snapshot_encrypted`；但真实 PG 测试的 TABLES（第 565 行）、建表/播种及 `expect(observed).toEqual`（第 713 行）仍未包含它。公开失败 diff 中新增该字段且状态为 `table_missing`，两变体均 AssertionError。由代码与日志可定位为 **新增目录项未同步到真实数据库夹具和精确清单**，不是据此证明真实部署缺表或加密函数失败。
+
+最小后续修复应在原测试中补真实列夹具、当前/旧材料两行、精确预期和总计（含 degraded 分支），保留 READ ONLY、零拒绝 SQL、前后 row fingerprint、脱敏断言；不能删生产普查项、过滤 missing 或放宽完整集合。尚未获得本轮新增修复授权，未实施/运行测试/提交/推送/重跑。
+
+第 114 步 approval real-DB、第 125/126/127 步 attendance 创建/测试/清理均 skipped，不能计为通过；第 121 步 Stop core backend success。attendance create 未尝试时 cleanup 跳过符合已修合同，但不证明 attempted failure/cancelled 的实际 CI 清理路径，本轮该分支仍只具备既有本地合同证据。
+
+公开完整日志 SHA `e897d2df549d5d4443a1d1884cc63664b819b9bea7dea91a891b1a55015e5c5c`（68521 行）；失败日志 SHA `15bbf7aeab18d3518da481fa6017e546ddbae0aa2e74d7b7c198192226b74dbe`（2494 行）。仅内存读取，输出固定枚举/布尔/计数/哈希；未读取私有 CI 产物、凭据或客户数据。失败定位中的首两次内存分类器未去尽显示型 ANSI，未命中 FAIL；使用既有双 ANSI 剥离方式后确认两条真实失败，没有将空匹配算通过。
+
+所有本轮检查终结后，`6337-ci` 跟踪已通过自动化工具设为 **PAUSED**，避免重复通知；开发总目标仍未完成。本轮应用合成证据已补齐，但全链验收仍被上述两断言及跳过的后置检查阻断。不合并、不部署、不真实发送。
+
+只读修复准备（尚未实施）：099 原迁移的实际列为 `snapshot_encrypted TEXT NOT NULL`，并有 `enc:` 前缀/长度 CHECK；原测试采用独立 schema 内的 probe-only 真列子集，不应把补普查夹具宣称为重新证明全部业务 FK/触发器。若按原测试每个新存储一条当前材料、一条旧材料补齐，精确期望应新增 `ok / rows=2 / encrypted=2 / undecryptable=1 / plaintext=0`；正常总计应由 encrypted 31 变为 33、undecryptable `15 + singleton` 变为 `16 + singleton`，degraded 总计由 27 变为 29、`13 + singleton` 变为 `14 + singleton`，missing 仍为 2。TABLES fingerprint 必须含新表；完整 observed 顺序与目录一致，不能自动从生产目录生成期望而形成同源自证。上述是根据源代码推导的待验证期望，不是测试结果；可用移除新表、旧材料错误替换为当前材料两类变异核对真实路径。当前只有本 MD 改动，PR head 未变化，无代码修复或测试启动。
+
 ## 2026-10-20 本轮前置修复获准追加至既有草稿
 
 Owner 已另行明确授权：将下节 **13 个修复文件及本 MD** 普通追加至现有草稿 #6337，并运行既有合成 CI。推送前核得远端仍为 `8f12ba5757f066b6e76693f8d895f4d3f5eaa1c1`，与本地父提交相同；不更换叠层 base、不强推、不新开 PR/切片。本次授权只覆盖这个已验补丁和既有合成 CI，不含合并、部署、客户数据读取或真实发送。下文“尚未获准/未推送”等表述保留为各次验证时点记录，不能误读为本轮状态。
 
 本地通过仍分别是后端 328/328、浏览器登记 6/6、workflow 合同 35/35、provenance 1/1 及四组变异，不代签正式 CI。新 head 必须逐项核对前置测试、正式 Chromium/PLM、POST202/ABORTED、实际停止和清理、宜搭 71 项及后置 SQL；pending/skipped 不算通过，旧失败与风险全部保留。实际提交、run/head 与结果在后续本地续记，不预填成功。
+
+实际发布与首轮观察（本段仅本地续记，未另行推送）：
+
+- 普通追加提交 `78de931cb8a4f4fa7203fe522a2a00d7a5292c5a`，父为 `8f12ba5757f066b6e76693f8d895f4d3f5eaa1c1`；精确 14 文件、无额外 staged/unstaged 文件。提交前逐个读取原始 Git index blob，13/13 与原生受验 LF 字节匹配，候选集合 SHA 仍为 `46a262a1879dcca8617e028c60df9b1dd78c713cde882290f70eab2e5af36036`，`git diff --cached --check` 通过。普通非 force push 后重新查询 #6337：OPEN/draft、head 精确匹配，base 未改。
+- 既有 `plugin-tests.yml` 的 PR 自动触发只匹配 main/develop，而本 PR 为叠层 base；先查询该新 head 无同工作流运行后，仅 dispatch 一次原 workflow 到现有分支。Plugin System Tests run `39376122557` attempt 1，实际 head 匹配；`test (20.x)` job `118474553644` 已开始，前置 core/锁/checkpoint、完整 PLM/宜搭/停止/后置 SQL 在首次快照仍 pending，没有提前签绿。
+- 自动 Stock-prep Browser Verify run `39376099864` 同 head：ownership/collection **success**、verification types **success**，真实 browser-render 步骤正在运行。这两项明确验证本轮漏登记修复跨过原失败点，但不等于正式宜搭 71 项已通过。Integration Guard run `39376099690` 仍运行中。
+- 同 head 全分页 check-runs 首轮 52 项：34 success、18 in_progress、0 已终结非 success。状态是该时点快照，不是全绿结论。只读辅助工具 `tmp/read-ci-repair-published.cjs` 固定预期 head/run/attempt，按名字定位 TEST20，输出固定状态/计数；未读取私有产物或原始业务值。
+- 复用已有 `6337-ci` 心跳，改为仅本轮 #6337、每 10 分钟只读观察；未变保持安静，有意义变化/失败/完成才通知。观察全部同 head 检查直至终结，届时报告并停用；不自动重跑/改代码/再次推送/合并/部署或真实发送。历史失败证据原样保留，目标不标完成。
+
+2026-10-20 13:44（Asia/Singapore）只读续查：当前 PR head 与上述 run 的 head/attempt 仍精确匹配。全分页同 head checks 为 **48 success /4 in_progress /0 已终结非 success**，未全绿。Stock-prep Browser Verify 已整轮 success，collection/types/实际 browser-render 三步均 success；不能将这个 workbench harness 的完成替代 Plugin 中的宜搭 71 项或实际 host.stop。主 TEST20 当前在第 5 步 `Global History flag manifest contract (R12-C)`（05:41:04Z 开始），job 05:40:45Z 开始；core 第 82 步、锁协议第 102 步、完整 PLM 第 103/104 步、宜搭第 105 步及后置/清理仍 pending。此时尚无该 head 的 ABORTED/停止/71 项计数可签，不以 pending 推断超时或失败。Integration Guard 仍运行，heartbeat 已核为 ACTIVE/10 分钟。本轮未重跑、取消或修改任何 CI/代码，仅续记本段；尚无可靠剩余时长估计，完整关键链通过后才进入正式同 head 合成验收结论。
+
+随后真实阶段变化：Integration Guard 已整轮 success；同 head checks **51 success /1 in_progress /0 failure**（API total 52，未截断）。主 TEST20 第 81 步 `Run type checking` success，第 82 步 `Run core-backend tests` 于 05:51:42Z（13:51:42 新加坡时间）开始，当前仍运行。这里只签该 head 的实际类型步骤通过，不追溯覆盖旧根图诊断；原 9 条前置失败是否已在整仓 CI 通过仍须等 core 终态。锁协议、完整 PLM/宜搭 71/停止清理仍未执行，不能把 51 个其他 check 的成功借作这些验收证据。
+
+14:03:27（Asia/Singapore）关键前置终态：同一 job 的 `Run core-backend tests` 已 **success**，实际结束时间为 06:03:27Z；主 job 继续执行后续 canaries，没有失败步骤。原失败所在整步已跨过，但本次尚未读取终结后的完整公开日志，暂不写具体通过测试总数、逐例 retry 数或“全部无重试”。checkpoint、固定 Chromium、锁协议、manual/interval、remaining-unknown、宜搭 71、实际停止及后置清理仍待后续独立证据。没有重跑、取消、补推或借其他 head 的结果。
+
+后续只读快照：第 91 步 `Run isolated manual checkpoint acceptance` 已 success，主 job 正执行第 93 步。同 head 全分页仍为 **51 success /1 in_progress /0 已终结非 success**，当前 PR head、run head 与 attempt 均匹配。第 100/102/103/104/105/127 步仍 pending；因此尚无本轮正式 ABORTED、PLM 实际停止/清理及宜搭 71 项结果。这里的 checkpoint 成功不代替后续锁协议和应用验收；历史失败保留，本次仅本地续记。
+
+继续核对同一 test (20.x) job：第 100 步固定官方 Chromium 安装和第 101 步 PLM full-app isolation/CI contracts 均 success；第 102 步真实数据库锁协议正在运行，尚未终结，无失败步骤。第 103–105 步及第 127 步仍 pending。浏览器安装成功仅证明安装步骤，不证明 POST202 完整读取、ABORTED 为零或宜搭 71 项通过。
+
+关键阶段变化：第 102 步真实数据库锁协议已 **success**，主 job 进入第 103 步 `Run synthetic PLM full-app manual and interval acceptance`，仍无失败步骤。先前尝试只读取得当前 job 公开日志在 30 秒观察预算内没有返回字节，随后重新查询 job 确认仍在运行；该观察超时不是测试失败，也未触发取消/重跑。当前仅签第 102 步终态，第 103 步内部 manual/interval、ABORTED/完整 body、实际停止/清理仍待日志证据，第 104/105/127 步仍 pending。
+
+第 103 步 PLM full-app manual/interval 的 GitHub 步骤终态已 **success**；主 job 进入第 104 步 YiDa remaining-budget UNKNOWN，尚无失败步骤。该状态证明正式命令步骤已通过，但当前尚未读取闭合公开诊断帧，因此不预填 `ABORTED=0`、各场景 actual-stop 计数或 owned PG/交接文件清理字段。第 105 步宜搭 71 项仍 pending，正式整体验收未闭合。
+
+第 104 步 remaining-budget UNKNOWN 已 **success**；第 105 步 owner YiDa JWT HTTP/browser real-DB proof 正在执行，主 job 仍无失败步骤。71 项精确计数、业务/哨兵拆分和清理字段尚待该步骤终态及公开日志确认；后置 SQL 和 attendance 清理仍 pending，不因前三个目标步骤绿灯宣布全链成功。
+
+第 105 步 owner YiDa JWT HTTP/browser real-DB proof 已 **success**，主 job 正执行第 107 步 Automation read unit contracts，当前无失败步骤。此处仅记录该 head 正式步骤终态，尚不把预期的 71 项写成已读取的精确计数；闭合诊断帧、实际停止及清理字段仍须读取公开日志确认。第 114 步后置 SQL 与第 127 步 attendance 清理尚待执行，整轮未终结。
 
 ## 2026-10-20 本轮 CI 前置失败：本地最小修复，不发布
 
