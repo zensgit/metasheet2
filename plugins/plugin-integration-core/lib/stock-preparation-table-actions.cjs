@@ -37,6 +37,10 @@ const { isStockPreparationProjectSheetObjectId } = require('./stock-preparation-
 const {
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_ROWS,
+  // R67 ③ — the read-ahead width: default and the expander's own clamp, reused by the config
+  // normalizer below so config time and read time cannot disagree about what a value means.
+  DEFAULT_READ_CONCURRENCY,
+  normalizeReadConcurrency,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   ROW_ERROR_LIMIT_CEILING,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
@@ -472,6 +476,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
   const rootSelection = normalizeActionRootSelection(input.rootSelection)
+  const readConcurrency = normalizeActionReadConcurrency(input.readConcurrency)
   return {
     actionId,
     kind,
@@ -509,6 +514,10 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // normalized object is stored and forwarded, so a new key needs no new wire here or in the
     // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
+    // R67 ③ — how many PLM reads the BOM walk may have in flight (see `actionReadConcurrency`).
+    // Spread CONDITIONALLY like every block above: a config that never set it normalizes byte-
+    // identically to before, and then runs at DEFAULT_READ_CONCURRENCY.
+    ...(readConcurrency !== undefined ? { readConcurrency } : {}),
     // S1 (ADR adr-stock-prep-project-sheets-20261008 §3): the PROJECT-SHEET OVERLAY MARKER. Set only
     // by the registry's `applyProjectTarget` below — the registry's config drain STRIPS the key from
     // deploy-time config (`withoutDeployTimeProjectTargetMarker`, R4), so this spread only ever sees
@@ -576,6 +585,29 @@ function normalizeActionRowErrorLimit(input) {
     )
   }
   return value
+}
+
+// R67 ③ — the config-time half of the read-ahead knob (`readConcurrency` on the action config, i.e.
+// the same deploy JSON as `maxReadCount` / `maxElapsedMs`). A CLAMP, not a refusal — unlike
+// `rowErrorLimit` above, and on purpose: this value decides how many PLM reads the walk keeps in
+// flight, never which rows are read or planned, so a 422 over it would take the whole stock-
+// preparation action down for a performance typo. A number (or numeric string) is stored CLAMPED
+// (0 -> 1, 99 -> 8), so the stored config says what will run; anything else is dropped, i.e. the
+// default (DEFAULT_READ_CONCURRENCY, 4) runs — `actionReadConcurrency` below.
+function normalizeActionReadConcurrency(input) {
+  const numeric = typeof input === 'number'
+    || (typeof input === 'string' && input.trim() !== '' && Number.isFinite(Number(input.trim())))
+  if (!numeric || !Number.isFinite(Number(input))) return undefined
+  return normalizeReadConcurrency(input)
+}
+
+// What `computeDryRun` hands the expander: the configured (already clamped) width, else the default.
+// 1 is today's strictly serial walk. The PLM side sees up to this many concurrent read queries — and
+// therefore up to this many pooled connections — from one dry-run/apply instead of one.
+function actionReadConcurrency(action) {
+  return action && action.readConcurrency !== undefined
+    ? normalizeReadConcurrency(action.readConcurrency)
+    : DEFAULT_READ_CONCURRENCY
 }
 
 function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {
@@ -2069,6 +2101,10 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // owner's ruling arrives without anyone having to configure it.
     rootSelection: action.rootSelection,
     extFieldMapping,
+    // R67 ③ — the read-ahead width. Always passed on this lane (dry-run, apply, MVP-persist,
+    // reconcile all come through here), so this lane's expansion always carries `readPhase`.
+    // The walk's output does not depend on it; only how many reads are in flight does.
+    readConcurrency: actionReadConcurrency(action),
     // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
     // being a silent truncation and becomes a refusal.
     requireCompleteBatch: Boolean(b2aTrialRegistration),
@@ -2330,6 +2366,15 @@ async function dryRunStockPreparationAction(input = {}) {
       // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
       ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
+    // R67 ③ — the PLM read phase, measured: the configured read-ahead width, the most reads that were
+    // ever in flight at once, every query the source received, how many of those the walk never
+    // consumed (0 on a run with no global error), and the phase's wall time. VALUES-FREE (five
+    // integers). Beside `evidence`, NOT inside it: `evidence` is what is stored, compared and shipped
+    // to audit rows, and two dry-runs of an unchanged project must keep producing identical evidence
+    // (pinned deep-equal across two runs by the b2a / ext-field-mapping / operator-value-read
+    // suites) — a wall-clock reading would break that. `summary.readCount` inside evidence is
+    // unchanged and stays the walk's own query count.
+    ...(isPlainObject(dryRun.expansion.readPhase) ? { plmReadPhase: cloneJson(dryRun.expansion.readPhase) } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -2776,6 +2821,8 @@ module.exports = {
     hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,
     normalizeActionLargeBomCaps,
+    normalizeActionReadConcurrency,
+    actionReadConcurrency,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,

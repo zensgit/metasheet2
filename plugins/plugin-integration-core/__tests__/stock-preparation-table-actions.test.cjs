@@ -6,6 +6,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -914,7 +915,8 @@ async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
     largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
   })
   assert.equal(bounded.status, 'large_bom_bounded')
-  assert.deepEqual(boundedWithCaps, bounded, 'a background cap block does not move the bounded dry-run')
+  // R67 ③: the read phase's wall-clock reading is the one value two calls do not share.
+  assert.deepEqual(withoutReadPhaseClock(boundedWithCaps), withoutReadPhaseClock(bounded), 'a background cap block does not move the bounded dry-run')
 
   // And the same on the path that DOES issue a token: everything but the token
   // itself (a fresh random string each call) must match.
@@ -924,7 +926,7 @@ async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
   assert.equal(typeof ready.dryRunToken, 'string')
   const { dryRunToken: _a, ...readyRest } = ready
   const { dryRunToken: _b, ...readyWithCapsRest } = readyWithCaps
-  assert.deepEqual(readyWithCapsRest, readyRest, 'a background cap block does not move the ready dry-run')
+  assert.deepEqual(withoutReadPhaseClock(readyWithCapsRest), withoutReadPhaseClock(readyRest), 'a background cap block does not move the ready dry-run')
   assert.equal(readyWithCaps.revision, ready.revision, 'and it does not move the revision an apply token binds')
 }
 

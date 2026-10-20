@@ -412,6 +412,10 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // `read`-tier trial it has always been, counts and hashes only, and it must stay reachable by the
   // legacy `integration:read` tier that has always run it.
   'tableActionDryRun',
+  // R67 ④ — the background dry-run's POLL. Its stored result is `tableActionDryRun`'s response, so a
+  // job enqueued with the opt-in carries the same part numbers; the poll that may read it back proves
+  // the same scope, under the same carve-out below, and is otherwise the same values-free read.
+  'tableActionDryRunJobGet',
 ].sort()
 
 const VALUE_BEARING_READ_HANDLERS = handlersCallingOperatorValueScope(ROUTES_SRC)
@@ -488,6 +492,9 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
  */
 const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
   ['tableActionDryRun', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
+  // R67 ④: the poll derives the tenant its job record is keyed by in the SAME gated form — the value
+  // job (opt-in) is only addressable through the proven scope.
+  ['tableActionDryRunJobGet', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
 ])
 
 /**

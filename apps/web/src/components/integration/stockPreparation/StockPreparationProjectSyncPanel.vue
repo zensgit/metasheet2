@@ -55,6 +55,19 @@
       </p>
     </div>
 
+    <!-- R67 ④: 试算 runs as a background job — while it reads PLM this line says so, with the time it
+         has taken, instead of one long spinner that a 60 s gateway timeout used to cut off. Also shown
+         after a reload when this caller's earlier trial of the project is still running (re-attach). -->
+    <p
+      v-if="dryRunProgressText"
+      class="sp-sync__hint"
+      role="status"
+      data-testid="stock-prep-project-sync-dry-run-progress"
+      :data-dry-run-progress="dryRunProgress?.source ?? ''"
+    >
+      {{ dryRunProgressText }}
+    </p>
+
     <!-- 一个项目一张备料表 (S2, R-36) — THE QUESTION THE PROJECT-SHEET FLOW IS WAITING ON. Rendered only
          while `runStockPreparationProjectPull` (projectTarget.ts) has asked and nobody has answered:
          create the sheet (absent), pull again (active), or write what the preview showed (a sheet this
@@ -522,18 +535,20 @@
 // route deliberately never serves it. Everything else on this panel is a count, a closed status
 // token, an HTTP status or a reason code.
 import { copyText } from '../../../utils/clipboard'
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
 import {
+  STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
   runStockPreparationProjectSync,
   type StockPreparationMissingComponent,
   type StockPreparationMissingComponentList,
+  type StockPreparationDryRunOptions,
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
   type StockPreparationProjectSyncStepResult,
@@ -605,6 +620,8 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /** Test seam ONLY (R67 ④) — the background dry run's poll wait, so specs never wait on a real timer. */
+    dryRunPollWait?: ((ms: number) => Promise<void>) | null
     /**
      * H14 — WHAT THIS BUTTON IS CALLED ON THE SURFACE THAT HOSTS IT.
      *
@@ -644,6 +661,7 @@ const props = withDefaults(
     api: null,
     largeBomApi: null,
     largeBomPollWait: null,
+    dryRunPollWait: null,
     runVariant: 'sync',
     fillTarget: null,
     targetApi: null,
@@ -723,6 +741,9 @@ watch(() => props.projectNo, (next) => {
   const seeded = (next ?? '').trim()
   if (!seeded || busy.value) return
   projectNo.value = seeded
+  // R67 ④: a different project may have its own trial still running.
+  dryRunProgress.value = null
+  void watchRunningDryRun()
 })
 
 // A row's 刷新 arms this panel: it explains why the number has to be typed and puts the cursor in the
@@ -817,11 +838,98 @@ const repairAffordance = computed(() => stockPrepProjectSheetRepairAffordance(re
   canPull: canRun.value,
 }))
 
+// ── R67 ④ — 试算 in the background ────────────────────────────────────────────────────────────────
+//
+// The run's dry-run step is an enqueue + poll (projectSync.ts). This panel shows its progress and
+// owns the one thing a page can decide about it: when to stop LOOKING. Unmounting aborts the poll —
+// the job itself keeps running on the server — and a later mount for the same project (a reload, a
+// tab switch) asks whether this caller's trial is still running and shows it again. A press while it
+// is still running attaches to it rather than reading PLM a second time.
+
+interface DryRunProgressState {
+  elapsedMs: number
+  /** `run`: this press's own job; `attached`: this press picked up a running one; `resumed`: seen on mount. */
+  source: 'run' | 'attached' | 'resumed'
+}
+const dryRunProgress = ref<DryRunProgressState | null>(null)
+let dryRunAbort: AbortController | null = null
+/** Bumped on every run and every unmount, so a re-attach probe that is still in flight lets go. */
+let dryRunWatchEpoch = 0
+
+function minutesSeconds(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+const dryRunProgressText = computed<string>(() => {
+  const progress = dryRunProgress.value
+  if (!progress) return ''
+  const elapsed = minutesSeconds(progress.elapsedMs)
+  if (progress.source === 'resumed') {
+    return bi(
+      `这个项目上次的试算还在后台读取 PLM(已用 ${elapsed})。再点一次会接着等它的结果,不会重复读取。`,
+      `This project's earlier trial is still reading PLM in the background (${elapsed} so far). Pressing again picks up its result instead of reading PLM twice.`,
+    )
+  }
+  return bi(
+    `正在后台试算,读取 PLM 中(已用 ${elapsed})。PLM 慢时会多等一会儿;离开本页不会中断,回来后会接着显示。`,
+    `Running the trial in the background — reading PLM (${elapsed} so far). A slow PLM just takes longer; leaving this page does not stop it, and the progress shows again when you return.`,
+  )
+})
+
+function dryRunOptions(): StockPreparationDryRunOptions {
+  dryRunAbort?.abort()
+  dryRunAbort = new AbortController()
+  return {
+    signal: dryRunAbort.signal,
+    ...(props.dryRunPollWait ? { wait: props.dryRunPollWait } : {}),
+    onProgress: (progress) => {
+      dryRunProgress.value = { elapsedMs: progress.elapsedMs, source: progress.attached ? 'attached' : 'run' }
+    },
+  }
+}
+
+/** Re-attach: is this caller's trial of the seeded project still running? Shown, never re-run. */
+async function watchRunningDryRun(): Promise<void> {
+  const target = projectNo.value.trim()
+  if (!target || busy.value || !canRun.value) return
+  const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+  if (typeof api.dryRunJobStatus !== 'function') return
+  const epoch = ++dryRunWatchEpoch
+  for (;;) {
+    let job
+    try {
+      job = await api.dryRunJobStatus(target)
+    } catch {
+      job = null
+    }
+    if (epoch !== dryRunWatchEpoch || busy.value) return
+    if (!job || job.status !== 'running') {
+      if (dryRunProgress.value?.source === 'resumed') dryRunProgress.value = null
+      return
+    }
+    dryRunProgress.value = { elapsedMs: job.elapsedMs, source: 'resumed' }
+    await (props.dryRunPollWait
+      ? props.dryRunPollWait(STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS)
+      : new Promise<void>((resolve) => { setTimeout(resolve, STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS) }))
+    if (epoch !== dryRunWatchEpoch || busy.value) return
+  }
+}
+
+onMounted(() => { void watchRunningDryRun() })
+onUnmounted(() => {
+  dryRunWatchEpoch += 1
+  dryRunAbort?.abort()
+  dryRunAbort = null
+})
+
 function syncRunner(api: StockPreparationProjectSyncApi, target: string) {
+  dryRunWatchEpoch += 1
   return (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => runStockPreparationProjectSync(api, target, (step) => {
     // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
+    if (step.id === 'dry-run') dryRunProgress.value = null
     results.value = [...results.value, step]
-  }, hooks)
+  }, { ...hooks, dryRun: dryRunOptions() })
 }
 
 /** One way a run ends, whichever entry (run / repair) started it. */
@@ -919,6 +1027,7 @@ async function onRun(): Promise<void> {
     }, target))
   } finally {
     targetPrompt.value = null
+    dryRunProgress.value = null
     busy.value = false
   }
 }
@@ -937,6 +1046,7 @@ async function onRepair(): Promise<void> {
       runSync: syncRunner(api, target),
     }, target))
   } finally {
+    dryRunProgress.value = null
     busy.value = false
   }
 }

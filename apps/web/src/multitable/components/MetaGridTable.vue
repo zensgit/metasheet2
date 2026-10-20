@@ -1,5 +1,5 @@
 <template>
-  <div ref="gridRoot" class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
+  <div ref="gridRoot" class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown" @paste="onGridPaste">
     <MetaGridRangeToolbar v-if="range.enabled.value" v-model:mode="range.mode.value" :busy="range.busy.value" :selected="!!range.selection.value && !editCell" :status="range.status.value" :zh="isZh" @copy="range.copy" @paste="range.paste" />
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
@@ -428,7 +428,7 @@
 </template>
 
 <script setup lang="ts">
-import { copyText, readClipboardText } from '../../utils/clipboard'
+import { copyText, pasteEventText } from '../../utils/clipboard'
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import type {
   MetaAttachment,
@@ -458,7 +458,7 @@ import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaGridRangeToolbar from './MetaGridRangeToolbar.vue'
 import { useGridRangeSelection } from '../composables/useGridRangeSelection'
 import { isGridRangeFillEnabled } from '../utils/grid-range-fill-flags'
-import type { RangeChange } from '../utils/grid-range-fill'
+import { parseClipboardMatrix, type RangeChange } from '../utils/grid-range-fill'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
   handleCommentAffordanceKeydown,
@@ -467,7 +467,7 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
-import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isFieldAlwaysReadOnly, isFieldHumanWriteLocked } from '../utils/field-permissions'
 import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
@@ -1210,10 +1210,12 @@ function canShowLockAction(recordId: string): boolean {
 // deriveFieldPermissions) — a client-side mirror of the same predicate the server write paths reject on,
 // so a mirror-link cell (or any field.property.mirrorOf/readOnly) is never editable even if the
 // per-field permission map is stale, not yet loaded, or a future call site forgets to thread it.
+// `!isFieldHumanWriteLocked(f)` is the same defense for a PLM-system column on a 备料 project sheet
+// (`property.humanWriteLock`): no editor ever opens on it; copying it is unaffected.
 const isEditable = (recordId: string, f: MetaField) =>
   !isRowLocked(recordId) &&
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) &&
-  !isFieldAlwaysReadOnly(f) && !props.fieldReadOnlyIds?.includes(f.id)
+  !isFieldAlwaysReadOnly(f) && !isFieldHumanWriteLocked(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {
@@ -1681,7 +1683,24 @@ function copyFocusedCell() {
   void copyText(text)
 }
 
-async function pasteFocusedCell() {
+// The single cell's text, read with the same grammar as the range paste: a spreadsheet copies one cell as
+// "abc\r\n" (and quotes cells holding tabs / line breaks), so the trailing line break goes and quoting is
+// undone; a multi-cell copy contributes its top-left cell. Text that grammar rejects (e.g. a stray quote
+// inside the value) is kept as typed, minus one trailing line break.
+function singleCellClipboardText(text: string): string {
+  try {
+    return parseClipboardMatrix(text)[0]?.[0] ?? ''
+  } catch {
+    return text.replace(/\r?\n$/, '')
+  }
+}
+
+// `text` comes from the native paste event (onGridPaste) — never from a programmatic clipboard read, which
+// does not exist on a plain-HTTP deployment.
+function pasteFocusedCell(text: string) {
+  // Empty paste (empty clipboard, or only an image / only HTML) never clears the cell; same rule as the
+  // range paste, which also reports it (CLIPBOARD_EMPTY). There is no status bar without the range toolbar.
+  if (text === '') return
   if (focusRow.value < 0 || focusCol.value < 0) return
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
@@ -1690,18 +1709,19 @@ async function pasteFocusedCell() {
   // text would be rejected by record-write-service's field validation (400).
   if (field.type === 'person' || field.type === 'multiSelect') return
   try {
-    const text = await readClipboardText()
-    let value: unknown = field.type === 'number' && text !== '' ? Number(text) : text
+    const cellText = singleCellClipboardText(text)
+    // A number cell pasted empty (e.g. a copied empty spreadsheet cell, "\n") is cleared, never 0.
+    let value: unknown = field.type === 'number' ? (cellText.trim() === '' ? null : Number(cellText)) : cellText
     // 客户反馈 2026-09-24 #4c (S1): pasted date-time text is a BUSINESS wall clock (zone rule: explicit
     // non-UTC field zone, else the business zone), converted here to the UTC instant — never read in the
     // browser's zone. Text the parser rejects is sent as-is: the server applies the same grammar and
     // answers 400, which the grid surfaces as an error toast — not a silent drop.
-    if (field.type === 'dateTime' && typeof text === 'string' && text.trim() !== '') {
-      const ms = parseDateTimeTextToUtcMs(text, resolveDateTimeTimezone(field.property))
+    if (field.type === 'dateTime' && cellText.trim() !== '') {
+      const ms = parseDateTimeTextToUtcMs(cellText, resolveDateTimeTimezone(field.property))
       if (ms !== null) value = new Date(ms).toISOString()
     }
     emit('patch-cell', row.id, field.id, value, row.version)
-  } catch { /* clipboard access denied */ }
+  } catch { /* a value the zone parser chokes on: nothing pasted, as before */ }
 }
 
 // D4: isComposing (Chrome/Firefox) / keyCode 229 (older Safari/IME shims) /
@@ -1753,12 +1773,41 @@ function isGridComposingEvent(e: KeyboardEvent): boolean {
 // P3-5 (round 3): also the single target gate for the REST of onKeydown's
 // switch (Arrow/Tab/Enter/Escape) below — see that call site. Renamed from
 // `isValidTypeToEditTarget` since it now guards more than just D1 seeding.
-function isValidGridKeydownTarget(e: KeyboardEvent): boolean {
-  const target = e.target as HTMLElement | null
-  if (!target) return false
-  if (target === gridRoot.value) return true
-  if (target.getAttribute('role') !== 'gridcell') return false
-  return Number(target.dataset.ri) === focusRow.value && Number(target.dataset.ci) === focusCol.value
+function isValidGridKeydownTarget(e: Event): boolean {
+  return isGridOwnFocusElement(e.target as HTMLElement | null)
+}
+function isGridOwnFocusElement(el: HTMLElement | null): boolean {
+  if (!el) return false
+  if (el === gridRoot.value) return true
+  if (el.getAttribute('role') !== 'gridcell') return false
+  return Number(el.dataset.ri) === focusRow.value && Number(el.dataset.ci) === focusCol.value
+}
+
+// Grid paste (Ctrl/Cmd+V, Shift+Insert, the browser's Paste command) — the ONE read path for keyboard
+// paste. `paste` is a user gesture, so `event.clipboardData` is readable even in a non-secure context
+// (plain-HTTP deployment by IP), where the async Clipboard API does not exist.
+//
+// The gate is by FOCUS, not by event target. A keydown is dispatched at the focused element, but a
+// paste is dispatched at the element holding the caret: after a click on a cell's text, real Chrome
+// fires it at the text span inside that cell while DOM focus is on the grid root (verified with
+// Playwright, verification/cell-text-keyboard-paste.spec.ts). So: the focused element must be the grid
+// root (or the focused gridcell itself), exactly what onKeydown's gate accepts; a focused descendant
+// control (checkbox, button, the cell editor's input) keeps its native paste. Two more rules: never
+// while a cell editor is open, and never when the caret sits inside an editable element.
+const PASTE_NATIVE_EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+function isGridPasteEvent(e: ClipboardEvent): boolean {
+  if (typeof document === 'undefined') return false
+  if (!isGridOwnFocusElement(document.activeElement as HTMLElement | null)) return false
+  const target = e.target
+  return !(target instanceof Element && target !== gridRoot.value && target.closest(PASTE_NATIVE_EDITABLE))
+}
+function onGridPaste(e: ClipboardEvent) {
+  if (editCell.value || !isGridPasteEvent(e)) return
+  const text = pasteEventText(e)
+  if (text === null) return
+  e.preventDefault()
+  if (range.pasteText(text, { row: focusRow.value, col: focusCol.value })) return
+  pasteFocusedCell(text)
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -1778,7 +1827,9 @@ function onKeydown(e: KeyboardEvent) {
   if (range.keydown(e, { row: focusRow.value, col: focusCol.value })) return
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
-  if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
+  // Ctrl/Cmd+V: deliberately NOT preventDefault-ed — the browser's native paste event must fire, and
+  // onGridPaste reads it (the async Clipboard API is absent on a plain-HTTP deployment).
+  if (mod && e.key === 'v' && !editCell.value) return
   if (editCell.value) return
   const navRows = displayRows.value
   const maxR = navRows.length - 1, maxC = props.visibleFields.length - 1

@@ -1845,6 +1845,23 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '系统已经转去后台通道处理,下面能看到进度 —— 不用重新点同步,也不用联系我们。',
     enNext: 'The system has switched to the background channel — progress shows below. No need to sync again, and no need to contact us.',
   }),
+  /**
+   * R67 ④ — the background dry-run lane. BUSY: another person's trial of this same project is still
+   * reading PLM, and the server runs one per project — starting a second would only double the load.
+   * INTERRUPTED: the server restarted under a running trial; nothing was planned or written.
+   */
+  PLAN_DRY_RUN_BUSY: Object.freeze({
+    zh: '这个项目正在由另一位同事在后台试算',
+    en: 'Someone else is already running a trial of this project in the background',
+    zhNext: '等一两分钟再点一次;同一个项目同时只跑一次试算,免得重复读取 PLM。什么都没有改动。',
+    enNext: 'Press again in a minute or two — one trial per project runs at a time so PLM is not read twice. Nothing was changed.',
+  }),
+  PLAN_DRY_RUN_INTERRUPTED: Object.freeze({
+    zh: '后台试算被中断了(服务重启)',
+    en: 'The background trial was interrupted (the service restarted)',
+    zhNext: '再点一次即可;什么都没有改动。',
+    enNext: 'Press again; nothing was changed.',
+  }),
   PLAN_NOT_APPLYABLE: Object.freeze({
     zh: '这次试算没能得出可以写入的计划',
     en: 'This plan cannot be written',

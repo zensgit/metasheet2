@@ -135,6 +135,7 @@ import {
   loadStockPreparationOverviewSheetIds,
   type StockPreparationOverviewQueryFn,
 } from './stock-preparation-overview-contract'
+import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import type { Database } from '../db/types'
 
 const logger = new Logger('AutomationService')
@@ -4457,6 +4458,13 @@ export class AutomationService {
       // rolled back, nothing written or announced). Ids outside the derived-id shape: no statement.
       if ((await loadStockPreparationOverviewSheetIds(query as StockPreparationOverviewQueryFn, [sheetId])).size > 0) {
         throw new Error(STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL)
+      }
+      // 备料 option B (human-write-lock.ts): the same sink never writes a human-write-locked (PLM-system) column —
+      // the rule's author mapped status / approver / completed-at onto it, which only the PLM pull may write. Read
+      // inside the fenced transaction; throws (→ `backwriteSkipped` with the fixed closed-code sentence, rolled
+      // back, nothing written or announced), exactly like the overview refusal above.
+      if ((await findHumanWriteLockedFieldIds(query, sheetId, Object.keys(patch))).length > 0) {
+        throw new Error(HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL)
       }
       // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
       // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query

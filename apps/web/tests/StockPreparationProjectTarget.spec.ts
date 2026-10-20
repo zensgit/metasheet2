@@ -848,7 +848,12 @@ describe('PT-WORKSPACE — 项目接入 opens the project\'s own sheet after a p
       h.apiFetch.mockReset()
       h.apiFetch.mockImplementation(async (path: string) => {
         if (path.includes('/target')) return targetAnswer()
-        if (path.includes('/dry-run')) return ok({ status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 2, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+        // R67 ④: the dry run is enqueued (POST, no projectNo in the query) and polled (GET …?projectNo=).
+        if (path.includes('/dry-run-jobs')) {
+          return path.includes('projectNo=')
+            ? ok({ jobId: 'job_syn', status: 'succeeded', elapsedMs: 0, result: { status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 2, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } } })
+            : ok({ jobId: 'job_syn', status: 'running', elapsedMs: 0 })
+        }
         if (path.includes('/apply')) return ok({ status: 'succeeded', apply: { counts: { created: 2, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } } })
         if (path.includes('/mvp-persist')) return ok({ status: 'created', persisted: true, created: { batch: 1, lines: 2, run: 1 } })
         return refused(404, 'NOT_ROUTED_IN_THIS_SUITE')
