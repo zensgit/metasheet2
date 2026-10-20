@@ -231,6 +231,10 @@
           <div>
             <h2>{{ selectedIntegration ? '编辑集成' : '创建集成' }}</h2>
             <p class="directory-admin__hint">`appSecret` 在更新时可留空，系统会继续使用已保存的值。</p>
+            <p class="directory-admin__hint" data-testid="dingtalk-login-config-hint">
+              此处的 App Key / App Secret 用于目录集成，不会配置钉钉登录。钉钉登录使用服务端环境变量。
+              <router-link class="directory-admin__link-button" to="/help/attendance/dingtalk-microapp#server-login">查看钉钉登录配置</router-link>
+            </p>
           </div>
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
