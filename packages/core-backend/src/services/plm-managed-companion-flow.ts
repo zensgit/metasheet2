@@ -263,7 +263,7 @@ async function handoffPersonalReadConnection(client: SqlClient, dataSourceId: st
   if (present && !valid(existing) || supplied && !valid(installation) || present && supplied && existing!==installation) fail()
   if (present) return
   // Visual source binding remains an explicit platform-admin configuration operation.
-  if (options.visualReviewEnabled===true) fail()
+  if (options.visualReviewEnabled===true || options.managedVisualReviewEnabled===true) fail()
   if (!supplied) fail()
   const changed=await client.query(`UPDATE data_sources SET config=$2::jsonb WHERE id=$1 AND owner_id=$3
     AND is_active=true AND deleted_at IS NULL RETURNING id`,[dataSourceId,JSON.stringify({...config,

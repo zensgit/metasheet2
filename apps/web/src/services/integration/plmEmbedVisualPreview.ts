@@ -1,4 +1,4 @@
-import { apiFetch } from '../../utils/api'
+import { apiFetch, getApiBase } from '../../utils/api'
 import { parseVisualPreviewDescriptorHeader, type VisualPreviewDescriptor } from './plmVisualMarkup'
 
 export interface VisualPreviewFile { file_id: string; version_id: string; filename: string; version_is_current: boolean }
@@ -15,6 +15,14 @@ export class VisualPreviewAccessError extends Error {
   constructor(reason: 'denied' | 'offline') { super(reason); this.reason = reason }
 }
 
+function managedPath(sourceId: string): string {
+  if (!sourceId || sourceId !== sourceId.trim()
+    || new URL(getApiBase(), window.location.origin).origin !== window.location.origin) {
+    throw new VisualPreviewAccessError('denied')
+  }
+  return '/api/plm/managed-login/sources/' + encodeURIComponent(sourceId) + '/discussion'
+}
+
 function unavailable(error: unknown): void {
   if (error instanceof VisualPreviewAccessError) throw error
   if (navigator.onLine === false) throw new VisualPreviewAccessError('offline')
@@ -24,10 +32,13 @@ function checkAccess(response: Response): void {
   if ([401, 403, 404].includes(response.status)) throw new VisualPreviewAccessError('denied')
 }
 
-export async function listVisualPreviewFiles(token: string, signal?: AbortSignal): Promise<VisualPreviewList | null> {
+export async function listVisualPreviewFiles(token: string, signal?: AbortSignal, managedSourceId?: string): Promise<VisualPreviewList | null> {
   try {
-    const response = await apiFetch(`${BASE}/files`, {
-      method: 'POST', headers: { 'X-PLM-Embed-Token': token }, suppressUnauthorizedRedirect: true, signal,
+    const managed = managedSourceId !== undefined
+    const response = await apiFetch(managed ? managedPath(managedSourceId) : `${BASE}/files`, {
+      method: 'POST', headers: { 'X-PLM-Embed-Token': token, ...(managed ? { 'Content-Type': 'application/json' } : {}) },
+      ...(managed ? { credentials: 'include' as const, body: JSON.stringify({ operation: 'preview-files' }) } : {}),
+      suppressUnauthorizedRedirect: true, signal,
     })
     checkAccess(response)
     const payload = await response.json()
@@ -39,12 +50,15 @@ export async function listVisualPreviewFiles(token: string, signal?: AbortSignal
   } catch (error) { unavailable(error); return null }
 }
 
-export async function loadVisualPreview(token: string, file: VisualPreviewFile, partId: string, signal?: AbortSignal): Promise<VisualPreviewResult> {
+export async function loadVisualPreview(token: string, file: VisualPreviewFile, partId: string, signal?: AbortSignal, managedSourceId?: string): Promise<VisualPreviewResult> {
   try {
-    const response = await apiFetch(`${BASE}/image`, {
+    const managed = managedSourceId !== undefined
+    const response = await apiFetch(managed ? managedPath(managedSourceId) : `${BASE}/image`, {
       method: 'POST',
       headers: { 'X-PLM-Embed-Token': token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file_id: file.file_id, version_id: file.version_id }),
+      body: JSON.stringify(managed ? { operation: 'preview-image', fileId: file.file_id, versionId: file.version_id }
+        : { file_id: file.file_id, version_id: file.version_id }),
+      ...(managed ? { credentials: 'include' as const } : {}),
       suppressUnauthorizedRedirect: true, signal,
     })
     checkAccess(response)

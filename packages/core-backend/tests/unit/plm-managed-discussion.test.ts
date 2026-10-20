@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { generateKeyPairSync, sign, randomUUID } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign, randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 
 const mocks = vi.hoisted(() => ({ lock: vi.fn(), consume: vi.fn(), query: vi.fn() }))
@@ -19,12 +19,14 @@ let providerStatus = 200
 let redirect = false
 let read = false
 let visualReply = false
+let previewMode = false
+const previewBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
 function token(overrides: Record<string, unknown> = {}) {
   const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', kid: 'managed-test' })).toString('base64url')
   const body = Buffer.from(JSON.stringify({ typ: 'embed', aud: 'metasheet2.embed', sub: '42',
     tenant_id: 'native-tenant', org_id: 'native-org', part_id: 'part', feature_key: 'bom_multitable',
     embed_origin: 'https://meta.example.test', exp: Math.floor(Date.now() / 1000) + 120,
-    jti: randomUUID(), ...overrides })).toString('base64url')
+    iat: Math.floor(Date.now() / 1000), jti: randomUUID(), ...overrides })).toString('base64url')
   return header + '.' + body + '.' + sign(null, Buffer.from(header + '.' + body), keys.privateKey).toString('base64url')
 }
 function request(body: unknown = { operation: 'list' }, overrides: Record<string, unknown> = {}) {
@@ -38,6 +40,25 @@ beforeAll(async () => {
     seen.push({ url: req.url!, method: req.method!, headers: req.headers, body: raw ? JSON.parse(raw) : null })
     res.setHeader('Content-Type', 'application/json')
     if (redirect) { res.writeHead(307, { Location: base + '/credential-sink' }); res.end(); return }
+    if (previewMode && req.url === '/api/v1/auth/embed/visual-preview-session') {
+      const input = JSON.parse(raw)
+      if (input.action === 'list') {
+        res.end(JSON.stringify({ files: [{ file_id: 'file', version_id: 'version', filename: 'owned.png',
+          version_is_current: true, storage_key: 'private-storage-key' }], has_more: false })); return
+      }
+      if (input.preview_token) { res.setHeader('Content-Type', 'image/png'); res.end(previewBytes); return }
+      const embed = JSON.parse(Buffer.from(input.embed_token.split('.')[1], 'base64url').toString())
+      const claims = { ...embed, typ: 'visual_preview', aud: 'metasheet2.visual-preview', jti: randomUUID(),
+        embed_jti: embed.jti, embed_iat: embed.iat, file_id: input.file_id, version_id: input.version_id,
+        checksum: 'a'.repeat(64), preview_checksum: createHash('sha256').update(previewBytes).digest('hex'),
+        media_type: 'image/png', width: 1, height: 1, page: 0, version_is_current: true }
+      const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', kid: 'managed-test' })).toString('base64url')
+      const payload = Buffer.from(JSON.stringify(claims)).toString('base64url')
+      const capability = header + '.' + payload + '.' + sign(null, Buffer.from(header + '.' + payload), keys.privateKey).toString('base64url')
+      res.end(JSON.stringify({ render: 'available', preview_token: capability, ...Object.fromEntries(
+        ['file_id', 'version_id', 'checksum', 'preview_checksum', 'media_type', 'width', 'height', 'page', 'version_is_current']
+          .map(key => [key, claims[key as keyof typeof claims]])) })); return
+    }
     if (req.url?.includes('/auth/embed/')) {
       read = req.url.includes('discussion-read-session')
       res.end(JSON.stringify({ access_token: read ? 'native-discussion-read' : 'native-discussion-write',
@@ -57,7 +78,7 @@ beforeEach(() => {
   vi.stubEnv('YUANTUS_EMBED_KEY_ID', 'managed-test')
   vi.stubEnv('YUANTUS_EMBED_PUBLIC_KEY', Buffer.from(publicKey, 'base64url').toString('base64'))
   vi.stubEnv('PLM_API_TOKEN', 'shared-credential-must-not-appear')
-  seen.length = 0; redirect = false; providerStatus = 200; visualReply = false
+  seen.length = 0; redirect = false; providerStatus = 200; visualReply = false; previewMode = false
   mocks.consume.mockResolvedValue(true)
   mocks.lock.mockResolvedValue({ row: { config: { connection: { url: base },
     options: { apiMode: 'yuantus', tenantId: 'native-tenant', orgId: 'native-org' } }, frozen_origin: base },
@@ -192,4 +213,78 @@ it('does not accept a caller source selector or implicit non-context fallback', 
   await expect(relayManagedDiscussion(request({ operation: 'context', parentOrigin: base, sourceId: 'other' }))).rejects.toMatchObject({ status: 422 })
   await expect(relayManagedDiscussion(request())).rejects.toMatchObject({ status: 422 })
   expect(mocks.lock).not.toHaveBeenCalled(); expect(mocks.query).not.toHaveBeenCalled(); expect(mocks.consume).not.toHaveBeenCalled()
+})
+
+
+async function enableManagedVisual(value: unknown = true) {
+  vi.stubEnv('PLM_EMBED_VISUAL_PREVIEW_ENABLED', 'true')
+  const current = await mocks.lock()
+  current.row.config.options.managedVisualReviewEnabled = value
+  mocks.lock.mockResolvedValue(current)
+  previewMode = true
+}
+const boundVisual = {
+  anchor: { kind: 'cad_2d_markup', file_id: 'file', file_version: 'version', content_checksum: 'a'.repeat(64),
+    preview_checksum: createHash('sha256').update(previewBytes).digest('hex'), page: 0 },
+  markup: { schema_version: 1, markup_type: 'pin', geometry: { x: .5, y: .5 }, file_id: 'file',
+    viewport: { width: 1, height: 1, rotation: 0 } },
+}
+it.each(['false', 'TRUE', '1', '0', ''])('refuses managed Visual runtime value %j before source/JTI/Native access', async flag => {
+  vi.stubEnv('PLM_EMBED_VISUAL_PREVIEW_ENABLED', flag)
+  await expect(relayManagedDiscussion(request({ operation: 'preview-files' }), 'source')).rejects.toMatchObject({ status: 404 })
+  expect(mocks.lock).not.toHaveBeenCalled(); expect(mocks.consume).not.toHaveBeenCalled(); expect(seen).toEqual([])
+})
+it.each([false, 'true', 1, null])('requires the persisted boolean Visual source flag, got %j', async value => {
+  await enableManagedVisual(value)
+  await expect(relayManagedDiscussion(request({ operation: 'preview-files' }), 'source')).rejects.toMatchObject({ status: 403 })
+  expect(mocks.consume).not.toHaveBeenCalled(); expect(seen).toEqual([])
+})
+it('lists Native preview candidates with fresh frame authority and no shared bearer/storage key', async () => {
+  await enableManagedVisual()
+  const result = await relayManagedDiscussion(request({ operation: 'preview-files' }), 'source')
+  expect(result).toEqual({ files: [{ file_id: 'file', version_id: 'version', filename: 'owned.png', version_is_current: true }], has_more: false })
+  expect(seen).toHaveLength(1); expect(seen[0].headers.authorization).toBeUndefined()
+  expect(seen[0].body).toMatchObject({ action: 'list' })
+  expect(JSON.stringify(result)).not.toContain('private-storage-key')
+  expect(JSON.stringify(seen)).not.toContain('shared-credential-must-not-appear')
+})
+it('mints and redeems the existing signed Native preview protocol under managed source admission', async () => {
+  await enableManagedVisual()
+  const result = await relayManagedDiscussion(request({ operation: 'preview-image', fileId: 'file', versionId: 'version' }), 'source')
+  expect(result).toMatchObject({ render: 'available', mediaType: 'image/png', bytes: previewBytes,
+    descriptor: { part_id: 'part', file_id: 'file', file_version: 'version', version_is_current: true } })
+  expect(seen).toHaveLength(2); expect(seen.every(row => row.headers.authorization === undefined)).toBe(true)
+  expect(seen[1].body).toMatchObject({ origin: 'https://meta.example.test' })
+})
+it('admits validated bound markup only with the separate source/runtime gate and Native write exchange', async () => {
+  await enableManagedVisual()
+  const body = { target_type: 'item', target_id: 'part', body: 'bound comment', ...boundVisual }
+  await relayManagedDiscussion(request({ operation: 'create', body }), 'source')
+  expect(seen[0].url).toBe('/api/v1/auth/embed/discussion-session')
+  expect(seen[1].headers.authorization).toBe('Bearer native-discussion-write'); expect(seen[1].body).toEqual(body)
+})
+it('does not turn a valid Visual payload into an ordinary Discussion write when runtime is disabled', async () => {
+  await expect(relayManagedDiscussion(request({ operation: 'create', body: {
+    target_type: 'item', target_id: 'part', body: 'bound', ...boundVisual } }), 'source')).rejects.toMatchObject({ status: 404 })
+  expect(mocks.lock).not.toHaveBeenCalled(); expect(seen).toEqual([])
+})
+it('reports enabled Visual only from the locked Native-tenant source, keeping the frame parent separate', async () => {
+  await enableManagedVisual()
+  const result = await relayManagedDiscussion(request({ operation: 'context', parentOrigin: base }), 'source')
+  expect(result).toEqual({ sourceId: 'source', partId: 'part', parentOrigin: base, visualPreviewEnabled: true })
+  expect(seen).toEqual([])
+})
+it('refuses a configured Meta tenant substituted for the distinct Native tenant', async () => {
+  await enableManagedVisual()
+  const current = await mocks.lock(); current.row.config.options.tenantId = 'meta-tenant'
+  await expect(relayManagedDiscussion(request({ operation: 'preview-files' }), 'source')).rejects.toMatchObject({ status: 403 })
+  expect(seen).toEqual([]); expect(mocks.consume).not.toHaveBeenCalled()
+})
+it.each([{ anchor: boundVisual.anchor }, { markup: boundVisual.markup },
+  { ...boundVisual, markup: { ...boundVisual.markup, geometry: { x: 2, y: .5 } } },
+  { ...boundVisual, markup: { ...boundVisual.markup, file_id: 'other-file' } },
+])('refuses incomplete/invalid Visual bodies before reading source state: %j', async visual => {
+  await expect(relayManagedDiscussion(request({ operation: 'create', body: {
+    target_type: 'item', target_id: 'part', body: 'invalid', ...visual } }), 'source')).rejects.toMatchObject({ status: 422 })
+  expect(mocks.lock).not.toHaveBeenCalled(); expect(seen).toEqual([])
 })

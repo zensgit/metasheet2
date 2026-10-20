@@ -47,12 +47,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import PlmVisualMarkupCanvas from './PlmVisualMarkupCanvas.vue'
-import { createPlmEmbedVisualPreviewTokenClient, PlmEmbedReadTokenError, type PlmEmbedVisualPreviewTokenClient } from '../../services/integration/plmEmbedWriteToken'
+import { createPlmEmbedVisualPreviewTokenClient, createPlmEmbedReadTokenClient, PlmEmbedReadTokenError, type PlmEmbedVisualPreviewTokenClient } from '../../services/integration/plmEmbedWriteToken'
 import { listVisualPreviewFiles, loadVisualPreview, VisualPreviewAccessError, type VisualPreviewFile } from '../../services/integration/plmEmbedVisualPreview'
 import { sameVisualPreview, visualMarkupWrite, type VisualComment, type VisualGeometry,
   type VisualMarkupDraft, type VisualMarkupTool, type VisualPreviewDescriptor } from '../../services/integration/plmVisualMarkup'
 
-const props = defineProps<{ parentOrigin: string | null; partId: string; comments?: VisualComment[];
+const props = defineProps<{ parentOrigin: string | null; partId: string; managedSourceId?: string; comments?: VisualComment[];
   draft?: VisualMarkupDraft | null; selectedId?: string | null; busy?: boolean }>()
 const emit = defineEmits<{ draft: [draft: VisualMarkupDraft | null]; select: [id: string] }>()
 const files = ref<VisualPreviewFile[]>([])
@@ -127,7 +127,7 @@ async function loadFiles(): Promise<void> {
   try {
     const token = await freshToken(current)
     if (!token || current !== generation) return
-    const result = await listVisualPreviewFiles(token, activeController.signal)
+    const result = await listVisualPreviewFiles(token, activeController.signal, props.managedSourceId)
     if (current !== generation) return
     if (!result) { state.value = 'unavailable'; return }
     files.value = result.files
@@ -149,7 +149,7 @@ async function preview(): Promise<void> {
   try {
     const token = await freshToken(current)
     if (!token || current !== generation) return
-    const result = await loadVisualPreview(token, file, props.partId, activeController.signal)
+    const result = await loadVisualPreview(token, file, props.partId, activeController.signal, props.managedSourceId)
     if (current !== generation) return
     if (result.render !== 'available') { state.value = 'missing'; return }
     // The rendered coordinate system must agree with the authenticated descriptor.
@@ -166,10 +166,13 @@ async function preview(): Promise<void> {
   }
 }
 
-watch(() => [props.parentOrigin, props.partId], () => {
+watch(() => [props.parentOrigin, props.partId, props.managedSourceId], () => {
   clearImage()
   client?.dispose()
-  client = props.parentOrigin ? createPlmEmbedVisualPreviewTokenClient(() => props.parentOrigin) : null
+  if (props.parentOrigin && props.managedSourceId !== undefined) {
+    const reader = createPlmEmbedReadTokenClient(() => props.parentOrigin)
+    client = { requestToken: () => reader.requestReadToken(), dispose: () => reader.dispose() }
+  } else client = props.parentOrigin ? createPlmEmbedVisualPreviewTokenClient(() => props.parentOrigin) : null
   void loadFiles()
 }, { immediate: true })
 

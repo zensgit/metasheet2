@@ -1,7 +1,8 @@
 import { hasVisualMarkupInput, validVisualMarkupBody, type VisualMarkupInput, type VisualMarkupRead } from '../auth/visual-review-markup'
 import { embedAllowedOrigins, embedAudience, embedPublicKeysByKid } from '../auth/embed-config'
 import { verifyEmbedToken, type EmbedTokenClaims } from '../auth/embed-token-verify'
-import { consumeVisualPreviewJti, verifyVisualPreviewToken, type VisualPreviewDescriptor } from '../auth/visual-preview-token'
+import { fetchNativeVisualPreviewJson, redeemNativeVisualPreview, type VisualPreviewFileList, type VisualPreviewImage } from '../services/plm-visual-preview-transport'
+export type { VisualPreviewFile, VisualPreviewFileList, VisualPreviewImage } from '../services/plm-visual-preview-transport'
 import { visualReviewSourceConfigured } from '../auth/visual-review-source'
 import { requirePlmApprovalCard, PlmPersonalApprovalError } from '../services/plm-personal-approval-wire'
 import {
@@ -1083,12 +1084,6 @@ export interface ThreadTransitionRequest {
   comment?: string;
   mentioned_user_ids?: number[];
 }
-
-export interface VisualPreviewFile { file_id: string; version_id: string; filename: string; version_is_current: boolean }
-export interface VisualPreviewFileList { files: VisualPreviewFile[]; has_more?: boolean }
-export type VisualPreviewImage =
-  | { render: 'unavailable' }
-  | { render: 'available'; bytes: Buffer; mediaType: 'image/png' | 'image/jpeg'; descriptor: VisualPreviewDescriptor }
 
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
@@ -3181,40 +3176,12 @@ export class PLMAdapter extends HTTPAdapter {
     return claims
   }
 
-  private async readVisualBytes(response: Response, limit: number): Promise<Buffer> {
-    if (!response.body || Number(response.headers.get('content-length')) > limit) {
-      await response.body?.cancel()
-      throw new Error('Visual preview unavailable')
-    }
-    const reader = response.body.getReader()
-    const chunks: Uint8Array[] = []
-    let size = 0
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      size += value.byteLength
-      if (size > limit) { await reader.cancel(); throw new Error('Visual preview unavailable') }
-      chunks.push(value)
-    }
-    return Buffer.concat(chunks)
-  }
-
   private async visualPreviewJson(body: Record<string, unknown>): Promise<QueryResult<Record<string, unknown>>> {
     await this.admitLegacySharedTransport('PLMAdapter.visualPreviewJson')
     const baseUrl = this.config.connection.baseURL || this.config.connection.url
-    if (!baseUrl) return { data: [], error: new Error('Visual preview unavailable') }
+    if (typeof baseUrl !== 'string' || !baseUrl) return { data: [], error: new Error('Visual preview unavailable') }
     try {
-      const response = await fetch(`${baseUrl}/api/v1/auth/embed/visual-preview-session`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-        redirect: 'error', signal: AbortSignal.timeout(15_000),
-      })
-      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0].trim() !== 'application/json') {
-        await response.body?.cancel()
-        return { data: [], error: new Error('Visual preview unavailable') }
-      }
-      const payload: unknown = JSON.parse((await this.readVisualBytes(response, 64 * 1024)).toString('utf8'))
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid preview response')
-      return { data: [payload as Record<string, unknown>], metadata: { totalCount: 1 } }
+      return { data: [await fetchNativeVisualPreviewJson(baseUrl, body)], metadata: { totalCount: 1 } }
     } catch {
       return { data: [], error: new Error('Visual preview unavailable') }
     }
@@ -3235,35 +3202,10 @@ export class PLMAdapter extends HTTPAdapter {
       if (embed.embed_origin !== origin) return { render: 'unavailable' }
       const minted = await this.visualPreviewJson({ embed_token: embedToken, file_id: fileId, version_id: versionId })
       const capability = minted.data[0]
-      if (minted.error || capability?.render !== 'available' || typeof capability.preview_token !== 'string') return { render: 'unavailable' }
-      const { claims, descriptor } = verifyVisualPreviewToken(capability.preview_token, {
-        publicKeysByKid: embedPublicKeysByKid(), embed, fileId, versionId, origin,
-      })
-      // Metadata does not confer authority. Reject disagreement; all exposed values
-      // are constructed from the independently verified signed capability.
-      for (const key of ['file_id', 'version_id', 'checksum', 'preview_checksum', 'media_type', 'width', 'height', 'page', 'version_is_current'] as const) {
-        if (capability[key] !== claims[key]) return { render: 'unavailable' }
-      }
-      if (!await consumeVisualPreviewJti(claims)) return { render: 'unavailable' }
+      if (minted.error || !capability) return { render: 'unavailable' }
       const baseUrl = this.config.connection.baseURL || this.config.connection.url
-      if (!baseUrl) return { render: 'unavailable' }
-      const response = await fetch(`${baseUrl}/api/v1/auth/embed/visual-preview-session`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview_token: capability.preview_token, origin }),
-        redirect: 'error', signal: AbortSignal.timeout(15_000),
-      })
-      const mediaType = response.headers.get('content-type')?.split(';', 1)[0].trim()
-      if (!response.ok || mediaType !== claims.media_type) {
-        await response.body?.cancel()
-        return { render: 'unavailable' }
-      }
-      const bytes = await this.readVisualBytes(response, 8 * 1024 * 1024)
-      const validMagic = mediaType === 'image/png'
-        ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-        : bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255]))
-      if (!validMagic || createHash('sha256').update(bytes).digest('hex') !== claims.preview_checksum
-        || claims.exp <= Math.floor(Date.now() / 1000)) return { render: 'unavailable' }
-      return { render: 'available', bytes, mediaType: claims.media_type, descriptor }
+      if (typeof baseUrl !== 'string' || !baseUrl) return { render: 'unavailable' }
+      return await redeemNativeVisualPreview(baseUrl, capability, embed, fileId, versionId, origin)
     } catch {
       return { render: 'unavailable' }
     }

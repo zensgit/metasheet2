@@ -1,3 +1,5 @@
+import { sendVisualPreviewImage } from '../auth/visual-preview-response'
+import type { VisualPreviewImage } from '../services/plm-visual-preview-transport'
 /**
  * Managed-login consumer routes.
  * The callback GET only hands the browser to the return view. Exchange waits
@@ -115,7 +117,9 @@ router.post('/sources/:sourceId/discussion', async (req: Request, res: Response)
   res.set('Cache-Control', 'no-store')
   res.set('Referrer-Policy', 'no-referrer')
   try {
-    res.json({ ok: true, data: await relayManagedDiscussion(req, req.params.sourceId) })
+    const data = await relayManagedDiscussion(req, req.params.sourceId)
+    if (req.body?.operation === 'preview-image') return sendVisualPreviewImage(res, data as VisualPreviewImage)
+    res.json({ ok: true, data })
   } catch (error) { sendRefusal(res, error) }
 })
 

@@ -246,6 +246,7 @@ const DataSourceCreateSchema = z.object({
     k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     visualReviewEnabled: z.boolean().optional(),
+    managedVisualReviewEnabled: z.boolean().optional(),
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
@@ -308,6 +309,7 @@ const DataSourceUpdateSchema = z.object({
     k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     visualReviewEnabled: z.boolean().optional(),
+    managedVisualReviewEnabled: z.boolean().optional(),
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
