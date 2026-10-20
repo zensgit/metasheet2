@@ -1,0 +1,101 @@
+{
+  "source_commit": "8d32889512014653d41412c4da39d145df8d7f65",
+  "baseline_meta_api_source": "059b06b595abf2bd4834541ce0b2db3aaaf72493",
+  "explicit_shell_provider": {
+    "commit": "aa69ff67a5ba0ba7eebbaa9835712950ce8662bb",
+    "frozen_package_overwritten": false,
+    "sha256": "55deea7810e3eca96e4c06f0d9ab543f0af1bbd7c9d4a459bcd14989975fb801"
+  },
+  "scope": "Owned self-contained installed host package + existing PM2/Nginx/upgrade/migration/health/backup restore engines; exact single script provider in private copy, not a newly shipped package or distribution image",
+  "passed": true,
+  "native_checks": 71,
+  "upgrade_failure_recovery": {
+    "all_sql_state_restored_before_start": true,
+    "application_and_static_bytes_restored": true,
+    "automatic_rollback_claimed": false,
+    "backup_sha256": "d3b96252ef1de739e2691dcaa2c8ac8756dc175f40e6d283e589f10a9a725d47",
+    "before_store_sha256": "52f0dfb52320e5b502d2cf77ef612a644202db1fca9239644f85a5eeecc02e21",
+    "candidate_migration_committed": true,
+    "candidate_upgrade_exit": 1,
+    "candidate_web_published": true,
+    "existing_upgrade_and_health_recovered": true,
+    "failed_backend_unavailable": true,
+    "private_pm2_namespace": true,
+    "readiness_provider": {
+      "commit": "aa69ff67a5ba0ba7eebbaa9835712950ce8662bb",
+      "frozen_package_overwritten": false,
+      "sha256": "55deea7810e3eca96e4c06f0d9ab543f0af1bbd7c9d4a459bcd14989975fb801"
+    },
+    "recovery_upgrade_exit": 0,
+    "retained_identity_material_unchanged": true,
+    "synthetic_fault_candidate": true
+  },
+  "pending_revoke_recovery": {
+    "acked_outboxes": 1,
+    "attempts": 2,
+    "duplicate_status": 200,
+    "frozen_identity_sha256": "79e3b3009869db3e6a2ff66201a88edff6b23f29af0fb53b612ec954c88e7c52",
+    "initial_state": "pending",
+    "restored_state": "acked",
+    "retry_status": 200,
+    "same_frozen_identity": true
+  },
+  "package_installer": {
+    "authenticated_product_mode": "plm-workbench",
+    "exit": 0,
+    "private_command_logs": true,
+    "published_web": {
+      "files": 164,
+      "sha256": "152847d401c2f36d5f7d7b5ffa7fcc90036a78e4c1329066248d873b8c6afab6"
+    },
+    "same_origin_health_and_plugins": true,
+    "service_manager_verified": true,
+    "transport": "owned pinned-template Nginx"
+  },
+  "native_cleanup": {
+    "reason": "removed",
+    "removed": true
+  },
+  "meta_cleanup": {
+    "backend_stopped": true,
+    "owned_directory_removed": true,
+    "redis_owned_removed": true
+  },
+  "pm2_manager": {
+    "cleanup": true,
+    "ecosystem_sha256": "35ddabd77ff744792e0ee6c120f74b9be6fb27e5d464ab2e90dddac64cd7788a",
+    "private_namespace": true,
+    "requested": true,
+    "starts": 3,
+    "version": "7.0.4"
+  },
+  "baseline_ids_preserved": {
+    "container": true,
+    "volume": true
+  },
+  "guard_tests": {
+    "tests": 10,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "provider_tests": {
+    "tests": 4,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "raw_sha256": {
+    "result.json": "21656b684629e6e326ed2b35ba7084cbba3ff501f3c9246f7a2b0c52bad98a29",
+    "meta-runtime/result.json": "174b0f8e50452c4dd2dffdfad61df1c673deeb769395b36199d1402c4e7dfc75",
+    "meta-runtime/upgrade-failure.private": "7a0553163cc389fb170ce3570a3062f8bfd1acc16ece21d88533092280f8841f",
+    "meta-runtime/upgrade-recovery.private": "22a3ef521ecf533eade85cb4e85bfaaa31b4e858bf7dffbd3c74538bfad1c95a"
+  },
+  "whole_goal_complete": false,
+  "remote_ci": "Unpublished; dependent Draft publication awaits #363 valuable queued performance job.",
+  "remaining": [
+    "Incorporate the separately committed upgrade provider into the actual deliverable through explicit source/package provenance; the frozen059 package was not overwritten.",
+    "New full-package/image exact-head CI and other W01-W23 scopes remain open.",
+    "No automatic rollback, production/customer or OS-specific service acceptance claim."
+  ]
+}
