@@ -1,0 +1,193 @@
+{
+  "scope": "source-process Meta target ACL encrypted enrollment; not worker or installed acceptance",
+  "source_commit": "491cdbed1b5b8c3ab720e73e46809ae860968af3",
+  "recorded_utc": "2026-10-20T00:06:08.578256+00:00",
+  "postgres_distinct_cases_cumulatively_qualified": 21,
+  "native_verify_in_pg": "controlled response; not end-to-end auth proof",
+  "crossprocess": [
+    "independent Node enrollment CAS 201/409",
+    "independent PG reader downgrade NOWAIT 55P03",
+    "real Node Native revoke then fresh received401"
+  ],
+  "typescript_final_exit": 0,
+  "git_diff_cached_check": "passed after removing own extra EOF blank line",
+  "retained_red": "same credential provenance renewal retired the current key; targeted red then corrected green",
+  "local_evidence": [
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-20261020.log",
+      "sha256": "5902b39734977f6a14b47b704b0b2cc20eeaaef0c42076a44ffc01a33854589c",
+      "bytes": 13751,
+      "summary": [
+        " ❯ tests/integration/plm-personal-change-read-pg.realdb.ts  (8 tests | 7 failed) 291ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  7 failed | 1 passed (8)",
+        "   Duration  945ms (transform 255ms, setup 0ms, collect 526ms, tests 291ms, environment 0ms, prepare 45ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-failed-only-20261020.log",
+      "sha256": "70421cec7ffb8907f8e7b48cfff04cabf7a0db6faaaf1ae289e2942c82918afb",
+      "bytes": 12113,
+      "summary": [
+        " ❯ tests/integration/plm-personal-change-read-pg.realdb.ts  (8 tests | 7 failed | 1 skipped) 178ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  7 failed | 1 skipped (8)",
+        "   Duration  741ms (transform 232ms, setup 0ms, collect 444ms, tests 178ms, environment 0ms, prepare 37ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-failed-only2-20261020.log",
+      "sha256": "0f1a9425f323b4cac49abf88ef504b1ebc66e0b2b92b5625e6f006e98e54b973",
+      "bytes": 1938,
+      "summary": [
+        " ❯ tests/integration/plm-personal-change-read-pg.realdb.ts  (8 tests | 1 failed | 1 skipped) 375ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 6 passed | 1 skipped (8)",
+        "   Duration  956ms (transform 245ms, setup 0ms, collect 461ms, tests 375ms, environment 0ms, prepare 38ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-target-repair-20261020.log",
+      "sha256": "d89daccb2e358c1c63b43f2700b60d5025573d79ba8ffebef691234a41c65243",
+      "bytes": 528,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  2 passed | 7 skipped (9)",
+        "   Duration  744ms (transform 246ms, setup 0ms, collect 491ms, tests 127ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-new-controls-20261020.log",
+      "sha256": "f1bccb8fc3298d826da542b17a3865f2e17c659c35046d64a4e3ce89ac4548e7",
+      "bytes": 530,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  8 passed | 9 skipped (17)",
+        "   Duration  1.48s (transform 240ms, setup 0ms, collect 456ms, tests 904ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-local-refusal-20261020.log",
+      "sha256": "791bfcf2d953f1cc04764628213bf351bb4e76dec6ea52b1bf24f6c8217e1946",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 17 skipped (18)",
+        "   Duration  625ms (transform 218ms, setup 0ms, collect 410ms, tests 105ms, environment 0ms, prepare 29ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-pg-revoke-outcomes-20261020.log",
+      "sha256": "815f060d72f522d12ad148f2a11764249c8e9eab9ee742280ef07386b1f9d417",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  4 passed | 15 skipped (19)",
+        "   Duration  1.03s (transform 252ms, setup 0ms, collect 507ms, tests 395ms, environment 0ms, prepare 41ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-same-key-before-20261020.log",
+      "sha256": "30930a77ef432b1ed16d027de03b026580061a2b9e3dd7857be020683e10b6eb",
+      "bytes": 1559,
+      "summary": [
+        " ❯ tests/integration/plm-personal-change-read-pg.realdb.ts  (20 tests | 1 failed | 19 skipped) 127ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        " Test Files  1 failed (1)",
+        "      Tests  1 failed | 19 skipped (20)",
+        "   Duration  748ms (transform 253ms, setup 0ms, collect 497ms, tests 127ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-same-key-after-20261020.log",
+      "sha256": "6cac3053935ca4dca5c34d517340b21f800b3b05c74da537034089723ce17625",
+      "bytes": 530,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 19 skipped (20)",
+        "   Duration  673ms (transform 238ms, setup 0ms, collect 453ms, tests 94ms, environment 0ms, prepare 38ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-enrollment-retired-replay-20261020.log",
+      "sha256": "03e90fc1e54d1883597522fef30a3e1aded12506013a53c02b0432dac6a8aab8",
+      "bytes": 532,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed | 20 skipped (21)",
+        "   Duration  734ms (transform 239ms, setup 0ms, collect 457ms, tests 156ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-read-enrollment-affected-unit-20261020.log",
+      "sha256": "8ecf24e095189601d410685c43ee56bb2293fa10839231cafc16eef5ff6d380b",
+      "bytes": 767,
+      "summary": [
+        " Test Files  2 passed (2)",
+        "      Tests  22 passed (22)",
+        "   Duration  878ms (transform 334ms, setup 106ms, collect 924ms, tests 46ms, environment 0ms, prepare 125ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-read-enrollment-revoke-audit-followup-20261020.log",
+      "sha256": "94fc252bdd65267df88713955a079ab2d1d542e53c22c8f31dc0fcc466f2b9cc",
+      "bytes": 1210,
+      "summary": [
+        " Test Files  2 passed (2)",
+        "      Tests  4 passed | 9 skipped (13)",
+        "   Duration  1.00s (transform 356ms, setup 101ms, collect 882ms, tests 24ms, environment 0ms, prepare 104ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-change-read-share-wrapper-compat-20261020.log",
+      "sha256": "7d79642015c9cdab2c1fab2b9675c777497f5ff2ed6725c561c3430f45c51630",
+      "bytes": 1203,
+      "summary": [
+        " Test Files  1 passed (1)",
+        "      Tests  3 passed | 11 skipped (14)",
+        "   Duration  1.34s (transform 303ms, setup 0ms, collect 593ms, tests 624ms, environment 0ms, prepare 39ms)"
+      ]
+    },
+    {
+      "path": "/tmp/plm-read-enrollment-tsc-final-20261020.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "summary": []
+    },
+    {
+      "path": "/tmp/plm-personal-change-read-native-20261020/revoke-received-error.json",
+      "sha256": "110e0d2b7e0df176389c48d8244aebe5ee5ea465a80d32baba2eefcb433231ae",
+      "bytes": 301,
+      "summary": [
+        "      \"passed\": true,",
+        "  \"passed\": true,"
+      ]
+    }
+  ],
+  "owned_qa_pg": {
+    "created_utc": "2026-10-19T23:32:20.623156+00:00",
+    "root": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-change-read-pg16-20261020-jscluw0c",
+    "database": "meta_change_read_99503e8e",
+    "url": "postgresql://plmgrantqa@localhost:55483/meta_change_read_99503e8e?host=%2Ftmp%2Fplm-crpg-s-q8qpjv8x",
+    "status": "ownedQAonly; same existing Unix-only PG16 cluster restarted explicitly, existing evidence DBs retained"
+  },
+  "compatibility_pg": {
+    "database": "meta_read_share_compat_62bba46b",
+    "socket_alias": "/tmp/plm-managed-consumer-pg-6kpd20du",
+    "actual_owned_socket": "/tmp/plm-crpg-s-q8qpjv8x",
+    "url": "postgresql://plmgrantqa@localhost:55483/meta_read_share_compat_62bba46b?host=%2Ftmp%2Fplm-managed-consumer-pg-6kpd20du",
+    "scope": "same owned Unix-only QA cluster; new owned socket alias for unchanged existing test DSN safety prefix, new disposable compatibility DB; no guard/config changes"
+  },
+  "open": [
+    "real Meta auth and Native-issued enrollment",
+    "personal listener worker and unlink/source hooks",
+    "cleanup background drain",
+    "frontend/source config",
+    "updated installed package/restore",
+    "whole W01-W23"
+  ],
+  "publication": "held: #363 exact74fcf61 valuable perf job118040891880 queued; no dependent push, no merge/deploy"
+}

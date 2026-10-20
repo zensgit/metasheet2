@@ -113,3 +113,8 @@ configuration, cross-process recovery and updated installed images remain open.
 The current installed Native/Meta images predate this feature. Prior package
 installation and restore evidence does not qualify these new paths. Whole W01–W23
 engineering acceptance remains incomplete.
+
+Source commit: `491cdbed1b5b8c3ab720e73e46809ae860968af3`. Compact evidence index:
+`artifacts/plm-personal-change-read-enrollment-20261020/verification.json`.
+This is the single source-closeout document commit; remote head CI is pending
+held publication.
