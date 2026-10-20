@@ -8,6 +8,7 @@ import { Router } from 'express'
 import { describeManagedCookie, managedSessionClientOrigin, revokePresentedManagedSession } from '../auth/plm-managed-session'
 import { buildFeaturePayload } from './auth'
 import { handoffSnapshotShare } from '../services/plm-managed-snapshot-share-flow'
+import { relayManagedDiscussion } from '../services/plm-managed-discussion'
 import {
   MANAGED_SESSION_COOKIE,
   ManagedCompanionRefusal,
@@ -101,6 +102,14 @@ function actorFrom(req: Request): ManagedActor {
     authenticatedTenantId: authenticatedTenantId || null,
   }
 }
+
+router.post('/sources/:sourceId/discussion', async (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  try {
+    res.json({ ok: true, data: await relayManagedDiscussion(req, req.params.sourceId) })
+  } catch (error) { sendRefusal(res, error) }
+})
 
 router.post('/links', async (req: Request, res: Response) => {
   try {
