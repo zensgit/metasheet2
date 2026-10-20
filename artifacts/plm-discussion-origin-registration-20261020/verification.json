@@ -1,0 +1,69 @@
+{
+  "source": "601e8a24441d8f9f3637be51c1b13897cd65e964",
+  "red": "one actual unit assertion failed with distinct installation issuer before repair; original installed browser retry403 persisted separately",
+  "unit_green": 33,
+  "actual_postgres": {
+    "scope": "Owned PostgreSQL/Redis/Native HTTP proof of the managed Discussion relay.\n\nMeta session rows are provisioned fixtures against real Native first-party\nlogin/authorize/exchange/status/revoke. The actual global JWT middleware and\nmounted router run. This is not the Meta OAuth callback, browser, complete\nmigration chain, service installation or production acceptance.\n",
+    "passed": true,
+    "native_api_ref": "ee067d96a51c041aeee7154701db14d98180949a",
+    "native_checkout_head": "7dcaaf08c6e85d04b43d92b80137082f1864be7d",
+    "meta_checkout_head": "19c5b1f02dee7e1c1397520b246ed9a3cfda8bcb",
+    "source_before": {
+      "files": 1438,
+      "sha256": "7b31eebc2f8ba0a4625c1179190ea55aef10e7ecadc86774d99b519f923a3731"
+    },
+    "critical_source": {
+      "packages/core-backend/src/services/plm-managed-discussion.ts": "75d2c009599e7afac586f7ef42a1d16884307510f926672e5ad3ab22e16c0c2a",
+      "packages/core-backend/src/routes/plm-managed-companion.ts": "e64a300dd17bae944ce26bb745be710bacef229825a1e9f51129f84816e216ff",
+      "packages/core-backend/src/services/plm-managed-bom-authority.ts": "5b5e1a3c4074cb363024b18c31def782613d49ddd6d5f737412524180fe61b7d",
+      "packages/core-backend/src/auth/jwt-middleware.ts": "e4497ea7df8ec4a4db9e7069ce10da1a4a8c43d9c3cd7d3fe7fa8ea8e6276f53",
+      "packages/core-backend/src/auth/plm-managed-session.ts": "8149f3a8986d9bb70f698fc5f67b05b2bfd4223650db2cac4916c2ad1ce01ab7",
+      "packages/core-backend/src/auth/visual-review-markup.ts": "0f4bd46fcb5b0b7274c1db069770cb9a2891fbcefbab9496fecb91f58ca54d42",
+      "packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts": "049b7d01d63d2f65e00d9ec2ce4b64c7f48dc6c525035371e3c94481fba84d31",
+      "packages/core-backend/vitest.plm-managed-discussion.config.ts": "b63c678ed1be44ac8fd9df33abe865c645e024fd7cde2dacae3b61ad097042c5",
+      "packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs": "8356be77ee49f1a0ddf5dc655dc90bfb011461b5b7d217ea5245a0c3ebd142a1",
+      "scripts/verification/plm-managed-discussion/verify.py": "ec62cc8d33ec702f065f902c9ee93c8f01e935e21fdb78db6c2ef15975edf36c"
+    },
+    "root": "/tmp/plm-mdpg-s-ufveg3uf",
+    "owner": "5325706e438947bc9806ef2fb9ebce6c",
+    "cleanup_errors": [],
+    "test_exit": 0,
+    "meta_workers": [
+      {
+        "pid": 73250,
+        "exit": 0,
+        "stopped": true
+      },
+      {
+        "pid": 73272,
+        "exit": 0,
+        "stopped": true
+      }
+    ],
+    "checks": 27,
+    "source_after": {
+      "files": 1438,
+      "sha256": "7b31eebc2f8ba0a4625c1179190ea55aef10e7ecadc86774d99b519f923a3731"
+    },
+    "directory_removed": true
+  },
+  "types_exit": 0,
+  "actionlint_exit": 0,
+  "private_archive": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/plm-discussion-origin-registration-20261020",
+  "raw_sha256": {
+    "plm-discussion-registration-pg-20261020.expiry-membership.json": "676fdaaa8886fa17408e0981cc80fef68811de6b2f0edc696a1b94b4815f731c",
+    "plm-discussion-registration-types-20261020.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "plm-discussion-registration-pg-command-20261020.log": "2c50a1274b50b78cdec9ae7cad69c03e2d8823f1ab4fb38ae07f26443860a932",
+    "plm-discussion-registration-unit-green-20261020.json": "c5c66083a71de0be6c9449d20930eabe5296f07c420827ee3e48a785a6df307a",
+    "plm-discussion-registration-red-20261020.log": "8652825398acae850bee28db27fcfc3d6d096d2557f5998687aa272c1399c50c",
+    "plm-discussion-registration-pg-20261020.json": "ae8a613b6e208cea2f7791f2efb5a2c016a6dbc1ed73defeba312496a0953e80",
+    "plm-discussion-registration-pg-20261020.tests.json": "b23a749b5dd76be7642012955fbe15529d47ce1766ea230b6aa328c911ed0c0d",
+    "plm-discussion-registration-pg-20261020.expiry-link.json": "753a350cb80c611c94ac7e13bf48ff58116b0d3acc9267c9b547d877d299cabd",
+    "plm-discussion-registration-unit-green-20261020.log": "2267bf2d2d2309e0a8277fcc7ef015edeca04b93fdb091ada815b86e109e24e9",
+    "plm-discussion-registration-pg-20261020.log": "b2cae2aef23f84f1f4fcca52218285bf77743063a60d0cc0e6884b252efc8d5d",
+    "plm-discussion-registration-pg-20261020.workers.json": "6f1b7627ba58e9f398eee2e3d269c369c8bb9b05001bdb0eb6ac93936ed25436",
+    "plm-discussion-registration-red-20261020.json": "66847e1b844b69c7d693fab270e0d3459920f2ed163b34e5c9a330faa65881a2"
+  },
+  "installed_repaired_tuple": false,
+  "pushed": false
+}
