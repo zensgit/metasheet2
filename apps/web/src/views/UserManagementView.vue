@@ -3651,6 +3651,13 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
+/* The missing-OpenID hint carries the whole corpId (one unbreakable token): full row, may break. */
+.user-admin__user > .user-admin__hint {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .user-admin__panel--detail {
   gap: 16px;
 }
@@ -3758,6 +3765,9 @@ onUnmounted(() => {
 
 .user-admin__user {
   display: flex;
+  /* The missing-OpenID governance hint (a <p> after the user-body button) takes its own line instead
+     of squeezing the button and running past the card. */
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 10px;
   text-align: left;

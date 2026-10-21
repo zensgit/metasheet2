@@ -48,7 +48,9 @@
           >
             <!--
               Customer field report 2026-10-21 (#6): the chevron of the ACTIVE sheet toggles its view
-              list open/closed (local UI state only, never an emit). On any other sheet the click falls
+              list open/closed (local fold state) and still emits the same-id select-sheet the button
+              would have emitted (MultitableWorkbench.vue's onSelectSheet uses it to leave the dashboard;
+              for the active sheet it never switches anything). On any other sheet the click falls
               through to the button and activates that sheet, which auto-expands it.
             -->
             <span
@@ -383,9 +385,11 @@ function onSheetActivate(s: MetaSheet) {
 
 function onChevronClick(event: MouseEvent, s: MetaSheet) {
   if (s.id !== props.activeSheetId) return // fall through: the button click activates (and expands) it
-  event.stopPropagation()
+  event.stopPropagation() // the button's own handler would unfold a folded sheet
   focusedKey.value = sheetKey(s.id)
   collapsedSheetId.value = collapsedSheetId.value === s.id ? null : s.id
+  // Keep the button's same-id emit: the workbench returns from the dashboard to the grid on it.
+  emit('select-sheet', s.id)
 }
 
 // --- Rename affordance (feat/multitable-rename) --------------------------------------------

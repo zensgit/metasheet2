@@ -3181,6 +3181,12 @@ describe('UserManagementView', () => {
     onTestFinished(() => {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
     })
+    // A listed user whose DingTalk identity has a corpId but no openId renders the governance hint (with
+    // the whole corpId, one unbreakable token) as a third child of the user row.
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].dingtalkCorpId = 'ding' + '0'.repeat(32)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
     app = createApp(UserManagementView)
     app.component('RouterLink', {
       props: ['to'],
@@ -3204,6 +3210,9 @@ describe('UserManagementView', () => {
     ])
     const bulkButtons = aside!.querySelectorAll('.user-admin__bulkbar > .user-admin__role-actions > .user-admin__button')
     expect(bulkButtons.length).toBeGreaterThanOrEqual(9)
+    const rowHints = Array.from(aside!.querySelectorAll('.user-admin__user > p.user-admin__hint'))
+    expect(rowHints).toHaveLength(1)
+    expect(rowHints[0].textContent).toContain('ding' + '0'.repeat(32))
 
     const source = readFileSync(resolve(process.cwd(), 'src/views/UserManagementView.vue'), 'utf8').replace(/\r\n/g, '\n')
     const style = source.slice(source.indexOf('<style scoped>'))
@@ -3220,6 +3229,10 @@ describe('UserManagementView', () => {
     expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('max-width: 100%;')
     expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('white-space: normal;')
     expect(rule('.user-admin__user')).toContain('box-sizing: border-box;')
+    expect(rule('.user-admin__user')).toContain('flex-wrap: wrap;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('flex-basis: 100%;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('min-width: 0;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('overflow-wrap: anywhere;')
     expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n  overflow-wrap: anywhere;/)
     // The shared flex-wrap rule for every action row is still in place.
     expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n  display: flex;\n  flex-wrap: wrap;/)

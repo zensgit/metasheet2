@@ -659,7 +659,7 @@ describe('MetaSheetViewRail — active-sheet chevron folds and unfolds the view 
     return el!
   }
 
-  it('expand -> collapse -> expand on the active sheet, without emitting anything', async () => {
+  it('expand -> collapse -> expand on the active sheet, emitting only the same-id select-sheet', async () => {
     const onSelectSheet = vi.fn()
     const onSelectView = vi.fn()
     const root = mountComponent(baseProps({ onSelectSheet, onSelectView }))
@@ -678,7 +678,10 @@ describe('MetaSheetViewRail — active-sheet chevron folds and unfolds the view 
     expect(viewNodes(root)).toHaveLength(3)
     expect(s1.getAttribute('aria-expanded')).toBe('true')
 
-    expect(onSelectSheet).not.toHaveBeenCalled() // the fold is local UI state, never a sheet switch
+    // The fold is local UI state; the chevron still emits the same-id select-sheet the button would have
+    // emitted (the workbench uses it to leave the dashboard — for the active sheet it never switches).
+    expect(onSelectSheet).toHaveBeenCalledTimes(2)
+    expect(onSelectSheet.mock.calls).toEqual([['s1'], ['s1']])
     expect(onSelectView).not.toHaveBeenCalled()
   })
 
@@ -689,6 +692,7 @@ describe('MetaSheetViewRail — active-sheet chevron folds and unfolds the view 
     await nextTick()
     expect(viewNodes(root)).toHaveLength(0)
 
+    onSelectSheet.mockClear()
     sheetNodes(root)[0].click()
     await nextTick()
     expect(viewNodes(root)).toHaveLength(3)
