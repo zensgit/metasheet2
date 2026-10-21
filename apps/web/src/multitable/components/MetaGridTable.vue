@@ -2014,16 +2014,26 @@ function onKeydown(e: KeyboardEvent) {
    body-row appearance — only the header cells adopt the panel/token look.
    #5863: these corner cells sit at the intersection of the left-sticky row-num/
    check-col stack and the sticky-top header row, so they need BOTH `top: 0`
-   and a zIndex above a frozen body cell's (2) — 3, matching the plain
-   (non-frozen) `.meta-field-header` tier, so the corner paints over body
-   content scrolling underneath it in both directions. */
+   and a zIndex above everything that can scroll underneath them.
+   Customer field report 2026-10-21 (#5): the corner used to share tier 3 with
+   the plain (scrolling) `.meta-field-header` cells, and on a z-index tie the
+   later DOM sibling paints on top — so once the grid was scrolled right far
+   enough, a scrolled-away header cell slid over the corner and hid the
+   select-all checkbox. Stacking tiers (top to bottom):
+     5  header corner (this rule)
+     4  frozen header cell (MetaFieldHeader.vue, frozenLeft set)
+     3  plain header cell (MetaFieldHeader.vue); frozen-row check/row-num and
+        frozen-row x frozen-column body cells (cellStyle)
+     2  frozen body cell (cellStyle)
+     1  body check-col / row-num
+   The corner must stay strictly above 4 and 3, never tie with them. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: 5;
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
