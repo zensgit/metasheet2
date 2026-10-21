@@ -36,7 +36,7 @@ import {
   type AttendanceW4TransactionClientV1,
   type VerifiedAttendanceOperationIdentityV1,
 } from './w4c0-identity'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { runAttendanceResultOperationTransactionV1, isAttendanceW4ConnectionUncertainV1 } from './w4c0-operation-registry'
 import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from './w4c0-operation-contract'
 import { attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1 } from './w4c2-authoritative-delivery'
 import {
@@ -1434,6 +1434,9 @@ async function runControlTransaction<T>(
     try {
       return await runAttendanceResultOperationTransactionV1(connection, body)
     } catch (error) {
+      // Settlement coordination (r6.1 §1.1 P1-1): once the runner reports the connection's state as
+      // unknown, nothing runs on it again — not even the one control-precondition retry.
+      if (isAttendanceW4ConnectionUncertainV1(error)) throw error
       if (attempt === 0 && isRetryableControlPrecondition(error)) continue
       throw error
     }

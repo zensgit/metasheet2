@@ -944,6 +944,24 @@ export default defineConfig({
       // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
       // wiring).
       'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
+      // Attendance settlement coordination (P1-1): dedicated key + credential, S1 / S2 handover
+      // snapshot and lock semantics, and cleanup of unknown results, each against a REAL
+      // PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green them;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-coordination-key-credential.db.test.ts',
+      'tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts',
+      'tests/integration/attendance-coordination-cleanup.db.test.ts',
+      // P1-1 S2: the coordinator (quota, prober, connect race, restart) on a real pool; same two-point wiring.
+      'tests/integration/attendance-coordination-acquire.db.test.ts',
+      'tests/integration/attendance-coordination-approval-handover.db.test.ts',
+      // P1-1 S3: the coordinated-transaction port, the handed-over runner and the class-00 re-entry; same two-point wiring.
+      'tests/integration/attendance-coordination-port.db.test.ts',
+      // P1-1 S4: every W4 runner-connection releaser destroys on the uncertainty mark (A05 / A06); same two-point wiring.
+      'tests/integration/attendance-w4-release-destroy.db.test.ts',
+      // P1-1 S5: production inertness from the real composition root (A01) and the hot-path measurement (A12); same two-point wiring.
+      'tests/integration/attendance-p11-hotpath-compare.db.test.ts',
+      'tests/integration/attendance-p11-inertness-baseline.db.test.ts',
+      'tests/integration/attendance-p11-inertness-head.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
       // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { Pool } from 'pg'
+import { noteSettlementCoordinationMainPoolAccessV1 } from '../../attendance/coordination/settlement-coordination-context'
 import { Logger } from '../../core/logger'
 import type { RecoveryArchiveTransactionDepthProbe } from '../../multitable/recovery-archive-crypto'
 import { secretManager } from '../../security/SecretManager'
@@ -51,6 +52,33 @@ interface TransactionDepthContext {
   parent: TransactionDepthContext | undefined
 }
 
+/**
+ * Settlement coordination nesting guard (r6.1 §3.2 step 11; P1-1 allowed change 2). Every connection
+ * this pool hands out — through `ConnectionPool`, through pg's own `query` (which borrows with
+ * `connect`), or through the raw pool other modules hold (`getInternalPool()`, `db/pg`, Kysely) — is
+ * noted once. Outside a live coordination context the note returns at once; inside one it is counted
+ * in production and refused in tests (`'throw'` mode), refused the way this call reports a connect
+ * error. The coordinator borrows before any context exists, so its own connections are never counted.
+ * Count only: alerting on the count belongs to P1-7.
+ */
+function noteSettlementCoordinationNestingOnConnect(pool: Pool, name: string): void {
+  const connect = pool.connect.bind(pool) as (...args: unknown[]) => unknown
+  const detail = `pool:${name}`
+  ;(pool as unknown as { connect: (...args: unknown[]) => unknown }).connect = (...args: unknown[]) => {
+    try {
+      noteSettlementCoordinationMainPoolAccessV1(detail)
+    } catch (error) {
+      const callback = args.find((arg) => typeof arg === 'function') as ((error: unknown) => void) | undefined
+      if (callback) {
+        queueMicrotask(() => callback(error))
+        return undefined
+      }
+      return Promise.reject(error)
+    }
+    return connect(...args)
+  }
+}
+
 export class ConnectionPool {
   private pool: Pool
   private slowMs: number
@@ -74,6 +102,7 @@ export class ConnectionPool {
 
   constructor(opts: ConnectionPoolOptions) {
     this.pool = new Pool(opts)
+    noteSettlementCoordinationNestingOnConnect(this.pool, opts.name || 'main')
     this.slowMs = opts.slowQueryMs || parseInt(process.env.DB_SLOW_MS || '500', 10)
     this.name = opts.name || 'main'
     this.logger = new Logger(`ConnectionPool:${this.name}`)
