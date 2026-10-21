@@ -129,3 +129,57 @@ test('UI-P2-2c drawer controls stay on top of the real grid (hit-test + click)',
   await expect(page.locator('tbody .meta-grid__check-col input[type="checkbox"]:checked')).toHaveCount(0)
   expect(errs, `page errors:\n${errs.join('\n')}`).toEqual([])
 })
+
+// Review round 3 (2026-10-21): with `.meta-grid` isolating its stacking context, a full-screen FIXED overlay
+// rendered from inside a grid cell — the linked-record popover — would have its z-index (1000) count only
+// inside the grid and paint UNDER every later positioned sibling of the grid: the record inspector (overlay
+// at narrow width, or the push column). The popover now teleports to <body>. This opens it from a real
+// grid link chip next to an open inspector and asks the browser what is top-most over the popover panel.
+for (const inspector of ['overlay', 'push'] as const) {
+  test(`linked-record popover opened from the grid paints above the ${inspector} record inspector`, async ({ page }) => {
+    const errs: string[] = []
+    page.on('pageerror', (e) => errs.push(`pageerror: ${String(e)}`))
+    await page.setViewportSize({ width: 720, height: 900 })
+    await page.goto(`${HARNESS}?grid=1&inspector=${inspector}`, { waitUntil: 'domcontentloaded' })
+    await page.locator('[data-test="mode-collapsed"]').click()
+    await expect(page.locator('[data-test="inspector"]')).toBeVisible()
+
+    await page.locator('[data-test="link-chip"]').first().click()
+    const panel = page.locator('.meta-linked-record-popover [role="dialog"]')
+    await expect(panel).toBeVisible()
+
+    const probe = await page.evaluate(() => {
+      const panelEl = document.querySelector('.meta-linked-record-popover [role="dialog"]') as HTMLElement
+      const p = panelEl.getBoundingClientRect()
+      const ins = document.querySelector('[data-test="inspector"]')!.getBoundingClientRect()
+      const overlapsInspector = p.left < ins.right && p.right > ins.left && p.top < ins.bottom && p.bottom > ins.top
+      let total = 0
+      let covered = 0
+      for (let x = p.left + 4; x < p.right - 4; x += 12) {
+        for (let y = p.top + 4; y < p.bottom - 4; y += 12) {
+          total += 1
+          if (!document.elementFromPoint(x, y)?.closest('.meta-linked-record-popover')) covered += 1
+        }
+      }
+      const close = document.querySelector('.meta-linked-record-popover__close') as HTMLElement
+      const c = close.getBoundingClientRect()
+      const atClose = document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2)
+      return { overlapsInspector, total, covered, closeOnTop: !!atClose && close.contains(atClose) }
+    })
+    expect(probe.overlapsInspector, 'precondition: the popover panel overlaps the inspector').toBe(true)
+    expect(probe.total).toBeGreaterThan(50)
+    expect(probe, 'no popover point is covered and its close button is top-most').toMatchObject({ covered: 0, closeOnTop: true })
+
+    const closeBox = await page.locator('.meta-linked-record-popover__close').boundingBox()
+    await page.mouse.click(closeBox!.x + closeBox!.width / 2, closeBox!.y + closeBox!.height / 2)
+    await expect(page.locator('.meta-linked-record-popover')).toHaveCount(0)
+
+    // The backdrop also still closes it when clicked over the inspector (outside the panel).
+    await page.locator('[data-test="link-chip"]').first().click()
+    await expect(panel).toBeVisible()
+    const ins = await page.locator('[data-test="inspector"]').boundingBox()
+    await page.mouse.click(ins!.x + ins!.width / 2, ins!.y + ins!.height - 20)
+    await expect(page.locator('.meta-linked-record-popover')).toHaveCount(0)
+    expect(errs, `page errors:\n${errs.join('\n')}`).toEqual([])
+  })
+}
