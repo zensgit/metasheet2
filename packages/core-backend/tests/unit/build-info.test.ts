@@ -75,6 +75,39 @@ describe('getBuildInfo provenance-file fallback', () => {
     getBuildInfo(env)
     expect(spy).toHaveBeenCalledTimes(1)
   })
+
+  it('re-reads when the file is replaced in place (no reset hook), and drops to nulls if it disappears', () => {
+    const file = path.join(mk(), 'p.json')
+    const env = { METASHEET_BUILD_PROVENANCE_PATH: file } as NodeJS.ProcessEnv
+    fs.writeFileSync(file, JSON.stringify({ gitCommit: 'prev', gitRef: 'r66' }))
+    expect(getBuildInfo(env).commit).toBe('prev')
+    fs.writeFileSync(file, JSON.stringify({ gitCommit: 'next-commit-longer', gitRef: 'r67' }))
+    const future = new Date(Date.now() + 5000)
+    fs.utimesSync(file, future, future)
+    expect(getBuildInfo(env)).toMatchObject({ commit: 'next-commit-longer', imageTag: 'r67' })
+    fs.rmSync(file)
+    expect(getBuildInfo(env)).toEqual(nulls)
+  })
+
+  it('skips an oversized file by lstat size without reading it', () => {
+    const file = path.join(mk(), 'huge.json')
+    fs.writeFileSync(file, JSON.stringify({ gitCommit: 'x', pad: 'a'.repeat(2 * 1024 * 1024) }))
+    const spy = vi.spyOn(fs, 'readFileSync')
+    expect(getBuildInfo({ METASHEET_BUILD_PROVENANCE_PATH: file } as NodeJS.ProcessEnv)).toEqual(nulls)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('a non-empty METASHEET_BUILD_PROVENANCE_PATH is the only candidate (no walk-up)', () => {
+    const root = mk()
+    fs.writeFileSync(path.join(root, 'BUILD_PROVENANCE.json'), JSON.stringify(prov))
+    vi.spyOn(process, 'cwd').mockReturnValue(root)
+    // pinned but missing: the cwd file must NOT be used
+    const missing = path.join(mk(), 'nope.json')
+    expect(getBuildInfo({ METASHEET_BUILD_PROVENANCE_PATH: missing } as NodeJS.ProcessEnv)).toEqual(nulls)
+    // unset / blank pin: walk-up still works
+    resetBuildInfoProvenanceCache()
+    expect(getBuildInfo({ METASHEET_BUILD_PROVENANCE_PATH: '  ' } as NodeJS.ProcessEnv).commit).toBe('abc123')
+  })
 })
 
 describe('getBuildInfo', () => {
