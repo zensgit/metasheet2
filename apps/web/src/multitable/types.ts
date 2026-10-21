@@ -1317,6 +1317,8 @@ export interface AutomationRule {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: the step was planned but nothing was dispatched (backend AutomationStepResult.simulated). */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
