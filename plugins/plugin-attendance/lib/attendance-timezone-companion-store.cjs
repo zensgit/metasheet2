@@ -12,6 +12,17 @@ function isPreCompanionLegacyTarget(frame, prior) {
     && frame.identity?.source !== 'legacy_repair' && frame.identity?.source !== 'frozen_v2'
 }
 
+// Admission also needs the persisted calculation posture to be legacy (no rollout
+// row, or state legacy): in shadow/authoritative a write would append an immutable
+// snapshot from today's rule, or move the record's current calculation, so the old
+// date stays on the controlled repair path. Checked only after the pure test passes,
+// so every other case issues exactly the queries it did before.
+async function admitsPreCompanionLegacyTarget(trx, orgId, frame, prior) {
+  if (!isPreCompanionLegacyTarget(frame, prior)) return false
+  const rows = await trx.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1',[orgId])
+  return rows.length === 0 || (rows.length === 1 && rows[0].state === 'legacy')
+}
+
 // The fingerprint carries no org or user; key the unfrozen marker by the full target.
 function targetKey(frame) {
   return JSON.stringify([frame.orgId,frame.userId,frame.workDate,frame.fingerprint])
@@ -162,7 +173,7 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
         // A pre-companion freeze cannot be rebound from today's mutable rule/version.
         // With multi-timezone OFF, an untracked pre-upgrade record in the same zone
         // keeps its pre-upgrade behaviour: computed now, and never frozen.
-        unbound = isPreCompanionLegacyTarget(frame, prior)
+        unbound = await admitsPreCompanionLegacyTarget(trx, frame.orgId, frame, prior)
         if (!unbound) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED')
       }
     }
@@ -203,4 +214,4 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
   return { readLegacyFrozenV2, readEligibleLegacyRepair, readEligibleOpen, readForWorkDate, readForWorkDates, assertTarget, bindFirst }
 }
 
-module.exports = { createAttendanceTimezoneCompanionStore, isPreCompanionLegacyTarget }
+module.exports = { createAttendanceTimezoneCompanionStore, isPreCompanionLegacyTarget, admitsPreCompanionLegacyTarget }

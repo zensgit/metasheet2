@@ -253,7 +253,7 @@ function createAttendanceTimezoneRuntime({
     }
   }
   const frames = new WeakMap()
-  const { createAttendanceTimezoneCompanionStore, isPreCompanionLegacyTarget } = require('./attendance-timezone-companion-store.cjs')
+  const { createAttendanceTimezoneCompanionStore, admitsPreCompanionLegacyTarget } = require('./attendance-timezone-companion-store.cjs')
   const companion = createAttendanceTimezoneCompanionStore({ HttpError,validateFrozenContext,validateFrozenAttribution })
   async function assertLegacyRepairPosture(trx, frame) {
     if (frame?.identity?.source !== 'legacy_repair') return
@@ -681,8 +681,8 @@ function createAttendanceTimezoneRuntime({
         WHERE org_id=$1 AND user_id=$2 AND work_date=$3 AND visibility_state='active'`,[orgId,userId,workDate])
       const window = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate},batch)
       // Same rule as companion.assertTarget: only a default-only reading in the
-      // record's own zone may stand in for a pre-companion record, unfrozen.
-      if (prior.length && !isPreCompanionLegacyTarget({timezone:window.timezone,timezoneContext:window.timezoneContext},prior)) {
+      // record's own zone, under legacy posture, may stand in for a pre-companion record, unfrozen.
+      if (prior.length && !await admitsPreCompanionLegacyTarget(trx,orgId,{timezone:window.timezone,timezoneContext:window.timezoneContext},prior)) {
         fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',409)
       }
       requestTargetFacts.set(trx,{window})
