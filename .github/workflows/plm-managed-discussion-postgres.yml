@@ -1,4 +1,4 @@
-name: PLM managed Discussion PostgreSQL
+name: PLM managed Discussion and Visual PostgreSQL
 on:
   pull_request:
   merge_group:
@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   discussion-postgres:
+    name: Managed Discussion and Visual PostgreSQL
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -29,7 +30,7 @@ jobs:
         with:
           repository: zensgit/yuantus-plm
           token: ${{ secrets.PLM_NATIVE_READ_TOKEN }}
-          ref: 'ee067d96a51c041aeee7154701db14d98180949a'
+          ref: 'ba07fa952083179c58b5e423b1212eabb2d0c170'
           path: .ci-native-discussion
           persist-credentials: false
       - name: Prepare locked consumers and owned database tools
@@ -72,15 +73,15 @@ jobs:
             --pg-bin "$PLM_STANDALONE_PG_BIN" --redis-server "$PLM_DISCUSSION_REDIS_BINARY" \
             --redis-sha256 "$PLM_DISCUSSION_REDIS_SHA256" \
             --out artifacts/plm-managed-discussion-20261020/ci-runtime.json
-          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 27
+          node scripts/verification/plm-managed-companion-ci/assert-report.mjs artifacts/plm-managed-discussion-20261020/ci-runtime.tests.json 31
           python - <<'PYTHON'
           import json
           from pathlib import Path
           report = json.loads(Path('artifacts/plm-managed-discussion-20261020/ci-runtime.json').read_text())
           assert report['passed'] and report['directory_removed'] and report['cleanup_errors'] == []
-          assert report['checks'] == 27 and report['test_exit'] == 0
+          assert report['checks'] == 31 and report['test_exit'] == 0
           assert report['source_before'] == report['source_after']
-          assert report['native_api_ref'] == report['native_checkout_head'] == 'ee067d96a51c041aeee7154701db14d98180949a'
+          assert report['native_api_ref'] == report['native_checkout_head'] == 'ba07fa952083179c58b5e423b1212eabb2d0c170'
           PYTHON
       - name: Retain compact runtime evidence
         if: always()

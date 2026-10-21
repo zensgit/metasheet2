@@ -1,6 +1,8 @@
 /** Real PG source-authority races; isolated schema, real manager, non-dialing adapter.
  * Uses the source-table and scope migrations, not the complete application catalog.
  */
+import { fork } from 'node:child_process'
+import { resolve } from 'node:path'
 import { EventEmitter } from 'eventemitter3'
 import { randomUUID, generateKeyPairSync, sign } from 'node:crypto'
 import express from 'express'
@@ -108,6 +110,66 @@ describe.skipIf(!dsn)('Visual source durable authority on PostgreSQL', () => {
     await expect(b.updateDataSource(id, { ...config(id, initial), name: 'stale rename' }, { actor: ownerActor }))
       .rejects.toMatchObject({ status: 409 })
     expect(await row(id)).toEqual(before)
+  })
+
+  const managedConfig = (id: string, enabled: boolean): DataSourceConfig => ({ ...config(id, false),
+    options: { tenantId: 'native-tenant', orgId: 'native-org', apiMode: 'yuantus', autoConnect: false,
+      managedVisualReviewEnabled: enabled } })
+  it('managed approval reloads with independent Native and Meta tenant names and never grants legacy preview', async () => {
+    const a = await manager(), id = 'managed-distinct'
+    await a.addDataSource(managedConfig(id, true), scope)
+    const b = await manager(true), cached = b.getDataSource(id)
+    expect(cached.getConfig().options).toMatchObject({ tenantId: 'native-tenant', orgId: 'native-org', managedVisualReviewEnabled: true })
+    expect(b.getScope(id)?.tenantId).toBe('tenant')
+    expect(await b.isVisualReviewSourceCurrent(id, 'native-tenant', cached)).toBe(false)
+    await expect(b.updateDataSource(id, managedConfig(id, false), { actor: ownerActor })).rejects.toMatchObject({ status: 403 })
+  })
+  it('managed stale-cache deletion uses locked current approval', async () => {
+    const a = await manager(), id = 'managed-delete'
+    await a.addDataSource(managedConfig(id, false), scope)
+    const b = await manager(true)
+    await a.updateDataSource(id, managedConfig(id, true), scope)
+    const before = await row(id)
+    await expect(b.removeDataSource(id, { actor: ownerActor })).rejects.toMatchObject({ status: 403 })
+    expect(await row(id)).toEqual(before)
+  })
+  it('independent stale manager waits on PostgreSQL then refuses overwriting administrator disable', async () => {
+    const a = await manager(), id = 'managed-crossprocess'
+    await a.addDataSource(managedConfig(id, true), scope)
+    const child = fork(resolve('tests/integration/fixtures/plm-managed-visual-source-worker.cjs'), [], {
+      execArgv: ['--require', resolve('../../node_modules/tsx/dist/cjs/index.cjs')],
+      env: { ...process.env, PLM_VISUAL_OWNED_SCHEMA: schema }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    })
+    let stderr = ''
+    child.stderr?.on('data', bytes => { stderr = (stderr + bytes).slice(-2000) })
+    const ended = new Promise(resolve => child.once('exit', resolve))
+    const receive = (operation: string) => new Promise<any>((resolve, reject) => {
+      const timer = setTimeout(() => { child.off('message', listener); reject(new Error('Owned worker timed out: ' + stderr)) }, 10000)
+      function listener(message: any) {
+        if (message?.operation === operation) { clearTimeout(timer); child.off('message', listener); resolve(message) }
+      }
+      child.on('message', listener)
+    })
+    const held = await pool.connect()
+    try {
+      expect((await receive('ready')).pid).toBe(child.pid)
+      await held.query('BEGIN')
+      await held.query("UPDATE data_sources SET config=jsonb_set(config,'{options,managedVisualReviewEnabled}','false') WHERE id=$1", [id])
+      const pid = (await held.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      const result = receive('result'); child.send({ operation: 'rename', id })
+      expect((await waitForBlocker(pid)).length).toBeGreaterThan(0)
+      await held.query('COMMIT')
+      expect(await result).toMatchObject({ status: 409, code: 'DATA_SOURCE_CONFIGURATION_CONFLICT' })
+      expect((await row(id)).config.options.managedVisualReviewEnabled).toBe(false)
+      expect((await row(id)).name).toBe(id)
+    } finally {
+      await held.query('ROLLBACK'); held.release()
+      if (child.connected) child.send({ operation: 'stop' })
+      const stopped = await Promise.race([ended.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 5000))])
+      if (!stopped) { child.kill('SIGKILL'); await ended; throw new Error('Owned worker did not stop cleanly') }
+      console.info(JSON.stringify({ proof: 'independent-managed-visual-worker-cleanup', pid: child.pid, exit: child.exitCode }))
+      expect(child.exitCode).toBe(0)
+    }
   })
 
   it('real PLM connect header mutation does not invalidate approved admission or name-only edit', async () => {

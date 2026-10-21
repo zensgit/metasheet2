@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { assertVisualReviewSourceScope } from '../auth/visual-review-source'
+import { assertVisualReviewSourceScope, isVisualReviewSource } from '../auth/visual-review-source'
 import { EventEmitter } from 'eventemitter3'
 import { sql } from 'kysely'
 import type { Kysely } from 'kysely'
@@ -683,7 +683,7 @@ export class DataSourceManager extends EventEmitter {
     const workspaceId = options?.workspaceId
     const tenantId = normalizeTenantId(options?.tenantId)
     assertVisualReviewSourceScope(config, tenantId)
-    if (config.options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
+    if (isVisualReviewSource(config)) requireVisualSourceAdmin(options?.actor)
     const scopeKind = options?.scopeKind ?? 'private'
     if (!isDataSourceScopeKind(scopeKind)) {
       throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
@@ -751,8 +751,8 @@ export class DataSourceManager extends EventEmitter {
 
     assertVisualReviewSourceScope(config, tenantId)
     const previousConfig = existing.getConfig()
-    const wasVisual = previousConfig.options?.visualReviewEnabled === true
-    const isVisual = config.options?.visualReviewEnabled === true
+    const wasVisual = isVisualReviewSource(previousConfig)
+    const isVisual = isVisualReviewSource(config)
     const bindingChanged = wasVisual && (!isDeepStrictEqual(visualSourceBinding(previousConfig), visualSourceBinding(config))
       || ownerId !== priorScope?.ownerId || workspaceId !== (priorScope?.workspaceId ?? undefined)
       || tenantId !== priorScope?.tenantId || scopeKind !== priorScope?.scopeKind)
@@ -1111,7 +1111,7 @@ export class DataSourceManager extends EventEmitter {
         }
 
         assertVisualReviewSourceScope(config, current.tenantId)
-        if (config.options?.visualReviewEnabled === true) requireVisualSourceAdmin(actor)
+        if (isVisualReviewSource(config)) requireVisualSourceAdmin(actor)
 
         await trx
           .updateTable('data_sources' as never)
@@ -1482,9 +1482,9 @@ export class DataSourceManager extends EventEmitter {
           config={...config,options:{...config.options,[readKey]:connectionId}}
           record=this.configToRecord(config,ownerId,workspaceId,tenantId,scopeKind)
         }
-        const currentVisual = (current?.config as { options?: AdapterOptions } | undefined)?.options?.visualReviewEnabled === true
+        const currentVisual = isVisualReviewSource((current?.config ?? {}) as DataSourceConfig)
         if (normalizeActor(context.actor).platformAdmin !== true &&
-            (currentVisual || config.options?.visualReviewEnabled === true || context.previousConfig?.options?.visualReviewEnabled === true)) {
+            (currentVisual || isVisualReviewSource(config) || context.previousConfig && isVisualReviewSource(context.previousConfig))) {
           if (!context.previousConfig || !current || !context.previousScope) requireVisualSourceAdmin(context.actor)
           else {
             const scope = context.previousScope
@@ -1599,7 +1599,7 @@ export class DataSourceManager extends EventEmitter {
       throw new Error(`Data source with id '${id}' not found`)
     }
 
-    if (adapter.getConfig().options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
+    if (isVisualReviewSource(adapter.getConfig())) requireVisualSourceAdmin(options?.actor)
 
     // The 409 the referential check raises. Built once so the transactional, the
     // database-backstop and the memory-only path cannot drift apart.
@@ -1673,10 +1673,10 @@ export class DataSourceManager extends EventEmitter {
             .selectAll()
             .where('id' as never, '=', id as never)
             .forUpdate()
-            .execute() as Array<{ config?: { options?: { visualReviewEnabled?: unknown } } }>
+            .execute() as Array<{ config?: DataSourceConfig }>
           // Another manager may have enabled Visual after this process loaded.
           // Decide from the row protected by the same lock as the delete.
-          if (lockedRows[0]?.config?.options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
+          if (isVisualReviewSource(lockedRows[0]?.config ?? {})) requireVisualSourceAdmin(options?.actor)
 
           // ALWAYS counted — there is no force bypass (owner ruling 2026-09-20 ①).
           const referenceCount = await this.countExternalSystemReferences(id, trx)

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({ discover: vi.fn(), signature: 'identity-A', li
 vi.mock('../src/services/plm/plmManagedDiscussion', () => ({ discoverManagedDiscussion: (...args: unknown[]) => mocks.discover(...args) }))
 vi.mock('../src/composables/authPrincipal', () => ({ readAuthSessionSignature: () => mocks.signature, onAuthSessionSwitch: (listener: () => void) => { mocks.listener = listener; return mocks.unsubscribe } }))
 vi.mock('../src/components/plm/PlmEmbedDiscussionPanel.vue', () => ({ default: defineComponent({ props: ['parentOrigin', 'managedSourceId', 'target'], setup: props => () => h('div', { 'data-testid': 'bound-panel' }, JSON.stringify(props)) }) }))
+vi.mock('../src/components/plm/PlmEmbedVisualPreviewPanel.vue', () => ({ default: defineComponent({ props: ['parentOrigin', 'partId', 'managedSourceId'], setup: props => () => h('div', { 'data-testid': 'visual-panel' }, JSON.stringify(props)) }) }))
 let app: App | undefined, host: HTMLElement, frame: HTMLIFrameElement, parent: Window, descriptor: PropertyDescriptor
 const origin = 'https://native.example.test', context = { sourceId: 'owned-source', partId: 'native-part', parentOrigin: origin }
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 0)); await nextTick() }
@@ -56,4 +57,22 @@ it('drops a late bootstrap response after frame unmount and unsubscribes identit
   initial(); await settle(); app!.unmount(); app = undefined
   release({ ok: true, data: context }); await settle()
   expect(host.textContent).toBe(''); expect(mocks.unsubscribe).toHaveBeenCalledOnce()
+})
+
+it('mounts the existing visual panel only for the exact server capability and clears it on identity switch', async () => {
+  mocks.discover.mockResolvedValue({ ok: true, data: { ...context, visualPreviewEnabled: true } })
+  initial(); await settle()
+  expect(host.querySelector('[data-testid="visual-panel"]')!.textContent).toContain('owned-source')
+  expect(host.querySelector('[data-testid="visual-panel"]')!.textContent).toContain('native-part')
+  mocks.signature = 'identity-B'; mocks.listener!(); await nextTick()
+  expect(host.querySelector('[data-testid="visual-panel"]')).toBeNull()
+})
+it.each([false, 'true', 1, null])('refuses malformed visual capability %s', async visualPreviewEnabled => {
+  mocks.discover.mockResolvedValue({ ok: true, data: { ...context, visualPreviewEnabled } })
+  initial(); await settle(); expect(host.querySelector('[data-testid="bound-panel"]')).toBeNull()
+  expect(host.querySelector('[data-testid="visual-panel"]')).toBeNull()
+})
+it('does not infer a visual capability from extra context fields', async () => {
+  mocks.discover.mockResolvedValue({ ok: true, data: { ...context, visualPreviewEnabled: true, untrusted: true } })
+  initial(); await settle(); expect(host.querySelector('[data-testid="visual-panel"]')).toBeNull()
 })

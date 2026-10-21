@@ -44,3 +44,15 @@ describe('visual review source scope', () => {
     }
   })
 })
+
+it('keeps managed approval separate from legacy scope and validates its explicit Native namespace', () => {
+  const config = source({ managedVisualReviewEnabled: true, tenantId: 'native-tenant', orgId: 'native-org' })
+  expect(() => assertVisualReviewSourceScope(config, 'meta-tenant')).not.toThrow()
+  expect(visualReviewSourceConfigured(config, 'native-tenant')).toBe(false)
+  for (const options of [
+    { ...config.options, managedVisualReviewEnabled: 'true' },
+    { ...config.options, orgId: '' }, { ...config.options, tenantId: ' native-tenant' },
+  ]) expect(() => assertVisualReviewSourceScope(source(options), 'meta-tenant')).toThrow()
+  expect(() => assertVisualReviewSourceScope(source(config.options, 'http'), 'meta-tenant')).toThrow()
+  expect(() => assertVisualReviewSourceScope(source({ ...config.options, visualReviewEnabled: true }), 'meta-tenant')).toThrow()
+})

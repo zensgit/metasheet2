@@ -1,4 +1,4 @@
-"""Owned PostgreSQL/Redis/Native HTTP proof of the managed Discussion relay.
+"""Owned PostgreSQL/Redis/Native HTTP proof of managed Discussion and Visual preview.
 
 Meta session rows are provisioned fixtures against real Native first-party
 login/authorize/exchange/status/revoke. The actual global JWT middleware and
@@ -20,7 +20,7 @@ import time
 import urllib.request
 import uuid
 
-NATIVE_REF = 'ee067d96a51c041aeee7154701db14d98180949a'
+NATIVE_REF = 'ba07fa952083179c58b5e423b1212eabb2d0c170'
 META = Path(__file__).resolve().parents[3]
 NATIVE_PATHS = ['src', 'requirements.lock', 'scripts/verification/plm-managed-package/discussion_native_fixture.py']
 
@@ -72,6 +72,10 @@ def verify(args):
         'PLM_MANAGED_LOGIN_CLIENTS_JSON': json.dumps([{'issuer': proxy_url + '/installation', 'client_id': 'discussion-client',
             'callback': 'https://meta.example.test/api/plm/managed-login/callback', 'tenant_id': 'default', 'org_id': 'fixture-org',
             'origin': 'https://meta.example.test', 'secret_sha256': hashlib.sha256(b'owned-client-secret').hexdigest()}])}
+    config.update(VISUAL_PREVIEW_SESSION_ENABLED='true', LOCAL_STORAGE_PATH=str(root / 'visual-storage'))
+    env.update(PLM_EMBED_VISUAL_PREVIEW_ENABLED='true', PLM_MANAGED_VISUAL_FIXTURE_ROOT=str(root),
+               PLM_MANAGED_VISUAL_PYTHON=args.python, PLM_MANAGED_VISUAL_NATIVE_TREE=str(native),
+               PLM_MANAGED_VISUAL_PG_BIN=str(pg), PLM_MANAGED_VISUAL_RESTORE_PROOF=str(out.with_suffix('.visual-restore.json')))
     env.update({'YUANTUS_' + k: v for k, v in config.items()})
     env.update(YUANTUS_EMBED_PUBLIC_KEY=keys[1], YUANTUS_EMBED_KEY_ID='managed-pg', PLM_EMBED_AUDIENCE='metasheet2.embed',
                PLM_DISCUSSION_TENANT_DATABASE_URL=dburl + 'native_default_fixture-org' + query,
@@ -80,7 +84,8 @@ def verify(args):
     source_files = [*sorted((META / 'packages/core-backend/src').rglob('*.ts')),
         META / 'packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts',
         META / 'packages/core-backend/vitest.plm-managed-discussion.config.ts',
-        META / 'packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs', Path(__file__).resolve()]
+        META / 'packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs',
+        META / 'packages/core-backend/tests/integration/fixtures/seed-managed-visual-native.py', Path(__file__).resolve()]
     def hashes():
         return {str(p.relative_to(META)): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files}
     before = hashes()
@@ -91,6 +96,8 @@ def verify(args):
         'packages/core-backend/src/services/plm-managed-bom-authority.ts',
         'packages/core-backend/src/auth/jwt-middleware.ts', 'packages/core-backend/src/auth/plm-managed-session.ts',
         'packages/core-backend/src/auth/visual-review-markup.ts',
+        'packages/core-backend/src/services/plm-visual-preview-transport.ts',
+        'packages/core-backend/tests/integration/fixtures/seed-managed-visual-native.py',
         'packages/core-backend/tests/integration/plm-managed-discussion-pg.realdb.ts',
         'packages/core-backend/vitest.plm-managed-discussion.config.ts',
         'packages/core-backend/tests/integration/fixtures/plm-managed-discussion-worker.cjs',
@@ -122,6 +129,7 @@ def verify(args):
             '--save', '', '--appendonly', 'yes', '--appendfsync', 'always'])
         wait('redis', lambda: (root / 'redis.sock').exists())
         command([args.python, native / NATIVE_PATHS[2], 'seed'])
+        command([args.python, META / 'packages/core-backend/tests/integration/fixtures/seed-managed-visual-native.py', 'seed'])
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
@@ -150,14 +158,14 @@ def verify(args):
                 raise RuntimeError('Owned Vitest process group exceeded its deadline; evidence retained')
         report = json.loads(tests.read_text())
         assertions = [a for suite in report['testResults'] for a in suite.get('assertionResults', [])]
-        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 27
+        assert result['test_exit'] == 0 and report['success'] and len(assertions) == 31
         assert all(a['status'] == 'passed' for a in assertions), 'No skips/todo/failed tests permitted'
         worker_proof = json.loads(out.with_suffix('.workers.json').read_text())
         workers = worker_proof['workers']
         assert len(workers) == 2 and len({w['pid'] for w in workers}) == 2
         assert all(w['exit'] == 0 and w['stopped'] is True for w in workers)
         result['meta_workers'] = workers
-        result['checks'] = 27
+        result['checks'] = 31
         after = hashes()
         result['source_after'] = digest(after)
         assert after == before

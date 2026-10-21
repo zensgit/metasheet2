@@ -369,3 +369,60 @@ describe('Visual V1 manager choke points and durable reload', () => {
     expect(db.writes()).toBe(2)
   })
 })
+
+
+describe('managed Visual explicit administration with separate Native and Meta namespaces', () => {
+  const managed = (id: string, enabled = true): DataSourceConfig => ({ ...source(id),
+    options: { autoConnect: false, apiMode: 'yuantus', tenantId: 'native-tenant', orgId: 'native-org',
+      managedVisualReviewEnabled: enabled } })
+  it('refuses an ordinary source owner and allows explicit admin provisioning with distinct storage tenant', async () => {
+    const refused = await as(OWNER).post('/api/data-sources').send(managed('managed-owner'))
+    expect(refused.status).toBe(403); expect(storage.rows.has('managed-owner')).toBe(false)
+    const accepted = await as(ADMIN).post('/api/data-sources').send(managed('managed-admin'))
+    expect(accepted.status).toBe(201)
+    expect(storage.rows.get('managed-admin')!.tenant_id).toBe(TENANT)
+    expect(manager.getDataSource('managed-admin').getConfig().options).toMatchObject({
+      tenantId: 'native-tenant', orgId: 'native-org', managedVisualReviewEnabled: true })
+    expect(manager.getDataSource('managed-admin').getConfig().options?.visualReviewEnabled).toBeUndefined()
+    expect(await manager.isVisualReviewSourceCurrent('managed-admin', 'native-tenant', manager.getDataSource('managed-admin'))).toBe(false)
+  })
+  it('requires a separate admin confirmation for enabling and disabling managed Visual', async () => {
+    const id = 'managed-toggle'
+    await manager.addDataSource(managed(id, false), scope)
+    expect((await as(OWNER).put(`/api/data-sources/${id}`).send({ options: { managedVisualReviewEnabled: true } })).status).toBe(403)
+    expect((await as(ADMIN).put(`/api/data-sources/${id}`).send({ options: { managedVisualReviewEnabled: true } })).status).toBe(200)
+    expect((await as(OWNER).put(`/api/data-sources/${id}`).send({ name: 'renamed' })).status).toBe(200)
+    expect(manager.getDataSource(id).getConfig().options?.managedVisualReviewEnabled).toBe(true)
+    expect((await as(OWNER).put(`/api/data-sources/${id}`).send({ options: { managedVisualReviewEnabled: false } })).status).toBe(403)
+    expect((await as(ADMIN).put(`/api/data-sources/${id}`).send({ options: { managedVisualReviewEnabled: false } })).status).toBe(200)
+  })
+  it.each([
+    ['connection', { connection: { baseUrl: 'https://other.invalid' } }],
+    ['native-tenant', { options: { tenantId: 'other' } }],
+    ['native-org', { options: { orgId: 'other' } }],
+    ['credentials', { credentials: { token: 'unapproved' } }],
+  ])('does not let owners redirect approved managed %s', async (label, body) => {
+    const id = 'managed-protect-' + label
+    await manager.addDataSource(managed(id), scope)
+    const before = structuredClone(storage.rows.get(id))
+    expect((await as(OWNER).put(`/api/data-sources/${id}` + (label === 'credentials' ? '/credentials' : '')).send(body)).status).toBe(403)
+    expect(storage.rows.get(id)).toEqual(before)
+  })
+  it('retains managed approval across restart and refuses stale-owner deletion after another process enables it', async () => {
+    const shared = database()
+    const a = new DataSourceManager({ db: shared.db as never }); a.registerAdapterType('plm', NoDialAdapter as never)
+    await a.addDataSource(managed('managed-stale', false), scope)
+    const b = new DataSourceManager(); b.registerAdapterType('plm', NoDialAdapter as never); await b.initialize(shared.db as never)
+    await a.updateDataSource('managed-stale', managed('managed-stale'), scope)
+    await expect(b.removeDataSource('managed-stale', { actor: { userId: OWNER.id } })).rejects.toMatchObject({ status: 403 })
+    const restarted = new DataSourceManager(); restarted.registerAdapterType('plm', NoDialAdapter as never)
+    await restarted.initialize(shared.db as never)
+    expect(restarted.getDataSource('managed-stale').getConfig().options).toMatchObject({
+      tenantId: 'native-tenant', orgId: 'native-org', managedVisualReviewEnabled: true })
+    expect(restarted.getScope('managed-stale')?.tenantId).toBe(TENANT)
+  })
+  it.each(['true', 1, null])('refuses malformed managed approval %s at the HTTP boundary', async enabled => {
+    const config = managed('managed-malformed-' + String(enabled)); config.options!.managedVisualReviewEnabled = enabled
+    expect((await as(ADMIN).post('/api/data-sources').send(config)).status).toBe(400)
+  })
+})

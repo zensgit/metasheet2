@@ -1,0 +1,95 @@
+{
+  "at": "2026-10-20T11:53:45.093732+00:00",
+  "source": "3f33e36fd7294fbc0e2739d179da5d9f6e592730",
+  "base": "595acaaea2bd5ce72c365809613084595fa4c4a7",
+  "qualification": "component, real PostgreSQL source-administration and independent source-manager process, production SPA build; managed Native provider/browser/install/restore NOT qualified",
+  "suites": [
+    {
+      "receipt": "plm-managed-visual-shared-transport-regression-1130.xml",
+      "passed": 97,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "39234f6ad16fe69636786f905bc4e9492f0e99333c9b3f7a570eca104570a610",
+      "scope": "existing signed-capability, adapter and binary response regressions"
+    },
+    {
+      "receipt": "plm-managed-visual-admin-green-1215.xml",
+      "passed": 101,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "afc7e2982acaae30336da778c61cebeeb17570331ab1226363b661248ee6d09b",
+      "scope": "managed service + admin source routes + legacy/source validators"
+    },
+    {
+      "receipt": "plm-managed-visual-companion-regressions-1205.xml",
+      "passed": 42,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "29fc185956a540940b34fd83452b046f0cb38a6410a8aa5a130e0909fd0bebfc",
+      "scope": "managed companion regressions"
+    },
+    {
+      "receipt": "plm-managed-visual-ui-expanded-1200.xml",
+      "passed": 18,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "2158da3f152f594b058cea16875667d97b188e8a6b36d63ba76f5d9c7bde20b9",
+      "scope": "Discussion component/view and optional capability boundary"
+    },
+    {
+      "receipt": "plm-managed-visual-preview-ui-1215.xml",
+      "passed": 7,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "251c2948a5969909ed2e1ff861fd1348b5a13e5ae8433bf11a59acb892074cef",
+      "scope": "managed preview browser helper/component"
+    },
+    {
+      "receipt": "plm-managed-visual-pg-20261020.xml",
+      "passed": 17,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "8a53afd56f45018c24a929b6d85616a2cd05f1c15165541bd716e741e08b4e77",
+      "scope": "actual PostgreSQL source administration; independent Node worker stale-write rejection"
+    }
+  ],
+  "frozen_meta_product": "bd6d8467d47f423285393d8b63d8a50af06c7811",
+  "native_pin": "ba07fa952083179c58b5e423b1212eabb2d0c170",
+  "new_images_built": false,
+  "pushed": false,
+  "full_goal_complete": false,
+  "owned_postgres_cleanup": {
+    "at": "2026-10-20T11:49:50.875440+00:00",
+    "owned_root": "/tmp/plm-managed-visual-pg-tf0e_jq4",
+    "source_tree": "/tmp/codex-plm-metaf0ee-package-source-20261020",
+    "scope": "owned PostgreSQL source-administration locks and independent stale manager; not Native Visual provider/browser/install acceptance",
+    "cleanup": true,
+    "test_exit": 0,
+    "passed": true,
+    "postgres_stopped": true
+  },
+  "distinct_passed_test_cases": 282,
+  "production_spa": {
+    "files": 166,
+    "sha256": "e964aa1af3a1669f62bf474207aa24f6a962ce1f8b3b10b85f4ffd80488e8d35",
+    "built": true,
+    "installed": false,
+    "browser_validated": false
+  },
+  "boundaries": [
+    "Exact global runtime PLM_EMBED_VISUAL_PREVIEW_ENABLED=true AND source managedVisualReviewEnabled=true with existing platform-admin confirmation",
+    "Legacy visualReviewEnabled and its same-tenant check remain unchanged; managed opt-in does not grant legacy access",
+    "Current managed link/source/session/user/org/root locks still gate every Native call; Native and Meta namespace checked independently",
+    "Fresh signed embed JWT and Native existing purpose/JTI/entitlement/file/version/checksum protocol; no service account or personal read/approval grant",
+    "No images, deployment, production enablement, merge, issue closure or external business notifications"
+  ],
+  "private_manifest_sha256": "688003ba9c40d9e9541ec99756a3752246cacfffa1b403a2646fbaead318d82e",
+  "native_postgres_followup": "native-postgres-verification.json",
+  "restore_acl_followup": "restore-acl-verification.json"
+}

@@ -1,8 +1,18 @@
 <template>
   <section data-testid="plm-managed-discussion-view">
     <h1>元图讨论</h1>
-    <PlmEmbedDiscussionPanel v-if="context" :key="panelKey" :parent-origin="context.parentOrigin"
-      :managed-source-id="context.sourceId" :target="{ target_type: 'item', target_id: context.partId }" />
+    <template v-if="context">
+      <PlmEmbedVisualPreviewPanel v-if="context.visualPreviewEnabled" :key="`visual:${panelKey}`" ref="visualPanel"
+        :parent-origin="context.parentOrigin" :part-id="context.partId" :managed-source-id="context.sourceId"
+        :comments="visualComments" :draft="visualDraft" :selected-id="selectedVisualComment" :busy="discussionBusy"
+        @draft="visualDraft = $event" @select="selectVisualComment" />
+      <PlmEmbedDiscussionPanel :key="panelKey" ref="discussionPanel" :parent-origin="context.parentOrigin"
+        :managed-source-id="context.sourceId" :target="{ target_type: 'item', target_id: context.partId }"
+        :visual-draft="visualDraft" :selected-comment-id="selectedVisualComment"
+        @visual-comments="visualComments = $event" @clear-visual-draft="visualDraft = null"
+        @visual-rejected="invalidateVisual" @select-visual-comment="selectVisualComment"
+        @busy-change="discussionBusy = $event" />
+    </template>
     <template v-else>
       <p data-testid="managed-discussion-message">{{ message }}</p>
       <a :href="signInPath" target="_blank" rel="noopener noreferrer" data-testid="managed-discussion-signin">在新窗口确认身份</a>
@@ -14,12 +24,32 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import PlmEmbedDiscussionPanel from '../components/plm/PlmEmbedDiscussionPanel.vue'
+import PlmEmbedVisualPreviewPanel from '../components/plm/PlmEmbedVisualPreviewPanel.vue'
+import type { VisualComment, VisualMarkupDraft } from '../services/integration/plmVisualMarkup'
 import { discoverManagedDiscussion } from '../services/plm/plmManagedDiscussion'
 import { createPlmEmbedReadTokenClient, type PlmEmbedReadTokenClient } from '../services/integration/plmEmbedWriteToken'
 import { onAuthSessionSwitch, readAuthSessionSignature } from '../composables/authPrincipal'
 
-type Context = { sourceId: string; partId: string; parentOrigin: string }
+type Context = { sourceId: string; partId: string; parentOrigin: string; visualPreviewEnabled?: true }
 const context = ref<Context | null>(null)
+const visualPanel = ref<InstanceType<typeof PlmEmbedVisualPreviewPanel> | null>(null)
+const discussionPanel = ref<InstanceType<typeof PlmEmbedDiscussionPanel> | null>(null)
+const visualDraft = ref<VisualMarkupDraft | null>(null)
+const visualComments = ref<VisualComment[]>([])
+const selectedVisualComment = ref<string | null>(null)
+const discussionBusy = ref(false)
+function clearContext(): void {
+  context.value = null; visualDraft.value = null; visualComments.value = []
+  selectedVisualComment.value = null; discussionBusy.value = false
+}
+function selectVisualComment(id: string): void {
+  selectedVisualComment.value = id
+  discussionPanel.value?.focusComment(id)
+}
+function invalidateVisual(reason: 'stale' | 'denied'): void {
+  visualPanel.value?.invalidate(reason)
+  if (reason === 'denied') { visualComments.value = []; selectedVisualComment.value = null }
+}
 const candidateOrigin = ref<string | null>(null)
 const busy = ref(false)
 const message = ref('请从元图入口打开并确认身份。')
@@ -30,14 +60,17 @@ let generation = 0, disposed = false, receivedInitial = false
 function exactContext(value: unknown, origin: string): value is Context {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
-  return Object.keys(item).length === 3 && item.parentOrigin === origin
+  return (Object.keys(item).length === 3 && !('visualPreviewEnabled' in item)
+    || Object.keys(item).length === 4 && item.visualPreviewEnabled === true)
+    && Object.keys(item).every(key => ['sourceId', 'partId', 'parentOrigin', 'visualPreviewEnabled'].includes(key))
+    && item.parentOrigin === origin
     && typeof item.sourceId === 'string' && Boolean(item.sourceId) && item.sourceId === item.sourceId.trim()
     && typeof item.partId === 'string' && Boolean(item.partId) && item.partId === item.partId.trim()
 }
 async function accept(token: () => Promise<string>, origin: string): Promise<void> {
   if (busy.value || disposed) return
   const current = ++generation, signature = readAuthSessionSignature()
-  busy.value = true; context.value = null
+  clearContext(); busy.value = true
   try {
     const raw = await token()
     if (disposed || current !== generation || signature !== readAuthSessionSignature()) return
@@ -67,14 +100,14 @@ function retry(): void {
   void accept(() => active.requestReadToken(), origin)
 }
 const unsubscribe = onAuthSessionSwitch(() => {
-  generation += 1; context.value = null; busy.value = false
+  generation += 1; clearContext(); busy.value = false
   client?.dispose()
   client = candidateOrigin.value ? createPlmEmbedReadTokenClient(() => candidateOrigin.value) : null
   message.value = '身份已改变，请重新确认当前讨论来源。'
 })
 onMounted(() => window.addEventListener('message', onMessage))
 onBeforeUnmount(() => {
-  disposed = true; generation += 1; context.value = null
+  disposed = true; generation += 1; clearContext()
   window.removeEventListener('message', onMessage); client?.dispose(); unsubscribe()
 })
 </script>

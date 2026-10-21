@@ -7,6 +7,7 @@ on:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/unit/**'
       - 'packages/core-backend/tests/integration/plm-visual-source-authority-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/data-source-permission-catalogue.db.test.ts'
       - 'packages/core-backend/vitest*.config.ts'
       - 'apps/web/src/**'
       - 'apps/web/tests/plm-*.spec.ts'
@@ -19,6 +20,7 @@ on:
       - 'packages/core-backend/src/**'
       - 'packages/core-backend/tests/unit/**'
       - 'packages/core-backend/tests/integration/plm-visual-source-authority-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/data-source-permission-catalogue.db.test.ts'
       - 'packages/core-backend/vitest*.config.ts'
       - 'apps/web/src/**'
       - 'apps/web/tests/plm-*.spec.ts'
@@ -70,6 +72,7 @@ jobs:
         run: >-
           pnpm exec vitest run --config vitest.integration.config.ts
           tests/integration/plm-visual-source-authority-realdb.test.ts
+          tests/integration/data-source-permission-catalogue.db.test.ts
       - name: Backend source types
         run: pnpm --filter @metasheet/core-backend exec tsc --noEmit
       - name: Web source types

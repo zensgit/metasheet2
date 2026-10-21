@@ -1,0 +1,39 @@
+{
+  "at": "2026-10-20T12:04:17.826624+00:00",
+  "verification_source": "163016141a6101a60cd23119f5cb305585f357a3",
+  "product_source": "3f33e36fd7294fbc0e2739d179da5d9f6e592730",
+  "native_source_pin": "ba07fa952083179c58b5e423b1212eabb2d0c170",
+  "executed_native_checkout": "0b013740398690753e761a703cfa0f7dd485c85b",
+  "native_full_src_and_fixture_match_pin": true,
+  "checks": 31,
+  "failed": 0,
+  "skipped": 0,
+  "errors": 0,
+  "source_before": {
+    "files": 1441,
+    "sha256": "8c2e0510fda8ce3520a1ed8dc6b664b1475e270e327a8273a6d3f134b247d1e2"
+  },
+  "source_after": {
+    "files": 1441,
+    "sha256": "8c2e0510fda8ce3520a1ed8dc6b664b1475e270e327a8273a6d3f134b247d1e2"
+  },
+  "independent_workers": [
+    {
+      "pid": 24566,
+      "exit": 0,
+      "stopped": true
+    },
+    {
+      "pid": 24584,
+      "exit": 0,
+      "stopped": true
+    }
+  ],
+  "owned_root_removed": true,
+  "cleanup_errors": [],
+  "scope": "Actual Native PostgreSQL identity/RBAC/business + real Meta PostgreSQL/Redis/global JWT/mounted routes; fixture-provisioned Meta session rows from live Native authorize/exchange/status/revoke. Includes actual PNG and bound markup across independent Meta workers, forged checksum/stale version/entitlement/delegation revocation refutations. Not browser, full callback, new installation images or restored runtime acceptance.",
+  "private_manifest_sha256": "583e7ec3e5734bb00f3bd13e572a32356cd48c8f3324ab919db2f8e231feb1e8",
+  "frozen_meta_bd6_changed": false,
+  "pushed": false,
+  "full_goal_complete": false
+}
