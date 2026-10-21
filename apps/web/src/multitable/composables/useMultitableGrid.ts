@@ -583,6 +583,10 @@ export function useMultitableGrid(opts: {
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
   // per-fetch contract intact under interleaving (scroll-append racing a filter/sort/search/view change).
   let latestLoadRequestId = 0
+  // Append-only token (PR #6479 review): a grouping change must drop an in-flight scroll-append WITHOUT touching
+  // latestLoadRequestId — bumping the shared id would also orphan a reset in flight (its rows never land and
+  // `loading` is never cleared). loadMore checks both; setGroupFields bumps only this one.
+  let appendGeneration = 0
   let rangePending = false
   let activeGridWrites = 0
   let rangeContextId = 0
@@ -806,6 +810,9 @@ export function useMultitableGrid(opts: {
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? fallback('grid.errorLoadViewData')
+      // This reset superseded any append in flight (whose own `finally` therefore leaves the flag alone) and will
+      // not land to clear it: clear it here, or scrolling stays blocked until some later reset succeeds.
+      loadingMore.value = false
     } finally {
       if (requestId === latestLoadRequestId) loading.value = false
     }
@@ -849,6 +856,7 @@ export function useMultitableGrid(opts: {
     if (loadingMore.value || loading.value || !canLoadMore.value) return
 
     const requestId = ++latestLoadRequestId
+    const appendToken = appendGeneration
     loadingMore.value = true
     const startCount = rows.value.length
     try {
@@ -863,7 +871,8 @@ export function useMultitableGrid(opts: {
       // A reset (filter/sort/search/view/sheet change, or a mutation reload) bumped the id while we were
       // in flight → DROP this page. Appending it would mix stale, cross-filter rows onto the fresh set,
       // breaking the "masked/filtered/sorted per fetch" contract. The reset already replaced rows.
-      if (requestId !== latestLoadRequestId) return
+      // A grouping change since (appendGeneration) drops it too: grouped page 1 is one page, not two.
+      if (requestId !== latestLoadRequestId || appendToken !== appendGeneration) return
       const serverPage = data.page
       const serverRows = data.rows ?? []
 
@@ -1171,25 +1180,28 @@ export function useMultitableGrid(opts: {
     newestGroupEdit = next
     groupFieldIds.value = next
     // A scroll-append in flight was fetched for the flat grid's next rows; landing after a grouping change it
-    // would put a second page under grouped "1 / N" (and Next would show it again). Supersede it — loadMore drops
-    // its page when the request id moved on — and clear its in-flight flag, which only its own request clears.
-    if (changed && loadingMore.value) {
-      latestLoadRequestId++
-      loadingMore.value = false
-    }
+    // would put a second page under grouped "1 / N" (and Next would show it again). Drop it via the append-only
+    // token — never the shared request id, which would also orphan a reset in flight. Its own finally still clears
+    // loadingMore (the shared id did not move).
+    if (changed) appendGeneration++
     const vid = opts.viewId.value
     if (!vid) return
     // Only into the view this grouping was loaded from (#6075 round 2): while the view's load is in flight or has
     // failed, `next` is built on the reset (or another view's) levels and would replace the view's own grouping.
     if (viewStateLoadedFor !== vid) return
     const contextId = rangeContextId
+    // Queued behind the view's other writes in flight (enqueueSortFilterWrite): overlapping edits must reach the
+    // server in the order they were made, or an older one committing last leaves stored != screen. Reads of this
+    // view (loadViewData) wait for the queue, so a page-1 reload sees the last of them.
     try {
-      await persistViewConfig(vid, {
+      await enqueueSortFilterWrite(vid, () => persistViewConfig(vid, {
         groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : emptyGroupInfo(),
-      })
+      }))
     } catch { /* silent */ }
     if (contextId !== rangeContextId) return
-    if (changed && !(page.value.offset === 0 && rows.value.length <= pageSize.value)) {
+    // Reload page 1 unless it is already held — and also when a load is still in flight: that read may have gone
+    // out before this write and would sync the old grouping back when it lands; a newer read supersedes it.
+    if (changed && (loading.value || !(page.value.offset === 0 && rows.value.length <= pageSize.value))) {
       await loadViewData(0)
       if (contextId !== rangeContextId) return
     }

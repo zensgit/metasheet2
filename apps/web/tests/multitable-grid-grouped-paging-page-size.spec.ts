@@ -387,6 +387,104 @@ describe('grid paging across grouping changes (客户反馈 2026-10-21)', () => 
     await onPage(grid, 2)
     expect(ids(grid.rows.value)).toEqual(range(50, 100))
   })
+  // ── PR #6479 review round 2 ───────────────────────────────────────────────────────────────────────────────────
+  it('append in flight → a reset in flight → a grouping pick: the reset still lands (no stuck loading), rows consistent', async () => {
+    const backend = makeBackend()
+    const grid = await loadedGrid(backend)
+    const releaseAppend = backend.holdNext('GET')
+    const append = grid.loadMore()
+    await vi.waitFor(() => expect(backend.gets().at(-1)).toMatchObject({ offset: 50 }))
+    const releaseReset = backend.holdNext('GET')
+    const reset = grid.reloadCurrentPage()
+    await vi.waitFor(() => expect(backend.gets()).toHaveLength(3))
+    expect(grid.loading.value).toBe(true)
+    const edit = grid.setGroupFields([GROUP_FIELD])
+    releaseAppend()
+    await append
+    releaseReset()
+    await reset
+    await edit
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+    expect(grid.loadingMore.value).toBe(false)
+    expect(grid.groupFieldIds.value).toEqual([GROUP_FIELD])
+    expect(ids(grid.rows.value)).toEqual(range(0, 50))
+    expect(grid.totalPages.value).toBe(4)
+    await onPage(grid, 2)
+    expect(ids(grid.rows.value)).toEqual(range(50, 100))
+  })
+
+  it('append in flight → a view switch → a grouping pick: the new view still loads and its state is known', async () => {
+    const backend = makeBackend()
+    const viewId = ref('v1')
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId, client: new MultitableApiClient({ fetchFn: backend.fetchFn }) })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+    const releaseAppend = backend.holdNext('GET')
+    const append = grid.loadMore()
+    await vi.waitFor(() => expect(backend.gets().at(-1)).toMatchObject({ offset: 50 }))
+    const releaseSwitch = backend.holdNext('GET')
+    viewId.value = 'v2'
+    await vi.waitFor(() => expect(backend.gets().at(-1)).toMatchObject({ viewId: 'v2' }))
+    const edit = grid.setGroupFields([GROUP_FIELD])
+    releaseAppend()
+    await append
+    releaseSwitch()
+    await edit
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+    expect(grid.isViewStateLoadedFor('v2')).toBe(true)
+    expect(ids(grid.rows.value)).toEqual(range(0, 50))
+  })
+
+  it('a reset that superseded an append and then fails does not leave scrolling blocked', async () => {
+    let status = 200
+    const backend = makeBackend({ getStatus: () => status })
+    const grid = await loadedGrid(backend)
+    const releaseAppend = backend.holdNext('GET')
+    const append = grid.loadMore()
+    await vi.waitFor(() => expect(backend.gets().at(-1)).toMatchObject({ offset: 50 }))
+    const releaseReset = backend.holdNext('GET')
+    const reset = grid.reloadCurrentPage()
+    await vi.waitFor(() => expect(backend.gets()).toHaveLength(3))
+    status = 500
+    releaseReset()
+    await reset
+    expect(grid.error.value).toBeTruthy()
+    status = 200
+    releaseAppend()
+    await append
+    expect(grid.loading.value).toBe(false)
+    expect(grid.loadingMore.value).toBe(false)
+    expect(grid.canLoadMore.value).toBe(true)
+    await grid.loadMore()
+    expect(ids(grid.rows.value)).toEqual(range(0, 100))
+  })
+
+  it.each([
+    ['the page-1 reload answering at once', false],
+    ['the page-1 reload held until every write is in', true],
+  ])('three overlapping edits, the first write slow: the server commits them in order, stored = screen = newest (%s)', async (_label, holdReload) => {
+    const backend = makeBackend({ groupInfo: G3 })
+    const grid = await loadedGrid(backend)
+    await onPage(grid, 2)
+    const releasePatch1 = backend.holdNext('PATCH')
+    const releaseReload = holdReload ? backend.holdNext('GET') : () => undefined
+    const edit1 = grid.setGroupFields(['g1', 'g2'])
+    const edit2 = grid.setGroupFields(['g1'])
+    const edit3 = grid.setGroupFields(['g2'])
+    await vi.waitFor(() => expect(backend.patches()).toHaveLength(1))
+    releasePatch1()
+    await vi.waitFor(() => expect(backend.patches()).toHaveLength(3))
+    releaseReload()
+    await Promise.all([edit1, edit2, edit3])
+    await vi.waitFor(() => expect(grid.loading.value).toBe(false))
+    expect(backend.patches().map((c) => (c.body?.groupInfo as { fieldIds?: string[] }).fieldIds)).toEqual([['g1', 'g2'], ['g1'], ['g2']])
+    expect(backend.stored()).toEqual({ fieldIds: ['g2'], fieldId: 'g2' })
+    expect(grid.groupFieldIds.value).toEqual(['g2'])
+    // A later reload reads the stored grouping: the screen does not flip.
+    await grid.reloadCurrentPage()
+    expect(grid.groupFieldIds.value).toEqual(['g2'])
+    expect(ids(grid.rows.value)).toEqual(range(0, 50))
+  })
 })
 
 describe('rows-per-page choice (客户反馈 2026-10-21)', () => {
