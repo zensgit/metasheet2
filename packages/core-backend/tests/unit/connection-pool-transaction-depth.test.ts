@@ -109,6 +109,8 @@ function fakeClient(): PoolClient {
   return {
     query: vi.fn(async () => result),
     release: vi.fn(),
+    on: vi.fn(),
+    removeListener: vi.fn(),
   } as unknown as PoolClient
 }
 

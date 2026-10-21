@@ -188,6 +188,8 @@ function fakeClient() {
       return execute(statement.text, statement.values, staged ?? db.committed)
     },
     release: vi.fn(),
+    on: vi.fn(),
+    removeListener: vi.fn(),
   }
 }
 

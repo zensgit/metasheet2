@@ -21,6 +21,22 @@ import {
 } from './BaseAdapter'
 import type { Transaction } from './BaseAdapter'
 import { startSchemaDetailBudget } from './schema-detail-budget'
+import { Logger } from '../core/logger'
+import { coreMetrics } from '../integration/metrics/metrics'
+
+const poolLogger = new Logger('PostgresAdapter:pool')
+
+/**
+ * The two fields a data-source pool connection error is logged with: the SQLSTATE and the severity
+ * when the server reported them, `'none'` otherwise. Nothing else from the error is logged.
+ */
+function poolErrorFields(error: unknown): { code: string; severity: string } {
+  const fields = error as { code?: unknown; severity?: unknown } | null | undefined
+  return {
+    code: typeof fields?.code === 'string' ? fields.code : 'none',
+    severity: typeof fields?.severity === 'string' ? fields.severity : 'none',
+  }
+}
 
 // Dynamic pg import
 let pg: typeof import('pg') | null = null
@@ -89,6 +105,20 @@ export class PostgresAdapter extends BaseDataAdapter {
         min: this.config.poolConfig?.min || 2,
         idleTimeoutMillis: this.config.poolConfig?.idleTimeout || 10000,
         connectionTimeoutMillis: this.config.poolConfig?.acquireTimeout || 30000
+      })
+
+      // An idle connection of this external source that the server closes is reported by pg as an
+      // 'error' event on the pool after the pool has already discarded it. This listener only logs
+      // (data-source id, SQLSTATE, severity) and counts; it does not go through `onError` and is not
+      // re-emitted on the adapter — nothing listens on the adapter on this path — so the pool keeps
+      // serving and the process keeps running.
+      const dataSourceId = String(this.config.id)
+      this.pool.on('error', (error: unknown) => {
+        coreMetrics.increment('data_source_pool_connection_errors_total', { dataSource: dataSourceId })
+        const { code, severity } = poolErrorFields(error)
+        poolLogger.error(
+          `Idle connection error on data-source pool "${dataSourceId}" (code=${code}, severity=${severity}); the connection was discarded and the pool keeps serving`,
+        )
       })
 
       // Test connection
