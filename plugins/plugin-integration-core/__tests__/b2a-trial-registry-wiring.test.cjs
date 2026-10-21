@@ -25,6 +25,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
@@ -574,7 +575,14 @@ async function unsetEnvIsDormantAndByteIdentical() {
   assert.deepEqual(res.body.data.counts, baseline.counts)
   assert.deepEqual(res.body.data.evidence, baseline.evidence, 'evidence gains nothing when the gate is dormant')
   assert.equal('b2aTrialRegistration' in res.body.data.evidence, false, 'a dormant deployment stamps no B2a stanza')
-  const { dryRunToken: _t, ...routeRest } = res.body.data
+  // R67 ③: the read-phase stanza rides beside evidence on BOTH sides; it is compared on its own
+  // below, minus its wall-clock reading (support/dry-run-read-phase-clock.cjs).
+  const { dryRunToken: _t, plmReadPhase: routeReadPhase, ...routeRest } = res.body.data
+  assert.deepEqual(
+    withoutReadPhaseClock({ plmReadPhase: routeReadPhase }),
+    withoutReadPhaseClock({ plmReadPhase: baseline.plmReadPhase }),
+    'the read phase is the same read phase when dormant',
+  )
   assert.deepEqual(routeRest, {
     action: baseline.action,
     status: baseline.status,

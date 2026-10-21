@@ -53,11 +53,23 @@ describe('explicit missing default recovery guards', () => {
     await expect(prepareAttendanceTimezoneDefaultRecovery(f.trx,f.input)).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_DEFAULT_RECOVERY_SOURCE_AMBIGUOUS'})
     expect(f.input.readFrozenContext).not.toHaveBeenCalled()
   })
-  it('rejects open parents with no verified freeze before any source update',async () => {
+  it('skips a pre-companion open parent (no freeze) and stays read-only',async () => {
     const f = fixture(); f.state.open = [{id:'record',user_id:userId,work_date:workDate,timezone:'UTC'}]
     f.input.readFrozenContext.mockResolvedValueOnce(null)
-    await expect(prepareAttendanceTimezoneDefaultRecovery(f.trx,f.input)).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+    await expect(prepareAttendanceTimezoneDefaultRecovery(f.trx,f.input)).resolves.toEqual(expect.any(Function))
     expect(f.trx.query.mock.calls.every(([sql]) => sql.startsWith('SELECT'))).toBe(true)
+  })
+  it('does not require a freeze for a nearby slot that never started, and records no proof for it',async () => {
+    const f = fixture(); f.state.nearby = [{user_id:userId}]
+    f.input.readFrozenContext.mockResolvedValue(null)
+    const verify = await prepareAttendanceTimezoneDefaultRecovery(f.trx,f.input)
+    await verify()
+    expect(f.input.readCurrentSemantics).not.toHaveBeenCalled()
+  })
+  it('still requires published candidates for a nearby assignment',async () => {
+    const f = fixture(); f.state.nearby = [{user_id:userId}]
+    f.input.readPublishedCandidates.mockResolvedValueOnce([])
+    await expect(prepareAttendanceTimezoneDefaultRecovery(f.trx,f.input)).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_DEFAULT_RECOVERY_SOURCE_AMBIGUOUS'})
   })
   it.each(['recordId','orgId','userId','workDate','timezone'])('does not accept a freeze with mismatching %s',async field => {
     const f = fixture(); f.state.open = [{id:'record',user_id:userId,work_date:workDate,timezone:'UTC'}]

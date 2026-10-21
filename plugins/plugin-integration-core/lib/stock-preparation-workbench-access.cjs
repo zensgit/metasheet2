@@ -441,6 +441,22 @@ const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
     path: '/api/integration/table-actions/:actionId/dry-run',
     legacyGate: 'read',
   }),
+  // R67 ④ — THE SAME DRY-RUN, ENQUEUED AND POLLED. The enqueue runs the dry-run handler itself (same
+  // gate, same lines), so it takes the dry-run's tier and legacy gate; the poll reads back only the
+  // caller's own job, at the same tier. Leaving them out of the split would admit a puller to the
+  // synchronous dry-run and refuse the one the page actually calls.
+  Object.freeze({
+    step: 'dry-run-job-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'dry-run-job-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
+    legacyGate: 'read',
+  }),
   Object.freeze({
     step: 'apply',
     method: 'POST',

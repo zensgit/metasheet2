@@ -1672,6 +1672,7 @@ exec npx vitest run \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
+  directoryConfigPickers \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
@@ -1683,6 +1684,7 @@ exec npx vitest run \
   IntegrationStockPrepPanel \
   IntegrationWorkbenchView \
   lineDerivation \
+  LoginView.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \

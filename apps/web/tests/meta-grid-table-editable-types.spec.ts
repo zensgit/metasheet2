@@ -13,7 +13,7 @@
  * Mirrors the mount helper from multitable-grid-cell-edit-commit.spec.ts (createApp + h, no
  * @vue/test-utils in this codebase).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
@@ -22,18 +22,15 @@ import { useLocale } from '../src/composables/useLocale'
 let app: App<Element> | null = null
 let container: HTMLDivElement | null = null
 
-// jsdom has no navigator.clipboard by default — pasteFocusedCell's `await
-// navigator.clipboard.readText()` would throw synchronously into its own try/catch and never reach
-// `emit('patch-cell', ...)` regardless of whether the person/multiSelect early-return guard exists,
-// which would make the Ctrl+V tests below pass for the WRONG reason (a vacuous "guard" that never ran).
-// Stubbing clipboard.readText to actually resolve text makes those tests discriminating: without the
-// guard, this text WOULD reach emit('patch-cell', ...).
-beforeEach(() => {
-  Object.defineProperty(navigator, 'clipboard', {
-    value: { readText: vi.fn().mockResolvedValue('pasted text') },
-    configurable: true,
-  })
-})
+// Keyboard paste is read from the native paste event (MetaGridTable's onGridPaste), not from the async
+// Clipboard API. The Ctrl+V tests below dispatch a paste event that really carries text, so they stay
+// discriminating: without the person/multiSelect early-return guard, this text WOULD reach
+// emit('patch-cell', ...). (jsdom has no ClipboardEvent constructor, hence the clipboardData stub.)
+function pasteEventWithText(text: string): Event {
+  const event = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'clipboardData', { value: { getData: (type: string) => (type === 'text/plain' ? text : '') } })
+  return event
+}
 
 afterEach(() => {
   app?.unmount()
@@ -283,11 +280,11 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     // Single click focuses the person cell WITHOUT opening the editor (pasteFocusedCell's target is
     // the focused, non-editing cell — same precondition as the existing D2 paste tests).
     cellAt(root, 0, 0).click()
+    gridEl(root).focus() // a real click on a cell focuses the grid root
     await flushUi()
     expect(root.querySelector('[data-test="person-picker-open"]')).toBeNull()
 
-    const pasteEvt = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
-    gridEl(root).dispatchEvent(pasteEvt)
+    gridEl(root).dispatchEvent(pasteEventWithText('pasted text'))
     await flushUi()
 
     expect(patchSpy).not.toHaveBeenCalled()
@@ -299,10 +296,10 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     await flushUi()
 
     cellAt(root, 0, 1).click()
+    gridEl(root).focus() // a real click on a cell focuses the grid root
     await flushUi()
 
-    const pasteEvt = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
-    gridEl(root).dispatchEvent(pasteEvt)
+    gridEl(root).dispatchEvent(pasteEventWithText('pasted text'))
     await flushUi()
 
     expect(patchSpy).not.toHaveBeenCalled()

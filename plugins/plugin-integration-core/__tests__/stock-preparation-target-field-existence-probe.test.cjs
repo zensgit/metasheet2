@@ -43,6 +43,7 @@
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -245,7 +246,8 @@ function dryRunInput({ action: config = action(), targetFieldExistence, tokenSto
 /** The dry-run result minus the one field that is random by construction (the minted token). */
 function comparable(result) {
   const { dryRunToken, ...rest } = result
-  return { ...clone(rest), dryRunTokenShape: typeof dryRunToken }
+  // R67 ③: minus the read phase's wall-clock reading too — see support/dry-run-read-phase-clock.cjs.
+  return { ...withoutReadPhaseClock(rest), dryRunTokenShape: typeof dryRunToken }
 }
 
 /** The stored token record minus the two wall-clock stamps. */

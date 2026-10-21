@@ -1717,6 +1717,34 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner.textContent).not.toContain('没有保存成功')
   })
 
+  // ---- R67 ④: 项目备料页 picks a background trial back up -----------------------------------------
+  //
+  // The board's pull panel is seeded with the board's project. Coming back to the page while this
+  // caller's trial of that project is still reading PLM shows it — and starts nothing on its own.
+
+  it('R67-B1: a trial of the board\'s project still running in the background is shown on mount; nothing is re-run', async () => {
+    const syncApi = syncApiDouble({
+      dryRunJobStatus: vi.fn().mockResolvedValue({ status: 'running', elapsedMs: 125_000 }),
+    })
+    const root = await mountBoard({ syncApi })
+    await flush()
+    const line = root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]') as HTMLElement | null
+    expect(line).not.toBeNull()
+    expect(line!.getAttribute('data-dry-run-progress')).toBe('resumed')
+    expect(line!.textContent).toContain('2:05')
+    expect(syncApi.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    expect(syncApi.dryRun).not.toHaveBeenCalled()
+    expect(syncApi.apply).not.toHaveBeenCalled()
+  })
+
+  it('R67-B2: no trial running for the board\'s project — no progress line, and the board reads as before', async () => {
+    const syncApi = syncApiDouble({ dryRunJobStatus: vi.fn().mockResolvedValue(null) })
+    const root = await mountBoard({ syncApi })
+    await flush()
+    expect(syncApi.dryRunJobStatus).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-dry-run-progress"]')).toBeNull()
+  })
+
   // ---- B-09: A REFRESH DOES NOT UNMOUNT WHAT THE OPERATOR IS READING ---------------------------
   //
   // THE BUG. '@synced="reloadBoard"' fires inside the panel's own emit, and the loader's first

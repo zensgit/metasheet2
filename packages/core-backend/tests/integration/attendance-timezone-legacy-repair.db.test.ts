@@ -94,6 +94,9 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
   }
   it('OFF: read-only plan, unchanged parent, checkout and replay keep archived UTC after current rules change',async()=>{
     const h=await historical()
+    // Same-zone pre-companion dates now follow the unfrozen pre-upgrade path;
+    // a changed default zone (same local date at 18:00Z) still needs the controlled repair.
+    await live.pool.query("UPDATE attendance_rules SET timezone='America/New_York' WHERE org_id=$1 AND is_default=true",[live.orgId])
     const blocked=await punch(h.actor,'check_out','18:00')
     expect(blocked).toMatchObject({status:409,body:{error:{code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'}}})
     const admission=await inspect(live.pool,{orgId:live.orgId,actorId:admin.userId})

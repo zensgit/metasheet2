@@ -145,7 +145,7 @@ import {
   approvalAttachmentRefsJsonParser,
   isApprovalAttachmentsEnabled,
 } from './routes/approval-attachments'
-import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
+import { isFieldReadOnlyForPeople, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
@@ -4966,7 +4966,9 @@ export class MetaSheetServer {
               const fieldById = new Map(
                 fields.map((f: any) => {
                   const prop = f.property || {}
-                  const isReadOnly = isFieldAlwaysReadOnly(f)
+                  // Person (collab) write spine: always-read-only OR the human write lock (human-write-lock.ts) —
+                  // `deriveFieldPermissions` below refuses it too (FieldWritePermissionDeniedError, metric-visible).
+                  const isReadOnly = isFieldReadOnlyForPeople(f)
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
                   // `property` rides along exactly as routes/univer-meta.ts buildFieldMutationGuardMap carries it:
                   // RecordWriteService.validateChanges reads it for person `limitSingleRecord`, longText config and
