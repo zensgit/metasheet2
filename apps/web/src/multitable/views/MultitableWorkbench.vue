@@ -50,7 +50,7 @@
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="openApiTokenManager(null)"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
@@ -427,6 +427,7 @@
           :group-fields="grid.groupFields.value"
           :search-text="searchText" :row-density="rowDensity"
           :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
+          :page-size="grid.pageSize?.value" :page-size-options="GRID_PAGE_SIZE_OPTIONS" @set-page-size="onSetGridPageSize"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -702,7 +703,9 @@
       :fields="grid.fields.value"
       :client="workbench.client"
       :views="workbench.views.value"
+      :can-open-ding-talk-group-settings="true"
       @close="showAutomationManager = false"
+      @open-dingtalk-groups="openApiTokenManager('dingtalk-groups')"
     />
     <MetaFormShareManager
       v-if="showFormShareManager || workbench.activeSheetId.value"
@@ -718,6 +721,7 @@
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       :can-manage-automation="caps.canManageAutomation.value"
+      :initial-tab="apiTokenManagerInitialTab"
       @close="showApiTokenManager = false"
     />
 
@@ -821,6 +825,7 @@ import {
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
@@ -1084,10 +1089,16 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
+// Rows-per-page is a per-viewer choice kept in localStorage per user + sheet (客户反馈 2026-10-21). Its own ref,
+// declared before the grid: the grid's first load runs during useMultitableGrid() itself and reads it through
+// resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
+// the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
+const gridPageSizeUserId = ref<string | null>(null)
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
   isPersonalMode: personalView.isPersonalMode,
+  resolvePageSize: (sheetId) => readGridPageSize(gridPageSizeUserId.value, sheetId),
   // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
   // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
   // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
@@ -1531,6 +1542,12 @@ const templateCenterHref = computed<string | undefined>(() => {
 })
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
+// 客户反馈 2026-10-21 (c): the automation rule editor opens this dialog directly on its DingTalk Groups tab.
+const apiTokenManagerInitialTab = ref<'dingtalk-groups' | null>(null)
+function openApiTokenManager(tab: 'dingtalk-groups' | null) {
+  apiTokenManagerInitialTab.value = tab
+  showApiTokenManager.value = true
+}
 const showTrash = ref(false)
 const showHistory = ref(false)
 // W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
@@ -2128,6 +2145,19 @@ const gridIsFlatPath = computed(() => grid.groupFields.value.length === 0)
 // composable says one exists (page.hasMore && !capped). The grid additionally re-checks flat/expanded
 // internally before emitting, so this is belt-and-suspenders.
 const gridCanLoadMore = computed(() => gridIsFlatPath.value && grid.canLoadMore.value)
+// Rows-per-page select (MetaGridTable footer): store the choice for this user + sheet, then reload page 1 at it.
+function onSetGridPageSize(size: number) {
+  const next = clampGridPageSize(size)
+  writeGridPageSize(gridPageSizeUserId.value, workbench.activeSheetId.value, next)
+  void grid.setPageSize(next)
+}
+// The user id arrives after the first load (which ran at the default size): apply this sheet's stored size now.
+function onGridPageSizeOwnerResolved(userId: string | null) {
+  gridPageSizeUserId.value = userId
+  const sheetId = workbench.activeSheetId.value
+  if (!userId || !sheetId) return
+  void grid.setPageSize?.(readGridPageSize(userId, sheetId) ?? DEFAULT_GRID_PAGE_SIZE)
+}
 const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[]>>(() => {
   const recordId = selectedRecordId.value
   if (!recordId) return {}
@@ -6093,6 +6123,7 @@ onMounted(async () => {
   window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
+    onGridPageSizeOwnerResolved(userId)
   }).catch(() => undefined)
   // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
   // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.

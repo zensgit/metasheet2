@@ -75,6 +75,7 @@ export type MetaCoreLabelKey =
   | 'grid.lockRow' | 'grid.unlockRow' | 'grid.lockedIndicator'
   | 'grid.errorLockRow' | 'grid.errorUnlockRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
+  | 'grid.pageSize' | 'grid.pageSizeAria'
   | 'grid.errorLoadViewData'
   | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
   | 'grid.errorContextRequired'
@@ -237,6 +238,8 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.errorUnlockRow': { en: 'Failed to unlock row', zh: '解锁行失败' },
   'grid.prev': { en: 'Prev', zh: '上一页' },
   'grid.next': { en: 'Next', zh: '下一页' },
+  'grid.pageSize': { en: 'Rows per page', zh: '每页行数' },
+  'grid.pageSizeAria': { en: 'Rows per page', zh: '每页显示的行数' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },
   // Frontend-owned composable fallbacks. Backend/user messages still win via `e.message ?? fallback`.
   'grid.errorLoadViewData': { en: 'Failed to load view data', zh: '加载视图数据失败' },

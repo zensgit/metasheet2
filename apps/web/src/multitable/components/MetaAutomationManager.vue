@@ -165,7 +165,21 @@
               class="meta-automation__hint"
               data-automation-field="dingtalkDestinationEmpty"
             >
-              {{ l('dingtalk.noGroupsAvailable') }}
+              <div>{{ l('dingtalk.noGroupsAvailable') }}</div>
+              <div class="meta-automation__inline-actions">
+                <el-button
+                  v-if="props.canOpenDingTalkGroupSettings === true"
+                  size="small"
+                  data-automation-field="dingtalkOpenGroupSettings"
+                  @click="emit('open-dingtalk-groups')"
+                >{{ l('dingtalk.openGroupSettings') }}</el-button>
+                <el-button
+                  size="small"
+                  data-automation-field="dingtalkReloadGroups"
+                  :disabled="dingTalkDestinationsReloading"
+                  @click="void reloadDingTalkDestinations()"
+                >{{ l('dingtalk.reloadGroups') }}</el-button>
+              </div>
             </div>
             <div
               v-if="selectedDingTalkGroupDestinations.length"
@@ -384,7 +398,10 @@
                 <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ l('dingtalk.inactiveUsersCannotBeAdded') }}</span>
               </button>
             </div>
-            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">{{ l('dingtalk.noMatchingUsersOrGroups') }}</div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint" data-automation-field="dingtalkPersonNoMatch">
+              <div>{{ l('dingtalk.noMatchingUsersOrGroups') }}</div>
+              <div data-automation-field="dingtalkPersonSearchScopeHint">{{ l('dingtalk.recipientSearchScopeHint') }}</div>
+            </div>
             <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="recipient in selectedDingTalkPersonRecipients"
@@ -400,6 +417,11 @@
                 <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
+            <div
+              v-if="selectedDingTalkPersonNotLinkedSummary"
+              class="meta-automation__hint meta-automation__hint--warning"
+              data-automation-field="dingtalkPersonNotLinkedSummary"
+            >{{ selectedDingTalkPersonNotLinkedSummary }}</div>
             <div v-if="selectedDingTalkPersonMemberGroups.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="group in selectedDingTalkPersonMemberGroups"
@@ -835,9 +857,11 @@
       :client="client"
       :views="views"
       :test-run-state="activeRuleTestRunState"
+      :can-open-ding-talk-group-settings="props.canOpenDingTalkGroupSettings === true"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
+      @open-dingtalk-groups="emit('open-dingtalk-groups')"
     />
     <MetaAutomationLogViewer
       :visible="showLogViewer"
@@ -927,10 +951,14 @@ import {
   automationDingTalkPresetLabel,
   automationLabel,
   automationLastRunChip,
+  automationDingTalkRecipientOutcomeText,
+  automationDingTalkSelectedNotLinkedSummary,
+  automationTestRunDingTalkOutcome,
   automationTestRunFailed,
   automationTestRunRequestFailed,
   automationTestRunSkipped,
   automationTestRunSucceeded,
+  readDingTalkRecipientOutcome,
   automationTriggerTypeLabel,
   type AutomationLabelKey,
   type AutomationLastRunChip,
@@ -954,11 +982,14 @@ const props = defineProps<{
   }>
   client?: MultitableApiClient
   views?: MetaView[]
+  /** 客户反馈 2026-10-21 (c): the host can open API & Webhooks > DingTalk Groups (the workbench can). */
+  canOpenDingTalkGroupSettings?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
+  (e: 'open-dingtalk-groups'): void
 }>()
 
 const router = useRouter()
@@ -966,7 +997,7 @@ const { isZh } = useLocale()
 const l = (key: AutomationLabelKey) => automationLabel(key, isZh.value)
 
 type AutomationTestRunState = {
-  status: 'running' | 'success' | 'failed' | 'skipped'
+  status: 'running' | 'success' | 'failed' | 'skipped' | 'warning'
   message: string
 }
 
@@ -1032,6 +1063,21 @@ function emptyDraft(): DraftState {
 
 const draft = ref<DraftState>(emptyDraft())
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const dingTalkDestinationsReloading = ref(false)
+
+// 客户反馈 2026-10-21 (c): after adding a group in API & Webhooks > DingTalk Groups, pick it up without
+// closing the form.
+async function reloadDingTalkDestinations() {
+  if (!props.client || !props.sheetId || dingTalkDestinationsReloading.value) return
+  dingTalkDestinationsReloading.value = true
+  try {
+    dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
+  } catch {
+    // keep what we had
+  } finally {
+    dingTalkDestinationsReloading.value = false
+  }
+}
 const dingtalkPersonUserSearch = ref('')
 const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
@@ -1160,6 +1206,13 @@ const selectedDingTalkPersonRecipients = computed(() =>
     }
   }),
 )
+
+// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the roster says have no DingTalk delivery
+// link (the same link the executor requires), as a count.
+const selectedDingTalkPersonNotLinkedSummary = computed(() => automationDingTalkSelectedNotLinkedSummary(
+  selectedDingTalkPersonRecipients.value.filter((recipient) => recipient.dingtalkPersonDeliveryAvailable === false).length,
+  isZh.value,
+))
 
 const selectedDingTalkPersonMemberGroups = computed(() =>
   parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => {
@@ -1920,15 +1973,38 @@ function describeTestRunExecution(execution: AutomationExecution): AutomationTes
       message: automationTestRunFailed(execution.error || failedStep?.error || '', isZh.value),
     }
   }
+  // 客户反馈 2026-10-21 (a): a DingTalk person message that skipped recipients is never reported as a plain
+  // success (or a bare "skipped") — say how many received it and why the rest did not. Counts only.
+  for (const step of execution.steps ?? []) {
+    if (step.actionType !== 'send_dingtalk_person_message') continue
+    const outcome = readDingTalkRecipientOutcome(step.output)
+    if (!outcome) continue
+    return {
+      status: 'warning',
+      message: automationTestRunDingTalkOutcome(
+        duration,
+        automationDingTalkRecipientOutcomeText(outcome, isZh.value),
+        isZh.value,
+      ),
+    }
+  }
   if (execution.status === 'skipped') {
     return {
       status: 'skipped',
       message: automationTestRunSkipped(duration, isZh.value),
     }
   }
+  // A simulated person message resolved no recipients at all (the dry run reads no data), so its
+  // success says nothing about delivery — state that instead of letting it read as a delivery check.
+  const simulatedPersonMessage = (execution.steps ?? []).some(
+    (step) => step.actionType === 'send_dingtalk_person_message' && step.simulated === true,
+  )
+  const succeeded = automationTestRunSucceeded(duration, isZh.value)
   return {
     status: 'success',
-    message: automationTestRunSucceeded(duration, isZh.value),
+    message: simulatedPersonMessage
+      ? `${succeeded}${isZh.value ? '' : ' '}${l('manager.testRunDingTalkSimulatedNote')}`
+      : succeeded,
   }
 }
 
@@ -2741,5 +2817,8 @@ watch(
 .meta-automation__test-run-status--success { color: var(--el-color-success-dark-2); }
 .meta-automation__test-run-status--failed { color: var(--el-color-danger-dark-2); }
 .meta-automation__test-run-status--skipped { color: var(--el-color-warning-dark-2); }
+.meta-automation__test-run-status--warning { color: var(--el-color-warning-dark-2); }
+.meta-automation__hint--warning { color: var(--el-color-warning-dark-2); }
+.meta-automation__inline-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .meta-automation__test-run-status--running { color: var(--el-color-primary-dark-2); }
 </style>

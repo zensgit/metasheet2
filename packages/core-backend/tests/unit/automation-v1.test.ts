@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
-import { AutomationExecutor, truncateDingTalkMessageText, AUTOMATION_NO_RECIPIENTS_ERROR, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
+import { AutomationExecutor, truncateDingTalkMessageText, AUTOMATION_NO_RECIPIENTS_ERROR, DINGTALK_RECIPIENTS_UNREACHABLE_REASON, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, cronHasNoMatchingDay, nextCronOccurrenceMs, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
@@ -3109,7 +3109,10 @@ describe('AutomationExecutor', () => {
       notifiedUsers: 1,
       skippedRecipientCount: 1,
       skippedUserIds: ['user_2'],
+      // 客户反馈 2026-10-21 (a): the partial case stays success but carries the per-cause count.
+      skippedReasonCounts: { notLinked: 0, inactive: 0, notFound: 1 },
     })
+    expect((result.steps[0].output as Record<string, unknown>).reason).toBeUndefined()
     const [, sendInit] = findDingTalkPersonSend(fetchFn)
     expect(JSON.parse(sendInit.body as string).userid_list).toBe('dt-user-1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
@@ -3144,8 +3147,9 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0]).toMatchObject({
       actionType: 'send_dingtalk_person_message',
       status: 'skipped',
-      error: 'DingTalk account not linked for users: user_1',
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 0, inactive: 0, not found: 1) (DINGTALK_RECIPIENTS_UNREACHABLE)',
       output: {
+        reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
         notifiedUsers: 0,
         skippedRecipientCount: 1,
         skippedUserIds: ['user_1'],
@@ -3156,6 +3160,106 @@ describe('AutomationExecutor', () => {
     expect(insertCall?.[1]?.[1]).toBe('user_1')
     expect(insertCall?.[1]?.[6]).toBe(false)
     expect(insertCall?.[1]?.[7]).toBe('skipped')
+  })
+
+  // 客户反馈 2026-10-21 (a): a person message that reaches NOBODY is a distinct, values-free outcome — never a
+  // plain success, and never a failure that fail-stops the rest of the rule.
+  describe('zero-notified DingTalk person message outcome', () => {
+    const RECIPIENT_ROWS: Record<string, { local_user_active: boolean; dingtalk_user_id: string | null }> = {
+      u_linked: { local_user_active: true, dingtalk_user_id: 'dt-linked' },
+      u_unlinked: { local_user_active: true, dingtalk_user_id: null },
+      u_inactive: { local_user_active: false, dingtalk_user_id: 'dt-inactive' },
+    }
+    function recipientAwareQuery() {
+      return vi.fn(async (sql: unknown, params?: unknown[]) => {
+        const text = typeof sql === 'string' ? sql : ''
+        if (/FROM meta_sheets/i.test(text)) return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+        if (/FROM users u/i.test(text) && /directory_account_links/i.test(text)) {
+          const ids = (params?.[0] as string[]) ?? []
+          const rows = ids
+            .filter((id) => RECIPIENT_ROWS[id])
+            .map((id) => ({ local_user_id: id, ...RECIPIENT_ROWS[id], integration_id: null }))
+          return { rows, rowCount: rows.length }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+    }
+    function okFetch() {
+      return vi.fn(async (url: unknown) => {
+        const body = String(url).includes('gettoken')
+          ? { errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }
+          : { errcode: 0, errmsg: 'ok', task_id: 4242 }
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }) as unknown as typeof fetch
+    }
+    const personAction = (userIds: string[]) => ({
+      type: 'send_dingtalk_person_message' as const,
+      config: { userIds, titleTemplate: 'Title', bodyTemplate: 'Body' },
+    })
+
+    beforeEach(() => {
+      process.env.DINGTALK_APP_KEY = 'dt-app-key'
+      process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+      process.env.DINGTALK_AGENT_ID = '123456789'
+    })
+
+    it('all recipients skipped -> skipped step with the reason code, per-cause counts and an id-free error', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_unlinked', 'u_inactive', 'u_missing'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.status).toBe('skipped')
+      expect(result.steps[0].status).toBe('skipped')
+      expect(result.steps[0].output).toMatchObject({
+        reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
+        notifiedUsers: 0,
+        skippedRecipientCount: 3,
+        skippedReasonCounts: { notLinked: 1, inactive: 1, notFound: 1 },
+        // ids stay in the stored output, as before
+        skippedUserIds: ['u_unlinked', 'u_inactive', 'u_missing'],
+      })
+      const error = result.steps[0].error ?? ''
+      expect(error).toContain('DINGTALK_RECIPIENTS_UNREACHABLE')
+      for (const id of ['u_unlinked', 'u_inactive', 'u_missing']) expect(error).not.toContain(id)
+      expect(fetchFn).not.toHaveBeenCalled()
+    })
+
+    it('some recipients notified -> success with the skipped count and no unreachable reason', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_linked', 'u_unlinked'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.status).toBe('success')
+      expect(result.steps[0].status).toBe('success')
+      expect(result.steps[0].output).toMatchObject({
+        notifiedUsers: 1,
+        skippedRecipientCount: 1,
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      })
+      expect((result.steps[0].output as Record<string, unknown>).reason).toBeUndefined()
+    })
+
+    it('a zero-notified step does not fail-stop the actions after it', async () => {
+      const queryFn = recipientAwareQuery()
+      const fetchFn = okFetch()
+      executor = new AutomationExecutor(createMockDeps({ queryFn, fetchFn }))
+      const result = await executor.execute(
+        createMockRule({ actions: [personAction(['u_unlinked']), personAction(['u_linked'])] }),
+        { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' },
+      )
+
+      expect(result.steps.map((step) => step.status)).toEqual(['skipped', 'success'])
+      expect(result.steps[1].output).toMatchObject({ notifiedUsers: 1 })
+      expect(result.status).toBe('success')
+    })
   })
 
   it('executes send_dingtalk_person_message with dynamic record recipients', async () => {

@@ -2885,7 +2885,7 @@ describe('MetaAutomationRuleEditor', () => {
 
     const emptyState = container.querySelector('[data-field="dingtalkDestinationEmpty"]')
     expect(emptyState?.textContent).toContain('No DingTalk groups are available for this table yet')
-    expect(emptyState?.textContent).toContain('API Tokens & Webhooks')
+    expect(emptyState?.textContent).toContain('API & Webhooks > DingTalk Groups')
     expect(emptyState?.textContent).toContain('record group field path')
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -4271,6 +4271,111 @@ describe('MetaAutomationRuleEditor', () => {
     const memberGroupIdsInput = container.querySelector('[data-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
     expect(memberGroupIdsInput.value).toBe('group_1')
     expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'inactive', limit: 8 })
+  })
+
+  // 客户反馈 2026-10-21 (b): a missing user is explainable — the no-match state says who the picker lists.
+  it('person picker no-match state explains the listing scope and the local user id fallback', async () => {
+    const client = {
+      ...mockClient(),
+      listFormShareCandidates: vi.fn(async () => ({ items: [], total: 0, limit: 8, query: 'nobody' })),
+    }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const searchInput = container.querySelector('[data-field="dingtalkPersonUserSearch"]') as HTMLInputElement
+    searchInput.value = 'nobody'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const noMatch = container.querySelector('[data-field="dingtalkPersonNoMatch"]')
+    expect(noMatch?.textContent).toContain('No matching users or member groups')
+    expect(container.querySelector('[data-field="dingtalkPersonSearchScopeHint"]')?.textContent)
+      .toContain('Only active users with access to this table (a multitable read or write role) are listed')
+    expect((searchInput as HTMLInputElement).placeholder).toContain('login name')
+  })
+
+  // 客户反馈 2026-10-21 (a): visible before saving — selected users without a DingTalk delivery link, as a count.
+  it('summarises selected person recipients without a DingTalk link (count only) and clears it for linked ones', async () => {
+    const client = mockClient()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const searchInput = container.querySelector('[data-field="dingtalkPersonUserSearch"]') as HTMLInputElement
+    searchInput.value = 'a'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-person-recipient-suggestion="user:user_1"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+
+    searchInput.value = 'z'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+    ;(container.querySelector('[data-person-recipient-suggestion="user:user_2"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const summary = container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')
+    expect(summary?.textContent).toContain('1 selected user is not linked to DingTalk and will not receive the message when the rule fires.')
+    expect(summary?.textContent).toContain('sign in with DingTalk once')
+    expect(summary?.textContent).not.toContain('user_2')
+    expect(summary?.textContent).not.toContain('Zhao Ming')
+  })
+
+  it('resolves the DingTalk link status of a SAVED person recipient on open, so the summary shows before any edit', async () => {
+    const client = mockClient()
+    const config = { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_person_message', config }],
+      }),
+    })
+    await flushPromises()
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
+      .toContain('1 selected user is not linked to DingTalk')
+  })
+
+  // 客户反馈 2026-10-21 (c): the empty group list links straight to API & Webhooks > DingTalk Groups.
+  it('empty DingTalk group list: opens API & Webhooks > DingTalk Groups through the host and reloads in place', async () => {
+    const onOpenDingtalkGroups = vi.fn()
+    const client = { ...mockClient(), listDingTalkGroups: vi.fn(async () => []) }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, canOpenDingTalkGroupSettings: true, onOpenDingtalkGroups })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+
+    const open = container.querySelector('[data-field="dingtalkOpenGroupSettings"]') as HTMLButtonElement
+    expect(open.textContent).toContain('Open API & Webhooks > DingTalk Groups')
+    open.click()
+    expect(onOpenDingtalkGroups).toHaveBeenCalledTimes(1)
+
+    client.listDingTalkGroups.mockResolvedValueOnce([
+      { id: 'dt_new', name: 'Fake New Group', webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=fake', enabled: true, scope: 'sheet', sheetId: 'sheet_1', createdBy: 'user_1', createdAt: '2026-10-21T00:00:00Z' },
+    ] as never)
+    const reads = client.listDingTalkGroups.mock.calls.length
+    ;(container.querySelector('[data-field="dingtalkReloadGroups"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(client.listDingTalkGroups.mock.calls.length).toBe(reads + 1)
+    expect(container.querySelector('[data-field="dingtalkDestinationEmpty"]')).toBeNull()
+  })
+
+  it('empty DingTalk group list without a host that can open the settings: no open button, reload still offered', async () => {
+    const client = { ...mockClient(), listDingTalkGroups: vi.fn(async () => []) }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+    expect(container.querySelector('[data-field="dingtalkOpenGroupSettings"]')).toBeNull()
+    expect(container.querySelector('[data-field="dingtalkReloadGroups"]')).not.toBeNull()
   })
 
   it('applies DingTalk group message presets', async () => {

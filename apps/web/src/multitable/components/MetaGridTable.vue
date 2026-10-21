@@ -411,11 +411,28 @@
       </table>
     </div>
     <!-- A1: classic offset pager — hidden on the infinite-scroll (flat/accumulating) path; kept for the
-         grouped path which doesn't accumulate. The two paging models are mutually exclusive. -->
-    <div v-if="totalPages > 1 && !infiniteScroll" class="meta-grid__pagination">
-      <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
-      <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
-      <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ l('grid.next') }} &rsaquo;</button>
+         grouped path which doesn't accumulate. The two paging models are mutually exclusive — except that a
+         flat grid holding a page past the first cannot scroll-append (the composable only appends from row 0),
+         so it keeps the pager rather than strand the viewer on that page (客户反馈 2026-10-21). The rows-per-page
+         select sits in the same footer whenever there is more than one page or a non-default size to undo. -->
+    <div v-if="showPager || showPageSizeSelect" class="meta-grid__pagination">
+      <template v-if="showPager">
+        <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
+        <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
+        <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ l('grid.next') }} &rsaquo;</button>
+      </template>
+      <label v-if="showPageSizeSelect" class="meta-grid__page-size">
+        <span class="meta-grid__page-size-label">{{ l('grid.pageSize') }}</span>
+        <select
+          class="meta-grid__page-size-select"
+          data-testid="grid-page-size-select"
+          :aria-label="l('grid.pageSizeAria')"
+          :value="String(pageSize)"
+          @change="onPageSizeChange"
+        >
+          <option v-for="n in pageSizeOptions" :key="n" :value="String(n)">{{ n }}</option>
+        </select>
+      </label>
     </div>
     <div v-if="loading" class="meta-grid__loading" aria-live="polite" :aria-label="l('grid.loading')">
       <div class="meta-grid__skeleton">
@@ -546,6 +563,10 @@ const props = defineProps<{
   // path; the grouped path leaves it false so its footer pager stays. Independent of transient expand
   // state so the pager doesn't flash back when a row is expanded.
   infiniteScroll?: boolean
+  // Rows-per-page select (客户反馈 2026-10-21): the current size and the offered sizes. No options => no select
+  // (mounts that do not page through the composable stay exactly as they were).
+  pageSize?: number
+  pageSizeOptions?: readonly number[]
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
@@ -595,6 +616,8 @@ const emit = defineEmits<{
   // The parent (workbench) calls grid.loadMore(), which dedups + appends. Emitting with no listener is
   // harmless (the windowing tests dispatch scroll without one).
   (e: 'load-more'): void
+  // The viewer picked a rows-per-page option; the parent stores it and reloads page 1.
+  (e: 'set-page-size', size: number): void
   (e: 'open-link-picker', ctx: { recordId: string; field: MetaField }): void
   (e: 'open-person-picker', ctx: { recordId: string; field: MetaField }): void
   (e: 'resize-column', fieldId: string, width: number): void
@@ -814,6 +837,18 @@ const bottomSpacerHeight = computed(() =>
 // / not expanded / not printing); those non-flat modes keep the classic footer pager. Dedup against
 // double-fire is owned by the composable (loadMore's loadingMore flag), so emitting freely is safe.
 const LOAD_MORE_THRESHOLD_PX = 400
+
+// Footer pager: the grouped path always; the flat (scrolling) path only past page 1, where it cannot append.
+const showPager = computed(() => props.totalPages > 1 && (!props.infiniteScroll || props.currentPage > 1))
+const showPageSizeSelect = computed(() => {
+  const options = props.pageSizeOptions ?? []
+  if (options.length === 0 || typeof props.pageSize !== 'number') return false
+  return props.totalPages > 1 || props.pageSize !== options[0]
+})
+function onPageSizeChange(event: Event) {
+  const value = Number((event.target as HTMLSelectElement | null)?.value)
+  if (Number.isFinite(value) && value !== props.pageSize) emit('set-page-size', value)
+}
 const infiniteScrollEnabled = computed(() =>
   !printing.value && !groupedRows.value && expandedRowIds.value.size === 0,
 )
@@ -2002,6 +2037,11 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__fill-handle { position: absolute; right: 0; bottom: 0; width: 9px; height: 9px; padding: 0; border: 1px solid white; background: #3567c9; cursor: crosshair; z-index: 3; }
 .meta-grid {
   position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;
+  /* The grid is its own stacking context, so its sticky z-index tiers (header corner 5, frozen header 4,
+     ... see `thead .meta-grid__check-col` below) stay LOCAL: without this they compete with the host page
+     (e.g. MultitableWorkbench's narrow-width rail drawer, z-index 5 in the same parent context, which the
+     later-in-DOM grid corner would tie and paint over). */
+  isolation: isolate;
   border: 1px solid var(--ms-border-light, #e7e8ec);
   border-radius: var(--ms-radius-lg, 12px);
   background: var(--ms-bg-card, #fff);
@@ -2014,16 +2054,28 @@ function onKeydown(e: KeyboardEvent) {
    body-row appearance — only the header cells adopt the panel/token look.
    #5863: these corner cells sit at the intersection of the left-sticky row-num/
    check-col stack and the sticky-top header row, so they need BOTH `top: 0`
-   and a zIndex above a frozen body cell's (2) — 3, matching the plain
-   (non-frozen) `.meta-field-header` tier, so the corner paints over body
-   content scrolling underneath it in both directions. */
+   and a zIndex above everything that can scroll underneath them.
+   Customer field report 2026-10-21 (#5): the corner used to share tier 3 with
+   the plain (scrolling) `.meta-field-header` cells, and on a z-index tie the
+   later DOM sibling paints on top — so once the grid was scrolled right far
+   enough, a scrolled-away header cell slid over the corner and hid the
+   select-all checkbox. Stacking tiers (top to bottom):
+     5  header corner (this rule)
+     4  frozen header cell (MetaFieldHeader.vue, frozenLeft set)
+     3  plain header cell (MetaFieldHeader.vue); frozen-row check/row-num and
+        frozen-row x frozen-column body cells (cellStyle)
+     2  frozen body cell (cellStyle)
+     1  body check-col / row-num
+   The corner must stay strictly above 4 and 3, never tie with them. These tiers
+   are local to `.meta-grid` (isolation: isolate), never compared with the
+   host page's overlays. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: 5;
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
@@ -2110,6 +2162,8 @@ thead .meta-grid__check-col {
 .meta-grid__page-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-grid__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta-grid__page-info { font-size: 12px; color: #666; }
+.meta-grid__page-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
+.meta-grid__page-size-select { padding: 2px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; font-size: 12px; }
 .meta-grid__loading { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: stretch; background: rgba(255,255,255,.85); z-index: 10; padding-top: 40px; }
 .meta-grid__skeleton { width: 100%; padding: 0 12px; }
 .meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }

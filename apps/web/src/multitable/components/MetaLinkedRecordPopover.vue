@@ -1,38 +1,46 @@
 <template>
-  <div v-if="visible" class="meta-linked-record-popover" @click.self="emit('close')">
-    <div class="meta-linked-record-popover__panel" role="dialog" :aria-label="l('linkedRecord.title')">
-      <div class="meta-linked-record-popover__header">
-        <strong>{{ l('linkedRecord.title') }}</strong>
-        <MtIconButton class="meta-linked-record-popover__close" :aria-label="l('linkedRecord.close')" @click="emit('close')">&times;</MtIconButton>
-      </div>
-      <div class="meta-linked-record-popover__body">
-        <div v-if="loading" class="meta-linked-record-popover__loading">{{ l('linkedRecord.loading') }}</div>
-        <div v-else-if="error" class="meta-linked-record-popover__error">{{ error }}</div>
-        <template v-else-if="context">
-          <div v-if="!visibleForeignFields.length" class="meta-linked-record-popover__empty">{{ l('linkedRecord.empty') }}</div>
-          <div
-            v-for="field in visibleForeignFields"
-            :key="field.id"
-            class="meta-linked-record-popover__field"
-          >
-            <span class="meta-linked-record-popover__label">{{ field.name }}</span>
-            <span class="meta-linked-record-popover__value">
-              <!-- Nesting cap = 1: deliberately do NOT pass fetchRecord to the
-                   inner renderer, so foreign link chips have no click affordance
-                   and cannot open another popover. -->
-              <MetaCellRenderer
-                :field="field"
-                :value="context.record.data[field.id]"
-                :link-summaries="context.linkSummaries?.[field.id]"
-                :person-summaries="context.personSummaries?.[field.id]"
-                :attachment-summaries="context.attachmentSummaries?.[field.id]"
-              />
-            </span>
-          </div>
-        </template>
+  <!--
+    Teleported to <body> (review of the grid stacking fix, 2026-10-21): this full-screen fixed overlay is
+    rendered from inside cells (MetaCellRenderer), i.e. inside `.meta-grid`, which isolates its own
+    stacking context. Left in place, its z-index 1000 would only count inside the grid and the popover
+    would paint under the workbench's rail drawer and record inspector. At <body> it stacks against the page.
+  -->
+  <Teleport to="body">
+    <div v-if="visible" class="meta-linked-record-popover" @click.self="emit('close')">
+      <div class="meta-linked-record-popover__panel" role="dialog" :aria-label="l('linkedRecord.title')">
+        <div class="meta-linked-record-popover__header">
+          <strong>{{ l('linkedRecord.title') }}</strong>
+          <MtIconButton class="meta-linked-record-popover__close" :aria-label="l('linkedRecord.close')" @click="emit('close')">&times;</MtIconButton>
+        </div>
+        <div class="meta-linked-record-popover__body">
+          <div v-if="loading" class="meta-linked-record-popover__loading">{{ l('linkedRecord.loading') }}</div>
+          <div v-else-if="error" class="meta-linked-record-popover__error">{{ error }}</div>
+          <template v-else-if="context">
+            <div v-if="!visibleForeignFields.length" class="meta-linked-record-popover__empty">{{ l('linkedRecord.empty') }}</div>
+            <div
+              v-for="field in visibleForeignFields"
+              :key="field.id"
+              class="meta-linked-record-popover__field"
+            >
+              <span class="meta-linked-record-popover__label">{{ field.name }}</span>
+              <span class="meta-linked-record-popover__value">
+                <!-- Nesting cap = 1: deliberately do NOT pass fetchRecord to the
+                     inner renderer, so foreign link chips have no click affordance
+                     and cannot open another popover. -->
+                <MetaCellRenderer
+                  :field="field"
+                  :value="context.record.data[field.id]"
+                  :link-summaries="context.linkSummaries?.[field.id]"
+                  :person-summaries="context.personSummaries?.[field.id]"
+                  :attachment-summaries="context.attachmentSummaries?.[field.id]"
+                />
+              </span>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
