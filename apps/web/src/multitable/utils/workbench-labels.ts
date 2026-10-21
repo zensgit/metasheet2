@@ -32,6 +32,8 @@ export type WorkbenchLabelKey =
   | 'kbd.recordPrev' | 'kbd.recordNext'
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
+  // R68 (#6454 judge note): status note + toast when /context reports `recordCreateBlockedByLock`
+  | 'notice.recordCreateBlockedByLock'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
   | 'toast.recordLocked' | 'toast.recordUnlocked' | 'toast.recordLockFailed'
   | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated' | 'toast.viewInHistory'
@@ -159,6 +161,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'kbd.recordPrev': { en: 'Previous record (inspector open)', zh: '上一条记录（检查器打开时）' },
   'kbd.recordNext': { en: 'Next record (inspector open)', zh: '下一条记录（检查器打开时）' },
 
+  'notice.recordCreateBlockedByLock': {
+    en: 'Required columns on this sheet are maintained by PLM, so rows cannot be added by hand.',
+    zh: '此表的必填列由 PLM 维护，不能手工加行。',
+  },
   'toast.recordCreateBlocked': {
     en: 'Record creation is not allowed in this view.',
     zh: '当前视图不允许创建记录。',

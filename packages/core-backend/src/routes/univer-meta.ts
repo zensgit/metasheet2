@@ -16,6 +16,7 @@ import {
 } from '../multitable/permission-derivation'
 import {
   carryHumanWriteLock,
+  hasHumanWriteLockedRequiredField,
   humanWriteLockRefusalBody,
   listHumanWriteLockedFieldIds,
   stripHumanWriteLockKey,
@@ -9581,6 +9582,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             canDeleteSheet,
             // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
             canCopySheet,
+            // R68 (#6454 judge note): a sheet with a human-write-locked column that is ALSO required by its own
+            // validation rule (the 备料 project sheet's PLM columns) can never take a person-created record:
+            // empty fails the rule, filled is a locked write. Sent ONLY when true and only to an actor who could
+            // otherwise create, so every other sheet's capabilities object is unchanged; the web hides its
+            // create / duplicate entries on it. Display-only: the create routes keep their own refusals.
+            ...(capabilities.canCreateRecord === true && hasHumanWriteLockedRequiredField(activeFields)
+              ? { recordCreateBlockedByLock: true }
+              : {}),
           },
           capabilityOrigin,
           fieldPermissions,

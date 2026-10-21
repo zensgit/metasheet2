@@ -227,6 +227,14 @@
       <strong>{{ capabilityOriginNotice.title }}</strong>
       <span>{{ capabilityOriginNotice.message }}</span>
     </div>
+    <div
+      v-if="recordCreateBlockedByLock && caps.canCreateRecord.value"
+      class="mt-workbench__capability-banner mt-workbench__create-locked-note"
+      role="status"
+      data-testid="record-create-locked-note"
+    >
+      <span>{{ wb('notice.recordCreateBlockedByLock', isZh) }}</span>
+    </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
@@ -242,7 +250,7 @@
       :filter-groups="grid.filterGroups.value"
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -321,7 +329,7 @@
           :group-info="workbench.activeView.value?.groupInfo"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
@@ -334,7 +342,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -350,7 +358,7 @@
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :calendar-holidays="calendarHolidays"
           :calendar-holiday-notice="calendarHolidayNotice"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -365,7 +373,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -381,7 +389,7 @@
           :view-config="workbench.activeView.value?.config"
           :group-info="workbench.activeView.value?.groupInfo"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
           @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
@@ -390,7 +398,7 @@
           v-else-if="activeViewType === 'hierarchy'"
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -410,7 +418,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="canCreateRecordByHand" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :commit-range="grid.patchRange"
           :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
@@ -466,7 +474,7 @@
         :dispatch-binding="dispatchBinding"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
-        :can-create="caps.canCreateRecord.value"
+        :can-create="canCreateRecordByHand"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
@@ -1053,6 +1061,14 @@ onBeforeUnmount(() => {
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
+// R68 (#6454 judge note): /context sends `recordCreateBlockedByLock: true` when the sheet has a column people may
+// not write (the 备料 project sheet's PLM columns) that its own validation also marks required, so a record a
+// person creates can never pass. Every hand-create entry below (toolbar add / import, grid "+ row", the
+// duplicate action, kanban / gallery / calendar / timeline / gantt / hierarchy create, a new form submission)
+// reads `canCreateRecordByHand`, and the note under the capability banner says why. Same fail-closed read as
+// canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`.
+const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
+const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
@@ -1838,8 +1854,8 @@ function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): vo
 }
 
 function ensureCanCreateRecord(): boolean {
-  if (caps.canCreateRecord.value) return true
-  showError(wb('toast.recordCreateBlocked', isZh.value))
+  if (canCreateRecordByHand.value) return true
+  showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
   return false
 }
 
@@ -2100,7 +2116,7 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
   return resolvers
 })
 const formReadOnly = computed(() => {
-  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
+  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !canCreateRecordByHand.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
 // A1 infinite-scroll activation. The FLAT (ungrouped) grid path accumulates rows via scroll (loadMore)

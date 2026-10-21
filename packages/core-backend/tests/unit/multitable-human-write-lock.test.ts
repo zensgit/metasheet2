@@ -17,6 +17,8 @@
  *   L7  the bulk / collab write spine (`RecordWriteService.validateChanges`) refuses with the CLOSED code.
  *   L8  wiring (source scan): every person guard builder uses the person floor, and the plugin records path never
  *       imports the lock module.
+ *   L10 `hasHumanWriteLockedRequiredField` (R68): a locked column that its own validation marks required means no
+ *       person can create a record on the sheet; `GET /context` reports it as `recordCreateBlockedByLock`.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -27,6 +29,7 @@ import {
   FIELD_HUMAN_WRITE_LOCK_PROPERTY_KEY,
   FIELD_READONLY_PLM_SYSTEM_CODE,
   carryHumanWriteLock,
+  hasHumanWriteLockedRequiredField,
   humanWriteLockRefusalBody,
   isFieldHumanWriteLocked,
   listHumanWriteLockedFieldIds,
@@ -253,5 +256,33 @@ describe('L8 wiring (source scan)', () => {
     const alwaysReadOnly = derivation.slice(start, derivation.indexOf('\n}\n', start))
     expect(alwaysReadOnly.length).toBeGreaterThan(100)
     expect(alwaysReadOnly).not.toMatch(/HumanWriteLock|humanWriteLock/)
+  })
+})
+
+describe('L10 hasHumanWriteLockedRequiredField: a locked + required column blocks every person create', () => {
+  const REQUIRED = { validation: [{ type: 'required' }] }
+  it('locked AND required → true (raw object, JSON-string property, mixed with other rules / fields)', () => {
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK, ...REQUIRED } }])).toBe(true)
+    expect(hasHumanWriteLockedRequiredField([{ property: JSON.stringify({ ...LOCK, ...REQUIRED }) }])).toBe(true)
+    expect(hasHumanWriteLockedRequiredField([
+      { property: {} },
+      { property: { ...LOCK, validation: [{ type: 'maxLength', params: { value: 10 } }, { type: 'required' }] } },
+    ])).toBe(true)
+  })
+  it('locked but not required, required but not locked, or split across two columns → false', () => {
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...REQUIRED } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK } }, { property: { ...REQUIRED } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK, validation: [{ type: 'maxLength', params: { value: 5 } }] } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK, validation: { type: 'required' } } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { ...LOCK, validation: [null, 'required'] } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([{ property: { humanWriteLock: 'PLM_SYSTEM', ...REQUIRED } }])).toBe(false)
+    expect(hasHumanWriteLockedRequiredField([])).toBe(false)
+  })
+  it('sees through the read serializer GET /context loads with, for the project-sheet column types', () => {
+    for (const type of ['string', 'number', 'boolean']) {
+      const row = serializeFieldRow({ id: 'fld', name: 'n', type, property: { ...LOCK, ...REQUIRED }, order: 0 })
+      expect(hasHumanWriteLockedRequiredField([row]), type).toBe(true)
+    }
   })
 })
