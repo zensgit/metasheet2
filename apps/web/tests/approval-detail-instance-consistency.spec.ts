@@ -122,6 +122,9 @@ vi.mock('../src/approvals/templateStore', () => ({
 
 import { useApprovalStore } from '../src/approvals/store'
 import { NODE_OPERATION_DISABLED_CODE, NODE_OPERATION_DISABLED_MESSAGE } from '../src/approvals/memberActionErrorCopy'
+// Collect/transform the view before per-test timers start. A timed-out dynamic import can
+// otherwise finish mounting into the next test's container and contaminate its assertions.
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 
 function stub(name: string, tag = 'div') {
   return defineComponent({
@@ -313,7 +316,6 @@ describe('ApprovalDetailView — instance consistency', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of ['ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElSkeleton', 'ElSkeletonItem']) {

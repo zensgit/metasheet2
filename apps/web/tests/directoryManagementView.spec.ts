@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
+import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
 
 const apiFetchMock = vi.fn()
 
@@ -265,6 +266,42 @@ describe('DirectoryManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+  })
+
+  it('offers server OAuth configuration guidance before a directory integration exists', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')
+    expect(hint?.textContent).toContain('不会配置钉钉登录')
+    expect(hint?.textContent).toContain('服务端环境变量')
+    expect(hint?.querySelector('a')?.getAttribute('href')).toBe('/help/attendance/dingtalk-microapp#server-login')
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations')
+  })
+
+  it('renders the linked OAuth help without fetching or editing credentials', async () => {
+    app = createApp(AttendanceDingTalkMicroappHelpView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector('#server-login')
+    expect(section).not.toBeNull()
+    expect(Array.from(section!.querySelectorAll('code'), (node) => node.textContent)).toEqual([
+      'docker/app.env',
+      'DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY',
+      'DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET',
+      'DINGTALK_REDIRECT_URI', '/login/dingtalk/callback',
+      'DINGTALK_CORP_ID', 'DINGTALK_ALLOWED_CORP_IDS',
+    ])
+    expect(section!.textContent).toContain('保存目录集成不会同步这些变量')
+    expect(section!.textContent).toContain('不要通过清空白名单绕过限制')
+    expect(section!.querySelector('input, textarea, form')).toBeNull()
+    expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
   it('loads integrations and recent runs on mount', async () => {
