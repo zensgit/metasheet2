@@ -23,6 +23,14 @@ the shared (`updateView`) branch is unchanged. Clearing still works: a patch fac
 `base` and `JSON.stringify` drops it, so the backend `sanitize` omits it (cleared) — while facets ABSENT from the
 patch are preserved from `base`. No backend change; the FE now sends the complete desired overlay each write.
 
+> **STALE as of #6075 / #6110 (2026-09):** the `undefined`-clears-a-facet mechanism above is still a real,
+> tested capability of `writePersonalConfigMerged` itself, but it is no longer how any toolbar clear actually
+> works. #6075 (sort/filter) and #6110 (grouping) changed every toolbar clear call site to send an explicit
+> EMPTY value instead (`{ rules: [] }`, `{ conjunction, conditions: [] }`, `{}` for groupInfo) — so clearing a
+> facet PUTs an explicit "no rule for me" personal override, not a removal that falls back to the shared
+> view's value. See `apps/web/src/multitable/utils/personal-config-write.ts`'s header comment for the current
+> state.
+
 ## Scope
 
 FE-only, one composable + one small util. Default-OFF (feature gated by `MULTITABLE_ENABLE_PERSONAL_VIEWS`; the
@@ -40,7 +48,9 @@ Goldens `apps/web/tests/multitable-grid-personal-additive-write.spec.ts` (7, all
 - **FAIL-CLOSED:** a non-404 GET failure (500 / network / transient auth) ⇒ re-throws and does NOT PUT — a blind
   write on a failed read would REPLACE the row and wipe the actor's other facets (the exact thing this helper
   prevents). Golden asserts reject + `putPersonalViewConfig` not called.
-- clearing: patch `{filterInfo: undefined}` drops filter on the wire while sort/hidden persist.
+- clearing: patch `{filterInfo: undefined}` drops filter on the wire while sort/hidden persist (a raw capability
+  of the merge helper itself — as of #6075/#6110 no toolbar clear action actually sends `undefined` any more;
+  see the STALE note above).
 - **grid wiring:** personal ON — `toggleFieldVisibility` merges over the existing personal config (sort
   preserved), `updateView` NOT called; personal OFF — uses the shared `updateView` path, no personal-config call.
 

@@ -14,7 +14,7 @@
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -61,8 +61,6 @@ const del = (recordId: string, token: string) =>
   request(app).delete(`/api/multitable/records/${recordId}`).set('Authorization', `Bearer ${token}`)
 const getRec = (path: string, token: string) =>
   request(app).get(path).set('Authorization', `Bearer ${token}`)
-const flush = () => new Promise((r) => setTimeout(r, 80)) // let the res.on('finish') audit listener flush
-
 describeIfDatabase('OAPI-4a scoped-token guard (real DB)', () => {
   beforeAll(async () => {
     app = express()
@@ -142,8 +140,11 @@ describeIfDatabase('OAPI-4a scoped-token guard (real DB)', () => {
     const after = await q('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [SHEET_B1])
     expect((after.rows[0] as { n: number }).n).toBe(1) // only the seed — nothing created
     expect(await recData(REC_B1)).toEqual(before)
-    await flush()
-    const denied = (await auditRows(tBaseAId)).filter((r) => r.outcome === 'denied' && r.status_code === 403)
+    let denied: Awaited<ReturnType<typeof auditRows>> = []
+    await vi.waitFor(async () => {
+      denied = (await auditRows(tBaseAId)).filter((r) => r.outcome === 'denied' && r.status_code === 403)
+      expect(denied.length).toBeGreaterThanOrEqual(1)
+    }, { timeout: 5000, interval: 50 })
     expect(denied.length).toBeGreaterThanOrEqual(1)
     expect(denied.some((r) => (r.detail as { reason?: string } | null)?.reason === 'out_of_base_sheet_scope')).toBe(true)
   })

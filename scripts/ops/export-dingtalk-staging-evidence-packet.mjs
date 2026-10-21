@@ -106,7 +106,7 @@ const requiredPacketFiles = [
   {
     path: 'scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs',
     kind: 'test',
-    description: 'mutually pins the behavior suite and wiring guard into the Node 18/20 test matrix; branch protection requires the Node 20 context',
+    description: 'mutually pins the behavior suite and wiring guard into the Node 20 test matrix; branch protection requires the Node 20 context',
   },
   {
     path: 'docs/development/dingtalk-directory-worker-drain-design-and-verification-20260726.md',

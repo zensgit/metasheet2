@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AttendanceAdminTaskHome from '../src/views/attendance/AttendanceAdminTaskHome.vue'
@@ -6,6 +8,7 @@ type Group = {
   key: string
   title: string
   detail: string
+  status?: string
   linkActions: Array<{ key: string; label: string; href: string; primary?: boolean }>
   buttonActions: Array<{ key: string; label: string; sectionId: string; primary?: boolean }>
 }
@@ -81,13 +84,15 @@ describe('AttendanceAdminTaskHome', () => {
 
   function mount(overrides: { groups?: Group[] } = {}) {
     const onSelectSection = vi.fn()
+    const onNavigate = vi.fn()
     app = createApp(AttendanceAdminTaskHome, {
       tr: (en: string) => en,
       groups: overrides.groups ?? FOUR_GROUPS,
       onSelectSection: onSelectSection,
+      onNavigate: onNavigate,
     })
     app.mount(container!)
-    return { onSelectSection }
+    return { onSelectSection, onNavigate }
   }
 
   it('renders the header, region semantics, and the four task groups in order', async () => {
@@ -112,7 +117,7 @@ describe('AttendanceAdminTaskHome', () => {
     expect(root?.textContent).toContain('Approvals, anomalies, imports, and audit follow-up.')
   })
 
-  it('renders link actions as real anchors that do not go through the emit path', async () => {
+  it('renders link actions as real anchors that do not go through the select-section emit path', async () => {
     mount()
     await flushUi()
 
@@ -123,6 +128,55 @@ describe('AttendanceAdminTaskHome', () => {
 
     const primaryLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
     expect(primaryLink?.classList.contains('attendance__btn--primary')).toBe(true)
+  })
+
+  it('a plain left-click on a link action prevents the default navigation and emits navigate (fix 4)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    expect(anomalyLink).toBeTruthy()
+
+    const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    const preventDefaultSpy = vi.spyOn(clickEvent, 'preventDefault')
+    anomalyLink!.dispatchEvent(clickEvent)
+    await flushUi()
+
+    // A real <a href> left-click that reaches jsdom's default action would attempt a full
+    // document navigation ("Not implemented: navigation to another Document"). The component
+    // calls preventDefault() itself and emits `navigate` with the href instead, so the PARENT
+    // (AttendanceView.vue's onAdminTaskHomeNavigate) can route it through the SPA router.
+    expect(preventDefaultSpy).toHaveBeenCalledTimes(1)
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+    expect(onNavigate).toHaveBeenCalledWith('/attendance?section=attendance-overview-anomalies')
+  })
+
+  it('does not intercept a modifier-clicked link action (open-in-new-tab stays native)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    const ctrlClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true })
+    const preventDefaultSpy = vi.spyOn(ctrlClick, 'preventDefault')
+    anomalyLink!.dispatchEvent(ctrlClick)
+    await flushUi()
+
+    expect(preventDefaultSpy).not.toHaveBeenCalled()
+    expect(onNavigate).not.toHaveBeenCalled()
+  })
+
+  it('does not intercept a non-primary-button click (e.g. middle-click open-in-new-tab)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    const middleClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 1 })
+    const preventDefaultSpy = vi.spyOn(middleClick, 'preventDefault')
+    anomalyLink!.dispatchEvent(middleClick)
+    await flushUi()
+
+    expect(preventDefaultSpy).not.toHaveBeenCalled()
+    expect(onNavigate).not.toHaveBeenCalled()
   })
 
   it('emits select-section with the section id when a button action is clicked', async () => {
@@ -154,5 +208,60 @@ describe('AttendanceAdminTaskHome', () => {
     const root = container!.querySelector('[data-admin-task-home="true"]')
     expect(root).toBeTruthy()
     expect(root?.textContent).toContain('Attendance management')
+  })
+
+  it('renders the four-state status badges from parent props and fail-closes missing/invalid to unknown', async () => {
+    const groups: Group[] = [
+      { ...FOUR_GROUPS[0], status: 'ok' },
+      { ...FOUR_GROUPS[1], status: 'needs_attention' },
+      { ...FOUR_GROUPS[2], status: 'not_configured' },
+      { ...FOUR_GROUPS[3], status: 'failed' },
+    ]
+    mount({ groups })
+    await flushUi()
+
+    const statuses = Array.from(container!.querySelectorAll('[data-admin-task-status]')).map((el) => ({
+      group: el.closest('[data-admin-task-group]')?.getAttribute('data-admin-task-group'),
+      status: el.getAttribute('data-admin-task-status'),
+      text: el.textContent?.trim(),
+    }))
+    expect(statuses).toEqual([
+      { group: 'daily-operations', status: 'ok', text: 'OK' },
+      { group: 'people-groups', status: 'needs_attention', text: 'Needs attention' },
+      { group: 'work-time-policies', status: 'not_configured', text: 'Not configured' },
+      { group: 'reporting-payroll', status: 'failed', text: 'Failed' },
+    ])
+    expect(container!.querySelector('.attendance__admin-task-status--ok')).toBeTruthy()
+    expect(container!.querySelector('.attendance__admin-task-status--needs_attention')).toBeTruthy()
+  })
+
+  it('shares the calm card surface and keeps the four-column task grid', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceAdminTaskHome.vue'), 'utf8')
+    expect(css).toMatch(/\.attendance__admin-task-group\s*\{[^}]*border:\s*1px solid var\(--ms-border-light\)/)
+    expect(css).toMatch(/\.attendance__admin-task-group\s*\{[^}]*box-shadow:\s*var\(--ms-shadow-card\)/)
+    expect(css).toMatch(/\.attendance__btn--primary\s*\{[^}]*background:\s*var\(--ms-color-primary\)/)
+    expect(css).toMatch(/\.attendance__admin-task-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/)
+    expect(css).toMatch(/@media \(max-width:\s*768px\)\s*\{[\s\S]*\.attendance__admin-task-grid\s*\{[^}]*grid-template-columns:\s*1fr/)
+    expect(css).not.toMatch(/#1976d2/)
+  })
+
+  it('does not render OK copy or ok style when status is missing or unrecognized', async () => {
+    mount({
+      groups: [
+        { ...FOUR_GROUPS[0], status: undefined },
+        { ...FOUR_GROUPS[1], status: 'ready' },
+      ],
+    })
+    await flushUi()
+
+    const badges = Array.from(container!.querySelectorAll('[data-admin-task-status]'))
+    expect(badges).toHaveLength(2)
+    for (const badge of badges) {
+      expect(badge.getAttribute('data-admin-task-status')).toBe('unknown')
+      expect(badge.textContent).toContain('Unknown')
+      expect(badge.textContent).not.toContain('OK')
+      expect(badge.classList.contains('attendance__admin-task-status--ok')).toBe(false)
+      expect(badge.classList.contains('attendance__admin-task-status--unknown')).toBe(true)
+    }
   })
 })

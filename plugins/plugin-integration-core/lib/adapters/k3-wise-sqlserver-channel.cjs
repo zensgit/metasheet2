@@ -18,6 +18,14 @@ const {
   normalizeReadRequest,
   normalizeUpsertRequest,
 } = require('../contracts.cjs')
+// E4 / G-4 (HG v1.2 §10) — this transport is the SECOND K3 kind covered by the permanent fence.
+// Layers 3 and 4 of its four live in this file; layers 1 and 2 are the shared route/C6 call sites,
+// which match this kind through the fence's own widened predicate. READS are untouched.
+const {
+  K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND,
+  K3_WISE_EXTERNAL_WRITE_DISABLED,
+  refuseK3ExternalWritePermanently,
+} = require('../k3-external-write-permanent-fence.cjs')
 
 const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
 
@@ -160,6 +168,13 @@ function assertAllowedTable(table, allowedTables, field) {
   return normalized
 }
 
+// SUPERSEDED, and kept only as inert depth. This was the channel's ENTIRE write guard before E4
+// covered this kind, and it was config-bypassable by construction: `allowDirectTableWrite: true`
+// on an object config returned early and authorised a direct write into a live K3 business table.
+// It is now unreachable — every caller is refused by the permanent fence in `upsert` several
+// statements earlier — and it is NOT the guard any more. Left in place rather than deleted so
+// that if a future edit removes the fence line, this still refuses the default-config case
+// instead of leaving nothing at all behind it.
 function assertNoDirectK3Write(table, objectConfig) {
   if (objectConfig.allowDirectTableWrite === true) return
   if (objectConfig.writeMode !== 'middle-table') {
@@ -169,6 +184,63 @@ function assertNoDirectK3Write(table, objectConfig) {
     })
   }
 }
+
+// The refusal both layers in this file throw. Same closed token, same 403, same fixed message as
+// every WebAPI layer — the two kinds are indistinguishable in a response body on purpose.
+// `code`/`status` ride alongside `details` exactly as the WebAPI layers do, so the fixed token
+// survives every reader (valuesFreeErrorCode, the HTTP error mapper, C6 row evidence).
+function refuseK3SqlServerExternalWrite() {
+  refuseK3ExternalWritePermanently(
+    (status, code, message, details) => Object.assign(
+      new AdapterValidationError(message, details), { code, status },
+    ),
+    K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND,
+  )
+}
+
+// ===== E4 LAYER 4 of FOUR for `erp:k3-wise-sqlserver` — THE EXECUTOR SEAM =================
+// The deepest fence, and the one that closes the actual gap. The channel issues no SQL itself: a
+// deployment INJECTS a `queryExecutor`, and the write capability therefore arrives from outside
+// this package. Until now the only thing stopping a K3 SQL write was that the wired default
+// executor happens to be read-only — swap in a write-capable one and a K3 write re-opened with no
+// edit to any fence. So the seam itself is fenced: whatever executor is injected, its
+// `insertMany` is replaced by an unconditional refusal before the channel can ever hold a
+// reference to the real one.
+//
+// Everything else is forwarded untouched — `testConnection` and `select` are the READ path and
+// must keep working (a blanket deny that killed reads would be a FAIL, not a pass, under §15.2
+// E4-05). Real methods are bound to the underlying executor so a class-based deployment executor
+// keeps its own `this` and any private state.
+async function refusedInsertMany() {
+  refuseK3SqlServerExternalWrite()
+}
+
+function fenceExecutorExternalWrites(executor) {
+  if (executor === null || executor === undefined) return executor
+  if (typeof executor !== 'object' && typeof executor !== 'function') return executor
+  return new Proxy(executor, {
+    get(target, property) {
+      // The single intercepted member. Note this also means `typeof executor.insertMany` stays
+      // 'function', so the channel's own shape check cannot be turned into a way to detect —
+      // or route around — the fence.
+      //
+      // ASYNC on purpose: a query executor's `insertMany` returns a promise, and callers may hold
+      // the result before awaiting it (`.catch(...)` on the returned promise). A synchronous throw
+      // from a method with that contract escapes such a caller as an uncaught exception instead of
+      // a rejection. Refusing as a REJECTION keeps the refusal inside the caller's error handling.
+      if (property === 'insertMany') return refusedInsertMany
+      const value = Reflect.get(target, property)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+    set(target, property, value) {
+      // Re-attaching a live `insertMany` from outside would be a runtime unlock. §10.1 reserves
+      // none, so the assignment is refused rather than silently dropped.
+      if (property === 'insertMany') refuseK3SqlServerExternalWrite()
+      return Reflect.set(target, property, value)
+    },
+  })
+}
+// =========================================================================================
 
 function normalizeExecutorResult(result) {
   if (Array.isArray(result)) {
@@ -190,7 +262,10 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
   const config = normalizedSystem.config
   const objects = normalizeObjects(config)
   const allowedTables = normalizeTableSet(config)
-  const executor = queryExecutor || config.queryExecutor
+  // BOTH executor sources are fenced — the injected one AND the one a stored system config could
+  // carry. `config.queryExecutor` is the more dangerous of the two precisely because it is
+  // customer-editable configuration, which is the shape §10.1 rules out as an unlock.
+  const executor = fenceExecutorExternalWrites(queryExecutor || config.queryExecutor)
 
   async function testConnection(input = {}) {
     if (!executor) {
@@ -284,6 +359,24 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
   }
 
   async function upsert(input = {}) {
+    // ===== E4 LAYER 3 of FOUR for `erp:k3-wise-sqlserver` — UNCONDITIONAL (HG v1.2 §10.2.3) ====
+    // The direct analogue of the WebAPI kind's layer-3 write-source refusal: no predicate, no
+    // parameter, no config field and no environment read can reach past this line. It is the
+    // FIRST statement of the function, ahead of the executor shape check, ahead of request
+    // normalisation, ahead of the table allowlist and ahead of `assertNoDirectK3Write` — so a
+    // refused call resolves no executor, normalises nothing and touches no driver.
+    //
+    // This is the layer that catches the pipeline runner, which calls `targetAdapter.upsert(...)`
+    // directly and never passes through the C6 route or apply engine at all.
+    //
+    // The older middle-table rule below is deliberately LEFT reachable-in-source but dead in
+    // practice: it was config-bypassable (`allowDirectTableWrite: true`), which is exactly why a
+    // permanent fence had to sit in front of it rather than be tightened in place.
+    //
+    // READ is untouched: `read`, `listObjects`, `getSchema` and `testConnection` all still work,
+    // and the read path is what this kind is actually wired for in production.
+    refuseK3SqlServerExternalWrite()
+    // ==========================================================================================
     if (!executor || typeof executor.insertMany !== 'function') {
       throw new AdapterValidationError('K3 WISE SQL Server channel requires queryExecutor.insertMany()', {
         field: 'queryExecutor.insertMany',
@@ -345,6 +438,10 @@ function createK3WiseSqlServerChannelFactory(defaults = {}) {
 
 const K3_WISE_SQLSERVER_ADAPTER_METADATA = {
   label: 'K3 WISE SQL Server Channel',
+  // `target` is retained deliberately. It is descriptive metadata only — `describeAdapterKind`
+  // publishes it and nothing gates on it — and existing stored systems carry `bidirectional`.
+  // Removing it here would change a published listing without adding any guarantee; the
+  // guarantee is the fence, and `guardrails.write` below is where this listing states it.
   roles: ['source', 'target'],
   advanced: true,
   guardrails: {
@@ -352,11 +449,16 @@ const K3_WISE_SQLSERVER_ADAPTER_METADATA = {
       requiresTableAllowlist: true,
       allowlistKeys: ['readTables', 'allowedTables'],
     },
+    // E4 / G-4 (HG v1.2 §10), 20260901. This used to publish `requiresMiddleTableMode` and a
+    // `middle-table` write mode — i.e. it told an integrator that configuring the channel a
+    // particular way made writes work. It no longer does at any configuration: this kind's write
+    // path is permanently refused at four layers with the fixed code below. The old keys are
+    // REMOVED rather than kept alongside the refusal, because a listing that names both a
+    // refusal and a recipe reads as a recipe.
     write: {
-      requiresMiddleTableMode: true,
-      requiresTableAllowlist: true,
-      allowlistKeys: ['writeTables', 'allowedTables'],
-      writeModes: ['middle-table'],
+      permanentlyRefused: true,
+      refusalCode: K3_WISE_EXTERNAL_WRITE_DISABLED,
+      authority: 'E4',
     },
     ui: {
       hiddenByDefault: true,
@@ -372,8 +474,12 @@ module.exports = {
   __internals: {
     DEFAULT_OBJECTS,
     IDENTIFIER_PATTERN,
+    // Exposed so the E4 parity suite can drive layer 4 (the executor seam) on its own, without
+    // going through `upsert` — which is what makes the two layers independently witnessable.
+    fenceExecutorExternalWrites,
     normalizeIdentifier,
     normalizeTableSet,
     normalizeObjects,
+    refuseK3SqlServerExternalWrite,
   },
 }

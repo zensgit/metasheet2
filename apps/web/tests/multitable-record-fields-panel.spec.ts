@@ -32,6 +32,7 @@ interface HarnessOptions {
   fieldPermissions?: Record<string, MetaFieldPermission>
   rowActions?: MetaRowActions | null
   aiShortcut?: AiShortcutState | null
+  aiAvailable?: boolean
   onPatch?: (fieldId: string, value: unknown) => void
   onAiPreview?: (field: MetaField) => void
   onAiRun?: (field: MetaField) => void
@@ -57,6 +58,7 @@ function mountPanel(options: HarnessOptions = {}): { container: HTMLElement; app
         fieldPermissions: options.fieldPermissions,
         rowActions: options.rowActions,
         aiShortcut: options.aiShortcut ?? null,
+        ...(options.aiAvailable !== undefined ? { aiAvailable: options.aiAvailable } : {}),
         ...(options.onPatch ? { onPatch: options.onPatch } : {}),
         ...(options.onAiPreview ? { onAiPreview: options.onAiPreview } : {}),
         ...(options.onAiRun ? { onAiRun: options.onAiRun } : {}),
@@ -148,6 +150,7 @@ describe('MetaRecordFieldsPanel (W2 S1 extraction)', () => {
       const { container, app } = mountPanel({
         record,
         fields,
+        aiAvailable: true, // A11: the buttons render only when the server reports AI available
         onAiPreview: previewSpy,
         onAiRun: runSpy,
       })

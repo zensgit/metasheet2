@@ -1,0 +1,67 @@
+name: Multitable O2 Observation Kit
+
+# Self-test for the O-2 enablement-ladder observation/drill kit. Hermetic, no
+# database, no secrets, no remote hosts — `node --test` directly against the
+# checked-out tree (same standalone shape as data-source-exposure-inventory.yml:
+# checkout + setup-node only, no pnpm install).
+#
+# NOTE (2026-08-21): scripts/ops/multitable-l1-battery-workflow.test.mjs AND
+# scripts/ops/create-l1-battery-admin-on-staging.test.mjs both also carry real-Docker
+# `golden` cases, but they are OPT-IN (L1_BATTERY_DOCKER_GOLDENS=1 / L1_ADMIN_DOCKER_GOLDENS=1
+# respectively) and this job does NOT set either env, so they skip here (LOUDLY) and this lane
+# stays hermetic — a docker hiccup can never red this required check. The goldens run in the
+# dedicated non-required lane .github/workflows/multitable-l1-battery-docker-goldens.yml.
+# create-l1-battery-admin-on-staging.test.mjs guards the durable ops helper (scripts/ops/
+# create-l1-battery-admin-on-staging.sh) that creates the staging L1 admin — its hermetic cases
+# are pure text/structure + string-mutation, no DB and no hosts, safe for this required lane.
+#
+# NOTE (2026-08-23): scripts/ops/multitable-role-cascade-witness.test.mjs joins this lane. It is
+# hermetic too — it runs the generated catalog probe as a node subprocess against a STUB `pg` it
+# writes into a temp dir, so no database, docker, or host is touched — and it carries the
+# cross-file sync pin asserting the witness SQL has exactly one definition (in
+# scripts/ops/multitable-l1-battery.mjs) across all workflows and non-test ops scripts. That pin
+# has to live in an always-on, path-filter-free lane or editing the other file defeats it.
+#
+# The test proves the observation
+# SQL is read-only by construction, drift-guards its trigger/function/lock-key
+# literals against the authoritative migration, and enforces that every
+# host-reaching command in the drill runbook is marked OWNER-GATED.
+#
+# TWO JOBS, deliberately:
+#   • `contract` — checkout + node only (plus the runner's local, registry-free docker
+#     daemon for the L1-battery goldens noted above): the STATIC census layer. Fast,
+#     runs on every trigger, and is the layer that gates a stray write shape by text.
+#   • `execution-proof` — real Postgres + migrations: runs the ENTIRE observation SQL
+#     inside a session pinned `default_transaction_read_only = on`, so a write that
+#     the static regex census misses still aborts (25006) and reds. Arms the suite's
+#     sentinel (METASHEET_REAL_DB_TEST_STEP=1), so a missing DATABASE_URL in THIS lane
+#     is a RED run, never a silent skipped-green (被触发≠被验证).
+# The execution layer is the load-bearing one — an enumerated blocklist never converges
+# on its own (枚举陷阱不收敛); it is why this workflow is no longer hermetic-only.
+
+on:
+  # NO pull_request path filter: this check is intended to be REQUIRED, and a path-filtered
+  # required check strands every PR that does not trigger it at "Expected — waiting for status"
+  # (the same trap already hit on ssh-hostkey-pin-contract.yml). The job is hermetic and runs in
+  # seconds, so running it on every PR is free. The expensive execution layer lives in
+  # multitable-o2-observation-kit-realdb.yml, which keeps the original path filters.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: observation-kit contract (read-only SQL census + runbook gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic observation-kit tests (no DB, no hosts)
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs scripts/ops/recovery-fingerprint-cross-guard.test.mjs scripts/ops/multitable-role-cascade-witness.test.mjs
+

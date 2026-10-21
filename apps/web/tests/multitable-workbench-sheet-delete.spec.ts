@@ -1,0 +1,706 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
+import { fieldDeleteErrorMessage, sheetDeleteErrorMessage } from '../src/multitable/utils/workbench-labels'
+import type { MetaConfigRevision } from '../src/multitable/api/client'
+
+// Wire-drift lock for the sheet-delete entry (rail trash button → workbench). The rail only EMITS
+// `delete-sheet(id)`; MultitableWorkbench.vue's `onDeleteSheet` is the untested link between that
+// emit and the write. This spec asserts the REAL contract end to end through a capturing rail stub:
+//
+//   1. the rail receives `can-delete-sheet` from the capabilities composable (server-derived bit) and
+//      `onDeleteSheet` as its listener;
+//   2. confirm → `client.deleteSheet(id)` → success toast → when the deleted sheet is the ACTIVE one,
+//      `workbench.loadBaseContext(activeBaseId)` re-pulls the base (NOT switchBase, which is a same-base
+//      no-op) so the first remaining sheet gets selected server-side; a non-active delete re-pulls the
+//      sheet list via `loadSheetMeta` instead;
+//   3. cancel → nothing is called, nothing is toasted;
+//   4. the coded refusals get plain-language toasts by CODE: 409 SHEET_PLUGIN_MANAGED (the managed-sheet
+//      guard) and 404 SHEET_DELETED (stale list, which additionally re-pulls the list);
+//   5. a false `canDeleteSheet` bit makes the handler a hard no-op even if the emit arrives (stale rail);
+//   6. the bit is read off the /context capabilities object exactly like pitResetEnabled (fail-closed
+//      `=== true`): an object without the key, or a legacy role-string source, hides the entry.
+//
+// #5707 follow-up extends the SAME by-CODE-copy contract to the FIELD delete entry (the field
+// manager's `delete-field` emit -> `onDeleteField`): 409 MANAGED_FIELD_DELETE_REFUSED must render the
+// localized sentence in both locales rather than the server's English prose.
+
+const showErrorSpy = vi.fn()
+const showSuccessSpy = vi.fn()
+
+let capturedRailAttrs: Record<string, unknown> | null = null
+let capturedSheetTrashAttrs: Record<string, unknown> | null = null
+let capturedHistoryAttrs: Record<string, unknown> | null = null
+let capturedFieldManagerAttrs: Record<string, unknown> | null = null
+let capturedConfigHistoryAttrs: Record<string, unknown> | null = null
+
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
+  return { ...actual, useRouter: () => ({ push: vi.fn().mockResolvedValue(undefined) }) }
+})
+
+function stubComponent(name: string) {
+  return defineComponent({ name, render() { return h('div', { [`data-stub-${name}`]: 'true' }) } })
+}
+
+let workbenchMock: any
+let gridMock: any
+// Everything below is a permissive admin so nothing else in the workbench gates the path under test.
+// The delete bit itself is flipped per test on `workbenchMock.capabilities` (the /context object):
+// the workbench derives `canDeleteSheet` from THAT object (`capabilitySource.value?.canDeleteSheet
+// === true`, the pitResetEnabled shape), not from the capabilities composable.
+
+vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
+  useMultitableWorkbench: () => workbenchMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
+  useMultitableGrid: () => gridMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
+  useMultitableCapabilities: () => ({
+    canRead: ref(true), canCreateRecord: ref(true), canEditRecord: ref(true), canDeleteRecord: ref(true),
+    canManageFields: ref(true), canManageSheetAccess: ref(true), canManageViews: ref(true), canComment: ref(true),
+    canManageAutomation: ref(false), canExport: ref(true), canSendNotification: ref(true),
+    canDeleteSheet: ref(true),
+  }),
+}))
+vi.mock('../src/multitable/composables/useMultitableComments', () => ({
+  useMultitableComments: () => ({
+    comments: ref([]), loading: ref(false), submitting: ref(false), resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]), deletingIds: ref<string[]>([]), error: ref<string | null>(null),
+    reactingKeys: ref<string[]>([]),
+    loadComments: vi.fn(), addComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(), resolveComment: vi.fn(),
+    addReaction: vi.fn(), removeReaction: vi.fn(),
+  }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
+  useMultitableCommentInbox: () => ({ unreadCount: ref(0), refreshUnreadCount: vi.fn().mockResolvedValue(0) }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({ useMultitableCommentRealtime: vi.fn() }))
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({ useMultitableSheetRealtime: vi.fn() }))
+vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
+
+// Capturing stub for the rail under wiring test — records the real props/listeners the workbench passes.
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
+  default: defineComponent({
+    name: 'MetaSheetViewRail',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedRailAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-MetaSheetViewRail': 'true' })
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/SheetTrashModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedSheetTrashAttrs = attrs
+    return () => h('div', { 'data-sheet-trash': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/HistoryCenterModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedHistoryAttrs = attrs
+    return () => h('div', { 'data-record-history': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/MetaConfigHistoryModal.vue', () => ({
+  default: defineComponent({ inheritAttrs: false, setup(_props, { attrs }) {
+    capturedConfigHistoryAttrs = attrs
+    return () => h('div', { 'data-config-history': true })
+  } }),
+}))
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
+vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
+vi.mock('../src/multitable/components/RestorePreviewDialog.vue', () => ({ default: stubComponent('RestorePreviewDialog') }))
+vi.mock('../src/multitable/components/RestoreBatchDialog.vue', () => ({ default: stubComponent('RestoreBatchDialog') }))
+vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
+vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
+  default: defineComponent({
+    name: 'MetaFieldManager',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedFieldManagerAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-MetaFieldManager': 'true' })
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
+vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
+vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
+vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
+vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
+vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
+vi.mock('../src/multitable/components/MetaToast.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToast',
+    setup(_, { expose }) {
+      expose({ showError: showErrorSpy, showSuccess: showSuccessSpy })
+      return () => h('div', { 'data-toast': 'true' })
+    },
+  }),
+}))
+
+import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+
+async function flushUi(cycles = 6): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
+}
+
+function apiError(status: number, code: string, message: string) {
+  const err = new Error(message) as Error & { status?: number; code?: string; name: string }
+  err.name = 'MultitableApiError'
+  err.status = status
+  err.code = code
+  return err
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: Error) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
+const configRows = (id: string): MetaConfigRevision[] => [{
+  id, entityType: 'field', entityId: 'fld_title', action: 'delete',
+  before: { name: id }, after: null, changedKeys: [], batchId: null,
+  actorId: 'test_actor', createdAt: '2026-09-14T00:00:00.000Z',
+}]
+
+function createWorkbenchMock() {
+  const activeBaseId = ref('base_ops')
+  const activeSheetId = ref<string | null>('sheet_orders')
+  const activeViewId = ref('view_grid')
+  const views = ref([{ id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid' }])
+  return {
+    client: {
+      listBases: vi.fn().mockResolvedValue({ bases: [{ id: 'base_ops', name: 'Ops Base' }] }),
+      loadContext: vi.fn().mockResolvedValue({ base: { id: 'base_ops' }, sheet: null, sheets: [], views: [], capabilities: {} }),
+      loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(), renameSheet: vi.fn(),
+      createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(), deleteField: vi.fn(),
+      createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(), submitForm: vi.fn(), updateView: vi.fn(),
+      getConfigHistory: vi.fn().mockResolvedValue([]),
+      // The function under test:
+      deleteSheet: vi.fn().mockResolvedValue({ deleted: 'sheet_orders' }),
+    },
+    sheets: ref([
+      { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+      { id: 'sheet_archive', baseId: 'base_ops', name: 'Archive', description: null },
+    ]),
+    fields: ref([{ id: 'fld_title', name: 'Title', type: 'string' }]),
+    views, activeBaseId, activeSheetId, activeViewId,
+    capabilities: ref({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: true,
+      canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: false, canExport: true,
+      canDeleteSheet: true,
+    }),
+    capabilityOrigin: ref(null), fieldPermissions: ref({}), viewPermissions: ref({}),
+    activeView: computed(() => views.value.find((v) => v.id === activeViewId.value) ?? null),
+    loading: ref(false), error: ref<string | null>(null),
+    loadSheets: vi.fn().mockResolvedValue(true), loadBaseContext: vi.fn().mockResolvedValue(true),
+    loadSheetMeta: vi.fn().mockResolvedValue(true), switchBase: vi.fn().mockResolvedValue(true),
+    syncExternalContext: vi.fn().mockResolvedValue(true),
+    selectBase: vi.fn((id: string) => { activeBaseId.value = id }),
+    selectSheet: vi.fn((id: string) => { activeSheetId.value = id }),
+    selectView: vi.fn((id: string) => { activeViewId.value = id }),
+  }
+}
+
+function createGridMock() {
+  return {
+    fields: ref([]), rows: ref([]), loading: ref(false), currentPage: ref(1), totalPages: ref(1),
+    page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }), visibleFields: ref([]), sortRules: ref([]),
+    filterRules: ref([]), filterConjunction: ref('and'), filterGroups: ref([]), canLoadMore: ref(false), canUndo: ref(false), canRedo: ref(false),
+    groupFieldId: ref<string | null>(null), groupFieldIds: ref([]), groupField: ref(null), groupFields: ref([]), hiddenFieldIds: ref<string[]>([]),
+    columnWidths: ref<Record<string, number>>({}), linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
+    fieldPermissions: ref({}), viewPermission: ref(null), rowActions: ref(null), rowActionOverrides: ref({}),
+    capabilityOrigin: ref(null), conflict: ref(null), error: ref<string | null>(null), sortFilterDirty: ref(false),
+    toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),
+    updateFilterRule: vi.fn(), removeFilterRule: vi.fn(), clearFilters: vi.fn(), applySortFilter: vi.fn(),
+    undo: vi.fn(), redo: vi.fn(), setGroupField: vi.fn(), setGroupFields: vi.fn(), goToPage: vi.fn(), patchCell: vi.fn(),
+    createRecord: vi.fn(), deleteRecord: vi.fn(), resolveRowActions: vi.fn(() => null),
+    loadViewData: vi.fn().mockResolvedValue(true), reloadCurrentPage: vi.fn(), dismissConflict: vi.fn(),
+    retryConflict: vi.fn(), setColumnWidth: vi.fn(), setSearchQuery: vi.fn(),
+  }
+}
+
+type DeleteFn = (sheetId: string) => Promise<void>
+
+describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet → confirm → client.deleteSheet → re-pull)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let confirmSpy: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capturedRailAttrs = null
+    capturedSheetTrashAttrs = null
+    capturedHistoryAttrs = null
+    capturedConfigHistoryAttrs = null
+    confirmSpy = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirmSpy)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    vi.unstubAllGlobals(); vi.clearAllMocks()
+  })
+
+  async function mountAndGetDelete(): Promise<DeleteFn> {
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    expect(capturedRailAttrs).not.toBeNull()
+    const onDeleteSheet = capturedRailAttrs!.onDeleteSheet as DeleteFn
+    expect(typeof onDeleteSheet).toBe('function')
+    // Mount-time init already issued one `loadBaseContext(activeBaseId, {...})` (the workbench's own
+    // bootstrap). Zero the refresh spies HERE so every assertion below counts only what onDeleteSheet did.
+    workbenchMock.loadBaseContext.mockClear()
+    workbenchMock.loadSheetMeta.mockClear()
+    workbenchMock.switchBase.mockClear()
+    return onDeleteSheet
+  }
+
+  it('passes the server-derived canDeleteSheet bit to the rail as `can-delete-sheet` (and a false bit hides it)', async () => {
+    await mountAndGetDelete()
+    expect(capturedRailAttrs!['can-delete-sheet']).toBe(true)
+    workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canDeleteSheet: false }
+    await flushUi()
+    expect(capturedRailAttrs!['can-delete-sheet']).toBe(false)
+  })
+
+  it('keeps the base recycle-bin entry after the last live sheet is gone and reloads that base on restore', async () => {
+    workbenchMock.activeSheetId.value = ''
+    workbenchMock.sheets.value = []
+    workbenchMock.capabilities.value = { canDeleteSheet: false }
+    await mountAndGetDelete()
+    const button = container!.querySelector('[data-action="open-trash"]') as HTMLElement
+    expect(button).not.toBeNull(); button.click(); await flushUi()
+    expect(capturedSheetTrashAttrs?.open).toBe(true)
+    expect(capturedSheetTrashAttrs?.['base-id']).toBe('base_ops')
+    expect(capturedSheetTrashAttrs?.client).toBe(workbenchMock.client)
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadBaseContext.mock.calls).toEqual([['base_ops', { sheetId: 'sheet_restored' }]])
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the active sheet list without switching sheets, and ignores stale-base restore notifications', async () => {
+    await mountAndGetDelete()
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    await onRestored({ baseId: 'old_base', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+    await onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    expect(workbenchMock.loadSheetMeta.mock.calls).toEqual([['sheet_orders']])
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+  })
+
+  it('does not toast a cancelled restore refresh after selecting another sheet in the same base', async () => {
+    await mountAndGetDelete()
+    const late = deferred<boolean>()
+    workbenchMock.loadSheetMeta.mockImplementationOnce(() => late.promise)
+    const onRestored = capturedSheetTrashAttrs!.onRestored as (value: { baseId: string; sheetId: string }) => Promise<void>
+    const pending = onRestored({ baseId: 'base_ops', sheetId: 'sheet_restored' })
+    workbenchMock.activeSheetId.value = 'another_live_sheet'
+    late.resolve(false)
+    await pending
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('routes deleted-record recovery through history and refreshes only its current sheet', async () => {
+    await mountAndGetDelete()
+    expect(capturedHistoryAttrs?.['can-restore-records']).toBe(true)
+    const onRestored = capturedHistoryAttrs!.onRestored as (value: { sheetId: string; recordId: string }) => void
+    onRestored({ sheetId: 'other_sheet', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).not.toHaveBeenCalled()
+    onRestored({ sheetId: 'sheet_orders', recordId: 'r1' })
+    expect(gridMock.reloadCurrentPage).toHaveBeenCalledTimes(1)
+  })
+
+  async function openConfigHistory(): Promise<void> {
+    const button = container!.querySelector('[data-action="open-config-history"]') as HTMLElement
+    expect(button).not.toBeNull()
+    button.click()
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(true)
+  }
+
+  it.each(['resolve', 'reject'] as const)('ignores an old config-history %s after a newer filter result', async (settlement) => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise).mockResolvedValueOnce(configRows('current'))
+    await mountAndGetDelete()
+    await openConfigHistory()
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('field')
+    await flushUi()
+    expect(workbenchMock.client.getConfigHistory.mock.calls).toEqual([['sheet_orders', {}], ['sheet_orders', { entityType: 'field' }]])
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('current'))
+    if (settlement === 'resolve') old.resolve(configRows('obsolete'))
+    else old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('current'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+    expect(capturedConfigHistoryAttrs?.['entity-type']).toBe('field')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['resolve', 'reject'] as const)('keeps a reopened config-history load intact after an old %s', async (settlement) => {
+    const old = deferred<MetaConfigRevision[]>()
+    const current = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    ;(capturedConfigHistoryAttrs!.onClose as () => void)()
+    await flushUi()
+    await openConfigHistory()
+    if (settlement === 'resolve') old.resolve(configRows('obsolete'))
+    else old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.loading).toBe(true)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    current.resolve(configRows('reopened'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('reopened'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+  })
+
+  it.each(['sheet', 'base'] as const)('closes and clears config history on a %s switch, including a return to the old scope', async (scope) => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockResolvedValueOnce(configRows('loaded')).mockReturnValueOnce(old.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('loaded'))
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('view')
+    await flushUi()
+    const scopeRef = scope === 'sheet' ? workbenchMock.activeSheetId : workbenchMock.activeBaseId
+    const original = scopeRef.value
+    scopeRef.value = `${original}_other`
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(false)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    scopeRef.value = original
+    await flushUi()
+    old.resolve(configRows('obsolete'))
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.visible).toBe(false)
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not toast a late config-history failure after workbench unmount', async () => {
+    const old = deferred<MetaConfigRevision[]>()
+    workbenchMock.client.getConfigHistory.mockReturnValueOnce(old.promise)
+    await mountAndGetDelete()
+    await openConfigHistory()
+    app!.unmount(); app = null
+    old.reject(new Error('obsolete failure'))
+    await flushUi()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('still surfaces a current config-history failure and accepts a subsequent retry', async () => {
+    workbenchMock.client.getConfigHistory.mockRejectedValueOnce(new Error('CURRENT_HISTORY_UNAVAILABLE')).mockResolvedValueOnce(configRows('retry'))
+    await mountAndGetDelete()
+    await openConfigHistory()
+    expect(showErrorSpy).toHaveBeenCalledWith('CURRENT_HISTORY_UNAVAILABLE')
+    expect(capturedConfigHistoryAttrs?.items).toEqual([])
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+    ;(capturedConfigHistoryAttrs!.onFilterChange as (type: string) => void)('field')
+    await flushUi()
+    expect(capturedConfigHistoryAttrs?.items).toEqual(configRows('retry'))
+    expect(capturedConfigHistoryAttrs?.loading).toBe(false)
+  })
+
+  it('fails CLOSED when the /context object carries no canDeleteSheet key (old backend), even though the capabilities composable says true', async () => {
+    const { canDeleteSheet: _dropped, ...withoutKey } = workbenchMock.capabilities.value
+    workbenchMock.capabilities.value = withoutKey
+    const onDeleteSheet = await mountAndGetDelete()
+    expect(capturedRailAttrs!['can-delete-sheet']).toBe(false)
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(workbenchMock.client.deleteSheet).not.toHaveBeenCalled()
+  })
+
+  it('ACTIVE sheet: confirm → deleteSheet(id) → success toast → loadBaseContext(activeBaseId) (never switchBase / never loadSheetMeta)', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // The confirm names the sheet and states the consequence + admin-only API restore.
+    const prompt = String(confirmSpy.mock.calls[0]?.[0])
+    expect(prompt).toContain('Orders')
+    expect(prompt).toMatch(/administrator/i)
+
+    expect(workbenchMock.client.deleteSheet).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.deleteSheet).toHaveBeenCalledWith('sheet_orders')
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    // Base re-pull is the ONLY refresh path for the active sheet: switchBase would short-circuit
+    // (same base, no sheetId ⇒ return true) and leave the workbench on a sheet that no longer exists.
+    expect(workbenchMock.loadBaseContext).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.loadBaseContext).toHaveBeenCalledWith('base_ops')
+    expect(workbenchMock.switchBase).not.toHaveBeenCalled()
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('NON-active sheet: confirm → deleteSheet(id) → loadSheetMeta(activeSheetId) re-pulls the list; the base is not re-pulled', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    workbenchMock.client.deleteSheet.mockResolvedValueOnce({ deleted: 'sheet_archive' })
+    await onDeleteSheet('sheet_archive')
+    await flushUi()
+
+    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain('Archive')
+    expect(workbenchMock.client.deleteSheet).toHaveBeenCalledWith('sheet_archive')
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancel → NO request, NO refresh, NO toast', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    confirmSpy.mockReturnValueOnce(false)
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.deleteSheet).not.toHaveBeenCalled()
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('409 SHEET_PLUGIN_MANAGED → the plain-language managed-sheet toast (by CODE, not the server prose), no refresh, no success', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    workbenchMock.client.deleteSheet.mockRejectedValueOnce(
+      apiError(409, 'SHEET_PLUGIN_MANAGED', 'This sheet is provisioned and owned by a plugin and cannot be deleted from the UI or the sheet API.'),
+    )
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledTimes(1)
+    const msg = String(showErrorSpy.mock.calls[0]?.[0])
+    // A6 (customer feedback 2026-09-24 #1b, adversarial-review round #6089 S2/S3): the copy now
+    // names a path that WORKS TODAY (filter + bulk-delete rows; restore a mistake from History →
+    // Deleted records) instead of "cannot be deleted", and does not promise anything the product
+    // does not back (no "uninstall the plugin", no "per-project cleanup is planned", no circular
+    // "contact an administrator") — see workbench-labels.ts's `toast.sheetPluginManaged`.
+    expect(msg).toBe(
+      'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its '
+      + 'data, filter the rows you want and delete them in bulk from the grid; rows deleted by '
+      + 'mistake can be restored from the toolbar’s History → Deleted records.',
+    )
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('404 SHEET_DELETED (stale list) → the already-deleted toast AND a list re-pull; no success', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    workbenchMock.client.deleteSheet.mockRejectedValueOnce(apiError(404, 'SHEET_DELETED', 'This sheet has been deleted.'))
+    await onDeleteSheet('sheet_archive')
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledTimes(1)
+    expect(String(showErrorSpy.mock.calls[0]?.[0])).toMatch(/already deleted/i)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+    expect(showSuccessSpy).not.toHaveBeenCalled()
+  })
+
+  it('other failures surface the server message (403 FORBIDDEN prose) through showError; no refresh', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    workbenchMock.client.deleteSheet.mockRejectedValueOnce(apiError(403, 'FORBIDDEN', 'Deleting a sheet requires schema authority.'))
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith('Deleting a sheet requires schema authority.')
+    expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
+  })
+
+  it('a false canDeleteSheet bit makes the handler a hard no-op — no confirm, no request (stale-rail defence)', async () => {
+    const onDeleteSheet = await mountAndGetDelete()
+    workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canDeleteSheet: false }
+    await flushUi()
+    await onDeleteSheet('sheet_orders')
+    await flushUi()
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(workbenchMock.client.deleteSheet).not.toHaveBeenCalled()
+  })
+})
+
+// A6 (customer feedback 2026-09-24 #1b, adversarial-review round #6089 S2/S3): the SHEET_PLUGIN_MANAGED
+// copy in BOTH locales, asserted directly against the pure mapping function (not only through the one
+// mounted-workbench cell above) — mirrors the 'fieldDeleteErrorMessage mapping' block below for the
+// sibling field-level refusal.
+describe('sheetDeleteErrorMessage mapping (409 SHEET_PLUGIN_MANAGED)', () => {
+  const EN = 'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its '
+    + 'data, filter the rows you want and delete them in bulk from the grid; rows deleted by mistake can be '
+    + 'restored from the toolbar’s History → Deleted records.'
+  const ZH = '这张表由插件维护，不能整表删除。要清理其中的数据，可以在表格里筛选后批量删除行；删错的行可在工具栏「历史 → 已删除的记录」中恢复。'
+
+  it('maps the code to the localized sentence in BOTH locales (zh-CN and en)', () => {
+    const error = { code: 'SHEET_PLUGIN_MANAGED', message: 'This sheet is provisioned and owned by a plugin.' }
+    expect(sheetDeleteErrorMessage(error, true)).toBe(ZH)
+    expect(sheetDeleteErrorMessage(error, false)).toBe(EN)
+    // the two locales must actually differ, and neither may echo the server prose
+    expect(sheetDeleteErrorMessage(error, true)).not.toBe(sheetDeleteErrorMessage(error, false))
+    expect(sheetDeleteErrorMessage(error, true)).not.toContain(error.message)
+    expect(sheetDeleteErrorMessage(error, false)).not.toContain(error.message)
+  })
+
+  it('names a path that works TODAY and makes no unapproved promise', () => {
+    // Neither locale may tell the actor to uninstall/reconfigure the plugin (the registry row that
+    // makes the sheet "managed" survives an uninstall — nothing removes it) or promise a
+    // not-yet-shipped per-project cleanup feature, and neither may say "contact an administrator" —
+    // the toast is only ever shown to an actor who already holds lifecycle authority.
+    for (const isZh of [true, false]) {
+      const copy = sheetDeleteErrorMessage({ code: 'SHEET_PLUGIN_MANAGED' }, isZh)
+      expect(copy).not.toMatch(/uninstall|reconfigure|卸载|重新配置/i)
+      expect(copy).not.toMatch(/planned|规划中/i)
+      expect(copy).not.toMatch(/administrator|管理员/i)
+    }
+    // both locales point at the SAME two real affordances: bulk-delete filtered rows, and the
+    // toolbar's History → Deleted records tab for undoing a mistake.
+    expect(EN).toMatch(/bulk/i)
+    expect(EN).toMatch(/History.*Deleted records/)
+    expect(ZH).toMatch(/批量删除/)
+    expect(ZH).toMatch(/历史.*已删除的记录/)
+  })
+})
+
+// #5707 follow-up -- field-delete refusal copy. The backend answers a coded 409
+// (MANAGED_FIELD_DELETE_REFUSED) with an English, values-free message when the field lives on a
+// plugin-managed sheet; the field manager used to surface `e.message` verbatim, so zh-CN users read
+// English. Same contract as the sheet-level SHEET_PLUGIN_MANAGED case above: copy is picked by CODE.
+describe('field-delete refusal copy (409 MANAGED_FIELD_DELETE_REFUSED)', () => {
+  const ZH = '这张表由应用托管，字段不能在这里删除；请通过应用侧流程处理。'
+  const EN = "This table is managed by an application; its fields cannot be deleted here. Use the application's own flow."
+
+  describe('fieldDeleteErrorMessage mapping', () => {
+    it('maps the code to the localized sentence in BOTH locales (zh-CN and en)', () => {
+      const error = { code: 'MANAGED_FIELD_DELETE_REFUSED', message: 'This field belongs to a sheet provisioned and owned by a plugin.' }
+      expect(fieldDeleteErrorMessage(error, true)).toBe(ZH)
+      expect(fieldDeleteErrorMessage(error, false)).toBe(EN)
+      // the two locales must actually differ, and neither may echo the server prose
+      expect(fieldDeleteErrorMessage(error, true)).not.toBe(fieldDeleteErrorMessage(error, false))
+      expect(fieldDeleteErrorMessage(error, true)).not.toContain(error.message)
+      expect(fieldDeleteErrorMessage(error, false)).not.toContain(error.message)
+    })
+
+    it('stays values-free: no field/sheet/tenant/plugin identifier can reach the copy', () => {
+      const error = {
+        code: 'MANAGED_FIELD_DELETE_REFUSED',
+        message: 'fld_abc123 on sheet_orders (tenant_7) is owned by plugin-integration-core',
+      }
+      for (const isZh of [true, false]) {
+        const copy = fieldDeleteErrorMessage(error, isZh)
+        expect(copy).not.toMatch(/fld_|sheet_|tenant_|plugin-integration-core/)
+      }
+    })
+
+    it('unknown codes keep the previous behaviour: server message first, generic toast when it sent none', () => {
+      expect(fieldDeleteErrorMessage({ code: 'FORBIDDEN', message: 'Deleting a field requires schema authority.' }, true))
+        .toBe('Deleting a field requires schema authority.')
+      expect(fieldDeleteErrorMessage({ code: 'FORBIDDEN' }, true)).toBe('删除字段失败')
+      expect(fieldDeleteErrorMessage({ code: 'FORBIDDEN' }, false)).toBe('Failed to delete field')
+      expect(fieldDeleteErrorMessage(null, true)).toBe('删除字段失败')
+      expect(fieldDeleteErrorMessage(undefined, false)).toBe('Failed to delete field')
+    })
+  })
+
+  describe('mounted workbench: the field manager\'s delete-field emit', () => {
+    let app: VueApp<Element> | null = null
+    let container: HTMLDivElement | null = null
+
+    beforeEach(() => {
+      workbenchMock = createWorkbenchMock()
+      gridMock = createGridMock()
+      capturedRailAttrs = null
+      capturedFieldManagerAttrs = null
+      vi.stubGlobal('confirm', vi.fn(() => true))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+    })
+
+    afterEach(() => {
+      if (app) app.unmount()
+      if (container) container.remove()
+      app = null; container = null
+      useLocale().setLocale('en')
+      showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+      vi.unstubAllGlobals(); vi.clearAllMocks()
+    })
+
+    async function mountAndGetDeleteField(): Promise<(fieldId: string) => Promise<void>> {
+      const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+      app = createApp(Host)
+      app.mount(container!)
+      await flushUi()
+      expect(capturedFieldManagerAttrs).not.toBeNull()
+      const onDeleteField = capturedFieldManagerAttrs!.onDeleteField as (fieldId: string) => Promise<void>
+      expect(typeof onDeleteField).toBe('function')
+      workbenchMock.loadSheetMeta.mockClear()
+      gridMock.loadViewData.mockClear()
+      return onDeleteField
+    }
+
+    it('zh-CN: the 409 code renders the Chinese sentence (not the server English), and nothing refreshes', async () => {
+      useLocale().setLocale('zh-CN')
+      const onDeleteField = await mountAndGetDeleteField()
+      workbenchMock.client.deleteField.mockRejectedValueOnce(
+        apiError(409, 'MANAGED_FIELD_DELETE_REFUSED', 'This field belongs to a sheet provisioned and owned by a plugin and cannot be deleted from the UI or the field API. Use the plugin\'s own flow.'),
+      )
+      await onDeleteField('fld_title')
+      await flushUi()
+
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(String(showErrorSpy.mock.calls[0]?.[0])).toBe(ZH)
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+      expect(gridMock.loadViewData).not.toHaveBeenCalled()
+    })
+
+    it('en: the same 409 code renders the English sentence from the label table', async () => {
+      const onDeleteField = await mountAndGetDeleteField()
+      workbenchMock.client.deleteField.mockRejectedValueOnce(
+        apiError(409, 'MANAGED_FIELD_DELETE_REFUSED', 'This field belongs to a sheet provisioned and owned by a plugin.'),
+      )
+      await onDeleteField('fld_title')
+      await flushUi()
+
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(String(showErrorSpy.mock.calls[0]?.[0])).toBe(EN)
+    })
+
+    it('other failures still surface the server message verbatim (403 prose), and a success still refreshes', async () => {
+      const onDeleteField = await mountAndGetDeleteField()
+      workbenchMock.client.deleteField.mockRejectedValueOnce(apiError(403, 'FORBIDDEN', 'Deleting a field requires schema authority.'))
+      await onDeleteField('fld_title')
+      await flushUi()
+      expect(showErrorSpy).toHaveBeenCalledWith('Deleting a field requires schema authority.')
+
+      showErrorSpy.mockReset()
+      workbenchMock.client.deleteField.mockResolvedValueOnce({ deleted: 'fld_title' })
+      await onDeleteField('fld_title')
+      await flushUi()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+      expect(gridMock.loadViewData).toHaveBeenCalledTimes(1)
+    })
+  })
+})

@@ -12,6 +12,8 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_CONFIGURED: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,6 +28,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
         run: |
@@ -56,7 +59,7 @@ jobs:
           if [ -z "$AUTH_HEADER" ] && [ "$URL_SOURCE" = "metasheet_base_url" ]; then
             token_fallback_log="/tmp/phase5-metrics-token-fallback.log"
             set +e
-            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
+            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false DEPLOY_KNOWN_HOSTS="${DEPLOY_KNOWN_HOSTS}" bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
             token_resolve_status=$?
             set -e
             if [ "$token_resolve_status" -ne 0 ]; then
@@ -94,12 +97,17 @@ jobs:
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
+
+      - name: Set up pnpm
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
 
       - name: Install deps
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
-        run: |
-          npm ci || pnpm i || yarn install
+        run: pnpm install --frozen-lockfile
 
       - name: Run Phase 5 validation
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
@@ -130,7 +138,7 @@ jobs:
           fi
 
       - name: Slack notify on failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK_CONFIGURED == 'true'
         uses: rtCamp/action-slack-notify@v2
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}

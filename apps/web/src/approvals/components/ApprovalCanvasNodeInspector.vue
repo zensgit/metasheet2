@@ -58,6 +58,17 @@ const emit = defineEmits<{
   'insert-condition': [nodeKey: string]
   'insert-parallel': [nodeKey: string]
   remove: [nodeKey: string]
+  /** B2 — mints the FIRST write path for a canvas node's display name (verified: no such path
+   *  existed before this slice — `approvalNodeEdit.ts`'s G-5 pass only ever touches `.config`,
+   *  never `.name`; `graphNodeLabel` is read-only). Parent stays the sole owner of mutation, per
+   *  this component's existing "parent owns selection and all mutations" contract. HOW the parent
+   *  applies it (updated 2026-08-25 — the original text described a direct node-field write, the
+   *  shape E-P2-4 removed): `onRenameCanvasNode` runs a topology op through the UNIFIED authoring
+   *  history, so rename is undo/redo-able like every structural edit; there is no live-name
+   *  overlay in undo any more. Blank/whitespace `name` means "clear the override" —
+   *  `graphNodeLabel` already falls back to the node-type label — and clearing is equally
+   *  undoable. */
+  rename: [nodeKey: string, name: string]
 }>()
 
 const rootEl = ref<HTMLElement | null>(null)
@@ -77,7 +88,7 @@ defineExpose({
 // presentation unchanged.
 const configEditorApi = inject(APPROVAL_NODE_CONFIG_EDITOR_KEY, undefined)
 const hasEditableApprovalConfig = computed(() => {
-  // Lock-3 §1.5: a handler node ALSO takes the tabbed presentation (办理人设置 + 表单权限), reusing the
+  // Lock-3 §1.5: a handler node ALSO takes the tabbed presentation (办理人设置 + 字段权限), reusing the
   // same edit model — so it must be admitted here alongside `approval`.
   if (props.node.type !== 'approval' && props.node.type !== 'handler') return false
   const fn = configEditorApi?.approvalNodeEditFor
@@ -90,7 +101,7 @@ const tabs = computed<ApprovalCanvasInspectorTabDescriptor[]>(() => {
     // Lock-3 §1.5: the first tab's LABEL is node-type specific (办理人设置 for a handler) — which is
     // exactly why the strip is derived per node TYPE rather than hand-written once.
     { id: 'assignee', label: props.node.type === 'handler' ? '办理人设置' : '审批人设置' },
-    { id: 'fieldPermissions', label: '表单权限' },
+    { id: 'fieldPermissions', label: '字段权限' },
   ]
   if (hasRatifiedOperationPolicy(registry, props.node.type)) {
     list.push({ id: 'operations', label: '操作权限' })
@@ -114,6 +125,40 @@ watch(tabs, (list) => {
 
 function selectTab(id: ApprovalCanvasInspectorTabId): void {
   activeTab.value = id
+}
+
+// ── B2 inline title rename ─────────────────────────────────────────────────────────────────────
+// Pencil affordance → text input; Enter/blur commits, Esc reverts without emitting. Local
+// component state only (the draft VALUE lives here while editing; the parent owns the committed
+// `node.name` once `rename` is emitted, same "parent owns mutation" split as topology actions).
+const isRenamingTitle = ref(false)
+const renameDraftValue = ref('')
+const renameInputEl = ref<HTMLInputElement | null>(null)
+
+watch(
+  () => props.node.key,
+  () => {
+    // Switching selection while mid-rename must not leak an uncommitted edit onto the newly
+    // selected node — discard, exactly like Esc.
+    isRenamingTitle.value = false
+  },
+)
+
+function beginRenameTitle(): void {
+  if (props.readOnly) return
+  renameDraftValue.value = props.node.name?.trim() ?? ''
+  isRenamingTitle.value = true
+  void nextTick(() => renameInputEl.value?.focus())
+}
+
+function commitRenameTitle(): void {
+  if (!isRenamingTitle.value) return
+  isRenamingTitle.value = false
+  emit('rename', props.node.key, renameDraftValue.value)
+}
+
+function cancelRenameTitle(): void {
+  isRenamingTitle.value = false
 }
 
 const tabButtonRefs = new Map<string, HTMLElement>()
@@ -166,9 +211,35 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
     <div class="template-authoring__canvas-inspector-header">
       <div class="template-authoring__canvas-inspector-title">
         <strong>{{ nodeTypeLabel(node.type) }}</strong>
-        <span class="template-authoring__node-type" :data-node-type="node.type">
+        <span
+          v-if="!isRenamingTitle"
+          class="template-authoring__node-type template-authoring__inspector-rename-row"
+          :data-node-type="node.type"
+        >
           {{ graphNodeLabel(node.key) }}
+          <button
+            v-if="!readOnly"
+            type="button"
+            class="template-authoring__inspector-rename-btn"
+            data-testid="approval-canvas-inspector-rename"
+            :aria-label="`重命名${graphNodeLabel(node.key)}节点`"
+            @click="beginRenameTitle"
+          >
+            ✎
+          </button>
         </span>
+        <input
+          v-else
+          ref="renameInputEl"
+          v-model="renameDraftValue"
+          type="text"
+          class="template-authoring__inspector-rename-input"
+          data-testid="approval-canvas-inspector-rename-input"
+          :aria-label="`${graphNodeLabel(node.key)}节点名称`"
+          @keydown.enter="commitRenameTitle"
+          @keydown.esc="cancelRenameTitle"
+          @blur="commitRenameTitle"
+        />
       </div>
       <el-button
         text
@@ -217,6 +288,10 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
             移动
           </el-button>
         </template>
+        <!-- T5b (test report 2026-10-08): the visible label is 「+添加分支」 — "并行分支/条件分支" was
+             simultaneously the gateway TYPE, the edge-menu item that inserts a NEW gateway, and this
+             add-a-lane action, so authors who had "added a parallel branch" did not read this as
+             "add another lane". The accessible names stay type-specific (pinned). -->
         <el-button
           v-if="node.type === 'condition'"
           size="small"
@@ -224,7 +299,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
           :aria-label="`为${graphNodeLabel(node.key)}添加条件分支`"
           @click="emit('add-condition-branch', node.key)"
         >
-          +条件分支
+          +添加分支
         </el-button>
         <el-button
           v-if="node.type === 'parallel'"
@@ -233,7 +308,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
           :aria-label="`为${graphNodeLabel(node.key)}添加并行分支`"
           @click="emit('add-parallel-branch', node.key)"
         >
-          +并行分支
+          +添加分支
         </el-button>
         <template v-if="canInsertAfter(node)">
           <el-button
@@ -313,10 +388,46 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
         <slot />
       </template>
     </div>
+    <!-- B1: fixed bottom action bar — a sibling of the scrolling body, never inside it, so it
+         stays pinned regardless of tab content height. ONE button, 关闭 (E-P2-3, external review
+         2026-08-25): every field commits live on blur/Enter — there is NO staged edit buffer —
+         so a 取消 here would claim to discard changes it cannot discard, and the RATIFIED A-8
+         invariant (no Save/Cancel/Apply controls anywhere in the inspector) forbids the pair
+         outright. 关闭 is pure navigation, identical to the header ×. A real 取消/确定 needs a
+         delta lock defining full staging/rollback semantics first. -->
+    <div class="template-authoring__canvas-inspector-footer" data-testid="approval-canvas-inspector-footer">
+      <el-button
+        size="small"
+        data-testid="approval-canvas-inspector-footer-close"
+        @click="emit('close')"
+      >
+        关闭
+      </el-button>
+    </div>
   </aside>
 </template>
 
 <style scoped>
+/* B1: right rail flush to the workspace's right edge (`align-items: stretch` + `gap: 0` on the
+   parent row, `.template-authoring__canvas-workspace`, TemplateAuthoringView.vue).
+   T5c (test report 2026-10-08) — D0 §5 desktop geometry "full height below header, independent
+   scroll": #4917 removed every cap, so on a long flow this rail became exactly as tall as the
+   canvas and the page (not the canvas) scrolled — selecting a node far down left the inspector's
+   header, actions and settings at the TOP of that tall rail, off screen. The rail now sticks just
+   below the sticky page header + step bar and is capped to the visible height, so its body
+   scrolls on its own (the footer 关闭 stays reachable).
+   - top: the step bar is sticky at `top: 72px` and measures 52px in Chromium
+     (TemplateAuthoringView.vue), so the sticky stack ends at 124px of the scroll container
+     (`.app-main` in the app, the document in the verification harness); 128px leaves a hairline.
+   - max-height: a sticky box is clamped by its containing block (the workspace row). At maximum
+     page scroll the row's bottom sits above the viewport bottom by the card padding, the sticky
+     「下一步」 bar and the shell padding (~120px), and the app nav (50px) sits above the scroll
+     container — the cap leaves room for all of it so the rail is never pushed up under the step
+     bar on the far-down-node path. It also bounds how far inspector content can stretch the row,
+     so a long inspector can no longer drive the stage height up.
+   - sticky only engages because the flow card no longer clips with `overflow: hidden` (see
+     `.template-authoring__panel--flow` in TemplateAuthoringView.vue).
+   ≤960px keeps the stacked presentation (static, scrolled into view on select). */
 .template-authoring__canvas-inspector {
   flex: 0 0 400px;
   width: 400px;
@@ -329,7 +440,9 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   background: var(--el-bg-color);
   display: flex;
   flex-direction: column;
-  max-height: none;
+  position: sticky;
+  top: 128px;
+  max-height: max(320px, calc(100vh - 320px));
   overflow: hidden;
   scroll-margin-top: 164px;
 }
@@ -360,6 +473,17 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   overflow: auto;
   padding: 10px 12px 14px;
 }
+/* B1: fixed bottom action bar — flex:0 0 auto keeps it pinned outside the scrolling body above,
+   which is the ONLY region that scrolls (header + footer never move). */
+.template-authoring__canvas-inspector-footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--el-border-color-light);
+  background: var(--el-bg-color);
+}
 .template-authoring__inspector-topology {
   display: flex;
   flex-wrap: wrap;
@@ -371,6 +495,44 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
 .template-authoring__node-type {
   font-size: 11px;
   color: var(--el-text-color-secondary);
+}
+/* B2 inline title rename. */
+.template-authoring__inspector-rename-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.template-authoring__inspector-rename-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+}
+.template-authoring__inspector-rename-btn:hover {
+  color: var(--el-color-primary);
+}
+.template-authoring__inspector-rename-btn:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
+}
+.template-authoring__inspector-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 3px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+}
+.template-authoring__inspector-rename-input:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
 }
 /* L0-1 tab strip — flat, no shadow/gradient (parent §3.2 restraint, V-8). */
 .template-authoring__canvas-inspector-tabs {
@@ -409,6 +571,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   .template-authoring__canvas-inspector {
     flex: 1 1 auto;
     width: 100%;
+    position: static;
     max-height: none;
   }
 }

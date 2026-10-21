@@ -13,17 +13,30 @@ import {
   type PlmApprovalBridgeSource,
 } from '../federation/plm-approval-bridge'
 import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
+import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
+import {
+  resolveEffectiveNodeOperations,
+  seatNodeKeysForViewer,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
+import { decisionDoorIsSeatGated, resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { computeReturnableNodeKeys } from './approval-return-targets'
+import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
   ApprovalBridgePlmAdapter,
   ApprovalInstanceRow,
   ApprovalQueryOptions,
+  ApprovalTabBadgeCountOptions,
   PlmSyncOptions,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
+import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
+import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
+import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -37,6 +50,7 @@ import {
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 
 /**
@@ -57,6 +71,20 @@ export function __setW4c3bBridgeDispatchTestBarrierForTests(
   hook: W4c3bBridgeDispatchBarrierFn | null,
 ): void {
   bridgeDispatchTestBarrierForTests = hook
+}
+
+/**
+ * `listApprovals`'s WHERE (see `ApprovalBridgeService.buildListWhere`): the conjuncts, their bound
+ * values, the next free placeholder, and the placeholders the `tab` filter bound for the actor id
+ * and the role array (`null` when the tab never referenced them — no tab, no actor, or a tab that
+ * reads neither).
+ */
+interface ApprovalListWhere {
+  conditions: string[]
+  params: unknown[]
+  nextParamIndex: number
+  tabActorParam: number | null
+  tabRolesParam: number | null
 }
 
 const logger = new Logger('ApprovalBridgeService')
@@ -104,8 +132,152 @@ function toOccurredAt(...values: Array<Date | string | null | undefined>): strin
   return null
 }
 
-function isPlmId(id: string): boolean {
+// Exported (additive-only; no behavior change) so a Lock-10 (S1) test can gate this hand-copied
+// detector's agreement with the other two shipped copies + the canonical form in
+// approval-instance-readability.ts (OD-S1-18(b): "the divergence of any one of them is a P1").
+export function isPlmId(id: string): boolean {
   return id.startsWith('plm:')
+}
+
+/**
+ * Sentinel pushed in place of an actor id / role set / permission set that the request could not
+ * resolve. It is compared against real columns, so it can never match; the scope condition is
+ * therefore assembled UNCONDITIONALLY and an unresolvable actor is denied by the predicate itself
+ * rather than by a caller remembering to append it. (Appending the conjunct only "when we have an
+ * actor" is the same shape as gating a scope on a client-supplied `tab` — the defect this fix
+ * removes.)
+ *
+ * EXPORTED (additive-only; no behaviour change) so the route layer binds the SAME sentinel and a
+ * test asserts against the shipped constant instead of a hand-copied string literal.
+ */
+export const APPROVAL_LIST_SCOPE_NO_MATCH = '__approval_list_scope_no_match__'
+
+/**
+ * The list feed's visibility scope, conjoined into EVERY `listApprovals` query — count and page
+ * alike — independently of `tab`, `sourceSystem`, or any other client-supplied parameter.
+ *
+ * ARMS (all OR-ed; the caller conjoins the result with every other filter):
+ *   1. REQUESTER    — `requester_snapshot->>'id'`.
+ *   2. SEAT         — `approval_assignments`, user- / role- / source_queue-typed, is_active-
+ *                     INSENSITIVE (a seat deactivates the moment its holder acts on it; requiring
+ *                     `is_active` would drop the row out of 我已处理 / 已完成 for the very person
+ *                     who processed it). The role half binds DB-derived roles — see ROLE SOURCE.
+ *   3. PAST ACTOR   — any `approval_records` row whose `actor_id` is the viewer.
+ *   4. CC TARGET    — `approval_records` `action = 'cc'`, user- or role-typed target; the role half
+ *                     binds the same DB-derived role set as arm 2.
+ *   5. ADMIN        — the DB-backed approval-admin predicate (`users.is_active` AND
+ *                     (`is_admin` OR `role = 'admin'`)), semantically identical to the one
+ *                     `approval-instance-readability.ts` uses for its own arm 5 (the SQL text
+ *                     differs only in table alias and parameter number). NOT the request's JWT role
+ *                     claims: a token-claimed admin does not widen the feed.
+ *   6. NON-PLATFORM — rows whose `source_system` is not `platform` keep their phase-1 visibility
+ *                     (see the `sourceSystem === 'plm'` branch below, which states that PLM
+ *                     assignment filtering does not exist in phase 1 and that the pending PLM queue
+ *                     must stay visible). Without this arm the unified inbox would go empty for
+ *                     every external mirror, which is an outage, not a narrowing. EMITTED ONLY WHEN
+ *                     THE ACTOR RESOLVED: it is the one arm that names no actor column, so leaving
+ *                     it in place for an unresolvable actor would make the scope admit every
+ *                     external mirror to a caller the request could not identify. With
+ *                     `actorResolved` false the predicate is arms 1-5 against the no-match
+ *                     sentinel, i.e. it denies everything.
+ *
+ * ROLE SOURCE (arms 2 and 4). The role array bound here is the DB-derived `viewerRoles()` from
+ * `approval-instance-readability.ts` — `users.role` for an active user, unioned with the viewer's
+ * `user_roles` rows (both `role_id` and the joined `roles.name`) — the SAME definition the
+ * canonical per-instance predicate uses, per OD-S1-17(a) ("roles derived from the DB, never from
+ * token claims"). Binding `req.user.role`/`req.user.roles` here instead would let a role claim the
+ * DB does not back widen the feed, and would make the feed and the per-instance predicate disagree
+ * about what "the viewer's roles" means. `viewerRoles` issues TWO queries (`users`, then
+ * `user_roles LEFT JOIN roles`), so every list call that resolves an actor pays two lookups; both
+ * callers reach it through `viewerRolesFailClosed`, whose empty-set-on-failure result is bound as
+ * the no-match sentinel below, so a lookup failure narrows the role arms instead of 500ing the
+ * whole list.
+ *
+ * PERMISSION SOURCE (arm 2's third disjunct), stated because it is NOT the same as the role source
+ * and reading the paragraph above alone would suggest it is. `assignment_type = 'source_queue'`
+ * seats are matched against `options.actorPermissions`, which the route fills from the REQUEST's
+ * `permissions` / `perms` claims — request-derived, not DB-derived. That asymmetry is pre-existing
+ * (the tab filters bind the same array, and this is the column's own storage semantics: a
+ * source_queue seat holds a permission string, not a role id) and untouched here. On the production
+ * login path the claim itself is DB-derived — `AuthService.resolveRbacProfile` fills `permissions`
+ * from `listUserPermissions` and `RBAC_TOKEN_TRUST` is refused there — so the asymmetry is a
+ * dev/test-shaped one, but it is real and is named rather than left to be inferred.
+ *
+ * WHY THIS IS A SECOND ARTIFACT AND NOT A COPY OF `canReadApprovalInstance` (Lock-10 / S1, the ONE
+ * per-instance admission predicate). This condition is WIDER than that predicate on exactly two
+ * axes, both of which are pre-existing feed behaviour this fix is not authorized to remove:
+ *   (a) `assignment_type = 'source_queue'` seats are matched here (against the actor's PERMISSION
+ *       set, which is what that column stores) — Lock-10 OD-S1-5 excludes them outright;
+ *   (b) non-platform rows are admitted by arm 6 — Lock-10 denies every `plm:` id outright.
+ * Folding those two into the canonical predicate would WIDEN detail / history / metrics /
+ * attachments, which is an owner decision, not a P0 scope fix. Folding them out of the feed would
+ * regress the source-queue pending queue and the unified inbox. `canReadApprovalInstance` remains
+ * the SOLE arbiter for detail, history, metrics and attachments, and this function is never
+ * consulted there.
+ *
+ * NOT A "STRICTLY WIDER" CLAIM. An earlier revision of this docblock inferred from (a)/(b) that the
+ * scope "can deny no one the canonical predicate admits". That inference is withdrawn: it holds for
+ * this condition's own arms only, and the FEED is this condition ANDed with a tab filter, and those
+ * tab filters still bind the REQUEST's claim-derived roles (`options.actorRoles`) rather than the DB
+ * set. A viewer whose role reaches them only through the DB can therefore still be narrowed by the
+ * tab filter on a row the canonical predicate admits. That claim-derived binding in the tab filters
+ * is pre-existing and untouched here; only this condition's own arms were moved onto `viewerRoles`.
+ *
+ * KNOWN CONSEQUENCE, disclosed rather than silently shipped: because this condition is wider on
+ * (a)/(b), a row can appear in the feed (source-queue seat, or a non-platform mirror) and still
+ * answer 404 when opened. That asymmetry predates this fix — the feed had no scope at all — and
+ * closing it means changing one of the two predicates, i.e. an owner ruling. Named for the ledger:
+ * this is the Lock-10 G-S1-8 gate (feed ⊆ admission), RECORDED-PENDING per Lock-10 §5.1.1 and cited
+ * in `.github/workflows/approval-realdb-instance-readability-s1.yml`'s own header. This change moves
+ * the feed TOWARD that containment — it goes from "no scope at all" to "a scope" — but does NOT
+ * satisfy it, because the feed stays wider on the two axes (a)/(b) above.
+ */
+export function buildApprovalListScopeCondition(placeholders: {
+  actorParam: number
+  rolesParam: number
+  permissionsParam: number
+  /** FALSE when the request carried no usable actor id. Arms 1-5 are still emitted (so all three
+   *  parameters stay referenced and typed — an unreferenced bind is what makes PostgreSQL refuse
+   *  the whole statement), but they are compared against the no-match sentinel and arm 6 is left
+   *  out, so the predicate denies every row. */
+  actorResolved: boolean
+}): string {
+  const { actorParam, rolesParam, permissionsParam, actorResolved } = placeholders
+  const nonPlatformArm = actorResolved
+    ? `\n      OR COALESCE(approval_instances.source_system, 'platform') <> 'platform'`
+    : ''
+  return `(
+      approval_instances.requester_snapshot->>'id' = $${actorParam}
+      OR EXISTS (
+        SELECT 1 FROM approval_assignments scope_seat
+         WHERE scope_seat.instance_id = approval_instances.id
+           AND (
+             (scope_seat.assignment_type = 'user' AND scope_seat.assignee_id = $${actorParam})
+             OR (scope_seat.assignment_type = 'role' AND scope_seat.assignee_id = ANY($${rolesParam}::text[]))
+             OR (scope_seat.assignment_type = 'source_queue' AND scope_seat.assignee_id = ANY($${permissionsParam}::text[]))
+           )
+      )
+      OR EXISTS (
+        SELECT 1 FROM approval_records scope_actor
+         WHERE scope_actor.instance_id = approval_instances.id
+           AND scope_actor.actor_id = $${actorParam}
+      )
+      OR EXISTS (
+        SELECT 1 FROM approval_records scope_cc
+         WHERE scope_cc.instance_id = approval_instances.id
+           AND scope_cc.action = 'cc'
+           AND (
+             (scope_cc.metadata->>'targetType' = 'user' AND scope_cc.metadata->>'targetId' = $${actorParam})
+             OR (scope_cc.metadata->>'targetType' = 'role' AND scope_cc.metadata->>'targetId' = ANY($${rolesParam}::text[]))
+           )
+      )
+      OR EXISTS (
+        SELECT 1 FROM users scope_admin
+         WHERE scope_admin.id = $${actorParam}
+           AND scope_admin.is_active = TRUE
+           AND (scope_admin.is_admin = TRUE OR scope_admin.role = 'admin')
+      )${nonPlatformArm}
+    )`
 }
 
 function extractExternalId(id: string): string {
@@ -171,10 +343,20 @@ function resolveCurrentNodeType(
   return null
 }
 
-function toUnifiedDTO(
+// Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the detail
+// carrier below); the list and detail paths in this module remain its callers.
+export function toUnifiedDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentRow[] = [],
   runtimeGraph: RedactableRuntimeGraph | null = null,
+  options: {
+    /**
+     * 退回 targets — DETAIL read only. The list path shares this builder and stays byte-identical:
+     * a per-row graph walk buys the list nothing (no list surface offers 退回), so the field is
+     * computed only when the caller asks for it.
+     */
+    withReturnableNodeKeys?: boolean
+  } = {},
 ): UnifiedApprovalDTO {
   // P1-C: redact form fields the instance's currently-active node(s) mark
   // `hidden`. Keyed on the instance-active node, NOT the viewer — so observers /
@@ -189,6 +371,21 @@ function toUnifiedDTO(
   // surface can withhold approve/reject on a 办理 (handler) task. Structural read of the same JSONB
   // view already loaded for redaction; null when there is no graph (bridged/external) or no cursor.
   const currentNodeType = resolveCurrentNodeType(runtimeGraph, row.current_node_key)
+  // The server-computed 退回 target list (see `computeReturnableNodeKeys` for the contract). The same
+  // frozen graph blob loaded for redaction is the graph the return gate walks; the walk reads the
+  // RAW `row.form_snapshot` (condition branches route on the stored form, hidden fields included),
+  // never the redacted echo built above. Spread only when computed, like `currentNodeType`.
+  const returnableNodeKeys = options.withReturnableNodeKeys
+    ? computeReturnableNodeKeys({
+        runtimeGraph,
+        formSnapshot: row.form_snapshot,
+        requesterSnapshot: row.requester_snapshot,
+        workflowKey: row.workflow_key,
+        currentNodeKey: row.current_node_key,
+        status: row.status,
+        metadata: row.metadata,
+      })
+    : undefined
   return {
     id: row.id,
     sourceSystem: row.source_system,
@@ -209,6 +406,7 @@ function toUnifiedDTO(
     formSnapshot,
     currentNodeKey: row.current_node_key,
     ...(currentNodeType ? { currentNodeType } : {}),
+    ...(returnableNodeKeys ? { returnableNodeKeys } : {}),
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
       type: assignment.assignment_type,
@@ -291,10 +489,14 @@ export class ApprovalBridgeService {
     return { synced, errors }
   }
 
-  async listApprovals(options?: ApprovalQueryOptions): Promise<{
-    data: UnifiedApprovalDTO[]
-    total: number
-  }> {
+  /**
+   * The list feed's WHERE, exactly as `listApprovals` has always assembled it — client filters,
+   * the `tab` filter, the server-determined scope, and the dormant org pin — extracted so a count
+   * over the same feed (the 抄送我的 / 我发起的 badges) is the SAME statement with one conjunct
+   * appended, never a second hand-built copy that can drift from the list it counts. Text and
+   * placeholder push order are unchanged by the extraction.
+   */
+  private async buildListWhere(options?: ApprovalQueryOptions): Promise<ApprovalListWhere> {
     if (!pool) throw new Error('Database not available')
 
     const conditions: string[] = []
@@ -350,9 +552,49 @@ export class ApprovalBridgeService {
     }
     const sourceSystem = options?.sourceSystem
     const includeExternalTabSources = options?.includeExternalTabSources === true
+    // Declared OUTSIDE the tab block so the placeholders the tab filter bound for the actor id and
+    // the role array are returned to the caller (`ApprovalListWhere.tabActorParam` /
+    // `tabRolesParam`): a conjunct appended later binds the SAME values the tab arm bound.
+    let tabActorIdParam: number | null = null
+    let tabActorRolesParam: number | null = null
     if (options?.tab && options.actorId) {
       const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
       const actorPermissions = options.actorPermissions && options.actorPermissions.length > 0 ? options.actorPermissions : ['__none__']
+      const tabActorId = options.actorId
+
+      // PLACEHOLDERS ARE ALLOCATED ON FIRST REFERENCE, never ahead of the branch that uses them.
+      // The two branches below used to bind the actor id, the role array and the permission array
+      // eagerly for every tab, but `mine` references only the actor id, `cc` never references the
+      // permission array and `processed` references neither array — so the statement bound values
+      // its own text declared no placeholder for. PostgreSQL refuses that: at the Bind step while
+      // the trailing parameters were the unreferenced ones ("bind message supplies N parameters,
+      // but prepared statement \"\" requires M"), and at the Parse step once later conjuncts
+      // referenced higher placeholders and left the unreferenced ones as untyped holes in the
+      // middle ("could not determine data type of parameter $N"). Either way 我发起的 / 抄送我的 /
+      // 我已处理 answered 500 on real PostgreSQL. Allocating on first reference keeps every bound
+      // value referenced and the numbering dense, for all five tabs in both source modes.
+      let tabActorPermissionsParam: number | null = null
+      const actorIdParam = (): number => {
+        if (tabActorIdParam === null) {
+          tabActorIdParam = paramIndex++
+          params.push(tabActorId)
+        }
+        return tabActorIdParam
+      }
+      const actorRolesParam = (): number => {
+        if (tabActorRolesParam === null) {
+          tabActorRolesParam = paramIndex++
+          params.push(actorRoles)
+        }
+        return tabActorRolesParam
+      }
+      const actorPermissionsParam = (): number => {
+        if (tabActorPermissionsParam === null) {
+          tabActorPermissionsParam = paramIndex++
+          params.push(actorPermissions)
+        }
+        return tabActorPermissionsParam
+      }
 
       if (sourceSystem === 'plm') {
         // PLM assignment filtering is not available in phase 1. The source
@@ -361,19 +603,10 @@ export class ApprovalBridgeService {
         if (options.tab === 'pending') {
           conditions.push(`status = 'pending'`)
         } else if (options.tab === 'mine') {
-          conditions.push(`requester_snapshot->>'id' = $${paramIndex++}`)
-          params.push(options.actorId)
+          conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND metadata->>'targetType' = 'user'
-                AND metadata->>'targetId' = $${paramIndex++}
-            )`,
-          )
-          params.push(options.actorId)
+          // User arm only on the PLM source — the historical shape, kept (see approval-cc-predicate.ts).
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: null }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
         } else if (options.tab === 'processed') {
@@ -382,19 +615,11 @@ export class ApprovalBridgeService {
             `id IN (
               SELECT instance_id
               FROM approval_records
-              WHERE actor_id = $${paramIndex++}
+              WHERE actor_id = $${actorIdParam()}
             )`,
           )
-          params.push(options.actorId)
         }
       } else if (includeExternalTabSources) {
-        const actorIdParam = paramIndex++
-        params.push(options.actorId)
-        const actorRolesParam = paramIndex++
-        params.push(actorRoles)
-        const actorPermissionsParam = paramIndex++
-        params.push(actorPermissions)
-
         if (options.tab === 'pending') {
           conditions.push(
             `(
@@ -406,9 +631,9 @@ export class ApprovalBridgeService {
                   FROM approval_assignments
                   WHERE is_active = TRUE
                     AND (
-                      (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                      OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
-                      OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
+                      (assignment_type = 'user' AND assignee_id = $${actorIdParam()})
+                      OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam()}))
+                      OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam()}))
                     )
                 )
               )
@@ -419,19 +644,9 @@ export class ApprovalBridgeService {
             )`,
           )
         } else if (options.tab === 'mine') {
-          conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
+          conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(
             `(
@@ -439,25 +654,17 @@ export class ApprovalBridgeService {
                 COALESCE(source_system, 'platform') = 'platform'
                 AND status <> 'pending'
                 AND (
-                  requester_snapshot->>'id' = $${actorIdParam}
+                  requester_snapshot->>'id' = $${actorIdParam()}
                   OR id IN (
-                    SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
+                    SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
                   )
-                  OR id IN (
-                    SELECT instance_id
-                    FROM approval_records
-                    WHERE action = 'cc'
-                      AND (
-                        (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
-                        OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
-                      )
-                  )
+                  OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
                   OR id IN (
                     SELECT instance_id
                     FROM approval_assignments
-                    WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                       OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
-                       OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
+                    WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam()})
+                       OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam()}))
+                       OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam()}))
                   )
                 )
               )
@@ -476,18 +683,22 @@ export class ApprovalBridgeService {
             `id IN (
               SELECT instance_id
               FROM approval_records
-              WHERE actor_id = $${actorIdParam}
+              WHERE actor_id = $${actorIdParam()}
             )`,
           )
         }
       } else {
-        const actorIdParam = paramIndex++
-        params.push(options.actorId)
-        const actorRolesParam = paramIndex++
-        params.push(actorRoles)
-        const actorPermissionsParam = paramIndex++
-        params.push(actorPermissions)
-        conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
+        // SOURCE CONJUNCT, and the one case that must NOT get it. This branch's own
+        // `COALESCE(source_system, 'platform') = 'platform'` is the legacy rule "an explicitly
+        // supplied tab implies the platform feed". A request that supplied NO tab is served the
+        // default tab (`tabDefaulted`), and applying the legacy rule to it would flip the tab-less,
+        // sourceSystem-less feed from the merge-base's MIXED platform+plm shape to platform-only —
+        // a source-filter change smuggled in by a tab default. `sourceSystem`'s own semantics are
+        // untouched either way: an explicit `platform` still pushes `source_system = $n` above, and
+        // an explicit `all` still routes to the `includeExternalTabSources` branch.
+        if (!options.tabDefaulted) {
+          conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
+        }
 
         if (options.tab === 'pending') {
           conditions.push(`status = 'pending'`)
@@ -497,49 +708,31 @@ export class ApprovalBridgeService {
               FROM approval_assignments
               WHERE is_active = TRUE
                 AND (
-                  (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                  OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
-                  OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
+                  (assignment_type = 'user' AND assignee_id = $${actorIdParam()})
+                  OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam()}))
+                  OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam()}))
                 )
             )`,
           )
         } else if (options.tab === 'mine') {
-          conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
+          conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
           conditions.push(
             `(
-              requester_snapshot->>'id' = $${actorIdParam}
+              requester_snapshot->>'id' = $${actorIdParam()}
               OR id IN (
-                SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
+                SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
               )
-              OR id IN (
-                SELECT instance_id
-                FROM approval_records
-                WHERE action = 'cc'
-                  AND (
-                    (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
-                    OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
-                  )
-              )
+              OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
               OR id IN (
                 SELECT instance_id
                 FROM approval_assignments
-                WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                   OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
-                   OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
+                WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam()})
+                   OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam()}))
+                   OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam()}))
               )
             )`,
           )
@@ -550,12 +743,176 @@ export class ApprovalBridgeService {
             `id IN (
               SELECT instance_id
               FROM approval_records
-              WHERE actor_id = $${actorIdParam}
+              WHERE actor_id = $${actorIdParam()}
             )`,
           )
         }
       }
     }
+
+    // ── Server-determined visibility scope ────────────────────────────────────────────────────
+    // Appended LAST and UNCONDITIONALLY. Every branch above is a client-driven FILTER (`tab`,
+    // `sourceSystem`, `status`, `assignee`, `search`, `templateId`, the created-at window); this
+    // conjunct is the SCOPE, and no request parameter — present, absent, or unrecognised — can
+    // reach the query without it. It is pushed after every other parameter so the existing
+    // filters' placeholder numbering is untouched.
+    const scopeActorId = typeof options?.actorId === 'string' && options.actorId.trim().length > 0
+      ? options.actorId
+      : null
+    // ROLES ARE READ FROM THE DB, not from `options.actorRoles` (which the route fills from the
+    // request's own `role` / `roles` claims). `viewerRoles` is the canonical definition
+    // `canReadApprovalInstance` uses for its own role-typed arms — OD-S1-17(a), "roles derived from
+    // the DB, never from token claims" — so the two predicates now agree on what "the viewer's
+    // roles" means, and a role a token asserts but the DB does not back cannot widen the feed.
+    // (`options.actorRoles` is still what the TAB filters bind; moving those is a separate change
+    // with its own blast radius, and is called out in this module's scope docblock.)
+    //
+    // COST, stated exactly rather than approximately: `viewerRoles` issues TWO queries — one on
+    // `users` and one on `user_roles LEFT JOIN roles` — so a list call that resolves an actor pays
+    // TWO extra lookups, and this surface now depends on two tables (`user_roles`, `roles`) the
+    // list queries did not previously read. FAIL CLOSED via `viewerRolesFailClosed`: a failure of
+    // either lookup yields an EMPTY role set, which is bound below as the no-match sentinel, so the
+    // role-typed seat and CC arms match nothing and the caller still gets their requester /
+    // user-seat / past-actor / admin rows — instead of the whole list answering 500. It can only
+    // ever remove rows from a response, never add one. (`viewerActiveOrgIds` in the org-pin block
+    // below is NOT wrapped: it is reached only while the dormant pin flag is on, so its failure
+    // path is unreachable on the shipped default and adding an untested branch there would be a
+    // behaviour change with no gate. Disclosed rather than silently differing.)
+    const scopeRoles = scopeActorId ? await viewerRolesFailClosed(pool, scopeActorId) : []
+    const scopeRolesParamValue = scopeRoles.length > 0 ? scopeRoles : [APPROVAL_LIST_SCOPE_NO_MATCH]
+    const scopePermissions = scopeActorId && options?.actorPermissions && options.actorPermissions.length > 0
+      ? options.actorPermissions
+      : [APPROVAL_LIST_SCOPE_NO_MATCH]
+    const scopeActorParam = paramIndex++
+    params.push(scopeActorId ?? APPROVAL_LIST_SCOPE_NO_MATCH)
+    const scopeRolesParam = paramIndex++
+    params.push(scopeRolesParamValue)
+    const scopePermissionsParam = paramIndex++
+    params.push(scopePermissions)
+    conditions.push(buildApprovalListScopeCondition({
+      actorParam: scopeActorParam,
+      rolesParam: scopeRolesParam,
+      permissionsParam: scopePermissionsParam,
+      actorResolved: scopeActorId !== null,
+    }))
+
+    // ORG PIN — the SAME `APPROVAL_S1_ORG_PIN_ENABLED` gate `canReadApprovalInstance` reads, and
+    // the same `viewerActiveOrgIds` definition of "the viewer's orgs". Enforcing the org column
+    // here while the per-instance predicate leaves it dormant would make the pin mean two
+    // different things (Lock-10: the divergence of any one of these is a P1), and would black out
+    // every row whose `org_id` is still NULL — an outage, not a narrowing. Activation is the
+    // flag's own owner-gated step, not this fix's to take. As in the canonical predicate, the
+    // column is named in the SQL text ONLY when the pin is on, so a missing/renamed column cannot
+    // deny every request while the pin is off.
+    //
+    // THE PIN GOVERNS PLATFORM ROWS ONLY. `canReadApprovalInstance` refuses a `plm:` id at
+    // `approval-instance-readability.ts`'s `if (isPlmApprovalId(instanceId)) return false` (its
+    // OD-S1-18 guard), which runs BEFORE `pinEnabled` is even consulted and before the org clause
+    // is assembled — so in the canonical predicate the org pin has, by construction, no say over a
+    // non-platform row. Mirroring that here means the org conjunct applies to platform rows and
+    // leaves arm 6's non-platform rows alone. It matters: `approval_instances.org_id` is NULL for
+    // `plm:` mirrors BY DESIGN (migration `zzzz20260821100000` — "Class 5 (`plm:` mirrors) …
+    // `org_id` stays NULL there permanently"), so an unqualified org conjunct would empty the
+    // unified inbox of every external mirror the moment the pin is switched on, and no backfill
+    // would ever fix it. The alternative shape — exempting every row whose `org_id` is NULL —
+    // is REJECTED: that would also exempt platform rows awaiting Migration B's backfill, and
+    // OD-S1-9(e) rules a NULL `org_id` false for everyone, admin included.
+    if (isOrgPinEnabled()) {
+      const scopeOrgIds = scopeActorId ? await viewerActiveOrgIds(pool, scopeActorId) : []
+      const scopeOrgParam = paramIndex++
+      params.push(scopeOrgIds.length > 0 ? scopeOrgIds : [APPROVAL_LIST_SCOPE_NO_MATCH])
+      conditions.push(
+        `(
+          COALESCE(approval_instances.source_system, 'platform') <> 'platform'
+          OR approval_instances.org_id = ANY($${scopeOrgParam}::text[])
+        )`,
+      )
+    }
+
+    return {
+      conditions,
+      params,
+      nextParamIndex: paramIndex,
+      tabActorParam: tabActorIdParam,
+      tabRolesParam: tabActorRolesParam,
+    }
+  }
+
+  /**
+   * 抄送我的 unread badge (test report 2026-10-08): the 抄送我的 feed — `buildListWhere` with
+   * `tab: 'cc'` and the caller's source scope, i.e. the very statement the tab lists — with ONE
+   * conjunct appended (`approvalCcUnreadConditionSql`, bound to the placeholders the tab filter
+   * bound). It can therefore never exceed the tab's own total for the same `sourceSystem`, and it
+   * equals the number of rows that tab marks `ccUnread` across all its pages. Client filters the
+   * tab may also carry (search, status, template, date window) are deliberately not applied: a
+   * badge counts the tab, not the current search — the same convention as the 待我处理 badge.
+   */
+  async countCcUnreadForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'cc',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalCcUnreadConditionSql({
+        instanceRef: 'approval_instances',
+        actorParam: listWhere.tabActorParam,
+        rolesParam: listWhere.tabRolesParam,
+      }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08): the 我发起的 feed (`buildListWhere` with
+   * `tab: 'mine'` and the caller's source scope) with ONE conjunct appended —
+   * `approvalMineOutcomeUnseenConditionSql`, bound to the actor placeholder the tab filter bound.
+   * Same contract as `countCcUnreadForViewer`: never above the tab's total for the same
+   * `sourceSystem`, equal to the rows that tab marks `outcomeUnseen`, client filters not applied.
+   */
+  async countMineOutcomesUnseenForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'mine',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: listWhere.tabActorParam }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  async listApprovals(options?: ApprovalQueryOptions): Promise<{
+    data: UnifiedApprovalDTO[]
+    total: number
+  }> {
+    if (!pool) throw new Error('Database not available')
+
+    const listWhere = await this.buildListWhere(options)
+    const { conditions, params } = listWhere
+    let paramIndex = listWhere.nextParamIndex
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const limit = options?.limit ?? 50
@@ -598,6 +955,55 @@ export class ApprovalBridgeService {
       readInstanceIds = new Set(readResult.rows.map((row) => row.instance_id))
     }
 
+    // 抄送我的 unread (test report 2026-10-08): resolved ONLY when the caller asks for it (the route
+    // does while APPROVAL_CC_UNREAD_BADGE_ENABLED is on) and only on the cc tab. Same conjunct the
+    // badge count appends to this same feed (`approvalCcUnreadConditionSql`), bound to the SAME
+    // values the tab filter bound — so the rows marked here are exactly the rows the badge counts.
+    let ccUnreadInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateCcUnread === true
+      && options.tab === 'cc'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const ccParams: unknown[] = [
+        instancesResult.rows.map((row) => row.id),
+        params[listWhere.tabActorParam - 1],
+      ]
+      let ccRolesParam: number | null = null
+      if (listWhere.tabRolesParam !== null) {
+        ccParams.push(params[listWhere.tabRolesParam - 1])
+        ccRolesParam = ccParams.length
+      }
+      const ccUnreadResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalCcUnreadConditionSql({ instanceRef: 'approval_instances', actorParam: 2, rolesParam: ccRolesParam })}`,
+        ccParams,
+      )
+      ccUnreadInstanceIds = new Set(ccUnreadResult.rows.map((row) => row.id))
+    }
+
+    // 我发起的 new outcome (test report 2026-10-08): same shape as the cc annotation above — only on
+    // request, only on the mine tab, and with the SAME conjunct the badge count appends to this feed.
+    let outcomeUnseenInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateMineOutcomeUnseen === true
+      && options.tab === 'mine'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const outcomeResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: 2 })}`,
+        [instancesResult.rows.map((row) => row.id), params[listWhere.tabActorParam - 1]],
+      )
+      outcomeUnseenInstanceIds = new Set(outcomeResult.rows.map((row) => row.id))
+    }
+
     const data = instancesResult.rows.map((row) => {
       const dto = toUnifiedDTO(
         row,
@@ -606,6 +1012,12 @@ export class ApprovalBridgeService {
       )
       if (readInstanceIds) {
         dto.isRead = readInstanceIds.has(row.id)
+      }
+      if (ccUnreadInstanceIds) {
+        dto.ccUnread = ccUnreadInstanceIds.has(row.id)
+      }
+      if (outcomeUnseenInstanceIds) {
+        dto.outcomeUnseen = outcomeUnseenInstanceIds.has(row.id)
       }
       return dto
     })
@@ -633,7 +1045,20 @@ export class ApprovalBridgeService {
     }
   }
 
-  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
+  /**
+   * `viewerRoles` (Lock-5 §2.3 / gate A-2, adversarial-gate finding P2-1 on PR #4983): the viewer's
+   * ROLE ids. Required — not optional-in-spirit — because an approval seat may be ROLE-typed, and
+   * the dispatch choke treats such a seat as first-class (`assignmentMatchesActor` matches when the
+   * actor's roles contain the assignment's `assignee_id`). A carrier scoped to user-typed seats only
+   * left every role-seated approver with NO `nodeOperations`, so the member bar rendered all four
+   * verbs and the server 409'd each click. Callers that genuinely have no role context pass nothing
+   * and get the pre-existing user-only scoping.
+   */
+  async getApproval(
+    id: string,
+    viewerUserId?: string | null,
+    viewerRoles?: readonly string[] | null,
+  ): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     if (isPlmId(id)) {
@@ -658,6 +1083,8 @@ export class ApprovalBridgeService {
       row,
       instanceAssignments,
       detailRuntimeGraph,
+      // The detail read is the one bridge carrier of `returnableNodeKeys` (the list never offers 退回).
+      { withReturnableNodeKeys: true },
     )
     // Lock-7 OD-L7-10 — DETAIL-only actor-scoped per-field access map. Computed from the viewer's
     // ACTIVE user-typed seats (the same seats the write path claims), over the SAME
@@ -674,6 +1101,58 @@ export class ApprovalBridgeService {
         const accessMap = resolveFieldAccessAtNodes(detailRuntimeGraph, actorNodeKeys)
         if (accessMap.size > 0) dto.fieldAccess = Object.fromEntries(accessMap)
       }
+    }
+    // Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective operation policy, resolved from the SAME
+    // frozen graph the dispatch choke reads and shipped as DECIDED booleans so the client renders
+    // rather than re-derives. Scoped exactly like `fieldAccess` above:
+    //   * the viewer's OWN ACTIVE user-typed seats, NOT `row.current_node_key`. Inside a parallel
+    //     region the cursor is the fork GATEWAY while the choke resolves policy from the actor's own
+    //     assignment `node_key` — deriving from the cursor would mirror the wrong node's policy on
+    //     every parallel instance (the divergence class §2.3 forbids compounding);
+    //   * BOTH user-typed and ROLE-typed seats. A role seat is first-class at the choke
+    //     (`assignmentMatchesActor` matches when the actor's roles contain the assignment's
+    //     `assignee_id`), so scoping the mirror to user seats made it silently absent for every
+    //     role-seated approver — who DOES have a bar, because FE `canAct` is global RBAC
+    //     `approvals:act`, not an assignment check. The earlier comment here claimed such a viewer
+    //     "has no member-action bar to gate"; that was FALSE and is corrected (gate finding P2-1);
+    //   * a viewer holding NO seat of either kind still gets nothing — correct, and the reason the
+    //     `null` return of `resolveEffectiveNodeOperations` is kept;
+    //   * multi-seat is most-restrictive, so the client can never over-report a capability the
+    //     server would then refuse.
+    if (dto && viewerUserId && detailRuntimeGraph) {
+      // ONE shared predicate (`seatNodeKeysForViewer`), not a hand-copy: it mirrors the choke's
+      // `assignmentMatchesActor` exactly, including refusing a `'source_queue'` seat outright.
+      const seatNodeKeys = seatNodeKeysForViewer(instanceAssignments, viewerUserId, viewerRoles)
+      const nodeOperations = resolveEffectiveNodeOperations(
+        detailRuntimeGraph as NodeOperationGraphView,
+        seatNodeKeys,
+        row.policy_snapshot,
+      )
+      if (nodeOperations) dto.nodeOperations = nodeOperations
+    }
+    // Viewer-scoped decision affordance. The detail view renders approve/reject and the member
+    // verbs on the coarse `approvals:act` grant alone, which disagrees with the server for anyone
+    // who may act somewhere but not at the node this instance is stopped on. This is the server's
+    // own answer for THIS viewer, produced by the door's OWN predicate
+    // (`assignmentMatchesActor` over `decidableNodeKeysForInstance`) rather than a second
+    // approximation — see `approval-seat-authorization.ts`. `viewerRoles` is the same set the
+    // route hands the dispatch door (`resolveApprovalActorRoles`), so a ROLE-typed seat is
+    // first-class here exactly as it is there.
+    if (dto) {
+      const canDecideCurrentNode = resolveCanDecideCurrentNode({
+        instance: row,
+        assignments: instanceAssignments,
+        viewerUserId: viewerUserId ?? null,
+        viewerRoles: viewerRoles ?? null,
+      })
+      dto.canDecideCurrentNode = canDecideCurrentNode
+      // Process-evidence (过程附件) uploader affordance: the seat answer above, restricted to the
+      // seat-gated door. `canDecideCurrentNode` alone is `true` on a pending instance with no seat
+      // gate (legacy platform row, `plm:` mirror), where nothing binds process evidence — see the
+      // field's doc in `approval-bridge-types.ts`. Two existing exports composed, no new predicate.
+      // THIS is the builder `GET /api/approvals/:id` serves; `ApprovalProductService.getApproval`
+      // builds the action / create responses and carries the identical expression.
+      dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
@@ -694,6 +1173,43 @@ export class ApprovalBridgeService {
         viewerUserId,
         queryFn,
       )
+    }
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 THIS is the `GET /api/approvals/:id` handler's `getApproval` (the route
+    // builds an `ApprovalBridgeService`, `routes/approvals.ts`'s `getBridgeService`), so this is the
+    // 刷新 path the ruling names. It shares ONE reader with `ApprovalProductService.getApproval`,
+    // the action-response builder, so the two cannot disagree about what a reload shows.
+    //
+    // Runs AFTER the per-instance admission the route applies ahead of this call
+    // (`canReadApprovalInstance`, Lock-10 S1) — a non-participant is 404'd before any of this, so
+    // the fence over these values is the existing one, unchanged and not re-implemented here.
+    //
+    // PLATFORM IDS ONLY — the SAME `isPlmId` branch this method opens with (`:915`), the route
+    // applies before its fence, and Lock-10 OD-S1-18(a) pins ("`plm:` ids are NEVER routed through
+    // the predicate — platform posture only"). A cancel round is minted by
+    // `createCancelRoundInstance` as a PLATFORM instance with a bare-UUID id (the verification
+    // measured `idHasPlmPrefix = false` on a real one), so for a `plm:` mirror this read can only
+    // ever match zero rows. Skipping it there is the architectural branch, not a new predicate.
+    // ⚠️ Deliberately NOT gated on `isCancelRoundInstance(row)` / `workflow_key`, which would be a
+    // tempting second narrowing: `workflow_key` is MUTABLE on an existing row (this corpus's own
+    // fixtures re-key instances with a bare UPDATE), and a read gated on a mutable column fails by
+    // SILENT ABSENCE — the exact defect shape this change exists to close.
+    // ⚠️ ASYMMETRY (gate round1 P3-2, OWNER-OPEN — not yet ruled on): `ApprovalProductService
+    // .getApproval`'s call to the SAME shared reader below has NO matching `isPlmId` guard; it runs
+    // unconditionally. That is not a correctness gap today — a `plm:`-mirror instance's
+    // `approval_records` rows are written by this service's own `insertApprovalRecord`, and no
+    // cancel-round writer ever attaches either whitelisted key to one, so the product-service side's
+    // extra query also matches zero rows, just without the short-circuit. Deleting THIS guard (M-F)
+    // leaves the whole redemption suite green: it is uncovered by construction, not by omission. The
+    // choice between (a) adding the same guard on the product-service side for textual symmetry with
+    // the claim two paragraphs above, or (b) dropping it here too and rewriting this branch as a bare
+    // performance short-circuit rather than an architectural one, is left to the owner — this
+    // comment documents the asymmetry that exists today; it does not resolve it.
+    if (dto && !isPlmId(id)) {
+      Object.assign(dto, await readCancelRoundDurableProjectionV1(
+        (text, values) => pool!.query(text, values),
+        id,
+      ))
     }
     return dto
   }
@@ -750,6 +1266,11 @@ export class ApprovalBridgeService {
       if (bridgeDispatchTestBarrierForTests) {
         await bridgeDispatchTestBarrierForTests('after_instance_lock', { instanceId: id })
       }
+
+      // Lock §14.3 outlet #8 — a cancel-round instance never terminalizes through the generic
+      // bridge dispatch (it only ever moves through `ApprovalProductService.dispatchAction`'s
+      // dedicated cancel-round handling, WI-7/WI-12).
+      rejectIfCancelRound(instance, 'ApprovalBridgeService.dispatchAction')
 
       // P17/P22: attendance instances cannot terminalize through the generic bridge.
       // Classify + lock request before any instance/assignment DML (including
@@ -1010,12 +1531,20 @@ export class ApprovalBridgeService {
       return []
     }
 
+    // Lock-5 §1.4 fact 2 / gate D-3 — the SECOND unfiltered full-timeline reader. A refused member
+    // operation writes an `action:'policy_denied'` audit row (§1.4, OD-L5-9(a)); it is an
+    // administrator/audit fact, not member-visible history, so it is excluded here exactly as it is
+    // in `routes/approval-history.ts`. The action-FILTERED readers (`loadApprovalHistory`'s
+    // `action='approve'`, the revoke window's `IN ('approve','reject','transfer')`, the threshold
+    // tally, and the multitable projection's `DECISION_ACTIONS`) need no change — gate D-4 pins that
+    // they do not move, with an injected real `approve` row as the non-vacuity control.
     const result = await pool.query<ApprovalRecordRow>(
       `SELECT id, action, actor_id, actor_name, comment, from_status, to_status, metadata, occurred_at
        FROM approval_records
        WHERE instance_id = $1
+         AND action <> $2
        ORDER BY occurred_at DESC`,
-      [id],
+      [id, APPROVAL_POLICY_DENIED_ACTION],
     )
 
     return result.rows.map((row) => ({
@@ -1239,4 +1768,44 @@ export class ServiceError extends Error {
     super(message)
     this.name = 'ServiceError'
   }
+}
+
+/**
+ * Approval change-request design lock v5.9 §14.3 — thrown by every one of the 8 chokepoints that
+ * must reject a cancel-round instance (outlets #2/#4/#6/#7/#7'/#8; #12/#13 land as a typed skip
+ * reason instead, per the lock's own distinction). `extends ServiceError` (not
+ * `AttendanceCentralApprovalError`) so `handleApprovalsError`'s `error instanceof ServiceError`
+ * branch (routes.ts) and this file's own callers funnel it through the standard envelope; extending
+ * `AttendanceCentralApprovalError` instead would get it silently absorbed into `skipped_stale` at
+ * `ApprovalProductService.ts:9637`, which is the one behavior this class must never have.
+ */
+export class CancelRoundOutletForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_OUTLET_FORBIDDEN')
+    this.name = 'CancelRoundOutletForbiddenError'
+  }
+}
+
+/** Lock §9-5 (lock:143) — creation-time suite gate: `suite='forbidden'` rejects before any write. */
+export class CancelRoundSuiteForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_SUITE_FORBIDDEN')
+    this.name = 'CancelRoundSuiteForbiddenError'
+  }
+}
+
+/**
+ * Shared outlet guard (lock §14.3, WI-7) — every chokepoint that must reject a cancel-round
+ * instance outright (as opposed to #12/#13's typed-skip treatment) calls this instead of
+ * hand-rolling the `isCancelRoundInstance` check, so the rejected action set stays centrally
+ * auditable. No-op for a non-cancel-round instance.
+ */
+export function rejectIfCancelRound(
+  instance: { workflow_key?: string | null },
+  outletLabel: string,
+): void {
+  if (!isCancelRoundInstance(instance)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances cannot be actioned through ${outletLabel}`,
+  )
 }

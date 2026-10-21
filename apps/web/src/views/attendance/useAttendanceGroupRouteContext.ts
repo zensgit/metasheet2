@@ -35,6 +35,7 @@ export type AttendanceGroupRouteContextState =
   | { kind: 'error' }
 
 type UseAttendanceGroupRouteContextOptions = {
+  isSessionCurrent?: () => boolean
   context: Readonly<Ref<AttendanceGroupRouteContext | null>>
   enabled: Readonly<Ref<boolean>>
   apiFetch?: typeof defaultApiFetch
@@ -49,6 +50,7 @@ function isAuthorizedGroup(value: unknown): value is AttendanceAuthorizedGroup {
 }
 
 export function useAttendanceGroupRouteContext({
+  isSessionCurrent = () => true,
   context,
   enabled,
   apiFetch = defaultApiFetch,
@@ -57,6 +59,7 @@ export function useAttendanceGroupRouteContext({
   let generation = 0
 
   async function probe(): Promise<void> {
+    if (!isSessionCurrent()) return
     const currentContext = context.value
     const currentGeneration = ++generation
 
@@ -69,7 +72,7 @@ export function useAttendanceGroupRouteContext({
     state.value = { kind: 'loading' }
     try {
       const response = await apiFetch(`/api/attendance/groups/${currentContext.groupId}`)
-      if (currentGeneration !== generation) return
+      if (currentGeneration !== generation || !isSessionCurrent()) return
       if (response.status === 403 || response.status === 404) {
         state.value = { kind: 'unavailable' }
         return
@@ -79,7 +82,7 @@ export function useAttendanceGroupRouteContext({
         return
       }
       const payload = await response.json()
-      if (currentGeneration !== generation) return
+      if (currentGeneration !== generation || !isSessionCurrent()) return
       if (!payload?.ok || !isAuthorizedGroup(payload.data)) {
         state.value = { kind: 'error' }
         return
@@ -92,7 +95,7 @@ export function useAttendanceGroupRouteContext({
         returnTo: currentContext.returnTo,
       }
     } catch {
-      if (currentGeneration !== generation) return
+      if (currentGeneration !== generation || !isSessionCurrent()) return
       state.value = { kind: 'error' }
     }
   }

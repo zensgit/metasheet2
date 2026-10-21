@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
+import * as authenticatedApi from '../src/utils/api'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('MetaCellRenderer link rendering', () => {
   it('shows linked record summaries instead of raw ids when summaries are present', async () => {
@@ -140,6 +146,11 @@ describe('MetaCellRenderer link rendering', () => {
   })
 
   it('renders attachment thumbnails for image summaries', async () => {
+    vi.spyOn(authenticatedApi, 'apiFetch').mockResolvedValue(new Response(new Uint8Array([1]), { status: 200 }))
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = () => 'blob:cell-thumbnail'
+      static revokeObjectURL = () => {}
+    })
     const container = document.createElement('div')
     document.body.appendChild(container)
 
@@ -172,7 +183,8 @@ describe('MetaCellRenderer link rendering', () => {
 
     const image = container.querySelector('img') as HTMLImageElement | null
     expect(image).not.toBeNull()
-    expect(image?.getAttribute('src')).toContain('thumbnail=true')
+    await vi.waitFor(() => expect(image?.getAttribute('src')).toBe('blob:cell-thumbnail'))
+    expect(authenticatedApi.apiFetch).toHaveBeenCalledWith('/api/multitable/attachments/att_img_1?thumbnail=true', expect.objectContaining({ signal: expect.any(AbortSignal) }))
 
     app.unmount()
     container.remove()

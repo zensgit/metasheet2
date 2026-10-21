@@ -13,6 +13,7 @@ import type {
   PlannedEffect,
 } from './deprovision-planner'
 import { planDirectoryDeprovision } from './deprovision-planner'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 
 export type DirectoryTransactionClient = {
   query: (
@@ -297,6 +298,20 @@ async function writeEffects(
 }
 
 export async function applyDirectoryDeprovisionCandidate(
+  client: DirectoryTransactionClient,
+  input: ApplyDeprovisionCandidateInput,
+): Promise<ApplyDeprovisionCandidateResult> {
+  // O2-S2: this writer mutates users / user_orgs / user_external_auth_grants inside the
+  // caller's transaction — a marker 40001 (recovery lease held) re-raises as the named
+  // retryable RecoveryConflictError so the sync/route boundary can classify it; every
+  // other error (candidacy aborts included) rethrows unchanged. The caller's transaction
+  // still rolls back either way.
+  return translateRecoveryConflict(() =>
+    applyDirectoryDeprovisionCandidateWrites(client, input),
+  )
+}
+
+async function applyDirectoryDeprovisionCandidateWrites(
   client: DirectoryTransactionClient,
   input: ApplyDeprovisionCandidateInput,
 ): Promise<ApplyDeprovisionCandidateResult> {

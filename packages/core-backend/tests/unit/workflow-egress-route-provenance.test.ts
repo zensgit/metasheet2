@@ -119,6 +119,9 @@ function draft(overrides: Record<string, unknown> = {}) {
 
 async function buildWorkflowApp() {
   delete process.env.DISABLE_WORKFLOW
+  // P0-S S1 gate: this suite tests the ENABLED runtime's egress-policy provenance;
+  // the disabled-runtime 503 behavior is covered by bpmnRuntimeConfig.test.ts.
+  process.env.ENABLE_BPMN_RUNTIME = 'true'
   const router = (await import('../../src/routes/workflow')).default
   const app = express()
   app.use(express.json())
@@ -128,6 +131,8 @@ async function buildWorkflowApp() {
 
 async function buildWorkflowDesignerApp() {
   delete process.env.DISABLE_WORKFLOW
+  // P0-S S1 gate: designer deploy/instantiate reach the engine only when the runtime is enabled.
+  process.env.ENABLE_BPMN_RUNTIME = 'true'
   const router = (await import('../../src/routes/workflow-designer')).default
   const app = express()
   app.use(express.json())
@@ -182,6 +187,7 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
 
   afterEach(() => {
     delete process.env.BPMN_HTTP_TASK_EGRESS_POLICY
+    delete process.env.ENABLE_BPMN_RUNTIME
   })
 
   test('workflow deploy/start and designer deploy remain authenticated route surfaces', async () => {

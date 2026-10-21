@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import MetaGanttView from '../src/multitable/components/MetaGanttView.vue'
 import { resolveGanttViewConfig } from '../src/multitable/utils/view-config'
 import { useLocale } from '../src/composables/useLocale'
+import { resetBusinessTimezone } from '../src/multitable/utils/business-timezone'
 
 describe('MetaGanttView', () => {
   afterEach(() => {
@@ -914,6 +915,50 @@ describe('MetaGanttView', () => {
     expect(container.querySelectorAll('[aria-label]')).toHaveLength(3)
     expect(container.querySelectorAll('[title]')).toHaveLength(1)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+
+    app.unmount()
+  })
+
+  // #6181 (the rule #6178 applies to `date` cells): a `date` start / end holding a stored INSTANT is the day it
+  // falls on in the business timezone (Asia/Shanghai default) — `2026-09-17T16:00:00.000Z` is 09-18 there — never
+  // the UTC day (09-17, what `toISOString().slice(0, 10)` of the instant gave). A day as written keeps its day and
+  // its bar position: both tasks below name the same days, so they must draw the same bar.
+  it('#6181: date start / end holding instants show and place on their business-timezone days, like days as written', async () => {
+    resetBusinessTimezone()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          rows: [
+            { id: 'rec_instant', version: 1, data: { fld_name: 'PLM refresh', fld_start: '2026-09-17T16:00:00.000Z', fld_end: '2026-09-19T16:00:00.000Z' } },
+            { id: 'rec_written', version: 1, data: { fld_name: 'Written days', fld_start: '2026-09-18', fld_end: '2026-09-20' } },
+          ],
+          viewConfig: { startFieldId: 'fld_start', endFieldId: 'fld_end', titleFieldId: 'fld_name' },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const rows = Array.from(container.querySelectorAll('.meta-gantt__row'))
+    const rowOf = (title: string) => rows.find((row) => row.querySelector('strong')?.textContent?.trim() === title)!
+    const instant = rowOf('PLM refresh')
+    const written = rowOf('Written days')
+    expect(instant.querySelector('small')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('2026-09-18 to 2026-09-20') // UTC days: 09-17 to 09-19
+    expect(written.querySelector('small')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('2026-09-18 to 2026-09-20')
+    const instantBar = instant.querySelector('.meta-gantt__bar') as HTMLElement
+    const writtenBar = written.querySelector('.meta-gantt__bar') as HTMLElement
+    expect(instantBar.getAttribute('title')).toBe('2026-09-18 → 2026-09-20')
+    expect(instantBar.getAttribute('style')).toBe(writtenBar.getAttribute('style'))
 
     app.unmount()
   })

@@ -31,6 +31,7 @@ const path = require('node:path')
 const SPIKE_LIB = path.join(__dirname, '..', 'lib', 'gip-binding-qualification-spike.cjs')
 const CONTRACTS_LIB = path.join(__dirname, '..', 'lib', 'gip-profile-certification-contracts.cjs')
 const PACKAGE_JSON = path.join(__dirname, '..', 'package.json')
+const { loadChain } = require(path.join(__dirname, '..', 'scripts', 'test-chain.cjs'))
 const SQLSERVER_RCSI_TEST_COMMAND = 'node __tests__/gip-sqlserver-rcsi-total-order-strategy.test.cjs'
 
 function behaviouralProof_registryResolvesNothingNew() {
@@ -92,8 +93,10 @@ function behaviouralProof_sqlServerRcsiSuiteIsInTheExplicitChain() {
     SQLSERVER_RCSI_TEST_COMMAND,
     'the named SQL Server RCSI certification suite command drifted or disappeared',
   )
-  const occurrences = pkg.scripts.test
-    .split(' && ')
+  // The chain moved out of `package.json` `scripts.test` into `test-chain.txt` so that adding a
+  // suite stops re-pinning `runtimeFiles.pluginPackageJson`. The commands are unchanged, so the
+  // literal above still matches; only where the list is read from changed.
+  const occurrences = loadChain(path.join(__dirname, '..'))
     .filter((command) => command === SQLSERVER_RCSI_TEST_COMMAND)
   assert.equal(
     occurrences.length,

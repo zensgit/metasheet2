@@ -34,6 +34,13 @@ const UNIT_SCOPE_PRIORITIES = Object.freeze({
   generic: 3,
 })
 
+// The two SELECT values this module stamps on a generated candidate rule. Named constants rather than
+// inline literals so the option-catalog sweep can prove they are seeded in
+// stock_preparation_unit_rule_source_v1 / stock_preparation_rounding_rule_v1 — an unseeded select
+// value is refused by the record validator at write time, on the customer's deployment.
+const CANDIDATE_RULE_SOURCE = 'system_candidate'
+const DEFAULT_ROUNDING_RULE = 'none'
+
 class StockPreparationUnitRuleMatchError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -194,9 +201,9 @@ function makeOutcome({ line, mapping, material, outcome, reason, rule }) {
     scopeType: 'material',
     scopeKey,
     lossRate: 0,
-    roundingRule: 'none',
+    roundingRule: DEFAULT_ROUNDING_RULE,
     minimumIssueQty: 0,
-    source: 'system_candidate',
+    source: CANDIDATE_RULE_SOURCE,
     requiresConfirmation: true,
     isActive: true,
   } : undefined
@@ -310,6 +317,8 @@ function generateUnitConversionRuleCandidates(input = {}) {
 module.exports = {
   HELD_REASONS,
   RULE_OUTCOMES,
+  CANDIDATE_RULE_SOURCE,
+  DEFAULT_ROUNDING_RULE,
   StockPreparationUnitRuleMatchError,
   generateUnitConversionRuleCandidates,
   __internals: {

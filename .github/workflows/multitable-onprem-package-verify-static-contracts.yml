@@ -1,0 +1,53 @@
+name: Multitable On-Prem Package Verify Static Contracts
+
+# Hermetic PR-time guard for the ~61 `search_fixed_string` contracts that
+# scripts/ops/multitable-onprem-package-verify.sh enforces against the two
+# on-prem PowerShell helpers ($launcher_helper / $apply_helper).
+#
+# verify.sh itself only ever runs inside dispatch-only workflows
+# (multitable-onprem-package-build.yml, stock-prep-main-package-verify.yml),
+# neither of which fires on a normal PR. A PR that edits either helper can
+# therefore pass every PR check while silently breaking a verify.sh contract
+# on main once merged — exactly what #4998 did (the launcher stopped emitting
+# the literal `-StagingRoot $stagingBase` once the apply-helper invocation
+# was switched to hashtable splatting; every package built from main after
+# that PR failed verification).
+#
+# This workflow runs a pure node:test re-implementation of those contracts
+# (parses verify.sh itself, decodes bash quoting, evaluates against the two
+# helper files) on every PR that touches any of the paths below, and on push
+# to main. No bash, no rg/grep subprocess, no network — same shape as
+# stock-preparation-lab0-inventory.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multitable-onprem-package-verify-static-contracts.yml'
+      - 'scripts/ops/multitable-onprem-package-verify.sh'
+      - 'scripts/ops/multitable-onprem-deploy-launcher.ps1'
+      - 'scripts/ops/multitable-onprem-apply-package.ps1'
+      - 'scripts/ops/multitable-onprem-package-verify-static-contracts.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multitable-onprem-package-verify-static-contracts.yml'
+      - 'scripts/ops/multitable-onprem-package-verify.sh'
+      - 'scripts/ops/multitable-onprem-deploy-launcher.ps1'
+      - 'scripts/ops/multitable-onprem-apply-package.ps1'
+      - 'scripts/ops/multitable-onprem-package-verify-static-contracts.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  static-contracts:
+    name: Package-verify static contracts (values-free, no bash, no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic static-contract tests
+        run: node --test scripts/ops/multitable-onprem-package-verify-static-contracts.test.mjs

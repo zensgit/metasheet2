@@ -304,7 +304,7 @@ describe('W6-R1 static leg — every recognized DB-seam argument is accounted fo
     const routeText = readFileSync(join(repoRoot, AGGREGATE_ROUTE_ENTRY_FILE), 'utf8')
     // Non-vacuity: the pool import really is there. If it ever goes away the
     // claim above changes and this leg should be revisited, not deleted.
-    expect(routeText).toContain("import { query } from '../db/pg'")
+    expect(routeText).toMatch(/import\s*{[^}]*\bquery\b[^}]*}\s*from\s*['"]\.\.\/db\/pg['"]/)
 
     // And the sweep really does catch a pool-routed write planted in a
     // call-path declaration — both by DML text and by the SELECT-only

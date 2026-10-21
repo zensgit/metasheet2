@@ -4,11 +4,13 @@ WORKDIR /app
 ARG PNPM_VERSION=10.16.1
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 ARG VITE_ENABLE_YJS_COLLAB=false
+ARG VITE_MULTITABLE_RANGE_FILL_ENABLED=false
 ARG VCS_REF=unknown
 ARG BUILD_IMAGE_TAG=unknown
 ARG BUILD_IMAGE_SOURCE=unknown
 ARG BUILD_CREATED=unknown
 ENV VITE_ENABLE_YJS_COLLAB=$VITE_ENABLE_YJS_COLLAB
+ENV VITE_MULTITABLE_RANGE_FILL_ENABLED=$VITE_MULTITABLE_RANGE_FILL_ENABLED
 ENV METASHEET_BUILD_COMMIT=$VCS_REF
 ENV METASHEET_BUILD_IMAGE_TAG=$BUILD_IMAGE_TAG
 ENV METASHEET_BUILD_SOURCE=$BUILD_IMAGE_SOURCE
@@ -20,7 +22,8 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @metasheet/web build
+# Build-only heap budget; leave native-memory headroom on an 8GB builder.
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @metasheet/web build
 RUN node -e "const fs=require('fs'); const clean=(value)=>{const trimmed=(value||'').trim(); return !trimmed || trimmed === 'unknown' ? null : trimmed}; const info={commit:clean(process.env.METASHEET_BUILD_COMMIT),imageTag:clean(process.env.METASHEET_BUILD_IMAGE_TAG),source:clean(process.env.METASHEET_BUILD_SOURCE),created:clean(process.env.METASHEET_BUILD_CREATED)}; fs.writeFileSync('apps/web/dist/build-info.json', JSON.stringify(info, null, 2)+'\n')"
 
 FROM nginx:1.27-alpine

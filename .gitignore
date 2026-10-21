@@ -37,6 +37,8 @@ yarn-error.log*
 # Testing
 coverage/
 .nyc_output/
+# Short-lived vitest mutant children written beside core-backend during task probes.
+packages/core-backend/.task-probe-*.mts
 
 # Temporary files
 *.tmp
@@ -107,3 +109,4 @@ apps/web/src/**/*.js
 # core-backend runtime file storage (StorageService: STORAGE_PATH || cwd()/uploads, layout <uuid>/<name>).
 # Local server/test runs write real blobs here; they are runtime artifacts, never source.
 packages/core-backend/uploads/
+output/deploy/

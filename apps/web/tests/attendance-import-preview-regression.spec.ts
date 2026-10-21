@@ -35,6 +35,14 @@ function jsonResponse(status: number, payload: unknown): Response {
   } as unknown as Response
 }
 
+function textResponse(status: number, body: string): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body,
+  } as unknown as Response
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -67,12 +75,21 @@ function unwrapRef<T>(value: unknown): T {
   return value as T
 }
 
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) => btoa(JSON.stringify(value))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`
+}
+
 describe('Attendance import preview regression', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
+    window.localStorage.removeItem('auth_token')
     window.localStorage.setItem('metasheet_locale', 'en')
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -83,6 +100,44 @@ describe('Attendance import preview regression', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.localStorage.removeItem('auth_token')
+  })
+
+  it('binds prepare and preview to the same non-default organization', async () => {
+    const tenantId = '00000000-0000-4000-8000-000000000123'
+    window.localStorage.setItem('auth_token', unsignedJwt({ id: 'qa-user', tenantId }))
+    const apiFetchMock = vi.mocked(apiFetch)
+    let preparePayload: Record<string, unknown> | null = null
+    let previewPayload: Record<string, unknown> | null = null
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/prepare')) {
+        preparePayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { commitToken: 'tenant-bound-token', expiresAt: '2099-01-01T00:00:00.000Z' },
+        })
+      }
+      if (url.startsWith('/api/attendance/import/preview')) {
+        previewPayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [], csvWarnings: [], groupWarnings: [], rowCount: 1 },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    findButton(findImportSection(container!), 'Preview').click()
+    await vi.waitFor(() => expect(previewPayload).not.toBeNull())
+
+    expect(preparePayload).toEqual({ orgId: tenantId })
+    expect(previewPayload).toMatchObject({ orgId: tenantId, commitToken: 'tenant-bound-token' })
   })
 
   it('clears stale preview rows/warnings on preview retry failure and keeps retry action context', async () => {
@@ -153,6 +208,7 @@ describe('Attendance import preview regression', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(container!.textContent).toContain('user-old'))
     expect(container!.textContent).toContain('user-old')
     expect(container!.textContent).toContain('CSV warnings: stale-csv-warning; stale-group-warning')
 
@@ -160,6 +216,7 @@ describe('Attendance import preview regression', () => {
     await flushUi(6)
 
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
     expect(importSection.textContent).not.toContain('stale-csv-warning')
@@ -175,6 +232,7 @@ describe('Attendance import preview regression', () => {
     findButton(container!, 'Retry preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(previewRequestCount).toBe(3)
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
@@ -337,6 +395,7 @@ describe('Attendance import preview regression', () => {
       // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('文件未解析出可导入的数据行'))
       expect(container!.textContent).toContain('文件未解析出可导入的数据行')
       expect(container!.textContent).toContain('另存为 → CSV')
       expect(container!.textContent).toContain('VALIDATION_ERROR')
@@ -344,6 +403,7 @@ describe('Attendance import preview regression', () => {
       // Server header-missing diagnostic → header-specific zh copy.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('CSV 表头缺少必需列'))
       expect(previewRequestCount).toBe(2)
       expect(container!.textContent).toContain('CSV 表头缺少必需列')
       expect(container!.textContent).toContain('VALIDATION_ERROR')
@@ -356,6 +416,9 @@ describe('Attendance import preview regression', () => {
     const apiFetchMock = vi.mocked(apiFetch)
     apiFetchMock.mockImplementation(async (path: string) => {
       const url = String(path)
+      if (url.startsWith('/api/attendance/import/template.csv')) {
+        return textResponse(200, 'UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因\nuser@example.com,2026-06-01,EMP001,张三,总部日班,2026-06-01 09:00,2026-06-01 18:00,正常,\n')
+      }
       if (url.startsWith('/api/attendance/import/template')) {
         return jsonResponse(200, {
           ok: true,
@@ -410,7 +473,7 @@ describe('Attendance import preview regression', () => {
     expect(picker!.textContent).toContain('Punch times')
 
     const preview = () => (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
-    expect(preview()).toBe('日期,工号,姓名,上班1打卡时间,下班1打卡时间,考勤结果,异常原因,考勤组')
+    expect(preview()).toBe('UserId,日期,工号,姓名,上班1打卡时间,下班1打卡时间,考勤结果,异常原因,考勤组')
 
     const overtime = Array.from(picker!.querySelectorAll('label')).find(
       candidate => candidate.textContent?.trim() === '加班小时'
@@ -423,7 +486,7 @@ describe('Attendance import preview regression', () => {
     findButton(picker!, 'Download template (selected fields)').click()
     await flushUi(2)
     expect(createObjectURL).toHaveBeenCalledTimes(1)
-    expect(container!.textContent).toContain('CSV template downloaded (9 columns, with an example row).')
+    expect(container!.textContent).toContain('CSV template downloaded (10 columns, with an example row).')
     const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
     // readAsText strips the BOM during decode (per spec) — check raw bytes.
     const downloadedBytes = await new Promise<Uint8Array>((resolve) => {
@@ -445,13 +508,15 @@ describe('Attendance import preview regression', () => {
     expect(lines[1]).toContain('8.5')
   })
 
-  it('one-click template download: works from a cold panel by auto-loading first', async () => {
+  it('one-click template download: cold panel uses the server CSV without loading or changing JSON payload', async () => {
     const apiFetchMock = mockTemplateEndpoint()
     const { createObjectURL } = stubObjectUrl()
 
     app = createApp(AttendanceView, { mode: 'admin' })
-    app.mount(container!)
+    const vm = app.mount(container!)
     await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    const payloadBefore = (setupState.importForm as { payload: string }).payload
     apiFetchMock.mockClear()
 
     const importSection = findImportSection(container!)
@@ -460,45 +525,103 @@ describe('Attendance import preview regression', () => {
     download.click()
     await flushUi(8)
 
-    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(true)
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(String(apiFetchMock.mock.calls[0][0])).toBe('/api/attendance/import/template.csv')
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(container!.textContent).toContain('CSV template downloaded.')
+    expect((setupState.importForm as { payload: string }).payload).toBe(payloadBefore)
 
-    // The fallback download exit also ships an example row (#3793 NIT-3
-    // harmonization) — not an empty line.
-    const fallbackBlob = createObjectURL.mock.calls[0][0] as Blob
-    const fallbackBytes = await new Promise<Uint8Array>((resolve) => {
+    const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
+    const downloadedBytes = await new Promise<Uint8Array>((resolve) => {
       const reader = new FileReader()
       reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
-      reader.readAsArrayBuffer(fallbackBlob)
+      reader.readAsArrayBuffer(downloadedBlob)
     })
-    const fallbackLines = new TextDecoder('utf-8').decode(fallbackBytes).replace(/^\ufeff/, '').split('\n').filter(Boolean)
+    expect([downloadedBytes[0], downloadedBytes[1], downloadedBytes[2]]).toEqual([0xef, 0xbb, 0xbf])
+    const downloadedText = new TextDecoder('utf-8').decode(downloadedBytes).replace(/^\ufeff/, '')
+    const fallbackLines = downloadedText.split('\n').filter(Boolean)
     expect(fallbackLines).toHaveLength(2)
-    expect(fallbackLines[1]).toContain('2026-06-01')
-    expect(fallbackLines[1]).toContain('EMP001')
-    expect(fallbackLines[1]).toContain('2026-06-01 09:00')
+    expect(fallbackLines[0]).toBe('UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
+    expect(fallbackLines[1]).toBe('user@example.com,2026-06-01,EMP001,张三,总部日班,2026-06-01 09:00,2026-06-01 18:00,正常,')
   })
 
-  it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {
-    const apiFetchMock = mockTemplateEndpoint()
-    stubObjectUrl()
+  it.each([
+    ['HTTP 530', () => textResponse(530, 'tunnel unavailable')],
+    ['non-200', () => textResponse(502, 'gateway error')],
+    ['fetch exception', () => { throw new Error('network unavailable') }],
+    ['empty body', () => textResponse(200, '   ')],
+  ])('download falls back to the loaded guide after %s and preserves the edited payload', async (_label, response) => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    const { createObjectURL } = stubObjectUrl()
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/attendance/import/template.csv')) return response()
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
 
     app = createApp(AttendanceView, { mode: 'admin' })
     const vm = app.mount(container!)
     await flushUi(6)
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
-    const editedPayload = '{"source":"manual","rows":['
+    const editedPayload = JSON.stringify({
+      source: 'manual',
+      mode: 'merge',
+      columns: ['UserId', '日期', '自定义映射列'],
+      customSetting: 'keep-me',
+    }, null, 2)
     ;(setupState.importForm as { payload: string }).payload = editedPayload
     await flushUi(2)
     apiFetchMock.mockClear()
 
-    const importSection = findImportSection(container!)
-    findButton(importSection, 'Download CSV template').click()
+    findButton(findImportSection(container!), 'Download CSV template').click()
     await flushUi(6)
 
-    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(false)
+    expect(apiFetchMock.mock.calls.map(call => String(call[0]))).toEqual(['/api/attendance/import/template.csv'])
     expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
-    expect(container!.textContent).toContain('Payload JSON has content but no template columns')
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
+    const bytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(downloadedBlob)
+    })
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf])
+    expect(new TextDecoder('utf-8').decode(bytes).replace(/^\ufeff/, '')).toBe(
+      'UserId,日期,自定义映射列\nuser@example.com,2026-06-01,\n',
+    )
+  })
+
+  it.each([
+    ['malformed JSON', '{"source":"manual","rows":['],
+    ['illegal JSON payload shape', '[]'],
+  ])('download from cold panel preserves %s and uses the built-in mapped template', async (_label, editedPayload) => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    const { createObjectURL } = stubObjectUrl()
+    apiFetchMock.mockImplementation(async () => textResponse(530, 'template unavailable'))
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    ;(setupState.importForm as { payload: string }).payload = editedPayload
+    await flushUi(2)
+    apiFetchMock.mockClear()
+
+    findButton(findImportSection(container!), 'Download CSV template').click()
+    await flushUi(6)
+
+    expect(apiFetchMock.mock.calls.map(call => String(call[0]))).toEqual(['/api/attendance/import/template.csv'])
+    expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
+    const bytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(downloadedBlob)
+    })
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf])
+    expect(new TextDecoder('utf-8').decode(bytes).replace(/^\ufeff/, '')).toBe(
+      'UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因\nuser@example.com,2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,\n',
+    )
   })
 
   async function selectImportCsv(content: string, name = 'attendance.csv') {
@@ -697,7 +820,7 @@ describe('Attendance import preview regression', () => {
     await flushUi(8)
 
     const preview = (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
-    expect(preview).toBe('日期,工号,姓名,加班小时')
+    expect(preview).toBe('UserId,日期,工号,姓名,加班小时')
     // The header builder drops unknown keys anyway — the intersection guard is
     // locked at the SELECTION-SET level, where a ghost key would otherwise hide.
     const setupState = (vm as any).$?.setupState as Record<string, any>

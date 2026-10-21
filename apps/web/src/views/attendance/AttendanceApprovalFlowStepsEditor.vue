@@ -70,6 +70,8 @@
               :tr="tr"
               :input-id="`approval-step-user-${index}`"
               endpoint="/api/attendance-admin/users/search"
+              :org-id="props.orgId"
+              :global-scope="props.globalScope"
               @update:model-value="(uid: string) => onAddUser(index, uid)"
             />
             <div class="approval-steps__chips" data-testid="attendance-approval-step-users">
@@ -171,6 +173,8 @@ type Translate = (en: string, zh: string) => string
 const props = defineProps<{
   modelValue: AttendanceApprovalStep[]
   tr: Translate
+  orgId?: string
+  globalScope?: boolean
   /**
    * Host-authoritative chain cap from the readiness seam.
    * null/undefined = unknown — manager_at_level creation/editing is disabled;

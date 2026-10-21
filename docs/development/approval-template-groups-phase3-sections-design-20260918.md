@@ -1,0 +1,422 @@
+# 审批表单分组 Phase 3(切片 A-4 分期 3:section 分节 + 重排)— 设计 MD
+
+- 锁文(唯一 ratify 对象):`approval-form-group-entity-design-lock-draft-20260916.md`,**v2.13 RATIFIED 2026-09-18**(全文见 `/Users/chouhua/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/approval-form-group-entity-design-lock-draft-20260916.md`)
+- 目标文档:`goal-three-locks-full-implementation-20260918.md`(切片 `A 分组 / A-4 分期 3`)
+- 实现任务书:`impl-taskbook-A-grouping-20260918.md` §2「分期 3」(W10–W14)
+- 补充清单:`impl-supplementary-gate-checklist-20260918.md`「lane A(分组)」#5–#7(#5=J/C 的 section 400 挪分期 3;#7=前端 spec 位置)
+- 本文档所在分支:`feat/approval-template-groups-phase3-sections`(worktree `wt-groups-p3`),堆叠基线 = `feat/approval-template-groups-phase1` 的 A-1 第 7 轮门审头 **`a728ed655`**(A-1 Draft PR #5852,DRAFT-READY 0 P1/0 P2/4 P3)
+- 本文档写作时 worktree HEAD:`6e2e48a7c94499bee6e0e2b622a9f238309ca6ef`
+- 下文所有 `file:line` 都是**对本 HEAD 现场 `grep -n` 的结果**,不是照抄锁文基线的行号(锁文行号仅在直接引用锁文条款时保留,并标注「锁文行号」)。
+- 本切片 = A-1 之后的 12 个功能提交(`51878dd08`…`27bb6edfe`)+ 2 个文档提交(本次新增),不含 A-2(session-org 共享组件)与 A-3(分期 2 按 category 建组)——A-4 直接堆叠在 A-1 之上,**不含** A-2 的 `SessionOrgSwitcher.vue`(见 §6「留给后续」)。
+
+## 0. RATIFY 记录(原样引用锁文抬头,不改写)
+
+> **RATIFY 记录(2026-09-18)**
+> - **授权来源(owner 亲写,本会话消息原文)**:「按 你建议执行1」——指向我前一条消息的建议 1:「ratify 三把锁:分组锁 v2.13、待办中心锁 v2.14、撤销锁 v5.9;待裁项按锁文里标的建议值」。owner 未点名的项(合并 PR、#5805 收口、#5698 处置)**不在本授权内**。
+> - **ratify 当刻 head**:`origin/main @ 00781e68b`(2026-09-18);**验证基线** `85ddd2926`(第 4–13 轮门审全部在此 head 上核实),两 head 之间相差 228 提交(timemachine/recovery 合并列车)。
+> - **裁决结果(按建议值)**:Q3 分组按 org 作用域,`org_id` 只取 `req.authenticatedTenantId` = **是**;Q4 归档不保留成员、解档得空组 = **是**;**Q5 `?category=` 与 `/categories` 首期不动、分期 3 再裁**;分期 2(按现有 category 建组并挂接)= **要**,做成预览→执行→可回滚的管理员操作;`key` 全局唯一 = **另立锁**,不顺带。§7 第 2 项(§2 两表形状 + 锁序表 + I1–I8)按 v2.13 ratify。
+> - **不变的约束**:含 DDL 的切片只能以 Draft PR 交付、**不应用、不合并**;任何合并仍需 owner 逐 PR 一句话;实现按分期走「Sonnet 实现 → Opus 门审 → 修复重跑闸 → Draft PR」。
+
+**本切片(A-4)的地位**:锁文 §7 把 Q5(「分期 3 时 `?category=` 过滤与 `/categories` 端点的去留」)明写为「首期不动,**分期 3 再裁**」——即 owner 在 ratify 时刻把 Q5 的实际决策**推迟到本切片**,不是一次性裁完。本切片不含 DDL(复用 A-1 已建的两张表,零新迁移),但仍是新写路径(reorder 端点),交付形态照常先 Draft(任务书 §1「DDL owner 闸(贯穿性)……分期 3 的重排端点不含新 DDL……但仍是新写路径,交付形态照常先 Draft」)。
+
+## 1. 范围 / 不在范围
+
+### 1.1 本切片(A-4)包含 —— 逐条对锁文 §
+
+| 内容 | 锁文出处 | 本文档章节 |
+|---|---|---|
+| `section=` 三令牌/四桶列表(`group:<id>` / `ungrouped` / `category:<name>`) | §4 验收 C;§6「期 3」 | §2 |
+| `category` 后备桶(从未关联 + 非空 category) | §4 验收 D | §2.3 |
+| 每 section 独立分页,`total` = 该桶自己的计数 | §4 验收 C「每个 section 独立 page/pageSize」 | §3 |
+| J 行「未知 `section=` 令牌 ⇒ 400」+ C 行「`?category=` 与 `section` 同现 ⇒ 400」(补充清单 #5 挪期) | §4 验收 J、C;补充清单 #5 | §2.4 |
+| 重排端点(该 org 全部活跃组的完整 1..n 排列) | §3 I3;§4 验收 E 后半;§6「期 3」表第 3 行 | §4 |
+| 前端「分组视图」:section 渲染、每 section 独立"加载更多"、`group:` 分组上移/下移、模板项按下拉移动分组 | §6「期 3」表第 3 行「拖拽归组」(本切片以键盘可操作控件替代原生 HTML5 拖拽,见 §5) | §5 |
+| 两个新 `.db.test.ts`(sections/reorder)+ 两点 CI 接线 + s6a 重钉 + 新增 `*-ci-wiring.test.mjs`(补 A-1 遗留的闭世界缺口) | §6「期 1」门原文对两个 A-1 文件提的要求,本切片同法应用到四个文件 | 验证 MD |
+
+### 1.2 本切片明确不做(逐条引用锁文 § 与去处)
+
+| 项 | 锁文出处 | 去处 / 理由 |
+|---|---|---|
+| 两个写入面(`TemplateAuthoringView.vue:211-218`、`TemplateDetailView.vue:99-110`)换成分组选择器(I4 生效) | §6「期 3」表第 3 行;任务书 W12 | **未做**——TemplateGroupSections.vue 头注释原话「the two write-face group selectors (I4) are deferred (needs the session-org entry point extended to those two surfaces plus a defined create-then-link failure contract; owner 勘误候选,not implemented here)」。I4「生效时点 = 分期 1 落地、两个写入面换成分组选择器之时」(锁文 I4)在本切片仍未触发——两个写入面维持裸 `el-input`,继续写 `category`,与 phase1 设计 MD §1.2 记录的现状一致 |
+| Q5 本身的裁决(`?category=` 过滤 / `/categories` 端点去留) | §7-2″ | **未裁,仍 OPEN**——见 §7;本切片**不删、不改** `GET /api/approval-templates/categories`(`routes/approvals.ts:539` → `listTemplateCategories`)与既有 `?category=` 等值过滤,两者原样保留 |
+| A-2 共享 `SessionOrgSwitcher.vue` + `useSessionOrg` 前端接线 | §2「多 org 成员」;验收 J 前端半;目标文档切片清单归 A-2 | 本切片堆叠在 A-1(`a728ed655`)之上,**不含** A-2 的任何提交——`apps/web/src/components/SessionOrgSwitcher.vue` 在本分支不存在(见 §6) |
+| 分期 2(按现有 category 建组并挂接) | §6「期 2」 | 另一条并行 lane(A-3),与本切片无依赖关系 |
+| 硬删分组端点 | §5「明确不做」 | 不排期,与 A-1 一致 |
+| 模板在分组内的排序 | §3 I3「模板在分组内首期无排序」;§5 | 本切片重排**只**对 `group:` 分组本身排序,不对分组内的模板项排序——前端 `TemplateGroupSections.vue` 中「模板项从不重新排序」是与此对应的实现事实(`:12` 头注释) |
+
+## 2. `section=` 四桶判定谓词(§4 验收 C/D)
+
+### 2.1 三令牌解析(`parseApprovalTemplateSectionToken`,`ApprovalTemplateGroupSectionService.ts:44-54`)
+
+| 令牌形状 | 解析结果 | 锁文出处 |
+|---|---|---|
+| 字面量 `ungrouped` | `{ kind: 'ungrouped' }` | §4「三个令牌、四个桶」 |
+| `group:<id>`(按**第一个** `:` 切分) | `{ kind: 'group', groupId }` | §2「令牌按第一个 `:` 切分,name 原样」 |
+| `category:<name>`(按第一个 `:` 切分,name **原样**,不 trim、不大小写折叠) | `{ kind: 'category', name }` | 同上——`normalizeTemplateCategory`(`ApprovalProductService.ts:4280`)只 trim + 64 上限,从不拒绝 `:`,故 `category:HR:Onboarding` 的 name 是 `HR:Onboarding` |
+| 空串 / 无冒号且非 `ungrouped` / `group:`(空 id)/ `category:`(空 name)/ 冒号在首字符 / 前缀大小写不匹配 / `ungrouped` 带后缀 | `null` → 路由层 400 `APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID`(§4 行 J) | 见 §2.4 |
+
+纯函数,零 DB 依赖,由 `tests/unit/approval-template-group-section-token.test.ts` 的 13 个 `it`/`it.each` 案例逐一钉死(含 8 个 `null` 反例,见验证 MD §3)。
+
+### 2.2 四桶 SQL 判定(`buildSectionBucketCondition`,`ApprovalTemplateGroupSectionService.ts:75-127`)
+
+**org 谓词落在 EXISTS/NOT EXISTS 子查询里,不落在外层**(`approval_templates` 无 org 列,锁文 §1)——三个桶各自的子查询都带 `l.org_id = $1`(与 A-1 §2「SELECT 必须带 org 谓词」/ 验收 A″ 同一纪律,应用到读路径而非行锁):
+
+| 桶 | 令牌 | SQL 判定(现场 `:line`) | 锁文出处 |
+|---|---|---|---|
+| ① | `group:<id>` | `EXISTS (… l.org_id=$1 AND l.template_id=t.id AND l.group_id=$N)`(`:87-90`) | §2「有效关联」= `group_id IS NOT NULL`,`atgl_state_check` 已把它与 `unlinked_at IS NULL` 配对,单条件即可 |
+| ②+④ | `ungrouped` | `EXISTS(...group_id IS NULL) OR (NOT EXISTS(...) AND (category IS NULL OR category=''))`(`:98-110`) | §4 验收 C「`ungrouped`(② 有关联行但 `group_id IS NULL` ∪ ④ 无关联行且 `category IS NULL OR category=''`)」 |
+| ③ | `category:<name>` | `NOT EXISTS(...) AND category IS NOT NULL AND category<>'' AND category=$N`(`:117-124`) | §4 验收 C/D;I2′「`NOT EXISTS` 判定谓词」 |
+
+**桶 ③/④ 的 `NOT EXISTS` 谓词是 A-1 锁文 §3 I2′ 判定谓词的逐字复用,非重新发明**——A-1 锁文原文(§3):
+
+> 判定谓词 = `NOT EXISTS (SELECT 1 FROM approval_template_group_links WHERE org_id = $org AND template_id = $tpl)`
+
+本切片桶 ③/④ 的 `NOT EXISTS` 子查询(`:104-107`、`:118-121`)与该谓词的表/列/组合逐字一致,只是把 `$org`/`$tpl` 换成参数化占位符 `$${orgIndex}`/`t.id`(外层查询的自然连接变量),没有引入第二套「是否从未关联过」的判定逻辑——这正是 A-1 设计 MD §6「留给后续切片的项」里点名的「I2′ 判定唯一消费方(`section=` 列表端点)也在 A-4 才存在」的兑现点,该行原话:「A-4 落地端点时须对该端点重做台账」——本切片桶③/④与 §4 D 行 mutation(同 B′:「后备判定改成『当前 `group_id IS NULL`』」)共同构成这份重做的台账,见验证 MD §4。
+
+`OR category = ''` 半句(`:108`)是 v2.6 P2-A 修法的逐字落地——锁文原句(§4 验收 C):「`section=ungrouped`……② 有活跃关联 ∪ ④ 无关联行且 **`category IS NULL OR category = ''`**——与 D 的 `<> ''` 收窄配对,否则空串行落零 section」。
+
+### 2.3 Row → DTO 映射复用(不新造第二套 DTO 转换)
+
+`listApprovalTemplatesBySection`(`ApprovalTemplateGroupSectionService.ts:140-184`)的 `SELECT t.*` 结果经 `ApprovalProductService.ts` 导出的 `TemplateRow` 类型与 `toApprovalTemplateListItemDTO` 函数映射(该服务文件本轮把两者从模块私有改为 `export`,`ApprovalProductService.ts:245`/`:4081` 附近,diff 见 `git diff a728ed655..HEAD -- packages/core-backend/src/services/ApprovalProductService.ts`)——`section=` 响应的 `data[]` 形状因此与既有 `GET /api/approval-templates` 逐字节一致,不是并行的第二套映射会漂移的风险。
+
+### 2.4 J/C 两句 400(补充清单 #5 挪期落地,`routes/approvals.ts:634-680`)
+
+A-1 设计 MD §6 把这两句列为「留给后续切片」,原话:
+
+> J 行「未知 `section=` 令牌 ⇒ 400」→ 补充清单 #5:锁文勘误请示 owner,挪到 A-4(分期 3)门,`section=` 到分期 3 才存在
+> C 行「`?category=` 与 `section` 同现 ⇒ 400」→ 同上,挪到 A-4
+
+本切片落地位置:`GET /api/approval-templates` 路由 handler 内,`section=` 分支的最前面(`:648-680`,先于任何 DB 访问):
+
+1. **`section` 与 `category` 冲突**(`:649-655`):`isOrgIdValuePresent(req.query.category)` 为真 ⇒ 400 `APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT`。
+2. **未知/非法 `section` 令牌**(`:660-667`):`sectionRaw` 非字符串(含重复 `?section=a&section=b` 解析成的数组)或解析失败 ⇒ 400 `APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID`。
+
+**实现者裁量,写明供门审核实**:`isOrgIdValuePresent`(`:350-354`)是 A-1 为 `orgId` 请求体/查询串检测而写的辅助函数,本切片复用它检测 `category` 查询参数是否「出现」(含数组形态)——函数名字面上是为 `orgId` 设计的,复用到 `category` 场景是命名与用途的不对齐,但行为正确(它的递归数组语义——「非空数组即算出现」——对 `?category=a&category=b` 同样适用,验证 MD §4 的「C/J: malformed section requests」用例已实测这条数组分支确实经这个调用点触发,不只是经 `resolveApprovalTemplateGroupOrgId` 自己的调用点触发)。是否要为 `category` 场景单独抽一个同义辅助函数是门审可核对项,不是缺陷。
+
+两句 400 的判定顺序(先 category 冲突,后 token 合法性)是实现者选择——两者都在任何 DB 访问之前,顺序不影响最终状态,只影响两者同时触发时返回哪一个码;测试(验证 MD §4)按当前实现顺序断言,未单独测过反序。
+
+## 3. 分页形状(§4 验收 C「每个 section 独立 page/pageSize」)
+
+- 请求:`GET /api/approval-templates?section=<token>&page=<n>&pageSize=<m>`(与既有 `listTemplates` 同一对 `page`/`pageSize` 参数名,路由内经 `resolveApprovalListPaging` 转换成 `limit`/`offset`,`:636-637`,本切片未新增分页参数形状)。
+- 响应:`{ data, total, limit, offset, section }`(`:670-676`)——`total` 是**该桶自己的行数**(`SELECT COUNT(*) … WHERE <同一 WHERE 子句>`,`ApprovalTemplateGroupSectionService.ts:167-170`),不是全部 section 的并集计数,也不是该 org 的模板总数(验证 MD §4「C: pagination」用例用一条桶外控制行验证这一点)。
+- **跨请求一致性不作承诺**——锁文原文(§4 验收 C):「独立请求之间不承诺跨时刻一致」。前端 `TemplateGroupSections.vue` 对每个 section 各自发起独立请求(`loadAll`/`loadMore`,`:270-337`),两次请求之间若发生归组变更,允许出现暂时的不一致,不是缺陷(任务书 §5 风险清单原话)。
+- 前端「加载更多」不用 `el-pagination`(N 个独立 section 游标用一个共享分页控件不自然),改为每个 section 一个手动"加载更多"按钮,`hasMore` 判据是 `items.length < total` 的真实剩余量检查,不是 `page * pageSize < total`(后者对短页/整页边界都会算错,`TemplateGroupSections.vue:310-313` 注释自陈理由)。
+
+## 4. 重排端点的事务与锁序(§3 I3;§4 验收 E 后半;§6 表第 3 行)
+
+### 4.1 端点(`routes/approvals.ts:1288-1303`)
+
+```
+POST /api/approval-template-groups/reorder
+Guard: authenticate, approvalTemplateAdminGuard(与其余六个 A-1 写端点同一常量)
+Body:  { groupIds: string[] }  — 该 org 全部活跃组的完整排列,不是增量
+```
+
+请求体形状校验(数组、每项非空白字符串)在**任何 DB 访问之前**完成(`:1292-1296`),失败 ⇒ 400 `GROUP_REORDER_IDS_REQUIRED`——与本文件其余六个端点「先解析 org / 校验请求,再碰 DB」的一贯纪律一致(`:1216` 附近的既有注释「Every handler resolves `orgId` … FIRST — before any query」)。
+
+### 4.2 锁序(§2 锁序表「重排 L0→L1(该 org 全部活跃行)」)
+
+`reorderApprovalTemplateGroups`(`ApprovalTemplateGroupReorderService.ts:111-142`),逐语句锁序:
+
+| 步骤 | 语句 | file:line | 锁 |
+|---|---|---|---|
+| 1 | `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` | `:117` | 无锁,但**必须是 `BEGIN` 后第一条语句**(与 A-1 四条 L0 路径同一纪律——晚置在 RR 默认下报 `25001` 并中止整事务) |
+| 2 | `SELECT pg_advisory_xact_lock(hashtext($1))`,key = `'atg:' + orgId` | `:118` | **L0**,与 A-1 六条既有路径共用同一把顾问锁 |
+| 3 | `SELECT id FROM approval_template_groups WHERE org_id=$1 AND archived_at IS NULL ORDER BY id FOR UPDATE` | `:119-122` | **L1**(批量,该 org 全部活跃行;`ORDER BY id` 只为锁等待轨迹的确定性,非正确性必需——见 `:103-106` 注释:任何其他写者都先取 L0,已经把这条事务与之全序化) |
+| 4 | `validateApprovalTemplateGroupReorderIds(orderedIds, activeIds)`(纯函数,零 DB) | `:123-126` | 在 L0+L1 临界区**内**读到的 `activeIds` 上做 SET 相等校验——与 §2「无 TOCTOU 窗口」的要求一致:校验用的快照与随后写入用的是同一个 | 
+| 5 | N 条 `UPDATE approval_template_groups SET sort_order=$3 WHERE org_id=$1 AND id=$2`(每行一条,`sortOrder = index+1`) | `:129-136` | 仍在同一事务/L0/L1 临界区内 |
+
+**六条路径(A-1 的五条 + 本切片重排)的锁序表全部满足 L0<L1<L2 递增或止步于 L0/L1,无一路径反向获取**——重排本身不碰 `approval_template_group_links`,故止于 L1,不涉及 L2(`ApprovalTemplateGroupReorderService.ts:13-14` 头注释:「reorder never touches `approval_template_group_links`, so there is no L2」)。
+
+### 4.3 `atg_sort_unique` DEFERRABLE 约束的利用(§2 DEFERRABLE 三条副作用)
+
+约束定义:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts:58`:
+
+```sql
+CONSTRAINT atg_sort_unique UNIQUE (org_id, sort_order) DEFERRABLE INITIALLY DEFERRED
+```
+
+重排的 N 条 `UPDATE` **逐行顺序写**而非「先清 NULL 再统一写」的两阶段舞步——利用的正是 DEFERRABLE 副作用③(约束只在 **COMMIT** 时检查):写第 K 行 `sort_order=k` 与写第 K+1 行之间,事务内部完全可能出现瞬时重复(例如把 `sort_order=1` 从组 A 移到组 B 之前,组 B 短暂持有旧值),这在语句级别合法,只在 COMMIT 时校验(锁文原句:「重排事务内允许中间态重复,提交时校验」——`ApprovalTemplateGroupReorderService.ts:21-26` 头注释与迁移文件 `:53` 注释引用同一条 DDL 注释)。这是本切片相对「两阶段清空再写」这种更保守写法的一个明确设计选择,依赖的正是 A-1 已经 ratify 的约束形状,不是本切片新增的约束行为。
+
+### 4.4 约束错误映射(与 A-1 同码,非新造)
+
+`mapReorderConstraintError`(`ApprovalTemplateGroupReorderService.ts:44-56`)是 A-1 `ApprovalTemplateGroupService.ts` 私有 `mapGroupConstraintError` 的**复制**,不是共享导入——头注释(`:6-11`)说明理由:并行的分期 2(A-3)lane 正在把 `ApprovalTemplateGroupService.ts` 重构为 `WithClient` 原语,本切片对它唯一的真实依赖只是这一段约束映射,体量小到不值得跨两条并发变化的 lane 做导出/导入耦合。映射结果:
+
+| 约束 | 触发条件 | 映射结果 | 与 A-1 关系 |
+|---|---|---|---|
+| `atg_sort_unique`(23505) | 重排写入的 `sort_order` 与另一并发写入的值在 COMMIT 时冲突 | 500 `GROUP_SORT_CONFLICT` | **复用 A-1 已 ratify 的同一个码**(A-1 §2「DEFERRABLE 副作用③」),不是本切片新码 |
+| `uq_atg_org_name_active`(23505) | 重排的 `UPDATE` 从不写 `name`,今天不可达(见下) | 409 `GROUP_NAME_TAKEN` | 同上——保留这条分支是防御性的,供未来若某次重排语句改为也写 `name` 时仍有类型化码,而非让裸 23505 经 `handleApprovalsError` 的通用 500 泄漏出去(`:38-42` 头注释原话) |
+
+### 4.5 请求形状校验(纯函数,§3 I3「排列缺项/多项/含归档组」)
+
+`validateApprovalTemplateGroupReorderIds`(`ApprovalTemplateGroupReorderService.ts:74-100`)对四种不匹配形状(缺项/多项/重复/含归档组或外部 id)统一抛同一个 `ServiceError`(400,`GROUP_REORDER_SET_MISMATCH`)——不是每种形状一个专属码。理由(`:67-72` 注释):客户端可观测的事实在四种情况下完全相同——「你发来的列表不是这个 org 当前的活跃组集合」——而 `activeIds` 参数按约定只包含活跃组 id,一个已归档组的 id 在这里与一个从未存在过的外部 id 无法区分(两者都只是没通过 `activeSet.has(id)`)。
+
+## 5. 前端分节 / 上移下移(`TemplateGroupSections.vue`,新文件,583 行)
+
+### 5.1 挂载方式(不影响既有测试)
+
+`TemplateCenterView.vue` 新增一个 `viewMode`(`'flat' | 'grouped'`,默认 `'flat'`)的视图切换按钮组;既有的管理表格/申请人画廊整块包进 `v-if="viewMode === 'flat'"`,`TemplateGroupSections` 作为**兄弟模板**(`v-else`)而非既有表格的包装层——诊断:若把新分组视图合并进既有表格自身的 `v-if`/`v-else` 对,会让画廊的 `v-else` 分支在「分组模式 + 非管理员」时也意外触发(`TemplateCenterView.vue` 新增注释原话,`:113-119`)。默认值保持 `'flat'`,故 `approvalTemplateCenterCategory.spec.ts`/`templateCenterI18n.spec.ts` 等既有 spec 在从不触碰 `viewMode` 时行为逐字节不变(验证 MD §5 已重跑确认)。
+
+### 5.2 分组上移/下移(§3 I3 / §4 验收 E 后半 / §6 表第 3 行)
+
+每个 `group:<id>` section 的表头带 ▲/▼ 两个按钮(`data-testid="template-group-section-move-up-<token>"`/`move-down-...`),点击后:
+
+1. 在**当前渲染的** `group:` 分组顺序(`groupTokenOrder`,`:259`,不是活跃重新拉取)里与相邻项交换;
+2. 组装该 org 全部活跃组 id 的完整排列,调用 `reorderApprovalTemplateGroups`;
+3. 成功 ⇒ 按响应的 `sortOrder` 重排 `sections` 里的 `group:` 项(不重新拉取任何 section 的内容——`applyGroupOrder`,`:377-384`);失败 ⇒ 非阻塞行内错误(`reorderError`),顺序保持移动前的状态。
+
+`reorderingToken` 在请求进行中禁用全部上移/下移按钮,防止第二次点击与同一个 L0 临界区竞争。`ungrouped`/`category:<name>` 两类 section 从不显示这两个按钮(`v-if="isGroupToken(section.token)"`,`:112`)。
+
+### 5.3 「拖拽归组」的实现替代(明确的设计选择,非缺失)
+
+锁文 §6「期 3」表第 3 行原文写「拖拽归组」;本切片**没有**实现原生 HTML5 拖放,而是给每个模板项一个键盘可操作的 `<select>`(「移动到…」)。这是一个**有意的、已写明的替代**,理由与先例(`TemplateGroupSections.vue:16-19` 头注释):
+
+- 与仓内既有先例 `TemplateAuthoringView.vue` 的步骤重排「上移」/「下移」按钮同一套惯例(该文件本身也不用原生拖放);
+- 键盘可操作的输入面覆盖面**等于或宽于**鼠标拖放(拖放操作本身通常也仍需一个非拖放的键盘替代方案才能满足可访问性,而 `<select>` 本来就是键盘原生的),不是缩窄。
+
+`<select>` 调用的是 A-1 phase-1 已经真库测试过的 link/unlink 端点(`linkApprovalTemplateToGroup` / `unlinkApprovalTemplateFromGroup`,B/B′/B″/H 覆盖),不是新写路径。
+
+**目标集规则**(`moveTargetsFor`,`:393-401`,三条边界,均在头注释里逐条写明理由,不是隐式行为):
+
+1. 目标只从**当前渲染的** `group:` 分组取,不做移动瞬间的活跃重新拉取——与分组重排同一「可接受的过期」惯例;若目标在加载与点击之间被别人归档,呈现为端点自身的 409 `GROUP_ARCHIVED`,按普通失败处理(非阻塞行内错误,行位置不变)。
+2. 「未分组」选项**只**从 `group:<id>` section 提供——从 `ungrouped` 提供是逻辑上的空操作;从 `category:<name>` 提供也不会做任何有意义的事(该行从未关联过,`unlink` 的 `WHERE … AND group_id IS NOT NULL` 匹配 0 行,`NOT EXISTS` 仍为真,行会继续留在原 category 桶——若 UI 对此显示"成功"就是在撒谎)。
+3. 把 `category:<name>` section 的最后一行移出后,该 section 从 `sections` 中整体移除(与 `loadAll()` 对零命中 category 候选的丢弃是同一条「0-total 候选即不渲染」规则,`applyItemMove:441-443`)。
+
+### 5.4 未做的门控(写明供门审核实,非疏漏)
+
+上移/下移按钮与移动 `<select>` **都不**在这个组件里再做一层 `canManageTemplates` 客户端门控——两者都只依赖路由自身的 `approvalTemplateAdminGuard`(I7)fail-closed 403(与其余错误同一种非阻塞行内呈现)。头注释(`:38-46`)说明这是对两个写控件的**统一**选择,不是逐控件的临时判断(只门控一个不门控另一个,会在同一组件里把一个 guard 拆成两半)。加客户端门控需要这个文件依赖 `useApprovalPermissions()`,会改变现有 spec 的 mock 面,列为未做(不是被否决,只是本次范围之外)。
+
+## 6. 留给后续 / 未做
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 两个写入面换分组选择器(I4 生效) | **未做** | 见 §1.2;I4 生效时点未到 |
+| 前端会话-组织(session-org)脱困入口接入 `section=` 端点 | **缺口,新披露** | `section=` 分支复用 `resolveApprovalTemplateGroupOrgId`(`:668`,与其余七个端点同一函数),多 org 成员在未选 session org 时会在**这条读路径**也吃 403 `SESSION_ORG_REQUIRED`(与既有 6 个写端点同一失败形状)——但 `TemplateGroupSections.vue` 的 `loadAll`/`loadMore` 只把任何异常的 `message` 塞进一个通用错误字符串(`:318-319`、`:333-336`),**没有**对 `SESSION_ORG_REQUIRED` 单独识别、也没有像 A-2 设计的那样触发 session-org 选择器。更根本的是:本分支不含 A-2 的任何提交,`apps/web/src/components/SessionOrgSwitcher.vue` 在这个 worktree 里**不存在**(`find` 零命中)——即便本切片想接,也没有可接的组件。锁文验收 J 的 mutation(「去掉前端对该码的处理 ⇒ 用例停在 403」)在这条新读路径上目前就是这个未处理状态,不是假设性风险。归类为「A-2/A-4 交叉线的新缺口」,列入 owner 待裁(见 §7)。 |
+| `approval_templates.key` 全局唯一 / 多级分组 / 按分组授权 / 跨组织共享分组 / 硬删分组端点 | 不排期 | 与 A-1 §5「明确不做」一致,本切片未新增 |
+| §4 验收 C 的跨请求一致性 | 不作承诺 | 锁文原文明写,见 §3 |
+| 移动/重排控件的客户端权限门控 | 未做 | 见 §5.4,依赖路由 fail-closed,不是客户端二次判断 |
+
+## 7. Owner 待裁项(Q5,原样引用抬头 RATIFY 记录;含本切片新增的一条披露)
+
+锁文 §7 原文(与 A-1 设计 MD §7 相同一份清单,Q5 那一行是本切片的门):
+
+> 2″. **Q5:分期 3 时 `?category=` 过滤与 `/categories` 端点的去留**(首期不动);
+
+抬头 RATIFY 记录对 Q5 的裁决是「首期不动,分期 3 再裁」——即 owner 把**实际决定**留给了本切片交付的这一刻。本切片**按锁文字面**执行了「不动」的那一半:`?category=` 等值过滤与 `GET /api/approval-templates/categories` 端点在本切片**零改动**(`git diff a728ed655..HEAD -- packages/core-backend/src/routes/approvals.ts` 里两处相关代码块之外的既有过滤逻辑未被触碰)。但「再裁」的那一半——去还是留——**本切片没有替 owner 作出**,原样悬空。
+
+**本切片新增的一条披露(不是「零改动」就等于「零影响」)**:`TemplateGroupSections.vue` 的 `loadAll()`(`:280-324`)新增了 `/categories` 端点的一个**新消费方**——它调用 `listTemplateCategories()` 枚举 `category:<name>` 候选 section(`:193`、`:286`),对每个候选名再向 `section=category:<name>` 请求解析成该 org 的真实桶,零命中的候选被丢弃(`:317`)。这意味着:如果 owner 在 Q5 上最终裁决**去掉** `/categories` 端点(该端点本身是「全局、org 无关的名字候选列表」,§Q5 待裁的正是这一点),分组视图会失去枚举 `category:<name>` section 的手段——不是「删掉一个没人用的端点」,而是「删掉一个刚多了一个新调用方的端点」。这条事实应当作为 Q5 裁决的一项输入,而不是被本切片的「不删不改」这句话盖过去当作与 Q5 无关。
+
+按 §0 抬头 RATIFY 记录以及本切片的执行结果:Q5 仍是唯一悬空的 owner 裁决点,新增了一条具体的影响面披露,不构成裁决,也不阻塞本切片的 Draft PR(与 A-1 设计 MD §7 末段「不阻塞本切片的 Draft PR」同一处置方式)。
+
+---
+
+## 8. A-2 × A-4 合流(2026-09-20,分支 `feat/approval-template-groups-phase3-sections-on-a2`)
+
+> **本节的适用范围**:本文件 §1–§7 描述的是 A-4 在 **A-1 之上**(分支 `feat/approval-template-groups-phase3-sections`,head `879070ef2e`)的切片。
+> owner 定下的合并顺序是 **#5854(A-2)→ #5878(A-4)→ #5866**,所以 A-4 实际落地的底座是 **A-2 的 head**,不是 A-1。
+> 本节记录「A-4 重放到 A-2 之上」这一步引入的取舍。**§1–§7 的任何一节都不作废**;受影响的句子在 §8.5 逐句求值。
+> 合流本身的缺陷清单来自 `reviews/verify-groups-a2-a4-combined-build-20260920.md`(判定 FAIL:P1-1 / P2-1 / P2-2 / P3-1)。
+
+### 8.1 底座与重放法(命令级,含对 prompt 字面命令的一处更正)
+
+| 项 | 值 |
+|---|---|
+| 新分支 | `feat/approval-template-groups-phase3-sections-on-a2` |
+| 底座(A-2 head, #5854) | `4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c` |
+| 被重放的 lane(A-4 head, #5878) | `879070ef2ec11c6d2e8b099b8ca9755b637a5fff` |
+| 切点(A-4 自己的 A-1 段末尾) | `66f526145c` |
+| 对应的 A-2 自己的 A-1 段末尾 | `c9636946de` |
+| 重放命令 | `git rebase --onto 4678b01cb6 66f526145c` |
+
+**为什么切点不是 A-1 的 head `afb88f05973b9f2cfa0c19483a6fa96afa1f3e06`**:`afb88f059` 不是 A-2 / A-4 任何一条 head 的祖先
+(`git merge-base --is-ancestor` 两次都返回 NO)——两条 lane 各自带着 A-1 的**同内容、不同 SHA** 的副本,且 A-1 自己的基点是更旧的 main
+(`merge-base(main, A-1) = 868c8d2b26`)。按字面执行 `git rebase --onto <A-2 head> afb88f059`,重放集是
+`afb88f059..HEAD`,其中 `868c8d2b26..19cb18f858` 的 main 提交**不在** A-1 一侧,会被当作 lane 提交重放成副本
+——正是 `feedback_stacked_lane_rebase_onto_base_duplicates_main` 记的那次事故的形状。
+
+改用两条 lane 各自的 A-1 段末尾作切点,判据是**树等价**而不是提交信息:
+
+```
+git rev-parse 66f526145c^{tree} c9636946de^{tree}
+d302d29569c12cd9d43d16a317c71b955db804b9
+d302d29569c12cd9d43d16a317c71b955db804b9      # 逐字节相同 ⇒ 切点两侧同底座
+```
+
+A-4 在切点之上有 27 个自己的提交,重放后落地 25 个(2 个因内容已在底座而成为空提交被 git 丢弃:
+A-2 的 exec 行合并已经先做掉了 A-4 的 `fix(ci): collapse duplicated exec lines`,s6a pin 在逐次冲突解决时已重算)。
+机械核对:`git cherry origin/main HEAD` **全部** `+`(零 `-`,即与 main 零重复);
+`origin/main..HEAD` 内部 patch-id 重复数 **0**(A-1 段只出现一次)。
+行数本身不在此处钉死:它随 main 前进、随本分支每一次修复轮自增(写下这句话的提交就会把它 +1),
+所以先前钉的 `83` 在落笔当刻即已过期。**定稿口径 = 对当时的 head 现跑
+`git cherry origin/main <final head> | grep -c '^-'` 必须为 0**,而不是与任何写死的行数比对。
+
+### 8.2 P1-1 —— 分组客户端收口成单一实现家
+
+合流后 `apps/web/src/approvals/api.ts` 有**三个函数各两份实现 + 一个类型两个家**(git 三方合并不报冲突,因为两段代码落在文件不同区域):
+
+| 符号 | A-4 侧 | A-2 侧 | 收口结果 |
+|---|---|---|---|
+| `listApprovalTemplateGroups` | `apiGet`,裸 `Error`,有 `USE_MOCK` | `getApprovalJson`,`ApprovalApiError`(带 `.code`) | **保 A-2 版**,吸收 A-4 的 I7 读门注释 |
+| `linkApprovalTemplateToGroup` | `apiPost`,`Promise<void>` | `postApprovalJson`,`Promise<ApprovalTemplateGroupLinkDTO>` | **保 A-2 版**(返回类型放宽,A-4 调用点忽略返回值) |
+| `unlinkApprovalTemplateFromGroup` | `apiFetch` + 手写 `!response.ok` | `deleteApprovalJson` | **保 A-2 版** |
+| `ApprovalTemplateGroupDTO` | `src/types/approval.ts:629` | `api.ts` 本地 `export interface`(字段逐个相同) | **单一家 = `types/approval.ts`**;`api.ts` 改成 `export type { … }` 再导出,A-2 消费方的 import 路径不变 |
+| `listTemplatesBySection` / `reorderApprovalTemplateGroups` | A-4 独有,无 A-2 对手 | — | 原样保留,**含各自的 `USE_MOCK` 分支** |
+
+**为什么保 A-2 版**(这是本次唯一一处「两边契约互斥、必须让一方落空」的取舍):验收 J 的 403 重试流
+(多 org 成员 → `SESSION_ORG_REQUIRED` → 共享选择器 → 重试 → 201)在 `ApprovalTemplateGroupsPanel.vue`
+的 `loadGroups` / `onCreate` 两处 catch 里写的是 `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'`
+(此处改用符号锚点:原文写的 `:135/:155` 是从 merge 树的报告里抄来的行号,对本 rebase 树从一开始就是错的);
+A-4 的包装抛的是裸 `Error('API error: <status> <statusText>')`,**没有 `.code` 这个字段**——保 A-4 版
+会把验收 J 的整条重试流变成任何测试都看不见的死码。反方向的代价则是可归零的:
+`TemplateGroupSections.vue` 的 catch 当时全是 `catch (e: any)` / `catch {}`,只读 `message`,不读 code。
+**已于 2026-09-20 第 2 轮修复中变更(门审 D3-1)**:`loadAll()` 的 catch 现在同样判
+`e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED'` 并转入共享选择器,即上面这条
+「反方向代价可归零」的论证只对其余三处 catch(`loadMore` / `moveGroupSection` / `onMoveItem`)继续成立;
+对 `loadAll()` 而言,保 A-2 版已从「代价为零」升级为「必要条件」。详见 §8.8。
+
+### 8.3 `USE_MOCK` —— 三个收口函数**不**带 mock 短路(明确取舍,非遗漏)
+
+prompt 写「`USE_MOCK` 短路若 A-4 的 spec 需要则以同一 guard 保留并写明」。核实结果:**A-4 的 spec 不需要**。
+
+- `apps/web/tests/approvalTemplateCenterSections.spec.ts:46` 把整个 `../src/approvals/api` 模块 `vi.mock` 掉,
+  18 个用例一个都不走真实 `fetch`,`USE_MOCK` 对它零影响;
+- 反方向**有**硬约束:`apps/web/tests/approvalTemplateGroupsClient.spec.ts` 的 8 个用例走真实 `fetch`
+  (`vi.stubGlobal('fetch', …)`),并且它自己的模块注释逐字写明「These functions carry no `USE_MOCK` gate
+  (unlike most of this file) … a function with no mock branch has nothing to bypass」。Vitest 下
+  `import.meta.env.DEV` 恒为真且这个 spec 不设 `__APPROVAL_MOCK__ = false`,所以给这三个函数加 `USE_MOCK`
+  会让这 8 个用例当场短路成空转/红。
+
+**已披露的残留(DEV 体验,非 CI/生产)**:`listTemplatesBySection` 保留了 `USE_MOCK`,三个收口函数没有,
+于是 DEV 且无后端时,分组视图的分组列表会走真实网络并落到它自己的顶层错误态,而分节内容走 mock 返回空。
+没有把 `listTemplatesBySection` 的 guard 一并删掉(那是 A-4 自己 spec 之外的行为改动),也没有另造一个更窄的
+第三种 mock 语义(会变成「另造更窄同类物」)。这条留给 lane 后续自行裁,**不影响任何闸**。
+
+### 8.4 P2-1 / P3-1 —— I6 不变量与两套分组界面的主从关系
+
+合流前两个问题是同一件事的两面:A-2 的 `<ApprovalTemplateGroupsPanel v-if="canManageTemplates">` **不分 viewMode 恒挂**,
+它 `onMounted` 就调 `listApprovalTemplateGroups()`;于是
+(a) 平铺视图的 `approvalTemplateCenterCategory.spec.ts` 里 A-4 的 I6 断言(「扁平表的分类标签绝不触发分组联查」)被证伪;
+(b) 管理员切到分组视图时,面板与分节视图同时渲染、各拉一次分组、状态互不同步。
+
+**裁决:改挂载,不改不变量。** 二选一里选「让 A-2 面板惰性/按需挂载」,不选「在 A-4 设计 MD 里改写 I6」,理由三条:
+
+1. I6 是**锁文 §3 的不变量**,不是 A-4 的实现细节。改写它需要 owner 裁;改一个组件的挂载条件不需要。
+   门审可以对照 A-4 head 逐字核:`approvalTemplateCenterCategory.spec.ts` 的 I6 断言在本分支**一个字都没改**。
+2. 「面板恒挂在平铺视图」本身就不是 A-2 想要的产品形态——它是 A-2 单独交付时唯一的入口位置;
+   A-4 落地后,分组视图才是分组的主场。
+3. 改写不变量会让「扁平表不联查分组」这条从**可机械证伪**降级成一句散文,而现在它仍然有正控
+   (同文件的 live-binding 正控 + 下面 §8.7 的两条 mutation)。
+
+主从关系(写入 `TemplateCenterView.vue` 模板注释,不只写在 MD 里):
+
+| 角色 | 组件 | 行为 |
+|---|---|---|
+| **主**(呈现) | `TemplateGroupSections`(A-4) | 拥有分组渲染顺序与每节的行;进入分组视图时**唯一**读分组列表的人 |
+| **从**(管理入口) | `ApprovalTemplateGroupsPanel`(A-2) | 仅管理员、**仅分组视图**、且**折叠**在「管理分组 / Manage groups」披露开关之后;只有管理员显式展开时才挂载(才读一次它要编辑的权威列表) |
+| 同步 | `changed` 事件 | 面板新建成功 ⇒ `emit('changed')` ⇒ 视图调分节视图已 `defineExpose` 的 `loadAll()` |
+
+**⚠️ 这一步收窄了验收 J 的页面级入口 —— owner 待裁(新增,本节唯一的 owner 项)**
+
+锁文 §2 原文要求「首期必须……提供 session-org 选择入口」,A-2 把这个入口实现成:
+管理员打开模板中心页 ⇒ 面板 `onMounted` 即调 `listApprovalTemplateGroups()` ⇒ 多 org 成员吃 403
+`SESSION_ORG_REQUIRED` ⇒ 共享选择器自动出现。**合流后这条路径变成两步**:先切到分组视图,再点开「管理分组」。
+并且第一步里 `TemplateGroupSections` 会先用同一个端点吃到同一个 403,而它的 catch 不读 `.code`
+(§8.5 第 4 行的缺口),所以多 org 成员**先看到的是一条通用错误**,要自己想到再点两下才能拿到选择器。
+
+组件级的验收 J 一个字没改(`ApprovalTemplateGroupsPanel.spec.ts` 3/3 仍绿,面板仍是 403→选择器→重试→201);
+**被收窄的是页面级入口的可达性**。按「另造更窄同类物 = 合同变更」的判据,这属于 owner 裁,不属于实现细节,
+本分支不替 owner 决定,原样披露:
+
+> **待裁(D3-1)**:接受「验收 J 入口从页面加载即触发收窄为分组视图 + 展开管理器两步」,
+> 还是要求把 `SESSION_ORG_REQUIRED` 的识别接进 `TemplateGroupSections`(即把 §8.5 第 4 行那条缺口
+> 一并关掉,让分组视图自己也能弹选择器)?
+> 两个选项都不阻塞本分支的构建闸;第二个选项是新增行为,需要新的用例与一次 lane 内的实现轮。
+
+**没有把分组列表上提到父组件共享一份 state**:`approvalTemplateCenterSections.spec.ts:150` 钉的是
+「分节视图自己调 `listApprovalTemplateGroups()` 恰好 1 次」,上提会直接打破 A-4 自己的验收。
+因此「共享同一份数据」在本分支实现为**单一权威呈现面 + 默认渲染路径零重复拉取 + 变更后主动重读**,
+而不是一个共享 store——这是被 A-4 既有验收约束住的形状,不是偷懒。
+
+### 8.5 §1–§7 受影响句子的逐句求值(不作废整节)
+
+| 出处 | 原句(摘要) | 本分支求值 |
+|---|---|---|
+| §5.1 | 「默认值保持 `'flat'`,故 `approvalTemplateCenterCategory.spec.ts`/`templateCenterI18n.spec.ts` 等既有 spec 在从不触碰 `viewMode` 时行为逐字节不变」 | **对 A-4 自己的改动仍然成立**(A-4 相对其底座没动平铺分支)。**在本合流分支上不可再读作「页面平铺视图与 A-2 head 相同」**:平铺视图里 A-2 的分组面板被移走了(§8.4)。两条 spec 仍然全绿,但原因变了——不是「没被触碰」,是「面板不再挂在这里」。 |
+| §5.1 | 「`TemplateGroupSections` 作为兄弟模板(`v-else`)」 | **仍然成立**,形状略变:`v-else` 现在是一个 `<template v-else>`,里面依次是(管理员才有的)折叠管理入口与分节视图本身。分节视图相对既有表格/画廊仍是兄弟,不是包装层。 |
+| §6 表「前端会话-组织接入 `section=`」行 | 「本分支不含 A-2 的任何提交,`SessionOrgSwitcher.vue` 在这个 worktree 里**不存在**(`find` 零命中)」 | **这半句在本分支被推翻**:底座就是 A-2,`apps/web/src/components/SessionOrgSwitcher.vue` 存在。 |
+| 同上 | 「`TemplateGroupSections.vue` 的 `loadAll`/`loadMore` 只把异常的 `message` 塞进通用错误字符串,没有对 `SESSION_ORG_REQUIRED` 单独识别」 | **仍然成立(OPERATIVE),而且后果比合流前更靠前**。缺口没被关掉,只是从「想接也没有组件可接」变成「组件与带 `.code` 的错误都有了,纯粹是没接」——§8.2 的收口顺带把这条路径的错误类型从裸 `Error` 换成了 `ApprovalApiError`,**接线的前置条件现在具备了**。但同时:分节视图成了分组的主呈现面(§8.4),多 org 成员现在**先**撞上它的通用错误,**再**才有机会点开管理器拿到选择器——所以这条缺口从「另一条读路径上的未处理码」升级成「验收 J 页面级入口的第一跳」。合并进 §8.4 的 owner 待裁项 **D3-1**,本分支不擅自接。 |
+| §5.4 | 「上移/下移与移动 `<select>` 都不在组件里再做 `canManageTemplates` 客户端门控」 | **仍然成立**,本分支未触碰 `TemplateGroupSections.vue` 的门控面。注意新增的**管理入口**(§8.4)确实带 `v-if="canManageTemplates"`——那是 A-2 面板的原有门控随挂载点一起搬过来的,不是给 A-4 控件新加的门控。 |
+| §7 / §6 其余行 | Q5 悬空、I4 未到、`/categories` 新消费方披露等 | **全部不受合流影响,原样成立**;`listTemplateCategories()` 的新消费方仍在 `TemplateGroupSections.vue`。 |
+
+### 8.6 合流冲突清单(8 个 hunk / 6 个文件)与解法
+
+| # | 文件 | 解法 | 性质 |
+|---|---|---|---|
+| R1 | `plugins/…/s6a-package-provenance-pins.json` ×3 次(`5f1681b00c` / `ac45ce475a` / `458cf76111`,每次都按当时的工作树重算) | 按当时工作树的 `.github/workflows/plugin-tests.yml` **重算** sha256,不抄任何一侧的旧值 | 机械 |
+| R2 | `apps/web/scripts/run-required-web-tests.sh` ×2 次(`8f4232b704` / `879070ef2e`) | token 并集后**恰好一条** `^exec npx vitest run` 行 | 机械(见 §8.7 闸) |
+| R3 | `apps/web/src/views/approval/TemplateCenterView.vue`(import 块) | 两条 import 都留 | 机械 |
+| R4 | `apps/web/tests/approvalTemplateCenterCategory.spec.ts`(`vi.mock` 工厂) | `listApprovalTemplateGroups` 单键,绑 **A-4 的 spy**(严格强于 A-2 的 `() => Promise.resolve([])`:同样返回空数组,另外可计数);A-2 的 `ApprovalApiError` / `createApprovalTemplateGroup` 两键保留 | **判断项** |
+| R5 | `api.ts` 的三函数 + 一类型 | 见 §8.2 —— **git 不报冲突,是静默缺陷** | **判断项** |
+| R6 | `TemplateCenterView.vue` 的面板挂载位置 | 见 §8.4 | **判断项** |
+
+`.github/workflows/plugin-tests.yml`、`packages/core-backend/vitest.config.ts`、`packages/core-backend/src/routes/approvals.ts`
+在本次重放中**没有**产生冲突(A-2 对前两者的改动是 A-4 的真子集,底座与切点树等价)。
+
+### 8.7 合流后闸(数字见验证 MD §15)
+
+四项全绿:`vue-tsc -b` 只剩 `vite.config.ts(28,29) TS2769`(已用 `origin/main` 同工作树基线证明是环境项,非 lane 引入)、
+`vite build` 通过、`bash -e apps/web/scripts/run-required-web-tests.sh` 退出 0、两条 lane 的 8 个定向 spec 全绿、
+core-backend `tsc --noEmit` 零错。`scripts/dev/atg-exec-line-post-rebase-check.sh` 在本分支 **PASS(exec 行 = 1)**——
+两条 lane 各自 head 上它曾经是红的。
+
+### 8.8 第 2 轮收口(2026-09-20,门审 `impl-gate-A4-on-A2-merge-fix-round1-20260920.md`)
+
+门审判 **DRAFT-READY**,P1 = 0,P2 = 1,P3 = 3,owner 自述项 1。本节逐条记处置;数字与实跑记在验证 MD §16。
+
+| 门审条目 | 处置 | 要点 |
+|---|---|---|
+| **P2-1** A-4 仅存两个客户端函数零线级覆盖 | **已修**(按门审建议 (a)) | `approvalTemplateGroupsClient.spec.ts` 增 2 条用例,覆盖 `listTemplatesBySection` 的查询串与 `reorderApprovalTemplateGroups` 的请求体 / `{groups}` 解包 / 缺键回退。**一处偏离建议的实现细节见下方「(a) 不能照字面复用夹具」。** |
+| **D3-1** 验收 J 页面级入口被收窄 | **已实现**(本 lane 收到的指令是「实现」,**不是** owner 已裁) | `TemplateGroupSections.vue` 的 `loadAll()` catch 改判 `e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED'` → 整段沿用 A-2 面板的机制(选择器 + `loadSessionOrgs()` + 单槽重试 + `switchSessionOrg` 后重放)。**owner 对「两步入口 vs 接进分节视图」的裁决仍未记录**;本轮只是把后者做出来,不代表该裁决已发生。 |
+| **P3-1(a)** 设计 MD `git cherry` = 83 | **已修:删硬数字,不改成新数字** | 该数字自指(写它的提交就把它 +1),任何写死值在落笔当刻即过期 —— 见 §8.1 改后的句子:判据改成「对定稿 head 现跑,`grep -c '^-'` 必须为 0」。 |
+| **P3-1(b)** `ApprovalTemplateGroupsPanel.vue:135/:155` 行号错 | **已修:改符号锚点** | `api.ts` 注释与本文 §8.2 都改成 `loadGroups` / `onCreate` 两处 catch。**不填新行号**:本仓已多次因行号锚点腐烂吃亏,且这两处正是从 merge 树的报告抄进 rebase 树才出的错。 |
+| **P3-2** `approvalTemplateCenterSections` 缺路径过滤点 | **已修** | `approval-web-guard.yml` 的两个 `paths:`(`pull_request` / `push`)各加 `TemplateGroupSections.vue` + `approvalTemplateCenterSections.spec.ts`,并把 token 加进该 workflow 的 vitest 行 —— 整段照 A-2 三个 spec 的先例摆放,含同形的双向子串普查注释。 |
+| **P3-3** `IntegrationRunDetail` 陈旧底座 | **已由 rebase 解决** | 本轮把候选重放到 A-2 的新 head(它已 rebase 到 `origin/main` `123b1d1e54`),`IntegrationRunDetail` 随之回到活 exec 行。解冲突取 **UNION**,三个差集实测为空 —— 见 §8.9。 |
+| **P3-4** exec 行 CI 到达性 | **仍 UNVERIFIED** | 本地仍无法在脚本内跑到第 45 个调用(阻塞点不变、与 `origin/main` 逐字节相同)。关门条件不变:本分支第一次 `web-tests` 绿。 |
+| **P3-5** `vite.config.ts(28,29) TS2769` | **仍是本机环境项** | 本轮复核:`git diff --stat origin/main HEAD -- apps/web/vite.config.ts` 输出 **0 字节**,`vue-tsc -b` 的唯一一条错仍是它。 |
+
+#### (a) P2-1 不能照字面「复用既有真 fetch 夹具」——实测出来的约束
+
+门审建议 (a) 写的是「复用它既有的 `vi.stubGlobal('fetch')` 夹具」。**照字面做会得到两条空转绿的用例**,实测如下:
+
+`api.ts` 的 `USE_MOCK = __APPROVAL_MOCK__ === true || (import.meta.env.DEV && __APPROVAL_MOCK__ !== false)`。
+A-2 的七个 §6 phase-1 函数**没有** `USE_MOCK` 短路(该 spec 文件的抬头注释正是这么写的),所以裸 fetch stub 对它们有效;
+而 `listTemplatesBySection` / `reorderApprovalTemplateGroups` **各自第一行就是 `if (USE_MOCK) return …`**(§8.3 记过这条取舍),
+`DEV` 在 Vitest 下恒 true ⇒ 探针实测 **fetch 调用数 = 0**,函数直接返回 mock 值,URL 根本没被拼出来。
+
+因此这 2 条用例用的是 `__APPROVAL_MOCK__ = false` + `vi.resetModules()` + 动态 `import()`
+(`api.ts` 自己的注释就为「mounted browser harness」写了这条逃生口,仓内先例:
+`apps/web/verification/approval-instance-consistency-race-harness.ts`、`approval-form-builder-mounted-harness.ts`)。
+**连带约束已写进 spec 注释**:动态重导入的模块有**自己的 `ApprovalApiError` 类身份**,所以这 2 条只断言请求与解包,
+绝不对文件顶部静态导入的那个类做 `toBeInstanceOf` —— 错误类契约仍由上面 8 条真 fetch 用例承载。
+
+这不是「另造更窄同类物」:覆盖的是门审点名的同两个函数、同一份文件、同一条 required exec 行;
+偏离的只有「怎么绕过 mock 闸」这一步,而那一步照字面做会使门审要的 mutation 判据(掏空函数 ⇒ 对应用例红)**不可达**。
+
+### 8.9 第 2 轮 rebase 的机械核对(底座 = A-2 新 head)
+
+| 项 | 值 |
+|---|---|
+| A-2 新 head(`gh pr view 5854 --json headRefOid`) | `8d0ecf6b1652892e5f867f5cb97484ee9e00e10d` |
+| 重放命令 | `git rebase --onto 8d0ecf6b16… 4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c` |
+| 冲突 | **1 个 hunk / 1 个文件**:`run-required-web-tests.sh` 的活 exec 行 |
+| 解法 | **token UNION**:保 HEAD(A-2 新 head)侧整段(含 `IntegrationRunDetail` 的 SC-04 注释块),把候选侧独有的 `approvalTemplateCenterSections` 追加到行尾 |
+
+机械断言(口径:`exec npx vitest run` 之后的全部空白分隔字段,减去 `--reporter=dot`;每个 ref 上都先断言 `^exec npx vitest run` 恰 1 行且行尾不是续行符):
+
+- 新活行 **400** 个 token,唯一 **400**
+- `origin/main`.live − 新.live = **空**(`IntegrationRunDetail` 在新活行上,计数 1)
+- A-2 新 head.live − 新.live = **空**
+- A-4 head `879070ef2e`.live − 新.live = **空**
+- 新.live − `origin/main`.live = `{SessionOrgSwitcher.spec.ts, approvalTemplateGroupsClient, ApprovalTemplateGroupsPanel, approvalTemplateCenterSections}`(两 lane 的四个新 token,各 1 次)
+- `git cherry origin/main HEAD`:`-` 行 **0**
+- `git merge-base --is-ancestor 8d0ecf6b16… HEAD` = **YES**(A-2 是逐字节祖先,未被改写);A-2 两份 lane MD 相对底座的 diff **零删除行**(判据:`git diff --numstat 8d0ecf6b16… HEAD -- <两份 phase1-fe MD>` 的第二列全为 0;插入行数随本轮追加的求值小节增长,故不在此钉死)

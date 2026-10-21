@@ -6,8 +6,10 @@ import {
   META_REVISION_RETENTION_MIN_KEEP_N,
   resolveMetaRevisionRetentionConfig,
   startMetaRevisionRetention,
+  sweepConfigRevisionRetention,
   sweepFieldValueTombstoneRetention,
   sweepLinkTombstoneRetention,
+  sweepMetaRevisionRetention,
 } from '../../src/multitable/meta-revision-retention'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} } as never
@@ -134,5 +136,114 @@ describe('meta-revision retention config', () => {
     }) as never
     const config = resolveMetaRevisionRetentionConfig({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' })
     await expect(sweepFieldValueTombstoneRetention(queryFn, config)).resolves.toBe(0)
+  })
+})
+
+describe('D2d1 operation_id ordinary-retention exclusion', () => {
+  const enabled = resolveMetaRevisionRetentionConfig({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' })
+  const enabledDays = resolveMetaRevisionRetentionConfig({
+    MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
+    MULTITABLE_META_REVISION_RETENTION_POLICY: 'keep-days',
+  })
+
+  function captureSql() {
+    const seenSql: string[] = []
+    const queryFn = (async (sql: string) => {
+      seenSql.push(String(sql))
+      return { rows: [], rowCount: 0 }
+    }) as never
+    return { seenSql, queryFn }
+  }
+
+  test('record keep-last-n candidates require operation_id IS NULL and keep tagged rows in the ranking window', async () => {
+    // Deliberate minimal semantics: tagged rows occupy recency ranks; only untagged
+    // rows outside keep-N are deleted. Whole-operation prune of tagged evidence is D2d2.
+    const { seenSql, queryFn } = captureSql()
+    await sweepMetaRevisionRetention(queryFn, enabled)
+    expect(seenSql).toHaveLength(1)
+    const [windowSql, candidateSql] = String(seenSql[0]).split(') ranked')
+    expect(windowSql).toContain('row_number()')
+    expect(windowSql).toContain('FROM meta_record_revisions')
+    expect(windowSql).not.toContain('operation_id IS NULL')
+    expect(candidateSql).toContain('ranked.operation_id IS NULL')
+  })
+
+  test('record keep-days candidates require operation_id IS NULL after ranking, not inside the window', async () => {
+    const { seenSql, queryFn } = captureSql()
+    await sweepMetaRevisionRetention(queryFn, enabledDays)
+    expect(seenSql).toHaveLength(1)
+    const [windowSql, candidateSql] = String(seenSql[0]).split(') ranked')
+    expect(windowSql).toContain('row_number()')
+    expect(windowSql).not.toContain('operation_id IS NULL')
+    expect(candidateSql).toContain('ranked.operation_id IS NULL')
+  })
+
+  test('config keep-last-n and keep-days candidates require operation_id IS NULL after ranking', async () => {
+    const lastN = captureSql()
+    await sweepConfigRevisionRetention(lastN.queryFn, enabled)
+    expect(lastN.seenSql[0]).toMatch(/FROM meta_config_revisions\s*\) ranked/)
+    expect(lastN.seenSql[0]).toContain('ranked.operation_id IS NULL')
+    expect(lastN.seenSql[0]).not.toMatch(/FROM meta_config_revisions\s+WHERE operation_id IS NULL/)
+
+    const days = captureSql()
+    await sweepConfigRevisionRetention(days.queryFn, enabledDays)
+    expect(days.seenSql[0]).toMatch(/FROM meta_config_revisions\s*\) ranked/)
+    expect(days.seenSql[0]).toContain('ranked.operation_id IS NULL')
+  })
+
+  test('record/config sweeps return janitor 0 when the missing column is identified as operation_id', async () => {
+    const queryFn = (async () => {
+      throw Object.assign(new Error('column "operation_id" does not exist'), { code: '42703' })
+    }) as never
+    await expect(sweepMetaRevisionRetention(queryFn, enabled)).resolves.toBe(0)
+    await expect(sweepConfigRevisionRetention(queryFn, enabled)).resolves.toBe(0)
+  })
+
+  test('tombstone grouped deletion is eligible only when every row in the exact anchor group is untagged', async () => {
+    const { seenSql, queryFn } = captureSql()
+    await sweepFieldValueTombstoneRetention(queryFn, enabled)
+    const grouped = seenSql.find((sql) => sql.includes('GROUP BY') && sql.includes('config_revision_id'))
+    const loose = seenSql.find((sql) => sql.includes('config_revision_id IS NULL'))
+    expect(grouped).toContain('HAVING bool_and(operation_id IS NULL)')
+    expect(grouped?.replace(/\s+/g, ' ')).toContain(
+      'DELETE FROM meta_field_value_tombstones WHERE operation_id IS NULL AND config_revision_id IN',
+    )
+    expect(loose).toContain('operation_id IS NULL')
+    for (const sql of seenSql) {
+      expect(sql.startsWith('DELETE')).toBe(true)
+      expect(sql).toContain('operation_id IS NULL')
+    }
+  })
+
+  test('link-tombstone 42703 delete_revision_id fallback still requires an untagged exact-anchor group', async () => {
+    const seenSql: string[] = []
+    const queryFn = (async (sql: string) => {
+      seenSql.push(String(sql))
+      if (sql.includes('delete_revision_id')) {
+        throw Object.assign(new Error('column tr.delete_revision_id does not exist'), { code: '42703' })
+      }
+      return { rows: [], rowCount: 0 }
+    }) as never
+    await sweepLinkTombstoneRetention(queryFn, enabled)
+    const fallback = seenSql.find((sql) => sql.includes('GROUP BY') && !sql.includes('delete_revision_id'))
+    const loose = seenSql.find((sql) => sql.includes('source_revision_id IS NULL'))
+    expect(fallback).toContain('HAVING bool_and(operation_id IS NULL)')
+    expect(fallback?.replace(/\s+/g, ' ')).toContain(
+      'DELETE FROM meta_link_tombstones WHERE operation_id IS NULL AND source_revision_id IN',
+    )
+    expect(loose).toContain('operation_id IS NULL')
+    expect(seenSql.some((sql) => sql.startsWith('DELETE') && !sql.includes('operation_id IS NULL'))).toBe(false)
+  })
+
+  test('tombstone sweep returns janitor 0 for a missing operation_id column and never issues a guardless DELETE', async () => {
+    const seenSql: string[] = []
+    const queryFn = (async (sql: string) => {
+      seenSql.push(String(sql))
+      throw Object.assign(new Error('column "operation_id" does not exist'), { code: '42703' })
+    }) as never
+    await expect(sweepFieldValueTombstoneRetention(queryFn, enabled)).resolves.toBe(0)
+    await expect(sweepLinkTombstoneRetention(queryFn, enabled)).resolves.toBe(0)
+    expect(seenSql.length).toBeGreaterThan(0)
+    expect(seenSql.some((sql) => sql.startsWith('DELETE') && !sql.includes('operation_id IS NULL'))).toBe(false)
   })
 })

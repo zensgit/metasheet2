@@ -24,6 +24,15 @@ const TARGET_FILES = [
   // IU-3/IU-4 wizard components above.
   'src/views/approval/ApprovalCenterDetailPane.vue',
   'src/views/approval/ApprovalDetailView.vue',
+  // P1b (审批可发现性, 2026-09-07): the two NEW approval surfaces join the UF-6 target set in their
+  // introducing slice, born token-only (var(--ms-*)/--el-* exclusively) — same precedent as the
+  // F2/F3/UI-7 components above.
+  'src/views/approval/ApprovalBatchTransferView.vue',
+  'src/approvals/components/ApprovalTodoBadge.vue',
+  // Round 2 (same slice): the server-gated nav entry and the app-shell error boundary that keeps
+  // either nav component from taking the shell down. Both are born token-only as well.
+  'src/approvals/components/ApprovalBatchTransferNavEntry.vue',
+  'src/components/ShellChromeBoundary.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
   'src/views/approval/ApprovalNewView.vue',
@@ -60,6 +69,9 @@ const TARGET_FILES = [
   'src/components/status/EmptyState.vue',
   'src/multitable/components/MetaAutomationManager.vue',
   'src/multitable/components/MetaAutomationRuleEditor.vue',
+  // 客户反馈 2026-09-24 #4b: the typed condition value control extracted for the rule editor's condition
+  // rows joins in its introducing slice, born token-only (var(--ms-*)/--el-* exclusively).
+  'src/multitable/components/ConditionValueInput.vue',
   // IU-2a (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
   // §3 hard locks "token-only"): Workbench chrome slice tokenized its 142 hardcoded hex/rgb
   // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
@@ -96,6 +108,12 @@ const TARGET_FILES = [
   // IU-4 (docs/development/integration-iu4-composition-wizard-design-lock-20260707.md, #3803):
   // sibling wizard, same "clean from the start" rule.
   'src/components/integration/IntegrationCompositionWizard.vue',
+  // Record inspector v3 PR-B1 (docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §4 item 9, round 2): the NEW details-tab section wrapper joins in its introducing slice, born
+  // token-only (`--ms-*` exclusively, no `var(--x, #hex)` fallbacks). The five pre-existing record
+  // inspector files named in the same §4 item (INS / FP / History / Attachments / Provenance) are
+  // PR-B3's migration and enrol there, not here.
+  'src/multitable/components/MetaRecordFieldSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

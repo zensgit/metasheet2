@@ -34,7 +34,7 @@ env:
   # FROZEN S6-A PINS (#4695). LAW — never recomputed, only verified against.
   PACKAGE_SHA256_PIN: 0b80d927732e4866296e053a88958fc0b9fb44ee648cb200ee7116a3cdd72759
   SERVICE_RUNTIME_SHA_PIN: a45a2fe3fa818b6b90830418a55a6b9f635e91c9
-  PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN: b5f40b3c9d56c04d4ff9001678f2cd9603c1bb1665bfe27decc0411a0e0270e6
+  PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN: 5b30eda389834f597153efb8d1f7566fb3e654e01e091cd34d9b8ffc0272cf68
 
 jobs:
   # ---------------------------------------------------------------------

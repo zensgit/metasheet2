@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- Synthetic browser verification only; this is not an application route or a backend persistence test. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>MetaSheet range fill verification</title>
+<style>body{font-family:system-ui,sans-serif;margin:32px;background:#edf1f8;color:#23314c}h1{font-size:24px}#app{height:620px;background:white;border-radius:12px}#receipt{font-size:13px;white-space:pre-wrap}</style>
+<h1>MetaSheet · 多行 / 多列填充验证</h1><p>合成数据 · 本地验证 · 默认关闭的功能预览</p><div id="app"></div><p id="receipt">等待操作</p>
+<script type="module">
+import { createApp, h, ref } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import MetaGridTable from '/src/multitable/components/MetaGridTable.vue'
+import { useLocale } from '/src/composables/useLocale.ts'
+useLocale().setLocale('zh-CN')
+const fields = [
+  {id:'a',name:'计划数量',type:'number'}, {id:'b',name:'复核数量',type:'number'},
+  {id:'c',name:'交付日期',type:'date'}, {id:'d',name:'备注',type:'string'},
+  {id:'tags',name:'多选标签',type:'multiSelect',options:[{value:'采购'},{value:'质检'}]},
+  {id:'people',name:'负责人',type:'person',property:{limitSingleRecord:false}},
+  {id:'place',name:'地点',type:'location'},
+]
+const rows = ref(Array.from({length:12}, (_,i)=>({id:`r${i}`,version:1,data:{a:i<2?(i+1)*10:null,b:null,c:i===0?'2026-10-08':null,d:i===0?'样例记录':null}})))
+rows.value[6].data.a=101; rows.value[6].data.b=102
+rows.value[7].data.a=201; rows.value[7].data.b=202
+rows.value[0].data.tags=['采购','质检']; rows.value[0].data.people=['synthetic-a','synthetic-b']
+rows.value[0].data.place={address:'合成仓库',latitude:25,longitude:121}
+const calls=[]
+async function commitRange(changes){
+  calls.push(changes)
+  const ids=new Set(changes.map(change=>change.recordId))
+  for(const change of changes) rows.value.find(row=>row.id===change.recordId).data[change.fieldId]=change.value
+  for(const row of rows.value) if(ids.has(row.id)) row.version++
+  document.querySelector('#receipt').textContent=`已验证一次批量提交：${changes.length} 个单元格；只修改目标记录。`
+}
+window.rangeDemo={rows,calls}
+const personSummaries=()=>Object.fromEntries(rows.value.map(row=>[row.id,{people:(row.data.people??[]).map(id=>({id,display:id==='synthetic-a'?'样例成员甲':'样例成员乙'}))}]))
+createApp({setup:()=>()=>h(MetaGridTable,{rows:rows.value,personSummaries:personSummaries(),visibleFields:fields,sortRules:[],loading:false,currentPage:1,totalPages:1,startIndex:0,canEdit:true,canComment:false,commitRange,rangeContextKey:'synthetic/local'})}).mount('#app')
+</script></html>

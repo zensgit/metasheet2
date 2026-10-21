@@ -31,6 +31,11 @@ describe('multitable xlsx service', () => {
       ['Alpha', '12'],
       ['Beta', '23'],
     ])
+    expect(parsed).toMatchObject({
+      sheetCount: 1,
+      hasFormula: false,
+      hasUnheadedData: false,
+    })
     expect(parsed.truncated).toBe(false)
   })
 
@@ -92,5 +97,28 @@ describe('multitable xlsx service', () => {
 
     const parsed = parseXlsxBuffer(xlsx, buffer)
     expect(parsed.rows).toEqual([[multiline]])
+  })
+
+  test('rejects an over-wide worksheet before expanding it into rows', () => {
+    let converted = false
+    const bounded = {
+      read: () => ({
+        SheetNames: ['Questions'],
+        Sheets: { Questions: { '!ref': 'A1:Z2' } },
+      }),
+      utils: {
+        sheet_to_json: () => {
+          converted = true
+          return []
+        },
+      },
+    } as unknown as XlsxModule
+
+    expect(() => parseXlsxBuffer(
+      bounded,
+      Buffer.from([1]),
+      { maxColumns: 25 },
+    )).toThrow('xlsx column limit exceeded')
+    expect(converted).toBe(false)
   })
 })

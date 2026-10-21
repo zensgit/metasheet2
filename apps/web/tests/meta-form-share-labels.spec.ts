@@ -16,6 +16,11 @@ describe('meta-form-share-labels', () => {
     expect(formShareLabel('access.option.dingtalkGranted', true)).toBe('仅已授权钉钉用户')
     expect(formShareLabel('link.regenerate', true)).toBe('重新生成令牌')
     expect(formShareLabel('error.clearBeforePublic', true)).toBe('切换回完全公开表单前，请先清除允许的用户和成员组。')
+    // #5795: search-required / clamped candidate list chrome
+    expect(formShareLabel('candidate.typeToSearch', false)).toBe('Type a name, email or group to search.')
+    expect(formShareLabel('candidate.typeToSearch', true)).toBe('输入姓名、邮箱或成员组名称以搜索。')
+    expect(formShareLabel('candidate.refineSearch', false)).toBe('Showing the first matches only — narrow your search.')
+    expect(formShareLabel('candidate.refineSearch', true)).toBe('仅显示前若干条匹配结果，请细化搜索。')
   })
 
   it('formats status and access-mode helper text', () => {

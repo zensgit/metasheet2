@@ -1,0 +1,87 @@
+# Windows PowerShell 5.1 acceptance lane for the stock-prep on-prem package.
+#
+# SEALED-EXPORT PROVENANCE EVIDENCE: this whole file is digest-pinned as
+# `evidenceFiles.s6aPowershell51Workflow` in
+# plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json.
+# It is the executor of the pinned S6-A acceptance test
+# scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1.
+# Any byte change here (triggers, env, permissions, steps, action refs, comments)
+# must recompute that pin in the same commit via computePackageProvenancePinSet(repoRoot).
+#
+# The job below was moved here byte-for-byte from .github/workflows/plugin-tests.yml,
+# which is no longer a provenance input; the job id and its `name:` (the required
+# status-check context) are unchanged. Keep this file single-purpose: every job added
+# here moves the pin. See docs/development/s6a-pins-scope-narrowing-design-20260930.md.
+name: Stock-prep PowerShell 5.1 acceptance
+
+on:
+  workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/**'
+      - 'plugins/**'
+      - 'apps/web/src/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/*.yml'
+  pull_request:
+    branches: [main, develop]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stock-prep-powershell51:
+    name: stock-prep PowerShell 5.1 acceptance
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
+      # different native-stderr semantics and cannot stand in for the target shell contract.
+      - name: Run target-shell smoke capture regression
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # S6-A win32 artifact-root ACL + attestation (follow-up 1 of
+      # docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md). This is the
+      # only job with a real NTFS volume and a real icacls.exe, so the layer-3 checks (apply, verify,
+      # idempotent re-run, tampered-ACL retraction against a throwaway TEMP directory) can only run
+      # here. Both shells are exercised: the deploy path runs under whichever PowerShell the operator
+      # host provides, and 5.1's native-stderr semantics differ from pwsh 7's.
+      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

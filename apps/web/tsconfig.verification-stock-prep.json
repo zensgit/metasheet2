@@ -1,0 +1,33 @@
+{
+  // 备料 browser-verify lane 的类型闸 —— sibling of tsconfig.verification-approval.json, and added
+  // for the same rot class it names: everything under verification/ lives outside
+  // tsconfig.app.json's `include` (`src/**` only), so `vue-tsc -b` — the CI-required `type-check`
+  // gate — never sees it. The approval lane learned this the expensive way (FAIL-1: eight missing
+  // interface members and a 2-vs-3 argument drift produced ZERO compile-time signal), and the
+  // stock-prep harness has the same exposure: it dynamically imports the REAL
+  // StockPreparationWorkspace and calls `useAuth().primeSession`, and the fixtures re-declare the
+  // plugin's response envelopes by hand. "A broken import would make Vite fail loudly" only covers
+  // an import that no longer resolves; it says nothing about a signature that quietly moved.
+  //
+  // Non-composite and `noEmit` on purpose: it type-checks these files and their production import
+  // closure WITHOUT folding verification/ into the composite app build graph. Scope is exactly the
+  // files this lane owns; the rest of verification/ stays with whichever lane owns it.
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.verification-stock-prep.tsbuildinfo",
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": ["node"],
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*.d.ts",
+    "verification/stock-prep-workbench-harness.ts",
+    "verification/stock-prep-fixtures.ts",
+    "verification/stock-prep-*.spec.ts"
+  ]
+}

@@ -31,8 +31,10 @@ export type ApprovalFlowStep = UpcomingApprovalNode
  * immediately (e.g. a single-node graph with no outgoing edge, or an empty graph) — never throws
  * on a malformed/empty graph.
  */
-export function summarizeApprovalFlow(graph: ApprovalGraph, schema?: FormSchema | null): ApprovalFlowStep[] {
+// O-8 / F8-1: ApprovalNewView (this helper's only caller) passes the shell locale; the zh-CN
+// default keeps the existing unit tests' calls unchanged.
+export function summarizeApprovalFlow(graph: ApprovalGraph, schema?: FormSchema | null, isZh = true): ApprovalFlowStep[] {
   const startKey = graph.nodes.find((node) => node.type === 'start')?.key
   if (!startKey) return []
-  return buildUpcomingNodes(graph, startKey, schema)
+  return buildUpcomingNodes(graph, startKey, schema, isZh)
 }

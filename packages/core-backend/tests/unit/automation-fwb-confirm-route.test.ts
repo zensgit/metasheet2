@@ -50,6 +50,7 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
     resolveSheetCapabilities.mockResolvedValue({
       access: { userId: 'author_1' },
       capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+      sheetLiveness: 'live',
     })
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes('FROM meta_sheets')) {
@@ -211,6 +212,7 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
       .mockResolvedValueOnce({
         access: { userId: 'author_1' },
         capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+        sheetLiveness: 'live',
       })
       .mockResolvedValueOnce({
         access: { userId: 'author_1' },
@@ -227,6 +229,89 @@ describe('POST /sheets/:sheetId/automations/fwb/confirm', () => {
         mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
       })
       .expect(403)
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('operation_audit_logs'))).toBe(false)
+  })
+
+  // #5803 follow-up: authority → liveness on the PATH sheet; a dead sheet never mints a hash nor
+  // writes the confirmation audit row, and an unauthorized caller cannot tell dead from live.
+  it('refuses a soft-deleted rule sheet with SHEET_DELETED before any template read or audit write', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    resolveSheetCapabilities.mockResolvedValue({
+      access: { userId: 'author_1' },
+      capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+      sheetLiveness: 'deleted',
+    })
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      })
+      .expect(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'SHEET_DELETED', message: expect.any(String) },
+    })
+    expect(res.body.confirmationHash).toBeUndefined()
+    expect(canReadApprovalTemplateForAutomation).not.toHaveBeenCalled()
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('answers an unauthorized author identically for a live and a deleted rule sheet', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    const bodies: unknown[] = []
+    for (const sheetLiveness of ['live', 'deleted']) {
+      resolveSheetCapabilities.mockResolvedValue({
+        access: { userId: 'author_1' },
+        capabilities: { canManageAutomation: false, canManageSheetAccess: true },
+        sheetLiveness,
+      })
+      pinned.setApp(buildApp())
+      const res = await request(pinned.url())
+        .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+        .send({
+          templateId: 'tpl_1',
+          sourceTemplateVersionId: 'ver_1',
+          mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+        })
+      bodies.push({ status: res.status, body: res.body })
+    }
+    expect(bodies[0]).toEqual({ status: 403, body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } } })
+    expect(bodies[1]).toEqual(bodies[0])
+  })
+
+  it('refuses a soft-deleted update target as unavailable and writes no audit row', async () => {
+    process.env.APPROVAL_FWB_WRITEBACK_ENABLED = 'true'
+    resolveSheetCapabilities
+      .mockResolvedValueOnce({
+        access: { userId: 'author_1' },
+        capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+        sheetLiveness: 'live',
+      })
+      .mockResolvedValueOnce({
+        access: { userId: 'author_1' },
+        capabilities: { canManageAutomation: true, canManageSheetAccess: true },
+        sheetLiveness: 'deleted',
+      })
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet_1/automations/fwb/confirm')
+      .send({
+        templateId: 'tpl_1',
+        sourceTemplateVersionId: 'ver_1',
+        mode: 'update',
+        recordLinkFieldId: 'linked',
+        mappings: [{ formFieldId: 'f1', targetFieldId: 't1', targetType: 'text' }],
+      })
+      .expect(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+    })
+    expect(resolveSheetCapabilities.mock.calls[1]?.[2]).toBe('sheet_target')
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_fields'))).toBe(false)
     expect(query.mock.calls.some(([sql]) => String(sql).includes('operation_audit_logs'))).toBe(false)
   })
 

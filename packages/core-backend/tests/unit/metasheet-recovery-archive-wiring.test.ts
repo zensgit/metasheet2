@@ -1,0 +1,313 @@
+import { readFileSync } from 'node:fs'
+
+import { Router } from 'express'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { pool as pgPool } from '../../src/db/pg'
+
+const routeMocks = vi.hoisted(() => ({
+  univerMetaRouter: vi.fn(),
+}))
+
+const indexSource = readFileSync(new URL('../../src/index.ts', import.meta.url), 'utf8')
+
+vi.mock('../../src/routes/univer-meta', () => ({
+  univerMetaRouter: routeMocks.univerMetaRouter,
+}))
+
+import {
+  coreBackendIsDirectEntry,
+  isCoreBackendDirectEntry,
+  MetaSheetServer,
+} from '../../src/index'
+
+describe('MetaSheetServer recovery archive wiring', () => {
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', '')
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', '')
+    routeMocks.univerMetaRouter.mockReset()
+    routeMocks.univerMetaRouter.mockImplementation(() => Router())
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps both router calls zero-argument and never invokes the factory with flags off', async () => {
+    const factory = vi.fn(() => {
+      throw new Error('factory must remain unreachable')
+    })
+    const getMainPool = vi.spyOn(poolManager, 'get')
+
+    const server = new MetaSheetServer({
+      port: 0,
+      host: '127.0.0.1',
+      pluginDirs: [],
+      createRecoveryArchiveComposition: factory,
+    })
+
+    expect(factory).not.toHaveBeenCalled()
+    expect(getMainPool).not.toHaveBeenCalled()
+    expect(routeMocks.univerMetaRouter).toHaveBeenCalledTimes(2)
+    expect(routeMocks.univerMetaRouter.mock.calls).toEqual([[], []])
+    await expect(server.retireExpiredRecoveryAttachmentStage('00000000-0000-0000-0000-000000000000'))
+      .rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    expect(factory).not.toHaveBeenCalled()
+    expect(getMainPool).not.toHaveBeenCalled()
+  })
+
+  it('passes the exact same options and runtime identity to both mounts', () => {
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    const mainPool = poolManager.get()
+    const getMainPool = vi.spyOn(poolManager, 'get').mockReturnValue(mainPool)
+    const keyCustody = {
+      produceGenerationDek: vi.fn(),
+      unwrapGenerationDek: vi.fn(),
+      deriveDekFingerprint: vi.fn(),
+      macManifestRoot: vi.fn(),
+      verifyManifestRootMac: vi.fn(),
+    }
+    const objectStore = {
+      put: vi.fn(),
+      get: vi.fn(),
+      head: vi.fn(),
+      deleteExpired: vi.fn(),
+      pin: vi.fn(),
+    }
+    const factory = vi.fn(() => ({
+      keyCustody,
+      objectStore,
+      auditedReplayHorizonMs: 86_400_000,
+      asyncResumeHorizonMs: 3_600_000,
+      workerIntervalMs: 60_000,
+      worker: {
+        processDerivedWork: async () => true,
+        recheckAuthority: async () => true,
+        apply: {
+          preliminaryFullRead: async () => true,
+          stabilizeAuthorization: async () => 'ready' as const,
+          finalLockedFullRead: async () => true,
+          evaluatePlanAuthorization: async () => true,
+        },
+        leaseMs: 60_000,
+        replayHorizonMs: 0,
+      },
+    }))
+
+    new MetaSheetServer({
+      port: 0,
+      host: '127.0.0.1',
+      pluginDirs: [],
+      createRecoveryArchiveComposition: factory,
+    })
+
+    expect(factory).toHaveBeenCalledTimes(1)
+    expect(getMainPool).toHaveBeenCalledTimes(1)
+    getMainPool.mockClear()
+    getMainPool.mockImplementation(() => {
+      throw new Error('main pool must not be re-resolved')
+    })
+    expect(routeMocks.univerMetaRouter).toHaveBeenCalledTimes(2)
+    const firstOptions = routeMocks.univerMetaRouter.mock.calls[0]?.[0]
+    const secondOptions = routeMocks.univerMetaRouter.mock.calls[1]?.[0]
+    expect(firstOptions).toBe(secondOptions)
+    expect(firstOptions?.recoveryArchiveRuntime).toBe(secondOptions?.recoveryArchiveRuntime)
+    expect(firstOptions?.recoveryArchiveDatabaseRuntime).toBe(
+      secondOptions?.recoveryArchiveDatabaseRuntime,
+    )
+    expect(firstOptions?.recoveryArchiveRuntime).toEqual({
+      keyCustody,
+      objectStore,
+      transactionDepth: mainPool.transactionDepthProbe,
+    })
+    expect(firstOptions?.recoveryArchiveRuntime?.transactionDepth).toBe(
+      mainPool.transactionDepthProbe,
+    )
+    expect(firstOptions?.recoveryArchiveDatabaseRuntime?.transactionDepthProbe).toBe(
+      mainPool.transactionDepthProbe,
+    )
+    expect(firstOptions?.recoveryArchiveRuntime?.transactionDepth).toBe(
+      firstOptions?.recoveryArchiveDatabaseRuntime?.transactionDepthProbe,
+    )
+    expect(Object.isFrozen(firstOptions?.recoveryArchiveDatabaseRuntime)).toBe(true)
+    expect(firstOptions).toEqual({
+      recoveryArchiveRuntime: firstOptions?.recoveryArchiveRuntime,
+      recoveryArchiveDatabaseRuntime: firstOptions?.recoveryArchiveDatabaseRuntime,
+      recoveryArchiveAuditedReplayHorizonMs: 86_400_000,
+      recoveryArchiveAsyncResumeHorizonMs: 3_600_000,
+    })
+    expect(getMainPool).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes direct execution from an injected launcher import', () => {
+    const currentModule = {}
+
+    expect(coreBackendIsDirectEntry).toBe(false)
+    expect(isCoreBackendDirectEntry(currentModule, currentModule)).toBe(true)
+    expect(isCoreBackendDirectEntry({}, currentModule)).toBe(false)
+    expect(isCoreBackendDirectEntry(undefined, currentModule)).toBe(false)
+  })
+
+  it('refuses already-cancelled startup before listening or creating a worker', async () => {
+    vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [], startupSignal: AbortSignal.abort(), manageProcessSignals: false })
+    const internals = server as unknown as { httpServer: { listen(): void }; recoveryArchiveApplication: { startWorker(): void } }
+    const listen = vi.spyOn(internals.httpServer, 'listen')
+    const worker = vi.fn()
+    internals.recoveryArchiveApplication = { ...internals.recoveryArchiveApplication, startWorker: worker }
+    await expect(server.start()).rejects.toThrow('SERVER_STARTUP_CANCELLED')
+    expect(listen).not.toHaveBeenCalled()
+    expect(worker).not.toHaveBeenCalled()
+  })
+
+  it('releases custody only after BOTH HTTP and worker drain, once, before pool close', async () => {
+    const order: string[] = []
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockImplementation(async () => { order.push('pool') })
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    let finishHttp!: () => void
+    let finishWorker!: () => void
+    const internals = server as unknown as {
+      closeHttpServerForShutdown(): Promise<void>
+      recoveryArchiveApplication: { stopWorker(): Promise<void>; releaseCustody(): void }
+    }
+    internals.closeHttpServerForShutdown = () => new Promise(resolve => { finishHttp = resolve })
+    const release = vi.fn(() => { order.push('custody') })
+    internals.recoveryArchiveApplication = { stopWorker: () => new Promise(resolve => { finishWorker = resolve }), releaseCustody: release }
+    const stopping = server.stop()
+    await vi.waitFor(() => expect(finishWorker).toBeTypeOf('function'))
+    finishWorker()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(release).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
+    finishHttp()
+    await stopping
+    await server.stop()
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['custody', 'pool'])
+  })
+
+  it.each(['http', 'worker', 'custody'])('does not close pool after %s failure', async failure => {
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const internals = server as unknown as {
+      closeHttpServerForShutdown(): Promise<void>
+      recoveryArchiveApplication: { stopWorker(): Promise<void>; releaseCustody(): void }
+    }
+    internals.closeHttpServerForShutdown = async () => { if (failure === 'http') throw new Error('private detail') }
+    const release = vi.fn(() => { if (failure === 'custody') throw new Error('private detail') })
+    internals.recoveryArchiveApplication = { async stopWorker() { if (failure === 'worker') throw new Error('private detail') }, releaseCustody: release }
+    const code = failure === 'http' ? 'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED'
+      : failure === 'worker' ? 'RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED' : 'RECOVERY_ARCHIVE_CUSTODY_RELEASE_FAILED'
+    await expect(server.stop()).rejects.toThrow(code)
+    if (failure !== 'custody') expect(release).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  it('keeps the database pool open when the restore worker cannot drain', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const stopWorker = vi.fn().mockRejectedValue(new Error('worker-stop-sentinel'))
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    ;(server as unknown as {
+      recoveryArchiveApplication: { stopWorker(): Promise<void> }
+    }).recoveryArchiveApplication = { stopWorker }
+
+    const firstStop = server.stop('SIGTERM')
+    const reentrantStop = server.stop('SIGINT')
+
+    expect(reentrantStop).toBe(firstStop)
+    await expect(firstStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    await expect(reentrantStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+
+    expect(stopWorker).toHaveBeenCalledTimes(1)
+    expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  it('closes the database pool after the restore worker drains', async () => {
+    expect(pgPool).not.toBeNull()
+    const order: string[] = []
+    let releaseMediaWorkers: (() => void) | undefined
+    let releaseRecoveryWorker: (() => void) | undefined
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockImplementation(async () => {
+      order.push('pool')
+    })
+    const stopMediaWorkers = vi.fn(async () => {
+      order.push('media:start')
+      await new Promise<void>((resolve) => {
+        releaseMediaWorkers = resolve
+      })
+      order.push('media:done')
+    })
+    const stopWorker = vi.fn(async () => {
+      order.push('recovery:start')
+      await new Promise<void>((resolve) => {
+        releaseRecoveryWorker = resolve
+      })
+      order.push('recovery:done')
+    })
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    ;(server as unknown as {
+      recoveryArchiveApplication: { stopWorker(): Promise<void>; releaseCustody(): void }
+      stopElearningMediaWorkers?: () => Promise<void>
+    }).recoveryArchiveApplication = { stopWorker, releaseCustody() {} }
+    ;(server as unknown as {
+      stopElearningMediaWorkers?: () => Promise<void>
+    }).stopElearningMediaWorkers = stopMediaWorkers
+
+    const firstStop = server.stop()
+    await vi.waitFor(() => {
+      expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start'])
+    expect(stopWorker).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
+
+    releaseMediaWorkers?.()
+    await vi.waitFor(() => {
+      expect(stopWorker).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start'])
+    expect(poolEnd).not.toHaveBeenCalled()
+
+    releaseRecoveryWorker?.()
+    await firstStop
+    const completedReplay = server.stop('SIGINT')
+    expect(completedReplay).toBe(firstStop)
+    await completedReplay
+
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start', 'recovery:done', 'pool'])
+    expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
+    expect(stopWorker).toHaveBeenCalledTimes(1)
+    expect(poolEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a failed signal shutdown with a non-zero exit code', async () => {
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const stop = vi.spyOn(server, 'stop').mockRejectedValue(
+      new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED'),
+    )
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as typeof process.exit)
+
+    ;(server as unknown as {
+      stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void
+    }).stopForSignal('SIGTERM')
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1))
+    expect(stop).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it('registers both runtime signals through the non-zero failure mapper', () => {
+    expect(indexSource).toContain("process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))")
+    expect(indexSource).toContain("process.on('SIGINT', () => this.stopForSignal('SIGINT'))")
+  })
+
+  it('injects the shared recovery archive metrics observer', () => {
+    expect(indexSource).toMatch(
+      /createRecoveryArchiveApplication\(\s*options\.createRecoveryArchiveComposition,\s*resolveRecoveryArchiveMainPoolRuntime,\s*process\.env,\s*recoveryArchiveObservability,\s*\)/,
+    )
+  })
+})

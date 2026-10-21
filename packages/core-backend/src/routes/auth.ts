@@ -31,13 +31,17 @@ import {
 } from '../auth/invite-accept-writes'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
+import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
+import { isElearningEnabled } from '../elearning/feature-flags'
+import { isTasksEnabled } from '../tasks/feature-flag'
 import { Logger } from '../core/logger'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
+import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } from '../services/approval-notify-badge-flags'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
@@ -49,6 +53,7 @@ import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { DingTalkBusinessError, DingTalkRequestError } from '../integrations/dingtalk/client'
+import { classifyDirectoryFailureText } from '../directory/directory-failure-text'
 
 const logger = new Logger('AuthRouter')
 
@@ -297,17 +302,31 @@ function buildFeaturePayload(authUser: User) {
     // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
     // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
     approvalAttachments: isApprovalAttachmentsEnabled(),
-    // Canvas V2 is an independent, default-OFF authoring rollout. It is never inferred from admin
-    // role, product mode, or plugin state; the legacy structured editor remains the fallback.
+    // Canvas V2 is the default authoring surface. It is never inferred from admin role, product
+    // mode, or plugin state; an explicit false env value selects the operator rollback renderer.
     approvalCanvasV2: isApprovalCanvasV2Enabled(),
     // FWB production authoring (write_approval_form_values). Surfaces APPROVAL_FWB_WRITEBACK_ENABLED
     // (default OFF) so the automation rule editor can offer the mapping UI only when execution is
     // actually enabled. Never inferred from admin/role/mode.
     approvalFwbWriteback: isFwbWritebackEnabled(),
+    // 抄送我的 unread badge (test report 2026-10-08): APPROVAL_CC_UNREAD_BADGE_ENABLED, default OFF,
+    // exact 'true'. The SAME predicate gates GET /api/approvals/cc-unread-count, so the web asks for
+    // the count only when the server answers it. Never inferred from role/mode.
+    approvalCcUnreadBadge: isApprovalCcUnreadBadgeEnabled(),
+    // 我发起的 new-outcome badge (test report 2026-10-08): APPROVAL_MINE_OUTCOME_BADGE_ENABLED, default
+    // OFF, exact 'true'; the SAME predicate gates GET /api/approvals/mine-outcomes/unseen-count.
+    approvalMineOutcomeBadge: isApprovalMineOutcomeBadgeEnabled(),
     // W6-3 (#4556) OD-W6-7=(a): the group effective-policy panel's default-OFF, two-layer gate
     // (master env switch AND per-org exact allowlist — see w6-group-effective-policy-panel-flag.ts).
     // Never inferred from role/mode/plugin state.
     attendanceGroupEffectivePolicyPanel: isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1(authUser.tenantId),
+    // E-learning V0.1 named pilot: master flag only. Never inferred from admin
+    // role, product mode, or plugin state.
+    elearning: isElearningEnabled(),
+    // Tasks: true only when TASKS_ENABLED is exactly 'true', i.e. exactly when tasksRouter() mounts
+    // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
+    // server without the flag issues no /api/tasks request at all. Never inferred from role.
+    tasks: isTasksEnabled(),
     mode,
   }
 }
@@ -607,6 +626,10 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
     // conflict is the exact drift the admin-route closure tests exist to prevent (#4833).
     || code === 'ACTIVATE_ORG_MISMATCH'
     || code === 'ACTIVATE_ORG_AMBIGUOUS'
+    // Not expected from this SSO callback: the grant check runs in every mode, but here the
+    // source row's openId already equals the scanning login's openId, so it passes. Tracked so
+    // the closed set follows the enum instead of falling through to 500.
+    || code === 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED'
   ) {
     return new DingTalkActivationIntentError(
       409,
@@ -786,6 +809,14 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     const user = await authService.register(cleanEmail, password, cleanName)
 
     if (!user) {
+      // O2-A3 (gate NIT-2): this 409 is truthful BY CONSTRUCTION — AuthService.register
+      // returns `null` ONLY for "identity already taken" (the getUserByEmail pre-check,
+      // or its race twins: a LoginAliasClaimError on the email claim / a 23505 from the
+      // users email unique index — see isDuplicateIdentityConflict in AuthService.ts).
+      // Every other failure rethrows and lands in the catch below (recovery conflict →
+      // 409 RECOVERY_AUTHORITY_BUSY; anything else → the generic 500), so an infra
+      // failure can no longer be misreported to the operator as "email already exists".
+      // Pinned by tests/unit/auth-register-null-discrimination.test.ts.
       logger.warn(`Registration attempt with existing email: ${cleanEmail} from ${ip}`)
       return res.status(409).json({
         success: false,
@@ -806,6 +837,12 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
       }
     })
   } catch (error) {
+    // O2-S2: registration writes users/user_roles (recovery-authority tables). Both the
+    // raw marker 40001 and AuthService's already-retried, named
+    // UserRoleAssignmentRecoveryBusyError surface as the uniform retryable 409
+    // (RECOVERY_AUTHORITY_BUSY) instead of collapsing to a generic 500. Every other
+    // error keeps the exact 500 below.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('Registration error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
@@ -908,6 +945,8 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
         success: false,
         error: 'Password does not meet requirements',
         details: passwordValidation.errors,
+        // Machine-readable codes parallel to `details`, for clients that localise.
+        reasons: passwordValidation.reasons,
       })
     }
 
@@ -989,6 +1028,9 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    // O2-S2: applyInviteAcceptanceWrites re-raises a marker 40001 as the named retryable
+    // RecoveryConflictError → uniform retryable 409. INVITE_* semantics unchanged below.
+    if (sendIfRecoveryConflict(res, error)) return
     const code = inviteAcceptWriteErrorCode(error)
     if (code === INVITE_TARGET_UPDATE_MISMATCH) {
       return res.status(409).json({
@@ -1041,6 +1083,8 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
         success: false,
         error: 'Password does not meet requirements',
         details: passwordValidation.errors,
+        // Machine-readable codes parallel to `details`, for clients that localise.
+        reasons: passwordValidation.reasons,
       })
     }
 
@@ -1176,6 +1220,55 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
       success: false,
       error: 'Internal server error'
     })
+  }
+})
+
+// Explicit organization selection from #5145, separated from its unapproved
+// default-login hint changes. Authentication/signing remain server-owned.
+authRouter.get('/session-orgs', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { user } = authResult
+    const orgs = await authService.listActiveMembershipOrgIds(user.id)
+    const currentOrgId = typeof user.tenantId === 'string' && orgs.includes(user.tenantId)
+      ? user.tenantId : null
+    return res.json({ success: true, data: { orgs, currentOrgId } })
+  } catch {
+    return res.status(503).json({ success: false, error: 'Organization list unavailable', code: 'SESSION_ORGS_UNAVAILABLE' })
+  }
+})
+
+authRouter.post('/session-org', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { token, user } = authResult
+    const body = req.body
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).length !== 1 || typeof body.orgId !== 'string' || !body.orgId.trim()) {
+      return res.status(400).json({ success: false, error: 'An explicit organization is required', code: 'SESSION_ORG_REQUIRED' })
+    }
+    const orgId = body.orgId.trim()
+    const chosen = await authService.resolveSessionTenantId(user.id, orgId)
+    if (chosen !== orgId) {
+      return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    }
+    const payload = authService.readTokenPayload(token)
+    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim() ? payload.sid : randomUUID()
+    const tokenUser = { ...user, tenantId: chosen }
+    const nextToken = authService.createToken(tokenUser, { sid: sessionId })
+    const nextPayload = authService.readTokenPayload(nextToken)
+    if (!nextPayload?.exp) {
+      return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
+    }
+    await createUserSession(user.id, {
+      sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+    })
+    return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
+  } catch {
+    return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
   }
 })
 
@@ -1342,6 +1435,9 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
       data: nextSnapshot,
     })
   } catch (error) {
+    // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → uniform
+    // retryable 409. Policy errors and the fail-closed 500 below are unchanged.
+    if (sendIfRecoveryConflict(res, error)) return
     if (error instanceof DingTalkLoginPolicyError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -1586,6 +1682,11 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
           },
         })
       } catch (error) {
+        // O2-S2: a recovery conflict (named retryable RecoveryConflictError from
+        // activatePendingUser) must NOT collapse into the 500 'activate_failed'
+        // fallback — rethrow it whole for the outer catch's uniform retryable 409.
+        // Every ACTIVATE_* mapping below is unchanged.
+        if (classifyRecoveryConflict(error) === 'recovery_conflict') throw error
         throw mapDingTalkActivationFailure(error)
       }
 
@@ -1653,6 +1754,11 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    // O2-S2: bind/JIT-provision/activate all write recovery-authority tables — marker
+    // 40001 (re-raised as the named retryable RecoveryConflictError by the service
+    // layer) → uniform retryable 409. Every DingTalk policy/request mapping below is
+    // unchanged; nothing fail-closed is loosened.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
     const statusCode = error instanceof DingTalkActivationIntentError
       ? error.statusCode
@@ -1666,7 +1772,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       : error instanceof DingTalkLoginPolicyError
       ? error.message
       : error instanceof DingTalkRequestError
-        ? error.message
+        ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
         : 'DingTalk authentication failed'
 
     return res.status(statusCode).json({
@@ -1760,6 +1866,9 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       },
     })
   } catch (error) {
+    // O2-S2: container login can JIT-provision a users row — marker 40001 → uniform
+    // retryable 409; the mappings below are unchanged.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('DingTalk container login error', error instanceof Error ? error : undefined)
     // DingTalkBusinessError here is DingTalk refusing the payload (typically an
     // invalid/expired authCode) — the caller's fault, not an upstream outage.
@@ -1775,7 +1884,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       : error instanceof DingTalkBusinessError
         ? 'DingTalk rejected the container auth code'
         : error instanceof DingTalkRequestError
-          ? error.message
+          ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
           : 'DingTalk authentication failed'
     const code = error instanceof DingTalkLoginPolicyError
       ? error.code

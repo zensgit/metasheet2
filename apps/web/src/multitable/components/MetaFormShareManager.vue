@@ -160,6 +160,13 @@
               <div class="meta-form-share__allowlist-subsection">
                 <label class="meta-form-share__label">{{ f('candidate.addSection') }}</label>
                 <div v-if="candidatesLoading" class="meta-form-share__empty">{{ f('candidate.loading') }}</div>
+                <!-- #5795: a term-less candidate call answers `requiresQuery` + no items (the endpoint no
+                     longer lists the roster). That is a prompt, not an empty result. -->
+                <div
+                  v-else-if="candidatesRequireQuery"
+                  class="meta-form-share__empty"
+                  data-form-share-candidates-search-required="true"
+                >{{ f('candidate.typeToSearch') }}</div>
                 <div v-else-if="filteredCandidates.length === 0" class="meta-form-share__empty">{{ f('candidate.empty') }}</div>
                 <div v-else class="meta-form-share__candidate-list">
                   <button
@@ -190,6 +197,11 @@
                     </span>
                   </button>
                 </div>
+                <div
+                  v-if="!candidatesLoading && candidatesHasMore"
+                  class="meta-form-share__hint"
+                  data-form-share-candidates-truncated="true"
+                >{{ f('candidate.refineSearch') }}</div>
               </div>
             </div>
 
@@ -208,7 +220,7 @@
                   data-form-share-copy="true"
                   @click="onCopyLink"
                 >
-                  {{ copied ? f('link.copied') : f('link.copy') }}
+                  {{ copied ? f('link.copied') : copyFailed ? f('link.copyFailed') : f('link.copy') }}
                 </MtButton>
               </div>
             </div>
@@ -261,6 +273,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { MtButton, MtIconButton } from '../ui'
@@ -294,9 +307,14 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const busy = ref(false)
 const copied = ref(false)
+const copyFailed = ref(false)
 const candidateQuery = ref('')
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const candidatesLoading = ref(false)
+// #5795 candidate response markers: `requiresQuery` = the server refused to list without a search term;
+// `hasMore` = the answer was clamped to the server ceiling.
+const candidatesRequireQuery = ref(false)
+const candidatesHasMore = ref(false)
 let candidateTimer: number | null = null
 const { isZh } = useLocale()
 
@@ -374,6 +392,8 @@ async function loadConfig() {
 async function loadCandidates() {
   if (!props.client || !props.visible || !showAllowlistSection.value) {
     candidates.value = []
+    candidatesRequireQuery.value = false
+    candidatesHasMore.value = false
     return
   }
   candidatesLoading.value = true
@@ -383,7 +403,11 @@ async function loadCandidates() {
       limit: 20,
     })
     candidates.value = response.items
+    candidatesRequireQuery.value = response.requiresQuery === true
+    candidatesHasMore.value = response.hasMore === true
   } catch (err) {
+    candidatesRequireQuery.value = false
+    candidatesHasMore.value = false
     error.value = err instanceof Error ? err.message : f('error.loadCandidates')
   } finally {
     candidatesLoading.value = false
@@ -504,9 +528,16 @@ async function onRegenerate() {
 
 function onCopyLink() {
   if (!publicLink.value) return
-  void navigator.clipboard.writeText(publicLink.value)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 2000)
+  // The public link is never logged; on failure the button says so and the link stays in the
+  // read-only input beside it for a manual copy.
+  void copyText(publicLink.value).then((ok) => {
+    copied.value = ok
+    copyFailed.value = !ok
+    setTimeout(() => {
+      copied.value = false
+      copyFailed.value = false
+    }, 2000)
+  })
 }
 
 function onPreview() {
@@ -566,6 +597,8 @@ watch(
       void loadCandidates()
     } else {
       candidates.value = []
+      candidatesRequireQuery.value = false
+      candidatesHasMore.value = false
     }
   },
   { immediate: true },

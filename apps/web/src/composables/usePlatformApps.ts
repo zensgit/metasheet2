@@ -1,5 +1,7 @@
 import { computed, ref } from 'vue'
 import { apiGet } from '../utils/api'
+import { useFeatureFlags } from '../stores/featureFlags'
+import { useAuth } from './useAuth'
 
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -37,6 +39,12 @@ export interface PlatformAppSummary {
   pluginStatus: 'active' | 'inactive' | 'failed'
   pluginError?: string
   displayName: string
+  /**
+   * One-line "what this app does for whoever reads the name" (app-manifest.ts §
+   * PlatformAppManifestSchema doc comment). Optional — a manifest written before this field
+   * existed serves `undefined`, and a reader falls back to `boundedContext.description`.
+   */
+  valueStatement?: string
   runtimeModel: 'instance' | 'direct'
   boundedContext: {
     code: string
@@ -416,11 +424,68 @@ async function fetchAppById(
   return request
 }
 
+/**
+ * Browser half of the App Center visibility gate (G-7 ④).
+ *
+ * The `permissions` codes were already on the wire — `platform/app-registry.ts` has been projecting
+ * every manifest's array into `PlatformAppSummary` all along, and this composable has been typing it
+ * (`permissions: string[]` above) with nobody consuming it. This consumes it, with the SAME rules the
+ * server now applies in `packages/core-backend/src/routes/platform-apps.ts#canSeePlatformApp`:
+ * admin bypass first, then ANY-OF over the declared codes, with an empty declaration public.
+ *
+ * It is a SECOND line, not the line: the server already filtered `GET /api/platform/apps` and 404s
+ * `GET /api/platform/apps/:appId`, so an app that reaches here at all is one the server allowed.
+ * This exists so a cached/stale list, or a summary picked up from a previous session, cannot render
+ * an entry the server would refuse — the exact "visible but unopenable" fake entry G-7 names.
+ *
+ * `auth.hasPermission` is reused verbatim rather than re-derived: it short-circuits on the admin
+ * snapshot and then delegates to `utils/permission-match.ts`, whose algebra the server mirrors
+ * against the shared truth table.
+ */
+export function isPlatformAppAccessible(
+  app: Pick<PlatformAppSummary, 'permissions'>,
+  auth: Pick<ReturnType<typeof useAuth>, 'hasAdminAccess' | 'hasPermission'> = useAuth(),
+): boolean {
+  if (auth.hasAdminAccess()) return true
+  const declared = Array.isArray(app.permissions) ? app.permissions : []
+  const codes = declared.map((code) => String(code || '').trim()).filter(Boolean)
+  // Declared-but-unusable fails closed, matching `matchesAnyPermission` on both sides.
+  if (codes.length === 0) return declared.length === 0
+  return codes.some((code) => auth.hasPermission(code))
+}
+
+/**
+ * Browser half of the catalog FEATURE gate, next to the permission gate above.
+ *
+ * The server drops an app from `GET /api/platform/apps` and 404s its detail when a product feature
+ * the manifest declares is switched off (packages/core-backend/src/routes/platform-apps.ts, keyed on
+ * the manifest's `featureFlags`). This re-applies that decision to whatever summary is already in
+ * the shared `apps` ref -- one loaded before the switch changed, or served by an older backend -- so
+ * the launcher and the shell never render a card for a feature whose routes are not there.
+ *
+ * Same single opinion as the server's `resolveElearningCatalogFeature`: only `elearning` is judged,
+ * from the session's product features (`features.elearning`, sent by the backend as
+ * `ELEARNING_ENABLED === 'true'` and loaded by the router guard before any view renders). Every
+ * other declared flag has no opinion here, exactly as on the server.
+ */
+export function isPlatformAppFeatureEnabled(
+  app: Pick<PlatformAppSummary, 'featureFlags'>,
+  flags: Pick<ReturnType<typeof useFeatureFlags>, 'hasFeature'> = useFeatureFlags(),
+): boolean {
+  const declared = Array.isArray(app.featureFlags) ? app.featureFlags : []
+  if (declared.includes('elearning') && !flags.hasFeature('elearning')) return false
+  return true
+}
+
 export function usePlatformApps() {
   const activeApps = computed(() => apps.value.filter((item) => item.pluginStatus === 'active'))
+  const accessibleApps = computed(() => apps.value.filter(
+    (item) => isPlatformAppAccessible(item) && isPlatformAppFeatureEnabled(item),
+  ))
   return {
     apps,
     activeApps,
+    accessibleApps,
     loading,
     error,
     fetchApps,

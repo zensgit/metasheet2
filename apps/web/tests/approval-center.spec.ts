@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import {
   createApp,
   defineComponent,
@@ -12,6 +13,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { NETWORK_UNREACHABLE_COPY } from '../src/utils/networkErrors'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -56,9 +58,30 @@ const getPendingCountSpy = vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 
 const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
 const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
+// Test report 2026-10-08 T4b: the summary line resolves `user` (人员) values through the shared
+// directory cache, whose batch fetch is `resolveApprovalDirectoryUsers`. Resolves immediately so the
+// cache's retry backoff is never entered (see directoryResolve.ts on the cross-test timer hazard).
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 
 // B3-03: the filter bar's template dropdown fetches options via listTemplates() on mount.
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
+
+// F3-E1: the 导出 CSV button's one call. The view also imports the error class and the client-side
+// "not a CSV" code from the same module to classify a failure, so both are part of this mock; the
+// class is a structural stand-in (the real one's wire behaviour is covered in
+// approvalApiErrorSurfacing.spec.ts).
+const exportApprovalsCsvSpy = vi.fn()
+const MOCK_EXPORT_UNEXPECTED_RESPONSE = 'APPROVAL_EXPORT_UNEXPECTED_RESPONSE'
+class MockApprovalApiError extends Error {
+  readonly status: number
+  readonly code?: string
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApprovalApiError'
+    this.status = status
+    this.code = code
+  }
+}
 
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
@@ -66,7 +89,11 @@ vi.mock('../src/approvals/api', () => ({
   markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
+  resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
+  exportApprovalsCsv: (...args: unknown[]) => exportApprovalsCsvSpy(...args),
+  ApprovalApiError: MockApprovalApiError,
+  APPROVAL_EXPORT_UNEXPECTED_RESPONSE: MOCK_EXPORT_UNEXPECTED_RESPONSE,
 }))
 
 // B3-03: REACTIVE so a deep-link test can set `?templateId=...&createdFrom=...&createdTo=...`
@@ -147,7 +174,20 @@ const ElTabs = defineComponent({
   props: { modelValue: String },
   emits: ['update:modelValue', 'tab-change'],
   render() {
-    return h('div', { 'data-el-tabs': this.modelValue }, this.$slots.default?.())
+    return h('div', { 'data-el-tabs': this.modelValue }, [
+      // F3-E1 test-only affordance (same idea as `test-select-all-rows` below): the real tab
+      // header cannot be clicked through this stub, so expose a direct trigger that does what a
+      // header click does — v-model update, then `tab-change`.
+      ...['pending', 'mine', 'cc', 'completed', 'processed'].map((name) => h('button', {
+        type: 'button',
+        'data-testid': `test-switch-tab-${name}`,
+        onClick: () => {
+          this.$emit('update:modelValue', name)
+          this.$emit('tab-change', name)
+        },
+      })),
+      this.$slots.default?.(),
+    ])
   },
 })
 
@@ -427,6 +467,8 @@ describe('ApprovalCenterView', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // O-8 / F8-1: the center follows the shell locale; this suite asserts its zh-CN copy.
+    useLocale().setLocale('zh-CN')
     mockPendingApprovals.value = []
     mockMyApprovals.value = []
     mockCcApprovals.value = []
@@ -456,6 +498,7 @@ describe('ApprovalCenterView', () => {
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
     listTemplatesSpy.mockClear()
     listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    exportApprovalsCsvSpy.mockReset()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
 
@@ -1113,6 +1156,39 @@ describe('ApprovalCenterView', () => {
       expect(summary!.textContent).not.toContain('附件')
     })
 
+    // Test report 2026-10-08 T4b: a 人员 (user) field among the summary fields shows the resolved
+    // name, never the stored member id.
+    it('T4b: a user field in the summary renders the directory-resolved name, never the member id', async () => {
+      const MEMBER_ID = '7d3e9a61-0c2f-4b85-9e14-a6f2c8d05b37'
+      // Imported here, not at the top: a static import would evaluate the mocked api module before
+      // this file's hoisted mock factory can see its own top-level class.
+      const { __resetResolvedDirectoryNamesForTests } = await import('../src/approvals/directoryResolve')
+      __resetResolvedDirectoryNamesForTests()
+      resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([{ id: MEMBER_ID, name: '王五' }])
+      getTemplateSpy.mockResolvedValue({
+        formSchema: {
+          fields: [
+            { id: 'fld_owner', type: 'user', label: '人员' },
+            { id: 'fld_reason', type: 'textarea', label: '事由' },
+          ],
+        },
+      })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_1',
+          templateId: 'tpl_owner',
+          formSnapshot: { fld_owner: MEMBER_ID, fld_reason: '出差' },
+        }),
+      ]
+      await mountView()
+      await flushUi(12)
+
+      expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(MEMBER_ID)
+      const summary = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(summary?.textContent?.trim()).toBe('人员：王五 · 事由：出差')
+      expect(container!.textContent).not.toContain(MEMBER_ID)
+    })
+
     it('a row without templateId renders no summary and never calls getTemplate', async () => {
       mockPendingApprovals.value = [
         pendingRow({ id: 'apv_1', templateId: null, formSnapshot: { fld_reason: '出差' } }),
@@ -1142,6 +1218,521 @@ describe('ApprovalCenterView', () => {
       expect(cell!.querySelector('.approval-center__row-summary')).toBeNull()
       // Silent by design — no toast, no console-visible rejection reaching the view layer.
       expect(elErrorSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // F3-E1 — 审批中心「导出 CSV」按钮. The button asks the SERVER for the CSV
+  // (`GET /api/approvals?format=csv`, mocked here at the client function) and hands the returned
+  // Blob to the browser; this view builds no CSV itself. Acceptance gates covered here: filter
+  // pass-through, the truncation notice, the PLM-disabled state. The wire half (URL, headers,
+  // refusals) lives in approvalApiErrorSurfacing.spec.ts; a real download is driven in the browser
+  // lane (verification/approval-list-csv-download.spec.ts).
+  // -------------------------------------------------------------------------
+  describe('F3-E1: 导出 CSV', () => {
+    const CJK_RE = /[㐀-鿿]/
+    let createObjectUrlSpy: ReturnType<typeof vi.fn>
+    let revokeObjectUrlSpy: ReturnType<typeof vi.fn>
+    let anchorClickSpy: ReturnType<typeof vi.spyOn>
+    let clickedAnchors: Array<{ href: string; download: string; attached: boolean }>
+    const originalCreateObjectUrl = (URL as { createObjectURL?: unknown }).createObjectURL
+    const originalRevokeObjectUrl = (URL as { revokeObjectURL?: unknown }).revokeObjectURL
+
+    async function setLocale(locale: 'en' | 'zh-CN'): Promise<void> {
+      const { useLocale } = await import('../src/composables/useLocale')
+      useLocale().setLocale(locale)
+    }
+
+    function exportResult(overrides: Record<string, unknown> = {}) {
+      return {
+        blob: new Blob(['﻿id,title\r\napv_1,x\r\n'], { type: 'text/csv' }),
+        fileName: 'approvals-export.csv',
+        rowCount: 1,
+        rowLimit: 500,
+        rowCap: 500,
+        capped: false,
+        ...overrides,
+      }
+    }
+
+    const exportButton = () => container!.querySelector<HTMLButtonElement>('[data-testid="approval-export-csv"]')
+    const exportHint = () => container!.querySelector<HTMLElement>('[data-testid="approval-export-hint"]')
+    const exportNotice = () => container!.querySelector<HTMLElement>('[data-testid="approval-export-notice"]')
+
+    async function clickExport(): Promise<void> {
+      exportButton()!.click()
+      await flushUi(6)
+    }
+
+    function changeSelect(testId: string, value: string): void {
+      const select = container!.querySelector<HTMLSelectElement>(`[data-testid="${testId}"]`)
+      expect(select, `${testId} renders`).toBeTruthy()
+      select!.value = value
+      select!.dispatchEvent(new Event('change'))
+    }
+
+    beforeEach(async () => {
+      await setLocale('en')
+      clickedAnchors = []
+      createObjectUrlSpy = vi.fn(() => 'blob:approval-export-test')
+      revokeObjectUrlSpy = vi.fn()
+      ;(URL as { createObjectURL?: unknown }).createObjectURL = createObjectUrlSpy
+      ;(URL as { revokeObjectURL?: unknown }).revokeObjectURL = revokeObjectUrlSpy
+      anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        clickedAnchors.push({ href: this.href, download: this.download, attached: this.isConnected })
+      })
+    })
+
+    afterEach(async () => {
+      // saveExportFile revokes the object URL in a setTimeout(0). Let that timer fire while the stub is
+      // still installed; restoring first leaves jsdom's URL (which has no revokeObjectURL) to take the
+      // call and vitest records an unhandled TypeError that fails the whole lane (#6207).
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      anchorClickSpy.mockRestore()
+      ;(URL as { createObjectURL?: unknown }).createObjectURL = originalCreateObjectUrl
+      ;(URL as { revokeObjectURL?: unknown }).revokeObjectURL = originalRevokeObjectUrl
+      await setLocale('en')
+    })
+
+    it('renders the button and its scope hint in the filter bar, in the UI locale (en / zh, switchable at runtime)', async () => {
+      await mountView()
+
+      const filters = container!.querySelector('.approval-center__filters')
+      expect(filters?.contains(exportButton())).toBe(true)
+      expect(exportButton()!.textContent?.trim()).toBe('Export CSV')
+      expect(exportButton()!.disabled).toBe(false)
+      // The button points at the explanation that sits next to it.
+      expect(exportButton()!.getAttribute('aria-describedby')).toBe(exportHint()!.id)
+      // The hint is what tells the user the file can hold fewer rows than the list total.
+      expect(exportHint()!.textContent).toContain('fewer rows than the total the list shows')
+      expect(exportHint()!.textContent).toContain('that you can open')
+      expect(CJK_RE.test(`${exportButton()!.textContent}${exportHint()!.textContent}`)).toBe(false)
+      // Nothing exported yet ⇒ no result line.
+      expect(exportNotice()).toBeNull()
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportButton()!.textContent?.trim()).toBe('导出 CSV')
+      expect(exportHint()!.textContent).toContain('导出行数可能少于列表显示的总数')
+      expect(exportHint()!.textContent).toContain('你可以打开详情的审批')
+    })
+
+    it('exports with the filters the list was LAST LOADED with (tab + filters, no paging) and saves the returned Blob as-is', async () => {
+      listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-7', name: '费用报销' }], total: 1 })
+      const result = exportResult({ rowCount: 37 })
+      exportApprovalsCsvSpy.mockResolvedValue(result)
+      await mountView()
+
+      changeSelect('approval-source-filter', 'platform')
+      await flushUi()
+      changeSelect('approval-template-filter', 'tpl-7')
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="approval-created-range-filter"]')!.click()
+      await flushUi()
+      // The status dropdown carries no test id; it is the one select offering 已通过.
+      expect(container!.querySelectorAll('select option[value="approved"]')).toHaveLength(1)
+      const statusSelect = container!.querySelector<HTMLOptionElement>('select option[value="approved"]')!.closest('select')!
+      statusSelect.value = 'approved'
+      statusSelect.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      await clickExport()
+
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
+      const [exportQuery] = exportApprovalsCsvSpy.mock.calls[0] as [Record<string, unknown>]
+      expect(exportQuery).toEqual({
+        tab: 'pending',
+        search: undefined,
+        status: 'approved',
+        sourceSystem: 'platform',
+        templateId: 'tpl-7',
+        createdFrom: '2026-05-01T00:00:00Z',
+        createdTo: '2026-06-30T23:59:59Z',
+      })
+      expect(exportQuery).not.toHaveProperty('page')
+      expect(exportQuery).not.toHaveProperty('pageSize')
+      // T1: header mode and language travel BESIDE the feed's filters (second argument), never inside
+      // the snapshot — the snapshot is compared against the list's filters, and it is captured at
+      // list-load time while the language is read when the button is clicked.
+      expect(exportQuery).not.toHaveProperty('header')
+      expect(exportQuery).not.toHaveProperty('lang')
+      expect(exportApprovalsCsvSpy.mock.calls[0]![1]).toEqual({ header: 'label', lang: 'en' })
+
+      // Same filters as the list request that produced the rows on screen — compared against the
+      // real last list call, not against a second hand-written literal.
+      const [lastListQuery] = loadPendingSpy.mock.calls.at(-1) as [Record<string, unknown>]
+      const { page, pageSize, ...listFilters } = lastListQuery
+      expect(page).toBe(1)
+      expect(pageSize).toBe(10)
+      // Pinned on its own: `toEqual` below ignores keys whose value is `undefined`, so it alone
+      // would not notice a status that reached neither request.
+      expect(listFilters.status).toBe('approved')
+      const { tab, ...exportFilters } = exportQuery
+      expect(tab).toBe('pending')
+      expect(exportFilters).toEqual(listFilters)
+
+      // Zero client-side CSV generation: the object handed to the browser is the very Blob the
+      // client function returned, under the file name it reported.
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      expect(createObjectUrlSpy.mock.calls[0]![0]).toBe(result.blob)
+      expect(clickedAnchors).toEqual([
+        { href: 'blob:approval-export-test', download: 'approvals-export.csv', attached: true },
+      ])
+      // The temporary link does not stay in the page.
+      expect(document.querySelector('a[download="approvals-export.csv"]')).toBeNull()
+
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('complete')
+      expect(exportNotice()!.textContent?.trim()).toBe('Exported 37 rows.')
+    })
+
+    it('T1: asks the server for labelled headers in the language the page shows WHEN THE BUTTON IS CLICKED (en, then zh after a runtime switch)', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult())
+      await mountView()
+
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
+      expect(exportApprovalsCsvSpy.mock.calls[0]![1]).toEqual({ header: 'label', lang: 'en' })
+
+      // Switch the UI language WITHOUT reloading the list: the snapshot taken at list-load time is
+      // the same one, yet the next export must follow the language the page shows now.
+      const listLoadsBeforeSwitch = loadPendingSpy.mock.calls.length
+      await setLocale('zh-CN')
+      await flushUi()
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
+      expect(exportApprovalsCsvSpy.mock.calls[1]![1]).toEqual({ header: 'label', lang: 'zh' })
+      expect(loadPendingSpy.mock.calls.length).toBe(listLoadsBeforeSwitch)
+      expect(exportApprovalsCsvSpy.mock.calls[1]![0]).toBe(exportApprovalsCsvSpy.mock.calls[0]![0])
+
+      // And back: the choice is not sticky.
+      await setLocale('en')
+      await flushUi()
+      await clickExport()
+      expect(exportApprovalsCsvSpy.mock.calls[2]![1]).toEqual({ header: 'label', lang: 'en' })
+    })
+
+    it('exports the ACTIVE tab, and a search term only once it has been applied to the list', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult())
+      await mountView()
+
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-mine"]')!.click()
+      await flushUi()
+      expect(loadMineSpy).toHaveBeenCalledTimes(1)
+
+      // Typed but not submitted: the list on screen is still the unfiltered one, so is the export.
+      const search = container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+      search.value = 'PO-2026'
+      search.dispatchEvent(new Event('input'))
+      await flushUi()
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ tab: 'mine', search: undefined }),
+        { header: 'label', lang: 'en' },
+      )
+
+      // Submitted (Enter) ⇒ the list reloads with it ⇒ the export carries it.
+      search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadMineSpy).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'PO-2026' }))
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ tab: 'mine', search: 'PO-2026' }),
+        { header: 'label', lang: 'en' },
+      )
+    })
+
+    it('truncation: a capped export says the file is incomplete and names the limit (en / zh)', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: 412, rowLimit: 500, rowCap: 500, capped: true }))
+      await mountView()
+      await clickExport()
+
+      const notice = exportNotice()!
+      expect(notice.getAttribute('data-export-outcome')).toBe('capped')
+      expect(notice.className).toContain('approval-center__export-notice--warning')
+      expect(notice.textContent).toContain('Exported 412 rows, but the file is incomplete')
+      expect(notice.textContent).toContain('per-export limit of 500 rows')
+      expect(notice.textContent).toContain('Narrow the filters')
+      expect(CJK_RE.test(notice.textContent ?? '')).toBe(false)
+      // The file is still saved — truncated is not failed.
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportNotice()!.textContent).toContain('已导出 412 行，但文件不完整')
+      expect(exportNotice()!.textContent).toContain('单次导出上限（500 行）')
+    })
+
+    it('truncation: the limit shown is the one this request ran under, falling back to the server ceiling', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: 200, rowLimit: null, rowCap: 500, capped: true }))
+      await mountView()
+      await clickExport()
+      expect(exportNotice()!.textContent).toContain('per-export limit of 500 rows')
+
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: null, rowLimit: null, rowCap: null, capped: true }))
+      await clickExport()
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('capped')
+      expect(exportNotice()!.textContent).toContain('is incomplete')
+      expect(exportNotice()!.textContent).not.toMatch(/\d/)
+    })
+
+    it('unreadable export headers are reported as "cannot confirm", never as a complete export', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: null, rowLimit: null, rowCap: null, capped: null }))
+      await mountView()
+      await clickExport()
+
+      const notice = exportNotice()!
+      expect(notice.getAttribute('data-export-outcome')).toBe('unknown')
+      expect(notice.className).toContain('approval-center__export-notice--warning')
+      expect(notice.textContent).toContain('cannot be confirmed that the file is complete')
+      expect(notice.textContent).not.toContain('Exported')
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+
+      // A count without the capped flag is still not enough to call it complete.
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: 12, capped: null }))
+      await clickExport()
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('unknown')
+    })
+
+    it('a zero-row export is reported as header-only, not as a failure', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: 0 }))
+      await mountView()
+      await clickExport()
+
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('complete')
+      expect(exportNotice()!.textContent).toContain('header row only')
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('PLM source: the button is disabled with a visible reason, a click sends nothing, and leaving PLM re-enables it', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult())
+      await mountView()
+      expect(exportButton()!.disabled).toBe(false)
+
+      changeSelect('approval-source-filter', 'plm')
+      await flushUi()
+
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ sourceSystem: 'plm' }))
+      expect(exportButton()!.disabled).toBe(true)
+      expect(exportHint()!.textContent).toContain('PLM-sourced approvals cannot be exported to CSV')
+      // The ordinary scope hint is replaced, not shown alongside.
+      expect(exportHint()!.textContent).not.toContain('fewer rows than the total')
+      // Neither a native click nor a synthetic click event on the disabled button sends anything.
+      exportButton()!.click()
+      exportButton()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(exportApprovalsCsvSpy).not.toHaveBeenCalled()
+      expect(createObjectUrlSpy).not.toHaveBeenCalled()
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportHint()!.textContent).toContain('PLM 来源的审批不支持导出 CSV')
+      await setLocale('en')
+
+      changeSelect('approval-source-filter', 'all')
+      await flushUi()
+      expect(exportButton()!.disabled).toBe(false)
+      expect(exportHint()!.textContent).toContain('fewer rows than the total the list shows')
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sourceSystem: 'all' }),
+        { header: 'label', lang: 'en' },
+      )
+    })
+
+    it('a refused export saves nothing and says why (status / not-a-CSV / forbidden / PLM refusal)', async () => {
+      await mountView()
+
+      exportApprovalsCsvSpy.mockRejectedValueOnce(new MockApprovalApiError('degraded', 503, 'APPROVAL_EXPORT_DEGRADED'))
+      await clickExport()
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('failed')
+      expect(exportNotice()!.getAttribute('role')).toBe('alert')
+      expect(exportNotice()!.className).toContain('approval-center__export-notice--error')
+      expect(exportNotice()!.textContent).toContain('Export failed (HTTP 503)')
+
+      exportApprovalsCsvSpy.mockRejectedValueOnce(new MockApprovalApiError('x', 200, MOCK_EXPORT_UNEXPECTED_RESPONSE))
+      await clickExport()
+      expect(exportNotice()!.textContent).toContain('the server did not return a CSV file')
+
+      exportApprovalsCsvSpy.mockRejectedValueOnce(new MockApprovalApiError('Insufficient permissions', 403, 'FORBIDDEN'))
+      await clickExport()
+      expect(exportNotice()!.textContent).toContain('not allowed to export approvals')
+
+      exportApprovalsCsvSpy.mockRejectedValueOnce(new MockApprovalApiError('plm', 400, 'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED'))
+      await clickExport()
+      expect(exportNotice()!.textContent).toContain('PLM-sourced approvals cannot be exported to CSV')
+
+      exportApprovalsCsvSpy.mockRejectedValueOnce(new Error('boom'))
+      await clickExport()
+      expect(exportNotice()!.textContent?.trim()).toBe('Export failed. Nothing was saved; please try again later.')
+
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(5)
+      expect(createObjectUrlSpy).not.toHaveBeenCalled()
+      expect(clickedAnchors).toEqual([])
+      // Failures use the inline line next to the button, not a toast.
+      expect(elErrorSpy).not.toHaveBeenCalled()
+      expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
+    })
+
+    it('a refused export with no response at all (network unreachable) shows the shared no-response copy, in the UI locale', async () => {
+      await mountView()
+
+      // Shape the API client throws when fetch gets no HTTP response (utils/networkErrors).
+      exportApprovalsCsvSpy.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'NETWORK_UNAVAILABLE', status: 0 }))
+      await clickExport()
+
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('failed')
+      expect(exportNotice()!.getAttribute('role')).toBe('alert')
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.en)
+      expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
+      expect(createObjectUrlSpy).not.toHaveBeenCalled()
+      expect(clickedAnchors).toEqual([])
+      expect(elErrorSpy).not.toHaveBeenCalled()
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.zh)
+    })
+
+    it('while an export is in flight the button is busy and a second click does not start another', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+
+      exportButton()!.click()
+      await flushUi()
+      expect(exportButton()!.disabled).toBe(true)
+      exportButton()!.click()
+      await flushUi()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
+      expect(exportNotice()).toBeNull()
+
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportButton()!.disabled).toBe(false)
+      expect(exportNotice()!.textContent?.trim()).toBe('Exported 3 rows.')
+    })
+
+    it('the result line is dropped once the list shows a different feed (filter or tab change)', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult({ rowCount: 5 }))
+      await mountView()
+      await clickExport()
+      expect(exportNotice()).toBeTruthy()
+
+      changeSelect('approval-source-filter', 'platform')
+      await flushUi()
+      expect(exportNotice()).toBeNull()
+
+      await clickExport()
+      expect(exportNotice()).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-cc"]')!.click()
+      await flushUi()
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight when the list moves to another feed saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      let rejectExport: (reason: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve, reject) => {
+        resolveExport = resolve
+        rejectExport = reject
+      }))
+      await mountView()
+
+      // Success half: export on 待我处理, switch to 抄送我的 before the server answers.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-cc"]')!.click()
+      await flushUi()
+      expect(loadCcSpy).toHaveBeenCalledTimes(1)
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      // The file matches the click-time feed, so it is still handed to the browser...
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      // ...but its result line does not appear under the 抄送我的 list.
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+
+      // Failure half: export on 抄送我的, switch to 我发起的, then the request fails.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-mine"]')!.click()
+      await flushUi()
+      expect(loadMineSpy).toHaveBeenCalledTimes(1)
+      rejectExport(new MockApprovalApiError('degraded', 503, 'APPROVAL_EXPORT_DEGRADED'))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('an export still in flight across a FILTER change saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      changeSelect('approval-source-filter', 'platform')
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ sourceSystem: 'platform' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight across a SUBMITTED search posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      const search = container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+      search.value = 'PO-2026'
+      search.dispatchEvent(new Event('input'))
+      await flushUi()
+      search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'PO-2026' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight across a reload of the SAME feed keeps its result line', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+
+      exportButton()!.click()
+      await flushUi()
+      // Enter on the (still empty) search box reloads the list with the same tab and filters.
+      const pendingLoadsBefore = loadPendingSpy.mock.calls.length
+      container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+        .dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy.mock.calls.length).toBe(pendingLoadsBefore + 1)
+
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()!.textContent?.trim()).toBe('Exported 3 rows.')
+    })
+
+    it('source tripwire: the view builds no CSV and no Blob of its own', async () => {
+      const fs = await import('node:fs')
+      const path = await import('node:path')
+      const source = fs.readFileSync(
+        path.resolve(__dirname, '../src/views/approval/ApprovalCenterView.vue'),
+        'utf-8',
+      )
+      // Positive controls first, so an emptied read cannot pass the negatives vacuously.
+      // T1: the call now passes the header options as a second argument (`exportApprovalsCsv(filters, { … })`).
+      expect(source).toContain('exportApprovalsCsv(filters, ')
+      expect(source).toContain('URL.createObjectURL(blob)')
+      expect(source).not.toMatch(/new\s+Blob\s*\(/)
+      expect(source).not.toMatch(/text\/csv/)
+      // Known bypass this does not see: CSV text assembled in an imported helper. The behavioural
+      // case above (identity of the Blob handed to createObjectURL) is the check that does.
     })
   })
 })

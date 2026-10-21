@@ -236,3 +236,90 @@ export async function captureLossyRetypePreImageRows(
     [ctx.sheetId, ctx.fieldId, ctx.configRevisionId, JSON.stringify(payload)],
   )
 }
+
+// ── Field retype CONVERT pre-image (design-lock docs/development/multitable-field-retype-first-batch-adr-20260926.md §3.2 / §3.6) ──
+// The SIBLING of `captureLossyRetypePreImageRows` above, which is untouched. It differs in four ways, each locked:
+//
+//   1. UNCONDITIONAL. It is NOT gated by `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED`. A conversion with no pre-image has no
+//      undo, so the conversion path never has a "skip the capture, rewrite anyway" branch: this function either writes
+//      every row or throws, and a throw rolls the whole conversion back. The capture flag keeps meaning exactly what it
+//      meant for field delete / record delete / lossy revert — this function neither reads nor changes it.
+//   2. EVERY live row, not only the rows that change: empty cells and cells whose value is already the target value
+//      are captured too. Undo compares the live record-id set against the pre-image set, so a row missing here would
+//      read as "a record was added since the conversion".
+//   3. ENVELOPE, not the raw cell. `value jsonb NOT NULL` cannot hold "the key was absent" or a JSON null, and undo
+//      must restore the four empty states exactly (absent key / JSON null / '' / []). The stored value is
+//      `{ "k": <the key was present>, "v": <the raw JSON value, null when absent>, "post": <the value written> }`.
+//      Any reader of this table that meets `reason = 'retype_convert'` must read `value` as this envelope, never as a
+//      cell value.
+//   4. `operation_id` stays NULL (it is not in the column list). An operation that tags zero record events writes no
+//      endpoint, so a tagged pre-image of an empty-sheet conversion would violate the endpoint FK at COMMIT; and
+//      retention only prunes untagged groups, so a tag would make the pre-image immortal.
+//
+// The cap is checked HERE rather than by the caller, so no caller can forget it: above
+// `MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS` the function throws `TombstoneCaptureCapExceededError` (HTTP 422) before
+// writing anything.
+
+export const RETYPE_CONVERT_TOMBSTONE_REASON = 'retype_convert'
+
+/** The `value` of a `reason = 'retype_convert'` row. `k` false ⇒ the key was absent and `v` is null. */
+export interface RetypeConvertPreImageEnvelope {
+  k: boolean
+  v: unknown
+  post: unknown
+}
+
+export interface RetypeConvertPreImageRow {
+  recordId: string
+  /** `data ? fieldId` before the conversion. */
+  hasKey: boolean
+  /** `data -> fieldId` before the conversion; ignored (stored as null) when `hasKey` is false. */
+  value: unknown
+  /** The value the conversion writes (or, for an untouched cell, the value that is already there). */
+  post: unknown
+}
+
+const RETYPE_CONVERT_CAPTURE_CHUNK_ROWS = 1000
+
+export function toRetypeConvertPreImageEnvelope(row: Pick<RetypeConvertPreImageRow, 'hasKey' | 'value' | 'post'>): RetypeConvertPreImageEnvelope {
+  return { k: row.hasKey === true, v: row.hasKey === true ? (row.value ?? null) : null, post: row.post ?? null }
+}
+
+/**
+ * Write one pre-image row per live record. Returns the number of rows written, which always equals `rows.length`
+ * (anything else throws). Runs on the caller's transaction `query`; must be called BEFORE the field or any cell is
+ * rewritten.
+ */
+export async function captureRetypeConvertPreImageRows(
+  query: TombstoneQueryFn,
+  rows: ReadonlyArray<RetypeConvertPreImageRow>,
+  ctx: { sheetId: string; fieldId: string; configRevisionId: string },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  const cap = resolveTombstoneCaptureMaxRows(env)
+  if (rows.length > cap) {
+    throw new TombstoneCaptureCapExceededError(
+      `This conversion would capture ${rows.length} pre-image row(s), above the ${cap}-row capture ceiling ` +
+        `(MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS). The conversion was refused; nothing was written.`,
+      rows.length,
+      cap,
+    )
+  }
+  let written = 0
+  for (let start = 0; start < rows.length; start += RETYPE_CONVERT_CAPTURE_CHUNK_ROWS) {
+    const chunk = rows.slice(start, start + RETYPE_CONVERT_CAPTURE_CHUNK_ROWS)
+    const payload = chunk.map((row) => ({ record_id: row.recordId, value: toRetypeConvertPreImageEnvelope(row) }))
+    const res = await query(
+      `INSERT INTO meta_field_value_tombstones (id, sheet_id, field_id, record_id, value, reason, config_revision_id, created_at)
+       SELECT gen_random_uuid(), $1, $2, item.record_id, item.value, 'retype_convert', $3::uuid, now()
+       FROM jsonb_to_recordset($4::jsonb) AS item(record_id text, value jsonb)
+       RETURNING record_id`,
+      [ctx.sheetId, ctx.fieldId, ctx.configRevisionId, JSON.stringify(payload)],
+    )
+    if (res.rows.length !== chunk.length) {
+      throw new Error(`retype-convert pre-image capture wrote ${res.rows.length} of ${chunk.length} rows; aborting`)
+    }
+    written += res.rows.length
+  }
+  return written
+}

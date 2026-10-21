@@ -26,8 +26,9 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
+import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -37,6 +38,7 @@ import {
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import { mintOperation, sealOperation, OperationLedger } from './operation-ledger'
 import {
   notifyRecordSubscribersBestEffort,
@@ -45,6 +47,11 @@ import {
 import { ensureRecordNotLocked } from './record-lock'
 import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  prepareLinkWriterFencePlan,
+} from './link-writer-fence'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -544,6 +551,14 @@ export class RecordWriteService {
           throw new RecordFieldForbiddenError(`Field is hidden: ${change.fieldId}`, change.fieldId, 'FIELD_HIDDEN')
         }
 
+        // Human write lock (human-write-lock.ts): the guard's `readOnly` already carries it (every person
+        // guard builder folds it in), so the generic refusal below would fire anyway. Answer the CLOSED code
+        // first when the guard carries the property (univer-meta + Yjs builders always do).
+        const humanLockKind = fieldHumanWriteLockKind(field)
+        if (humanLockKind) {
+          throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${change.fieldId}`, change.fieldId, humanWriteLockRefusalCode(humanLockKind))
+        }
+
         if (field.readOnly === true) {
           throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
         }
@@ -570,11 +585,11 @@ export class RecordWriteService {
         }
 
         if (field.type === 'select') {
-          if (typeof change.value !== 'string') {
+          const verdict = classifySelectCellValue(change.value, field.options ?? [])
+          if (verdict === 'not_string') {
             throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
           }
-          const allowed = new Set(field.options ?? [])
-          if (change.value !== '' && !allowed.has(change.value)) {
+          if (verdict === 'not_in_options') {
             throw new RecordValidationError(`Invalid select option for ${change.fieldId}: ${change.value}`)
           }
         }
@@ -809,12 +824,39 @@ export class RecordWriteService {
         }),
       ] as const),
     )
+    const candidateFieldIds = Array.from(
+      changesByRecord.values(),
+      (changes) => changes.map((change) => change.fieldId),
+    ).flat()
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      candidateFieldIds,
+    )
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const updates = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
       // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
       // revert-execute's own in-fence patch loop (it owns the block).
-      await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan, {
+          bypassBlockCheck: input.bypassWriterBlock === true,
+        })
+      } else {
+        await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      }
+      // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
+      // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
+      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the conversion flag AND the writer fence are both on.
+      await assertFieldSchemaUnchangedAfterFence(
+        query,
+        sheetId,
+        fieldById,
+        [...changesByRecord.values()].flatMap((changes) => changes.map((change) => change.fieldId)),
+      )
       // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
       // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
       // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.
@@ -837,8 +879,10 @@ export class RecordWriteService {
       // injected sheet-member loader (h.loadSheetMemberUserIds) so the existing unit seam is preserved.
       const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId, h.loadSheetMemberUserIds)
 
-      // #16: source each person field's restrictToMemberGroupIds from the property-bearing `fields`
-      // list (the per-change `fieldById` guard does not carry property). Built once per patch op.
+      // #16: source each person field's restrictToMemberGroupIds from the `fields` list. (The per-change
+      // `fieldById` guard ALSO carries `property` on both write paths — routes/univer-meta.ts
+      // buildFieldMutationGuardMap and the Yjs bridge guard in index.ts — but this map is built once per
+      // patch op from the field list rather than per change.) Built once per patch op.
       const personRestrictByFieldId = new Map<string, string[]>()
       for (const f of fields as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
         if (!f || f.type !== 'person') continue

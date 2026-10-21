@@ -48,6 +48,11 @@ const MISSING_CHILD_BOM_ROW_ERROR = 'missing_child_bom'
 // stock-preparation-readonly-intake.cjs so routing an expansion row through either path yields one value.
 const DESIGN_QTY_KEYS = Object.freeze(['designQty', 'rawQuantity', 'totalQuantity'])
 
+// 规格. The expansion emits `spec` only where the read plan DECLARED a spec column
+// (readPlan.part.specField); `specification` is accepted so a row that came in through the readonly
+// intake vocabulary maps identically. Closed list, same discipline as DESIGN_QTY_KEYS.
+const SPEC_KEYS = Object.freeze(['spec', 'specification'])
+
 class StockPreparationExpansionSnapshotMapperError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -68,6 +73,36 @@ function assertPlanGrounded(plan) {
     )
   }
   return { codeField, versionField: optionalString(part.versionField) }
+}
+
+// D-C (stock-preparation-bom-expansion.cjs ROW_ERROR_LIMIT). `expansion.rowErrors` is capped at 5000
+// entries, so the array this module reads is a SAMPLE, not the set — and this module's whole job is
+// to turn `missing_child_bom` rowErrors into the incomplete snapshot lines the diff engine and
+// generation branch on. A project whose `missing_child_bom` entries all landed past the cap would
+// therefore be mapped as if it had none: `status` flips 'incomplete' -> 'mapped', the incomplete
+// lines are never synthesized, `stock-preparation-sync-run-plan.cjs` computes no flags off them and
+// the run is persisted as SUCCEEDED. That is the same fail-open the cap opened in
+// `hasHardApplyBlockingRowErrors`, in the second place the array is mistaken for the facts.
+//
+// The expander publishes the TRUE per-type totals whenever it truncated, and they ride on
+// `expansion.summary`, which the live callers already hand over whole. This reads them.
+//
+// Returns `null` for every expansion under the cap, so nothing below it changes by a byte.
+function rowErrorTruncationOf(rowsArg, retainedMissingChildBom) {
+  const summary = (isPlainObject(rowsArg) && isPlainObject(rowsArg.summary)) ? rowsArg.summary : null
+  if (!summary || summary.rowErrorsTruncated !== true) return null
+  const counts = isPlainObject(summary.rowErrorTypeCounts) ? summary.rowErrorTypeCounts : {}
+  const trueMissingChildBom = Number(counts[MISSING_CHILD_BOM_ROW_ERROR] || 0)
+  const total = Number(summary.rowErrorsTotal || 0)
+  return {
+    rowErrorsTotal: Number.isFinite(total) ? total : 0,
+    // The count this mapper could NOT synthesize a line for. Non-zero is the whole point: it is the
+    // number of incomplete lines the batch is knowingly short, and it is what forbids 'mapped'.
+    unstampedMissingChildBom: Number.isFinite(trueMissingChildBom) && trueMissingChildBom > retainedMissingChildBom
+      ? trueMissingChildBom - retainedMissingChildBom
+      : 0,
+    trueMissingChildBom: Number.isFinite(trueMissingChildBom) ? trueMissingChildBom : 0,
+  }
 }
 
 function extractRowsAndErrors(rowsArg, options) {
@@ -143,11 +178,34 @@ function toSnapshotLine({ row, parentIndex, snapshotBatchId, defaultDesignUnit }
       (parent ? firstValue(parent, ['componentCode']) : null),
     parentVersion: firstValue(row, ['parentVersion']) ||
       (parent ? firstValue(parent, ['sourceVersion']) : null),
+    // 父组件名称. The expansion never emits a parentName key at all — the parent is only an OBJ_ID on
+    // the child row — so it resolves the same way parentDrawingNo/parentVersion already do: through
+    // the in-batch parentIndex, reading the PARENT row's componentName. Closed vocabulary, same
+    // ordering discipline (explicit key first, then the indexed parent), no invention.
+    parentName: firstValue(row, ['parentName']) ||
+      (parent ? firstValue(parent, ['componentName']) : null),
     childDrawingNo: firstValue(row, ['childDrawingNo', 'componentCode']),
     childVersion: firstValue(row, ['childVersion', 'sourceVersion']),
+    // 当前组件/零件名称. The expansion HAS carried componentName since the MVP (createRow reads the
+    // plan's part.nameField); it was read and then dropped here. Persisting it is what lets the
+    // material matcher's plmNameOf() see a name instead of a bare drawing number.
+    childName: firstValue(row, ['childName', 'componentName']),
+    // Fingerprint decomposition (stock-prep-change-adjudication-20260901): material is persisted as a
+    // first-class line field so the diff can raise MATERIAL_CHANGED by name. It was ALREADY part of
+    // sourceIdentity (hashed below), so the fingerprint computation is unchanged — historical batches
+    // simply lack the field and the diff falls back to the fingerprint for that dimension.
+    material: firstValue(row, ['material']),
+    // 规格. Present only where the deployment DECLARED a spec column on its read plan
+    // (readPlan.part.specField). Undeclared => the expansion row has no `spec` key => firstValue
+    // yields null => clean() drops it. Absence, never a guessed column and never an empty string.
+    spec: firstValue(row, SPEC_KEYS),
     bomLevel: firstNumber(row, ['bomLevel', 'depth']),
     pathKey,
     designQty: firstNumber(row, DESIGN_QTY_KEYS),
+    // 总数量. DESIGN_QTY_KEYS deliberately falls back to totalQuantity for designQty, which meant a
+    // row carrying BOTH persisted only the per-level number and the rollup was lost. This keeps the
+    // rollup as its own field; designQty's own resolution is untouched.
+    totalQuantity: firstNumber(row, ['totalQuantity']),
     designUnit: firstValue(row, ['designUnit', 'unit']) || defaultDesignUnit || null,
     lineStatus: firstValue(row, ['lineStatus']) ||
       (row && row.active === false ? LINE_STATUSES.INACTIVE : LINE_STATUSES.ACTIVE),
@@ -186,15 +244,27 @@ function summarizeBy(rows, field) {
   return out
 }
 
-function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampedLines, plan }) {
+function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampedLines, plan, rowErrorTruncation }) {
   const allLines = mappedLines.concat(stampedLines)
+  const retainedMissingChildBom = rowErrors.filter(
+    (entry) => isPlainObject(entry) && optionalString(entry.type) === MISSING_CHILD_BOM_ROW_ERROR,
+  ).length
+  const truncated = isPlainObject(rowErrorTruncation) ? rowErrorTruncation : null
   return {
     input: {
       expansionRows: expansionRows.length,
-      rowErrors: rowErrors.length,
-      missingChildBomRowErrors: rowErrors.filter(
-        (entry) => isPlainObject(entry) && optionalString(entry.type) === MISSING_CHILD_BOM_ROW_ERROR,
-      ).length,
+      // TRUE TOTALS once D-C truncated, not array lengths — `input` is what
+      // `stock-preparation-sync-run-plan.cjs` stringifies into the persisted run's `inputShape`, and
+      // a run record that reports the sample size as the input size is a durable false number. The
+      // sample size stays available, under its own key, mounted only when the two differ.
+      rowErrors: truncated ? Math.max(truncated.rowErrorsTotal, rowErrors.length) : rowErrors.length,
+      missingChildBomRowErrors: truncated
+        ? Math.max(truncated.trueMissingChildBom, retainedMissingChildBom)
+        : retainedMissingChildBom,
+      // CONDITIONAL, so every expansion under the cap keeps a byte-identical evidence stanza.
+      ...(truncated
+        ? { rowErrorsTruncated: true, rowErrorsRetained: rowErrors.length }
+        : {}),
     },
     result: {
       lines: allLines.length,
@@ -203,6 +273,11 @@ function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampe
       byLineStatus: summarizeBy(allLines, 'lineStatus'),
       withParentDrawingNo: mappedLines.filter((line) => optionalString(line.parentDrawingNo)).length,
       missingChildBomMarked: allLines.filter((line) => line.missingChildBom === true).length,
+      // The gap between what the expansion FOUND and what this mapper could synthesize a line for.
+      // Mounted only when it is non-zero, and it is the reason `status` is forced off 'mapped'.
+      ...(truncated && truncated.unstampedMissingChildBom > 0
+        ? { unstampedMissingChildBomRowErrors: truncated.unstampedMissingChildBom }
+        : {}),
     },
     // readPlanId is a public compile-time template constant (not a secret / tenant / host / private config).
     readPlanId: optionalString(plan && plan.id),
@@ -247,12 +322,25 @@ function mapExpansionRowsToSnapshotLines(rows, opts = {}) {
     }
   })
 
+  // D-C fail-closed. See `rowErrorTruncationOf`: when the cap dropped `missing_child_bom` entries
+  // this mapper never saw them, so `stampedLines.length` is short and 'mapped' would be a claim the
+  // expansion's own summary contradicts. `null` (and therefore no change at all) below the cap.
+  const rowErrorTruncation = rowErrorTruncationOf(rows, stampedLines.length)
+  const missingChildBomUnstamped = rowErrorTruncation ? rowErrorTruncation.unstampedMissingChildBom > 0 : false
+
   const lines = mappedLines.concat(stampedLines)
   return {
-    status: stampedLines.length ? 'incomplete' : 'mapped',
+    status: (stampedLines.length || missingChildBomUnstamped) ? 'incomplete' : 'mapped',
     snapshotBatchId,
     lines,
-    evidence: buildValuesFreeEvidence({ expansionRows: normalizedRows, rowErrors, mappedLines, stampedLines, plan }),
+    evidence: buildValuesFreeEvidence({
+      expansionRows: normalizedRows,
+      rowErrors,
+      mappedLines,
+      stampedLines,
+      plan,
+      rowErrorTruncation,
+    }),
   }
 }
 
@@ -267,6 +355,7 @@ module.exports = {
   LINE_STATUSES,
   MISSING_CHILD_BOM_ROW_ERROR,
   DESIGN_QTY_KEYS,
+  SPEC_KEYS,
   StockPreparationExpansionSnapshotMapperError,
   mapExpansionRowsToSnapshotLines,
   summarizeExpansionSnapshotMappingForEvidence,

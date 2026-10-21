@@ -12,6 +12,11 @@ import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { supportsAttendanceSelfService } from '../config/product-mode'
+import {
+  ATTENDANCE_SELF_SERVICE_NAMESPACE,
+  decideAttendanceSelfServiceBackfill,
+  parseAttendanceSelfServiceAdmissionRows,
+} from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
@@ -20,6 +25,9 @@ import {
   findUserIdByLoginAlias,
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
+import type { AliasQueryClient } from './login-alias-service'
+import { assignUserRoles } from '../rbac/role-assignment'
+import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
@@ -67,16 +75,21 @@ export interface AuthConfig {
 }
 
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
+/** The closed set this service may assign. Both call sites below pass only this id. */
+const SELF_SERVICE_ASSIGNABLE_ROLE_IDS = [ATTENDANCE_SELF_SERVICE_ROLE_ID] as const
 const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:write'] as const
 
-// P23: user_roles is one of exact-anchor recovery's eight recovery-authority tables. A write
-// that lands while recovery holds the per-subject lease fails fast with Postgres SQLSTATE
-// 40001 (see recovery-authorization-stability.ts's isRecoveryAuthorityBusyError /
-// RECOVERY_AUTHORITY_BUSY_MARKER — reused here, not re-derived). That is transient and
-// retryable, so assignUserRoles below retries it a bounded number of times in-process before
-// giving up. USER_ROLE_ASSIGNMENT_RETRY_LIMIT is the total number of INSERT attempts (not
-// "retries after the first"); the backoff is small because assignUserRoles is also reached
-// from the read-path backfill in resolveRbacProfile, so a busy lease must not add much
+// P23: user_roles (and users) are among exact-anchor recovery's eight recovery-authority
+// tables. A write that lands while recovery holds the per-subject lease fails fast with
+// Postgres SQLSTATE 40001 (see recovery-authorization-stability.ts's
+// isRecoveryAuthorityBusyError / RECOVERY_AUTHORITY_BUSY_MARKER — reused here, not
+// re-derived). That is transient and retryable, so both retry sites below reuse these
+// constants: backfillAttendanceSelfService retries its locked transaction a bounded number of times
+// in-process (read-path backfill in resolveRbacProfile), and register() retries its WHOLE
+// user-creation transaction the same bounded number of times (O2-S1 — a 40001 aborts the
+// open transaction, so per-statement retry inside it is impossible; the retry unit is the
+// transaction). USER_ROLE_ASSIGNMENT_RETRY_LIMIT is the total number of attempts (not
+// "retries after the first"); the backoff is small because a busy lease must not add much
 // latency to every authenticated request for a user missing attendance permissions.
 export const USER_ROLE_ASSIGNMENT_RETRY_LIMIT = 3
 const USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS = 20
@@ -86,7 +99,30 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Thrown by assignUserRoles when every retry against a recovery-authority-busy (40001) write
+ * O2-A3 (gate NIT-2): the register-path discrimination between "identity already taken"
+ * (swallow to `null` → the route's 409 "already exists") and every other failure
+ * (rethrow → the route's real 500). Register claims only the email alias, so an
+ * ALIAS_CONFLICT LoginAliasClaimError here IS an email-identity conflict (a WRITE_FAILED
+ * one is a real write failure and must rethrow); Postgres 23505 on this path is the
+ * users email unique index (user_permissions/user_roles both insert with
+ * ON CONFLICT DO NOTHING, and the id is a fresh randomUUID). NOT a general-purpose
+ * duplicate detector — scoped to register()'s write set only.
+ *
+ * Duck-typed on `.code` rather than a bare `instanceof LoginAliasClaimError` (gate #5018
+ * NIT-3, lesson 判据本身也要被攻击): under a duplicated module instance `instanceof`
+ * silently fails and a genuine ALIAS_CONFLICT would rethrow → generic 500 instead of the
+ * truthful 409. `'ALIAS_CONFLICT'` is produced only by LoginAliasClaimError on this
+ * write set (Postgres errors carry SQLSTATE codes), so the duck-type does not widen the
+ * criterion; `'ALIAS_WRITE_FAILED'` still falls through to rethrow.
+ */
+function isDuplicateIdentityConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  return code === 'ALIAS_CONFLICT' || code === '23505'
+}
+
+/**
+ * Thrown when every retry against a recovery-authority-busy (40001) write
  * is exhausted. Named and exported so callers (and tests) can distinguish "role assignment is
  * retryable-failed" from every other error assignUserRoles used to swallow unconditionally.
  */
@@ -395,6 +431,21 @@ export class AuthService {
     }
   }
 
+  // Reused from #5145's explicit membership selector; login resolution is unchanged.
+  async listActiveMembershipOrgIds(userId: string): Promise<string[]> {
+    const result = await poolManager.get().query(
+      `SELECT uo.org_id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+       ORDER BY uo.org_id ASC`,
+      [userId],
+    )
+    return result.rows
+      .map((row: { org_id?: unknown }) => row.org_id)
+      .filter((orgId: unknown): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+  }
+
   /**
    * 用户注册
    */
@@ -413,9 +464,18 @@ export class AuthService {
   // user created via this path).
   async register(email: string, password: string, name: string): Promise<User | null> {
     try {
-      // 检查邮箱是否已存在
-      const existingUser = await this.getUserByEmail(email)
-      if (existingUser) {
+      const pool = poolManager.get()
+      const normalizedEmail = email.trim().toLowerCase()
+      const existingIdentity = await pool.query(
+        `SELECT 1
+         FROM users
+         WHERE lower(email) = $1
+            OR ($2::boolean AND lower(username) = $1)
+            OR ($2::boolean AND regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3)
+         LIMIT 1`,
+        [normalizedEmail, !isAuthLoginAliasCutoverEnabled(), email.trim().replace(/\s+/g, '')],
+      )
+      if (existingIdentity.rows.length > 0) {
         return null
       }
 
@@ -434,30 +494,82 @@ export class AuthService {
 
       // 创建用户
       const userId = crypto.randomUUID()
-      const newUser = await this.createUser({
-        id: userId,
-        email,
-        name,
-        password_hash: passwordHash,
-        role: 'user',
-        permissions: registrationPermissions
-      })
+      const selfServiceRoleIds = enableAttendanceSelfService
+        ? [ATTENDANCE_SELF_SERVICE_ROLE_ID]
+        : []
 
-      if (newUser && enableAttendanceSelfService) {
-        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
+      // P23 / O2-S1: user creation and self-service role assignment are ONE transaction —
+      // the users, user_login_aliases, user_permissions and user_roles rows all commit or
+      // none do. user_roles (and users) are recovery-authority tables, so any of these
+      // writes can fail fast with 40001 while recovery holds the per-subject lease; a 40001
+      // aborts the whole open transaction (later statements would fail with 25P02), so the
+      // bounded retry re-runs the WHOLE transaction, reusing the same retry-limit/backoff
+      // constants as the read-path backfill. Exhaustion throws the same named
+      // UserRoleAssignmentRecoveryBusyError — but now with zero residue, unlike the
+      // pre-slice shape where the user row stayed committed while the role was missing.
+      for (let attempt = 1; ; attempt++) {
+        let newUser: User | null
+        try {
+          newUser = await pool.transaction(async (client) => {
+            const created = await this.createUserInTransaction(client, {
+              id: userId,
+              email,
+              name,
+              password_hash: passwordHash,
+              role: 'user',
+              permissions: registrationPermissions,
+            })
+            if (created && selfServiceRoleIds.length > 0) {
+              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds)
+            }
+            return created
+          })
+        } catch (txnError) {
+          if (isRecoveryAuthorityBusyError(txnError)) {
+            if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
+              throw new UserRoleAssignmentRecoveryBusyError(userId, selfServiceRoleIds, txnError)
+            }
+            await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
+            continue
+          }
+          // O2-A3 (gate NIT-2): `null` must mean "identity already taken" and NOTHING
+          // else — the registration route maps null to 409 "User with this email
+          // already exists" (routes/auth.ts). A duplicate-identity conflict (the alias
+          // claim losing a concurrent-register race, or the users email unique index
+          // firing — the race twin of the email existence pre-check) keeps the
+          // historical swallow-to-null; the whole transaction has rolled back,
+          // fail-closed. Every OTHER transaction failure now rethrows, so the route's
+          // catch answers its real 500 instead of fabricating an "exists" 409.
+          if (isDuplicateIdentityConflict(txnError)) {
+            this.logger.warn('Registration identity conflict', txnError instanceof Error ? txnError : undefined)
+            return null
+          }
+          this.logger.warn('Database insert failed', txnError instanceof Error ? txnError : undefined)
+          throw txnError
+        }
+        if (newUser && selfServiceRoleIds.length > 0) {
+          // Only after the transaction actually committed — invalidating before commit
+          // could refill the cache from a state the commit then supersedes.
+          invalidateUserPerms(userId)
+        }
+        return newUser
       }
-
-      return newUser
     } catch (error) {
       this.logger.error('Registration error', error instanceof Error ? error : undefined)
-      // P23: the user row may already be committed (createUser succeeded) while role
-      // assignment could not persist after bounded retries. Re-throw so the caller (the
-      // registration route in routes/auth.ts, which wraps this call in its own try/catch)
-      // sees a failure instead of a fabricated success with a missing role — never swallow
-      // this one to `null` alongside the ordinary "email already exists" case. Every other
-      // error keeps the existing swallow-to-null behavior.
+      // P23: bounded whole-transaction retries exhausted against a busy recovery lease.
+      // Everything rolled back (no user/alias/permission/role residue — O2-S1), but
+      // re-throw so the caller (the registration route in routes/auth.ts, which wraps this
+      // call in its own try/catch) sees a retryable failure instead of a fabricated
+      // success — never swallow this one to `null` alongside the ordinary "email already
+      // exists" case.
       if (error instanceof UserRoleAssignmentRecoveryBusyError) throw error
-      return null
+      // O2-A3 (gate NIT-2): the same discrimination as the transaction catch — `null`
+      // is reserved for "identity already taken". Anything else (bcrypt failure,
+      // email existence-read failure, rethrown transaction failures passing
+      // through) propagates to the route's own catch → its real 500, never a
+      // fabricated "email already exists" 409.
+      if (isDuplicateIdentityConflict(error)) return null
+      throw error
     }
   }
 
@@ -523,10 +635,6 @@ export class AuthService {
       this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
-  }
-
-  private async getUserByEmail(email: string): Promise<(User & { password_hash: string }) | null> {
-    return this.getUserByIdentifier(email)
   }
 
   /**
@@ -653,18 +761,12 @@ export class AuthService {
     }
 
     if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
-      // P23: this call is NOT inside a try today, and assignUserRoles can now throw
-      // (UserRoleAssignmentRecoveryBusyError) instead of always swallowing. resolveRbacProfile
-      // is reached from every getUserById/getUserByIdentifier read (login, verifyToken, ...),
-      // so an uncaught throw here would turn a transient recovery-busy lease into "user not
-      // found" for an otherwise-valid session on every authenticated request. Contain the
-      // failure locally: only merge the backfilled attendance permissions into the in-memory
-      // result once assignUserRoles has confirmed they persisted. If it did not persist, the
-      // permissions must not appear in the returned value even though this is a best-effort
-      // backfill — do not fabricate unpersisted permissions.
+      // Only merge after the locked eligibility read + role INSERT commit. Recovery-busy
+      // retries start a fresh transaction and re-read the revoke witness under the same lock.
       try {
-        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
-        permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+        if (await this.backfillAttendanceSelfService(userId, role, permissions)) {
+          permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+        }
       } catch (error) {
         this.logger.warn(
           'Attendance self-service role backfill did not persist; omitting unpersisted permissions',
@@ -683,97 +785,128 @@ export class AuthService {
   }
 
   /**
-   * 创建新用户
+   * 创建新用户 — runs inside the CALLER's open transaction (O2-S1).
+   *
+   * The only caller is register(), which owns the pool.transaction wrapper so that the
+   * self-service user_roles insert commits or rolls back atomically with the users row.
+   * Errors propagate to the transaction owner — retry/swallow semantics live there, because
+   * after a 40001 the transaction is aborted and nothing here could be retried in place.
    *
    * Load-bearing alias writer hook: activated self-registration must claim the email
    * login alias in the same transaction as the users row. Removing
    * claimNonEmptyLoginAliasesOrThrow here must fail tests/unit/login-alias-writers.test.ts
    * and tests/integration/login-alias-writers.db.test.ts (auth_register class).
+   * An alias conflict throws and rolls back the users insert (fail-closed).
    */
-  private async createUser(userData: {
-    id: string
-    email: string
-    name: string
-    password_hash: string
-    role: string
-    permissions: string[]
-  }): Promise<User | null> {
-    try {
-      try {
-        const pool = poolManager.get()
-        const permissionsJson = JSON.stringify(userData.permissions)
-        // Transaction required: alias conflict must roll back the users insert (fail-closed).
-        const created = await pool.transaction(async (client) => {
-          const result = await client.query(
-            `INSERT INTO users (
-               id, email, name, password_hash, role, permissions,
-               activation_status, local_password_set, is_active,
-               created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
-             RETURNING id, email, name, role, permissions, must_change_password,
-                       activation_status, local_password_set, is_active, created_at, updated_at`,
-            [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson],
-          )
+  private async createUserInTransaction(
+    client: AliasQueryClient,
+    userData: {
+      id: string
+      email: string
+      name: string
+      password_hash: string
+      role: string
+      permissions: string[]
+    },
+  ): Promise<User | null> {
+    const permissionsJson = JSON.stringify(userData.permissions)
+    const result = await client.query(
+      `INSERT INTO users (
+         id, email, name, password_hash, role, permissions,
+         activation_status, local_password_set, is_active,
+         created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
+       RETURNING id, email, name, role, permissions, must_change_password,
+                 activation_status, local_password_set, is_active, created_at, updated_at`,
+      [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson],
+    )
 
-          if (result.rows.length === 0) return null
+    if (result.rows.length === 0) return null
 
-          // Alias full-writer: claim non-empty identifiers (email for self-registration).
-          await claimNonEmptyLoginAliasesOrThrow({
-            userId: userData.id,
-            email: userData.email,
-            source: 'auth_register',
-            client,
-          })
+    // Alias full-writer: claim non-empty identifiers (email for self-registration).
+    await claimNonEmptyLoginAliasesOrThrow({
+      userId: userData.id,
+      email: userData.email,
+      source: 'auth_register',
+      client,
+    })
 
-          if (userData.permissions.length > 0) {
-            const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-            await client.query(
-              `INSERT INTO user_permissions (user_id, permission_code)
-               VALUES ${values}
-               ON CONFLICT DO NOTHING`,
-              [userData.id, ...userData.permissions],
-            )
-          }
+    if (userData.permissions.length > 0) {
+      const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+      await client.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ${values}
+         ON CONFLICT DO NOTHING`,
+        [userData.id, ...userData.permissions],
+      )
+    }
 
-          const row = result.rows[0] as User
-          return {
-            id: row.id,
-            email: row.email,
-            name: row.name,
-            role: row.role,
-            permissions: Array.isArray(row.permissions) ? row.permissions : [],
-            must_change_password: row.must_change_password,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-          }
-        })
-        return created
-      } catch (dbError) {
-        this.logger.warn('Database insert failed', dbError instanceof Error ? dbError : undefined)
-      }
-      return null
-    } catch (error) {
-      this.logger.error('Create user error', error instanceof Error ? error : undefined)
-      return null
+    const row = result.rows[0] as User
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      permissions: Array.isArray(row.permissions) ? row.permissions : [],
+      must_change_password: row.must_change_password,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     }
   }
 
-  private async assignUserRoles(userId: string, roleIds: string[]): Promise<void> {
-    if (roleIds.length === 0) return
+  /**
+   * Single-shot user_roles insert against the caller's transaction (backfill or register).
+   * Deliberately does NOT
+   * retry or invalidate caches — the caller owns both.
+   */
+  private async insertUserRolesOnce(
+    client: AliasQueryClient,
+    userId: string,
+    roleIds: readonly string[],
+  ): Promise<void> {
+    for (const roleId of roleIds) {
+      // Self-service assigns from a set fixed in this module, so the authority is stated as
+      // exactly that set rather than as an unbounded one.
+      await assignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
+        executor: client,
+      })
+    }
+  }
+
+  private async backfillAttendanceSelfService(
+    userId: string,
+    role: string,
+    permissions: string[],
+  ): Promise<boolean> {
+    const roleIds = [ATTENDANCE_SELF_SERVICE_ROLE_ID]
     const pool = poolManager.get()
     for (let attempt = 1; ; attempt++) {
       try {
-        for (const roleId of roleIds) {
-          await pool.query(
-            `INSERT INTO user_roles (user_id, role_id)
-             VALUES ($1, $2)
-             ON CONFLICT DO NOTHING`,
-            [userId, roleId]
+        const persisted = await pool.transaction(async (client) => {
+          await lockNamespaceAdmissionWrites(client, userId)
+          const result = await client.query(
+            `SELECT enabled, source
+               FROM user_namespace_admissions
+              WHERE user_id = $1 AND namespace = $2
+              LIMIT 1`,
+            [userId, ATTENDANCE_SELF_SERVICE_NAMESPACE],
           )
-        }
-        invalidateUserPerms(userId)
-        return
+          if (decideAttendanceSelfServiceBackfill({
+            supportsProductMode: supportsAttendanceSelfService(process.env.PRODUCT_MODE),
+            role,
+            permissions,
+            admission: parseAttendanceSelfServiceAdmissionRows(result.rows),
+          }) !== 'bootstrap') return false
+
+          await this.insertUserRolesOnce(client, userId, roleIds)
+          return true
+        })
+        if (persisted) invalidateUserPerms(userId)
+        return persisted
       } catch (error) {
         if (isRecoveryAuthorityBusyError(error)) {
           if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
@@ -784,9 +917,8 @@ export class AuthService {
           await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
           continue
         }
-        // Unrelated errors keep the pre-existing behavior: warn and swallow.
-        this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
-        return
+        // Failed reads/writes roll back and must not fabricate attendance permissions.
+        throw error
       }
     }
   }

@@ -28,6 +28,23 @@ export function isFieldAlwaysReadOnly(field: Pick<MetaField, 'type' | 'property'
   return property?.readonly === true || property?.readOnly === true
 }
 
+// Human write lock — client mirror of packages/core-backend/src/multitable/human-write-lock.ts
+// (`isFieldHumanWriteLocked`): `property.humanWriteLock === 'plm_system'` marks a column whose value a SYSTEM
+// writer owns (the 备料 PLM pull on a project sheet). People never edit it — the server refuses with
+// FIELD_READONLY_PLM_SYSTEM and already reports it read-only through `fieldPermissions` — so this is
+// defense-in-depth for the grid editor and the range planner's per-column SKIP (grid-range-fill.ts), which
+// must tell a locked column apart from any other read-only cell. Deliberately NOT part of
+// `isFieldAlwaysReadOnly` above: that one mirrors the server predicate the plugin records path also uses,
+// and the parity guard pins it byte-for-byte. Closed vocabulary — exact match only.
+export const FIELD_HUMAN_WRITE_LOCK_PROPERTY_KEY = 'humanWriteLock'
+export const FIELD_HUMAN_WRITE_LOCK_PLM_SYSTEM = 'plm_system'
+
+export function isFieldHumanWriteLocked(field: Pick<MetaField, 'property'> | null | undefined): boolean {
+  if (!field) return false
+  const property = field.property as Record<string, unknown> | undefined
+  return property?.[FIELD_HUMAN_WRITE_LOCK_PROPERTY_KEY] === FIELD_HUMAN_WRITE_LOCK_PLM_SYSTEM
+}
+
 export function filterPropertyVisibleFields<T extends Pick<MetaField, 'property'>>(fields: T[]): T[] {
   return fields.filter((field) => !isPropertyHiddenField(field))
 }
@@ -50,6 +67,7 @@ export function isFieldBulkEditable(args: {
   if (isSystemField(args.field)) return false
   const property = args.field.property as Record<string, unknown> | undefined
   if (property?.readonly === true || property?.readOnly === true) return false
+  if (isFieldHumanWriteLocked(args.field)) return false
   if (NON_BULK_EDITABLE_TYPES.has(args.field.type)) return false
   if (isPropertyHiddenField(args.field)) return false
   return true

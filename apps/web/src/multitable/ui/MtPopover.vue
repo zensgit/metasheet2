@@ -112,7 +112,15 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', handleEscape)
 })
 
-defineExpose({ close })
+// P3-6 (2026-09-05, record inspector v3 finding, additive-only kit change): `triggerRef` exposed
+// ALONGSIDE the pre-existing `close` — a consumer (MtMenu.vue) needs to reliably identify the DOM
+// node that actually opened this popover, rather than guessing via `document.activeElement` at open
+// time (a Chromium-mouse-click assumption that is wrong whenever the trigger was activated some
+// other way — a caller opening it programmatically, a non-mouse focus path, or simply focus already
+// having moved elsewhere before the open). Reading an exposed ref through a template ref
+// auto-unwraps (see MtMenu.vue's own comment on this same expose-proxy semantics for `close`), so a
+// consumer's `popoverRef.value?.triggerRef` reads the CURRENT trigger span with no extra plumbing.
+defineExpose({ close, triggerRef })
 </script>
 
 <style scoped>

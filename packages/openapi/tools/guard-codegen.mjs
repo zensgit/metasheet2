@@ -51,6 +51,8 @@ const SOURCE_NEEDLES = [
   'record-link',
   'record-link-options',
   'listApprovalRecordLinkOptions',
+  'directory/departments',
+  'listApprovalDirectoryDepartments',
   'FormFieldDetailLeaf',
   'RecordLinkFieldProps',
 ]
@@ -74,16 +76,39 @@ if (!yaml.includes('/api/approvals/record-link-options')) {
 }
 ok('record-link-options path present in dist')
 
+const departmentDirectoryPath = json?.paths?.['/api/approvals/directory/departments']?.get
+if (departmentDirectoryPath?.operationId !== 'listApprovalDirectoryDepartments') {
+  fail('department directory path/operationId missing from generated OpenAPI')
+}
+const departmentDirectoryParameters = departmentDirectoryPath.parameters || []
+const departmentDirectoryParameterNames = departmentDirectoryParameters.map((entry) => entry?.name).sort()
+if (JSON.stringify(departmentDirectoryParameterNames) !== JSON.stringify(['limit', 'mode', 'parentId', 'q'])) {
+  fail(`department directory query contract drifted: ${JSON.stringify(departmentDirectoryParameterNames)}`)
+}
+if (departmentDirectoryParameterNames.includes('orgId') || departmentDirectoryParameterNames.includes('integrationId')) {
+  fail('department directory must not accept caller-selected org/integration parameters')
+}
+const departmentDirectoryItem = departmentDirectoryPath?.responses?.['200']?.content?.['application/json']?.schema
+  ?.properties?.departments?.items
+const departmentDirectoryItemKeys = Object.keys(departmentDirectoryItem?.properties || {}).sort()
+if (JSON.stringify(departmentDirectoryItemKeys) !== JSON.stringify(['fullPath', 'hasChildren', 'id', 'name', 'parentId'])) {
+  fail(`department directory item exposure drifted: ${JSON.stringify(departmentDirectoryItemKeys)}`)
+}
+if (departmentDirectoryItem?.additionalProperties !== false) {
+  fail('department directory item must reject undeclared provider/integration fields')
+}
+ok('department directory path is scoped and minimal')
+
 if (!yaml.includes('listApprovalRecordLinkOptions')) {
   fail('dist/openapi.yaml missing operationId listApprovalRecordLinkOptions')
 }
 
-// FormField must be a discriminated oneOf (record-link vs generic) — not a single object with
-// overlapping props oneOf (invalid: free-form object also matches RecordLinkFieldProps shapes).
+// FormField must be a discriminated oneOf. Dedicated strict-props members cannot overlap the
+// free-form generic member.
 const formField = json?.components?.schemas?.FormField
 const formOneOf = formField?.oneOf
-if (!Array.isArray(formOneOf) || formOneOf.length < 2) {
-  fail('FormField must be a oneOf union (FormFieldRecordLink | FormFieldGeneric)')
+if (!Array.isArray(formOneOf) || formOneOf.length < 3) {
+  fail('FormField must include strict record-link/department members plus FormFieldGeneric')
 }
 const oneOfRefs = formOneOf.map((e) => String(e?.$ref || ''))
 if (!oneOfRefs.some((r) => r.includes('FormFieldRecordLink'))) {
@@ -92,6 +117,9 @@ if (!oneOfRefs.some((r) => r.includes('FormFieldRecordLink'))) {
 if (!oneOfRefs.some((r) => r.includes('FormFieldGeneric'))) {
   fail(`FormField.oneOf must include FormFieldGeneric, got ${JSON.stringify(oneOfRefs)}`)
 }
+if (!oneOfRefs.some((r) => r.includes('FormFieldDepartment'))) {
+  fail(`FormField.oneOf must include FormFieldDepartment, got ${JSON.stringify(oneOfRefs)}`)
+}
 const disc = formField?.discriminator
 if (!disc || disc.propertyName !== 'type') {
   fail('FormField.discriminator.propertyName must be type')
@@ -99,7 +127,10 @@ if (!disc || disc.propertyName !== 'type') {
 if (!String(disc?.mapping?.['record-link'] || '').includes('FormFieldRecordLink')) {
   fail('FormField.discriminator.mapping.record-link must point at FormFieldRecordLink')
 }
-ok('FormField is discriminated union (record-link vs generic)')
+if (!String(disc?.mapping?.department || '').includes('FormFieldDepartment')) {
+  fail('FormField.discriminator.mapping.department must point at FormFieldDepartment')
+}
+ok('FormField is a discriminated union with strict record-link and department members')
 
 const rlField = json?.components?.schemas?.FormFieldRecordLink
 const rlTypeEnum = rlField?.properties?.type?.enum
@@ -180,10 +211,44 @@ for (const pin of ['baseId', 'sheetId']) {
 }
 ok('RecordLinkFieldProps baseId/sheetId reject whitespace-only via pattern')
 
+const departmentField = json?.components?.schemas?.FormFieldDepartment
+const departmentTypeEnum = departmentField?.properties?.type?.enum
+if (!Array.isArray(departmentTypeEnum) || departmentTypeEnum.length !== 1 || departmentTypeEnum[0] !== 'department') {
+  fail('FormFieldDepartment.type must be enum [department] only')
+}
+if (departmentField?.additionalProperties !== false) {
+  fail('FormFieldDepartment.additionalProperties must be false')
+}
+if (!String(departmentField?.properties?.props?.$ref || '').includes('DepartmentFieldProps')) {
+  fail('FormFieldDepartment.props must $ref DepartmentFieldProps')
+}
+if (!Array.isArray(departmentField?.required) || !departmentField.required.includes('props')) {
+  fail('FormFieldDepartment.required must include props')
+}
+const departmentProps = json?.components?.schemas?.DepartmentFieldProps
+if (departmentProps?.additionalProperties !== false) {
+  fail('DepartmentFieldProps.additionalProperties must be false')
+}
+const departmentPropKeys = Object.keys(departmentProps?.properties || {}).sort()
+const expectedDepartmentPropKeys = [
+  'defaultDepartmentIds',
+  'defaultMode',
+  'display',
+  'maxSelections',
+  'selection',
+]
+if (JSON.stringify(departmentPropKeys) !== JSON.stringify(expectedDepartmentPropKeys)) {
+  fail(`DepartmentFieldProps keys drifted: ${JSON.stringify(departmentPropKeys)}`)
+}
+if (!Array.isArray(departmentProps?.required) || !departmentProps.required.includes('selection') || !departmentProps.required.includes('display')) {
+  fail('DepartmentFieldProps must require selection and display')
+}
+ok('FormFieldDepartment requires strict DepartmentFieldProps')
+
 const genField = json?.components?.schemas?.FormFieldGeneric
 const genTypeEnum = genField?.properties?.type?.enum
-if (!Array.isArray(genTypeEnum) || genTypeEnum.includes('record-link')) {
-  fail('FormFieldGeneric.type must exclude record-link (no oneOf overlap)')
+if (!Array.isArray(genTypeEnum) || genTypeEnum.includes('record-link') || genTypeEnum.includes('department')) {
+  fail('FormFieldGeneric.type must exclude record-link and department (no oneOf overlap)')
 }
 const genProps = genField?.properties?.props
 if (!genProps || genProps.$ref) {
@@ -193,7 +258,7 @@ const columnsRef = genField?.properties?.columns?.items?.$ref || ''
 if (!String(columnsRef).includes('FormFieldDetailLeaf')) {
   fail(`FormFieldGeneric.columns must $ref FormFieldDetailLeaf, got ${columnsRef}`)
 }
-ok('FormFieldGeneric excludes record-link and keeps free-form props')
+ok('FormFieldGeneric excludes strict-props members and keeps free-form props')
 
 const leaf = json?.components?.schemas?.FormFieldDetailLeaf
 const leafEnum = leaf?.properties?.type?.enum
@@ -225,11 +290,16 @@ if (!dts.includes('record-link') && !dts.includes('"record-link"')) {
 if (!dts.includes('FormFieldRecordLink') && !dts.includes('RecordLinkFieldProps')) {
   fail('SDK types missing FormFieldRecordLink / RecordLinkFieldProps (discriminated union not generated)')
 }
-// openapi-typescript should express the union (FormFieldRecordLink | FormFieldGeneric) or equivalent.
-if (!dts.includes('FormFieldGeneric') && !dts.includes('FormFieldRecordLink')) {
+if (!dts.includes('FormFieldDepartment') || !dts.includes('DepartmentFieldProps')) {
+  fail('SDK types missing FormFieldDepartment / DepartmentFieldProps')
+}
+if (!dts.includes('listApprovalDirectoryDepartments') || !dts.includes('/api/approvals/directory/departments')) {
+  fail('SDK types missing approval department directory operation/path')
+}
+if (!dts.includes('FormFieldGeneric') || !dts.includes('FormFieldRecordLink')) {
   fail('SDK types missing FormField union members')
 }
-ok('SDK types include record-link surfaces + FormField union')
+ok('SDK types include strict record-link/department surfaces + FormField union')
 
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 if (pkg.name !== '@metasheet/openapi') {

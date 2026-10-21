@@ -4,6 +4,7 @@ import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { useMultitableGrid } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { businessTodayKey } from '../src/multitable/utils/business-timezone'
 
 // Calendar drag-to-reschedule: dragging an event onto a new day rewrites the
 // record's configured date field via the SAME `patch-cell` path Kanban uses
@@ -17,10 +18,12 @@ function fmt(d: Date): string {
 }
 
 // Pick two distinct in-month days the month grid is guaranteed to render: the
-// 10th and the 20th of the current month (both always present in the 42-cell grid).
+// 10th and the 20th of the month the calendar OPENS on (both always present in the 42-cell grid). That month is
+// the business today's (客户反馈 2026-09-24 #4c follow-up), not the browser's — on a month's last day between
+// 16:00 and 24:00 UTC the two months differ.
 function dayOfThisMonth(day: number): string {
-  const now = new Date()
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  const [year, month] = businessTodayKey().split('-')
+  return `${year}-${month}-${String(day).padStart(2, '0')}`
 }
 
 function cellForDate(container: HTMLElement, dateStr: string): HTMLElement | null {

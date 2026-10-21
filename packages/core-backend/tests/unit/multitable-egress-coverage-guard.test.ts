@@ -42,6 +42,14 @@ const EGRESS_HELPERS = [
  * header). Seeded from the first run; update deliberately, never to silence a red without doing the above.
  */
 const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], number>>> = {
+  // Subscription webhook body: each value map is filtered over loadReadableRecordFieldIdsForAccess
+  // (loadAllowedFieldIds layer-2 ∧ layer-3 → maskStoredRecordFieldIds with the database-read access).
+  // Real-DB locking tests: tests/integration/multitable-webhook-scoping-realdb.test.ts M2 (field_permissions
+  // hidden field absent from body and stored row), M16 (definition-hidden), M14 (formula taint), M10 (re-mask
+  // before a retry).
+  'multitable/webhook-delivery-authority.ts': {
+    filterRecordDataByFieldIds: 1,
+  },
   'multitable/record-write-service.ts': {
     filterRecordDataByFieldIds: 3,
     buildLinkSummaries: 1,

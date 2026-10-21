@@ -11,6 +11,37 @@ import {
 import type { AutomationRule } from '../src/multitable/types'
 
 describe('MultitableApiClient', () => {
+  it('accepts only an explicit record-restore identity from the server', async () => {
+    const result = { restored: 'r1', sheetId: 's1' }
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: result }))) })
+    await expect(client.restoreDeletedRecord('r1')).resolves.toEqual(result)
+  })
+
+  it.each([{}, { sheetId: 's1' }, { restored: 'other', sheetId: 's1' }, { restored: 'r1', sheetId: '' }])('does not fabricate success for an invalid record-restore result', async (data) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data }))) })
+    await expect(client.restoreDeletedRecord('r1')).rejects.toThrow('Invalid record restore response')
+  })
+
+  it('lists soft-deleted sheets within the requested base and preserves opaque pagination', async () => {
+    const data = { sheets: [{ id: 's1', baseId: 'b1', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: 'opaque-next' }
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data })))
+    const client = new MultitableApiClient({ fetchFn })
+    await expect(client.listDeletedSheets('b1', { cursor: 'opaque+cursor', limit: 20 })).resolves.toEqual(data)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/bases/b1/trash?cursor=opaque%2Bcursor&limit=20')
+  })
+
+  it.each([
+    { sheets: null, nextCursor: null },
+    { sheets: [], nextCursor: '' },
+    { sheets: [], nextCursor: 12 },
+    { sheets: [{ baseId: 'b1', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: null },
+    { sheets: [{ id: 's1', baseId: 'other', name: 'Orders', description: null, deletedAt: '2026-09-14T08:00:00.000Z' }], nextCursor: null },
+    { sheets: [{ id: 's1', baseId: 'b1', name: 'Orders', description: null, deletedAt: 'invalid' }], nextCursor: null },
+  ])('rejects malformed or wrong-base sheet recycle-bin responses', async (data) => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data }))) })
+    await expect(client.listDeletedSheets('b1')).rejects.toThrow('Invalid deleted sheets response')
+  })
+
   beforeEach(() => {
     setMultitableApiErrorLocaleResolver(undefined)
     vi.useFakeTimers()
@@ -95,7 +126,93 @@ describe('MultitableApiClient', () => {
       total: 2,
       limit: 8,
       query: 'lin',
+      // #5795 markers default to "not truncated / term given" when the server omits them
+      hasMore: false,
+      requiresQuery: false,
+      minQueryLength: 1,
     })
+  })
+
+  // #5795: both roster-shaped candidate reads are search-required and capped; the client passes the
+  // server's values-free markers through so the UI can tell "type to search" from "no match".
+  it('passes the form-share candidate requiresQuery / hasMore markers through', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? { items: [], total: 0, limit: 20, query: q, hasMore: true, requiresQuery: false, minQueryLength: 1 }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    const blank = await client.listFormShareCandidates('sheet_1', { q: '' })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/sheet_1/form-share-candidates')
+    expect(blank).toMatchObject({ items: [], requiresQuery: true, hasMore: false, minQueryLength: 1 })
+    const typed = await client.listFormShareCandidates('sheet_1', { q: 'f' })
+    expect(typed).toMatchObject({ requiresQuery: false, hasMore: true, query: 'f' })
+  })
+
+  it('passes the comment mention-candidate markers through and never invents a population count', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      const q = new URL(input, 'http://fake.invalid').searchParams.get('q')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: q
+          ? {
+              items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+              total: 1,
+              limit: 20,
+              query: q,
+              hasMore: true,
+              requiresQuery: false,
+              minQueryLength: 1,
+            }
+          : { items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1 },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: '', limit: 20 })).resolves.toEqual({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
+    })
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=sheet_1&limit=20')
+    await expect(client.listCommentMentionSuggestions({ spreadsheetId: 'sheet_1', q: 'fa', limit: 20 })).resolves.toEqual({
+      items: [{ id: 'u_fake', label: 'Fake Person', subtitle: 'fake@example.invalid' }],
+      total: 1,
+      limit: 20,
+      query: 'fa',
+      hasMore: true,
+      requiresQuery: false,
+      minQueryLength: 1,
+    })
+  })
+
+  // #5809: the import resolvers rely on the server's exact modes; a client that silently dropped
+  // `match` would fall back to the substring search and the ceiling could hide the real owner.
+  it('sends match=exact on the person-field directory lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, query: 'x', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listPersonFieldDirectory('s', 'f', { q: 'x', match: 'exact' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/multitable/sheets/s/person-fields/f/directory?q=x&match=exact')
+  })
+
+  it('sends match=exact-email on the mention-candidate lookup', async () => {
+    const fetchFn = vi.fn(async (_input: string) => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [], total: 0, limit: 50, query: 'a@b.c', hasMore: false, requiresQuery: false, minQueryLength: 1 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listCommentMentionSuggestions({ spreadsheetId: 's', q: 'a@b.c', limit: 50, match: 'exact-email' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe('/api/comments/mention-candidates?spreadsheetId=s&q=a%40b.c&limit=50&match=exact-email')
   })
 
   it('normalizes automation rule list responses from snake_case API rows', async () => {
@@ -577,6 +694,43 @@ describe('MultitableApiClient', () => {
     expect(error.code).toBe('FORBIDDEN')
   })
 
+  // Field retype slice 3b: the write was refused because its column changed type while it waited on the sheet
+  // fence. The server's message is an English literal; the user reads the client's sentence in their language.
+  it('409 FIELD_SCHEMA_CHANGED: the client sentence replaces the server message, in the client locale; code and status are kept', async () => {
+    const refusal = () => new Response(JSON.stringify({
+      ok: false,
+      error: {
+        code: 'FIELD_SCHEMA_CHANGED',
+        message: 'A field this write touches changed type or options while the write was waiting; reload and retry',
+      },
+    }), { status: 409 })
+    const patch = { sheetId: 'sheet_1', changes: [{ recordId: 'rec_1', fieldId: 'fld_1', value: 'x' }] }
+
+    const zh = await new MultitableApiClient({ isZh: true, fetchFn: vi.fn().mockImplementation(async () => refusal()) })
+      .patchRecords(patch as never).catch((err) => err)
+    expect(zh.message).toBe('这一列刚刚被改成了别的类型，你这次的修改没有保存。请刷新页面后重新修改。')
+    expect([zh.name, zh.status, zh.code]).toEqual(['MultitableApiError', 409, 'FIELD_SCHEMA_CHANGED'])
+
+    const en = await new MultitableApiClient({ isZh: false, fetchFn: vi.fn().mockImplementation(async () => refusal()) })
+      .patchRecords(patch as never).catch((err) => err)
+    expect(en.message).toBe('This column was just changed to another type, so your edit was not saved. Refresh the page and edit again.')
+    expect([en.status, en.code]).toEqual([409, 'FIELD_SCHEMA_CHANGED'])
+  })
+
+  it('409 with any other code keeps the server message — VERSION_CONFLICT and RECOVERY_IN_PROGRESS are untouched', async () => {
+    for (const [code, message] of [
+      ['VERSION_CONFLICT', 'Version conflict for rec_1'],
+      ['RECOVERY_IN_PROGRESS', 'Another recovery operation is in progress on this sheet; retry shortly.'],
+    ]) {
+      const client = new MultitableApiClient({
+        isZh: true,
+        fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: false, error: { code, message } }), { status: 409 })),
+      })
+      const error = await client.patchRecords({ sheetId: 'sheet_1', changes: [{ recordId: 'rec_1', fieldId: 'fld_1', value: 'x' }] } as never).catch((err) => err)
+      expect([error.code, error.message]).toEqual([code, message])
+    }
+  })
+
   it('localizes missing field-error messages but preserves field ids', async () => {
     const client = new MultitableApiClient({
       isZh: true,
@@ -937,6 +1091,27 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/record-subscription-notifications?sheetId=sheet_1&recordId=rec_1&limit=10')
   })
 
+  // #5745 §5.4: a notification.sent row from a record-less trigger (approval.completed etc.) has
+  // recordId '' — it must survive normalisation (the server's unread-count counts it), while
+  // record-scoped rows without a recordId are still dropped.
+  it('listRecordSubscriptionNotifications keeps a record-less notification.sent row and still drops record-scoped rows without recordId', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [
+          { id: 'note_sent', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'notification.sent', actorId: 'user_2', revisionId: null, commentId: null, message: 'approval done', createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+          { id: 'note_upd', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'record.updated', actorId: 'user_2', revisionId: 'rev_1', commentId: null, createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+          { id: 'note_cmt', sheetId: 'sheet_1', recordId: '', userId: 'user_1', eventType: 'comment.created', actorId: 'user_2', revisionId: null, commentId: 'cmt_1', createdAt: '2026-09-15T08:30:12.861Z', readAt: null },
+        ],
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const rows = await client.listRecordSubscriptionNotifications({ limit: 50 })
+    expect(rows.map((r) => r.id)).toEqual(['note_sent'])
+    expect(rows[0]).toMatchObject({ eventType: 'notification.sent', recordId: '', message: 'approval done' })
+  })
+
   // Notification Center S1b — real-wire coverage for the 3 read-state methods (#1779/#1781 forward
   // rule: every contract-consuming method must round-trip URL/method/envelope, not be mocked away).
   it('getRecordSubscriptionUnreadCount GETs the unread-count route and unwraps data.count', async () => {
@@ -1069,5 +1244,285 @@ describe('MultitableApiClient', () => {
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/records/rec_1')
+  })
+
+  // Sheet/base rename affordances (feat/multitable-rename). Both PATCH endpoints gate
+  // server-side on canManageFields — these tests cover the wire contract (URL/method/body,
+  // envelope unwrap) and the 403 -> MultitableApiError surfacing the exact server message.
+  it('renameSheet PATCHes the sheet endpoint with the given name and unwraps the sheet', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Renamed', description: null } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.renameSheet('sheet_1', 'Renamed')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Renamed' })
+    expect(result).toEqual({ sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Renamed', description: null } })
+  })
+
+  it('renameSheet surfaces the server FORBIDDEN message on a 403 (schema-authority gate)', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'FORBIDDEN', message },
+    }), { status: 403 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.renameSheet('sheet_1', 'Renamed').catch((err) => err)
+
+    expect(error.message).toBe(message)
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('deleteSheet DELETEs the sheet endpoint (no body) and unwraps { deleted }', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { deleted: 'sheet_1' },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.deleteSheet('sheet_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('DELETE')
+    expect(init.body).toBeUndefined()
+    expect(result).toEqual({ deleted: 'sheet_1' })
+  })
+
+  it('deleteSheet URL-encodes the sheet id', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { deleted: 'a/b' } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await client.deleteSheet('a/b')
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/a%2Fb')
+  })
+
+  it('deleteSheet surfaces the coded 409 SHEET_PLUGIN_MANAGED refusal (code + message + status) so the caller can pick copy by code', async () => {
+    const message = 'This sheet is provisioned and owned by a plugin and cannot be deleted from the UI or the sheet API.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'SHEET_PLUGIN_MANAGED', message },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.deleteSheet('sheet_1').catch((err) => err)
+
+    expect(error.name).toBe('MultitableApiError')
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('SHEET_PLUGIN_MANAGED')
+    expect(error.message).toBe(message)
+  })
+
+  it('restoreSheet POSTs the restore endpoint and unwraps { restored, sheet } (API half only — no UI caller yet)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { restored: 'sheet_1', sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Orders', description: null } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.restoreSheet('sheet_1')
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1/restore')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(result.restored).toBe('sheet_1')
+    expect(result.sheet.id).toBe('sheet_1')
+  })
+
+  it('renameBase PATCHes the base endpoint with the given name, unwraps the base, and invalidates the bases cache', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { bases: [{ id: 'base_1', name: 'Old name' }] },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { base: { id: 'base_1', name: 'New name', icon: null, color: null, ownerId: 'u1', workspaceId: 'w1' } },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { bases: [{ id: 'base_1', name: 'New name' }] },
+      }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    // Warm the bases cache.
+    await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    const result = await client.renameBase('base_1', 'New name')
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/bases/base_1')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'New name' })
+    expect(result).toEqual({ base: { id: 'base_1', name: 'New name', icon: null, color: null, ownerId: 'u1', workspaceId: 'w1' } })
+
+    // The cache warmed above must NOT be served after the rename — a subsequent listBases()
+    // must hit the network again and return the renamed base.
+    const after = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.bases[0]?.name).toBe('New name')
+  })
+
+  it('renameBase surfaces the server FORBIDDEN message on a 403 (schema-authority gate)', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'FORBIDDEN', message },
+    }), { status: 403 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.renameBase('base_1', 'New name').catch((err) => err)
+
+    expect(error.message).toBe(message)
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  // P3-4: whole-execution re-run (A5 endpoint). The UI confirm-gates this call and always sends
+  // confirmSideEffects:true (never lets the caller omit it) — a component-level mock can only see
+  // `toHaveBeenCalledWith(id)`, so this wire-contract assertion is the one place that can go red if
+  // that flag is ever dropped from the request body.
+  it('retryAutomationExecution POSTs confirmSideEffects:true to the execution retry endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'axe_new', ruleId: 'rule-1', sheetId: 'sheet-a', status: 'running', statusLegacy: 'running',
+      triggeredBy: 'event', triggeredAt: '2026-05-28T00:00:02.000Z', finishedAt: null, duration: null,
+      error: null, schemaVersion: 1, steps: [], rerunOfExecutionId: 'axe_1', initiatedBy: 'user_1',
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.retryAutomationExecution('axe_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe_1/retry')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // Exact deep-equal (not toContain): an extra field or confirmSideEffects:false must also fail.
+    expect(JSON.parse(init.body as string)).toEqual({ confirmSideEffects: true })
+    expect(result.id).toBe('axe_new')
+  })
+
+  it('retryAutomationExecution encodes the execution id and surfaces a discriminated 409 code', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'NOT_RETRYABLE', message: 'Only failed/skipped executions can be retried (got resolved)' },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.retryAutomationExecution('axe with space').catch((err) => err)
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe%20with%20space/retry')
+    expect(error.code).toBe('NOT_RETRYABLE')
+    expect(error.status).toBe(409)
+  })
+
+  // 「把 Base 存为模板」(09-10 测试反馈第 8 条)。组件级 spec 把整个 client mock 掉了,
+  // 只看得见「方法被调用时传了什么」——URL / method / body / 缓存作废这几条 wire 契约
+  // 只有在这里才钉得住(把路径改成 /api/multitable/TYPO-templates 时,这三条会红)。
+  it('createTemplateFromBase POSTs to /api/multitable/templates and invalidates the templates cache', async () => {
+    const template = { id: 'mtpl_1', name: 'Ops', description: '', category: 'Custom', icon: 'T', color: '#111', sheets: [], custom: true, visibility: 'private' }
+    const fetchFn = vi.fn()
+      // 1) 预热模板缓存
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+      // 2) 创建
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { template, warnings: ['w'] } }), { status: 201 }))
+      // 3) 缓存作废后的重新拉取
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [template] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    const result = await client.createTemplateFromBase({ baseId: 'base_1', name: 'Ops', visibility: 'private' })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+    // 精确 deep-equal:visibility 被吞掉(默认变成全租户可见)也要红
+    expect(JSON.parse(init.body as string)).toEqual({ baseId: 'base_1', name: 'Ops', visibility: 'private' })
+    expect(result.template.id).toBe('mtpl_1')
+    expect(result.warnings).toEqual(['w'])
+
+    // 缓存必须作废,否则模板中心刷不出刚建的模板
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates[0]?.id).toBe('mtpl_1')
+  })
+
+  // F7「从表一键存为模板」:工作台提交的是带 sheetIds/fieldIds 的收窄请求。这两个键必须
+  // **原样**落到 POST body 上 —— client 里任何一层「顺手清理/挑字段」的改写都会让服务端
+  // 退回整 Base 抽取(用户勾掉的列照样进模板),而组件级 spec 看不见 body。
+  it('createTemplateFromBase forwards sheetIds/fieldIds verbatim in the POST body', async () => {
+    const template = { id: 'mtpl_2', name: '订单', description: '', category: 'Custom', icon: 'T', color: '#111', sheets: [], custom: true, visibility: 'private' }
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { template, warnings: [] } }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [template] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    await client.createTemplateFromBase({
+      baseId: 'base_1',
+      name: '订单',
+      sheetIds: ['sheet_1'],
+      fieldIds: ['fld_a', 'fld_c'],
+      visibility: 'private',
+    })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // 精确 deep-equal:少一个键、多一个键、或把数组摊平成字符串都要红
+    expect(JSON.parse(init.body as string)).toEqual({
+      baseId: 'base_1',
+      name: '订单',
+      sheetIds: ['sheet_1'],
+      fieldIds: ['fld_a', 'fld_c'],
+      visibility: 'private',
+    })
+
+    // 收窄请求同样要作废模板缓存,否则模板中心刷不出刚建的那张
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates[0]?.id).toBe('mtpl_2')
+  })
+
+  it('deleteTemplate DELETEs the encoded template id and invalidates the templates cache', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [{ id: 'mtpl with space' }] } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templateId: 'mtpl with space' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    await expect(client.deleteTemplate('mtpl with space')).resolves.toEqual({ templateId: 'mtpl with space' })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates/mtpl%20with%20space')
+    expect((fetchFn.mock.calls[1]?.[1] as RequestInit).method).toBe('DELETE')
+
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates).toEqual([])
+  })
+
+  it('listTemplates passes the customTemplatesUnavailable degradation flag through (cache hits included)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { templates: [{ id: 'project-tracker' }], customTemplatesUnavailable: true },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const first = await client.listTemplates()
+    expect(first.customTemplatesUnavailable).toBe(true)
+    // 缓存命中的那次也必须带着标志位,否则提示条会闪一下就消失
+    const cached = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(cached.customTemplatesUnavailable).toBe(true)
   })
 })

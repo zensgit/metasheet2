@@ -5,7 +5,7 @@
   -->
   <el-dialog
     :model-value="visible"
-    title="选择关联记录"
+    :title="t.title"
     width="480px"
     append-to-body
     destroy-on-close
@@ -13,7 +13,7 @@
     close-on-press-escape
     class="approval-record-link-picker-dialog"
     data-testid="approval-record-link-picker"
-    aria-label="选择关联记录"
+    :aria-label="t.title"
     @close="emit('close')"
     @opened="onDialogOpened"
   >
@@ -24,14 +24,14 @@
           v-model="search"
           class="approval-record-link-picker__input"
           type="search"
-          placeholder="搜索显示名称"
+          :placeholder="t.searchPlaceholder"
           data-testid="approval-record-link-picker-search"
           @input="onSearch"
         />
       </div>
       <div class="approval-record-link-picker__body">
         <div v-if="loading" class="approval-record-link-picker__loading" data-testid="approval-record-link-picker-loading">
-          加载中…
+          {{ t.loading }}
         </div>
         <div
           v-else-if="errorMessage"
@@ -60,7 +60,7 @@
           class="approval-record-link-picker__empty"
           data-testid="approval-record-link-picker-empty"
         >
-          暂无可用记录
+          {{ t.empty }}
         </div>
         <button
           v-if="!loading && !errorMessage && hasMore"
@@ -69,7 +69,7 @@
           data-testid="approval-record-link-picker-load-more"
           @click="loadMore"
         >
-          加载更多
+          {{ t.loadMore }}
         </button>
       </div>
     </div>
@@ -81,7 +81,7 @@
           data-testid="approval-record-link-picker-cancel"
           @click="emit('close')"
         >
-          取消
+          {{ t.cancel }}
         </button>
         <button
           type="button"
@@ -90,7 +90,7 @@
           :disabled="!canConfirm"
           @click="onConfirm"
         >
-          确认
+          {{ t.confirm }}
         </button>
       </div>
     </template>
@@ -104,7 +104,9 @@ import {
   listApprovalRecordLinkOptions,
   type ApprovalRecordLinkOption,
 } from '../api'
-import { RECORD_LINK_SELECTED_GENERIC } from '../recordLinkField'
+import { recordLinkSelectedGeneric } from '../recordLinkField'
+import { useLocale } from '../../composables/useLocale'
+import { RECORD_LINK_PICKER_EN, RECORD_LINK_PICKER_ZH } from './approvalPickerLabels'
 
 const props = defineProps<{
   visible: boolean
@@ -118,10 +120,16 @@ const emit = defineEmits<{
   (e: 'confirm', payload: { recordId: string; display: string }): void
 }>()
 
+// O-8 / F8-1: picker chrome follows the shell locale (module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? RECORD_LINK_PICKER_ZH : RECORD_LINK_PICKER_EN))
+
 const search = ref('')
 const records = ref<ApprovalRecordLinkOption[]>([])
 const loading = ref(false)
-const errorMessage = ref('')
+// O-8 / F8-1: the error is kept as a label KEY so the rendered message follows a later locale switch.
+const errorKey = ref<'' | 'errorTargetUnavailable' | 'errorTargetForbidden' | 'errorLoadFailed'>('')
+const errorMessage = computed(() => (errorKey.value ? t.value[errorKey.value] : ''))
 const selectedId = ref<string | null>(null)
 /**
  * Desired pin from currentRecordId on open/re-pin. Never treated as a confirmed selection
@@ -200,7 +208,7 @@ watch(
     search.value = ''
     page.value = { offset: 0, limit: 20, total: 0, hasMore: false }
     records.value = []
-    errorMessage.value = ''
+    errorKey.value = ''
     loading.value = true
     await loadRecords(true)
   },
@@ -225,7 +233,7 @@ async function loadRecords(reset: boolean) {
   const sheetId = props.sheetId.trim()
   if (!baseId || !sheetId) {
     if (generation !== loadGeneration) return
-    errorMessage.value = '目标表不可用'
+    errorKey.value = 'errorTargetUnavailable'
     records.value = []
     selectedId.value = null
     loading.value = false
@@ -233,7 +241,7 @@ async function loadRecords(reset: boolean) {
   }
   loading.value = true
   if (reset) {
-    errorMessage.value = ''
+    errorKey.value = ''
     // While reloading a target, selection is unproven until options arrive.
     selectedId.value = null
   }
@@ -253,9 +261,9 @@ async function loadRecords(reset: boolean) {
       records.value = reset ? [] : records.value
       if (reset) selectedId.value = null
       if (result.status === 403 || result.status === 404) {
-        errorMessage.value = '目标表不可用或无权访问'
+        errorKey.value = 'errorTargetForbidden'
       } else {
-        errorMessage.value = '加载失败，请稍后重试'
+        errorKey.value = 'errorLoadFailed'
       }
       page.value = { ...page.value, hasMore: false }
       return
@@ -289,7 +297,7 @@ function onSearch() {
   selectedId.value = null
   // Search is a new option set; do not auto-reselect previous currentRecordId under a filter.
   desiredRecordId.value = null
-  errorMessage.value = ''
+  errorKey.value = ''
   page.value = { offset: 0, limit: page.value.limit, total: 0, hasMore: false }
   loading.value = true
   debounceTimer = setTimeout(() => {
@@ -313,7 +321,7 @@ function onConfirm() {
   // Never emit a raw id as display.
   const display = match.display && match.display !== id
     ? match.display
-    : RECORD_LINK_SELECTED_GENERIC
+    : recordLinkSelectedGeneric(isZh.value)
   emit('confirm', { recordId: id, display })
 }
 </script>

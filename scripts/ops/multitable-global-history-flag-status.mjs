@@ -7,19 +7,14 @@
  * per-flag activation string, and the illegal-combination rules). It never dumps the full container
  * environment, tokens, or connection strings.
  *
- * `--strict` additionally runs the manifest's dependency/conflict rules (`evaluateFlagRules`) against
- * the observed flags and turns any violation into a hard STOP (non-zero exit), in addition to its
- * existing job of promoting the image-tag-mismatch WARN into a STOP. The four illegal-combination
- * checks (lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on,
- * undelete-without-revert-gate) are ALSO
- * evaluated and reported as STOPs in the default (non-strict) mode — this preserves the pre-existing
- * unconditional PIT_RESET-vs-retention stop (do not regress that to strict-only) and is the safer
- * default for an operator-facing safety helper: a plain run cannot miss a genuinely illegal config.
+ * Manifest dependency/conflict rules (`evaluateFlagRules`) are hard STOPs in both modes.
+ * `--strict` additionally promotes advisory warnings to STOPs. A plain run must not
+ * miss an illegal flag combination.
  */
 
 import { execFileSync } from 'node:child_process'
 
-import { GLOBAL_HISTORY_FLAG_KEYS, GLOBAL_HISTORY_FLAG_BY_KEY, evaluateFlagRules, isActivated, isMisconfiguredTruthy } from './global-history-flag-manifest.mjs'
+import { GLOBAL_HISTORY_FLAG_KEYS, GLOBAL_HISTORY_FLAG_BY_KEY, countListEntries, evaluateFlagRules, isActivated, isMisconfiguredTruthy, isValueRedactedType, renderFlagValueForOperator } from './global-history-flag-manifest.mjs'
 
 const FLAG_KEYS = GLOBAL_HISTORY_FLAG_KEYS
 
@@ -69,9 +64,8 @@ Flags shown come from scripts/ops/global-history-flag-manifest.mjs (single sourc
 Global History line's flags, their exact activation string, and illegal-combination rules).
 
 --strict additionally promotes advisory warnings (image-tag mismatch, a flag value that looks truthy
-but does not match its exact activation string) into hard stops. Illegal flag combinations
-(lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on,
-undelete-without-revert-gate) are ALWAYS hard stops, in both modes.
+but does not match its exact activation string) into hard stops. Manifest illegal
+flag combinations are always hard stops, in both modes.
 
 Examples:
   METASHEET_STATUS_SSH_HOST=mainuser@staging-host \\
@@ -181,10 +175,10 @@ function buildAssessment(input, { strict = false } = {}) {
   }
 
   // R12-C: manifest-driven illegal-combination rules (lossy-without-base, side-door-without-capture,
-  // pit-reset-intent-with-retention-on, undelete-without-revert-gate). These are UNCONDITIONAL stops in
+  // sheet-revert-intent-with-retention-on, pit-reset-intent-with-retention-on, undelete-without-revert-gate). These are UNCONDITIONAL stops in
   // both modes — an illegal
   // combination is illegal regardless of whether the operator remembered --strict; this also preserves
-  // the pre-existing behavior where PIT_RESET-vs-retention already stopped without --strict.
+  // the pre-existing behavior where destructive-recovery-vs-retention stops without --strict.
   const violations = evaluateFlagRules(input.flags)
   for (const violation of violations) {
     stops.push(`[${violation.id}] ${violation.description}`)
@@ -197,7 +191,11 @@ function buildAssessment(input, { strict = false } = {}) {
   for (const key of FLAG_KEYS) {
     const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
     if (spec && isMisconfiguredTruthy(spec, input.flags[key])) {
-      const warning = `${key}=${input.flags[key]} looks truthy but does NOT match its activation value ('${spec.activationValue}') — the flag is OFF`
+      // Belt-and-braces: this branch is unreachable for `list` specs (isMisconfiguredTruthy returns
+      // false for every non-boolean type), but it echoes an observed value into a string that reaches
+      // BOTH outputs, so it goes through the same operator renderer as the flags block rather than
+      // relying on that unreachability to stay true.
+      const warning = `${key}=${renderFlagValueForOperator(spec, input.flags[key])} looks truthy but does NOT match its activation value ('${spec.activationValue}') — the flag is OFF`
       warnings.push(warning)
       misconfigured.push(warning)
     }
@@ -230,7 +228,12 @@ function renderText(snapshot, assessment) {
   lines.push('flags:')
   for (const key of FLAG_KEYS) {
     const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
-    const rawValue = snapshot.flags[key] ?? '(absent)'
+    // NEVER `snapshot.flags[key]` directly: `list`-typed flags carry IDENTIFIERS (the designated
+    // trust-checkpoint canary sheet ids) and this tool must not broadcast designated-canary identity.
+    // renderFlagValueForOperator keys the redaction off spec.type — the manifest's own taxonomy —
+    // not off a flag name, so a future list flag is redacted the day it is registered. It is the
+    // identity function for every other type, and still yields '(absent)' for an unobserved one.
+    const displayValue = renderFlagValueForOperator(spec, snapshot.flags[key])
     // Only boolean flags have a meaningful ACTIVE/inactive state; numeric/enum knobs (e.g. a configured
     // MAX_ROWS or KEEP_N) always take effect once their gating boolean flag is on, so labeling them
     // "inactive" would misread as "not set" / "off" to a hurried operator.
@@ -240,7 +243,7 @@ function renderText(snapshot, assessment) {
         : spec
           ? ` [${spec.type}: ${spec.activationValue} danger=${spec.danger}]`
           : ''
-    lines.push(`  ${key}=${rawValue}${suffix}`)
+    lines.push(`  ${key}=${displayValue}${suffix}`)
   }
   lines.push('')
   lines.push('checks:')
@@ -248,6 +251,37 @@ function renderText(snapshot, assessment) {
   for (const stop of assessment.stops) lines.push(`  STOP ${stop}`)
   for (const warning of assessment.warnings) lines.push(`  WARN ${warning}`)
   return lines.join('\n')
+}
+
+/**
+ * The `--json` payload. Extracted out of `main()` on purpose: while the object literal lived inline
+ * there, NOTHING about the JSON leg was reachable from a test, so the text-mode redaction could be
+ * proven and the JSON leg could still print raw values (that asymmetry IS the defect this closes —
+ * `--json` is what an operator pipes into a ticket or a log).
+ *
+ * Redaction happens HERE, at the serialization boundary, and only here. `buildAssessment` keeps
+ * seeing the raw `snapshot.flags` — the manifest's dependency/conflict rules compare against exact
+ * activation strings and must never adjudicate a rendered string — so this must not be pushed
+ * upstream into `collectStatus`.
+ *
+ * `renderText` is deliberately handed the RAW snapshot and calls the same per-key renderer itself,
+ * rather than being fed this redacted copy: one definition (renderFlagValueForOperator), two call
+ * sites, and no invariant of the form "redaction happens to be the identity for the booleans that
+ * `isActivated` still reads".
+ */
+function buildJsonPayload(snapshot, assessment) {
+  const flags = Object.fromEntries(
+    Object.entries(snapshot.flags).map(([key, rawValue]) => {
+      const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+      // ONLY value-redacted (list) flags are rewritten. Every other flag keeps its observed JSON
+      // shape byte-for-byte — including the `null` an unobserved flag serializes to, which machine
+      // consumers of this payload key off; the text renderer's '(absent)' marker is a text-mode
+      // affordance and must not leak into the JSON contract.
+      if (!isValueRedactedType(spec)) return [key, rawValue]
+      return [key, renderFlagValueForOperator(spec, rawValue)]
+    }),
+  )
+  return { snapshot: { ...snapshot, flags }, assessment }
 }
 
 async function collectStatus(options) {
@@ -282,7 +316,7 @@ async function main() {
 
   const assessment = buildAssessment(snapshot, { strict: options.strict })
   if (options.json) {
-    console.log(JSON.stringify({ snapshot, assessment }, null, 2))
+    console.log(JSON.stringify(buildJsonPayload(snapshot, assessment), null, 2))
   } else {
     console.log(renderText(snapshot, assessment))
   }
@@ -296,6 +330,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 export {
   FLAG_KEYS,
   buildAssessment,
+  buildJsonPayload,
   collectFlagMapFromEnvText,
   flagEnabled,
   imageTag,
@@ -303,7 +338,10 @@ export {
   parseContainerInspect,
   renderText,
   GLOBAL_HISTORY_FLAG_BY_KEY,
+  countListEntries,
   evaluateFlagRules,
   isActivated,
   isMisconfiguredTruthy,
+  isValueRedactedType,
+  renderFlagValueForOperator,
 }

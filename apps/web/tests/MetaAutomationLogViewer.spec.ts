@@ -347,3 +347,110 @@ describe('MetaAutomationLogViewer — load failure surfaces error', () => {
     expect(empty).toBeNull()
   })
 })
+
+// 客户反馈 2026-09-24 #3 final review F1 — after the executor fix one delete of a record.deleted rule's trigger
+// record logs ONE skipped run. This panel counted it in 总计 only, badged it 跳过, and printed the step output as
+// raw JSON — a zh customer read `"reason":"target_record_missing"`.
+const GONE_EXECUTION: AutomationExecution = {
+  id: 'exec-gone',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-09-24T10:00:00Z',
+  duration: 7,
+  steps: [
+    {
+      actionType: 'delete_record',
+      status: 'skipped',
+      durationMs: 5,
+      output: { recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' },
+    },
+  ],
+}
+const NOOP_EXECUTION: AutomationExecution = {
+  id: 'exec-noop',
+  ruleId: 'rule-1',
+  status: 'success',
+  triggeredBy: 'event',
+  triggeredAt: '2026-09-24T10:01:00Z',
+  duration: 6,
+  steps: [
+    {
+      actionType: 'update_record',
+      status: 'success',
+      durationMs: 4,
+      output: { updatedFields: ['fld_status'], noop: true, reason: 'target_record_missing' },
+    },
+    {
+      actionType: 'start_approval',
+      status: 'success',
+      durationMs: 1,
+      output: { approvalInstanceId: 'ai_1', backwriteSkipped: 'target_record_missing' },
+    },
+    {
+      actionType: 'write_approval_form_values',
+      status: 'skipped',
+      durationMs: 0,
+      output: { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' },
+    },
+  ],
+}
+const GONE_STATS: AutomationStats = { total: 3, success: 1, failed: 0, skipped: 2, avgDuration: 7 }
+
+async function expandLog(container: HTMLElement, id: string): Promise<HTMLElement> {
+  const item = container.querySelector(`[data-log-id="${id}"]`) as HTMLElement
+  item.click()
+  await nextTick()
+  return item
+}
+
+describe('MetaAutomationLogViewer — a run skipped because its trigger record is gone (F1)', () => {
+  it('zh: the stats bar counts 已跳过, the run is badged 已跳过, and the step reads as a sentence, not the code', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [GONE_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    const skippedStat = mounted.container.querySelector('[data-stat="skipped"]')
+    expect(skippedStat?.querySelector('.meta-log-viewer__stat-label')?.textContent).toBe('已跳过')
+    expect(skippedStat?.querySelector('[data-field="stat-skipped"]')?.textContent?.trim()).toBe('2')
+    expect(mounted.container.querySelector('[data-log-id="exec-gone"] [data-status="skipped"]')?.textContent?.trim()).toBe('已跳过')
+    expect(mounted.container.querySelector('[data-field="statusFilter"] option[value="skipped"]')?.textContent).toBe('已跳过')
+
+    const item = await expandLog(mounted.container, 'exec-gone')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('触发记录已不存在，已跳过（未做任何修改）')
+    const output = item.querySelector('[data-field="step-output"]')?.textContent ?? ''
+    expect(output).toContain('rec_gone') // ids stay raw
+    expect(item.textContent ?? '').not.toContain('target_record_missing')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
+  })
+
+  it('en: the same run reads in English', async () => {
+    const client = makeMockClient({ logs: [GONE_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    expect(mounted.container.querySelector('[data-stat="skipped"] .meta-log-viewer__stat-label')?.textContent).toBe('Skipped')
+    const item = await expandLog(mounted.container, 'exec-gone')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('The trigger record no longer exists; skipped (nothing was changed).')
+    expect(item.textContent ?? '').not.toContain('target_record_missing')
+  })
+
+  it('zh: the update no-op and the approval writeback marker get their own sentences; an unknown reason stays raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOOP_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-noop')
+
+    const reasons = [...item.querySelectorAll('[data-field="step-reason"]')].map((el) => el.textContent)
+    expect(reasons).toEqual(['触发记录已不存在，未做任何修改', '审批结果未写回：触发记录已不存在（未做任何修改）'])
+    const outputs = [...item.querySelectorAll('[data-field="step-output"]')].map((el) => el.textContent ?? '')
+    expect(outputs).toHaveLength(3)
+    expect(outputs[0]).toContain('fld_status')
+    expect(outputs[0]).not.toContain('noop')
+    expect(outputs[1]).toContain('ai_1')
+    for (const text of outputs.slice(0, 2)) expect(text).not.toContain('target_record_missing')
+    // Positive control: a reason this change does not recognise is rendered exactly as before.
+    expect(outputs[2]).toContain('APPROVAL_FWB_WRITEBACK_ENABLED is OFF')
+  })
+})

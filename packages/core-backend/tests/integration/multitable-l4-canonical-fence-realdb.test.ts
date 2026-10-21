@@ -103,6 +103,7 @@ import {
   disableRecoveryAuthorityTriggers,
   enableRecoveryAuthorityTriggers,
 } from '../utils/recovery-authority-trigger-posture'
+import { defineFieldSchemaFenceRecheckRealDbCases } from './multitable-field-schema-fence-recheck-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -726,3 +727,9 @@ describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB
     await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [RSHEET])
   })
 })
+
+// Field retype slice 3a (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §3.11): the
+// post-fence field-schema re-check races ride in this already-wired real-DB host — same two-connection +
+// pg_blocking_pids technique as R1 — so they run in the existing "Run multitable real-DB integration" step without a new
+// lane file. Self-contained fixtures (own base / sheet / user, unique ids), own cleanup.
+defineFieldSchemaFenceRecheckRealDbCases()

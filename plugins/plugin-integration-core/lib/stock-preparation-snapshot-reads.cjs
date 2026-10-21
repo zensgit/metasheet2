@@ -271,6 +271,15 @@ function changeCountsFromEvidence(diff) {
     pathChanged: byChangeType[CHANGE_TYPES.PATH_CHANGED] || 0,
     missingChildBom: byChangeType[CHANGE_TYPES.MISSING_CHILD_BOM] || 0,
     fingerprintChanged: byChangeType[CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED] || 0,
+    // Q3c: the fingerprint-decomposition change types (component-code swap / material substitution at
+    // an otherwise unchanged path) were computed by the engine (compareMatchedRows) and tallied into
+    // evidence.byChangeType all along, but this summary vocabulary never surfaced them — an in-place
+    // swap only ever showed up here folded into fingerprintChanged, and a reviewer had to open the
+    // row-by-row drill-down to learn WHICH kind of swap it was. Both counts are independent of
+    // fingerprintChanged (a row can carry more than one changeType), so adding them here does not
+    // change any existing count.
+    componentCodeChanged: byChangeType[CHANGE_TYPES.COMPONENT_CODE_CHANGED] || 0,
+    materialChanged: byChangeType[CHANGE_TYPES.MATERIAL_CHANGED] || 0,
   }
 }
 

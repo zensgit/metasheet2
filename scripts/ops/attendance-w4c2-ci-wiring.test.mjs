@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { fileURLToPath } from 'node:url'
 import { dirname, join, posix } from 'node:path'
 import { tmpdir } from 'node:os'
+import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
@@ -636,6 +637,12 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
   assert.doesNotThrow(() => requireAttendanceRealDbStepExecutable())
 })
 
+test('ACP scratch database suite receives the same explicit synthetic database as its real-DB step', () => {
+  const step = requireAttendanceRealDbStepExecutable()
+  assert.equal(step.env.ATTENDANCE_TEST_DATABASE_URL, step.env.DATABASE_URL)
+  assert.match(step.run, /\$\{ATTENDANCE_TEST_DATABASE_URL:\?[^}]+\}/)
+})
+
 // ---------------------------------------------------------------------------------------------
 // Issue 4828 hole 2 (owner-ruled): "wired" must also mean "the command actually executes the
 // files it carries".
@@ -1167,7 +1174,7 @@ function jobsContainingStepId(stepId) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1183,14 +1190,14 @@ function jobsContainingStepId(stepId) {
     '                hits.append(str(job_name))',
     'json.dump(hits, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, stepId], {
+  const res = spawnPythonSync(['-c', py, stepId], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`job-scope guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`job-scope guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -1216,7 +1223,7 @@ function stepRunScriptsOfJob(jobName) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1230,14 +1237,14 @@ function stepRunScriptsOfJob(jobName) {
     '        out.append(run if isinstance(run, str) else "")',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, jobName], {
+  const res = spawnPythonSync(['-c', py, jobName], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`step-order guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`step-order guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -2175,6 +2182,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
   'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',
   'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+  'tests/integration/attendance-business-trip.db.test.ts',
   'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
   'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
   'tests/integration/attendance-csv-export-bom.test.ts',
@@ -2187,15 +2195,24 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
   'tests/integration/attendance-import-template-prefs.test.ts',
+  'tests/integration/attendance-import-user-identity.db.test.ts',
   'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',
+  'tests/integration/attendance-live-punch-order.db.test.ts',
   'tests/integration/attendance-makeup-punch-policy.test.ts',
+  'tests/integration/attendance-multitimezone-browser.db.test.ts',
   'tests/integration/attendance-notification-deliveries.test.ts',
   'tests/integration/attendance-notification-redelivery-route.db.test.ts',
   'tests/integration/attendance-notification-redelivery.db.test.ts',
+  'tests/integration/attendance-online-punch-replay.db.test.ts',
+  'tests/integration/attendance-online-punch-server-time.db.test.ts',
+  'tests/integration/attendance-org-resolution-shadow.db.test.ts',
   'tests/integration/attendance-outdoor-punch.test.ts',
   'tests/integration/attendance-plugin.test.ts',
+  'tests/integration/attendance-punch-org-resolution.db.test.ts',
+  'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
   'tests/integration/attendance-result-edit.test.ts',
   'tests/integration/attendance-schedule-dispatch.test.ts',
+  'tests/integration/attendance-self-service-revocation-atomicity.db.test.ts',
   'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
   'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
   'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
@@ -2203,6 +2220,18 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
   'tests/integration/attendance-shift-swap.test.ts',
   'tests/integration/attendance-soak-diff-families.db.test.ts',
+  'tests/integration/attendance-timezone-default-recovery.db.test.ts',
+  'tests/integration/attendance-timezone-legacy-repair.db.test.ts',
+  'tests/integration/attendance-timezone-policy-preview.db.test.ts',
+  'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+  'tests/integration/attendance-timezone-policy-store.db.test.ts',
+  'tests/integration/attendance-timezone-policy-write-routes.db.test.ts',
+  'tests/integration/attendance-timezone-read-context.db.test.ts',
+  'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
+  'tests/integration/attendance-timezone-runtime.db.test.ts',
+  'tests/integration/attendance-timezone-scheduled.db.test.ts',
+  'tests/integration/attendance-timezone-target-routes.db.test.ts',
+  'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
   'tests/integration/attendance-unscheduled-reminder.test.ts',
   'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
   'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',
@@ -3140,7 +3169,7 @@ function workflowStepsWithRun(files) {
     'except Exception as exc:',
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
-    'entries = json.loads(sys.stdin.read())',
+    'entries = json.loads(sys.stdin.buffer.read().decode("utf-8"))',
     'out = []',
     'for entry in entries:',
     '    try:',
@@ -3171,14 +3200,14 @@ function workflowStepsWithRun(files) {
     '            })',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py], {
+  const res = spawnPythonSync(['-c', py], {
     input: JSON.stringify(files),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`workflow step walk: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`workflow step walk: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(

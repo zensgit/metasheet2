@@ -12,6 +12,8 @@ function isAuthWhitelisted(p: string): boolean {
     || p === '/api/health'
     || p === '/api/permissions/health'
     || p.startsWith('/metrics')
+    // Token-auth MP4 GET. Credential is `token` query, not session JWT.
+    || p === '/api/elearning/media/playback'
 }
 
 function main() {

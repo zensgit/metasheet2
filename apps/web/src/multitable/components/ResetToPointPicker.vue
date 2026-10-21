@@ -89,6 +89,7 @@ import type { ExactAnchorRequest, ResetPreview, ResetResult } from '../api/clien
 import type { HistoryBatchSummary } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { recordLabel, resetPickerRecordCount, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 
 type ListHistoryEvents = (
   baseId: string,
@@ -143,7 +144,8 @@ function hasUsableCreatedAt(batch: HistoryBatchSummary): boolean {
 }
 
 function historyBatchLabel(batch: HistoryBatchSummary): string {
-  const when = new Date(batch.createdAt).toLocaleString()
+  // 客户反馈 2026-09-24 #4c follow-up: business timezone, 24-hour, to the second.
+  const when = formatBusinessTimestamp(batch.createdAt, { precision: 'second' }) ?? batch.createdAt
   const actor = batch.actorName || batch.actorId || l('record.resetPickerSystemActor')
   const action = batch.action || l('record.resetPickerDefaultAction')
   const records = resetPickerRecordCount(batch.visibleAffectedRecordCount, isZh.value)
@@ -169,7 +171,9 @@ const anchor = computed<ExactAnchorRequest | null>(() =>
 )
 // Derived FROM the selected batch (never from free-form input), so the displayed target and the anchor the
 // destructive op uses can never diverge.
-const targetDisplay = computed(() => (historyAsOf.value ? new Date(historyAsOf.value).toLocaleString() : ''))
+const targetDisplay = computed(() => (historyAsOf.value
+  ? formatBusinessTimestamp(historyAsOf.value, { precision: 'second' }) ?? historyAsOf.value
+  : ''))
 
 async function loadHistoryBatches(): Promise<void> {
   const loadSeq = ++historyLoadSeq

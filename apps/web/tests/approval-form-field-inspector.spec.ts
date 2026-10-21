@@ -17,6 +17,10 @@ import ApprovalFormFieldInspector, {
   INSPECTOR_INVALID_BUFFER_MESSAGE,
   INSPECTOR_LAST_DETAIL_COLUMN_MESSAGE,
   INSPECTOR_LAST_FIELD_MESSAGE,
+  INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+  INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE,
+  INSPECTOR_RECORD_LINK_LOADING_MESSAGE,
+  INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE,
   INSPECTOR_RETYPE_REFUSAL_PREFIX,
   type FormFieldInspectorCommand,
 } from '../src/approvals/components/ApprovalFormFieldInspector.vue'
@@ -26,13 +30,24 @@ import {
   type FormAuthoringSession,
 } from '../src/approvals/approvalFormAuthoringAdapter'
 import {
+  buildFormSchema,
+  buildVisibilityRule,
+  conditionValueFieldFromDraft,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
+  validateTemplateFormFields,
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import type { DetailColumnDraft } from '../src/approvals/detailField'
+import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
+import { CONDITION_VALUE_COPY_EN, conditionValueIssueMessage } from '../src/approvals/conditionValueTyping'
+import {
+  RECORD_LINK_TARGET_UNAVAILABLE,
+  validateRecordLinkPinAgainstLoadedCatalog,
+  type RecordLinkAuthoringCatalog,
+} from '../src/approvals/recordLinkField'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -96,6 +111,10 @@ interface InspectorHarness {
   pressEnter(testid: string): Promise<void>
   changeSelect(testid: string, value: string): Promise<void>
   toggle(testid: string): Promise<void>
+  /** Parent-owned record-link catalog seam (F0 gate #2): the test plays the parent. */
+  setRecordLinkCatalog(next: RecordLinkAuthoringCatalog | null): Promise<void>
+  /** How many retry/load intents the inspector emitted to its parent. */
+  recordLinkCatalogRetries(): number
   unmount(): void
 }
 
@@ -109,6 +128,8 @@ async function mountInspector(
     optionValueFactory?: () => string
     /** Force every executed command to this failure (for canned refusals). */
     executeOverride?: (command: FormFieldInspectorCommand) => FormAdapterResult | null
+    /** Parent-owned record-link catalog snapshot (omitted = the inspector's default). */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   } = {},
 ): Promise<InspectorHarness> {
   const container = document.createElement('div')
@@ -120,6 +141,10 @@ async function mountInspector(
   )
   const commands: FormFieldInspectorCommand[] = []
   const exposedRef = ref<InspectorExposed | null>(null)
+  const recordLinkCatalogRef = shallowRef<RecordLinkAuthoringCatalog | null | undefined>(
+    options.recordLinkCatalog,
+  )
+  let recordLinkCatalogRetries = 0
 
   function runCommand(command: FormFieldInspectorCommand): FormAdapterResult | null {
     commands.push(command)
@@ -192,7 +217,12 @@ async function mountInspector(
           candidate.type !== 'record-link' &&
           candidate.type !== 'detail',
       )
-      .map((candidate) => ({ id: candidate.id.trim(), label: candidate.label }))
+      .map((candidate) => ({
+        id: candidate.id.trim(),
+        label: candidate.label,
+        // R-43 (B): same derivation as the production builder (ApprovalFormBuilder.vue).
+        ...conditionValueFieldFromDraft(candidate),
+      }))
   })
 
   const app = createApp({
@@ -205,6 +235,10 @@ async function mountInspector(
           readOnly: options.readOnly ?? false,
           execute: runCommand,
           optionValueFactory: options.optionValueFactory,
+          recordLinkCatalog: recordLinkCatalogRef.value,
+          onRetryRecordLinkCatalog: () => {
+            recordLinkCatalogRetries += 1
+          },
           ref: exposedRef,
         })
     },
@@ -267,6 +301,11 @@ async function mountInspector(
       el.dispatchEvent(new Event('change', { bubbles: true }))
       await nextTick()
     },
+    async setRecordLinkCatalog(next) {
+      recordLinkCatalogRef.value = next
+      await nextTick()
+    },
+    recordLinkCatalogRetries: () => recordLinkCatalogRetries,
     unmount() {
       app.unmount()
       container.remove()
@@ -335,10 +374,13 @@ describe('ApprovalFormFieldInspector — surface (§3.4)', () => {
         'select',
         'multi-select',
         'user',
+        'department',
         'detail',
         'record-link',
         // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
         'date_range',
+        // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1).
+        'explanation',
       ]),
     )
     expect(values).not.toContain('attachment')
@@ -454,6 +496,302 @@ describe('ApprovalFormFieldInspector — committed edits only (FB-D7)', () => {
   })
 })
 
+describe('ApprovalFormFieldInspector — Lock-2 user control properties', () => {
+  it('commits selection, cap, requester default, and allow-self cleanup as distinct history entries', async () => {
+    const inspector = await mountInspector([field(1, { type: 'user' })])
+    expect(
+      inspector.q('[data-testid="approval-form-field-inspector-user"]'),
+    ).toBeTruthy()
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-user-selection',
+      'multi',
+    )
+    expect(inspector.session().draft.fields[0].userSelection).toBe('multi')
+
+    await inspector.typeText('approval-form-field-inspector-user-max', '3')
+    expect(inspector.commands).toHaveLength(1)
+    await inspector.blur('approval-form-field-inspector-user-max')
+    expect(inspector.session().draft.fields[0].userMaxSelectionsText).toBe('3')
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-user-default-mode',
+      'requester',
+    )
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      userAllowSelf: true,
+      userDefaultMode: 'requester',
+      userDefaultIds: [],
+    })
+
+    await inspector.toggle('approval-form-field-inspector-user-allow-self')
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      userAllowSelf: false,
+      userDefaultMode: '',
+      userDefaultIds: [],
+    })
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { userSelection: 'multi' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { userMaxSelectionsText: '3' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          userDefaultMode: 'requester',
+          userDefaultIds: [],
+          userAllowSelf: true,
+        },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          userAllowSelf: false,
+          userDefaultMode: '',
+          userDefaultIds: [],
+        },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(4)
+  })
+
+  it('keeps an off-page designated default visible with a values-free label', async () => {
+    const inspector = await mountInspector([
+      field(1, {
+        type: 'user',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['opaque-contact-id'],
+      }),
+    ])
+    await Promise.resolve()
+    await nextTick()
+
+    const select = inspector.select('approval-form-field-inspector-user-default-ids')
+    const option = Array.from(select.options).find((candidate) => candidate.value === 'opaque-contact-id')
+    expect(option).toBeTruthy()
+    expect(option?.textContent).toBe('成员 1')
+    expect(option?.textContent).not.toContain('opaque-contact-id')
+    expect(option?.disabled).toBe(false)
+  })
+})
+
+// --- Lock-8 type-specific properties ---------------------------------------
+
+describe('ApprovalFormFieldInspector — Lock-8 type-specific properties', () => {
+  it('renders each section only for its matching type and removes inapplicable explanation controls', async () => {
+    const number = await mountInspector([field(1, { type: 'number' })])
+    expect(
+      number.root.querySelector(
+        '[data-testid="approval-form-field-inspector-number-format"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      number.root.querySelector(
+        '[data-testid="approval-form-field-inspector-date-range"]',
+      ),
+    ).toBeNull()
+
+    const dateRange = await mountInspector([
+      field(1, { type: 'date_range' }),
+    ])
+    expect(
+      dateRange.root.querySelector(
+        '[data-testid="approval-form-field-inspector-date-range"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      dateRange.root.querySelector(
+        '[data-testid="approval-form-field-inspector-explanation"]',
+      ),
+    ).toBeNull()
+
+    const explanation = await mountInspector([
+      field(1, { type: 'explanation' }),
+    ])
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-explanation"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-required"]',
+      ),
+    ).toBeNull()
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-placeholder"]',
+      ),
+    ).toBeNull()
+  })
+
+  it('number controls commit on change as three commands and three history entries', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' })])
+    await inspector.changeSelect(
+      'approval-form-field-inspector-number-currency',
+      '¥',
+    )
+    await inspector.toggle('approval-form-field-inspector-number-thousands')
+    await inspector.toggle('approval-form-field-inspector-number-uppercase')
+
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberCurrencySymbol: '¥' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberThousandsSeparator: true },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberUppercaseCny: true },
+      },
+    ])
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(3)
+  })
+
+  it('a rejected number edit snaps every immediate control back with zero history', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' })], {
+      executeOverride: () => null,
+    })
+    await inspector.changeSelect(
+      'approval-form-field-inspector-number-currency',
+      '¥',
+    )
+    await inspector.toggle('approval-form-field-inspector-number-thousands')
+    await inspector.toggle('approval-form-field-inspector-number-uppercase')
+
+    expect(
+      inspector.select('approval-form-field-inspector-number-currency').value,
+    ).toBe('')
+    expect(
+      inspector.input('approval-form-field-inspector-number-thousands').checked,
+    ).toBe(false)
+    expect(
+      inspector.input('approval-form-field-inspector-number-uppercase').checked,
+    ).toBe(false)
+    expect(inspector.commands).toHaveLength(3)
+    expect(inspector.session().history.undoStack).toHaveLength(0)
+  })
+
+  it('date-range granularity commits immediately while its three labels settle as one combined patch', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'date_range' }),
+    ])
+    const typeSelect = inspector.select(
+      'approval-form-field-inspector-date-range-type',
+    )
+    expect(typeSelect.value).toBe('')
+    expect(typeSelect.options[0]?.disabled).toBe(true)
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-date-range-type',
+      'date_minute',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-start-label',
+      '开始时间',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-end-label',
+      '结束时间',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-duration-label',
+      '共计',
+    )
+    expect(inspector.commands).toHaveLength(1)
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { dateRangeDateType: 'date_minute' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          dateRangeStartLabel: '开始时间',
+          dateRangeEndLabel: '结束时间',
+          dateRangeDurationLabel: '共计',
+        },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+  })
+
+  it('blank required date-range labels block without issuing a command', async () => {
+    const inspector = await mountInspector([
+      field(1, {
+        type: 'date_range',
+        dateRangeDateType: 'date',
+        dateRangeStartLabel: '开始',
+        dateRangeEndLabel: '结束',
+      }),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-start-label',
+      ' ',
+    )
+    await inspector.blur(
+      'approval-form-field-inspector-date-range-start-label',
+    )
+    expect(inspector.commands).toHaveLength(0)
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+    expect(inspector.vm.isDirty()).toBe(true)
+  })
+
+  it('explanation text preserves newlines, ignores plain Enter, and commits once on blur', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation' }),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      '第一行\n第二行',
+    )
+    await inspector.pressEnter(
+      'approval-form-field-inspector-explanation-text',
+    )
+    expect(inspector.commands).toHaveLength(0)
+    await inspector.blur('approval-form-field-inspector-explanation-text')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { explanationText: '第一行\n第二行' },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      ' ',
+    )
+    await inspector.blur('approval-form-field-inspector-explanation-text')
+    expect(inspector.commands).toHaveLength(1)
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+  })
+})
+
 // --- retype through the inspector -------------------------------------------
 
 describe('ApprovalFormFieldInspector — type change is the typed retype command', () => {
@@ -469,6 +807,56 @@ describe('ApprovalFormFieldInspector — type change is the typed retype command
       type: 'date',
     })
     expect(inspector.session().history.undoStack).toHaveLength(1)
+  })
+
+  it('settles a valid dirty type-specific buffer before retyping the field', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation', explanationText: '原说明' }),
+      field(2),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      '新说明',
+    )
+
+    await inspector.changeSelect('approval-form-field-inspector-type', 'date')
+
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { explanationText: '新说明' },
+      },
+      { kind: 'retype', localId: 'local_1', nextType: 'date' },
+    ])
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      type: 'date',
+      explanationText: '新说明',
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+    expect(inspector.vm.isDirty()).toBe(false)
+  })
+
+  it('blocks retype when the old type has an invalid dirty buffer', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation', explanationText: '原说明' }),
+      field(2),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      ' ',
+    )
+
+    await inspector.changeSelect('approval-form-field-inspector-type', 'date')
+
+    expect(inspector.commands).toHaveLength(0)
+    expect(inspector.session().draft.fields[0].type).toBe('explanation')
+    expect(inspector.session().history.undoStack).toHaveLength(0)
+    expect(inspector.select('approval-form-field-inspector-type').value).toBe(
+      'explanation',
+    )
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+    expect(inspector.vm.isDirty()).toBe(true)
   })
 
   it('a NAMED refusal renders values-free business copy listing the dependency kinds and reverts the control', async () => {
@@ -763,5 +1151,706 @@ describe('ApprovalFormFieldInspector — settlePendingEdits (FB-D7 selection-swi
     await inspector.selectField('local_2')
     expect(inspector.vm.isDirty()).toBe(false)
     expect(inspector.input('approval-form-field-inspector-label').value).toBe('字段 2')
+  })
+})
+
+// --- record-link target pickers (delta §3.4; parity ledger deferral (3)) -----
+
+/**
+ * Delta §3.4: the inspector renders "record-link base/sheet typed pickers"; no raw base/sheet id is
+ * ever accepted as text or rendered as copy. The catalog stays PARENT-OWNED (F0 gate #2): this
+ * spec plays the parent through `recordLinkCatalog` and counts the retry/load intents the inspector
+ * emits. Every pick is a typed `update-properties` command through the same adapter path; a base
+ * change carries BOTH pins in ONE command (one history entry), clearing a sheet that does not
+ * belong to the new base.
+ */
+describe('ApprovalFormFieldInspector — record-link target pickers (delta §3.4)', () => {
+  const BASE_SELECT = 'approval-form-field-inspector-record-link-base'
+  const SHEET_SELECT = 'approval-form-field-inspector-record-link-sheet'
+  const SUMMARY = 'approval-form-field-inspector-record-link-summary'
+
+  function catalog(
+    overrides: Partial<RecordLinkAuthoringCatalog> = {},
+  ): RecordLinkAuthoringCatalog {
+    return {
+      bases: [
+        { id: 'base_alpha', name: '销售空间' },
+        { id: 'base_beta', name: '客服空间' },
+      ],
+      sheets: [
+        { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+        { id: 'sheet_alpha_2', name: '合同表', baseId: 'base_alpha' },
+        { id: 'sheet_beta_1', name: '工单表', baseId: 'base_beta' },
+      ],
+      loading: false,
+      loaded: true,
+      error: '',
+      ...overrides,
+    }
+  }
+
+  function optionTexts(select: HTMLSelectElement): string[] {
+    return Array.from(select.options).map((option) => option.textContent?.trim() ?? '')
+  }
+
+  function optionValues(select: HTMLSelectElement): string[] {
+    return Array.from(select.options).map((option) => option.value)
+  }
+
+  function selectedText(select: HTMLSelectElement): string {
+    return select.options[select.selectedIndex]?.textContent?.trim() ?? ''
+  }
+
+  function recordLinkIssues(draft: TemplateAuthoringDraft): string[] {
+    const loaded = catalog()
+    return validateTemplateFormFields(draft, null, {
+      loaded: loaded.loaded,
+      sheets: loaded.sheets,
+    }).filter((issue) => issue.includes('关联记录'))
+  }
+
+  it('renders typed base/sheet pickers with business names only; the sheet picker waits for a base; no raw id anywhere in the copy', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link', label: '关联订单' }), field(2)],
+      { recordLinkCatalog: catalog() },
+    )
+    const base = inspector.select(BASE_SELECT)
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(optionTexts(base)).toEqual(['请选择目标空间', '销售空间', '客服空间'])
+    expect(optionValues(base)).toEqual(['', 'base_alpha', 'base_beta'])
+    expect(base.value).toBe('')
+    expect(base.disabled).toBe(false)
+    expect(sheet.disabled).toBe(true)
+    expect(optionTexts(sheet)).toEqual(['请选择目标表'])
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE,
+    )
+    expect(inspector.root.textContent).not.toMatch(/base_alpha|base_beta|sheet_alpha|sheet_beta/)
+    // No free-text id entry: the record-link section has selects only.
+    expect(
+      inspector.root.querySelectorAll(
+        '[data-testid="approval-form-field-inspector-record-link"] input',
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('base then sheet = one typed command each through the adapter; sheet options are scoped to the chosen base; the publish validation then has no record-link issue', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link', label: '关联订单' }), field(2)],
+      { recordLinkCatalog: catalog() },
+    )
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([
+      '字段 关联订单（关联记录）需要选择目标空间与目标表',
+    ])
+
+    await inspector.changeSelect(BASE_SELECT, 'base_alpha')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { recordLinkBaseId: 'base_alpha', recordLinkSheetId: '' },
+      },
+    ])
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(sheet.disabled).toBe(false)
+    expect(optionTexts(sheet)).toEqual(['请选择目标表', '订单表', '合同表'])
+
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_alpha_2')
+    expect(inspector.commands).toHaveLength(2)
+    expect(inspector.commands[1]).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkSheetId: 'sheet_alpha_2' },
+    })
+    const pinned = inspector.session().draft.fields[0]
+    expect(pinned).toMatchObject({
+      type: 'record-link',
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+    expect(inspector.select(BASE_SELECT).value).toBe('base_alpha')
+    expect(inspector.select(SHEET_SELECT).value).toBe('sheet_alpha_2')
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+    )
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+  })
+
+  it('changing the base is ONE command carrying both pins: a sheet outside the new base is cleared', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      { recordLinkCatalog: catalog() },
+    )
+    await inspector.changeSelect(BASE_SELECT, 'base_beta')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { recordLinkBaseId: 'base_beta', recordLinkSheetId: '' },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    expect(optionTexts(inspector.select(SHEET_SELECT))).toEqual(['请选择目标表', '工单表'])
+    expect(inspector.select(SHEET_SELECT).value).toBe('')
+  })
+
+  it('choosing the empty base option clears BOTH pins in one command (the clearable picker), which lifts the record-link retype lock on a fresh field', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      { recordLinkCatalog: catalog() },
+    )
+    await inspector.changeSelect('approval-form-field-inspector-type', 'text')
+    expect(inspector.session().draft.fields[0].type).toBe('record-link')
+    expect(inspector.status()).toContain(DEPENDENCY_KIND_BUSINESS_LABELS.record_link_config)
+
+    await inspector.changeSelect(BASE_SELECT, '')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkBaseId: '', recordLinkSheetId: '' },
+    })
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    await inspector.changeSelect('approval-form-field-inspector-type', 'text')
+    expect(inspector.session().draft.fields[0].type).toBe('text')
+  })
+
+  it('a stale (unavailable) pin shows the values-free 目标不可用 option and the SAME message the publish check reports; re-picking repairs it', async () => {
+    const stale = field(1, {
+      type: 'record-link',
+      label: '客户关联',
+      recordLinkBaseId: 'base_gone',
+      recordLinkSheetId: 'sheet_gone',
+    })
+    const inspector = await mountInspector([stale, field(2)], {
+      recordLinkCatalog: catalog(),
+    })
+    const base = inspector.select(BASE_SELECT)
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(base.value).toBe('base_gone')
+    expect(selectedText(base)).toBe(RECORD_LINK_TARGET_UNAVAILABLE)
+    expect(sheet.value).toBe('sheet_gone')
+    expect(selectedText(sheet)).toBe(RECORD_LINK_TARGET_UNAVAILABLE)
+    const publishMessage = validateRecordLinkPinAgainstLoadedCatalog(stale, {
+      loaded: true,
+      sheets: catalog().sheets,
+    })
+    expect(publishMessage).not.toBeNull()
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(publishMessage!)
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([publishMessage])
+    expect(inspector.root.textContent).not.toMatch(/base_gone|sheet_gone/)
+
+    await inspector.changeSelect(BASE_SELECT, 'base_alpha')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkBaseId: 'base_alpha', recordLinkSheetId: '' },
+    })
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+    )
+  })
+
+  it('catalog failure renders the parent-owned values-free error with 重试; retry is an intent emitted to the parent, never a command', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link' }), field(2)],
+      {
+        recordLinkCatalog: catalog({
+          bases: [],
+          sheets: [],
+          loaded: false,
+          error: '关联表目录加载失败，请重试',
+        }),
+      },
+    )
+    const error = inspector.q(
+      '[data-testid="approval-form-field-inspector-record-link-catalog-error"]',
+    )
+    expect(error.textContent).toContain('关联表目录加载失败，请重试')
+    inspector
+      .q('[data-testid="approval-form-field-inspector-record-link-catalog-retry"]')
+      .click()
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+    expect(inspector.commands).toEqual([])
+
+    await inspector.setRecordLinkCatalog(catalog())
+    expect(
+      inspector.root.querySelector(
+        '[data-testid="approval-form-field-inspector-record-link-catalog-error"]',
+      ),
+    ).toBeNull()
+    expect(optionTexts(inspector.select(BASE_SELECT))).toEqual([
+      '请选择目标空间',
+      '销售空间',
+      '客服空间',
+    ])
+  })
+
+  it('while loading both pickers are disabled and busy; focusing a picker of an unloaded catalog requests ONE load; a loaded catalog requests none', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      {
+        recordLinkCatalog: catalog({ bases: [], sheets: [], loaded: false, loading: true }),
+      },
+    )
+    expect(inspector.select(BASE_SELECT).disabled).toBe(true)
+    expect(inspector.select(SHEET_SELECT).disabled).toBe(true)
+    expect(inspector.select(BASE_SELECT).getAttribute('aria-busy')).toBe('true')
+    expect(inspector.root.textContent).toContain(INSPECTOR_RECORD_LINK_LOADING_MESSAGE)
+
+    await inspector.setRecordLinkCatalog(
+      catalog({ bases: [], sheets: [], loaded: false, loading: false }),
+    )
+    inspector.select(BASE_SELECT).dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+
+    await inspector.setRecordLinkCatalog(catalog())
+    inspector.select(BASE_SELECT).dispatchEvent(new Event('focus'))
+    inspector.select(SHEET_SELECT).dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+    expect(inspector.root.textContent).not.toContain(INSPECTOR_RECORD_LINK_LOADING_MESSAGE)
+  })
+
+  it('a loaded catalog with no readable base explains the empty state instead of leaving a silent empty picker', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link' }), field(2)],
+      { recordLinkCatalog: catalog({ bases: [], sheets: [] }) },
+    )
+    expect(optionTexts(inspector.select(BASE_SELECT))).toEqual(['请选择目标空间'])
+    expect(inspector.root.textContent).toContain(INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE)
+  })
+
+  it('retyping a field INTO record-link reaches the pickers (no configuration dead-end)', async () => {
+    const inspector = await mountInspector([field(1), field(2)], {
+      recordLinkCatalog: catalog(),
+    })
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    await inspector.changeSelect('approval-form-field-inspector-type', 'record-link')
+    expect(inspector.session().draft.fields[0].type).toBe('record-link')
+    await inspector.changeSelect(BASE_SELECT, 'base_beta')
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_beta_1')
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      type: 'record-link',
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: 'sheet_beta_1',
+    })
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+  })
+
+  it('pickers render only for record-link fields and never in read-only mode', async () => {
+    const inspector = await mountInspector(
+      [field(1), field(2, { type: 'record-link' })],
+      { recordLinkCatalog: catalog() },
+    )
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    await inspector.selectField('local_2')
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).not.toBeNull()
+
+    const readOnly = await mountInspector([field(1, { type: 'record-link' })], {
+      readOnly: true,
+      recordLinkCatalog: catalog(),
+    })
+    expect(readOnly.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    expect(readOnly.root.querySelector('select')).toBeNull()
+  })
+})
+
+// R-43 (B) — condition values by the dependency field's type (Designer 2.0 inspector). The test
+// locale is en (jsdom navigator), so new copy renders from the EN table.
+describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () => {
+  const OPT_A = 'opt_aaaaaaaaaaaaaaaa'
+  const OPT_B = 'opt_bbbbbbbbbbbbbbbb'
+  const selectField = (index: number, extra: Partial<FieldAuthoringDraft> = {}) =>
+    field(index, { type: 'select', optionsText: `出差:${OPT_A}\n其他:${OPT_B}`, ...extra })
+  const visibilityOf = (inspector: InspectorHarness, index: number) =>
+    inspector.session().draft.fields[index].visibility
+  const issueText = (inspector: InspectorHarness) =>
+    inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-issue"]')?.textContent ?? ''
+
+  it('new options → pick the NAME → the saved rule holds the opaque option value and the evaluator matches it', async () => {
+    const values = [OPT_A, OPT_B]
+    const inspector = await mountInspector(
+      [field(1, { type: 'select', optionsText: '' }), field(2)],
+      { optionValueFactory: () => values.shift()! },
+    )
+    inspector.q('[data-testid="approval-form-field-inspector-option-add"]').click()
+    await nextTick()
+    inspector.q('[data-testid="approval-form-field-inspector-option-add"]').click()
+    await nextTick()
+    await inspector.typeText('approval-form-field-inspector-option-label-0', '出差')
+    await inspector.blur('approval-form-field-inspector-option-label-0')
+    await inspector.selectField('local_2')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    const select = inspector.select('approval-form-field-inspector-visibility-option-value')
+    const optionTexts = Array.from(select.options).map((option) => option.textContent?.trim())
+    expect(optionTexts).toContain('出差')
+    expect(inspector.root.textContent).not.toContain('opt_')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-value"]')).toBeNull()
+
+    const historyBefore = inspector.session().history.undoStack.length
+    await inspector.changeSelect('approval-form-field-inspector-visibility-option-value', OPT_A)
+    expect(inspector.session().history.undoStack).toHaveLength(historyBefore + 1)
+    expect(visibilityOf(inspector, 1)).toStrictEqual({ dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A })
+    const schema = buildFormSchema(inspector.session().draft)
+    expect(schema.fields[1].visibilityRule).toEqual({ fieldId: 'field_1', operator: 'eq', value: OPT_A })
+    expect(getVisibleFormFields(schema, { field_1: OPT_A }).map((f) => f.id)).toContain('field_2')
+    expect(getVisibleFormFields(schema, { field_1: '出差' }).map((f) => f.id)).not.toContain('field_2')
+  })
+
+  it('in over options: ticking two options saves a list that round-trips through reselection', async () => {
+    const inspector = await mountInspector([selectField(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-option-values"]')).not.toBeNull()
+    await inspector.toggle('approval-form-field-inspector-visibility-option-0')
+    await inspector.toggle('approval-form-field-inspector-visibility-option-1')
+    const rule = buildVisibilityRule(visibilityOf(inspector, 1))
+    expect(rule).toEqual({ fieldId: 'field_1', operator: 'in', values: [OPT_A, OPT_B] })
+    const schema = buildFormSchema(inspector.session().draft)
+    expect(getVisibleFormFields(schema, { field_1: OPT_B }).map((f) => f.id)).toContain('field_2')
+    expect(getVisibleFormFields(schema, { field_1: 'opt_c' }).map((f) => f.id)).not.toContain('field_2')
+
+    await inspector.selectField('local_1')
+    await inspector.selectField('local_2')
+    expect(inspector.input('approval-form-field-inspector-visibility-option-0').checked).toBe(true)
+    expect(inspector.input('approval-form-field-inspector-visibility-option-1').checked).toBe(true)
+  })
+
+  it('in over text: a textarea keeps one value per line (no Enter commit, no collapse) and untouched values commit nothing', async () => {
+    const inspector = await mountInspector([field(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    const box = inspector.q('[data-testid="approval-form-field-inspector-visibility-values"]')
+    expect(box.tagName).toBe('TEXTAREA')
+    const before = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-values', 'a\nb\nc')
+    await inspector.pressEnter('approval-form-field-inspector-visibility-values')
+    expect(inspector.commands).toHaveLength(before)
+    await inspector.blur('approval-form-field-inspector-visibility-values')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toEqual({ fieldId: 'field_1', operator: 'in', values: ['a', 'b', 'c'] })
+
+    const seeded = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: 'a\nb' } })],
+      { selected: 'local_2' },
+    )
+    expect((seeded.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement).value).toBe('a\nb')
+    await seeded.blur('approval-form-field-inspector-visibility-values')
+    expect(seeded.commands).toHaveLength(0)
+  })
+
+  it('number dependency: eq saves a NUMBER, rejects non-numbers, and a stored numeric string is marked and fixed by re-entering it', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '1500')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    const rule = buildVisibilityRule(visibilityOf(inspector, 1))
+    expect(rule).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 1500 })
+    expect(getVisibleFormFields(buildFormSchema(inspector.session().draft), { field_1: 1500 }).map((f) => f.id)).toContain('field_2')
+
+    const commandsBefore = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'abc')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
+    expect(inspector.commands).toHaveLength(commandsBefore)
+
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '1500')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    await inspector.typeText('approval-form-field-inspector-visibility-values', '1\n2')
+    await inspector.blur('approval-form-field-inspector-visibility-values')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'in', values: [1, 2] })
+
+    const stale = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '5000' } })],
+      { selected: 'local_2' },
+    )
+    expect(stale.input('approval-form-field-inspector-visibility-number-value').value).toBe('')
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('not-number', false))
+    // gate r4 NIT-f: the empty number box's saved value is shown read-only
+    const storedNoteSelector = '[data-testid="approval-form-field-inspector-visibility-stored-value-text"]'
+    expect(stale.root.querySelector(storedNoteSelector)?.textContent).toBe('5000')
+    await stale.typeText('approval-form-field-inspector-visibility-number-value', '5000')
+    await stale.blur('approval-form-field-inspector-visibility-number-value')
+    expect(stale.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 5000 })
+    expect(issueText(stale)).toBe('')
+    expect(stale.root.querySelector(storedNoteSelector)).toBeNull()
+  })
+
+  it('gate r2 F2-1: a non-string value on a TEXT dependency is marked, shown empty, and re-entering the same text commits a string', async () => {
+    // e.g. a number left behind when the dependency was retyped number → text (`'5' === 5` never matches)
+    const stale = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: 5 } })],
+      { selected: 'local_2' },
+    )
+    expect(stale.input('approval-form-field-inspector-visibility-value').value).toBe('')
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('not-text', false))
+    // gate r3 F3-1 / NIT-e: the saved value is shown read-only next to the empty box
+    const storedNote = (mounted: typeof stale): string | null => {
+      try {
+        return mounted.q('[data-testid="approval-form-field-inspector-visibility-stored-value-text"]').textContent
+      } catch {
+        return null // `q` throws when nothing is rendered
+      }
+    }
+    expect(storedNote(stale)).toBe('5')
+    expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).not.toContain('field_2')
+    await stale.typeText('approval-form-field-inspector-visibility-value', '5')
+    await stale.blur('approval-form-field-inspector-visibility-value')
+    expect(stale.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: '5' })
+    expect(issueText(stale)).toBe('')
+    expect(storedNote(stale)).toBeNull()
+    expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).toContain('field_2')
+
+    const staleList = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\n2', values: [1, 2] } })],
+      { selected: 'local_2' },
+    )
+    expect((staleList.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement).value).toBe('')
+    expect(issueText(staleList)).toContain(conditionValueIssueMessage('not-text', false))
+    expect(storedNote(staleList)).toBe('[1,2]')
+    await staleList.typeText('approval-form-field-inspector-visibility-values', '1\n2')
+    await staleList.blur('approval-form-field-inspector-visibility-values')
+    expect(staleList.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(staleList, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'in', values: ['1', '2'] })
+    expect(issueText(staleList)).toBe('')
+    expect(storedNote(staleList)).toBeNull()
+  })
+
+  it('gate r5 P3-j: the saved-value note on a number `in` list follows what the textarea shows (no duplicate of its lines; shown when it is empty)', async () => {
+    const storedNoteSelector = '[data-testid="approval-form-field-inspector-visibility-stored-value-text"]'
+    const valuesBox = (mounted: InspectorHarness) =>
+      mounted.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement
+    // API-written list with a non-number entry: the box shows its lines, so no note repeats them
+    const shown = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\nabc', values: [1, 'abc'] } })],
+      { selected: 'local_2' },
+    )
+    expect(valuesBox(shown).value).toBe('1\nabc')
+    expect(issueText(shown)).toContain(conditionValueIssueMessage('not-number', false))
+    expect(shown.root.querySelector(storedNoteSelector)).toBeNull()
+
+    // pre-R-43 digit strings: the box is empty, so the saved value is shown read-only
+    const blank = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\n2' } })],
+      { selected: 'local_2' },
+    )
+    expect(valuesBox(blank).value).toBe('')
+    expect(issueText(blank)).toContain(conditionValueIssueMessage('not-number', false))
+    expect(blank.root.querySelector(storedNoteSelector)?.textContent).toBe('["1","2"]')
+    expect(blank.commands).toHaveLength(0)
+  })
+
+  it('multi-select dependency offers only effective operators; a stored eq is shown disabled and marked', async () => {
+    const multi = (index: number, extra: Partial<FieldAuthoringDraft> = {}) => selectField(index, { type: 'multi-select', ...extra })
+    const inspector = await mountInspector([multi(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    expect(visibilityOf(inspector, 1).operator).toBe('in')
+    const enabled = Array.from(inspector.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(enabled).toEqual(['in', 'isEmpty', 'notEmpty'])
+
+    const legacy = await mountInspector(
+      [multi(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A } })],
+      { selected: 'local_2' },
+    )
+    const operator = legacy.select('approval-form-field-inspector-visibility-operator')
+    expect(operator.value).toBe('eq')
+    expect(operator.selectedOptions[0]?.disabled).toBe(true)
+    expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-not-effective', false))
+  })
+
+  // R-43 follow-up (b), owner Q2: a multi-person picker (user + selection multi) submits a LIST, so it
+  // is treated like a multi-select. This also locks that the inspector keeps `listValued` when it
+  // rebuilds the dependency description (it used to drop it).
+  it('follow-up (b): a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is shown disabled, marked and never rewritten', async () => {
+    const person = (index: number, selection: 'single' | 'multi') => field(index, { type: 'user', userSelection: selection })
+    const inspector = await mountInspector([person(1, 'multi'), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    expect(visibilityOf(inspector, 1).operator).toBe('in')
+    const enabled = Array.from(inspector.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(enabled).toEqual(['in', 'isEmpty', 'notEmpty'])
+
+    const legacy = await mountInspector(
+      [person(1, 'multi'), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' } })],
+      { selected: 'local_2' },
+    )
+    const operator = legacy.select('approval-form-field-inspector-visibility-operator')
+    expect(operator.value).toBe('eq')
+    expect(operator.selectedOptions[0]?.disabled).toBe(true)
+    expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-multi-person', false))
+    expect(legacy.commands).toHaveLength(0)
+    expect(visibilityOf(legacy, 1)).toStrictEqual({ dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' })
+
+    // a single person keeps every operator and is not marked
+    const single = await mountInspector(
+      [person(1, 'single'), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' } })],
+      { selected: 'local_2' },
+    )
+    const singleEnabled = Array.from(single.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(singleEnabled).toEqual(['eq', 'neq', 'in', 'isEmpty', 'notEmpty'])
+    expect(issueText(single)).toBe('')
+  })
+
+  it('gate r4 P3-h: a LIST stored under eq on a select dependency is marked with the picker placeholder — never a raw option-code note', async () => {
+    // API-only shape (the editor cannot write it): the picker carries its own invalid-value
+    // placeholder, so the free-entry「stored value」note must not also print the raw option code.
+    const stale = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: [OPT_A] } })],
+      { selected: 'local_2' },
+    )
+    // positive controls first: the rule loaded, is marked, and the picker shows the placeholder
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('list-not-scalar', false))
+    const select = stale.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(stale.root.querySelector('[data-testid="approval-form-field-inspector-visibility-stored-value"]')).toBeNull()
+    expect(stale.root.textContent).not.toContain(OPT_A)
+    expect(stale.commands).toHaveLength(0)
+  })
+
+  it('stale / renamed / deleted options: marked, re-picking fixes it; a rename shows the new name with the value unchanged', async () => {
+    const stale = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'opt_gone' } })],
+      { selected: 'local_2' },
+    )
+    const select = stale.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('value-not-option', false))
+    await stale.changeSelect('approval-form-field-inspector-visibility-option-value', OPT_B)
+    expect(issueText(stale)).toBe('')
+
+    const inspector = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A } })],
+      { selected: 'local_1' },
+    )
+    await inspector.typeText('approval-form-field-inspector-option-label-0', '差旅')
+    await inspector.blur('approval-form-field-inspector-option-label-0')
+    await inspector.selectField('local_2')
+    const renamed = inspector.select('approval-form-field-inspector-visibility-option-value')
+    expect(renamed.selectedOptions[0]?.textContent?.trim()).toBe('差旅')
+    expect(visibilityOf(inspector, 1).valueText).toBe(OPT_A)
+    expect(issueText(inspector)).toBe('')
+    await inspector.selectField('local_1')
+    inspector.q('[data-testid="approval-form-field-inspector-option-remove-0"]').click()
+    await nextTick()
+    await inspector.selectField('local_2')
+    expect(issueText(inspector)).toContain(conditionValueIssueMessage('value-not-option', false))
+
+    const list = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: `${OPT_A}\nopt_gone` } })],
+      { selected: 'local_2' },
+    )
+    expect(list.q('[data-testid="approval-form-field-inspector-visibility-stale-count"]').textContent).toContain('1')
+    await list.toggle('approval-form-field-inspector-visibility-option-1')
+    expect(buildVisibilityRule(visibilityOf(list, 1))).toEqual({ fieldId: 'field_1', operator: 'in', values: [OPT_A, OPT_B] })
+    expect(list.root.querySelector('[data-testid="approval-form-field-inspector-visibility-stale-count"]')).toBeNull()
+  })
+
+  it('settlePendingEdits commits a valid number buffer as ONE typed command, and blocks an invalid one', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    const before = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '42')
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    expect(inspector.commands).toHaveLength(before + 1)
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 42 })
+
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'x1')
+    expect(inspector.vm.settlePendingEdits()).toBe(false)
+    await nextTick()
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
+  })
+
+  it('gate r1 P3-2: leftover number text under isEmpty (value box hidden) neither blocks a switch nor overwrites the kept value', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '42')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'abc')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'isEmpty')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-number-value"]')).toBeNull()
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    await nextTick()
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'isEmpty' })
+    expect(visibilityOf(inspector, 1).value).toBe(42) // the kept value is untouched by the hidden box's text
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'eq')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 42 })
+  })
+
+  it('gate r1 P3-6: a non-string value on a select dependency shows the invalid placeholder, not the look-alike option; re-picking fixes it', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, { type: 'select', optionsText: '一级:1\n二级:2' }),
+        field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: 1 } }),
+      ],
+      { selected: 'local_2' },
+    )
+    const select = inspector.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(issueText(inspector)).toContain(conditionValueIssueMessage('value-not-option', false))
+    await inspector.changeSelect('approval-form-field-inspector-visibility-option-value', '1')
+    expect(issueText(inspector)).toBe('')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: '1' })
+  })
+
+  it('gate r1 F1/P3-1: in → isEmpty → eq keeps the first entry; a stored eq LIST is marked', async () => {
+    const inspector = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: 'a\nb' } })],
+      { selected: 'local_2' },
+    )
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'isEmpty')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'eq')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 'a' })
+    expect(issueText(inspector)).toBe('')
+
+    const listed = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'neq', valueText: '', value: ['a', 'b'] } })],
+      { selected: 'local_2' },
+    )
+    expect(issueText(listed)).toContain(conditionValueIssueMessage('list-not-scalar', false))
   })
 })

@@ -1,66 +1,155 @@
 <template>
   <div v-if="visible" class="meta-field-mgr__overlay" @click.self="requestClose">
-    <div class="meta-field-mgr">
-      <div class="meta-field-mgr__header">
+    <!-- r8-B (2026-09-11): the dialog's two halves (field list / field config) used to share one
+         84vh box with no user control, so a tall config panel squeezed the list to nothing. The
+         config pane's height ceiling now rides on this inline custom property (same idiom as
+         MetaRecordInspector.vue's `--meta-record-drawer-width`), driven by the splitter below.
+         keydown/keyup are bound HERE, on the root, and dispatched by target -- the same
+         single-root-listener discipline MetaRecordInspector.vue settled on (a second @keydown bound
+         on the splitter itself was reproducibly flaky under this vitest/jsdom harness; see that
+         file's `onInspectorKeydown` comment). Only the four splitter resize keys are consumed, and
+         only when the event originates inside `[role="separator"]`, so the rename input's own
+         Enter/Escape handling above is untouched.
+         客户反馈 2026-09-24 #7a: the header, splitter, add-field row and delete confirmation carry
+         template refs so their MEASURED heights bound the config pane (see `measureFixedRows`), and
+         the list's floor rides on a second custom property so a very short window can shrink it
+         instead of pushing those rows out of the dialog. -->
+    <div
+      class="meta-field-mgr"
+      :style="{
+        '--meta-field-mgr-config-height': configPaneHeight + 'px',
+        '--meta-field-mgr-list-min-height': fieldListFloor + 'px',
+      }"
+      @keydown="onManagerKeydown"
+      @keyup="onManagerKeyup"
+    >
+      <div ref="headerRef" class="meta-field-mgr__header">
         <h4 class="meta-field-mgr__title">{{ ml('field.title') }}</h4>
         <MtIconButton class="meta-field-mgr__close" @click="requestClose">&times;</MtIconButton>
       </div>
 
       <div class="meta-field-mgr__body">
-        <div
-          v-for="(field, idx) in fields"
-          :key="field.id"
-          class="meta-field-mgr__row"
-        >
-          <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
+        <!-- #7a round 3 (SF2): a plain wrapper whose height is the list's CONTENT height, so the
+             untouched split can give the list exactly what it needs (see `measureListContent`). -->
+        <div ref="listContentRef" class="meta-field-mgr__list">
+          <div
+            v-for="(field, idx) in fields"
+            :key="field.id"
+            class="meta-field-mgr__row"
+            :class="{
+              'meta-field-mgr__row--dragging': dragFieldId === field.id,
+              'meta-field-mgr__row--drop-before': dropIndicatorFor(field.id) === 'before',
+              'meta-field-mgr__row--drop-after': dropIndicatorFor(field.id) === 'after',
+            }"
+            :draggable="editingId !== field.id"
+            @dragstart="onRowDragStart($event, field.id)"
+            @dragover.prevent="onRowDragOver(field.id)"
+            @dragleave="onRowDragLeave($event, field.id)"
+            @drop.prevent="onRowDrop(idx)"
+            @dragend="onRowDragEnd"
+          >
+            <span class="meta-field-mgr__grip" aria-hidden="true" :title="ml('action.dragToReorder')">&#x283F;</span>
+            <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
 
-          <template v-if="editingId === field.id">
-            <div class="meta-field-mgr__rename-wrap">
-              <input
-                class="meta-field-mgr__rename"
-                :class="{ 'meta-field-mgr__rename--invalid': renameNameConflict }"
-                :value="editingName"
-                :aria-invalid="renameNameConflict"
-                :aria-describedby="renameNameConflict ? 'meta-field-mgr-rename-error' : undefined"
-                @input="editingName = ($event.target as HTMLInputElement).value"
-                @keydown.enter="confirmRename(field.id)"
-                @keydown.escape="cancelRename"
-              />
-              <span
-                v-if="renameNameConflict"
-                id="meta-field-mgr-rename-error"
-                class="meta-field-mgr__inline-error"
-                data-test="rename-conflict-error"
-                role="alert"
-              >{{ duplicateFieldName(editingName.trim(), isZh) }}</span>
-            </div>
-            <button
-              class="meta-field-mgr__action meta-field-mgr__action--ok"
-              :disabled="renameNameConflict"
-              :title="renameNameConflict ? duplicateRenameTitle : ml('action.confirmRename')"
-              @click="confirmRename(field.id)"
-            >&#x2713;</button>
-            <button class="meta-field-mgr__action" :title="ml('action.cancelRename')" @click="cancelRename">&#x2717;</button>
-          </template>
-          <template v-else>
-            <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
-            <span class="meta-field-mgr__type">{{ fieldTypeName(field) }}</span>
-            <button class="meta-field-mgr__action" :title="ml('action.configure')" @click="openConfig(field)">&#x2699;</button>
-            <button class="meta-field-mgr__action" :title="ml('action.rename')" @click="startRename(field)">&#x270E;</button>
-            <button class="meta-field-mgr__action" :disabled="idx === 0" :title="ml('action.moveUp')" @click="moveField(field.id, idx - 1)">&#x25B2;</button>
-            <button class="meta-field-mgr__action" :disabled="idx === fields.length - 1" :title="ml('action.moveDown')" @click="moveField(field.id, idx + 1)">&#x25BC;</button>
-            <button class="meta-field-mgr__action meta-field-mgr__action--danger" :title="ml('action.delete')" @click="onDeleteField(field)">&#x1F5D1;</button>
-          </template>
+            <template v-if="editingId === field.id">
+              <div class="meta-field-mgr__rename-wrap">
+                <input
+                  class="meta-field-mgr__rename"
+                  :class="{ 'meta-field-mgr__rename--invalid': renameNameConflict }"
+                  :value="editingName"
+                  :aria-invalid="renameNameConflict"
+                  :aria-describedby="renameNameConflict ? 'meta-field-mgr-rename-error' : undefined"
+                  @input="editingName = ($event.target as HTMLInputElement).value"
+                  @keydown.enter="confirmRename(field.id)"
+                  @keydown.escape="cancelRename"
+                />
+                <span
+                  v-if="renameNameConflict"
+                  id="meta-field-mgr-rename-error"
+                  class="meta-field-mgr__inline-error"
+                  data-test="rename-conflict-error"
+                  role="alert"
+                >{{ duplicateFieldName(editingName.trim(), isZh) }}</span>
+              </div>
+              <button
+                class="meta-field-mgr__action meta-field-mgr__action--ok"
+                :disabled="renameNameConflict"
+                :title="renameNameConflict ? duplicateRenameTitle : ml('action.confirmRename')"
+                @click="confirmRename(field.id)"
+              >&#x2713;</button>
+              <button class="meta-field-mgr__action" :title="ml('action.cancelRename')" @click="cancelRename">&#x2717;</button>
+            </template>
+            <template v-else>
+              <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
+              <span class="meta-field-mgr__type">{{ fieldTypeName(field) }}</span>
+              <button class="meta-field-mgr__action" :title="ml('action.configure')" @click="openConfig(field)">&#x2699;</button>
+              <button class="meta-field-mgr__action" :title="ml('action.rename')" @click="startRename(field)">&#x270E;</button>
+              <button class="meta-field-mgr__action" :disabled="idx === 0" :title="ml('action.moveUp')" @click="moveField(field.id, idx - 1)">&#x25B2;</button>
+              <button class="meta-field-mgr__action" :disabled="idx === fields.length - 1" :title="ml('action.moveDown')" @click="moveField(field.id, idx + 1)">&#x25BC;</button>
+              <button class="meta-field-mgr__action meta-field-mgr__action--danger" :title="ml('action.delete')" @click="onDeleteField(field)">&#x1F5D1;</button>
+            </template>
+          </div>
+
+          <div v-if="!fields.length" class="meta-field-mgr__empty">{{ ml('field.empty') }}</div>
         </div>
-
-        <div v-if="!fields.length" class="meta-field-mgr__empty">{{ ml('field.empty') }}</div>
       </div>
 
-      <div v-if="configTargetType" class="meta-field-mgr__config">
+      <!-- r8-B: horizontal splitter, mounted only while a config pane exists (there is nothing to
+           split otherwise). Drag or Arrow/Home/End to move the boundary; see `onSplitterPointerDown`
+           / `onSplitterKeydown`. -->
+      <div
+        v-if="configTargetType"
+        ref="splitterRef"
+        class="meta-field-mgr__splitter"
+        role="separator"
+        aria-orientation="horizontal"
+        :aria-valuenow="Math.round(configPaneHeight)"
+        :aria-valuemin="Math.round(minConfigPaneHeight)"
+        :aria-valuemax="Math.round(maxConfigPaneHeight)"
+        :aria-label="ml('field.configPaneResizeHandle')"
+        tabindex="0"
+        data-test="field-mgr-splitter"
+        @pointerdown="onSplitterPointerDown"
+      ></div>
+
+      <div
+        v-if="configTargetType"
+        ref="configPaneRef"
+        class="meta-field-mgr__config meta-field-mgr__config--scrollable"
+        :class="{ 'meta-field-mgr__config--squeezed': isConfigPaneSqueezed }"
+      >
         <div class="meta-field-mgr__config-header">
           <strong>{{ configTarget ? configureField(configTarget.name, isZh) : configureNewField(newFieldType, isZh) }}</strong>
-          <span>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
+          <!-- #9: the type is a DROPDOWN only for the lossless directions in
+               utils/field-retype.ts (everything else stays a read-only span). -->
+          <select
+            v-if="configRetypeOptions.length"
+            v-model="configDraftType"
+            class="meta-field-mgr__select meta-field-mgr__type-select"
+            data-test="config-type-select"
+          >
+            <option v-for="t in configRetypeOptions" :key="t" :value="t">{{ fieldTypeLabel(t, isZh) }}</option>
+          </select>
+          <span v-else>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
+          <!-- r8-B: 放大/缩小 -- a pressed-state toggle that jumps the config pane to its current
+               maximum and back to the last MANUALLY chosen height (drag or keyboard), or to the
+               live default split when there never was one -- never to a hardcoded px. -->
+          <button
+            type="button"
+            class="meta-field-mgr__expand"
+            :class="{ 'meta-field-mgr__expand--active': isConfigPaneExpanded }"
+            :aria-pressed="isConfigPaneExpanded"
+            :aria-label="ml(isConfigPaneExpanded ? 'field.configPaneCollapse' : 'field.configPaneExpand')"
+            :title="ml(isConfigPaneExpanded ? 'field.configPaneCollapse' : 'field.configPaneExpand')"
+            data-test="field-mgr-config-expand"
+            @click="toggleConfigPaneExpand"
+          >{{ isConfigPaneExpanded ? '⤡' : '⤢' }}</button>
         </div>
+        <div
+          v-if="retypeNoticeText"
+          class="meta-field-mgr__hint meta-field-mgr__hint--retype"
+          data-test="retype-notice"
+        >{{ retypeNoticeText }}</div>
         <div v-if="fieldConfigOutdated" class="meta-field-mgr__warning">
           <span>{{ fieldConfigWarningText }}</span>
           <button class="meta-field-mgr__btn-inline" @click="reloadLatestConfig">{{ ml('action.reloadLatest') }}</button>
@@ -74,8 +163,39 @@
           <div class="meta-field-mgr__field">
             <span>{{ ml('field.options') }}</span>
             <div class="meta-field-mgr__stack">
-              <div v-for="(option, idx) in selectDraft.options" :key="idx" class="meta-field-mgr__option-row">
+              <div v-for="(option, idx) in selectDraft.options" :key="idx" class="meta-field-mgr__option-row meta-field-mgr__option-row--select">
                 <input v-model="option.value" class="meta-field-mgr__input" :placeholder="ml('field.optionValue')" />
+                <!-- #6: preset swatches + native picker + the (kept) hex text box.
+                     The preview block is what makes "unset" visually distinct from
+                     "#409eff", which used to be the placeholder of the text box. -->
+                <span class="meta-field-mgr__swatches">
+                  <button
+                    v-for="preset in SELECT_OPTION_PALETTE"
+                    :key="preset"
+                    type="button"
+                    class="meta-field-mgr__swatch"
+                    :class="{ 'meta-field-mgr__swatch--active': expandHex(option.color) === preset }"
+                    :style="{ backgroundColor: preset }"
+                    :aria-label="preset"
+                    :title="preset"
+                    :data-test="`option-swatch-${idx}-${preset}`"
+                    @click="option.color = preset"
+                  />
+                </span>
+                <input
+                  type="color"
+                  class="meta-field-mgr__color-input"
+                  :data-test="`option-color-picker-${idx}`"
+                  :value="expandHex(option.color) || '#409eff'"
+                  @input="option.color = ($event.target as HTMLInputElement).value"
+                />
+                <span
+                  class="meta-field-mgr__color-preview"
+                  :class="{ 'meta-field-mgr__color-preview--empty': !isHexColor(option.color) }"
+                  :style="isHexColor(option.color) ? { backgroundColor: expandHex(option.color) } : undefined"
+                  :title="isHexColor(option.color) ? option.color.trim() : ml('field.optionColorEmpty')"
+                  :data-test="`option-color-preview-${idx}`"
+                />
                 <input v-model="option.color" class="meta-field-mgr__input" placeholder="#409eff" />
                 <button class="meta-field-mgr__action meta-field-mgr__action--danger" @click="removeSelectOption(idx)">&times;</button>
               </div>
@@ -156,6 +276,25 @@
               <option v-for="sheet in targetSheets" :key="sheet.id" :value="sheet.id">{{ sheet.name }}</option>
             </select>
           </label>
+          <!-- 目标表缺失时的常驻提示 + 保存禁用（2026-09-10）。编辑一个"历史坏字段"（property 里没有
+               foreignSheetId）时它立刻可见，选好目标表保存即完成自愈；后端也已 fail-closed。
+               空态先判：同 base 路径下这个 base 只有当前这一张表时，上面的下拉是空的（targetSheets 排除
+               自己），编辑既有字段时跨 base 开关又是锁的 —— 只说"请选目标表"等于让用户对着空下拉干瞪眼。
+               这一支直接说清下一步：先去建第二张表。 -->
+          <div
+            v-if="linkTargetMissing && linkNoTargetSheetsAvailable"
+            class="meta-field-mgr__hint meta-field-mgr__hint--error"
+            data-test="link-target-no-sheets"
+          >
+            {{ ml('field.linkNoOtherSheetsHint') }}
+          </div>
+          <div
+            v-else-if="linkTargetMissing"
+            class="meta-field-mgr__hint meta-field-mgr__hint--error"
+            data-test="link-target-required"
+          >
+            {{ ml('field.linkTargetRequiredHint') }}
+          </div>
           <label class="meta-field-mgr__toggle">
             <input
               v-model="linkDraft.limitSingleRecord"
@@ -301,7 +440,7 @@
           </div>
           <!-- M4 / Lane B2: NL→formula suggest. Describe → generate ONE candidate →
                accept (copies into the expression textarea) → Test validates. -->
-          <div v-if="formulaSuggestFn" class="meta-field-mgr__field meta-field-mgr__formula-suggest" data-test="formula-suggest">
+          <div v-if="formulaSuggestFn && aiSurfacesAvailable" class="meta-field-mgr__field meta-field-mgr__formula-suggest" data-test="formula-suggest">
             <span>{{ ml('field.formulaSuggest.heading') }}</span>
             <textarea
               v-model="formulaSuggestInstruction"
@@ -597,16 +736,63 @@
           </div>
         </template>
 
+        <!-- r4 item 4: types with no branch above AND no AI-shortcut section below (that
+             section covers string/longText) previously left this space blank between the
+             header and the save/cancel buttons — indistinguishable from a broken render. -->
+        <template v-else-if="!aiShortcutSectionVisible">
+          <p class="meta-field-mgr__no-config" data-test="field-config-no-options">
+            {{ ml('field.noConfigurableOptions') }}
+          </p>
+        </template>
+
         <!-- A3 §2.1: AI shortcut config section (string/longText targets only) -->
         <div v-if="aiShortcutSectionVisible" class="meta-field-mgr__ai" data-test="ai-shortcut-section">
-          <div class="meta-field-mgr__ai-header">
+          <!-- A11 (customer feedback 2026-09-24 #7c): AI is not available on this deployment → the
+               section collapses to ONE line + a 了解更多 expander. This is a RENDER-ONLY gate
+               (`aiSurfacesAvailable`), deliberately NOT `aiShortcutSectionVisible`: that computed also
+               decides the no-config fallback above, the dirty leg and the bulk-fill leg. The draft is
+               still hydrated, serialized and re-emitted on save, so a saved config is kept — in the
+               same canonical form every save already writes (resolveAiShortcutDraft drops deleted
+               sources and inert params), never removed. -->
+          <div v-if="aiSurfacesAvailable" class="meta-field-mgr__ai-header">
             <strong>{{ ml('field.ai.title') }}</strong>
           </div>
-          <label class="meta-field-mgr__toggle">
+          <template v-else>
+            <div class="meta-field-mgr__ai-unavailable" data-test="ai-shortcut-unavailable">
+              <span>{{ ml(aiUnavailableConfirmed === true ? 'field.ai.unavailable' : 'field.ai.unconfirmed') }}</span>
+              <button
+                type="button"
+                class="meta-field-mgr__btn-inline"
+                :aria-expanded="aiHelpOpen ? 'true' : 'false'"
+                data-test="ai-shortcut-learn-more"
+                @click="aiHelpOpen = !aiHelpOpen"
+              >{{ aiHelpOpen ? ml('field.ai.hideHelp') : ml('field.ai.learnMore') }}</button>
+            </div>
+            <ul v-if="aiHelpOpen" class="meta-field-mgr__ai-help" data-test="ai-shortcut-help">
+              <li>{{ ml('field.ai.help.kinds') }}</li>
+              <li>{{ ml('field.ai.help.sources') }}</li>
+              <li>{{ ml('field.ai.help.preview') }}</li>
+              <li>{{ ml('field.ai.help.manual') }}</li>
+              <li>{{ ml('field.ai.help.local') }}</li>
+            </ul>
+            <p v-if="aiSavedConfigPresent" class="meta-field-mgr__hint" data-test="ai-shortcut-saved-kept">
+              {{ ml('field.ai.savedConfigKept') }}
+            </p>
+          </template>
+          <!-- The toggle stays reachable while collapsed WHEN a saved config exists: a saved config whose
+               source fields were all deleted blocks every save of this field (resolveAiShortcutDraft),
+               and turning the shortcut off is then the only way out. -->
+          <label v-if="aiSurfacesAvailable || aiSavedConfigPresent" class="meta-field-mgr__toggle">
             <input v-model="aiDraft.enabled" type="checkbox" data-test="ai-shortcut-enable" />
             <span>{{ ml('field.ai.enable') }}</span>
           </label>
-          <template v-if="aiDraft.enabled">
+          <p
+            v-if="!aiSurfacesAvailable && aiSourceAllDeletedBlocked"
+            class="meta-field-mgr__ai-source-deleted-warning"
+            data-test="ai-source-deleted-warning"
+            role="alert"
+          >{{ ml('field.error.aiSourceAllDeleted') }}</p>
+          <template v-if="aiSurfacesAvailable && aiDraft.enabled">
             <label class="meta-field-mgr__field">
               <span>{{ ml('field.ai.kind') }}</span>
               <select v-model="aiDraft.kind" class="meta-field-mgr__select" data-test="ai-shortcut-kind">
@@ -716,7 +902,8 @@
               <div v-if="aiBulkFillDisabledHint" class="meta-field-mgr__hint" data-test="ai-bulk-fill-disabled-hint">{{ aiBulkFillDisabledHint }}</div>
             </div>
           </template>
-          <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe) -->
+          <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe).
+               A11: never loaded — so never shown — while AI is unavailable (see the usage watch below). -->
           <div v-if="aiUsageSummary" class="meta-field-mgr__ai-usage" data-test="ai-usage-card">
             <strong>{{ ml('field.aiUsage.title') }}</strong>
             <div class="meta-field-mgr__ai-usage-stats">
@@ -739,11 +926,11 @@
         <div v-if="fieldConfigError" class="meta-field-mgr__error">{{ fieldConfigError }}</div>
         <div class="meta-field-mgr__config-actions">
           <MtButton class="meta-field-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</MtButton>
-          <MtButton variant="primary" class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</MtButton>
+          <MtButton variant="primary" class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason) || linkTargetMissing" data-test="field-config-save" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</MtButton>
         </div>
       </div>
 
-      <div class="meta-field-mgr__add-section">
+      <div ref="addSectionRef" class="meta-field-mgr__add-section">
         <div class="meta-field-mgr__add-row">
           <input
             v-model="newFieldName"
@@ -751,7 +938,7 @@
             :class="{ 'meta-field-mgr__input--invalid': addNameConflict }"
             :placeholder="ml('field.namePlaceholder')"
             :aria-invalid="addNameConflict"
-            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : undefined"
+            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : (addNameMissing ? 'meta-field-mgr-add-name-required' : undefined)"
             @keydown.enter="onAddField"
           />
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
@@ -761,6 +948,8 @@
             variant="primary"
             class="meta-field-mgr__btn-add"
             :disabled="!newFieldName.trim() || addNameConflict"
+            :title="addDisabledHint || undefined"
+            data-test="add-field-submit"
             @click="onAddField"
           >{{ ml('field.addButton') }}</MtButton>
         </div>
@@ -771,12 +960,20 @@
           data-test="add-conflict-error"
           role="alert"
         >{{ duplicateFieldName(newFieldName.trim(), isZh) }}</div>
+        <!-- #3: the empty-name leg of the disabled predicate had NO visible
+             reason. Quiet muted line (not the boxed __hint), no role=alert. -->
+        <div
+          v-if="addNameMissing"
+          id="meta-field-mgr-add-name-required"
+          class="meta-field-mgr__inline-hint"
+          data-test="add-name-required-hint"
+        >{{ ml('field.nameRequiredHint') }}</div>
         <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
           {{ systemFieldHint(newFieldType) }}
         </div>
       </div>
 
-      <div v-if="deleteTarget" class="meta-field-mgr__confirm">
+      <div v-if="deleteTarget" ref="confirmRef" class="meta-field-mgr__confirm">
         <p>{{ deleteFieldConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-field-mgr__confirm-actions">
           <MtButton class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</MtButton>
@@ -788,7 +985,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { FieldValidationRule, MetaBase, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
@@ -836,9 +1033,12 @@ import {
   duplicateFieldName,
   aggregationLabel,
   fieldOptionRequired,
+  fieldRetypeNotice,
   insertFieldTokenTitle,
   managerLabel,
 } from '../utils/meta-manager-labels'
+import { SELECT_OPTION_PALETTE, expandHex, isHexColor, nextPaletteColor } from '../utils/select-option-palette'
+import { losslessRetypeTargets, retainedRetypeValidationRules, validationPanelTypeFor } from '../utils/field-retype'
 import { aiTokensConsumed, fieldTypeLabel } from '../utils/meta-core-labels'
 import { aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import { aiBulkLabel } from '../utils/meta-ai-bulk-labels'
@@ -861,10 +1061,12 @@ import { MtButton, MtIconButton } from '../ui'
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
 
+// Single source of truth with the retype rule filter (utils/field-retype.ts): the panel
+// that authors a rule is the panel that decides whether the rule may survive a retype.
+// The `?? 'select'` only ever fires for types the panel is not rendered for at all
+// (validationPanelVisible gates on VALIDATION_PANEL_TYPES) — kept for the old behaviour.
 function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
-  if (fieldType === 'string' || fieldType === 'longText') return 'text'
-  if (fieldType === 'number') return 'number'
-  return 'select'
+  return validationPanelTypeFor(fieldType) ?? 'select'
 }
 
 /**
@@ -990,6 +1192,16 @@ const props = defineProps<{
   // in-flight guard + countdown cover this entry point too. null outcome =
   // guarded no-op (another AI request is in flight / countdown active).
   formulaSuggestFn?: (params: { instruction: string }) => Promise<AiFormulaSuggestOutcome | null>
+  // A11 (customer feedback 2026-09-24 #7c): the server reports the AI surfaces available
+  // (GET /api/multitable/ai/availability, resolved fail-closed by the workbench). Absent/false ⇒
+  // the AI section collapses to a one-line "not enabled" notice + help, and the usage card, the
+  // config-time preview, the bulk-fill trigger and the formula AI-suggest panel are not rendered.
+  // RENDER-ONLY: a saved `property.aiShortcut` still hydrates, serializes and is re-emitted on save.
+  aiAvailable?: boolean
+  // A11: WORDING ONLY (never the gate). True only when the server EXPLICITLY answered
+  // `{ available: false }` → the collapsed line says 「未开通」. Absent/false (the availability read
+  // failed, or has not answered yet) → neutral 「AI 状态暂时无法确认」: an error is not "not enabled".
+  aiUnavailableConfirmed?: boolean
   // Cross-base link picker (design 2026-06-14). The base-read gate is the FE's
   // source of truth: these fns are the ONLY way the picker learns what bases /
   // foreign sheets exist, and both are backend base-read-gated (listBases returns
@@ -1030,8 +1242,24 @@ const newFieldConfigVisible = ref(false)
 const editingId = ref<string | null>(null)
 const editingName = ref('')
 const deleteTargetId = ref<string | null>(null)
+// Feedback B (2026-09-14): the field list could only be reordered one slot at a time with the
+// ▲▼ buttons. These two refs back a press-and-drag reorder of the same rows. HTML5 drag
+// (`draggable` + dragstart/dragover/drop), mirroring MetaFieldHeader.vue's column reorder in this
+// same package -- the browser then supplies the drag image, the auto-scroll inside the scrolling
+// `.meta-field-mgr__body`, and the Escape-cancels-the-drag behaviour for free, none of which a
+// hand-rolled pointer drag would get. The dragged id lives in a REF (the MetaHierarchyView.vue
+// variant) instead of being read back out of `event.dataTransfer`, so the drop knows its source
+// even where the platform DataTransfer is unavailable; `setData` is still called on dragstart
+// because Firefox refuses to start a drag without it.
+const dragFieldId = ref<string | null>(null)
+const dragOverFieldId = ref<string | null>(null)
 const configTargetId = ref<string | null>(null)
 const configDraftType = ref<string | null>(null)
+// #9: the type the panel was HYDRATED with. Splits the two signals that used to be
+// conflated by `fieldConfigSchemaChanged`: `configDraftType !== baseline` is the USER
+// picking a new type in the dropdown (allowed), `stored type !== baseline` is the
+// field being re-typed in the BACKGROUND (still blocks the save).
+const configTypeBaseline = ref<string | null>(null)
 const fieldConfigError = ref('')
 // r2 item 6: distinct field-level state for "every persisted AI source field was deleted" — drives a
 // warning banner ON the AI config section so the user sees the AI section is the blocker (not their
@@ -1348,6 +1576,32 @@ const configTargetType = computed(() => {
   return newFieldConfigVisible.value && requiresConfig(newFieldType.value) ? newFieldType.value : null
 })
 
+/**
+ * 关联字段草稿缺目标表（2026-09-10）。true ⇒ 面板给常驻提示 + 保存按钮禁用。
+ *
+ * 为什么要有这条：后端过去允许没有 foreignSheetId 的 link 字段落库（univer-meta.ts 的 §2a.2 墙在
+ * `parseLinkFieldConfig` 返回 null 时直接放行），这样的字段一点「选择关联记录」就 400。现在后端已
+ * fail-closed，这里是同一条规则的前置提示，也是"已有坏字段"在字段管理里的自愈入口：编辑它就会看到
+ * 提示，选好目标表保存即修复。跨 base 与同 base 两条路径共用 `linkDraft.foreignSheetId`，所以一条判断
+ * 覆盖两个 select。
+ */
+const linkTargetMissing = computed(() =>
+  configTargetType.value === 'link' && !linkDraft.foreignSheetId.trim(),
+)
+
+/**
+ * 同 base 路径下"一张可选的表都没有"（2026-09-10 反驳意见）。
+ *
+ * `targetSheets` 会排掉当前表（不能关联自己），所以一个只有一张表的 base 里这个下拉是空的；而编辑既有
+ * 字段时跨 base 开关被 `linkCrossBaseToggleLocked` 锁死（同 base↔跨 base 改向会毁掉已存的记录 id 值，
+ * 那条锁保持不动）。这两条一叠，用户看到的就是"提示要选目标表 + 空下拉 + 灰掉的保存"。这个计算量只用来
+ * 把提示换成一句能执行的下一步，不解锁任何东西、也不放宽保存条件。
+ * 跨 base 打开时不适用：那条路径自己有 loading / 403 / 空表三个提示（data-test="link-cross-base-*"）。
+ */
+const linkNoTargetSheetsAvailable = computed(() =>
+  !linkDraft.crossBase && targetSheets.value.length === 0,
+)
+
 // 3c foreign-field picker (defined AFTER configTargetType — activeForeignSheetId reads it, and watch
 // evaluates its source at registration). Foreign sheet = the active config's foreignSheetId override,
 // else the chosen link field's foreignSheetId (link fields live in props.fields). Loaded via
@@ -1573,13 +1827,53 @@ function resetFormulaSuggestState() {
   formulaSuggestSeq++
 }
 
-const fieldConfigSchemaChanged = computed(() =>
-  Boolean(configTarget.value && configDraftType.value && displayFieldType(configTarget.value) !== configDraftType.value),
+/** User picked a different type in the edit panel's type dropdown. NEVER blocks. */
+const userRetypeRequested = computed(() =>
+  Boolean(
+    configTarget.value &&
+    configTypeBaseline.value &&
+    configDraftType.value &&
+    configDraftType.value !== configTypeBaseline.value,
+  ),
 )
+/**
+ * The STORED type moved under us since hydration (someone else re-typed the field).
+ * This is the only leg that blocks the save — the drafts on screen were built for the
+ * old type. Falls back to the pre-split comparison when no baseline was recorded.
+ */
+const backendTypeDrift = computed(() => {
+  const target = configTarget.value
+  if (!target) return false
+  const baseline = configTypeBaseline.value ?? configDraftType.value
+  return Boolean(baseline) && displayFieldType(target) !== baseline
+})
 const fieldConfigBlockingReason = computed(() => {
-  if (!configTarget.value || !fieldConfigOutdated.value || !fieldConfigSchemaChanged.value) return ''
+  if (!configTarget.value || !fieldConfigOutdated.value || !backendTypeDrift.value) return ''
   return ml('field.changedTypeBlocking')
 })
+/**
+ * Type dropdown contents: the hydrated type + its lossless targets. Keyed off the
+ * BASELINE (not the live stored type) so a background retype can't empty the list out
+ * from under the current selection — that case is handled by `backendTypeDrift`.
+ */
+const configRetypeOptions = computed<string[]>(() => {
+  const baseline = configTypeBaseline.value
+  if (!configTarget.value || !baseline) return []
+  // F8A: the source field's stored `property` decides the longText row — a RICH longText
+  // offers nothing (its HTML would show as bare markup in a text field). The server
+  // re-checks the same rule against the DB row, so this is the dropdown, not the wall.
+  const targets = losslessRetypeTargets(baseline, configTarget.value.property)
+  return targets.length ? [baseline, ...targets] : []
+})
+const retypeNoticeText = computed(() =>
+  userRetypeRequested.value
+    ? fieldRetypeNotice(
+        fieldTypeLabel(configDraftType.value ?? '', isZh.value),
+        isZh.value,
+        { from: configTypeBaseline.value ?? '', to: configDraftType.value ?? '' },
+      )
+    : '',
+)
 const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || ml('field.changedWarning')
 })
@@ -1599,6 +1893,18 @@ const addNameConflict = computed(() => {
   const normalized = normalizeFieldName(newFieldName.value)
   if (!normalized) return false
   return props.fields.some((field) => normalizeFieldName(field.name) === normalized)
+})
+
+/**
+ * #3: the two legs of the '+ Add' :disabled predicate, spelled out. Display-only —
+ * deliberately NOT part of `hasPendingDrafts`, so an untouched panel with the hint
+ * showing still closes without the discard confirm.
+ */
+const addNameMissing = computed(() => newFieldName.value.trim().length === 0)
+const addDisabledHint = computed(() => {
+  if (addNameMissing.value) return ml('field.nameRequiredHint')
+  if (addNameConflict.value) return duplicateFieldName(newFieldName.value.trim(), isZh.value)
+  return ''
 })
 
 const renameNameConflict = computed(() => {
@@ -1862,6 +2168,7 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
   resetDrafts()
   const fieldType = displayFieldType(field)
   configDraftType.value = fieldType
+  configTypeBaseline.value = fieldType
   fieldConfigLiveRefreshText.value = options?.liveRefreshText ?? ''
   if (fieldType === 'select' || fieldType === 'multiSelect') {
     const optionsList = resolveSelectFieldOptions(field.property)
@@ -1971,6 +2278,7 @@ function closeConfig() {
   }
   configTargetId.value = null
   configDraftType.value = null
+  configTypeBaseline.value = null
   fieldConfigBaseline.value = ''
   fieldConfigOutdated.value = false
   fieldConfigLiveRefreshText.value = ''
@@ -1982,16 +2290,20 @@ function resetTransientState() {
   newFieldName.value = ''
   newFieldType.value = 'string'
   editingId.value = null
+  dragFieldId.value = null
+  dragOverFieldId.value = null
   editingName.value = ''
   deleteTargetId.value = null
   configTargetId.value = null
   configDraftType.value = null
+  configTypeBaseline.value = null
   newFieldConfigVisible.value = false
   fieldConfigBaseline.value = ''
   fieldConfigOutdated.value = false
   fieldConfigLiveRefreshText.value = ''
   fieldConfigSourceSignature.value = ''
   resetDrafts()
+  resetConfigPaneSessionState()
 }
 
 function requestClose() {
@@ -2005,6 +2317,7 @@ function openNewFieldConfigIfNeeded() {
     newFieldConfigVisible.value = false
     configTargetId.value = null
     configDraftType.value = null
+    configTypeBaseline.value = null
     fieldConfigBaseline.value = ''
     fieldConfigOutdated.value = false
     fieldConfigLiveRefreshText.value = ''
@@ -2015,6 +2328,7 @@ function openNewFieldConfigIfNeeded() {
   newFieldConfigVisible.value = true
   configTargetId.value = null
   configDraftType.value = newFieldType.value
+  configTypeBaseline.value = null
   fieldConfigBaseline.value = serializeFieldDraft(newFieldType.value)
   fieldConfigOutdated.value = false
   fieldConfigLiveRefreshText.value = ''
@@ -2026,6 +2340,14 @@ function openNewFieldConfigIfNeeded() {
 const aiShortcutSectionVisible = computed(() =>
   configTargetType.value === 'string' || configTargetType.value === 'longText',
 )
+
+// A11 (customer feedback 2026-09-24 #7c): RENDER-ONLY availability gate — fail-closed (only an
+// explicit `true` from the workbench counts). It decides what is OFFERED (config controls, preview,
+// bulk fill, usage card, formula AI-suggest); it never touches the draft, the dirty leg or the save
+// payload, so `aiShortcutSectionVisible` above keeps its three jobs unchanged.
+const aiSurfacesAvailable = computed(() => props.aiAvailable === true)
+// A11: the collapsed section's 了解更多 expander (session-local, closed by default).
+const aiHelpOpen = ref(false)
 
 // Constraint mirror (A2): existing, non-computed, not the target field itself.
 const aiSourceFieldCandidates = computed(() =>
@@ -2194,6 +2516,10 @@ const aiBulkPersistedConfig = computed(() => {
   const cfg = baseline?.aiShortcut
   return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : null
 })
+// A11: the field being edited carries a SAVED aiShortcut (read from the baseline, so it stays true
+// while the user unticks the toggle and only changes after a save). While AI is unavailable this keeps
+// the enable toggle — and the all-sources-deleted warning — reachable in the collapsed section.
+const aiSavedConfigPresent = computed(() => aiBulkPersistedConfig.value !== null)
 const aiBulkFillVisible = computed(
   () => Boolean(configTarget.value) && aiShortcutSectionVisible.value && aiBulkPersistedConfig.value !== null,
 )
@@ -2278,7 +2604,9 @@ async function loadAiUsageSummary() {
   }
 }
 
-watch(aiShortcutSectionVisible, (visible) => {
+// A11: no admin usage probe (and no card) while AI is unavailable — the watch source includes the
+// availability gate, so the card also loads if availability resolves after the section opened.
+watch(() => aiShortcutSectionVisible.value && aiSurfacesAvailable.value, (visible) => {
   if (visible) void loadAiUsageSummary()
   else aiUsageSummary.value = null
 })
@@ -2347,7 +2675,28 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
   }
   if (normalizedType === 'person') {
-    return { limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord }
+    // 历史“link 背书的人员字段”（stored type='link' + refKind:'user'，displayFieldType 把它显示成
+    // person）：`update-field` 是整体替换 property，而这个分支过去只发 `limitSingleRecord` ——
+    // 于是一次“改单选/多选”就把 refKind 和 foreignSheetId 一起抹掉，字段当场退化成“link 但没有目标表”，
+    // 正是用户报告里那种点「选择关联记录」必 400 的坏字段。这里把这两个结构键按存量原样带回（和本文件
+    // 既有的 actionConfig / hidden / visible 不透明携带同一套做法），既堵住这条产坏字段的路，也让后端
+    // 新加的 fail-closed 门不会把这条合法编辑挡在外面。新建 person 字段没有 configTarget，落的是原生
+    // `person` 类型，不受影响。
+    const storedPersonProperty = (configTarget.value?.property ?? {}) as Record<string, unknown>
+    const storedRefKind = typeof storedPersonProperty.refKind === 'string' ? storedPersonProperty.refKind.trim() : ''
+    const storedForeign = resolveLinkFieldProperty(storedPersonProperty).foreignSheetId
+    // 只在存量确实有目标表时才携带（后端唯一的 refKind:'user' 生产者 `ensurePeopleSheetPreset`
+    // 总是同时写 foreignSheetId，univer-meta.ts:5595）。存量本来就没有目标表的话，这里凭空补 refKind
+    // 也救不了它 —— 那种字段得当成 link 去「管理字段」里选目标表，不在这条携带的职责范围内。
+    const isLegacyLinkBackedPerson = configTarget.value?.type === 'link'
+      && storedRefKind.length > 0
+      && Boolean(storedForeign)
+    return {
+      ...(isLegacyLinkBackedPerson
+        ? { refKind: storedRefKind, foreignSheetId: storedForeign as string, foreignDatasheetId: storedForeign as string }
+        : {}),
+      limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord,
+    }
   }
   if (normalizedType === 'lookup') {
     if (!lookupDraft.linkFieldId || !linkSourceFields.value.some((field) => field.id === lookupDraft.linkFieldId) || !lookupDraft.targetFieldId) {
@@ -2556,6 +2905,11 @@ function saveConfig() {
   }
   if (fieldConfigBlockingReason.value) return
   const fieldType = configDraftType.value ?? displayFieldType(configTarget.value)
+  // #9 retype: one explicit confirm carrying the exact consequence (the server
+  // re-sanitizes `property` under the NEW type, and no cell value is converted).
+  // Same window.confirm affordance as confirmDiscardFieldManagerChanges.
+  const retyping = userRetypeRequested.value
+  if (retyping && !window.confirm(retypeNoticeText.value)) return
   const property = currentDraftProperty(fieldType)
   if (!property && fieldConfigError.value) return
   if (!property) return
@@ -2572,17 +2926,38 @@ function saveConfig() {
   const storedProperty = (configTarget.value.property ?? {}) as Record<string, unknown>
   if (storedProperty.hidden === true) carried.hidden = true
   if (storedProperty.visible === false) carried.visible = false
+  // #9 retype, part 2: `currentDraftProperty` was just called with the NEW type, but the
+  // validation draft it serialises was authored under the OLD one — and both number and
+  // string/longText/select sit in VALIDATION_PANEL_TYPES, so a number field's `min`/`max`
+  // (or a select's `enum`) would ride along into a text column. That is not lossless: the
+  // engine coerces before comparing (field-validation-engine.ts:76-80 `toNumber` → null →
+  // false) and record-service.ts:725-731 turns every subsequent write into
+  // RecordValidationFailedError — a text column no non-numeric value can ever enter again.
+  // The server keeps whatever we send (field-codecs.ts:552 default branch returns the
+  // object as-is), so the filter has to happen HERE. Keep only what the target type's own
+  // validation panel could have authored; drop the key entirely when nothing survives.
+  if (retyping) {
+    const keptRules = retainedRetypeValidationRules(carried.validation, fieldType)
+    if (keptRules.length) carried.validation = keptRules
+    else delete carried.validation
+  }
   // Skip no-op saves for types that only expose validation + aiShortcut: if
   // the user touched neither surface there is nothing to persist, and
   // emitting an empty `property: {}` would otherwise clobber existing values
   // on the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
+  // A retype is ALWAYS a real change, so it must never take the no-op skip below
+  // (number -> string with untouched validation would otherwise close silently and
+  // drop the retype on the floor).
   const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText')
-  if (onlyValidationSurface && !validationDraftTouched.value && !aiShortcutDirty.value) {
+  if (!retyping && onlyValidationSurface && !validationDraftTouched.value && !aiShortcutDirty.value) {
     closeConfig()
     return
   }
-  emit('update-field', configTarget.value.id, { property: carried })
+  // `type` only when the user asked for it — a plain settings save keeps the exact
+  // pre-existing payload shape. `property: carried` (not a bare `{ type }`) is what
+  // preserves the hidden/visible carry above.
+  emit('update-field', configTarget.value.id, { ...(retyping ? { type: fieldType } : {}), property: carried })
   closeConfig()
 }
 
@@ -2610,6 +2985,65 @@ function moveField(fieldId: string, newIdx: number) {
   emit('update-field', fieldId, { order: newIdx })
 }
 
+/** Which edge of `fieldId`'s row the dragged field would land on -- the drop placeholder. Dragging
+ *  DOWN (fromIdx < toIdx) lands the field after the hovered row, dragging UP lands it before, which
+ *  is exactly where the splice in `moveField`'s destination-index semantics puts it. */
+function dropIndicatorFor(fieldId: string): 'before' | 'after' | null {
+  if (!dragFieldId.value || dragOverFieldId.value !== fieldId || dragFieldId.value === fieldId) return null
+  const fromIdx = props.fields.findIndex((field) => field.id === dragFieldId.value)
+  const toIdx = props.fields.findIndex((field) => field.id === fieldId)
+  if (fromIdx < 0 || toIdx < 0) return null
+  return fromIdx < toIdx ? 'after' : 'before'
+}
+
+function onRowDragStart(event: DragEvent, fieldId: string) {
+  // A row being renamed is not draggable (`:draggable` is false there) so its <input> keeps native
+  // caret dragging; this guard is the belt to that suspenders.
+  if (editingId.value === fieldId) return
+  dragFieldId.value = fieldId
+  dragOverFieldId.value = null
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', fieldId)
+  }
+}
+
+function onRowDragOver(fieldId: string) {
+  // `@dragover.prevent` in the template is what makes the row a valid drop target at all -- without
+  // the preventDefault the browser never fires `drop`.
+  if (!dragFieldId.value) return
+  dragOverFieldId.value = fieldId
+}
+
+function onRowDragLeave(event: DragEvent, fieldId: string) {
+  // dragleave bubbles up from the row's OWN children (the action buttons), so an unguarded handler
+  // flickers the placeholder off every time the pointer crosses one.
+  const row = event.currentTarget as HTMLElement | null
+  const related = event.relatedTarget as Node | null
+  if (related && row?.contains(related)) return
+  if (dragOverFieldId.value === fieldId) dragOverFieldId.value = null
+}
+
+/** LOAD-BEARING: the drop persists through `moveField` -- the very function the ▲▼ buttons call --
+ *  so drag and the arrows are ONE code path, ONE `update-field` emit, and ONE ordering semantics
+ *  (`order` = destination index). Nothing is written on dragstart/dragover/dragend, so a cancelled
+ *  drag (Escape, or a drop outside the list) persists nothing at all. */
+function onRowDrop(targetIdx: number) {
+  const fromId = dragFieldId.value
+  dragFieldId.value = null
+  dragOverFieldId.value = null
+  if (!fromId) return
+  const fromIdx = props.fields.findIndex((field) => field.id === fromId)
+  // Dropping a row on itself (or on nothing we can locate) is not a move: no emit, no PATCH.
+  if (fromIdx < 0 || fromIdx === targetIdx) return
+  moveField(fromId, targetIdx)
+}
+
+function onRowDragEnd() {
+  dragFieldId.value = null
+  dragOverFieldId.value = null
+}
+
 function onDeleteField(field: MetaField) {
   deleteTargetId.value = field.id
 }
@@ -2623,6 +3057,17 @@ function confirmDelete() {
 
 const fieldConfigDirty = computed(() => {
   if (!configTarget.value) return false
+  // A user retype is a pending draft in its own right. serializeFieldDraft is keyed by
+  // type and string/longText serialize IDENTICALLY (:1924 both return
+  // {validation, aiShortcut}, and both are in VALIDATION_PANEL_TYPES), so string ->
+  // longText would otherwise read as NOT dirty — and the manager-dialog metadata keep-alive
+  // in MultitableWorkbench (DIALOG_META_REFRESH_INTERVAL_MS; #5743 changed its cadence from
+  // 1.2s, not the re-hydrate -> any upstream rename changes the source signature) would take
+  // the `else` branch below at :2834 and re-hydrate, silently resetting configDraftType back
+  // to the stored type under the user's cursor.
+  // It also keeps hasPendingDrafts/update:dirty honest, so closing the dialog or
+  // switching fields asks before dropping the pick.
+  if (userRetypeRequested.value) return true
   return serializeFieldDraft(configDraftType.value) !== fieldConfigBaseline.value
 })
 
@@ -2659,7 +3104,10 @@ function dismissLiveRefreshNotice() {
 }
 
 function addSelectOption() {
-  selectDraft.options.push({ value: '', color: '' })
+  // #6: auto-assign the next palette colour so a fresh option is never "unset"
+  // (which renders as an uncoloured chip). EXISTING options are never rewritten —
+  // resetDrafts/hydrate still seed `color: ''` so a stored blank stays blank.
+  selectDraft.options.push({ value: '', color: nextPaletteColor(selectDraft.options.length) })
 }
 
 function removeSelectOption(index: number) {
@@ -2719,6 +3167,579 @@ watch(
   { immediate: true },
 )
 
+// ---------------------------------------------------------------------------
+// r8-B (2026-09-11, feedback item 8 "管理字段弹窗上下两半都看不全，要能放大缩小"):
+// a horizontal splitter between the field LIST (`__body`) and the field CONFIG pane.
+//
+// Why it moves a CEILING and not a fixed height: `.meta-field-mgr__config--scrollable` bounds the
+// config pane with `max-height` (r4 item 5) so a SHORT panel still hugs its content instead of
+// leaving a tall empty box. The splitter therefore moves that ceiling, and `__body`'s own
+// `min-height: 96px` (added alongside, see the <style> block) is what keeps the list from being
+// squeezed to zero -- `overflow-y: auto` there resolves `min-height: auto` to 0, which is the
+// actual mechanism behind the "the list collapses when the config panel is tall" report.
+//
+// Every mechanic below is deliberately COPIED from MetaRecordInspector.vue's already-reviewed
+// splitter (primary-button guard -> preventDefault -> setPointerCapture on the HANDLE -> try/finally
+// teardown of all three pointer listeners -> persist only on release; +-16px keyboard steps with
+// Home/End; clamp; re-clamp on viewport change) rather than abstracted into a shared component:
+// that one is a right-edge VERTICAL drawer splitter, this one a HORIZONTAL in-dialog one, and
+// folding both into one abstraction would drag two separately reviewed files into a single
+// regression surface. Extract when a third one appears.
+//
+// 客户反馈 2026-09-24 #7a (also #5864 ②): "配置区高度调不了、⤢ 无效". The ceiling above was real but
+// invisible. The dialog is a flex column capped at 84vh with no definite height, the list is its only
+// `flex: 1` region, and the pane used to be an ordinary shrinkable flex item. Whenever the two halves
+// wanted more than the frame had, the shortfall was shared out in proportion to CONTENT height, so a
+// tall pane was drawn well below its ceiling and raising the ceiling (drag up, ArrowUp, End, ⤢)
+// changed nothing on screen. On top of that, drag and key steps started from the ceiling rather than
+// from what was drawn. Now:
+//   - the pane never shrinks (`flex: 0 0 auto` in <style>), so it is drawn at min(content, published
+//     height) -- a short config still hugs its content;
+//   - the published height is bounded by what the frame REALLY has left after its measured fixed
+//     rows (header, splitter, add-field row, delete confirmation) and the list's floor, so it can
+//     always be honoured, and a short window shrinks the floors instead of pushing those rows out;
+//   - drag and key steps start from the drawn height, and a step that draws nothing new (growing a
+//     pane that already shows all its content, a click on the splitter) chooses nothing;
+//   - no height is written to localStorage unless the user chose it, a clamp never overwrites one,
+//     and what the deployed r8-B build stored is not trusted (it moved to a versioned key).
+// #7a round 3: a step that grows the pane stops at its content height, so every stored height was
+// drawn; the untouched split gives the list only what its rows need; ⤡ at the ceiling forgets the
+// choice instead of storing a window-derived number; on a window too short for the pane's own padding
+// the pane drops it, and whatever still does not fit scrolls inside the dialog.
+const CONFIG_PANE_MIN_HEIGHT = 120
+const CONFIG_PANE_STEP = 16
+// Mirrors `.meta-field-mgr__config`'s vertical padding (14px + 14px) and top border (1px) in <style>:
+// a border-box pane is never drawn shorter than this, whatever its max-height says. Pinned against
+// the CSS at source level by multitable-field-config-panel.spec.ts.
+const CONFIG_PANE_CHROME_HEIGHT = 29
+// The list's floor whenever the frame has room for both floors. Mirrors the `96px` fallback of
+// `--meta-field-mgr-list-min-height` on `.meta-field-mgr__body`.
+const FIELD_LIST_MIN_HEIGHT = 96
+// Mirrors the frame's `max-height: 84vh` in <style> (the frame has no padding or border of its own).
+// multitable-field-config-panel.spec.ts pins the two against each other at source level.
+const FRAME_MAX_HEIGHT_VH_RATIO = 0.84
+// Header + splitter + add-field row, used ONLY while no row can be measured (jsdom, SSR, a dialog
+// that is not laid out). 64 keeps r8-B's `0.84vh - 160` ceiling (0.84vh - 64 - 96) in that case.
+// As soon as a row is laid out, the real sum replaces it (Chromium: 57 + 6 + 53 to 74).
+const FALLBACK_FIXED_ROWS_HEIGHT = 64
+// A drag whose pointer is still within this many px of where it went down is a click or a wobble, not
+// a choice: the pane stays (or returns to) exactly as it was when the drag began.
+const CONFIG_PANE_DRAG_DEAD_ZONE = 3
+// Per-browser, NOT per-user: a pane height is a device/viewport preference, not an identity-scoped
+// one (the same call MetaRecordInspector.vue made for its own width key).
+// #7a review B1: versioned. Under the r8-B key the deployed build stored heights nobody chose -- the
+// first ⤢ click saved the mount-time default (round(0.52 * vh)) and a drag started from the ceiling
+// saved r8-B's ceiling -- and no stored number can tell those apart from a real choice. Trusting
+// them now that the stored height is drawn faithfully leaves ⤢ with 0px of travel at 728px windows
+// and below, 23px at 800. Dropping them costs at most one re-drag: r8-B drew a stored height as
+// chosen only when the list and the pane both fitted the frame; whenever they did not (the #7a case)
+// the pane was shrunk in proportion to its content, so the stored number was never what the user saw.
+const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight.v2'
+// Read by nothing: removed on mount so it stops lingering in the browser.
+const LEGACY_CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
+
+// Viewport-tracked (not read once) so the ceiling -- and with it Home/End, the drag clamp, the
+// enlarge target and the default split -- stays correct across a live window resize.
+const viewportHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 900)
+
+// The frame's fixed-size rows, MEASURED rather than estimated: the add-field row grows with its
+// conflict error, name-required hint and system-type hint, and the delete confirmation exists only
+// while a delete is pending -- and it opens WITHOUT closing the config pane.
+const headerRef = ref<HTMLElement | null>(null)
+const splitterRef = ref<HTMLElement | null>(null)
+const addSectionRef = ref<HTMLElement | null>(null)
+const confirmRef = ref<HTMLElement | null>(null)
+const configPaneRef = ref<HTMLElement | null>(null)
+// The wrapper around the field rows (its parent, the list, scrolls and carries the padding).
+const listContentRef = ref<HTMLElement | null>(null)
+// null = nothing is laid out, which selects FALLBACK_FIXED_ROWS_HEIGHT.
+const measuredFixedRowsHeight = ref<number | null>(null)
+// #7a round 3 (SF2): the height the field list needs to show every row -- rows plus the list's own
+// padding. null = not laid out, and the untouched split falls back to half and half.
+const measuredListContentHeight = ref<number | null>(null)
+
+function renderedHeight(el: HTMLElement | null): number {
+  if (!el) return 0
+  const { height } = el.getBoundingClientRect()
+  return Number.isFinite(height) && height > 0 ? height : 0
+}
+
+function measureFixedRows() {
+  const header = renderedHeight(headerRef.value)
+  if (header <= 0) {
+    measuredFixedRowsHeight.value = null
+    return
+  }
+  // Rounded UP: a fractional row (the confirmation is 84.5px in Chromium) must never leave the
+  // arithmetic below short of what the frame actually spends on it.
+  measuredFixedRowsHeight.value = Math.ceil(
+    header
+      + renderedHeight(splitterRef.value)
+      + renderedHeight(addSectionRef.value)
+      + renderedHeight(confirmRef.value),
+  )
+}
+
+function cssPx(value: string): number {
+  const px = Number.parseFloat(value)
+  return Number.isFinite(px) ? px : 0
+}
+
+function measureListContent() {
+  const rows = listContentRef.value
+  const content = renderedHeight(rows)
+  const list = rows?.parentElement
+  if (content <= 0 || !list) {
+    measuredListContentHeight.value = null
+    return
+  }
+  const style = window.getComputedStyle(list)
+  // Rounded UP, like the fixed rows: a list given a fraction of a px less than its rows need shows a
+  // scrollbar for nothing.
+  measuredListContentHeight.value = Math.ceil(
+    content
+      + cssPx(style.paddingTop) + cssPx(style.paddingBottom)
+      + cssPx(style.borderTopWidth) + cssPx(style.borderBottomWidth),
+  )
+}
+
+function measureLayout() {
+  measureFixedRows()
+  measureListContent()
+}
+
+function syncViewportHeight() {
+  viewportHeight.value = window.innerHeight
+  measureLayout()
+}
+
+let fixedRowsObserver: ResizeObserver | null = null
+function disconnectFixedRowsObserver() {
+  fixedRowsObserver?.disconnect()
+  fixedRowsObserver = null
+}
+// Re-armed whenever a measured row mounts or unmounts (the splitter and the confirmation are
+// `v-if`s); the observer then catches height changes INSIDE a row (the add-field hints) and in the
+// list's rows (a field added or removed, a rename error). Where ResizeObserver does not exist (jsdom),
+// this watch, the one below, the window `resize` listener and every gesture entry point still
+// re-measure.
+watch(
+  [headerRef, splitterRef, addSectionRef, confirmRef, listContentRef],
+  (rows) => {
+    disconnectFixedRowsObserver()
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => measureLayout())
+      for (const row of rows) if (row) observer.observe(row)
+      fixedRowsObserver = observer
+    }
+    measureLayout()
+  },
+  { flush: 'post' },
+)
+// The add-field row's three conditional lines, re-measured once they have rendered.
+watch([addNameConflict, addNameMissing, newFieldTypeIsSystem], () => measureFixedRows(), { flush: 'post' })
+
+const fixedRowsHeight = computed(() => measuredFixedRowsHeight.value ?? FALLBACK_FIXED_ROWS_HEIGHT)
+// What the field list and the config pane share: the frame's ceiling minus every fixed-size row.
+const splitRoomHeight = computed(() =>
+  Math.max(0, viewportHeight.value * FRAME_MAX_HEIGHT_VH_RATIO - fixedRowsHeight.value),
+)
+// The list's floor (published as `--meta-field-mgr-list-min-height`). With room for both floors it
+// is the full 96px. When a short window -- or a pending delete on one -- leaves less than 96 + 120,
+// both floors shrink in the same proportion instead: holding either at full size pushes the
+// add-field row and the confirmation's 取消/删除 out of the dialog (what #6072's verifiers measured
+// at 640x360). With no config pane open the list is the only flexible region and may use all of it.
+const fieldListFloor = computed(() => {
+  const room = splitRoomHeight.value
+  if (!configTargetType.value) return Math.floor(Math.min(FIELD_LIST_MIN_HEIGHT, room))
+  const floors = FIELD_LIST_MIN_HEIGHT + CONFIG_PANE_MIN_HEIGHT
+  if (room >= floors) return FIELD_LIST_MIN_HEIGHT
+  return Math.floor((room * FIELD_LIST_MIN_HEIGHT) / floors)
+})
+// The tallest the pane may get with the list at its floor. Rounded DOWN so the published px never
+// exceeds the room the frame really has.
+const maxConfigPaneHeight = computed(() =>
+  Math.max(0, Math.floor(splitRoomHeight.value - fieldListFloor.value)),
+)
+// 120px wherever it fits. On a window too short for it the floor meets the ceiling (there is
+// genuinely no room to resize) instead of overrunning it.
+const minConfigPaneHeight = computed(() => Math.min(CONFIG_PANE_MIN_HEIGHT, maxConfigPaneHeight.value))
+function clampConfigPaneHeight(height: number): number {
+  return Math.max(minConfigPaneHeight.value, Math.min(maxConfigPaneHeight.value, height))
+}
+// An untouched split gives the list what its rows need and the pane the rest, but never less than
+// half of the room: on a sheet with few fields the pane gets everything the list leaves unused (about
+// what r8-B's `0.52 * viewport` drew there), on one with many each half gets half. Recomputed live
+// with the window and the list, clamped, and never stored. (r8-B's `0.52 * viewport` sat at or near
+// the ceiling on common laptop windows whatever the list held, so ⤢ had little or nothing to enlarge
+// to on the sheets where the list needed the room.) Unmeasured (jsdom): half and half.
+const defaultConfigPaneHeight = computed(() => {
+  const room = splitRoomHeight.value
+  const half = Math.floor(room / 2)
+  const listNeeds = measuredListContentHeight.value
+  return clampConfigPaneHeight(listNeeds === null ? half : Math.max(half, Math.floor(room - listNeeds)))
+})
+
+// Corrupt-safe: absent / non-numeric / non-finite / non-positive means "no manual choice" (null), so
+// the live default applies. A valid value is kept AS STORED and clamped only for display (see
+// `configPaneHeight`): a height chosen on a taller window is clamped on a shorter one and comes back
+// in full once the window is tall enough again. The legacy r8-B key is removed, never read (B1).
+function readStoredConfigPaneHeight(): number | null {
+  if (typeof window === 'undefined') return null
+  try {
+    window.localStorage?.removeItem(LEGACY_CONFIG_PANE_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup; the legacy key is ignored either way.
+  }
+  try {
+    const raw = window.localStorage?.getItem(CONFIG_PANE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed) || parsed <= 0) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+// The last height the USER chose (drag or keyboard), or null while there never was one (or ⤡ has
+// forgotten it). This -- not the published px -- is the state, and the collapse target.
+const chosenConfigPaneHeight = ref<number | null>(readStoredConfigPaneHeight())
+// What storage holds (as written: rounded), so a release that chose nothing new writes nothing.
+let storedConfigPaneHeight: number | null =
+  chosenConfigPaneHeight.value === null ? null : Math.round(chosenConfigPaneHeight.value)
+
+function persistConfigPaneHeight(height: number) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage?.setItem(CONFIG_PANE_STORAGE_KEY, String(Math.round(height)))
+    storedConfigPaneHeight = Math.round(height)
+  } catch {
+    // Quota/serialization failures must never block resizing itself -- persistence is best-effort.
+  }
+}
+
+/** Back to "the user chose nothing": the live default applies again, and nothing is left in storage
+ *  for the next mount to seed from. */
+function forgetChosenConfigPaneHeight() {
+  chosenConfigPaneHeight.value = null
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage?.removeItem(CONFIG_PANE_STORAGE_KEY)
+    storedConfigPaneHeight = null
+  } catch {
+    // Best-effort, like the write.
+  }
+}
+
+// Presentation state only -- deliberately not persisted (a reload that comes back "pressed" without
+// the user having pressed anything is worse than starting off).
+const isConfigPaneExpanded = ref(false)
+// #7a review S2: set by ⤡ when the manual height was chosen on a TALLER window and is only clamped to
+// this one's ceiling. The collapse must still visibly move (r8-B), so the pane shows the collapse
+// fallback -- but only for this dialog, and only while the choice stays clamped: the stored height is
+// never overwritten by a clamp, and a window tall enough for it gives it back in full. Cleared by the
+// next gesture that chooses a height, by closing the dialog (#7a round 3: the component stays mounted
+// while it is closed, see `resetConfigPaneSessionState`), and as soon as the choice fits again (the
+// watch below), so a later clamp shows the clamped choice rather than bringing the fallback back.
+const isConfigPaneCollapsedBelowClampedChoice = ref(false)
+// ⤡'s DISPLAY-ONLY target while the manual height is clamped: the default, capped one step below the
+// ceiling so the move is always visible. On a window so short that the floor meets the ceiling this
+// clamps back onto the ceiling -- there is genuinely nowhere to go.
+const collapseFallbackConfigPaneHeight = computed(() =>
+  clampConfigPaneHeight(Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP)),
+)
+// The published height (the CSS ceiling and aria-valuenow), derived on every read: expanded pins it
+// to the CURRENT ceiling, otherwise it is the manual choice (or the live default) clamped into the
+// CURRENT range. Deriving it keeps aria-valuenow inside [valuemin, valuemax] through any resize or
+// any row appearing, with no watcher writing clamped copies back.
+const configPaneHeight = computed(() => {
+  if (isConfigPaneExpanded.value) return maxConfigPaneHeight.value
+  const chosen = chosenConfigPaneHeight.value
+  if (chosen === null) return clampConfigPaneHeight(defaultConfigPaneHeight.value)
+  // `chosen > max` is also enforced by the watch below, which clears the flag once the choice fits;
+  // kept so this derivation is right on its own, without depending on that watch's timing.
+  if (isConfigPaneCollapsedBelowClampedChoice.value && chosen > maxConfigPaneHeight.value) {
+    return collapseFallbackConfigPaneHeight.value
+  }
+  return clampConfigPaneHeight(chosen)
+})
+watch(
+  () => isConfigPaneCollapsedBelowClampedChoice.value
+    && chosenConfigPaneHeight.value !== null
+    && chosenConfigPaneHeight.value <= maxConfigPaneHeight.value,
+  (fits) => {
+    if (fits) isConfigPaneCollapsedBelowClampedChoice.value = false
+  },
+)
+// #7a round 3: a border-box pane is never drawn below its own padding + border, so where the ceiling
+// is lower than that (640x360 with the add-field row's system-type hint and a pending delete leaves
+// about 25px) the pane drops its vertical padding (`--squeezed` in <style>) and is drawn at the
+// published height instead of pushing the rows below it out of the dialog.
+const isConfigPaneSqueezed = computed(() => configPaneHeight.value < CONFIG_PANE_CHROME_HEIGHT)
+
+/** The ONLY thing ever written to localStorage is the last MANUAL height.
+ *
+ *  r8-B follow-up: persisting the published height instead made the enlarge/collapse pair dead
+ *  ACROSS MOUNTS -- enlarge wrote the ceiling, the next mount seeded both the live height and the
+ *  restore target from it, and neither button changed anything.
+ *  #7a: while the user has chosen nothing, nothing is written -- storing the live default would
+ *  freeze a window-derived number into a px preference that no longer follows the window. Nor is a
+ *  number that storage already holds written again, so a gesture that chose nothing new is silent. */
+function persistChosenConfigPaneHeight() {
+  const chosen = chosenConfigPaneHeight.value
+  if (chosen === null || Math.round(chosen) === storedConfigPaneHeight) return
+  persistConfigPaneHeight(chosen)
+}
+
+/** The pane as a drag or key step found it. `from` is where the step starts: the height actually
+ *  DRAWN -- a pane whose content is shorter than its published height is drawn at content height, and
+ *  starting from the published number made the first stretch of every downward drag / ArrowDown
+ *  invisible. When nothing is laid out (jsdom) it is the published height. */
+type ConfigPaneGestureOrigin = {
+  published: number
+  /** The exact height drawn (never above the published one); the published height when unmeasured. */
+  drawn: number
+  from: number
+  /** #7a round 3 (SF1): the tallest the pane can be DRAWN -- its content's natural border-box height,
+   *  rounded up. Infinity while nothing is laid out. */
+  growCap: number
+  chosen: number | null
+  expanded: boolean
+  collapsedBelowClampedChoice: boolean
+}
+
+/** The border-box height the pane would take with no ceiling: `scrollHeight` is its content plus
+ *  padding; what the box adds outside its padding box (the top border, a horizontal scrollbar) is the
+ *  drawn height minus `clientHeight`. */
+function naturalConfigPaneHeight(pane: HTMLElement, drawn: number): number {
+  return pane.scrollHeight + (drawn - pane.clientHeight)
+}
+
+function captureConfigPaneGestureOrigin(): ConfigPaneGestureOrigin {
+  // #7a: bound the gesture by the rows (and the list) as they are NOW.
+  measureLayout()
+  const published = configPaneHeight.value
+  const pane = configPaneRef.value
+  const rendered = renderedHeight(pane)
+  // Drawn more than 1px below its published height: the pane hugs content shorter than that.
+  const contentBound = rendered > 0 && published - rendered > 1
+  return {
+    published,
+    drawn: rendered > 0 ? Math.min(rendered, published) : published,
+    from: contentBound ? Math.round(rendered) : published,
+    growCap: pane && rendered > 0 ? Math.ceil(naturalConfigPaneHeight(pane, rendered)) : Number.POSITIVE_INFINITY,
+    chosen: chosenConfigPaneHeight.value,
+    expanded: isConfigPaneExpanded.value,
+    collapsedBelowClampedChoice: isConfigPaneCollapsedBelowClampedChoice.value,
+  }
+}
+
+/** Puts the pane back exactly as the gesture found it (a drag that returns to where it began). */
+function restoreConfigPaneGestureOrigin(origin: ConfigPaneGestureOrigin) {
+  chosenConfigPaneHeight.value = origin.chosen
+  isConfigPaneExpanded.value = origin.expanded
+  isConfigPaneCollapsedBelowClampedChoice.value = origin.collapsedBelowClampedChoice
+}
+
+/** Manual resize (drag or keyboard) toward `next`. Does NOT persist: it runs on every intermediate
+ *  pointermove/keydown step; the localStorage write waits for the gesture's release.
+ *
+ *  #7a review S1: a step that draws nothing new chooses nothing -- the pane stays exactly as the
+ *  gesture found it. Growing a content-bound pane draws nothing (it already shows all its content),
+ *  and neither does shrinking one to a target at or above what it draws, nor any step that clamps
+ *  back onto the published height (the ceiling, the floor, or a window where they meet). Without
+ *  this, ArrowUp on one short config stored its content height + 16 as the height of EVERY config.
+ *  A step that does draw something is the user's choice: it becomes the manual height, and it always
+ *  leaves the expanded state (the toggle's aria-pressed must not keep claiming "the max").
+ *
+ *  #7a review S2: reaching the ceiling keeps a manual height that already reaches it -- one chosen on
+ *  a taller window and only clamped here -- instead of replacing it with this window's clamp.
+ *
+ *  #7a round 3 (SF1): a step that GROWS the pane (ArrowUp, End, a drag up) stops at the pane's content
+ *  height, so what is chosen is always what is drawn. Before, End on a config with ~300px of content
+ *  under a 267px pane stored the 439px ceiling while drawing 300: the next tall config opened at 439
+ *  and ⤢ had nothing left to enlarge -- the #7a symptom again. A step moves the pane only if the drawn
+ *  height changes by at least 1px; the same rule, the same cap, for a key step and for every
+ *  pointermove of a drag, so held ArrowUp and a drag stop at the same height. */
+function applyConfigPaneGesture(origin: ConfigPaneGestureOrigin, next: number) {
+  const grows = next > origin.from
+  const target = grows
+    ? Math.min(clampConfigPaneHeight(next), origin.growCap)
+    : clampConfigPaneHeight(next)
+  const draws = grows ? target - origin.drawn >= 1 : origin.drawn - target >= 1
+  if (!draws) {
+    restoreConfigPaneGestureOrigin(origin)
+    return
+  }
+  const max = maxConfigPaneHeight.value
+  chosenConfigPaneHeight.value =
+    target >= max && origin.chosen !== null && origin.chosen > max ? origin.chosen : target
+  isConfigPaneExpanded.value = false
+  isConfigPaneCollapsedBelowClampedChoice.value = false
+}
+
+/** 放大/缩小: enlarge pins the pane to the current ceiling, collapse returns to the last MANUAL
+ *  height ("记住上一次手动值"), or to the live default when there never was one.
+ *
+ *  When the remembered manual height IS the ceiling (the user dragged, or pressed End, all the way up,
+ *  possibly in an earlier session), "restoring" it would draw no change at all. #7a round 3: collapse
+ *  then FORGETS it -- the choice goes back to "none" and the key is removed -- so the live default
+ *  applies. r8-B stored the default (capped one step below the ceiling) instead, which froze a number
+ *  derived from this window -- and from a delete confirmation, when one was pending -- into the px
+ *  preference. ⤡ never writes a height.
+ *
+ *  #7a review S2: when the manual height is ABOVE this ceiling (chosen on a taller window), it is kept:
+ *  the fallback is only shown, and only while it moves the pane. */
+function toggleConfigPaneExpand() {
+  measureLayout()
+  if (!isConfigPaneExpanded.value) {
+    isConfigPaneExpanded.value = true
+    return
+  }
+  isConfigPaneExpanded.value = false
+  isConfigPaneCollapsedBelowClampedChoice.value = false
+  const chosen = chosenConfigPaneHeight.value
+  const max = maxConfigPaneHeight.value
+  if (chosen === null || clampConfigPaneHeight(chosen) < max) return
+  if (chosen > max) {
+    if (collapseFallbackConfigPaneHeight.value < max) isConfigPaneCollapsedBelowClampedChoice.value = true
+    return
+  }
+  forgetChosenConfigPaneHeight()
+}
+
+// The handle sits ABOVE the config pane, so dragging it UP (smaller clientY) grows the pane:
+// ArrowUp grows and ArrowDown shrinks, the same direction as the pointer drag below.
+// #7a: the rows are re-measured first and each step starts from the DRAWN height.
+function onSplitterKeydown(event: KeyboardEvent) {
+  const origin = captureConfigPaneGestureOrigin()
+  switch (event.key) {
+    case 'ArrowUp':
+      event.preventDefault()
+      applyConfigPaneGesture(origin, origin.from + CONFIG_PANE_STEP)
+      break
+    case 'ArrowDown':
+      event.preventDefault()
+      applyConfigPaneGesture(origin, origin.from - CONFIG_PANE_STEP)
+      break
+    case 'Home':
+      event.preventDefault()
+      applyConfigPaneGesture(origin, minConfigPaneHeight.value)
+      break
+    case 'End':
+      event.preventDefault()
+      applyConfigPaneGesture(origin, maxConfigPaneHeight.value)
+      break
+    default:
+      break
+  }
+}
+
+const SPLITTER_RESIZE_KEYS = new Set(['ArrowUp', 'ArrowDown', 'Home', 'End'])
+function fromSplitter(event: Event): boolean {
+  return (event.target as HTMLElement | null)?.closest('[role="separator"]') != null
+}
+/** Root-level dispatch (see the template comment for why the listener lives on the root): the four
+ *  resize keys act ONLY when the event originates inside the splitter, so nothing else in the dialog
+ *  -- the rename input's Enter/Escape, the selects, the type dropdown -- changes behaviour. */
+function onManagerKeydown(event: KeyboardEvent) {
+  if (!SPLITTER_RESIZE_KEYS.has(event.key)) return
+  if (!fromSplitter(event)) return
+  onSplitterKeydown(event)
+}
+/** Persist once the key is RELEASED: a held-down arrow repeat-fires keydown many times and each of
+ *  those already applied live. Scoped to the same four keys, so a plain Tab on/off the splitter
+ *  writes nothing. */
+function onManagerKeyup(event: KeyboardEvent) {
+  if (!SPLITTER_RESIZE_KEYS.has(event.key)) return
+  if (!fromSplitter(event)) return
+  persistChosenConfigPaneHeight()
+}
+
+// #7a round 3 (nit 6): ends the drag in progress WITHOUT choosing anything -- its listeners come off
+// the handle and the pane goes back to exactly how the drag found it. null while no drag is live.
+let discardActiveConfigPaneDrag: (() => void) | null = null
+
+/** What belongs to ONE opening of the dialog. MultitableWorkbench.vue keeps this component mounted
+ *  and toggles `:visible`, so these survive a close unless `resetTransientState` ends them here: a
+ *  drag still in progress, and ⤡'s display-only collapse fallback (#7a round 3, nits 4 and 6). */
+function resetConfigPaneSessionState() {
+  discardActiveConfigPaneDrag?.()
+  isConfigPaneCollapsedBelowClampedChoice.value = false
+}
+
+// Pointer Events + setPointerCapture on the HANDLE ITSELF (not `document`): capture redirects every
+// later pointermove/pointerup to this exact element wherever the pointer travels, so the listeners
+// live on -- and are torn down from -- the handle alone. The dialog closing mid-drag discards the
+// drag (`resetConfigPaneSessionState`); the config pane's own v-if flipping takes the element and its
+// listeners with it.
+function onSplitterPointerDown(event: PointerEvent) {
+  // Primary-button guard: only a MOUSE pointerdown is checked (touch/pen have no meaningful
+  // `button`), and only a non-primary one is rejected -- it returns BEFORE preventDefault/capture,
+  // so a right-click here still opens its native context menu instead of silently starting a drag.
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+  // Without preventDefault the drag starts a text selection across the dialog.
+  event.preventDefault()
+  // #7a: bound the drag by the rows as they are NOW, and start it from the drawn height.
+  const origin = captureConfigPaneGestureOrigin()
+  const startY = event.clientY
+  const pointerId = event.pointerId
+  const handle = event.currentTarget as HTMLElement
+  handle.setPointerCapture?.(pointerId)
+  function onMove(moveEvent: PointerEvent) {
+    const grow = startY - moveEvent.clientY
+    // #7a review N1: a tap or a 1-2px wobble sends pointermoves too; inside the dead zone the pane is
+    // (or goes back to) exactly as the drag found it, so a click never freezes the live default.
+    if (Math.abs(grow) < CONFIG_PANE_DRAG_DEAD_ZONE) {
+      restoreConfigPaneGestureOrigin(origin)
+      return
+    }
+    applyConfigPaneGesture(origin, origin.from + grow)
+  }
+  function detach() {
+    discardActiveConfigPaneDrag = null
+    handle.removeEventListener('pointermove', onMove)
+    handle.removeEventListener('pointerup', onUp)
+    handle.removeEventListener('pointercancel', onUp)
+  }
+  function onUp(upEvent: PointerEvent) {
+    // `releasePointerCapture` has been observed to throw on some browser/input-device combinations
+    // (and jsdom has no implementation at all, hence the `?.`). Without this `finally` a throw would
+    // skip the three removeEventListener calls, leaving `onMove` attached to the handle forever --
+    // every later pointermove over it would keep resizing, long past the drag that started it.
+    // `try/finally`, not `try/catch`: the exception still propagates and is reported by the platform;
+    // this block's only job is to guarantee that cleanup (and the release-time persist) still runs.
+    try {
+      handle.releasePointerCapture?.(upEvent.pointerId)
+    } finally {
+      detach()
+      // Persist on release (pointerup/pointercancel), never per pointermove.
+      persistChosenConfigPaneHeight()
+    }
+  }
+  handle.addEventListener('pointermove', onMove)
+  handle.addEventListener('pointerup', onUp)
+  handle.addEventListener('pointercancel', onUp)
+  discardActiveConfigPaneDrag = () => {
+    detach()
+    restoreConfigPaneGestureOrigin(origin)
+    try {
+      handle.releasePointerCapture?.(pointerId)
+    } catch {
+      // The pointer may already be gone; the drag is over either way, and a close must not throw.
+    }
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('resize', syncViewportHeight)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncViewportHeight)
+  disconnectFixedRowsObserver()
+})
+
 onBeforeUnmount(() => {
   emit('update:dirty', false)
 })
@@ -2726,15 +3747,60 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .meta-field-mgr__overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 100; display: flex; align-items: center; justify-content: center; }
-.meta-field-mgr { width: 720px; max-height: 84vh; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column; }
+/* r8-B (2026-09-11): the width was a bare `720px`, so on a narrow window the dialog ran off both
+   edges with no way to shrink it. It is now a custom property (same idiom as MetaRecordInspector's
+   `--meta-record-drawer-width`) with the SAME 720px default, bounded by the viewport. */
+/* #7a round 3 (nit 5): `overflow-y: auto` is the last resort of a very short window. The script sizes
+   the list and the config pane so that everything fits the 84vh frame, but once the fixed rows alone
+   (header, add-field row with its hints, a pending delete's 取消/删除) leave less room than the list's
+   own 16px of padding and the pane's 1px border, nothing else can give way: the frame then scrolls
+   instead of spilling those rows below its edge and off the window. In every layout the browser
+   matrix measures above that point (verification/field-manager-config-pane.spec.ts), nothing
+   overflows and no scrollbar shows. */
+.meta-field-mgr {
+  width: var(--meta-field-mgr-width, 720px);
+  max-width: calc(100vw - 32px);
+  max-height: 84vh; overflow-y: auto; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column;
+}
 .meta-field-mgr__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-field-mgr__title { font-size: 15px; font-weight: 600; margin: 0; }
 /* .meta-field-mgr__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
    its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
    (UI-P2-1c T1 batch-7). Class kept on the element only for selector stability (multitable-field-manager.spec.ts,
    scripts/verify-multitable-live-smoke.mjs, packages/core-backend/tests/e2e/multitable-ai-bulk-fill-over-cap.e2e.spec.ts). */
-.meta-field-mgr__body { flex: 1; overflow-y: auto; padding: 8px 16px; }
+/* r8-B: `overflow-y: auto` makes this flex item's `min-height: auto` resolve to 0, so a tall config
+   pane below could squeeze the field list to nothing (feedback item 8: "上半的字段列表看不全").
+   96px is the floor the splitter can never push past -- the JS clamp's ceiling
+   (`maxConfigPaneHeight`) is the primary bound, this is the belt-and-suspenders CSS half.
+   #7a: the floor is published by the script (`fieldListFloor`) with the same 96px as fallback. It
+   stays 96px wherever both halves fit; a very short window lowers it so the add-field row and the
+   delete confirmation stay inside the dialog instead. `border-box` keeps that floor the list's WHOLE
+   height, padding included, without relying on App.vue's global reset (the component is exported). */
+.meta-field-mgr__body { flex: 1; box-sizing: border-box; min-height: var(--meta-field-mgr-list-min-height, 96px); overflow-y: auto; padding: 8px 16px; }
+/* r8-B: the drag/keyboard handle between the field list and the config pane (see
+   `onSplitterPointerDown` / `onSplitterKeydown`). `flex: 0 0 auto` keeps it out of the flex
+   distribution; `touch-action: none` stops a touch drag from scrolling the list instead. */
+.meta-field-mgr__splitter {
+  flex: 0 0 auto; height: 6px; cursor: row-resize; touch-action: none; background: #eef1f5;
+}
+.meta-field-mgr__splitter:hover, .meta-field-mgr__splitter:focus-visible { background: #409eff; opacity: 0.45; }
+.meta-field-mgr__splitter:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
+/* Deliberately NOT reusing .meta-field-mgr__btn-inline: meta-field-manager-migration.spec.ts
+   reaches the select-option "+ Add option" button as "the first .meta-field-mgr__btn-inline", and
+   this control renders earlier in the config pane. */
+.meta-field-mgr__expand { padding: 2px 8px; border: 1px solid #ddd; border-radius: 3px; background: #fff; color: #666; cursor: pointer; font-size: 12px; line-height: 1; }
+.meta-field-mgr__expand--active { border-color: #409eff; color: #409eff; }
 .meta-field-mgr__row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f5f5f5; }
+/* Feedback B: press-and-drag reorder. The grip is decorative (`aria-hidden`) -- it adds no tab stop
+   and the ▲▼ buttons remain the keyboard/touch path (HTML5 drag does not fire on touch). */
+.meta-field-mgr__grip { width: 12px; text-align: center; color: #c0c4cc; font-size: 12px; line-height: 1; cursor: grab; user-select: none; }
+.meta-field-mgr__row:active .meta-field-mgr__grip { cursor: grabbing; }
+.meta-field-mgr__row--dragging { opacity: 0.45; }
+/* Drop placeholder. `box-shadow: inset` rather than a border so the 2px cue costs no layout shift
+   (a border would nudge every later row). Same #ecf5ff / #409eff pair the grid's column-reorder
+   drop target already uses (MetaFieldHeader.vue .meta-field-header--drag-over). */
+.meta-field-mgr__row--drop-before { background: #ecf5ff; box-shadow: inset 0 2px 0 0 #409eff; }
+.meta-field-mgr__row--drop-after { background: #ecf5ff; box-shadow: inset 0 -2px 0 0 #409eff; }
 .meta-field-mgr__icon { width: 24px; text-align: center; color: #999; font-size: 13px; }
 .meta-field-mgr__name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-field-mgr__type { font-size: 11px; color: #999; background: #f5f5f5; padding: 1px 6px; border-radius: 3px; }
@@ -2745,7 +3811,51 @@ onBeforeUnmount(() => {
 .meta-field-mgr__action--ok { color: #67c23a; }
 .meta-field-mgr__action--danger:hover { color: #f56c6c; }
 .meta-field-mgr__empty { text-align: center; padding: 20px; color: #999; font-size: 13px; }
+/* No-configurable-options fallback copy (r4 item 4) — same muted treatment as this
+   file's __empty class above, kept as a distinct class so tests can target it precisely
+   without also matching the (unrelated) "no fields defined" empty state. */
+.meta-field-mgr__no-config { margin: 0; padding: 4px 0; color: #909399; font-size: 12px; }
 .meta-field-mgr__config { padding: 14px 16px; border-top: 1px solid #eee; background: #fbfdff; display: flex; flex-direction: column; gap: 12px; }
+/* r4 item 5: the formula config panel (expression box + AI generate + insert-field chips +
+   formula reference catalog) has no bound on its own, so — inside a modal whose OUTER box
+   merely caps at max-height:84vh with default (visible) overflow — it was free to grow past
+   the modal, pushing the save/cancel row (__config-actions, the LAST child inside this same
+   container) below the viewport with no scrollbar to reach it. Bounding height here
+   (relative to the viewport, not a fixed px) turns this panel into its own scroll region
+   for every field type, not just formula. */
+/* r8-B: the ceiling is now the splitter-driven `--meta-field-mgr-config-height` (set inline on
+   `.meta-field-mgr`, in px). The previous expression stays as the var's FALLBACK, so the rule is
+   still viewport-relative whenever JS has not set the property (SSR, a stale/absent var, or the
+   var being unsupported) -- never a hardcoded px ceiling, which multitable-field-config-panel.spec
+   pins at source level.
+   客户反馈 2026-09-24 #7a: `flex: 0 0 auto` is what makes that ceiling visible. As a shrinkable flex
+   item the pane was shrunk in proportion to its CONTENT height whenever both halves wanted more than
+   the 84vh frame had, so a tall pane was drawn below its ceiling and raising the ceiling (splitter,
+   End, ⤢) showed nothing. Now it is drawn at min(content, ceiling) -- a short config still hugs its
+   content -- and the field list, the one `flex: 1` region, absorbs the difference down to its
+   floor, which the script's ceiling already reserves. `border-box` makes the published px the
+   pane's WHOLE height (the app's global reset already sets it; stated here so the arithmetic holds
+   wherever the component is mounted). */
+.meta-field-mgr__config--scrollable {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  max-height: var(--meta-field-mgr-config-height, min(52vh, calc(84vh - 160px)));
+  overflow-y: auto;
+}
+/* #7a round 3 (nit 5): set by the script while the published height is below the 29px of vertical
+   padding + border above (`CONFIG_PANE_CHROME_HEIGHT`) -- a border-box pane is never drawn shorter
+   than those, so on such a window it would overrun its max-height and push the rows below it out. */
+.meta-field-mgr__config--squeezed { padding-top: 0; padding-bottom: 0; }
+/* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel (e.g.
+   formula, button+notification). Sits inside the scrollable container above, so it rides
+   along with it rather than escaping to the fixed-size row of buttons elsewhere. */
+.meta-field-mgr__config--scrollable .meta-field-mgr__config-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  margin-top: 4px;
+  background: #fbfdff;
+}
 .meta-field-mgr__config-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #666; }
 .meta-field-mgr__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
 .meta-field-mgr__toggle { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
@@ -2800,6 +3910,9 @@ onBeforeUnmount(() => {
 /* A3: AI shortcut config section */
 .meta-field-mgr__ai { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid #e0e7ff; border-radius: 8px; background: #fafbff; }
 .meta-field-mgr__ai-header { font-size: 12px; color: #4338ca; }
+/* A11: collapsed "AI not enabled" line + its 了解更多 help list. */
+.meta-field-mgr__ai-unavailable { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: #475569; }
+.meta-field-mgr__ai-help { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #475569; }
 .meta-field-mgr__ai-sources { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .meta-field-mgr__ai-source { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
 /* r2 item 6: all-sources-deleted needs-attention banner ON the AI section. */
@@ -2826,4 +3939,16 @@ onBeforeUnmount(() => {
 .meta-field-mgr__rename--invalid { border-color: #f56c6c; }
 .meta-field-mgr__input--invalid { border-color: #f56c6c; }
 .meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
+/* --- field-manager: empty-name hint / select-option palette / retype select --- */
+.meta-field-mgr__inline-hint { color: #909399; font-size: 11px; margin-top: 4px; }
+.meta-field-mgr__option-row--select { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.meta-field-mgr__option-row--select > .meta-field-mgr__input { flex: 1 1 120px; width: auto; min-width: 96px; }
+.meta-field-mgr__swatches { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.meta-field-mgr__swatch { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #d0d5dc; cursor: pointer; padding: 0; }
+.meta-field-mgr__swatch--active { box-shadow: 0 0 0 2px #1d4ed8; }
+.meta-field-mgr__color-input { width: 32px; height: 24px; padding: 0; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; }
+.meta-field-mgr__color-preview { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #d0d5dc; display: inline-block; }
+.meta-field-mgr__color-preview--empty { background: repeating-linear-gradient(45deg, #fff, #fff 3px, #e4e7ed 3px, #e4e7ed 6px); }
+.meta-field-mgr__type-select { width: auto; max-width: 160px; }
+.meta-field-mgr__hint--retype { border-color: #f5dab1; background: #fdf6ec; color: #8a5a1a; }
 </style>

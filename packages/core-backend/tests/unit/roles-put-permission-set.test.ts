@@ -1,0 +1,1762 @@
+/**
+ * PUT /api/roles/:id — the permission set is actually persisted.
+ *
+ * The defect these legs pin: the handler used to read only `req.body.name`, never
+ * reference `req.body.permissions`, never touch `role_permissions`, and still answer
+ * `{ ok: true }`. The role editor therefore reported a successful grant while nothing
+ * was written, and the documented remedy was raw SQL.
+ *
+ * No supertest / `request(app)` anywhere (CI tripwire #4154): the route's FINAL handler
+ * is invoked directly, the same shape tests/unit/recovery-conflict-surfaces-routes-rbac
+ * already uses for this router.
+ *
+ * The fake DB below is not a stub that answers fixed rows — it is a tiny interpreter with
+ * REAL state, so "nothing was written" is asserted against the state a statement would
+ * have produced, not against a mock call list. It models the two properties the fix
+ * leans on:
+ *   - `transaction()` rolls the state back when its callback throws (so a partial-failure
+ *     leg can distinguish an atomic write from two independent ones), and
+ *   - `role_permissions.permission_code` REFERENCES `permissions(code)` (so a leg that
+ *     removes the explicit catalog probe still cannot write an uncatalogued code — the
+ *     400 has to come from the route, not from luck).
+ * Both pool.query and the transaction client route through the SAME interpreter, so a
+ * mutation that moves a statement between those two seams still executes and is still
+ * observed.
+ */
+
+import type { Request, Response, Router } from 'express'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const pgMocks = vi.hoisted(() => ({
+  query: vi.fn(),
+  transaction: vi.fn(),
+  poolQuery: vi.fn(),
+}))
+
+const rbacServiceMocks = vi.hoisted(() => ({
+  isAdmin: vi.fn(),
+  listUserPermissions: vi.fn(),
+  invalidateUserPerms: vi.fn(),
+  userHasPermission: vi.fn(),
+}))
+
+const auditMocks = vi.hoisted(() => ({
+  auditLog: vi.fn(),
+}))
+
+vi.mock('../../src/db/pg', () => ({
+  query: pgMocks.query,
+  transaction: pgMocks.transaction,
+  pool: { query: pgMocks.poolQuery },
+}))
+
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: rbacServiceMocks.isAdmin,
+  listUserPermissions: rbacServiceMocks.listUserPermissions,
+  invalidateUserPerms: rbacServiceMocks.invalidateUserPerms,
+  userHasPermission: rbacServiceMocks.userHasPermission,
+}))
+
+vi.mock('../../src/audit/audit', () => ({
+  auditLog: auditMocks.auditLog,
+}))
+
+import { rolesRouter } from '../../src/routes/roles'
+import {
+  canonicalStockPrepRoleName,
+  RESERVED_ROLE_DISPLAY_NAME_OWNERS,
+  reservedRoleDisplayNameOwner,
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+  STOCK_PREP_BUILTIN_ROLE_IDS,
+  STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
+} from '../../src/services/stock-preparation-members'
+import { ELEARNING_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz20260826140000_add_elearning_role_templates'
+
+// --------------------------------------------------------------------------- fake DB
+
+type Rows = { rows: Array<Record<string, unknown>>; rowCount: number }
+
+interface FakeDbState {
+  roleNames: Map<string, string>
+  roleUpdatedAt: Map<string, string>
+  rolePermissions: Map<string, string[]>
+  members: Map<string, string[]>
+  /** `delegated_role_admin_scopes` (department audience), one entry per row. */
+  delegatedScopes?: Array<{ admin_user_id: string; namespace: string }>
+  /** `delegated_role_admin_member_groups` (member-group audience), one entry per row. */
+  delegatedGroupScopes?: Array<{ admin_user_id: string; namespace: string }>
+}
+
+function cloneState(state: FakeDbState): FakeDbState {
+  return {
+    roleNames: new Map(state.roleNames),
+    roleUpdatedAt: new Map(state.roleUpdatedAt),
+    rolePermissions: new Map(Array.from(state.rolePermissions, ([k, v]) => [k, [...v]])),
+    members: new Map(Array.from(state.members, ([k, v]) => [k, [...v]])),
+    delegatedScopes: (state.delegatedScopes ?? []).map((row) => ({ ...row })),
+    delegatedGroupScopes: (state.delegatedGroupScopes ?? []).map((row) => ({ ...row })),
+  }
+}
+
+/** The stored concurrency token of the seeded roles. */
+const SEEDED_UPDATED_AT = '2026-09-16T01:02:03.000Z'
+
+/** `role_permissions_permission_code_fkey` — the error the route must never provoke. */
+function fkViolation(code: string): Error & { code: string } {
+  return Object.assign(
+    new Error(`insert or update on table "role_permissions" violates foreign key constraint "role_permissions_permission_code_fkey" (${code})`),
+    { code: '23503' },
+  )
+}
+
+function makeFakeDb(options: {
+  catalog: string[]
+  state: FakeDbState
+  /** Injects a failure at a chosen statement, to exercise the rollback. */
+  failOn?: (sql: string, params: unknown[]) => Error | null
+  /**
+   * Whether deleting a `roles` row cascades into `role_permissions` / `user_roles`. True models the
+   * SQL migration set (033_create_rbac_core.sql); FALSE models the schema this repo's migration
+   * chain actually builds (no role_id foreign key at all), where nothing but the route removes them.
+   */
+  roleDeleteCascades?: boolean
+}) {
+  const catalog = new Set(options.catalog)
+  const statements: Array<{ sql: string; params: unknown[] }> = []
+  let state = options.state
+
+  const run = async (sql: string, params: unknown[] = []): Promise<Rows> => {
+    statements.push({ sql, params })
+    const injected = options.failOn?.(sql, params)
+    if (injected) throw injected
+
+    const norm = sql.replace(/\s+/g, ' ').trim()
+
+    if (/^SELECT id, name, updated_at FROM roles WHERE id=\$1 FOR UPDATE$/i.test(norm)) {
+      const id = String(params[0])
+      const name = state.roleNames.get(id)
+      return name === undefined
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ id, name, updated_at: state.roleUpdatedAt.get(id) ?? null }], rowCount: 1 }
+    }
+    if (/^SELECT id FROM roles WHERE id=\$1 FOR UPDATE$/i.test(norm)) {
+      const id = String(params[0])
+      return state.roleNames.has(id)
+        ? { rows: [{ id }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    if (/^SELECT id, name FROM roles WHERE id=/i.test(norm)) {
+      const id = String(params[0])
+      const name = state.roleNames.get(id)
+      return name === undefined
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ id, name }], rowCount: 1 }
+    }
+    if (/^SELECT id, name, created_at, updated_at FROM roles WHERE id=/i.test(norm)) {
+      const id = String(params[0])
+      const name = state.roleNames.get(id)
+      return name === undefined
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ id, name, created_at: SEEDED_UPDATED_AT, updated_at: state.roleUpdatedAt.get(id) ?? null }], rowCount: 1 }
+    }
+    if (/^INSERT INTO roles\(id, name\)/i.test(norm)) {
+      // ON CONFLICT (id) DO NOTHING — an existing role keeps its name, as the real statement does.
+      const [id, name] = [String(params[0]), String(params[1])]
+      if (!state.roleNames.has(id)) {
+        state.roleNames.set(id, name)
+        state.roleUpdatedAt.set(id, SEEDED_UPDATED_AT)
+      }
+      return { rows: [], rowCount: 1 }
+    }
+    if (/^DELETE FROM roles WHERE id=/i.test(norm)) {
+      const id = String(params[0])
+      const existed = state.roleNames.delete(id)
+      if (options.roleDeleteCascades !== false) {
+        state.rolePermissions.delete(id)
+        // ON DELETE CASCADE on BOTH children (migrations/033_create_rbac_core.sql:17 and :36).
+        // Modelling the user_roles half is what makes "read the members before the delete"
+        // a testable property instead of a code-shape preference: a fan-out that looked them
+        // up afterwards finds nobody here, exactly as it would in Postgres.
+        state.members.delete(id)
+      }
+      return { rows: [], rowCount: existed ? 1 : 0 }
+    }
+    // The membership writer (rbac/role-assignment.ts unassignUserRoles) and its audience cleanup.
+    if (/^DELETE FROM user_roles WHERE role_id = \$2 AND user_id = ANY\(\$1::text\[\]\) RETURNING user_id$/i.test(norm)) {
+      const [userIds, roleId] = [(params[0] as string[]) || [], String(params[1])]
+      const current = state.members.get(roleId) || []
+      const removed = current.filter((userId) => userIds.includes(userId))
+      state.members.set(roleId, current.filter((userId) => !userIds.includes(userId)))
+      return { rows: removed.map((user_id) => ({ user_id })), rowCount: removed.length }
+    }
+    if (/^SELECT user_id, role_id FROM user_roles WHERE user_id = ANY\(\$1::text\[\]\)$/i.test(norm)) {
+      const userIds = (params[0] as string[]) || []
+      const rows: Array<Record<string, unknown>> = []
+      for (const [roleId, memberIds] of state.members) {
+        for (const userId of memberIds) if (userIds.includes(userId)) rows.push({ user_id: userId, role_id: roleId })
+      }
+      return { rows, rowCount: rows.length }
+    }
+    const audienceDelete = /^DELETE FROM (delegated_role_admin_scopes|delegated_role_admin_member_groups) WHERE admin_user_id = ANY\(\$1::text\[\]\) AND namespace = \$2 RETURNING admin_user_id$/i.exec(norm)
+    if (audienceDelete) {
+      const key = audienceDelete[1] === 'delegated_role_admin_scopes' ? 'delegatedScopes' : 'delegatedGroupScopes'
+      const [userIds, namespace] = [(params[0] as string[]) || [], String(params[1])]
+      const rows = state[key] ?? []
+      const removed = rows.filter((row) => userIds.includes(row.admin_user_id) && row.namespace === namespace)
+      state[key] = rows.filter((row) => !removed.includes(row))
+      return { rows: removed.map((row) => ({ admin_user_id: row.admin_user_id })), rowCount: removed.length }
+    }
+    if (/^SELECT user_id FROM user_roles WHERE role_id=/i.test(norm)) {
+      const members = state.members.get(String(params[0])) || []
+      return { rows: members.map((user_id) => ({ user_id })), rowCount: members.length }
+    }
+    if (/^SELECT permission_code FROM role_permissions WHERE role_id=/i.test(norm)) {
+      const codes = state.rolePermissions.get(String(params[0])) || []
+      return { rows: codes.map((permission_code) => ({ permission_code })), rowCount: codes.length }
+    }
+    if (/^SELECT code FROM permissions WHERE code = ANY/i.test(norm)) {
+      const wanted = (params[0] as string[]) || []
+      const hit = wanted.filter((code) => catalog.has(code))
+      return { rows: hit.map((code) => ({ code })), rowCount: hit.length }
+    }
+    if (/^UPDATE roles SET name=/i.test(norm)) {
+      const [name, id] = [String(params[0]), String(params[1])]
+      if (!state.roleNames.has(id)) return { rows: [], rowCount: 0 }
+      state.roleNames.set(id, name)
+      // `updated_at=now()` — the token moves on every successful write.
+      state.roleUpdatedAt.set(id, new Date(Date.parse(SEEDED_UPDATED_AT) + 60_000).toISOString())
+      return { rows: [], rowCount: 1 }
+    }
+    if (/^DELETE FROM role_permissions WHERE role_id=/i.test(norm)) {
+      const id = String(params[0])
+      const keep = new Set((params[1] as string[]) || [])
+      const current = state.rolePermissions.get(id) || []
+      const next = current.filter((code) => keep.has(code))
+      state.rolePermissions.set(id, next)
+      return { rows: [], rowCount: current.length - next.length }
+    }
+    if (/^INSERT INTO role_permissions/i.test(norm)) {
+      const [id, code] = [String(params[0]), String(params[1])]
+      // The FK is real in both migration paths, so the fake enforces it.
+      if (!catalog.has(code)) throw fkViolation(code)
+      const current = state.rolePermissions.get(id) || []
+      if (!current.includes(code)) state.rolePermissions.set(id, [...current, code])
+      return { rows: [], rowCount: 1 }
+    }
+    throw new Error(`fake db: unhandled statement: ${norm}`)
+  }
+
+  return {
+    run,
+    statements,
+    permissionsOf: (roleId: string) => [...(state.rolePermissions.get(roleId) || [])].sort(),
+    nameOf: (roleId: string) => state.roleNames.get(roleId),
+    membersOf: (roleId: string) => [...(state.members.get(roleId) || [])].sort(),
+    /** Audience rows per `user:namespace`, department and member-group counted separately. */
+    audienceOf: (userId: string, namespace: string) => ({
+      departments: (state.delegatedScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
+      groups: (state.delegatedGroupScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
+    }),
+    /** ATOMIC: the callback's writes survive only if it resolves. */
+    transaction: async <T>(handler: (client: { query: typeof run }) => Promise<T>): Promise<T> => {
+      const snapshot = cloneState(state)
+      try {
+        return await handler({ query: run })
+      } catch (error) {
+        state = snapshot
+        throw error
+      }
+    },
+  }
+}
+
+// ------------------------------------------------------------------------- harness
+
+function mockResponse() {
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code
+      return this
+    },
+    json(payload: unknown) {
+      this.body = payload
+      return this
+    },
+  }
+  return res as Response & { statusCode: number; body: unknown }
+}
+
+type RouteMethod = 'post' | 'put' | 'delete'
+
+/** The registered middleware chain of one route, guard included. */
+function routeStack(router: Router, method: RouteMethod, path: string) {
+  const layer = (router as unknown as {
+    stack: Array<{
+      route?: {
+        path: string
+        methods: Record<string, boolean>
+        stack: Array<{ handle: (req: Request, res: Response, next: (err?: unknown) => void) => unknown }>
+      }
+    }>
+  }).stack.find((entry) => entry.route?.path === path && entry.route?.methods?.[method])
+  if (!layer?.route) throw new Error(`Route ${method.toUpperCase()} ${path} not found`)
+  return layer.route.stack
+}
+
+/** Invoke the route's FINAL handler directly (the rbacGuard above it is not under test). */
+function invokeHandler(
+  router: Router,
+  method: RouteMethod,
+  path: string,
+  req: Partial<Request>,
+  res: Response,
+): Promise<unknown> {
+  const stack = routeStack(router, method, path)
+  const handler = stack[stack.length - 1].handle
+  const fullReq = {
+    method: method.toUpperCase(),
+    headers: {},
+    query: {},
+    params: {},
+    body: {},
+    user: { id: 'owner-1' },
+    ...req,
+  } as unknown as Request
+  return Promise.resolve(handler(fullReq, res, (err?: unknown) => {
+    if (err) throw err
+  }))
+}
+
+const CATALOG = ['stock-prep:read', 'stock-prep:write', 'stock-prep:*', 'roles:read', 'roles:write', 'admin:users', '*:*']
+
+function seed(overrides: Partial<{
+  permissions: string[]
+  members: string[]
+  adminPermissions: string[]
+  failOn: (sql: string, params: unknown[]) => Error | null
+}> = {}) {
+  return makeFakeDb({
+    catalog: CATALOG,
+    failOn: overrides.failOn,
+    state: {
+      roleNames: new Map([['role-1', '备料角色'], ['role-other', '其它角色'], ['admin', 'platform admin']]),
+      roleUpdatedAt: new Map([
+        ['role-1', SEEDED_UPDATED_AT],
+        ['role-other', SEEDED_UPDATED_AT],
+        ['admin', SEEDED_UPDATED_AT],
+      ]),
+      rolePermissions: new Map([
+        ['role-1', overrides.permissions ?? ['roles:read', 'stock-prep:read']],
+        ['role-other', ['roles:read']],
+        ['admin', overrides.adminPermissions ?? ['*:*', 'admin:users']],
+      ]),
+      members: new Map([
+        ['role-1', overrides.members ?? ['user-a', 'user-b']],
+        ['role-other', ['user-z']],
+        ['admin', ['owner-9']],
+      ]),
+    },
+  })
+}
+
+function wire(db: ReturnType<typeof makeFakeDb>) {
+  pgMocks.poolQuery.mockImplementation((sql: string, params?: unknown[]) => db.run(sql, params ?? []))
+  pgMocks.transaction.mockImplementation((handler: Parameters<typeof db.transaction>[0]) => db.transaction(handler))
+}
+
+function putRole(
+  body: Record<string, unknown>,
+  res: Response,
+  id = 'role-1',
+  user: Record<string, unknown> = { id: 'owner-1' },
+) {
+  return invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
+    params: { id },
+    body,
+    user: user as Request['user'],
+  }, res)
+}
+
+function postRole(body: Record<string, unknown>, res: Response, user: Record<string, unknown> = { id: 'owner-1' }) {
+  return invokeHandler(rolesRouter(), 'post', '/api/roles', {
+    body,
+    user: user as Request['user'],
+  }, res)
+}
+
+function deleteRole(res: Response, id: string, user: Record<string, unknown> = { id: 'owner-1' }) {
+  return invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
+    params: { id },
+    user: user as Request['user'],
+  }, res)
+}
+
+/** Audit entries whose action is a WRITE (`create`/`update`/`delete`), i.e. not a `*_denied` refusal. */
+function writeAuditEntries() {
+  return auditMocks.auditLog.mock.calls
+    .map((call) => call[0] as { action: string })
+    .filter((entry) => !entry.action.endsWith('_denied'))
+}
+
+/** Audit entries the refusal path records (values-free: counts, never the codes). */
+function deniedAuditEntries() {
+  return auditMocks.auditLog.mock.calls
+    .map((call) => call[0] as { action: string; resourceId: string; meta: Record<string, unknown> })
+    .filter((entry) => entry.action.endsWith('_denied'))
+}
+
+beforeEach(() => {
+  pgMocks.query.mockReset()
+  pgMocks.transaction.mockReset()
+  pgMocks.poolQuery.mockReset()
+  rbacServiceMocks.isAdmin.mockReset()
+  rbacServiceMocks.listUserPermissions.mockReset()
+  rbacServiceMocks.invalidateUserPerms.mockReset()
+  rbacServiceMocks.userHasPermission.mockReset()
+  rbacServiceMocks.isAdmin.mockResolvedValue(false)
+  rbacServiceMocks.userHasPermission.mockResolvedValue(false)
+  auditMocks.auditLog.mockReset()
+  auditMocks.auditLog.mockResolvedValue(undefined)
+})
+
+describe('PUT /api/roles/:id — permission set persistence', () => {
+  it('ABSENT permissions key: a name-only rename leaves the permission set untouched', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '备料角色(改名)' }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBe('备料角色(改名)')
+    // The whole point of absent-vs-empty: a rename must not strip the role.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    // and it must not have TOUCHED role_permissions at all.
+    expect(db.statements.some((s) => /role_permissions/i.test(s.sql))).toBe(false)
+    // nothing changed for any member, so no cache fan-out.
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('PRESENT array: replace semantics — the listed codes are added AND the unlisted ones removed', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    // drops stock-prep:read, keeps roles:read, adds stock-prep:write
+    await putRole({ name: '备料角色', permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:write'])
+    expect((res.body as { ok: boolean }).ok).toBe(true)
+    expect((res.body as { data: { permissions: string[] } }).data.permissions).toEqual(['roles:read', 'stock-prep:write'])
+    // the sibling role is untouched — the DELETE is scoped to this role_id.
+    expect(db.permissionsOf('role-other')).toEqual(['roles:read'])
+  })
+
+  it('PRESENT empty array: clears the set (an unchecked grid is a real instruction, unlike an absent key)', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '备料角色', permissions: [] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual([])
+  })
+
+  it('UNKNOWN code → 400 and NOTHING written (the old set and the old name both survive)', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '改了的名字', permissions: ['roles:read', 'not-a-real:code'] }, res)
+
+    expect(res.statusCode).toBe(400)
+    expect((res.body as { error: { code: string } }).error.code).toBe('UNKNOWN_PERMISSION_CODE')
+    const details = (res.body as { error: { details: { unknownCount: number; unknown: string[] } } }).error.details
+    expect(details.unknownCount).toBe(1)
+    // Echoing is safe: these codes came from THIS request's own body.
+    expect(details.unknown).toEqual(['not-a-real:code'])
+
+    // NOTHING written — not the permissions, not even the rename.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(db.statements.some((s) => /^INSERT INTO role_permissions/i.test(s.sql.trim()))).toBe(false)
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    // No WRITE-shaped entry — but the refusal itself IS recorded, values-free.
+    expect(writeAuditEntries()).toEqual([])
+    const denied = deniedAuditEntries()
+    expect(denied).toHaveLength(1)
+    expect(denied[0].action).toBe('update_denied')
+    expect(denied[0].resourceId).toBe('role-1')
+    expect(denied[0].meta.refusalCode).toBe('UNKNOWN_PERMISSION_CODE')
+    expect(denied[0].meta.offendingCount).toBe(1)
+    // counts only: the durable record must not carry the submitted codes.
+    expect(JSON.stringify(denied[0].meta)).not.toContain('not-a-real:code')
+  })
+
+  it('non-array permissions → 400 rather than a guess', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: 'x', permissions: 'roles:read' }, res)
+
+    expect(res.statusCode).toBe(400)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSIONS_INVALID')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    expect(db.nameOf('role-1')).toBe('备料角色')
+  })
+
+  it('TRANSACTION: a failure part-way through the permission write leaves NEITHER change applied', async () => {
+    const db = makeFakeDb({
+      catalog: CATALOG,
+      state: {
+        roleNames: new Map([['role-1', '备料角色']]),
+        roleUpdatedAt: new Map([['role-1', SEEDED_UPDATED_AT]]),
+        rolePermissions: new Map([['role-1', ['roles:read', 'stock-prep:read']]]),
+        members: new Map([['role-1', ['user-a']]]),
+      },
+      // The DELETE lands first, then the second INSERT blows up — the worst case for a
+      // non-atomic writer: the role would be left renamed AND half-granted.
+      failOn: (sql, params) =>
+        /^INSERT INTO role_permissions/i.test(sql.trim()) && params[1] === 'stock-prep:write'
+          ? Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' })
+          : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '改了的名字', permissions: ['roles:write', 'stock-prep:write'] }, res)
+
+    // The unclassified failure ANSWERS. This router has no async error wrapper, so a
+    // rethrow here would leave the caller with no response at all — a hung request.
+    expect(res.statusCode).toBe(500)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_WRITE_FAILED')
+    // and the body stays values-free: no driver text, no submitted codes.
+    expect(JSON.stringify(res.body)).not.toContain('connection terminated')
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('a role deleted mid-write (role_id FK, 23503) answers 409 instead of hanging the caller', async () => {
+    const db = makeFakeDb({
+      catalog: CATALOG,
+      state: {
+        roleNames: new Map([['role-1', '备料角色']]),
+        roleUpdatedAt: new Map([['role-1', SEEDED_UPDATED_AT]]),
+        rolePermissions: new Map([['role-1', ['roles:read']]]),
+        members: new Map([['role-1', ['user-a']]]),
+      },
+      failOn: (sql) => /^INSERT INTO role_permissions/i.test(sql.trim())
+        ? Object.assign(
+          new Error('insert or update on table "role_permissions" violates foreign key constraint "role_permissions_role_id_fkey"'),
+          { code: '23503' },
+        )
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+    expect(res.statusCode).toBe(409)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_WRITE_CONFLICT')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+  })
+
+  it('CACHE: the permission memo is invalidated for exactly the role members, and nobody else', async () => {
+    const db = seed({ members: ['user-a', 'user-b'] })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '备料角色', permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort())
+      .toEqual(['user-a', 'user-b'])
+    // scoped by role_id: a member of the OTHER role is not invalidated.
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalledWith('user-z')
+    expect(db.statements.some((s) => /FROM user_roles WHERE role_id=/i.test(s.sql))).toBe(true)
+  })
+
+  it('CACHE: a REVOCATION invalidates too (the direction that otherwise fails open for the TTL)', async () => {
+    const db = seed({ permissions: ['roles:read', 'stock-prep:write'], members: ['user-a'] })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read'] }, res)
+
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+    expect(rbacServiceMocks.invalidateUserPerms).toHaveBeenCalledWith('user-a')
+  })
+
+  it('AUDIT: the entry records the permission delta (codes and counts, no user data)', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '备料角色', permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+    const entry = auditMocks.auditLog.mock.calls[0][0] as {
+      action: string
+      resourceType: string
+      resourceId: string
+      meta: Record<string, unknown>
+    }
+    expect(entry.action).toBe('update')
+    expect(entry.resourceType).toBe('role')
+    expect(entry.resourceId).toBe('role-1')
+    expect(entry.meta.permissionsChanged).toBe(true)
+    expect(entry.meta.permissionsAdded).toEqual(['stock-prep:write'])
+    expect(entry.meta.permissionsRemoved).toEqual(['stock-prep:read'])
+    expect(entry.meta.membersInvalidated).toBe(2)
+    expect((entry.meta.before as { permissions: string[] }).permissions).toEqual(['roles:read', 'stock-prep:read'])
+    expect((entry.meta.after as { permissions: string[] }).permissions).toEqual(['roles:read', 'stock-prep:write'])
+  })
+
+  it('AUDIT: a name-only rename reports no permission change', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '新名字' }, res)
+
+    const entry = auditMocks.auditLog.mock.calls[0][0] as { meta: Record<string, unknown> }
+    expect(entry.meta.permissionsChanged).toBe(false)
+    expect(entry.meta.permissionsAdded).toEqual([])
+    expect(entry.meta.permissionsRemoved).toEqual([])
+  })
+
+  it('ESCALATION: a non-admin, non-wildcard caller cannot ADD the all-permissions code', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:read', '*:*'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    // Nothing was written — but the attempt is on the record, so a caller probing the gate
+    // cannot spend an afternoon guessing codes and leave no trace.
+    expect(writeAuditEntries()).toEqual([])
+    const denied = deniedAuditEntries()
+    expect(denied).toHaveLength(1)
+    expect(denied[0].meta.refusalCode).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(denied[0].meta.offendingCount).toBe(1)
+    expect(JSON.stringify(denied[0].meta)).not.toContain('*:*')
+  })
+
+  it('ESCALATION: a platform admin may add it (the gate narrows, it does not block the owner)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:read', '*:*'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['*:*', 'roles:read', 'stock-prep:read'])
+  })
+
+  it('ESCALATION: a wildcard HOLDER who is not in the admin role may add it too (live check, not the memo)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    rbacServiceMocks.userHasPermission.mockImplementation(async (_userId: string, code: string) => code === '*:*')
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:read', 'admin:users'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['admin:users', 'roles:read', 'stock-prep:read'])
+    expect(rbacServiceMocks.userHasPermission).toHaveBeenCalledWith('owner-1', '*:*')
+  })
+
+  it('ESCALATION: keeping an already-granted elevated code is not an escalation (rename must stay possible)', async () => {
+    const db = seed({ permissions: ['*:*'] })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: '超级角色', permissions: ['*:*'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBe('超级角色')
+    expect(db.permissionsOf('role-1')).toEqual(['*:*'])
+  })
+
+  it('a missing role is still a 404 and writes nothing', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ name: 'x', permissions: ['roles:read'] }, res, 'role-missing')
+
+    expect(res.statusCode).toBe(404)
+    expect(db.statements.some((s) => /role_permissions/i.test(s.sql))).toBe(false)
+  })
+
+  it('LOCK: the role row is read FOR UPDATE as the FIRST statement inside the transaction', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    // Without the lock, two overlapping saves both read the pre-state under READ COMMITTED
+    // and interleave their DELETE/INSERT pairs into the union of both desired sets.
+    expect(db.statements[0].sql.replace(/\s+/g, ' ').trim())
+      .toBe('SELECT id, name, updated_at FROM roles WHERE id=$1 FOR UPDATE')
+    // and it is the same read the 404 and the rename are decided from — no pre-read outside
+    // the transaction that the lock could not cover.
+    expect(db.statements.filter((s) => /FROM roles WHERE id=\$1/i.test(s.sql)))
+      .toHaveLength(1)
+  })
+
+  it('RENAME stays lease-proof: an unchanged set skips the DELETE/INSERT entirely', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    // What the editor actually sends on a rename: the WHOLE grid it loaded, unchanged.
+    await putRole({ name: '新名字', permissions: ['roles:read', 'stock-prep:read'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBe('新名字')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    // role_permissions carries a recovery-authority trigger; `roles` carries none. Writing
+    // it for a no-op would make a rename answer the retryable 409 under a held lease, and
+    // amplify every save into a pointless revoke+regrant.
+    expect(db.statements.some((s) => /^DELETE FROM role_permissions/i.test(s.sql.trim()))).toBe(false)
+    expect(db.statements.some((s) => /^INSERT INTO role_permissions/i.test(s.sql.trim()))).toBe(false)
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('CONCURRENCY: a stale editor cannot resurrect a revoked code — the echoed token 409s', async () => {
+    const db = seed({ permissions: ['roles:read'] })
+    wire(db)
+    const res = mockResponse()
+
+    // Admin A loaded {roles:read, stock-prep:read} at SEEDED_UPDATED_AT; admin B has since
+    // revoked stock-prep:read (the seeded state above), moving the row's updated_at.
+    await putRole({
+      permissions: ['roles:read', 'stock-prep:read'],
+      expectedUpdatedAt: new Date(Date.parse(SEEDED_UPDATED_AT) - 60_000).toISOString(),
+    }, res)
+
+    expect(res.statusCode).toBe(409)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_MODIFIED')
+    // the revocation SURVIVES — the fail-open direction is the security-relevant one.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+    expect(writeAuditEntries()).toEqual([])
+  })
+
+  it('CONCURRENCY: the matching token is accepted, and an absent token keeps the old behaviour', async () => {
+    const db = seed()
+    wire(db)
+    const matching = mockResponse()
+
+    await putRole({ permissions: ['roles:read'], expectedUpdatedAt: SEEDED_UPDATED_AT }, matching)
+    expect(matching.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+
+    const db2 = seed()
+    wire(db2)
+    const noToken = mockResponse()
+    await putRole({ permissions: ['roles:read'] }, noToken)
+    expect(noToken.statusCode).toBe(200)
+    expect(db2.permissionsOf('role-1')).toEqual(['roles:read'])
+  })
+
+  it('CONCURRENCY: a set changed WITHOUT touching roles.updated_at is still caught (the provisioner case)', async () => {
+    // applyRoleMatrix (the plugin provisioner) grants codes by writing role_permissions
+    // directly, so the timestamp token stays valid while the set underneath has moved.
+    const db = seed({ permissions: ['roles:read', 'stock-prep:read', 'stock-prep:write'] })
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({
+      permissions: ['roles:read'],
+      expectedUpdatedAt: SEEDED_UPDATED_AT,
+      expectedPermissions: ['roles:read', 'stock-prep:read'],
+    }, res)
+
+    expect(res.statusCode).toBe(409)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_MODIFIED')
+    // the code the admin never saw is NOT revoked.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read', 'stock-prep:write'])
+  })
+
+  it('CONCURRENCY: a baseline that matches the stored set is accepted', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({
+      permissions: ['roles:read'],
+      expectedPermissions: ['stock-prep:read', 'roles:read'],
+    }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+  })
+
+  it('CONCURRENCY: an unparseable token is a 400, never a silently skipped check', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read'], expectedUpdatedAt: 'not-a-timestamp' }, res)
+
+    expect(res.statusCode).toBe(400)
+    expect((res.body as { error: { code: string } }).error.code).toBe('EXPECTED_UPDATED_AT_INVALID')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+  })
+
+  it('ESCALATION is SYMMETRIC: a non-admin cannot REMOVE an elevated code either', async () => {
+    const db = seed({ permissions: ['stock-prep:*', 'roles:read'] })
+    wire(db)
+    const res = mockResponse()
+
+    // Quietly revoking a whole delivery team, reported as ok:true, is not "less dangerous"
+    // than granting — and the cache fan-out makes it effective immediately.
+    await putRole({ permissions: ['roles:read'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:*'])
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('ESCALATION is SYMMETRIC: a non-admin cannot EMPTY the seeded platform-admin role', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: [] }, res, 'admin')
+
+    expect(res.statusCode).toBe(403)
+    expect(db.permissionsOf('admin')).toEqual(['*:*', 'admin:users'])
+    expect(db.nameOf('admin')).toBe('platform admin')
+  })
+
+  it('PROTECTED ROLE: a non-admin cannot even add an ordinary code to the platform-admin role', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['*:*', 'admin:users', 'roles:read'] }, res, 'admin')
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PROTECTED_ROLE_FORBIDDEN')
+    expect(db.permissionsOf('admin')).toEqual(['*:*', 'admin:users'])
+  })
+
+  it('PROTECTED ROLE: a platform admin may still edit it (the gate narrows, it does not brick)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['*:*', 'admin:users', 'roles:read'] }, res, 'admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('admin')).toEqual(['*:*', 'admin:users', 'roles:read'])
+  })
+
+  it('PROTECTED ROLE: DELETE of the platform-admin role is refused for a non-admin and allowed for an admin', async () => {
+    const db = seed()
+    wire(db)
+    const refused = mockResponse()
+
+    await deleteRole(refused, 'admin')
+
+    expect(refused.statusCode).toBe(403)
+    expect((refused.body as { error: { code: string } }).error.code).toBe('PROTECTED_ROLE_FORBIDDEN')
+    expect(db.nameOf('admin')).toBe('platform admin')
+    expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(['delete_denied'])
+
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const allowed = mockResponse()
+    await deleteRole(allowed, 'admin')
+    expect(allowed.statusCode).toBe(200)
+    expect(db.nameOf('admin')).toBeUndefined()
+  })
+
+  it('DELETE of an ordinary role is untouched by the protection', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBeUndefined()
+  })
+
+  it('CACHE: DELETE drops the memo for exactly the deleted role members, and nobody else', async () => {
+    const db = seed({ members: ['user-a', 'user-b'] })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    // Deleting a role is the WIDEST revocation this router offers — every code it carried,
+    // for every member — and it is open to any roles:write holder for every role but
+    // `admin`. Without the fan-out its members keep the whole revoked set for up to
+    // RBAC_CACHE_TTL_MS (rbac/service.ts:13, default 60s): a revoke that fails OPEN.
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort())
+      .toEqual(['user-a', 'user-b'])
+    // scoped by role_id, like PUT's: a member of the OTHER role is untouched.
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalledWith('user-z')
+    // and the trail records the COUNT, never the member ids.
+    const entry = auditMocks.auditLog.mock.calls[0][0] as { action: string; meta: Record<string, unknown> }
+    expect(entry.action).toBe('delete')
+    expect(entry.meta.membersInvalidated).toBe(2)
+    expect(JSON.stringify(entry.meta)).not.toContain('user-a')
+  })
+
+  it('CACHE: DELETE reads the members BEFORE the row goes (user_roles cascades with it)', async () => {
+    const db = seed({ members: ['user-a', 'user-b'] })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    const memberRead = db.statements.findIndex((s) => /FROM user_roles WHERE role_id=/i.test(s.sql))
+    const roleDelete = db.statements.findIndex((s) => /^DELETE FROM roles WHERE id=/i.test(s.sql.trim()))
+    expect(memberRead).toBeGreaterThanOrEqual(0)
+    expect(roleDelete).toBeGreaterThanOrEqual(0)
+    // The ordering is the whole fix: user_roles.role_id REFERENCES roles(id) ON DELETE
+    // CASCADE, so a fan-out placed after the DELETE reads an empty set and invalidates
+    // nobody while still looking like a fan-out.
+    expect(memberRead).toBeLessThan(roleDelete)
+    expect(rbacServiceMocks.invalidateUserPerms).toHaveBeenCalledWith('user-a')
+  })
+
+  it('DELETE: a failing member snapshot refuses BEFORE deleting anything (the read is pre-commit)', async () => {
+    const db = seed({
+      members: ['user-a'],
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    // The snapshot is a statement this fix ADDED to the handler; it must not become a new
+    // way to hang the caller. It runs inside the try, so its failure is an answer.
+    await expect(deleteRole(res, 'role-1')).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(500)
+    expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_WRITE_FAILED')
+    // and nothing was deleted: the failure is pre-commit, so refusing is the honest answer.
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(JSON.stringify(res.body)).not.toContain('connection slots')
+  })
+
+  it('POST-COMMIT: DELETE still answers when the memo drop itself throws (the row is already gone)', async () => {
+    const db = seed({ members: ['user-a'] })
+    wire(db)
+    rbacServiceMocks.invalidateUserPerms.mockImplementation(() => {
+      throw new Error('memo backend down')
+    })
+    const res = mockResponse()
+
+    await expect(deleteRole(res, 'role-1')).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain('memo backend down')
+  })
+
+  it('ADMIT SET: an administrator known only by the legacy claim is NOT refused', async () => {
+    // isAdmin() and userHasPermission() both false — this principal has no user_roles row
+    // and no '*:*' grant. It is exactly the population `ensurePlatformAdmin` admits for
+    // GET /api/admin/roles, i.e. the read side of this very editor; refusing it here would
+    // recreate the "the owner has to do it in SQL" symptom this route exists to remove.
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'stock-prep:read', '*:*'] }, res, 'role-1', { id: 'owner-1', role: 'admin' })
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['*:*', 'roles:read', 'stock-prep:read'])
+    expect(rbacServiceMocks.isAdmin).not.toHaveBeenCalled()
+  })
+
+  it('ADMIT SET: a token `perms` claim of admin:all is admitted too (the same predicate admin-users.ts uses)', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['roles:read', 'admin:users'] }, res, 'role-1', { id: 'owner-1', perms: ['admin:all'] })
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['admin:users', 'roles:read'])
+  })
+
+  it('POST-COMMIT: a failing cache fan-out still ANSWERS 200 — the write is already committed', async () => {
+    const db = seed({
+      members: ['user-a'],
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    // The handler must RESOLVE. This router is mounted bare in src/index.ts — no
+    // asyncHandler, Express 4 — so a rejection in the post-commit tail is an unhandled
+    // rejection and the caller gets NO response at all: a hung request until its own
+    // timeout, which is the exact failure sendRoleWriteFailure exists to prevent.
+    await expect(putRole({ permissions: ['roles:read', 'stock-prep:write'] }, res)).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect((res.body as { ok: boolean }).ok).toBe(true)
+    // ...and 200 is the TRUTH: the row really is committed. A 500 here would report a
+    // landed write as a failed one and invite a retry whose delta is empty.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:write'])
+    // the audit entry still lands, with the fan-out reported as UNKNOWN rather than as 0
+    // (0 is the "no members / nothing changed" value and would read as a clean run).
+    const entry = auditMocks.auditLog.mock.calls[0][0] as { meta: Record<string, unknown> }
+    expect(entry.meta.membersInvalidated).toBeNull()
+    // values-free: no driver text reaches the caller.
+    expect(JSON.stringify(res.body)).not.toContain('connection slots')
+  })
+
+  it('POST-COMMIT: a failing AUDIT write answers 200 too, and the fan-out already ran', async () => {
+    const db = seed({ members: ['user-a'] })
+    wire(db)
+    auditMocks.auditLog.mockRejectedValue(Object.assign(new Error('audit sink down'), { code: '57P01' }))
+    const res = mockResponse()
+
+    await expect(putRole({ permissions: ['roles:read'] }, res)).resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+    // ordering matters: the fan-out runs FIRST, so a dead audit sink cannot leave the
+    // revocation effective-for-60s on top of losing the record.
+    expect(rbacServiceMocks.invalidateUserPerms).toHaveBeenCalledWith('user-a')
+  })
+
+  it('GUARD: every write verb is still registered BEHIND rbacGuard, and the guard refuses an unauthenticated request', async () => {
+    const router = rolesRouter()
+    for (const [method, path] of [['post', '/api/roles'], ['put', '/api/roles/:id'], ['delete', '/api/roles/:id']] as const) {
+      const stack = routeStack(router, method, path)
+      // guard + handler. Dropping the guard would turn this RBAC write path into an
+      // authenticated-free-for-all while every behaviour leg above (which invokes the FINAL
+      // handler directly) stayed green.
+      expect(stack).toHaveLength(2)
+      const res = mockResponse()
+      let nexted = false
+      await stack[0].handle(
+        { method: method.toUpperCase(), headers: {}, query: {}, params: {}, body: {} } as unknown as Request,
+        res,
+        () => { nexted = true },
+      )
+      expect(nexted).toBe(false)
+      expect(res.statusCode).toBe(401)
+    }
+  })
+})
+
+describe('POST /api/roles — the same authority boundary as PUT', () => {
+  it('BYPASS CLOSED: the intent PUT refuses cannot be re-sent as POST with an existing id', async () => {
+    const db = seed()
+    wire(db)
+
+    const putRes = mockResponse()
+    await putRole({ permissions: ['roles:read', 'stock-prep:read', '*:*'] }, putRes)
+    expect(putRes.statusCode).toBe(403)
+
+    // Same caller, same role, same intent — POST's INSERT … ON CONFLICT DO NOTHING on the
+    // role row plus its additive per-code INSERT used to land the grant unguarded.
+    const postRes = mockResponse()
+    await postRole({ id: 'role-1', name: '备料角色', permissions: ['*:*'] }, postRes)
+
+    expect(postRes.statusCode).toBe(403)
+    expect((postRes.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+  })
+
+  it('BYPASS CLOSED: the seeded platform-admin role cannot be topped up through POST either', async () => {
+    const db = seed({ adminPermissions: ['admin:users'] })
+    wire(db)
+    const res = mockResponse()
+
+    await postRole({ id: 'admin', name: '管理员', permissions: ['*:*'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect(db.permissionsOf('admin')).toEqual(['admin:users'])
+  })
+
+  it('a brand-new role cannot be born with an elevated code either, and the role row rolls back', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await postRole({ id: 'role-new', name: '新角色', permissions: ['*:*'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    // atomic: the role row itself must not survive a refused grant.
+    expect(db.nameOf('role-new')).toBeUndefined()
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(['create_denied'])
+  })
+
+  it('a platform admin may still create an elevated role (the gate narrows, it does not block the owner)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await postRole({ id: 'role-new', name: '新角色', permissions: ['*:*'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-new')).toEqual(['*:*'])
+  })
+
+  it('ordinary codes are unaffected: a roles:write holder still creates and tops up normal roles', async () => {
+    const db = seed()
+    wire(db)
+
+    const created = mockResponse()
+    await postRole({ id: 'role-new', name: '新角色', permissions: ['stock-prep:read'] }, created)
+    expect(created.statusCode).toBe(200)
+    expect(db.permissionsOf('role-new')).toEqual(['stock-prep:read'])
+
+    // additive on an existing role — POST's documented semantics, deliberately NOT replace.
+    const topped = mockResponse()
+    await postRole({ id: 'role-1', name: '备料角色', permissions: ['stock-prep:write'] }, topped)
+    expect(topped.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read', 'stock-prep:write'])
+    // and the members' permission memo is dropped, exactly as on PUT.
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort())
+      .toEqual(['user-a', 'user-b'])
+  })
+
+  it('LOOK-ALIKE IDS: an id with invisible padding or a format character is refused 400 before any row is written — even with NO codes', async () => {
+    const db = seed()
+    wire(db)
+    // Each of these renders as `attendance_admin` in the role list; a client that trims
+    // before addressing it would hit the real namespace main-admin role.
+    const lookAlikes = [
+      'attendance_admin ',
+      '\uFEFFattendance_admin',
+      '\u3000attendance_admin',
+      'attendance_admin\u00A0',
+      'attendance\u200B_admin',
+      '   ',
+    ]
+    for (const id of lookAlikes) {
+      const res = mockResponse()
+      await postRole({ id, name: '考勤管理员' }, res)
+      expect(res.statusCode, JSON.stringify(id)).toBe(400)
+      expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_ID_INVALID')
+      expect(db.nameOf(id)).toBeUndefined()
+    }
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(lookAlikes.map(() => 'create_denied'))
+
+    // POSITIVE CONTROL: a plain id with no codes is still created.
+    const ok = mockResponse()
+    await postRole({ id: 'attendance_viewer', name: '考勤查看' }, ok)
+    expect(ok.statusCode).toBe(200)
+    expect(db.nameOf('attendance_viewer')).toBe('考勤查看')
+  })
+
+  it('POST-COMMIT: POST answers when its fan-out AND its read-back fail (both are past the commit)', async () => {
+    const db = seed({
+      failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
+        || /^SELECT id, name, created_at, updated_at FROM roles/i.test(sql.trim())
+        ? Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' })
+        : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await expect(postRole({ id: 'role-1', name: '备料角色', permissions: ['stock-prep:write'] }, res))
+      .resolves.toBeDefined()
+
+    expect(res.statusCode).toBe(200)
+    expect((res.body as { ok: boolean }).ok).toBe(true)
+    // the grant landed; only the tail failed.
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read', 'stock-prep:write'])
+    // with the read-back gone, the id is all the handler can state as FACT: POST's
+    // `ON CONFLICT (id) DO NOTHING` means the submitted name need not be the stored one,
+    // so echoing it back would be a guess.
+    expect((res.body as { data: unknown }).data).toEqual({ id: 'role-1' })
+  })
+
+  it('an uncatalogued code is a 400 here too, not a foreign-key rejection with no response', async () => {
+    const db = seed()
+    wire(db)
+    const res = mockResponse()
+
+    await postRole({ id: 'role-new', name: '新角色', permissions: ['not-a-real:code'] }, res)
+
+    expect(res.statusCode).toBe(400)
+    expect((res.body as { error: { code: string } }).error.code).toBe('UNKNOWN_PERMISSION_CODE')
+    expect(db.nameOf('role-new')).toBeUndefined()
+    expect(db.statements.some((s) => /^INSERT INTO role_permissions/i.test(s.sql.trim()))).toBe(false)
+  })
+})
+
+// ------------------------------------------------- admin-level codes and admin-role deletes
+
+/**
+ * A role id, an admin-equivalent role and an ordinary one, all with members, plus delegated-admin
+ * audience in two namespaces. `cascade: false` is the schema this repo's migration chain builds.
+ */
+function seedAdminRoles(options: { cascade?: boolean; failOn?: (sql: string, params: unknown[]) => Error | null } = {}) {
+  return makeFakeDb({
+    catalog: [...CATALOG, 'attendance:read', 'attendance:admin', 'Attendance:Admin', 'crm:read', 'crm:admin'],
+    failOn: options.failOn,
+    roleDeleteCascades: options.cascade ?? false,
+    state: {
+      roleNames: new Map([
+        ['role-1', '备料角色'],
+        ['attendance_lead', '考勤组长'],
+        ['crm_admin', 'CRM 管理员'],
+        ['crm_lead', 'CRM 组长'],
+        ['hr_admin', 'HR 管理员'],
+        ['admin', 'platform admin'],
+      ]),
+      roleUpdatedAt: new Map([
+        ['role-1', SEEDED_UPDATED_AT],
+        ['attendance_lead', SEEDED_UPDATED_AT],
+        ['crm_admin', SEEDED_UPDATED_AT],
+        ['crm_lead', SEEDED_UPDATED_AT],
+        ['hr_admin', SEEDED_UPDATED_AT],
+        ['admin', SEEDED_UPDATED_AT],
+      ]),
+      rolePermissions: new Map([
+        ['role-1', ['attendance:read', 'roles:read']],
+        ['attendance_lead', ['attendance:read', 'attendance:admin']],
+        ['crm_admin', ['crm:read']],
+        ['crm_lead', ['crm:read', 'crm:admin']],
+        ['hr_admin', []],
+        ['admin', ['*:*']],
+      ]),
+      members: new Map([
+        ['role-1', ['user-a', 'user-b']],
+        ['attendance_lead', ['user-c']],
+        ['crm_admin', ['user-a', 'user-b']],
+        ['crm_lead', ['user-c']],
+        ['hr_admin', ['user-a']],
+        ['admin', ['owner-9']],
+      ]),
+      delegatedScopes: [
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'hr' },
+      ],
+      delegatedGroupScopes: [
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-b', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'hr' },
+      ],
+    },
+  })
+}
+
+/** Statements that WRITE membership or audience — the cleanup's whole footprint. */
+function membershipWrites(db: ReturnType<typeof makeFakeDb>): string[] {
+  return db.statements
+    .map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    .filter((sql) => /^DELETE FROM (user_roles|delegated_role_admin_scopes|delegated_role_admin_member_groups)\b/i.test(sql))
+}
+
+describe('ADMIN-LEVEL codes in the role editor — only a platform admin adds or removes them (owner ruling 「只有平台管理员能任命 *_admin」)', () => {
+  it('EDITOR: a roles:write holder cannot add `attendance:admin` to a role that is already assigned (PUT) — the members do not become admins', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:admin', 'attendance:read', 'roles:read'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+    expect(db.membersOf('role-1')).toEqual(['user-a', 'user-b'])
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode, entry.meta.offendingCount]))
+      .toEqual([['update_denied', 'PERMISSION_ESCALATION_FORBIDDEN', 1]])
+  })
+
+  it('EDITOR: the same grant re-sent as POST on the existing id is refused too, and so is `<ns>:*`', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+
+    for (const code of ['attendance:admin', 'crm:admin']) {
+      const res = mockResponse()
+      await postRole({ id: 'role-1', name: '备料角色', permissions: [code] }, res)
+      expect({ code, status: res.statusCode }).toEqual({ code, status: 403 })
+      expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    }
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+  })
+
+  it('EDITOR is SYMMETRIC: a roles:write holder cannot remove `attendance:admin` from an admin-equivalent role either', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:read'] }, res, 'attendance_lead')
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('attendance_lead')).toEqual(['attendance:admin', 'attendance:read'])
+  })
+
+  it('EDITOR NORMALISATION: whitespace and case variants of an admin-level code are refused the same way; an ordinary code still passes', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+
+    // ` attendance:admin ` is trimmed on write to `attendance:admin`; `Attendance:Admin` is a
+    // catalogued code that the predicate folds to admin-level (over-refusal, never admission).
+    for (const variant of [' attendance:admin ', 'Attendance:Admin']) {
+      const res = mockResponse()
+      await putRole({ permissions: ['attendance:read', 'roles:read', variant] }, res)
+      expect({ variant, status: res.statusCode, code: (res.body as { error?: { code: string } }).error?.code })
+        .toEqual({ variant, status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    }
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+
+    // POSITIVE CONTROL — the same caller still edits ordinary codes.
+    const ordinary = mockResponse()
+    await putRole({ permissions: ['attendance:read', 'crm:read', 'roles:read'] }, ordinary)
+    expect(ordinary.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'crm:read', 'roles:read'])
+  })
+
+  it('EDITOR: a platform administrator still adds `attendance:admin` (the gate narrows, it does not brick)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:admin', 'attendance:read', 'roles:read'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:admin', 'attendance:read', 'roles:read'])
+  })
+})
+
+describe('DELETE of a namespace main-admin or admin-equivalent role — platform admin only; memberships and audience go with it', () => {
+  it('a roles:write holder cannot delete `<ns>_admin`: 403, role, memberships and audience intact, refusal audited', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PROTECTED_ROLE_FORBIDDEN',
+        message: 'Only a platform administrator may delete a namespace admin role',
+        details: { roleId: 'crm_admin' },
+      },
+    })
+    expect(db.nameOf('crm_admin')).toBe('CRM 管理员')
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 2, groups: 1 })
+    expect(membershipWrites(db)).toEqual([])
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['delete_denied', 'PROTECTED_ROLE_FORBIDDEN']])
+  })
+
+  it('a roles:write holder cannot delete an admin-equivalent role either (judged by its codes, counted, never echoed)', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(403)
+    const body = res.body as { error: { code: string; details: Record<string, unknown> } }
+    expect(body.error.code).toBe('PROTECTED_ROLE_FORBIDDEN')
+    expect(body.error.details).toEqual({ roleId: 'crm_lead', escalatingCount: 1 })
+    expect(JSON.stringify(res.body)).not.toContain('crm:admin')
+    expect(db.nameOf('crm_lead')).toBe('CRM 组长')
+    expect(db.membersOf('crm_lead')).toEqual(['user-c'])
+    expect(deniedAuditEntries()[0].meta.offendingCount).toBe(1)
+  })
+
+  it('a platform admin deletes `<ns>_admin` on the no-FK schema: memberships gone, that namespace\'s audience gone (another namespace\'s stays), audited, one transaction', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('crm_admin')).toBeUndefined()
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+    expect(db.audienceOf('user-b', 'crm')).toEqual({ departments: 0, groups: 0 })
+    expect(db.audienceOf('user-a', 'hr')).toEqual({ departments: 1, groups: 1 })
+    expect(db.membersOf('hr_admin')).toEqual(['user-a'])
+    // Every write went through the transaction client (pool.query is the same interpreter here,
+    // so assert the route never called it for DML).
+    expect(pgMocks.poolQuery.mock.calls.filter((call) => /^\s*(DELETE|INSERT|UPDATE)/i.test(String(call[0])))).toEqual([])
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    // Post-commit: per-member cache fan-out, the cleanup audit (counts, trigger role_deleted) and the delete entry.
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort()).toEqual(['user-a', 'user-b'])
+    const cleanupAudits = auditMocks.auditLog.mock.calls
+      .map((call) => call[0] as { resourceType: string; resourceId: string; meta: Record<string, unknown> })
+      .filter((entry) => entry.resourceType === 'delegated-admin-scope')
+    expect(cleanupAudits.map((entry) => [entry.resourceId, entry.meta.trigger, entry.meta.scopeRows, entry.meta.groupScopeRows]).sort())
+      .toEqual([['user-a:crm', 'role_deleted', 2, 1], ['user-b:crm', 'role_deleted', 0, 1]])
+    const deleteEntry = writeAuditEntries().find((entry) => entry.action === 'delete') as unknown as { meta: Record<string, unknown> }
+    expect(deleteEntry.meta.membershipsRemoved).toBe(2)
+    expect(deleteEntry.meta.membersInvalidated).toBe(2)
+  })
+
+  it('a platform admin deletes an admin-equivalent role: its memberships go (no audience DML — the role derives no namespace)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('crm_lead')).toEqual([])
+    expect(membershipWrites(db).every((sql) => /^DELETE FROM user_roles/i.test(sql))).toBe(true)
+    expect(membershipWrites(db)).toHaveLength(1)
+  })
+
+  it('ORDER: the membership removal runs BEFORE the role row goes, so it still finds the members where the FK cascades', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: true })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    // With the cascade a removal placed after the DELETE would find nobody and clear no audience.
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+    const statements = db.statements.map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    const removal = statements.findIndex((sql) => /^DELETE FROM user_roles/i.test(sql))
+    const roleDelete = statements.findIndex((sql) => /^DELETE FROM roles WHERE id=/i.test(sql))
+    expect(removal).toBeGreaterThanOrEqual(0)
+    expect(removal).toBeLessThan(roleDelete)
+  })
+
+  it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({
+      cascade: false,
+      failOn: (sql) => (/DELETE FROM delegated_role_admin_member_groups/i.test(sql)
+        ? Object.assign(new Error('could not serialize access'), { code: '40P01' })
+        : null),
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
+    expect(db.nameOf('crm_admin')).toBe('CRM 管理员')
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 2, groups: 1 })
+  })
+
+  it('memberships that outlived an earlier delete of the role row are removed when the id is deleted again (platform admin)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    // The pre-fix state: the `roles` row is gone, the memberships (and so the identity) are not.
+    const first = mockResponse()
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    await deleteRole(first, 'crm_admin')
+    expect(first.statusCode).toBe(403) // and a non-platform caller still cannot use this path
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    await db.run('DELETE FROM roles WHERE id=$1', ['crm_admin'])
+    expect(db.nameOf('crm_admin')).toBeUndefined()
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+
+    const res = mockResponse()
+    await deleteRole(res, 'crm_admin')
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+  })
+
+  it('the seeded platform-admin role is NOT emptied of members by its own delete (a lock-out is a separate decision)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('admin')).toEqual(['owner-9'])
+    expect(membershipWrites(db)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — an ordinary role is still deleted by any roles:write holder, with no membership statement', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBeUndefined()
+    expect(membershipWrites(db)).toEqual([])
+    // …and no grant statement either: an ordinary delete stays a `roles`-only write (the
+    // `roles:delete` recovery-census premise in the L1 battery ledger).
+    expect(db.statements.some((s) => /^\s*DELETE FROM role_permissions/i.test(s.sql))).toBe(false)
+  })
+
+  it('LOCK: the classification read takes the role row FOR UPDATE as the FIRST statement inside the transaction', async () => {
+    // Without the lock a concurrent platform PUT that has already written `attendance:admin` under
+    // its own FOR UPDATE (uncommitted) is invisible to the classification below, and a roles:write
+    // holder deletes a role that just became admin-equivalent — the members keep the code through
+    // the orphan membership. The real-DB race leg shows the outcome; this pins the statement.
+    for (const roleId of ['role-1', 'crm_admin', 'crm_lead']) {
+      const db = seedAdminRoles({ cascade: false })
+      wire(db)
+      const res = mockResponse()
+
+      await deleteRole(res, roleId)
+
+      expect({ roleId, status: res.statusCode }).toEqual({ roleId, status: roleId === 'role-1' ? 200 : 403 })
+      expect(db.statements[0].sql.replace(/\s+/g, ' ').trim()).toBe('SELECT id, name FROM roles WHERE id=$1 FOR UPDATE')
+      // …and no read of the role or its codes happens before it.
+      expect(db.statements.findIndex((s) => /\b(roles|role_permissions)\b/i.test(s.sql))).toBe(0)
+    }
+  })
+
+  it('GRANTS GO TOO: a platform admin\'s delete of an admin-equivalent role leaves no role_permissions behind, so a roles:write holder cannot resurrect it through POST', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const deleted = mockResponse()
+
+    await deleteRole(deleted, 'crm_lead')
+
+    expect(deleted.statusCode).toBe(200)
+    expect(db.permissionsOf('crm_lead')).toEqual([])
+    // The resurrection shape: an ordinary editor re-creates the id with NO codes (POST returns
+    // before the gate when no codes are sent). It must come back empty, not carrying crm:admin.
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    const resurrected = mockResponse()
+    await postRole({ id: 'crm_lead', name: 'Viewer' }, resurrected)
+    expect(resurrected.statusCode).toBe(200)
+    expect(db.nameOf('crm_lead')).toBe('Viewer')
+    expect(db.permissionsOf('crm_lead')).toEqual([])
+    // Other roles' grants are untouched — the DELETE is scoped to the id.
+    expect(db.permissionsOf('attendance_lead')).toEqual(['attendance:admin', 'attendance:read'])
+  })
+
+  it('GRANTS GO TOO for a namespace main-admin role with NO members (the grant removal does not hang off the membership removal)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    // Empty the role's membership first, and give it a code to lose.
+    await db.run('DELETE FROM user_roles WHERE role_id = $2 AND user_id = ANY($1::text[]) RETURNING user_id', [['user-a', 'user-b'], 'crm_admin'])
+    await db.run('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2)', ['crm_admin', 'crm:read'])
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.permissionsOf('crm_admin')).toEqual(['crm:read'])
+    db.statements.length = 0
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('crm_admin')).toEqual([])
+    expect(membershipWrites(db)).toEqual([])
+  })
+
+  it('ATOMIC: a failure in the grant removal rolls back the membership removal and keeps the role and its codes', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({
+      cascade: false,
+      failOn: (sql) => (/^\s*DELETE FROM role_permissions/i.test(sql)
+        ? Object.assign(new Error('could not serialize access'), { code: '40P01' })
+        : null),
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(500)
+    expect(db.nameOf('crm_lead')).toBe('CRM 组长')
+    expect(db.membersOf('crm_lead')).toEqual(['user-c'])
+    expect(db.permissionsOf('crm_lead')).toEqual(['crm:admin', 'crm:read'])
+  })
+})
+
+// ------------------------------------------------- reserved display names (#6348 follow-up)
+
+describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 form)', () => {
+  /** `admin` however it is spelled: case, full width, spaces / format characters, a built-in marker. */
+  const ADMIN_SPELLINGS = [
+    'admin', 'Admin', ' ADMIN ', '\uff41\uff44\uff4d\uff49\uff4e', 'ad\u200bmin', 'ad min', '\u3000admin\u00a0', '\ufeffadmin',
+    'admin（内置）', 'admin (built-in)', 'Admin(builtin)',
+  ]
+  const everyReservedName = () => RESERVED_ROLE_DISPLAY_NAME_OWNERS.flatMap(([ownerId, names]) => [ownerId, ...names])
+
+  function seedNamed(roleNames: Array<[string, string]>) {
+    return makeFakeDb({
+      catalog: CATALOG,
+      state: {
+        roleNames: new Map(roleNames),
+        roleUpdatedAt: new Map(roleNames.map(([id]) => [id, SEEDED_UPDATED_AT])),
+        rolePermissions: new Map(roleNames.map(([id]) => [id, ['roles:read']])),
+        members: new Map(roleNames.map(([id]) => [id, []])),
+      },
+    })
+  }
+
+  const refusalCode = (res: { body: unknown }) => (res.body as { error?: { code?: string } }).error?.code
+
+  it('the table covers every S8 name and id and 「审批与提交」, each canonical name has ONE owner, and the seeded platform roles are in it', () => {
+    const owners = new Map<string, string>()
+    for (const [ownerId, names] of RESERVED_ROLE_DISPLAY_NAME_OWNERS) {
+      for (const name of [ownerId, ...names]) {
+        const canonical = canonicalStockPrepRoleName(name)
+        expect(owners.get(canonical) ?? ownerId, name).toBe(ownerId)
+        owners.set(canonical, ownerId)
+      }
+    }
+    const listed = new Set(everyReservedName())
+    for (const name of [
+      ...STOCK_PREP_BUILTIN_ROLE_IDS,
+      ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+      ...STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
+      ...ELEARNING_ROLE_TEMPLATES.flatMap((template) => [template.id, template.name]),
+      'admin', '管理员', 'user', '普通用户',
+      'attendance_employee', 'Attendance Employee', 'attendance_approver', 'Attendance Approver',
+      'attendance_importer', 'Attendance Importer', 'attendance_admin', 'Attendance Admin',
+    ]) {
+      expect(listed.has(name), name).toBe(true)
+    }
+    expect(STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES).toEqual(['审批与提交'])
+    expect(reservedRoleDisplayNameOwner('审批与提交')).toBe('approvals_operator')
+    for (const name of ADMIN_SPELLINGS) expect(reservedRoleDisplayNameOwner(name), JSON.stringify(name)).toBe('admin')
+    for (const name of ['administrator', 'admins', '管理员甲', '审批与提交组', 'Operators', '备料角色']) {
+      expect(reservedRoleDisplayNameOwner(name), name).toBeNull()
+    }
+  })
+
+  it('POST: a NEW role may not be born as admin (any spelling) or under a built-in / reserved name — 400 ROLE_NAME_RESERVED before any statement, audited as create_denied, never echoed', async () => {
+    for (const name of [...ADMIN_SPELLINGS, ...everyReservedName(), ' 操作人员 ', '审批\u3000与提交', '一线填写（内置）', 'ＯＰＥＲＡＴＯＲ']) {
+      auditMocks.auditLog.mockClear()
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await postRole({ id: 'role-new', name, permissions: ['roles:read'] }, res)
+
+      expect([res.statusCode, refusalCode(res)], JSON.stringify(name)).toEqual([400, 'ROLE_NAME_RESERVED'])
+      expect(db.statements, JSON.stringify(name)).toEqual([])
+      expect(db.nameOf('role-new')).toBeUndefined()
+      expect(writeAuditEntries()).toEqual([])
+      expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['create_denied', 'ROLE_NAME_RESERVED']])
+      if (!/admin/i.test(name) && name.trim().length > 2) expect(JSON.stringify(res.body)).not.toContain(name.trim())
+    }
+  })
+
+  it('POST: the owner id may carry its own reserved name; an ordinary name is unaffected', async () => {
+    for (const [id, name] of [['approvals_operator', '审批与提交'], ['stock-prep_frontline', '操作人员'], ['role-new', '审批与提交组'], ['role-new-2', 'administrator']]) {
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await postRole({ id, name }, res)
+
+      expect(res.statusCode, `${id} ${name}`).toBe(200)
+      expect(db.nameOf(id)).toBe(name)
+    }
+  })
+
+  it('PUT: renaming a role to admin (any spelling) or to another role\'s reserved name is refused — 400, nothing written (name and codes kept)', async () => {
+    for (const name of [...ADMIN_SPELLINGS, '管理员', '操作人员', ' 审批与提交 ', 'Floor operator', 'stock-prep_admin', 'E-learning Admin']) {
+      auditMocks.auditLog.mockClear()
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await putRole({ name, permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+      expect([res.statusCode, refusalCode(res)], JSON.stringify(name)).toEqual([400, 'ROLE_NAME_RESERVED'])
+      expect(db.nameOf('role-1')).toBe('备料角色')
+      expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+      expect(db.statements.some((s) => /^\s*(UPDATE|DELETE|INSERT)/i.test(s.sql)), JSON.stringify(name)).toBe(false)
+      expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['update_denied', 'ROLE_NAME_RESERVED']])
+    }
+  })
+
+  it('PUT: the stored name sent back EXACTLY unchanged always passes (legacy names stay editable); any change of spelling toward admin is a rename and refused; the owner may rename to its own name', async () => {
+    const db = seedNamed([['legacy-x', 'Admin'], ['legacy-y', '操作人员'], ['stock-prep_frontline', '一线填写'], ['approvals_operator', 'approvals operator']])
+    wire(db)
+
+    const unchanged = mockResponse()
+    await putRole({ name: 'Admin', permissions: ['roles:read', 'stock-prep:read'] }, unchanged, 'legacy-x')
+    expect(unchanged.statusCode).toBe(200)
+    expect(db.permissionsOf('legacy-x')).toEqual(['roles:read', 'stock-prep:read'])
+
+    // The editor sends `name.trim()` (RoleManagementView.vue): a stored reserved name with edge
+    // whitespace, saved back trimmed by a permission-only edit, is no rename (fix round 1).
+    const padded = seedNamed([['legacy-p', ' Admin\u3000'], ['legacy-q', '\u00a0操作人员 ']])
+    wire(padded)
+    for (const [id, sent] of [['legacy-p', 'Admin'], ['legacy-q', '操作人员']] as const) {
+      const res = mockResponse()
+      await putRole({ name: sent, permissions: ['roles:read', 'stock-prep:read'] }, res, id)
+      expect(res.statusCode, id).toBe(200)
+      expect(padded.permissionsOf(id), id).toEqual(['roles:read', 'stock-prep:read'])
+    }
+    const paddedToLower = mockResponse()
+    await putRole({ name: 'admin' }, paddedToLower, 'legacy-p')
+    expect([paddedToLower.statusCode, refusalCode(paddedToLower)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    wire(db)
+
+    const nameOmitted = mockResponse()
+    await putRole({ permissions: ['roles:read'] }, nameOmitted, 'legacy-y')
+    expect(nameOmitted.statusCode).toBe(200)
+    expect(db.nameOf('legacy-y')).toBe('操作人员')
+
+    const toLowerAdmin = mockResponse()
+    await putRole({ name: 'admin' }, toLowerAdmin, 'legacy-x')
+    expect([toLowerAdmin.statusCode, refusalCode(toLowerAdmin)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    expect(db.nameOf('legacy-x')).toBe('Admin')
+
+    const ownerRename = mockResponse()
+    await putRole({ name: '操作人员' }, ownerRename, 'stock-prep_frontline')
+    expect(ownerRename.statusCode).toBe(200)
+    expect(db.nameOf('stock-prep_frontline')).toBe('操作人员')
+
+    const splitOwner = mockResponse()
+    await putRole({ name: '审批与提交' }, splitOwner, 'approvals_operator')
+    expect(splitOwner.statusCode).toBe(200)
+    expect(db.nameOf('approvals_operator')).toBe('审批与提交')
+
+    const notOwner = mockResponse()
+    await putRole({ name: '审批与提交' }, notOwner, 'legacy-y')
+    expect([notOwner.statusCode, refusalCode(notOwner)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    expect(db.nameOf('legacy-y')).toBe('操作人员')
+  })
+})

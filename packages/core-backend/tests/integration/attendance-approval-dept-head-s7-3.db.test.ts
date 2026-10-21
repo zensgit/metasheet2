@@ -112,6 +112,8 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
   const createdFlowIds: string[] = []
   const createdInstanceIds: string[] = []
   const createdRequestIds: string[] = []
+  const seededDefaultRuleIds: string[] = []
+  const seededOrgMemberships: Array<[string, string]> = []
 
   let adminToken = ''
   let headToken = ''
@@ -232,12 +234,40 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
     return id
   }
 
+  async function seedDefaultRule(orgId: string): Promise<void> {
+    const defaultRule = await (pool as Pool).query(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'S7-3 timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id as string))
+  }
+
+  async function seedOrgMembership(userId: string, orgId: string): Promise<void> {
+    await (pool as Pool).query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, orgId],
+    )
+    seededOrgMemberships.push([userId, orgId])
+  }
+
   async function createRequest(
     orgId: string,
     token: string,
     workDate: string,
     reason: string,
   ): Promise<HttpResponse> {
+    // Lock-11 §10 W-4 fixture delta: this helper always names `orgId` on the request (arm f) —
+    // the SUBJECT (whoever the token belongs to) must be an active member of THAT org. This
+    // file drives one requester across many orgs (org anchoring is a directory-lookup property,
+    // never a user_orgs membership property), so grant membership on demand per org used,
+    // idempotently (DO UPDATE, not DO NOTHING — never leaves a stale inactive row).
+    await seedOrgMembership(requester, orgId)
+    await seedDefaultRule(orgId)
     return requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(token),
@@ -470,6 +500,10 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
           await pool.query(`DELETE FROM directory_departments WHERE integration_id = $1`, [integrationId]).catch(() => undefined)
           await pool.query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId]).catch(() => undefined)
         }
+        await pool.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
+        for (const [userId, orgId] of seededOrgMemberships) {
+          await pool.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [userId, orgId]).catch(() => undefined)
+        }
         await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
         await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
       } finally {
@@ -670,6 +704,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
     const multiUser = `s7-3-unlinked-multi-user-${runSuffix}`
     await seedUser(multiUser)
     userIds.push(multiUser)
+    await seedOrgMembership(multiUser, orgMulti)
     await (pool as Pool).query(
       `INSERT INTO user_permissions (user_id, permission_code)
        VALUES ($1, 'attendance:write'), ($1, 'attendance:admin')
@@ -703,6 +738,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
       [orgMulti],
     )
 
+    await seedDefaultRule(orgMulti)
     const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(multiToken),
@@ -746,6 +782,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
   it('FREEZE: 2-step flow keeps step-2 assignee after directory dept-head mutation', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
+    await seedOrgMembership(headHome, orgFreeze)
     await seedFlow(
       orgFreeze,
       'time_correction',
@@ -812,6 +849,9 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
     setFlag(true)
     process.env.RBAC_BYPASS = 'false'
     try {
+      await seedOrgMembership(headHome, orgAuthz)
+      await seedOrgMembership(otherApprover, orgAuthz)
+      await seedOrgMembership(adminActor, orgAuthz)
       await seedFlow(orgAuthz, 'time_correction', [{ kind: 'dept_head' }], `s7-3-authz-${runSuffix}`)
       const authzInt = await seedIntegration(orgAuthz, `s7-3-authz-int-${runSuffix}`, `corp-authz-${runSuffix}`)
       const authzHeadExternal = `ext-head-authz-${runSuffix}`
@@ -930,6 +970,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
     process.env.RBAC_BYPASS = 'true'
     setFlag(true)
     const orgAdv = `s7-3-adv-${runSuffix}`
+    await seedOrgMembership(headHome, orgAdv)
     // Directory for this org so create freezes dept_head successfully under flag ON.
     const advInt = await seedIntegration(orgAdv, `s7-3-adv-int-${runSuffix}`, `corp-adv-${runSuffix}`)
     const advHeadExternal = `ext-head-adv-${runSuffix}`
@@ -1107,6 +1148,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
   it('MIXED: direct_manager + dept_head freezes both and assigns step 0 from manager', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
+    await seedOrgMembership(managerHome, orgHome)
     await seedFlow(
       orgHome,
       'time_correction',

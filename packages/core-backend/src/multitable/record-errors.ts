@@ -6,6 +6,15 @@ export class MultitableRecordNotFoundError extends Error {
   code = 'NOT_FOUND'
 }
 
+export class MultitableRecordVersionConflictError extends Error {
+  code = 'VERSION_CONFLICT'
+
+  constructor() {
+    super('Record version conflict')
+    this.name = 'MultitableRecordVersionConflictError'
+  }
+}
+
 /**
  * Thrown by the plugin-SDK record API (records.ts) when a caller tries to edit or delete a record that
  * is locked. The plugin path carries no per-record actor identity, so a locked record is hard read-only

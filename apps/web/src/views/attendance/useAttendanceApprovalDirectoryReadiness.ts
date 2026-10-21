@@ -18,6 +18,7 @@ export interface AttendanceDirectoryReadiness {
 }
 
 interface UseAttendanceApprovalDirectoryReadinessOptions {
+  isSessionCurrent?: () => boolean
   apiFetch?: ApiFetchFn
   endpoint?: string
 }
@@ -31,6 +32,7 @@ export function resolveAttendanceReadinessOrgId(orgId: string | null | undefined
 }
 
 export function useAttendanceApprovalDirectoryReadiness({
+  isSessionCurrent = () => true,
   apiFetch = defaultApiFetch,
   endpoint = DEFAULT_ENDPOINT,
 }: UseAttendanceApprovalDirectoryReadinessOptions = {}) {
@@ -49,6 +51,7 @@ export function useAttendanceApprovalDirectoryReadiness({
   }
 
   async function loadReadiness(orgId: string | null | undefined): Promise<AttendanceDirectoryReadiness | null> {
+    if (!isSessionCurrent()) return null
     const normalized = resolveAttendanceReadinessOrgId(orgId)
     const seq = ++requestSeq
     lastOrgId.value = normalized
@@ -61,7 +64,7 @@ export function useAttendanceApprovalDirectoryReadiness({
       const params = new URLSearchParams({ orgId: normalized })
       const response = await apiFetch(`${endpoint}?${params.toString()}`)
       // Stale-response guard: a later loadReadiness (different org or re-entry) wins.
-      if (seq !== requestSeq || lastOrgId.value !== normalized) {
+      if (seq !== requestSeq || lastOrgId.value !== normalized || !isSessionCurrent()) {
         return null
       }
       if (!response.ok) {
@@ -72,7 +75,7 @@ export function useAttendanceApprovalDirectoryReadiness({
       const body = await response.json().catch(() => null) as
         | { ok?: boolean; data?: Partial<AttendanceDirectoryReadiness> }
         | null
-      if (seq !== requestSeq || lastOrgId.value !== normalized) {
+      if (seq !== requestSeq || lastOrgId.value !== normalized || !isSessionCurrent()) {
         return null
       }
       const data = body?.ok && body.data ? body.data : null
@@ -94,14 +97,14 @@ export function useAttendanceApprovalDirectoryReadiness({
         maxManagerChainLevels: data.maxManagerChainLevels,
       }
     } catch (err) {
-      if (seq !== requestSeq || lastOrgId.value !== normalized) {
+      if (seq !== requestSeq || lastOrgId.value !== normalized || !isSessionCurrent()) {
         return null
       }
       resetToUnknown()
       errorMessage.value = err instanceof Error ? err.message : 'directory-readiness failed'
       return null
     } finally {
-      if (seq === requestSeq) {
+      if (seq === requestSeq && isSessionCurrent()) {
         loading.value = false
       }
     }

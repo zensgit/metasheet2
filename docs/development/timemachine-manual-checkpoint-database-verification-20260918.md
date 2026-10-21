@@ -1,0 +1,1543 @@
+# Manual Archive Checkpoint Database Verification
+
+Status: Draft/HOLD #5849; runtime caller implemented; no enablement or deployment.
+
+## Current Evidence Matrix (2026-09-19)
+
+Checkpoint: `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e`.
+Remote main observed: `bb77ca5f2ce3c2825265ec8877861d367d017ead`.
+The sections below are chronological, SHA-scoped evidence. Their original
+limitations must not be read as the latest implementation status or erased.
+
+| Requirement | Evidence and current boundary |
+| --- | --- |
+| Server-owned capture scope and policy | Actual HTTP registrar and canonical authorization/database: anonymous 401, injected storage path 400, zero generation side effects; synthetic authentication, not tenant login |
+| Complete immutable capture and retry | HTTP capture/status/catalog, closed recoverable result, same-request retry with exactly one generation; see HTTP Attachment Capture Acceptance |
+| Attachment source independence | Completed generation returns exact archived bytes while an owned source file is absent; a fresh capture fails incomplete without publishing objects |
+| Existing scalar restore loop | Production component/client at 1440/390 through HTTP, confirmed scalar restore, one request and independent DB/history readback; see Source Independence And Browser Regression |
+| Attachment restore boundary | Not authorized or implemented as a write; real HTTP preview returns unsupported_attachments with no token for differing attachment fields; scalar-only selection remains supported |
+| Diagnostic regression | Reader/reconstructor/preview 44/44; client/modal 154/154; HTTP enumeration-removal mutation RED, restored full isolated runner GREEN |
+| Source and fixture containment | Task-owned synthetic storage/PostgreSQL only; source file and DB fixture values restored in finally; owned database/connections/cluster cleaned |
+| Latest remote acceptance | Still pending at this observation; no failure reported, but Node18/20 and two Web gates remain in progress; not a terminal-green claim |
+| Independent review | Bounded Terra reader review produced no terminal verdict; no independent approval claimed |
+| Operational acceptance | No full tenant login/UAT, customer storage, flag enablement or deployment; whole hard-deleted table resurrection excluded |
+
+Commands and mutation logs remain in their respective sections. A newer CI
+result must bind its own exact head; this table is not a substitute for that gate.
+
+Terminal update: `2afb1cfaca48734aef82fb0cde8ec3bfa659ee9e` now has
+37 SUCCESS, one intentional Strict E2E SKIPPED, zero failure and zero pending.
+Both Node18 and Node20, multitable-web-guard and web-tests succeeded. This
+supersedes only that checkpoint's pending observation above. The subsequent
+report-only commits require their own published-head checks and do not alter the
+tested production/test tree. PR remains Draft/HOLD; no merge or enablement.
+The later bounded Luna diagnostic review was closed while running without a
+terminal verdict; it is not independent approval.
+
+## Latest Full Local Regression
+
+Latest full local regression, 2026-09-19: clean
+`14a6e1d9ca1777d6f54029be1075a0387e06d287` ran
+`TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node scripts/ops/run-recovery-manual-checkpoint.mjs --browser`
+with exit 0. Both 1440/390 production-component/client HTTP capture/reload/catalog/
+preview/confirmed scalar restore cases passed with independent DB/history readback.
+The same run includes the new whole/record/field attachment refusal diagnostic,
+scalar-only selection positive, source-loss independence, real local attachment
+capture/publication/reader, migration drift and nonce/pin/refusal cases. Neighbor
+real-DB suites passed 59/59 and 127/127; migration replay reported 31 migration
+fingerprints and 963 catalog objects. Browser/Vite/cache cleanup passed; owned
+database/connections were zero and the synthetic cluster was stopped/removed.
+This is a fresh run after the diagnostic/facade repair, not reused browser evidence.
+It remains synthetic component-to-HTTP acceptance, not full tenant login/UAT or
+attachment restore-write acceptance. Remote CI is separate.
+
+## Historical Database Extension Baseline
+
+Parent: `b843d37cc21e665f7f0686a4d21b0cc14fc64105`.
+Main inspected: `89f1ecdee2c3b70205a318074824c834bc6a5c7e`.
+Existing carrier: Draft/HOLD #5849. Its earlier remote CI is not evidence for
+this database extension until this candidate is published and checked.
+
+## Bounded Change
+
+- New forward migration only. Previously deployed migrations are unchanged.
+- Preserve bootstrap genesis and its immutable marker. Repeated captures use
+  nine fresh `section_checkpoint` operations, `checkpoint_snapshot` revision
+  actions, and the existing `archive_snapshot` parent kind.
+- Reuse generation reservations, owner/fence and source-vector binding. Do not
+  introduce a second marker ledger or admit ordinary events as full snapshots.
+- Require exact row-count/hash payloads, uniform member kinds, a sealed earlier
+  genesis, and parent/member reservation identity binding.
+- Dedicated internal checkpoint helper uses v2 identity hashing and private
+  allocation proofs. It rejects unavailable/expired ownership, incomplete
+  reservations, partial seals and changed-content retries.
+- Migration replay checks canonical old/new function bodies, trigger wiring and
+  CHECK definitions. PostgreSQL canonicalizes expected CHECK expressions rather
+  than lowercasing quoted literals. Empty rollback restores old definitions;
+  rollback with any checkpoint authority rows is refused.
+
+The migration carries explicit original and replacement function definitions
+so rollback does not synthesize or rewrite a live function body. Most of its
+size is the unchanged bootstrap, restore and claim-anchor authority branches.
+
+## Local Evidence
+
+Commands, from the isolated worktree:
+
+```sh
+TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
+NODE_ENV=test pnpm --filter @metasheet/core-backend exec tsx scripts/verify-recovery-manual-source.mts
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/multitable-recovery-archive-section-checkpoint.test.ts tests/unit/multitable-recovery-archive-source-vector.test.ts tests/unit/multitable-recovery-archive-seals.test.ts tests/unit/multitable-recovery-archive-section-bootstrap.test.ts
+pnpm --filter @metasheet/core-backend exec tsc -p scripts/tsconfig.recovery-archive-acceptance.json --noEmit
+pnpm --filter @metasheet/core-backend exec eslint src/multitable/recovery-archive-section-checkpoint.ts src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints.ts
+```
+
+Checkpoint acceptance used a task-owned PostgreSQL 15 cluster and unique
+synthetic database. Before implementation, full fresh migration and bootstrap
+passed; the first checkpoint reservation failed with SQLSTATE 23514 and
+`recovery_archive_snapshot_reservation_shape_invalid`.
+
+After implementation:
+
+- Full fresh stream and second migrator no-op replay pass.
+- Direct migration `up/down/down/up/up` passes independently of the ledger.
+- Same-name CHECK(true), a RETURN NEW guard body, and a disabled guard trigger
+  each cause direct replay to refuse schema drift. All mutations roll back.
+- Independent migration review identified missing drift verification of the
+  pre-existing bootstrap-marker authority. The follow-up pins both original
+  marker function bodies and row/truncate trigger wiring without replacing
+  them. Marker RETURN NEW and disabled-row-trigger mutations now fail replay;
+  the full acceptance driver passes after restoration.
+- Bootstrap succeeds; two subsequent checkpoint generations succeed. Repeated
+  identical finalization is read-only and exact; different content is refused.
+- Missing genesis, ordinary seal forgery, unexpected payload keys and a section
+  revision without its reservation are refused by their specific DB guards.
+- Original bootstrap marker remains byte-equivalent. Exactly 18 checkpoint
+  operations remain after two accepted generations; rejected transactions leave
+  none behind.
+- Populated migration down refuses with `RECOVERY_ARCHIVE_CHECKPOINT_DOWN_IN_USE`.
+- Four focused/neighbor unit files: 60/60 pass. Acceptance typecheck passes;
+  source/migration ESLint has no errors or warnings.
+- The neighboring full-source driver also passes on the new full migration
+  stream: seven sections, attachment inventory, scope/liveness negatives and
+  two-client source-snapshot visibility.
+
+Discriminating DB mutation: temporarily remove the dedicated seal-kind guard
+inside a transaction. A reserved full-section event can then be sealed as
+`ordinary`, proving the guard is load-bearing. Rollback restores the complete
+canonical function definition, verified by exact comparison.
+
+The acceptance driver closes clients/pools, drops its database, and asserts
+database/connection residue zero. Cluster shutdown is a separate final cleanup
+step, not inferred from a passing test. Final independent database/backend
+prefix counts were both zero; the owned PG15 cluster was stopped and its data
+directory removed after checking PG_VERSION and absence of a postmaster PID.
+
+## Review And Remaining Gates
+
+Terra implemented the dedicated helper; coordinator corrected the parent-kind
+interface before integration and added expiry checks. Luna's read-only helper
+review found no concrete P1/P2. This verdict does not cover the migration.
+The first Sol migration attempt timed out without an artifact or verdict and
+was closed; coordinator implemented the forward migration directly.
+Terra migration review found the bootstrap-marker dependency drift gap above.
+After its fix and successful full DB rerun, the narrow closure review found no
+new P1/P2. All reviewer sessions are closed. This is not a whole-product final
+review or remote CI result.
+
+Remaining: remote exact-head proof of the new required-CI acceptance step;
+lease takeover and permission-revocation tests;
+bounded canonical capture coordinator; permission/provider revalidation;
+authenticated object receipts; publication and restore-loop acceptance; UI.
+Identity and DB sealing alone do not prove captured bytes correspond to the
+current source state. No manual-capture endpoint or button is claimed here.
+
+## CI Compatibility Follow-Up
+
+Remote head `20c0a121eef30df1c41b439c2883a64a3ae8435b` failed the migration
+replay job and two historical real-DB suites in Node20. The new checkpoint
+amendment was missing from the causal replay roster; historical suites also
+reset older function definitions without first unwinding the newer amendment.
+Fresh migration succeeded; the full catalog fingerprint correctly detected
+the mismatch. No production migration or fingerprint assertion was weakened.
+
+The test-only correction appends the transaction-wrapped checkpoint migration
+to replay, and temporarily unwinds/restores it around historical suite setup
+and cleanup. The wiring census now requires all 28 migrations. The checkpoint
+acceptance driver runs the actual replay verifier and both historical suites
+before its own protocol assertions.
+
+Local restored verification: replay 28 migrations / 931 catalog objects with
+identical fingerprint; section causality 40/40; claim anchor 19/19; checkpoint
+acceptance passed; wiring contract 36/36; acceptance TypeScript passed.
+Removing the new replay entry reproduced `catalog_changed count=12`; restoring
+it returned the full driver to green. The wiring contract independently rejects
+the same removal. Luna's narrow static review found no concrete P1/P2; it ran
+no tests and is not a whole-product verdict. Remote CI on the follow-up commit
+must be checked separately; local success does not supersede the failed 20c run.
+
+## Concurrent Retry And Expiry Follow-Up
+
+The acceptance driver now uses two real PostgreSQL clients for the same
+persisted checkpoint plan. The first consumes all nine members inside an open
+transaction. The second is observed through `pg_stat_activity` and
+`pg_blocking_pids`: it must wait on the generation `SELECT ... FOR UPDATE`,
+not merely block later on a duplicate INSERT. After the first commits, the
+second returns the exact same plan; exactly nine revision rows exist.
+
+Mutation: remove `FOR UPDATE` only from the second client's generation query.
+The new barrier fails because the observed blocking query is an INSERT into
+section revisions. Restore the query and the complete driver passes again.
+Production helper and migration bytes are unchanged by this test-only slice.
+
+Three further negatives prove lease expiration, archive expiration, and a
+mismatched owner fence return `RECOVERY_ARCHIVE_CHECKPOINT_GENERATION_UNAVAILABLE`
+with zero checkpoint revisions. Short synthetic lifetimes are assigned at
+INSERT and allowed to elapse; no ownership trigger is disabled. An initial
+attempt to shorten an existing active lease was rejected by the existing
+catalog guard and was replaced with this legitimate expiry fixture.
+
+These tests do not prove actual owner takeover, user permission revocation,
+source coherence under concurrent edits, process restart, or runtime capture.
+The concurrent driver passed locally; its new required-CI wiring below still
+needs an exact-head remote run before it counts as remote evidence.
+
+## Portable Required-CI Runner
+
+`scripts/ops/run-recovery-manual-checkpoint.mjs` creates an isolated cluster in
+the platform temporary directory, with a unique port and fixed synthetic DB
+owner. It accepts only the PostgreSQL binaries directory, not an existing DB
+URL/data directory. The driver validates loopback, nonstandard port, role,
+temporary path ownership, and the server's actual data directory before
+creating its unique database. It continues to sanitize migration environments.
+The runner stops the owned cluster and removes its directory after success or
+failure; ambiguous server status refuses removal.
+
+`plugin-tests.yml` invokes this runner after PostgreSQL setup, in both matrix
+versions, without conditional skipping or continue-on-error. Existing workflow
+content is byte-equivalent after removing the one added step. The static wiring
+contract is 37/37 and rejects removal/conditional disabling of this invocation.
+Only `evidenceFiles.pluginTestsWorkflow` changed in the official provenance
+recomputation. Old pin failed; refreshed pin passed with differenceCount=0.
+
+Local PostgreSQL 15 portable run passed the full driver and automatic cleanup;
+acceptance TypeScript passed. The first portable startup exposed macOS temp-path
+symlink canonicalization and missing LC_ALL; both are corrected. Its stopped
+failed-start cluster was removed separately after checking PG_VERSION/no PID.
+Sealed-export S5 was rerun with the already-installed mssql package supplied via
+temporary NODE_PATH because this worktree lacks that package's direct symlink;
+no dependency installation or package changes were made.
+
+Coordinator refute-first found no blocking issue in this bounded test-runner
+delta. A Luna read-only review did not return a terminal verdict within its
+bounded window and was closed; no external approval is claimed for this slice.
+
+The independent source-reader driver still uses its older local-only launch
+contract. This slice wires checkpoint acceptance, not that separate driver or
+the unfinished runtime manual-capture coordinator.
+
+No automatic scheduling, retention policy, cleanup, customer storage, flags,
+dispatch, staging, deployment, production, or hard-deleted-table resurrection.
+
+## Remote Proof And Interrupted-Upload Regression
+
+Published head `9072e1192b6f8d825413cf0815e7db255b22bef5` completed with
+34 successful checks and one expected skip. Plugin run `35285210558`, Node18
+job `105415896318` and Node20 job `105415896343`, each logs the new isolated
+checkpoint step: 28 migrations / 931 catalog objects with equal fingerprint,
+59 historical tests, checkpoint/concurrent retry/expiry acceptance, and zero
+database/connection residue followed by owned-cluster stop/removal.
+This closes the remote wiring gate for that head, not the manual runtime flow.
+
+A subsequent unit regression models one uploaded ciphertext followed by an
+interruption and another invocation using changed source bytes. The same nonce
+registry state refuses the retry before any new sealing/upload; the previously
+uploaded ciphertext remains unchanged. This is an in-memory registry model,
+not a process-restart or durable-storage acceptance. Crypto 58/58 and snapshot
+planner 11/11 passed. Temporarily swallowing the production nonce reservation
+error makes the new test fail; restoration returns 69/69, with zero production
+diff. The interrupted-capture coordinator/original-byte persistence remains OPEN.
+
+## Prepared Byte Store Local Acceptance
+
+Additive migration `zzzz20260918130000` and internal
+`recovery-archive-prepared-capture.ts` implement immutable generation-owned byte
+persistence. This is a local successor to `1a45a0798b11a2c173655fe5c22fd8c638da1d38`,
+not part of the remote 9072 proof above. The existing required owned-cluster
+driver now exercises the byte store; no workflow or provenance pin was changed.
+
+Fresh/replay and causal down/up now cover 29 migrations and 946 catalog objects,
+fingerprint `f97da837b6a6c10583aeb22c84f64aa40573cc32a5b52ad5eaf6cedb2e22d76e`.
+The claim-anchor fixture explicitly includes the new FK child in owned-state
+cleanup; no CASCADE or assertion weakening was used. Both historical suites
+remain 59/59. The static migration census includes the new entry and a removal
+negative, with wiring 37/37.
+
+Synthetic AES-GCM bytes commit once, then a separate PostgreSQL connection reads
+the identical payload. Same-byte retry succeeds; changed bytes conflict. Reads
+without an explicit transaction, mismatched fence, expired lease and expired
+generation refuse. UPDATE/DELETE/TRUNCATE and nonempty down refuse. Direct empty
+up/down/down/up/up succeeds. NOT NULL, CHECK(true), disabled-trigger and replaced
+guard-function mutations make replay fail and roll back to canonical state.
+
+Discriminating production mutation: removing the stored-byte equality check makes
+the changed-payload test fail with a missing expected conflict; the driver exits
+nonzero while still dropping the owned database and stopping/removing its cluster.
+The guard was restored before final acceptance. TypeScript acceptance compilation
+and scoped source ESLint pass. No external review verdict is claimed.
+
+This proves cross-connection durable byte storage, not an end-to-end process
+restart, real wrapped-key envelope, object-store resume, permission recheck,
+request binding or archive publication. Those coordinator obligations remain OPEN.
+Only a disposable synthetic database was used; no customer storage or flags.
+
+## Prepared Envelope Continuation
+
+Successor to local `88a8add2786ab0f465b08562a51e383bba23fa0c` connects existing
+reserve-then-seal to immutable persistence before any upload. An existing
+envelope bypasses capture, custody and encryption. Closed-envelope negatives
+cover extra envelope/binding/plaintext keys, missing/reordered sections, invalid
+base64, duplicate nonces, short tags and empty wrapped material. Crypto and
+snapshot-planner focused suites pass 71/71. The new tests live in the already
+required crypto whole-file suite; no selector change was necessary.
+
+The unit interruption test uses an in-memory query model and the existing
+synthetic custody adapter; it is not real custody assurance. It proves upload
+starts only after persistence, retry performs no capture/reservation, callback
+mutation leaves the retained payload unchanged, mismatched sheet binding refuses,
+and injected authority revocation stops subsequent uploads. Forcing the resume
+branch to recapture produces `MUST_NOT_RECAPTURE`; restoration returns 71/71.
+
+The owned PostgreSQL driver independently stores a presealed ten-section fixture,
+interrupts a synthetic upload callback, closes/replaces the DB connection and
+resumes all ten original sections without invoking capture. It preserves the
+exact envelope and refuses an injected revoked-authority callback. The fixture's
+wrapped handle is synthetic, not a KMS/local-custody proof; no object provider is
+contacted. Fresh/replay, 29-migration catalog fingerprint and 59 legacy tests
+remain green; database/connections and owned cluster are cleaned.
+
+Actual actor/request binding, source consistency, runtime permission integration,
+object PUT/HEAD receipts, catalog publication and the manual UI remain OPEN.
+
+## Legacy Migration Layer CI Repair
+
+Remote `79798b1b4ee2db65125299ba913ed7d3d1155153` is NOT all-green: Node18
+passed, but Node20 job `105468004548` in run `35302546154` failed in the broad
+multitable real-DB step (six suites). The first concrete failure was PostgreSQL
+0A000: the new prepared-capture FK prevented old catalog fixture TRUNCATE.
+Follow-on transaction failures were not classified as flakes and no rerun was used.
+
+Six historical migration suites now use a test-only layer helper. It audits and
+rolls back empty prepared storage and checkpoint amendments in one transaction,
+runs the original suite, then restores and audits both layers before DB closure.
+Production down guards remain intact: populated storage cannot be removed.
+No foreign key, immutable trigger, production constraint or test assertion was
+weakened, and no CASCADE was introduced. Legal-hold migration tests also need
+the old checkpoint parent function definition during their exact-schema checks.
+
+Discriminating local progression: unwinding only prepared storage made all 127
+historical assertions pass but the following checkpoint audit failed with
+SCHEMA_DRIFT. Unwinding/restoring both layers for all six suites closes that
+gap. The owned-cluster driver now explicitly runs those six suites (127/127),
+the original two suites (59/59), and repeats the full 29-migration replay after
+the historical tests. Current checkpoint, prepared-byte and continuation
+acceptance follows that replay; the owned database/connections and cluster are
+removed on success or failure. This is fixture/migration-order repair, not a new
+manual-capture capability or permission expansion.
+
+## Canonical Manual Continuation Authority
+
+Local successor to `2132c1b63662b1aaa6973e430f8906bdad45f5bd` extracts the
+existing recovery worker scope evaluator without changing worker job-ID checks.
+The internal `createRecoveryArchiveManualContinuation` factory binds that
+evaluator to the existing `hasFullTableReadAccess` policy and supplies the
+prepared-upload authority callback itself. It registers no HTTP route.
+
+Focused worker/crypto suites pass 73/73 using query-model fixtures, not live
+permission/UAT proof. A resumed ten-section upload reads the database actor
+eleven times (entry plus each upload); initial and mid-upload deactivation,
+scope drift, mismatched crypto scope and lookup errors refuse. A separate
+negative proves management authority cannot bypass a denied full-read result.
+Neutralizing the manual continuation's denied-authority guard makes the inactive
+actor negative fail (promise resolves); restoration returns green. Existing
+worker apply/plan/stabilization neighbors retain their previous outcomes.
+Acceptance TypeScript compilation, scoped module lint and diff-check pass.
+
+Outstanding: durable request/actor admission, real-DB permission-race acceptance,
+source locking/revalidation, provider receipt persistence and catalog publication.
+No archive command, flag, deployment, customer data or external storage was used.
+
+### Real Database Continuation Authority Follow-Up
+
+On local `99abfd2de0482f5a10c28a69582e7570ff58bbca` plus this acceptance
+addition, the owned-cluster driver invokes the canonical factory with a real
+synthetic active admin user. All ten presealed sections upload through a stub.
+A separate PostgreSQL connection then deactivates that user immediately after
+the first upload: the second section and subsequent retry both refuse with
+`RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE`. A mismatched base binding also
+refuses before upload. This proves fresh database authority between sections;
+it does not prove cancellation of an already in-flight provider operation.
+
+Fresh migration/replay, the 29-migration catalog fingerprint, 59 legacy anchor
+tests, 127 historical migration tests, and checkpoint/prepared acceptance all
+pass. Owned database/connections are zero and the synthetic cluster is stopped
+and removed. The envelope is presealed synthetic input and uploads are callbacks,
+not actual KMS/object-storage or process-restart acceptance. Durable request
+admission, consistent source capture, provider receipts, catalog publication and
+the command/UI remain OPEN. No flags or deployment changed.
+
+## Durable Request Binding Acceptance
+
+Local successor to `7ce6696fd00e3d5d0ac45fac364e127a1c76e352` adds the
+manual request migration, internal lookup/bind helper, and owned-cluster tests.
+The synthetic driver proves new-connection lookup, exact retry, actor isolation,
+scope/generation conflict, explicit transaction enforcement, and a two-connection
+retry waiting on the first transaction before returning the same generation with
+one persisted row. Row UPDATE/DELETE/TRUNCATE and nonempty migration down refuse.
+Column-nullability, disabled-trigger, function-body and deferrable-unique drift
+are rejected on replay; empty down/down/up/up succeeds.
+
+Discrimination: temporarily removing the helper's hash comparison lets a tampered
+stored hash resolve instead of rejecting. The real-DB assertion fails with
+`Missing expected rejection`; restoring the comparison makes the full driver pass.
+Both runs remove the owned DB/connections and stop/remove the synthetic cluster.
+
+Full fresh migration and replay pass. The exact Time Machine replay census is now
+30 migrations / 963 catalog objects, fingerprint
+`47d05a62b2afabf386aacbedc725ff7ed92dfcde7064b580fd17851093d150e4`.
+Existing 59 anchor/section tests and 127 historical migration tests pass, followed
+by a second complete catalog replay and all checkpoint/prepared/authority tests.
+Historical fixture layers explicitly unwind/restore the empty request layer;
+production retention guards are not weakened. Static wiring 37/37, acceptance
+TypeScript and scoped source ESLint pass. No workflow selector is removed.
+
+This is internal durable identity, not completed request admission: generation
+allocation and canonical authority must still be composed in one transaction.
+No command/UI, real object provider, customer data, flag or deployment is exercised.
+
+## Atomic Reservation Admission Acceptance
+
+Local successor to `de78798590800f48c1998879aa7f56eaacb4e19b` invokes the
+canonical runtime admission factory on the synthetic database. First capture
+persists nine bootstrap identities and one snapshot identity; a sheet with genesis
+uses nine checkpoint identities. Exact retry returns the original generation.
+A second connection waits behind the first admission transaction, then returns
+that generation with `replayed=true`; the catalog grows by exactly one row.
+
+Cross-base and revoked-user calls refuse, including revoked replay. A wrong key
+row version and a missing active trust checkpoint refuse without generation growth.
+Fault injection at the request-binding INSERT rolls back the already-created
+generation and reservations, and the request remains absent. Neutralizing the
+lookup-first replay return makes the exact-retry positive fail with
+`RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT`; restoration passes the complete driver.
+
+The driver retains fresh/replay, the 30-migration catalog census, 59+127 historical
+real-DB tests and all earlier checkpoint/prepared/request/authority acceptance.
+Unit neighbors pass 73/73; acceptance TypeScript, scoped new-module ESLint and
+full sealed-export S5 pass. Tests use only the owned synthetic cluster; cleanup
+requires database/connections zero and cluster removal. This evidence proves
+reservation admission only, not consistent source sealing, archive publication,
+HTTP/UI readiness or use of customer storage.
+
+## In-Fence Source Snapshot Acceptance
+
+Local successor to `2c1ace18f57ed384b49b85cac9333ddc73e98b55` adds source
+snapshot handles to fresh admission, while exact replay returns no source handle.
+The real-DB driver proves empty and nonempty snapshots, detached-copy mutation
+isolation, and unchanged-source recheck. A separate connection adds schema/record
+data after the empty capture and later changes an existing record/version: each
+old handle refuses with `RECOVERY_ARCHIVE_MANUAL_SOURCE_CHANGED` and retains its
+original data. A new request can capture the later state; the old request cannot.
+User deactivation, fabricated handles and elapsed generation lease also refuse.
+
+Removing the digest comparison causes the schema/record drift negative to fail
+with `Missing expected rejection`; after restoration the complete owned-cluster
+driver passes. Existing 30-migration replay, 59+127 real-DB neighbors and all prior
+acceptance remain included. Focused source/worker/crypto tests pass 115/115;
+acceptance TypeScript, scoped module ESLint, static wiring and S5 are also checked.
+Owned database/connections and temporary cluster are removed after either result.
+
+These are in-process source and recheck proofs, not a crash-resumable plaintext
+store, verified attachment bytes, sealed source revisions or complete publication.
+No HTTP route, flag, customer storage or deployment was introduced.
+
+## Source-Bound Continuation Acceptance
+
+Local successor to `4f68eb0fdb73255a5033daac1b02ee5286c2bd0a` binds the
+first encryption attempt to the original admission source. The owned PostgreSQL
+driver checks missing handles, different-generation handles, actor/anchor mismatch,
+single consumption, and altered relational plaintext refusal before key custody.
+The positive path uses real AES-GCM with synthetic custody and nonce-reservation
+ports, interrupts the first upload, then resumes all ten authenticated sections
+without a source handle, capture call, second DEK or second nonce reservation.
+Decrypted relational sections are compared to the original snapshot's canonical
+bytes. The other three fixture sections are synthetic, not attachment/permission
+or coverage proofs; the upload callback is not an object-store receipt.
+
+Mutation: removing plaintext equality admitted altered records and reached the
+synthetic upload interruption instead of `RECOVERY_ARCHIVE_MANUAL_SOURCE_PLAN_MISMATCH`.
+The negative failed precisely; the original guard was restored. Both mutation and
+normal runs remove their owned database/connections and temporary PostgreSQL cluster.
+
+After restoration, the full isolated driver passes, including 30-migration replay
+and existing 59+127 real-DB neighbors. Focused source/worker/crypto is 115/115;
+acceptance TypeScript, scoped source ESLint, static wiring 37/37, full sealed-export
+S5 and diff-check pass. Final driver log:
+`/private/tmp/tm-manual-source-continuation-final.log` (local evidence only).
+
+The remote predecessor was verified at 35 SUCCESS / 1 intentional SKIPPED. During
+this local batch main advanced from `89f1ecdee2c3b70205a318074824c834bc6a5c7e`
+to `62aa4dc4cdf99ecad72f3acb2b34430d8524a3dc`, including shared route changes.
+This batch does not claim then-current-main equivalence, remote successor CI or
+complete manual archive readiness. Integration and publication gates remain separate.
+
+## Current-Main Replay
+
+True merge `140aa46d1043a4a470f88d1d5eb3a1a3b5abffbe` has ordered parents
+`8d47548c93d4583eafae6bdae63b5d3c5230f211` and then-current main
+`aebed089654f756a76b024a98e051f65e59a1969`; tree
+`76985019006378fe117f91bb7368cc1749d16280`. The merge is conflict-free,
+with no manual resolutions. The shared route delta relative to main contains only
+the manual archive imports/factories; main's record authorization-before-liveness
+change is preserved and its 33 behavior tests pass alongside 115 archive tests.
+
+Post-merge local evidence: 148/148 focused tests, complete isolated checkpoint DB
+driver including prior neighbors, acceptance TypeScript, static wiring 37/37 and
+full S5 pass. Logs are `/private/tmp/tm-manual-current-main-{unit,db,wiring,s5}.log`.
+Owned DB/connections and temporary cluster are removed. First-parent diff-check
+reports seven existing main documentation EOF blank lines; these unrelated files
+are not edited. The candidate-versus-main diff-check is the owned-change gate.
+This records local replay, not new remote CI, archive publication or deployment.
+
+## Manual Attachment Intent Acceptance
+
+Successor to `c8dbf4ad88466b3245161e0dcdedd566f21bd2a5` reuses the source-pin
+claim helper during admission. Synthetic PostgreSQL fixtures contain a live and a
+deleted attachment row. The exact catalog assertion requires both intents, the
+generation's owner/fence and exact database lease, mutable availability and null
+immutable-version/content-hash/content-size. Request replay leaves exactly two pins.
+Injecting a values-bearing error on the second pin produces only
+`RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED`; generation/request/first pin all roll
+back. A mutation filtering out deleted candidates fails the exact two-pin assertion.
+The filter is restored before final verification.
+
+This gate neither reads attachment bytes nor writes customer/local attachment files.
+It does not establish provider receipts, complete attachments_index, permission
+evidence or catalog publication. The tests use only a disposable owned database.
+
+Final verification includes conflict-free true merge
+`11290b272b9940f5bc0473c25902c4a916f1f4b6` (parents
+`9bc144d4c9bdb129cf7bbb2021bee010da55c493` and main
+`3c6c28958c2ce51334b8f02df13272ef0ae77889`). Full owned-cluster acceptance,
+30-migration replay and prior DB neighbors pass; cleanup reports zero connections
+and database, with the temporary cluster removed. Source-pin wiring/source/worker
+and new-main comment route tests pass 114/114. Acceptance TypeScript, scoped lint,
+static wiring 37/37 and full S5 pass. Local logs:
+`/private/tmp/tm-manual-attachment-{final,unit-final,wiring,s5}.log`.
+No new remote terminal CI result is implied by these local results.
+
+## Physically Purged Attachment Refusal
+
+The synthetic driver marks its deleted attachment's blob physically purged, then
+attempts a fresh manual request. Admission must return only
+`RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE`; generation count, durable request
+lookup and source-pin count prove zero partial admission. Existing live/deleted
+non-purged candidates remain the positive control. This is a catalog refusal test,
+not an assertion that unmarked attachment bytes are available or immutable.
+
+Read-only source audit found `StorageService.downloadByKey` has no versioned-source
+contract. The existing archive object-store validates immutable destination objects,
+but does not prove the legacy attachment source was immutable during copying.
+No customer path was read; no alternate source assurance was invented.
+
+Mutation bypassing the purged-marker guard produces `Missing expected rejection`
+for the exact unavailable code. Restored final acceptance passes on merge
+`18f73f5b3988da6391f9063249ac5595dfa1c747`, whose second parent is docs-only main
+`8b6aea8b725a1c7f4c9b0746851d51a59e7d1bb4`. Owned database/connections and cluster
+are removed on both results. Source/source-pin wiring/worker unit tests: 57/57;
+acceptance TypeScript, scoped lint, static wiring 37/37 and full S5 pass. Logs:
+`/private/tmp/tm-manual-purged-{final,mutation,unit,wiring,s5}.log`.
+
+## Server-Owned Nonce Reservation
+
+Local bounded delta from `21c5ac49ec8136a5db26ca4d8e43db0cbc52430a` replaces
+the caller's reservation callback with the manual continuation's transactional sink.
+The existing nonce registry remains authoritative. The synthetic driver proves:
+
+- The caller-owned callback is never invoked; exactly ten registry rows exist.
+- An independent connection inside the first upload callback sees all ten committed
+  rows. Interrupted upload resumes the original prepared sections without another
+  capture, DEK or reservation.
+- Pre-inserting the final section reservation makes capture fail with the existing
+  values-free `RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED`. The first nine inserts
+  roll back, the original conflict row remains, and no prepared envelope or upload
+  is produced. Existing crypto unit coverage supplies reserve-before-seal ordering;
+  this DB test does not independently instrument AES calls.
+- Restoring the caller-owned sink is a discriminating mutation: the exact callback
+  assertion fails (`10 !== 0`). Restoring the implementation returns the full driver
+  to green. The initial conflict test used an incorrect expected error-code spelling;
+  that test expectation was corrected to the existing crypto contract.
+
+Final owned-cluster acceptance passes, including the 30-migration replay and earlier
+DB neighbors. Database/connections are zero and the owned cluster is removed.
+Worker/crypto unit tests pass 73/73; acceptance TypeScript, production-file ESLint
+and static wiring 37/37 pass. Logs are local evidence only:
+`/private/tmp/tm-manual-nonce-{final,mutation,unit,s5}.log`.
+
+This checkpoint does not claim fresh remote CI or then-current-main equivalence.
+PR #5849's preceding head had one cloud schema-gate timeout; it is not classified
+as a flake. Source seals, immutable attachment copy, object receipts and catalog
+publication remain separate incomplete gates. No customer storage, flags or
+deployment are involved.
+
+## Custody-Interval Source Drift
+
+The follow-up synthetic regression changes a captured record from a second database
+connection inside `produceGenerationDek`, after the initial source checks but before
+nonce reservation. The server-owned sink must reject with
+`RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED`, leave zero nonce rows and no prepared
+envelope for that generation, and invoke no upload callback. This does not claim a
+final publication fence: source may still change after the reservation transaction.
+
+Mutation replacing the sink's transactional source recheck with its cached source
+entry produces `Missing expected rejection` in this new case. Both mutation and
+restored runs clean their owned database/connections and temporary cluster.
+The test-only wrapper forwards the complete custody input, including generation ID.
+Logs: `/private/tmp/tm-manual-custody-drift-{mutation,final}.log`.
+
+Preceding main integration `b49d82ec91d455319bd966cc1c77e4d8f5f4bdeb` has ordered
+parents `e43eb22869eaf5858b725f336380580c2ddc68bc` and
+`bb77ca5f2ce3c2825265ec8877861d367d017ead`. The merge had no conflict or manual
+resolution; official provenance comparison was zero differences. Full owned-PG,
+73 worker/crypto tests, static wiring 37/37, acceptance TypeScript and full S5 passed
+on that merged tree. Its main-relative whitespace check passed; two unrelated PLM
+docs inherited trailing blank lines from main and were not edited. Remote CI is
+separate evidence and is not implied by these local results.
+
+## Integrated No-Attachment Source Seals
+
+The manual nonce transaction now calls the existing bootstrap/checkpoint consumer
+after its fresh fenced source checks. The driver compares all nine persisted
+snapshot-member row counts and hashes to canonical captured rows, including empty
+attachment/audit sections. The first request proves bootstrap; a subsequent request
+proves repeat checkpoint and ten uploads. A final-section nonce conflict leaves no
+snapshot members, proving the preceding seals rolled back with nonce reservation.
+
+Mutation disabling both consumer calls fails the exact first nine-member comparison
+(empty result instead of nine canonical members). Restored full isolated-PG acceptance
+passes; database/connections are zero and the temporary cluster is removed. Logs:
+`/private/tmp/tm-manual-seals-{mutation,final,unit,wiring,s5}.log`.
+Acceptance TypeScript, scoped source ESLint, worker/crypto 73/73, wiring 37/37 and
+full S5 pass. No migration or workflow changes are part of this delta.
+
+The continuation currently refuses attachment candidates and accepts zero-row
+audit-only permission evidence. Derived coverage is still a synthetic placeholder in
+this test; these seals are not complete publication, retention/prune authority or a
+restore grant. Final publication checks and immutable attachment support remain open.
+
+## Real Source Coverage Integration
+
+The subsequent implementation supersedes the preceding seal-in-nonce ordering.
+It seals and reads the actual nine revisions, ten operation endpoints and nine
+snapshot memberships in a short fenced transaction. The existing canonical snapshot
+planner derives the encrypted coverage section from those rows, with canonical UTC
+timestamps and decimal sequence strings. It never trusts callback coverage bytes.
+Custody remains outside the transaction; the later nonce transaction repeats source
+and authority checks. Historical seals can remain after nonce failure, while nonce
+batch rollback, no prepared ciphertext and no upload remain mandatory. These seals
+do not publish an archive or authorize history pruning.
+
+The full synthetic driver supplies deliberately bogus callback coverage, then decrypts
+the server-created section after interruption/resume. It requires 28 entries with
+exact 9/10/9 kind counts and independently rehashes the database snapshot endpoint.
+The nonce-conflict test now requires the original historical seal set to remain and
+still proves no prepared ciphertext/upload. The earlier empty-seal expectation failed
+on the first run, as expected for this documented ordering change, and was updated.
+The initial TypeScript pass also caught query-row typing that was corrected before
+final verification.
+
+Mutation dropping one real coverage candidate must fail the decrypted count assertion;
+the complete candidate set is restored before final gates. Logs:
+`/private/tmp/tm-manual-coverage-{mutation,final}.log`. This is no-attachment internal
+acceptance, not a provider receipt, finalized catalog entry or restore grant.
+
+Final local gates: owned full-PG acceptance and cleanup pass; snapshot/coverage/worker
+unit neighbors 3 files, 66/66; acceptance TypeScript, scoped source ESLint,
+static wiring 37/37, full S5 and diff check pass. The mutation fails precisely
+`27 !== 28` in the decrypted coverage assertion, then restoration is green.
+No new remote CI result is claimed for this local follow-up.
+
+## Local Ciphertext Upload And Receipt Integration
+
+An internal factory using the canonical recovery authorizer composes the existing
+transaction-guarded PUT/HEAD compiler with the database uploaded-receipt helper.
+Acceptance resumes an already prepared ten-section envelope into an owned temporary
+filesystem provider. Each callback deliberately supplies different plaintext-like
+bytes; provider GET must return the original persisted ciphertext instead. Two complete
+resumes leave exactly ten `section` receipts, all `uploaded`, never `verified`.
+
+A separate connection deactivates the synthetic actor during provider HEAD. The
+post-IO authorization check must refuse and leave zero receipts for that generation.
+Mutation bypassing that check fails with one unauthorized receipt instead of zero;
+it is restored before final gates. Database and provider fixtures are disposable.
+The first development runs exposed a test transaction-adapter mismatch, a wrong
+receipt table name and a missing test import; these were corrected without changing
+the existing storage/receipt authorities.
+
+Logs: `/private/tmp/tm-manual-object-upload-{mutation,final}.log`. No manifest/root
+receipt, verified transition, final publication, local custody integration or customer
+storage acceptance is claimed by these section-upload tests.
+
+Final gates: complete owned-PG acceptance and cleanup pass; receipt-compiler/worker
+unit neighbors 2 files, 23/23; acceptance TypeScript, upload-module ESLint, wiring
+37/37, full S5 and diff check pass. The owning temporary provider directory is removed
+by the driver's final cleanup. All plaintext and storage paths are synthetic.
+
+## Manual Capture With Real Local Custody
+
+Follow-up acceptance is based on exact product head
+`47c2942bd0b6232719645b18ce1e749e5d8af585`. No production changes are necessary:
+the existing opaque local capability already satisfies the manual crypto path.
+
+The driver creates a real encrypted custody backup and retains it through the
+existing immutable custody store, outside its owned archive root. It registers the
+local key in the disposable catalog, manually captures with that capability, and
+uploads ten ciphertext sections through the real temporary filesystem provider.
+After locking the original custody session, a fresh session reads the saved backup,
+unlocks and unwraps the generation DEK, and authenticates/decrypts all ten stored
+prepared sections. Each resulting plaintext matches its authenticated SHA-256.
+Wrong secret, wrong generation and modified wrapped-DEK bytes refuse with the exact
+values-free local custody code. Locked-origin-session upload resume leaves exactly
+ten uploaded receipts and does not capture or encrypt again.
+
+This uses a fresh session, not a separate process or a separate-host manual restore.
+The existing custody-core tests independently include a separate-process primitive
+recovery positive; neither test substitutes for final catalog publication. Keys and
+owned sessions are scrubbed/locked in finally; the driver removes its DB, cluster
+and temporary storage. Logs: `/private/tmp/tm-manual-local-custody-{final,unit}.log`.
+Core/store neighbors pass 2 files, 29/29; acceptance TypeScript and diff check pass.
+
+## Authenticated Manifest In Durable Capture
+
+Implementation range starts at `5137894c1dd7eefb18c68d42e739b28d826befbc`;
+this section belongs to its manifest integration child commit. Manual capture now
+uses the existing sealed-snapshot compiler and transaction-guarded custody MAC.
+The generation's database timestamps and source vector, not callback values, bind
+the root. A source/authority/key/owner recheck follows the outside-transaction MAC.
+Internal prepared-package version 2 persists the signed v1 manifest object envelope
+with the original ciphertext before upload; public archive format remains v1.
+Decoding cross-checks scope, anchor, wrapped DEK and all section crypto descriptors.
+This is structural validation, not a substitute for restore-time MAC/AEAD checks.
+
+Real PostgreSQL driver proves exact MAC bytes, ten-section manifest, source-vector
+binding, altered anchor rejection, no re-sign on resume, and zero prepared package
+or upload on MAC failure. Old unsigned version-1 packages remain usable by the
+generic legacy fixture but are refused by the manual continuation. Its existing
+separate-connection revocation-between-uploads test now runs on a signed package.
+The real local custody scenario also passes through this production signing path.
+
+Focused manifest neighbors: 2 files / 21 tests PASS. Acceptance TypeScript and
+three-source ESLint PASS. Full synthetic driver PASS, owned DB/connections and
+cluster removed. Neutralizing the required-manifest guard makes the old-package
+negative fail with `Missing expected rejection`; the guard was restored before the
+final full run. Logs: `/private/tmp/tm-manual-signed-manifest-final.log`,
+`/private/tmp/tm-manual-manifest-{unit,mutation,restored}.log`.
+
+Not yet delivered: manifest-object PUT/HEAD, verified receipt/catalog atomic
+publication, runtime admission/UI, or immutable attachment-source integration.
+No flag, customer storage, production, Ready or merge action is implied.
+
+## Durable Manifest Object Receipt
+
+Implementation starts at `c37bfe252906ce562f8c4f5646c2dd64991e7f29`.
+The manual manifest uploader reads the original signed envelope from the prepared
+package, checks its expiry/source vector against the admitted generation, and uses
+the existing guarded PUT/HEAD compiler. It shares the section uploader's pre/post
+IO fresh authority and owner checks; caller-supplied bytes are not accepted.
+The manifest object id/version/hash are its exact SHA-256. Its receipt has class
+`manifest`, null section/attachment identity, and remains `uploaded`.
+
+The synthetic PostgreSQL/filesystem driver verifies ten section receipts plus
+exactly one manifest receipt after repeated uploads, GET byte-equivalence with the
+durable signed envelope, and zero verified receipts. HEAD failure and actor
+deactivation inside HEAD both refuse without registering the manifest. A mutation
+that skips post-IO authorization only for the manifest causes the exact revocation
+negative to fail with `Missing expected rejection`; it is restored for the final
+run. The first test attempt used an incorrect receipt-column name; canonical
+`provider_version`/`size_bytes` fixed the test query, not production schema.
+
+Evidence logs: `/private/tmp/tm-manual-manifest-object-{final,mutation,restored,unit,s5}.log`.
+Compiler neighbors: 10/10. Acceptance tsc, source ESLint, full S5 and diff-check
+pass. Owned database/connections and temporary cluster are removed by the runner.
+No catalog transition or finalization is implemented by this adapter; recovery
+availability still requires the later atomic verification/publication transaction.
+
+## Atomic Publication And Stored-Object Recovery
+
+Implementation range starts at `590f86bce0c59e87a86007aee60168024aba5e56`.
+Sol high's bounded read-only review of that checkpoint found a real critical
+integrity defect: section objects omitted the GCM tag, while the reader splits
+the final 16 stored bytes as that tag. The new download/decrypt positive failed on
+the old implementation with `RECOVERY_ARCHIVE_CRYPTO_AEAD_OPEN_FAILED`. Upload,
+object hash/size and final receipt expectations now use `ciphertext || authTag`.
+The preceding ciphertext-equality positives are not evidence of recoverability.
+The reviewer did not review the subsequently written finalizer; no independent
+approval of that new implementation is claimed here.
+
+Finalization uses a pre-authorized immutable prepared payload, verifies its MAC
+outside transactions, then rechecks byte equality and all authority inside the
+publication transaction. Canonical fence, key/version, live actor/request, writer
+exclusion, generation binding/lease/expiry and exact unpruned trust checkpoint
+precede source/coverage comparisons. Real immutable history rows produce the
+coverage plan; arbitrary caller coverage is never accepted. All eleven receipts,
+28 coverage rows and parent `verified/finalized/complete` transition are atomic.
+
+Real-DB negatives cover missing manifest receipt, wrong request identity, stale
+key version, rejected MAC, actor revoked during MAC, inactive actor, changed source
+and a fault at the final parent UPDATE. The final-write fault leaves zero verified
+receipts and zero coverage rows. Removing the source/hash guard makes the drift
+negative red. Removing the MAC-result guard makes the rejected-MAC negative red.
+Both guards are restored before the final run.
+
+The real local-custody path resumes uploads with its original session locked,
+uses a backup-restored fresh session for MAC verification/publication, and calls
+the existing `readRecoveryArchiveCompleteSectionsInternal` against the actual
+filesystem objects. All ten sections open; records=1 and coverage=28. This is a
+synthetic internal reader proof, not an enabled HTTP restore/apply or customer UAT.
+
+Logs: `/private/tmp/tm-manual-object-auth-tag-red.log`,
+`/private/tmp/tm-manual-finalization-{negative,mutation,authenticated-final,reader,mac-mutation,final,neighbors}.log`.
+Reader/compiler neighbors: 2 files / 25 tests. Acceptance tsc and source ESLint
+pass. The driver removes its owned DB, connections and cluster. A test injection
+was adjusted after MAC verification introduced a read transaction: source drift
+is injected only into the final transaction so rollback restores the fixture.
+No migration/flag/deployment or customer data change accompanies this slice.
+
+## Explicit Manual Command And Public Reader
+
+Code checkpoint: `aad6d0e18` (parent `d390c1e4797f8a86ef714a34b2fe49e35d686d19`).
+The owner-confirmed contract is composed into explicit POST capture and GET status
+routes. Server-owned manual policy has no numeric defaults and is validated and
+snapshotted during composition. Commands remain behind existing exact-true gates;
+this verification does not configure or enable them outside synthetic tests.
+
+Responses expose only requestId, generationId and pending/incomplete/recoverable.
+Pending denotes an active durable lease, not scheduled background work. A retry
+without original source or durable prepared bytes never captures a later live
+table. Prepared retries use their original signed bytes and nonce reservations.
+Fresh canonical scope/actor authority applies to admission, reads, upload and
+publication; provider and custody IO remain outside database transactions.
+
+The preceding internal-reader proof is historical. The current driver calls the
+public `readRecoveryArchiveCompleteSectionState` facade and reconciles stored
+sections with canonical history. It also starts the production HTTP router with
+synthetic authentication and owned PG/filesystem dependencies: anonymous request
+401, caller identity alias 400, capture/read/retry recoverable, catalog generation
+match, interrupted upload resume, lost-source pending then lease-expired incomplete,
+revoked identity refusal and default-OFF refusal. This is not real-login browser
+UAT, restore/apply acceptance or customer storage evidence.
+
+Final local gates:
+- Route/composition/startup/liveness/DB-wiring: 5 files, 164 tests PASS.
+- Reconstructor/worker-authorization CI regressions: 2 files, 29 tests PASS.
+- Synthetic TM migration stream: 30 migrations, 963 catalog objects, replay PASS;
+  fingerprint `47d05a62b2afabf386aacbedc725ff7ed92dfcde7064b580fd17851093d150e4`.
+  This is the dedicated TM stream, not all repository migrations.
+- Full dedicated driver, public-reader and HTTP assertions PASS; owned database,
+  connections and synthetic cluster removed. Integration neighbor groups remain
+  59 and 127 tests as reported by the runner; driver assertions are not that count.
+- Acceptance TypeScript, scoped source ESLint, wiring guard, full sealed-export S5
+  and diff-check PASS. Whole `univer-meta.ts` ESLint retains exactly its baseline
+  1 error and 194 warnings; no blanket whole-file lint PASS is claimed.
+
+Mutation evidence: neutralizing fresh command-read authorization makes revoked
+actor read fail its rejection oracle; removing strict request-body parsing makes
+all nine caller-alias negatives fail. Both mutations were restored before final
+green runs.
+
+The parent exact-head Node18/20 CI failures were two deterministic regressions:
+the driver bypassed the public reader facade, and a continuation unit fixture was
+still unsigned v1. The former now uses the public facade; the latter uses a
+structural signed-v2 fixture while preserving explicit unsigned-v1 rejection.
+Real cryptographic verification remains covered by the synthetic custody driver.
+Remote CI for this new checkpoint remains pending publication, not inferred green.
+
+Sol high's completed read-only review of parent d390 found no substantiated P1/P2
+in the bounded atomic finalizer. It did not review this runtime command. A bounded
+Terra runtime review returned no substantive verdict; no approval is inferred.
+
+Evidence logs: `/private/tmp/tm-manual-command-final-unit.log`,
+`/private/tmp/tm-manual-command-ci-fix.log`,
+`/private/tmp/tm-manual-command-public-reader-db.log`,
+`/private/tmp/tm-manual-command-authority-mutation.log`,
+`/private/tmp/tm-manual-command-body-mutation.log`.
+Remaining: user-facing confirmation/status flow, immutable attachment capture,
+separately authorized restore/apply acceptance, and final product closeout.
+No automatic schedule, retention, cleanup, hard-deleted-table revival, Ready,
+merge, flag enablement, dispatch, deployment or production action is included.
+
+## Manual Capture Web Client
+
+Implementation `248a4c7b3` adds capture/read methods to the existing client, with
+an isolated closed-response parser. The POST body is exactly requestId; scope
+stays in the encoded sheet URL, never an actor/key/generation body alias. Both
+operations reject malformed request identities before IO and require the returned
+requestId to match the requested identity. Unknown keys, malformed generation,
+missing fields and unsupported/non-string states refuse with a fixed error.
+
+Existing client and modal suites: 2 files / 137 tests PASS (99 client, 38 modal).
+Before implementation 20 new cases failed and 78 existing passed. A subsequent
+array-state negative also passes. Removing request identity equality produces
+exactly one failed case; restoration returns all 137 to green. These are client
+and mounted-component tests, not evidence that a new capture UI exists yet.
+
+Application `vue-tsc -p tsconfig.app.json --noEmit`, scoped ESLint and diff-check
+PASS. Full `vue-tsc -b` does NOT pass in this shared dependency installation:
+vite.config.ts:28 reports TS2769 from installed Vite 5/Vite 7 plugin type identity.
+No dependency/lockfile/config change was made to hide that result. Existing web
+dependencies were linked into this worktree; lint used already-installed parser
+packages through temporary NODE_PATH, with no install.
+
+The existing spec is already included in multitable-web-guard and the dedicated
+required-web invocation (client + modal). No selector was removed or changed.
+Logs: `/private/tmp/tm-manual-client-{red,green,identity-mutation,lint,tsc,app-tsc}.log`.
+UI confirmation, durable reload state and browser acceptance remain outstanding.
+
+## Manual Archive UI Checkpoint
+
+Implementation `360a65ce3` supersedes the preceding client-only UI gap. The real
+workbench passes capture/read client methods and the selected table name into the
+archive modal; a separate ManualArchiveCapture component owns confirmation and
+status. Existing restore preview/execute/job actions remain separate and are not
+invoked by capture completion. Completion triggers catalog rediscovery only.
+
+Only the request UUID is stored in sessionStorage, before the first POST. Retry
+reuses it; remount queries the server rather than trusting a cached success.
+Missing actor-scoped request clears the hint; authorization/storage failures do
+not become success. New capture after terminal state requires another explicit
+confirmation. Sheet changes/unmount invalidate old responses. Pending-to-complete
+refresh notifies the catalog once; a completed remount cannot create a refresh
+loop. This is tab-session reload continuity, not cross-device request discovery.
+
+Local evidence: client/modal 2 files / 145 tests PASS, including 8 new manual UI
+cases. Application vue-tsc and scoped component/test ESLint PASS, diff-check PASS.
+Removing the successful-response epoch guard causes exactly the old-sheet result
+negative to fail; the guard was restored and all tests rerun green.
+
+Chromium synthetic component harness at 1440 and 390 px verifies confirmation,
+capture, full page reload/server-status read, visible refresh icon and no document
+horizontal overflow. Screenshots: `/private/tmp/tm-manual-ui-1440.png` and
+`/private/tmp/tm-manual-ui-390.png`. Harness uses production component, Element Plus
+and repository tokens with synthetic callback responses; it is NOT authenticated
+whole-workbench/backend UAT. Its temporary Vite server was stopped after checks.
+Logs: `/private/tmp/tm-manual-ui-{final-unit,epoch-mutation,tsc,lint}.log`.
+
+Outstanding acceptance is unchanged where not directly exercised: live identity
+changes across browser sessions, full selected-table HTTP browser loop, attachments,
+public preview followed by separately authorized restore/apply, and final TM audit.
+No flags, automatic work, customer storage, Ready, merge or deployment enabled.
+
+Follow-up `de2a1ca85` clears a formerly recoverable status when a later read fails,
+including revocation (403); it never leaves a stale success beside the new error.
+The added revocation-refresh case passes. Workbench source ESLint also passes.
+Luna's bounded read-only UI review was stopped without a terminal verdict; no
+independent approval is inferred. This checkpoint remains Draft/HOLD.
+
+## Public HTTP Preview Round Trip
+
+Test checkpoint `4a32c0f3e` extends the existing CI-wired synthetic driver without
+changing production code or flags outside its isolated process. The chain now
+covers production capture -> status -> catalog -> public preview against actual
+PostgreSQL, local-custody cryptography and filesystem archive objects.
+
+- Unchanged live data returns a closed no_changes preview, zero writes, no
+  executable identity.
+- A synthetic post-archive record edit produces exactly one revert for the
+  expected record/field, executable=true and a nonempty preview identity. The
+  record retains the edited value afterward: preview does not apply recovery.
+  The fixture's direct edit is not evidence of a real user edit/history writer.
+- Provider read interruption returns 503 without its private error value.
+- Returning corrupted bytes from the real object's read result returns 503;
+  restoring normal reads restores a successful preview.
+- The temporary data/version/timestamp fixture is restored in finally. The HTTP
+  listener closes; owned DB/connections are zero and synthetic cluster removed.
+
+Full dedicated runner PASS (30 TM migrations/replay, 59 + 127 neighbor tests plus
+driver assertions); acceptance tsc, existing exact-anchor wiring and diff-check
+PASS. Logs: `/private/tmp/tm-manual-public-preview-final-db.log`,
+`/private/tmp/tm-manual-public-preview-tsc.log`,
+`/private/tmp/tm-manual-public-preview-wiring.log`.
+This joins the backend stages; it does not yet join the browser with that backend,
+exercise real-login authorization or execute restore. Attachments remain refused
+by the current manual continuation. No broader completion or UAT claim is made.
+
+## Production Modal To HTTP Browser Acceptance
+
+Code checkpoint: `067b0154794a91222407e29e9c8ae84c5d2208d2`.
+Run the owned synthetic runner with `--browser`; it starts its own loopback Vite
+listener and Chromium using already-installed dependencies, never customer storage.
+
+At both 1440px and 390px, the production RecoveryArchiveModal and
+MultitableApiClient reach the production HTTP router, isolated PostgreSQL, local
+custody and filesystem object provider. Confirmation is required; capture returns
+the closed recoverable result; page reload performs a fresh status lookup; the
+exact captured generation is selectable and preview returns no_changes with
+executable=false. No execute/job write requests or browser page errors occur.
+The dialog has no horizontal overflow. Screenshots were inspected locally.
+
+The first browser run exposed a fixture limitation: serial HTTP checks had shared
+one pg.Client transaction connection. Concurrent catalog/status requests failed.
+The HTTP fixture now checks out one pool connection per transaction and tracks
+transaction depth through AsyncLocalStorage. No product code was changed to make
+the browser pass. The original failure is not recorded as successful acceptance.
+
+Final runner PASS: 30 TM migrations/replay, 59 + 127 neighbor tests, driver
+assertions and both browser viewports. Acceptance TypeScript, node syntax check,
+existing exact-anchor wiring and diff-check PASS. Browser, listener and cache
+closed/removed; owned DB/connections zero; synthetic cluster removed.
+Log: `/private/tmp/tm-manual-http-browser-final-verified.log`.
+Screenshots are `tm-manual-http-browser-{1440,390}.png` under Node's os.tmpdir().
+
+This is local production-component/client/HTTP acceptance with synthetic auth,
+not full Workbench login/UAT, restore execution or an attachment recovery drill.
+The optional browser leg is not claimed as remotely required CI. Attachments
+remain refused by manual continuation. PR stays Draft/HOLD; no flags outside
+the owned test process, dispatch, deployment or production operations occurred.
+
+## Manual Capture To Real HTTP Restore
+
+Code checkpoint: `49a590333952d88a37435253cdfe94b061dcdcd1`.
+Test-only increment, with production restore code byte-identical after mutation
+restoration. The same owned database/local custody/filesystem archive now supplies
+a real explicit HTTP restore after the synthetic post-archive field edit.
+
+- Strict history mode disabled: execute returns 409 RECOVERY_TRUST_REQUIRED and
+  adds no restore history. Enabling it is confined to the owned test process and
+  restored in finally; canonical authority triggers are enabled only in the
+  disposable database, as in the existing server/local-startup acceptance drivers.
+- The positive path uses the actual route, fresh permission stabilization and
+  restore kernel, not injected write/authorization callbacks. One field returns
+  to its archived value. The response reports one revert, zero resurrection and
+  zero deletion.
+- The new revision has the exact actor, source=restore, changed field, patch and
+  snapshot; its joined operation is sealed with event_count=1.
+- Reusing the consumed preview returns 409 and leaves data, version and history
+  unchanged. The fixture does not rewind the successful recovery's live version.
+- A synthetic-only server replay horizon is explicitly supplied in this driver;
+  no production default or retention value is introduced.
+
+Mutation: replace the restore SQL data assignment with an identity assignment,
+while preserving its successful update/response, then run the same driver. It
+fails precisely at the archived-field-value assertion. Restoring the production
+file byte-for-byte returns the full driver and both browser viewports to green.
+
+Final evidence: 59 + 127 neighbor tests, TM migration/replay census and all driver
+assertions PASS; Chromium 1440/390 capture/reload/catalog/preview PASS; acceptance
+TypeScript, exact-anchor wiring and diff-check PASS. Owned browser/listener/cache
+cleaned; database/connections zero; synthetic cluster removed on red and green.
+Logs: `/private/tmp/tm-manual-restore-http-{mutation,restored,tsc,wiring}.log`.
+
+Scope: one scalar revert through real HTTP in a synthetic environment. This is
+not evidence of browser-driven restore confirmation, deleted-record/field replay,
+attachment copying, full authenticated Workbench UAT or production readiness.
+No customer data/storage, deployment, dispatch, Ready or merge action occurred.
+
+## Browser-Confirmed Restore And Coverage Copy
+
+Browser checkpoint: `c6d786ccfd3bb6bdec5392215ae6e3eacdfec429`.
+Copy fix: `d4c179ed0304957fb164d89b3fb3f3aa4de972ee`.
+
+At both 1440px and 390px, the production modal/client now completes capture,
+reload, catalog selection, no-change preview, then an executable preview after
+an explicitly synthetic SQL edit. Before checking the restore confirmation,
+execute is disabled and no write request occurs. After checking it, exactly one
+execute request returns one revert and no resurrection/deletion; the modal shows
+completion and clears confirmation. Independent DB readback proves the archived
+value, version increment from the synthetic edit plus restore, and one additional
+restore history revision. This is not a real Workbench editing/login flow.
+
+Mutation: remove the modal button's confirmation-dependent disabled condition.
+The browser fails precisely at the unconfirmed-disabled assertion; restoration
+returns the full driver/browser matrix to green. The prior real SQL no-op mutation
+also pins the database-value oracle independently of response success.
+
+Screenshot inspection exposed a copy defect: coverageRowCount includes sealed
+history/configuration evidence and is not a business-row count. The catalog now
+says "archive evidence entries" / "项归档证据". Two English/Chinese exact-text
+tests fail on the old copy and pass after the fix; no DTO/count semantics changed.
+
+Final: client/modal 147/147; application vue-tsc; scoped ESLint; acceptance tsc;
+exact-anchor wiring; full owned runner with 59 + 127 neighbors and both Chromium
+viewports PASS. ESLint initially could not resolve the already-installed Vue
+parser through isolated symlinks; a temporary NODE_PATH to existing pnpm packages
+allowed the scoped command, with no install or dependency changes.
+Logs: `/private/tmp/tm-manual-browser-execute-final.log`,
+`/private/tmp/tm-manual-browser-confirm-mutation.log`,
+`/private/tmp/tm-manual-coverage-label-{red,green}.log` and
+`/private/tmp/tm-manual-browser-execute-{tsc,app-tsc,lint-final,wiring}.log`.
+Screenshots in os.tmpdir() show the completion result and were visually inspected.
+All owned browser/server/cache/DB/cluster resources are cleaned.
+
+A bounded Sol read-only attachment review confirmed D1's immutable-source
+requirement but did not finish storage writer/deleter inspection; it is not a
+code-review approval or evidence of attachment support. Immutable attachments,
+full authenticated Workbench UAT and broader restore shapes remain open.
+
+## Unsupported Attachment Capture Diagnostic
+
+Code checkpoint: `86d97984559c24696c230165335279f8fc04c111`.
+
+The owner route preserves the exact known manual attachment-unavailable code in
+a closed 503 response. The UI renders fixed bilingual copy explaining that
+attachment-containing manual archives are unavailable and the archive is
+incomplete. It does not render provider error text, claim successful capture,
+or override 401/403/409 handling. Prefix lookalikes remain generic failures.
+
+Evidence: backend route/writer neighbors 59/59; modal/client 151/151;
+acceptance TypeScript, application vue-tsc, scoped source ESLint and diff-check
+PASS. Initial tests failed on the missing diagnostic. Independently replacing
+exact code equality with prefix matching makes one backend and one UI test RED;
+both were restored before the final green runs. No DB test was run for this
+diagnostic-only change; previous DB evidence remains bound to its earlier SHA.
+Logs: `/private/tmp/tm-manual-attachment-diagnostic-{backend,web}-{red,green,mutation,final}.log`.
+
+This diagnoses the initial rejected capture only. The failure reason is not
+durably persisted for subsequent status reads; pending is not success. The
+storage audit found create-only destination writes but no provider-returned
+immutable source version on download. A successful download plus hash is not
+immutable-source admission. Actual attachment capture, version-specific reads,
+source-pin-aware deletion coverage and full Workbench UAT remain OPEN.
+No flags, customer storage/data, Ready, merge, dispatch or deployment changed.
+
+## Attachment Source Deletion Audit
+
+Read-only source checkpoint: `82451aae946bc7870c1aed648c77e130629da744`.
+These are code-path findings, not reproduced real-DB race evidence.
+
+- `StorageProvider` in `src/services/StorageService.ts` exposes exclusive-create
+  uploadByKey, but downloadByKey returns bytes without a provider source-version
+  identity. Destination exclusivity alone does not close the immutable-source gate.
+- `recovery-archive-manual-admission.ts` admits every non-purged attachment
+  candidate, including unreferenced deleted rows, and records source-pin intents.
+  Continuation still rejects attachment candidates, so no successful attachment
+  capture is currently claimed.
+- `univer-meta.ts`, the attachment DELETE transaction, acquires the sheet fence
+  and soft-deletes the row, then calls deleteAttachmentBinaryShared after commit.
+  That physical-delete helper does not itself consult source pins. Existing
+  source pins therefore need protection in this direct deletion path too.
+- `attachment-orphan-retention.ts` checks active pins under the sheet fence in
+  claimAttachmentBlobPurge, then releases the transaction before deleteByKey.
+  Its comment assumes future admission refuses deleted rows. Actual manual
+  admission includes non-purged deleted candidates. A deleted-row pin can thus
+  be admitted between purge claim and physical deletion. Holding DB locks over
+  provider I/O is not an acceptable repair under D1.
+
+Next verification must reproduce both orderings with two connections and an
+explicit provider barrier: pin-first/direct-delete and purge-claim-first/pin.
+The eventual protocol must durably arbitrate source claims versus purge claims
+before provider I/O, preserve historical attachment scope, keep disabled behavior
+unchanged, and never label a lost source recoverable. Do not merely remove the
+attachment refusal or add a second non-atomic pre-delete read. Immutable source
+versioning remains a separate mandatory prerequisite after deletion arbitration.
+
+## Source Purge Arbitration Checkpoint
+
+Code: `ac390fb7e106852b141051b980602a8a79d9de67` (seven files).
+The persistent purge claim is separate from confirmed purge. Direct deletion,
+orphan cleanup and delayed blob purge check pins and commit the claim under the
+canonical sheet fence. Manual admission uses that fence and rejects claims,
+including non-purged deleted candidates. Provider operations remain outside DB
+transactions. Missing direct transaction/identity prerequisites fail closed only
+when the existing archive/fence flags are enabled.
+
+The owned PG15 full-schema runner first reproduced a pinned source reaching the
+production deletion helper (one storage call, expected zero). Final tests prove
+pin-first refusal, separate-connection purge-first admission refusal, no leaked
+generation/request from rejection, retained claim after provider failure, no
+premature purge stamp, and successful idempotent retry. Migration down/down/up/up,
+default-expression drift rejection and nonempty-down refusal pass. Source-pin
+neighbor tests and the full checkpoint suite pass; all owned DB connections,
+database and cluster are removed after red and green runs.
+
+Mutations independently remove the existing-pin guard (physical-delete count
+becomes one) and admission's purge-claim refusal (generation count increases).
+Both produce precise RED results; restored final runner is GREEN. Backend
+attachment/source-pin unit neighbors 35/35, acceptance tsc, scoped source ESLint,
+exact-anchor wiring and diff-check pass. Browser code is unchanged; no new browser
+or Workbench UAT claim. Logs: `/private/tmp/tm-source-purge-{final,unit,tsc-final,lint,wiring}.log`,
+`tm-source-purge-{pin,admission}-mutation.log`, and
+`tm-manual-source-pin-delete-red.log`.
+
+Sol's bounded read-only review raised concurrent repeated purge calls as P1.
+Independent disposition: repeated calls are possible, but existing
+StorageProvider.deleteByKey explicitly requires idempotent ENOENT success and the
+compensating sweeper already retries. This marker is source-use exclusion, not
+an exclusive provider-execution lease; exactly-once purge was not the contract.
+No reviewer approval is claimed. The agent is closed. Immutable source versioning
+and actual attachment archive copying are still OPEN. No Ready/merge/flag,
+dispatch, deployment or customer storage/data operation occurred.
+
+## Upload-Time Content Identity
+
+Code checkpoint: `93796435d5119da2fe40e2ca8a883249bdfa4d35`.
+Local attachment uploads with both existing archive/fence flags exact true now
+clone their input buffer, derive SHA-256 before I/O and exclusively create a
+server-UUID/sha256-digest key. The attachment row persists that key; user-visible
+filename remains the original DB filename. Other uploads retain their old layout.
+The source read API requires that content-addressed key format and compares read
+bytes against its preexisting digest. It never derives a new source identity for
+a legacy mutable key. Unsupported provider capability fails closed.
+
+Real temporary filesystem tests prove upload/read through a reopened provider,
+exclusive-create refusal, tampered bytes refusal, missing file refusal, legacy
+key refusal and flags-off upload parity. A production storeAttachment invocation
+with a capturing DB adapter proves the persisted key and unchanged display name;
+this adapter is not real-DB evidence. F3 workflow already explicitly invokes this
+whole test file, alongside filesStorageKey/filesAcl. Four focused/neighbor files
+77/77, acceptance tsc, source ESLint and diff-check PASS. Removing digest equality
+produces one exact tampered-source RED; restored tests PASS. All filesystem data
+is synthetic and removed by the suite.
+
+Logs: `/private/tmp/tm-source-version-{red,green,mutation,restored,canaries,tsc,lint}.log`.
+Terra's bounded read-only session did not return a terminal verdict and was
+closed; no external approval is claimed. This is content-identity enforcement,
+not filesystem WORM, NAS certification or customer-storage validation. Manual
+continuation still refuses attachments until source-pin verification, encrypted
+copy, attachment manifest/receipt finalization and restore consumption are
+connected and verified. This checkpoint is not end-to-end attachment archival.
+
+## Attachment AEAD Work In Progress (Not A Publication Checkpoint)
+
+Inspected remote base/main remains `bb77ca5f2ce3c2825265ec8877861d367d017ead`;
+published candidate remains `ec856b14317ce717e6df4e5e89cc0d68e49f365f`.
+The following evidence belongs to uncommitted working-tree changes, not either
+published SHA. Attachment AEAD binds the generation, source version, attachment
+identity and plaintext digest, with a domain separate from section encryption.
+Crypto/reader focused tests pass 78/78 and acceptance tsc passes. Removing the
+attachment identity from AAD produces the substitution negative. The prepared
+upload forwarding negative first reached the upload callback instead of refusing;
+passing the attachment plan into sealing restores the expected old-format refusal
+before ciphertext persistence/upload. Logs: `/private/tmp/tm-attachment-forward-{red,green,tsc}.log`.
+
+The owned synthetic database runner completed fresh/replay and existing manual
+capture/restore neighbors, with zero remaining database/connections and its
+cluster removed (`/private/tmp/tm-attachment-aead-realdb-neighbors.log`). This run
+does NOT prove binary attachment nonce registration or attachment restore.
+
+Authoritative schema inspection found a missing integration requirement:
+`meta_recovery_archive_nonce_reservations` has BOTH a `(dek_fingerprint, nonce)`
+primary key and a `(generation_id, section_name)` unique constraint. Therefore
+registering attachment nonces under `attachments_index` collides with the index
+section itself. The mock reservation callback does not exercise this constraint.
+The uncommitted batch integration is not publication-ready. A durable attachment
+identity must retain cross-section/attachment nonce uniqueness and per-object
+single-ciphertext authority without relaxing existing section protection. Verify
+that authority using real SQL before wiring source reads, persistent attachment
+ciphertext, upload receipts, publication and restore. Existing manual commands
+remain attachment-refusing; no flag, deployment or customer-storage action.
+
+## Attachment Nonce Authority Checkpoint
+
+The work-in-progress registry collision above is resolved at code commit
+`591c559f151c1579b006d748d231e12001b0b880`, tree
+`fe41c79a9ef3c19310099e679b89caa0b6e11f19`, parent
+`ec856b14317ce717e6df4e5e89cc0d68e49f365f`. Eight code/test files; no workflow,
+flag or permission edits. Nonce identity is `attachment:sha256(exact source ID)`;
+the AEAD binds the full ID and source version separately. The production ID
+shape `att_<uuid>` is covered, not incorrectly constrained to bare UUIDs.
+
+Evidence on final code:
+- crypto/reader 78/78; acceptance tsc and four-source ESLint PASS;
+- owned fresh full migration plus replay PASS; historical migration census now
+  31 and before/after catalog fingerprints identical;
+- real SQL admits index plus attachment reservations, refuses cross-object nonce
+  reuse and a second nonce for the same attachment, refuses invalid object names,
+  UPDATE/DELETE/TRUNCATE, and nonempty extension rollback;
+- direct up/down/down/up/up PASS; CHECK(true), old/new CHECK coexistence,
+  deferrable uniqueness, disabled row/truncate guard and replaced reservation/row
+  functions all cause drift refusal;
+- separately dropping each nonce/object unique arbiter makes its real refusal
+  assertion RED inside a rolled-back transaction; canonical up succeeds afterward;
+- existing real HTTP manual capture, preview and synthetic field restore PASS;
+- required migration wiring contract passes, including deleting the new migration
+  from replay census as a RED counterexample; diff-check PASS;
+- scratch database/connections zero, owned cluster stopped and removed.
+
+Logs: `/private/tmp/tm-nonce-object-restored-realdb.log`,
+`/private/tmp/tm-nonce-object-reviewed-{unit,tsc,lint}.log`,
+`/private/tmp/tm-nonce-object-final-wiring.log`.
+An intermediate mutation setup used unnamed replacement function parameters and
+failed before reaching the audit; that attempt is not counted. Corrected named
+parameters reached the intended refusal in the final full run.
+
+Sol read-only review found the original bare-UUID mismatch and audit omissions;
+both were corrected above. Its transaction concern was independently disproved
+against the installed Kysely Migrator and PostgreSQL adapter and explicitly
+withdrawn by the reviewer. No fresh external approval of the corrected full diff
+is claimed; session closed. This checkpoint is not attachment end-to-end proof:
+manual admission/continuation still refuse attachment capture; durable encrypted
+objects, verified upload/finalization and restore consumption remain incomplete.
+Remote CI for the new commit is pending publication, not a claimed pass.
+
+## Durable Attachment Continuation And CI Neighbor Repair
+
+Code `9c107f15a8ee1faef26cd853d07f7f55debfee0a`, tree
+`7bdac8c35c3eb9b99d35f4d18fbeea7c22454944`, adds internal v3 sealed attachment
+persistence and continuation in three files. Crypto/reader/manifest neighbors
+91/91, acceptance tsc, source ESLint and diff-check pass. An owned full fresh/replay
+PostgreSQL run persists synthetic binary ciphertext, interrupts its callback,
+reconnects, resumes identical bytes without capture/custody, decrypts to the
+original bytes, and verifies callback mutation did not alter persisted bytes.
+Missing uploader refuses before section upload; revoked authority refuses; manual
+unsigned-envelope rejection remains. The fixture proves persistence/continuation,
+not source-pin admission, signed attachment index, real provider receipts or
+attachment restore publication. Cluster/database/connections cleaned to zero.
+Mutation omitting attachments from the upload loop produces a precise RED;
+restored neighbors pass. Logs: `/private/tmp/tm-attachment-envelope-{realdb,tsc,lint,mutation,final-unit}.log`.
+Luna bounded read-only review did not return a terminal verdict and was closed;
+no external approval claimed.
+
+Remote exact `6c133be06f4746c2edf9851e27692e3e0b9aef6c` Node18/20 failed
+in `multitable-attachment-cleanup.test.ts`: two old SQL mocks did not handle the
+new durable purge-claim UPDATE. Local reproduction confirmed both failures.
+Test-only fix `9b7e6593a018c3ce4165e1be85dec05f2047c5e4` adds the expected
+returning row and requires claim plus commit before storage deletion. Production
+code is unchanged. Four focused/neighbor files pass 106/106. Removing the
+production claim makes the focused test RED; restoring it gives cleanup 15/15.
+Logs: `/private/tmp/tm-cleanup-ci-{red,green,mutation,restored}.log`.
+The old failed remote matrix is not treated as a pass; the next pushed SHA needs
+fresh CI. Attachment end-to-end capture/publication/restore remains incomplete.
+
+## Attachment Manifest Reconciliation (Local Checkpoint)
+
+`f7284a457b0e4771196547642bc79d5031a93356` extends the existing sealed snapshot
+manifest compiler, preserving the ten-section manifest shape. Before building the
+unsigned manifest/MAC preimage, it reconciles every attachments_index row with
+exactly one sealed attachment and its reserved object nonce. Original ID, immutable
+source version, plaintext digest and byte size must agree. It rejects absent/extra
+attachments, swapped identities/versions/digests, wrong size/tag, nonce reuse and
+wrong reservation identity. A deleted attachment index row is included in the
+positive case. This is compiler evidence, not a runtime attachment source proof.
+
+Crypto/reader/compiler neighbors: 3 files, 92/92. Acceptance tsc, source ESLint and
+diff-check pass. Temporarily removing reconciliation makes the exact attachment
+test RED; restoration returns all tests GREEN. Logs:
+`/private/tmp/tm-attachment-manifest-{unit,mutation,final,tsc,lint}.log`.
+No DB run was needed for these two pure compiler/test files. No external review
+verdict is claimed for this increment. This checkpoint is local until a later
+ordinary push; remote CI must not be inferred from these local results.
+Source-pin reads, provider attachment receipts, finalization, source release and
+restored attachment-byte consumption still need end-to-end integration.
+
+## Pinned Local Source Read Checkpoint
+
+Code `12e286316e1f8555943e5a4cef1f80cc638c3dd6` changes only admission source
+preparation and the existing synthetic checkpoint driver. Real local storage
+objects are created through upload-time content addressing. The driver asserts
+file IO is outside transactions, exact source-pin version/hash/size on success,
+and zero partial available pins on digest/version/size mismatch, authorization
+revocation, source movement, lease expiry and second-pin transition failure.
+Initial authorization denial never reaches provider IO. The expiry test uses a
+one-second synthetic lease and natural expiry; an initial attempt to shorten a
+persisted lease was correctly refused by the DB and was replaced, not counted.
+
+Final full checkpoint driver PASS: fresh migration and replay, 31-migration
+catalog fingerprint replay, 59 and 127 neighboring real-DB assertions, existing
+manual HTTP/restore checks, and the new source-read cases. Database/connections
+zero and task-owned cluster stopped/removed. Acceptance tsc, source ESLint and
+diff-check pass; compiler/crypto neighbors pass 77/77. Removing the actual-byte
+digest comparison makes the corrupted-byte negative RED with missing rejection;
+restoration passes. Logs: `/private/tmp/tm-source-read-mutation.log` and
+`/private/tmp/tm-source-read-final.log`.
+
+Sol high bounded read-only review did not return a terminal verdict and was
+closed; no external approval is claimed. This does not prove HTTP attachment
+publication or attachment-byte restoration. Prior remote `f767b846...` migration
+replay failed while installing PostgreSQL because its package repository was
+unreachable; no migration ran in that job. Local evidence is not remote CI.
+
+## Attachment Provider Checkpoint (Local Only)
+
+Code `06d2a530d52d643674851276878709210e767b27` adds the server-owned durable
+attachment uploader and passes the attachment callback through continuation.
+The synthetic presealed binary fixture now exercises actual local PUT/HEAD/GET:
+callback ciphertext substitution is ignored, an unknown ID performs zero PUT,
+post-HEAD authority revocation leaves zero receipts, and a missing verified source
+pin refuses receipt insertion. After claiming/verifying the fixture source pin,
+two uploads yield one exact uploaded receipt. Downloaded nonce/ciphertext/tag
+decrypt to the original seven binary bytes with the original attachment AAD.
+
+Full checkpoint runner passes fresh/replay, existing real-DB neighbors and all
+manual acceptance cases; database/connection residue zero, owned cluster removed.
+Crypto/receipt compiler unit neighbors 74/74, acceptance tsc, source ESLint and
+diff-check pass. Mutation omitting the nonce from stored attachment bytes gives
+the expected receipt hash/size assertion RED; restored full runner GREEN. Logs:
+`/private/tmp/tm-attachment-provider-mutation.log` and
+`/private/tmp/tm-attachment-provider-final.log`.
+
+The initial fixture lacked a source pin and was refused by the production DB
+guard; it was corrected using the existing pin authority, not by weakening the
+guard. No external review verdict is claimed. This local checkpoint is not yet
+pushed, to batch subsequent runtime integration without cancelling the current
+remote long lanes. It does not prove source-to-publication-to-restore completion.
+
+## Attachment Capture And Publication (Local Only)
+
+Code `dcbe71ebe5a7d581033abe36cee36df3b228373e` joins admitted real local files
+to authenticated index/sections, exact 10+N nonce reservations, durable prepared
+ciphertext, provider uploads and atomic catalog publication. The synthetic driver
+includes live and deleted attachments, supplies a deliberately false caller
+attachment plan, interrupts after an attachment upload, then resumes with no
+source/capture callback. Original prepared bytes and source-read count stay exact.
+
+Missing manifest refuses finalization with source pins retained. Changing the
+registered content-addressed source version also refuses. Injecting a failure on
+the second source release rolls back receipt verification, archive references and
+the first source deletion. Restored execution yields verified/finalized/complete,
+11+N verified objects, N archive references matching provider versions, and no
+source references for that generation. Other generations are not released.
+
+Final full checkpoint driver, fresh/replay and 31-migration catalog replay PASS;
+existing DB neighbors and manual HTTP cases stay green; owned database, connections
+and cluster cleaned. Crypto/compiler/receipt unit neighbors 87/87; acceptance tsc,
+three-source ESLint and diff-check PASS. Mutation removing final source-version
+validation makes the changed-source negative RED (missing rejection), restored
+full runner GREEN. Logs: `/private/tmp/tm-attachment-publication-mutation.log`
+and `/private/tmp/tm-attachment-publication-restored.log`.
+
+Terra high bounded read-only review timed out without a verdict and was closed;
+no external approval claimed. This is local internal runtime evidence, not a
+published exact-head CI result or public attachment restore acceptance. HTTP
+source-reader composition and archive-reader/restore consumption remain required.
+
+## Authenticated Attachment Reads (Local Only)
+
+Code `7f97b26f9`: reader/preview/crypto 3 files, 88/88 PASS; acceptance tsc,
+four-source ESLint and diff-check PASS. Live/deleted binary fixtures prove byte
+fidelity and defensive copies, fabricated-state refusal, missing/extra descriptors,
+equal-size swapped objects and corrupted AEAD tags with recomputed provider hashes.
+Removing the exact roster count guard makes the extra-descriptor negative RED
+(1 failed, 15 passed); restoring it returns the full 88/88 GREEN.
+
+The full isolated checkpoint driver passes fresh/replay, migration catalog and
+neighbor gates, then loads published authority and invokes both internal section
+reading and complete historical reconstruction with actual synthetic attachments.
+Missing provider objects and swapped bindings refuse; owned database/connections
+and cluster are cleaned. The custody-race negative now restores its direct fixture
+write in finally: previously it polluted later fixtures with an unrecorded data
+change and correctly tripped the reconstructor overlap check. No production
+history guard was weakened.
+
+Logs: `/private/tmp/tm-attachment-reader-realdb.log`,
+`/private/tmp/tm-attachment-reader-mutation.log`,
+`/private/tmp/tm-attachment-reader-final.log`.
+This is local evidence, not fresh remote CI or attachment restore-write proof.
+No external review verdict is claimed for this checkpoint. Public source-reader
+composition and file/metadata restore acceptance remain unfinished.
+
+## Manual Command Attachment Composition
+
+Code `597ca95c7` wires the server local source reader and durable attachment
+uploader. Full isolated database driver PASS before and after mutation restoration:
+command captures live/deleted synthetic files, returns recoverable, loads published
+authority and reconstructs complete state with byte-exact attachments. Repeating
+the same command returns the same result with no additional source reads.
+
+Mutation omitting the source-reader binding fails the new command positive with
+`RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE`; restored runner GREEN. Both
+runs clean the owned database/connections and stop/remove the synthetic cluster.
+Acceptance tsc, command-source ESLint and diff-check PASS.
+Logs: `/private/tmp/tm-attachment-command-realdb.log`,
+`/private/tmp/tm-attachment-command-mutation.log`,
+`/private/tmp/tm-attachment-command-restored.log`.
+
+The command test uses synthetic server adapters and is not HTTP/browser attachment
+acceptance. Production factory wiring reuses the existing attachment storage
+service; no environment flag or customer storage was changed. Attachment restore
+application and final end-to-end acceptance remain OPEN. Previous remote head
+`992f92716a306cf7f6f5b447c440c3fe3da688cf` had 37 SUCCESS and one SKIPPED at
+readback; that result does not cover these subsequent local commits.
+
+## HTTP Attachment Capture Acceptance
+
+Test code `e29903468`: actual Express registrar, canonical authorization/database,
+server local attachment provider and authenticated reader. Test-only storage root
+is set before route module loading and restored during cleanup. Synthetic
+authentication is the only authentication substitute; this is not tenant UAT.
+
+Full driver GREEN: anonymous capture 401, caller storage path 400, both zero
+generation side effects; valid capture 200 with closed recoverable DTO; retry
+same DTO and exactly one new generation; catalog 200 and exact generation;
+independent complete reconstruction returns exact live/deleted file bytes.
+Acceptance tsc and diff-check PASS. Mutation removing the route factory source
+binding yields HTTP 503 instead of 200; restore returns full driver GREEN.
+Owned database/connections and synthetic cluster clean on both paths.
+
+Logs: `/private/tmp/tm-attachment-http-realdb.log`,
+`/private/tmp/tm-attachment-http-mutation.log`,
+`/private/tmp/tm-attachment-http-restored.log`.
+No public attachment restore-write or full login/browser UAT is claimed. Current
+canonical restore excludes attachment fields; the proposed write-contract
+expansion is awaiting explicit confirmation. Existing scalar restoration remains
+a separate evidence class. No flags, customer storage or deployment changed.
+
+## Source Independence And Browser Regression
+
+Code `2cc9ebbf8705ca84a32c9395bdab58a63bbdfde4`: park one owned synthetic
+source file, submit a fresh HTTP capture, require 503/building/incomplete, zero
+archive objects and the full source-pin set retained as mutable. Independently
+reopen the previously completed generation while that source is absent: all
+attachment bytes match. Restore the parked file in finally. Full runner and
+acceptance tsc/diff-check PASS; log `/private/tmp/tm-attachment-source-independent.log`.
+
+Final browser rerun used the required runner `--browser` argument. Chromium at
+1440 and 390 exercises production component/client capture, reload, catalog,
+preview and confirmed scalar restore, exactly one restore request and independent
+database/history readback. Full attachment HTTP cases also pass in that run.
+Browser/Vite/cache and owned database/connections/cluster are cleaned.
+Log `/private/tmp/tm-manual-browser-attachment-final.log`. An earlier invocation
+using only an environment variable did not enter browser mode and is counted
+only as database acceptance, not browser evidence. This still does not prove
+attachment restore writes or real tenant login/UAT.
+
+Terra high reader-only review was closed while nonterminal at the bounded cutoff;
+no independent verdict is claimed. Canonical attachment restore-write policy is
+still unchanged and the proposed expansion remains pending owner confirmation.
+
+## Unsupported Attachment Preview Diagnostic
+
+Code `e40d32fd3`: backend preview/reader 28/28; client/modal 154/154; acceptance
+tsc, web app vue-tsc, backend source lint and web source lint PASS. Web lint first
+lacked the existing vue-eslint-parser link; rerun used NODE_PATH to the already
+installed pnpm store only, with no install or dependency changes. Diff-check PASS.
+New negatives cover whole-sheet/selected-record attachment differences, including
+zero scalar writes. Positives retain identical attachments and scalar-only field
+selection. Client accepts the closed blocked reason; both UI languages explain
+it and offer no execute action. Mutation skipping attachment-field enumeration
+causes exactly two backend failures, restored GREEN; log
+`/private/tmp/tm-attachment-preview-mutation.log`.
+
+This is a diagnostic refusal, not new attachment write authority. No dedicated
+real-DB/browser proof for this latest diagnostic is claimed yet; existing HTTP
+capture and scalar browser evidence precede this checkpoint.
+
+## HTTP Attachment Diagnostic And CI Facade Repair
+
+Code `ce9dbc7c5` adds a real attachment field before HTTP capture, then changes
+only that live field. Whole-sheet, selected-record and selected-attachment-field
+preview return `unsupported_attachments`, executable=false and null identity.
+Unchanged state and scalar-only selection return no_changes. Fixture data/version/
+timestamp are restored in finally. Full isolated runner PASS, with database,
+connections and cluster cleaned. Removing attachment enumeration yields the
+precise HTTP semantic failure no_changes instead of unsupported_attachments;
+restored full runner GREEN. Logs `/private/tmp/tm-attachment-preview-realdb.log`,
+`/private/tmp/tm-attachment-preview-http-mutation.log` and
+`/private/tmp/tm-attachment-preview-http-restored.log`.
+
+Remote `da985c8e131a47f1501b7df6b12fc3fa4d1719e2` Node18 job 105850321249
+failed the reconstructor's production-consumer census because the acceptance
+script called the internal section reader. This was a deterministic integration
+mistake, not a runner flake. The script now uses only the public complete-state
+facade for positive and refusal reads. The consumer guard was NOT changed.
+Reconstructor/reader/preview 3 files 44/44, acceptance tsc and diff-check PASS.
+Fresh remote CI is still required for the repaired head.

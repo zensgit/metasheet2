@@ -320,7 +320,9 @@ describeIfDatabase('invite accept concurrency + rollback (real DB)', () => {
     const writes = await fs.readFile(path.join(root, 'invite-accept-writes.ts'), 'utf8')
     const ledger = await fs.readFile(path.join(root, 'invite-ledger.ts'), 'utf8')
 
-    expect(writes).toContain('await transaction(async (client)')
+    // O2-S2: the one transaction is now wrapped by the 40001 recovery-conflict translator —
+    // pin the WHOLE shape (wrapper + single transaction) so neither can be dropped silently.
+    expect(writes).toContain('await translateRecoveryConflict(() => transaction(async (client)')
     expect(writes).toContain('markInviteAccepted')
     expect(writes).toContain('UPDATE users')
     expect(writes).toContain("activation_status = 'activated'")

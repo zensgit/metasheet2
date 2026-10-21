@@ -18,6 +18,7 @@ import type {
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+import { readLocalRecoveryAttachment, reserveLocalRecoveryAttachment, retireLocalRecoveryAttachment } from './recovery-attachment-local-ownership'
 
 /**
  * F3 files-storage-integrity design-lock (2026-07-10), G1/G2: derive a display-only safe basename from
@@ -57,7 +58,18 @@ export function resolveWithinBase(basePath: string, key: string): string {
  * module-private. Exporting it is the named prerequisite, not a new capability: no implementation
  * changes, and the only in-repo implementation remains `LocalStorageProvider` below.
  */
+export type ContentAddressedAttachmentSource = {
+  bytes: Buffer
+  immutableVersion: string
+  contentSha256: string
+  sizeBytes: number
+}
+
 export interface StorageProvider {
+  reserveRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<void>
+  readRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource>
+  uploadContentAddressed?(file: Buffer, options: UploadOptions): Promise<StorageFile>
+  readContentAddressed?(storageKey: string): Promise<ContentAddressedAttachmentSource>
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   /** B3-07 §7: write a physical object AT a caller-chosen deterministic storage key — the symmetric
    * write-side counterpart to `downloadByKey`/`deleteByKey`, completing the by-key triple. Unlike
@@ -237,6 +249,42 @@ class LocalStorageProvider implements StorageProvider {
       this.logger.error(`Failed to upload file ${displayName}`, error as Error)
       throw error
     }
+  }
+
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    const bytes = Buffer.from(file)
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+    // The identity is fixed before exclusive-create, never discovered from mutable bytes during archive capture.
+    return this.upload(bytes, { ...options, filename: `sha256-${digest}` })
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return reserveLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+  }
+
+  async readRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource> {
+    const bytes = await readLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (digest !== storageKey.slice(-64)) throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+    return { bytes, immutableVersion: `sha256:${digest}`, contentSha256: digest, sizeBytes: bytes.length }
+  }
+
+  /** Internal cleanup port; not exposed by StorageService or the plugin capability interface. */
+  async retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return retireLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    const match = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(storageKey)
+    if (!match) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    let bytes: Buffer
+    try { bytes = await fs.readFile(resolveWithinBase(this.basePath, storageKey)) } catch {
+      throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE')
+    }
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== match[1]) {
+      throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+    }
+    return { bytes, immutableVersion: `sha256:${match[1]}`, contentSha256: match[1]!, sizeBytes: bytes.length }
   }
 
   // B3-07 §7: key-addressed write. Containment (G2) is asserted exactly as `downloadByKey`/`deleteByKey`
@@ -500,6 +548,15 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     }
   }
 
+  /** Trusted launcher capability only; deliberately absent from service/plugin instances. */
+  static resolveLocalRecoveryCleanup(service: StorageServiceImpl): Readonly<{
+    retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void>
+  }> | undefined {
+    const provider = service.provider
+    if (!(provider instanceof LocalStorageProvider)) return undefined
+    return Object.freeze({ retireRecoveryAttachment: provider.retireRecoveryAttachment.bind(provider) })
+  }
+
   async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
     try {
       // 检查文件大小（如果是 Buffer）
@@ -515,6 +572,29 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
       this.emit('file:error', { operation: 'upload', error })
       throw error
     }
+  }
+
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    if (file.length > this.uploadLimit) throw new Error('ATTACHMENT_SOURCE_SIZE_LIMIT')
+    if (!this.provider.uploadContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    const result = await this.provider.uploadContentAddressed(file, options)
+    this.emit('file:uploaded', result)
+    return result
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    return this.provider.readContentAddressed(storageKey)
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    if (!this.provider.reserveRecoveryAttachment) throw new Error('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    return this.provider.reserveRecoveryAttachment(storageKey, ownershipKey)
+  }
+
+  async readRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readRecoveryAttachment) throw new Error('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    return this.provider.readRecoveryAttachment(storageKey, ownershipKey)
   }
 
   async download(fileId: string): Promise<Buffer> {

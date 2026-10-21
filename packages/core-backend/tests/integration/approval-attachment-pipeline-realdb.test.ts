@@ -3,8 +3,11 @@
  *
  * Proves the boot wiring (flag-gated mount), the §4.1 template-access gate (outsider → values-free
  * 404), the §4.4 in-transaction submit bind (atomic freeze; a bind failure rolls back the WHOLE
- * create), and the §4.2 auth-proxied download (participant 200 + safe headers; outsider 404). The
- * flag-OFF posture is proven by a second boot without the flag: the surface is simply not mounted.
+ * create), the §4.2 auth-proxied download (participant 200 + safe headers; outsider 404), and the
+ * §8 batched refs route's bound-metadata mode (G-S1-2, P3-2 S1 requal: SAME real predicate as
+ * download, route altitude — a participant gets 200 with metadata, a non-participant gets the SAME
+ * status code and SAME values-free error envelope download gives). The flag-OFF posture is proven
+ * by a second boot without the flag: the surface is simply not mounted.
  * Two-point wired (vitest.config.ts exclusion + plugin-tests.yml approval real-DB run list).
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
@@ -428,6 +431,57 @@ describeIfDatabase('approval attachment production pipeline (real DB, booted ser
       headers: { Authorization: `Bearer ${await authToken(OUTSIDER, 'user', 'approvals:read')}` },
     })
     expect(outsider.status).toBe(404) // not the uploader, not a participant — values-free denial
+  })
+
+  // G-S1-2 (P3-2, S1 requal): the refs route's gate-1 predicate (`isInstanceParticipant`, DI-bound
+  // to the REAL `canReadApprovalInstance` at approval-attachment-runtime.ts:422 — not the stubbed
+  // `authChecks` the unit route test (`approval-attachment-routes.test.ts`) exercises) had never
+  // run in any real-DB lane. Proves route altitude, not predicate altitude: a real participant
+  // gets 200 with the bound attachment's metadata, and a non-participant is denied with the SAME
+  // status code and the SAME values-free error envelope the download gate gives — asserted by
+  // equality on both, matching download's own coverage one test above.
+  it('refs (bound metadata): participant 200 with metadata; non-participant SAME 404 envelope as download', async () => {
+    const adminToken = await authToken(`aatt-admin-${RUN}`)
+    const requesterToken = await authToken(REQUESTER, 'user', 'approvals:read,approvals:write')
+    const templateId = await publishAttachmentTemplate(adminToken)
+    const up = await uploadPdf(requesterToken, templateId, 'files')
+    expect(up.status).toBe(201)
+    const attId = ((await up.json()) as { id: string }).id
+    createdAttachmentIds.add(attId)
+    const create = await jsonRequest('/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'refs route-level participation', files: [attId] } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const inst = (await create.json()) as { id: string }
+    createdApprovalIds.add(inst.id)
+
+    // Participant (requester, arm 1) — 200 with the bound attachment's metadata, through the REAL
+    // predicate, not a stub.
+    const participantRefs = await jsonRequest('/api/approval/attachments/refs', requesterToken, {
+      method: 'POST',
+      body: { instanceId: inst.id, ids: [attId] },
+    })
+    expect(participantRefs.status, await participantRefs.clone().text()).toBe(200)
+    const participantBody = (await participantRefs.json()) as { attachments: Array<{ id: string; tombstone: boolean }> }
+    expect(participantBody.attachments).toEqual([expect.objectContaining({ id: attId, tombstone: false })])
+
+    // Non-participant: SAME route, SAME real predicate, denied with the SAME status code AND the
+    // SAME values-free error envelope the download gate gives.
+    const outsiderToken = await authToken(OUTSIDER, 'user', 'approvals:read')
+    const outsiderRefs = await jsonRequest('/api/approval/attachments/refs', outsiderToken, {
+      method: 'POST',
+      body: { instanceId: inst.id, ids: [attId] },
+    })
+    const outsiderDownload = await fetch(`${baseUrl}/api/approval/attachments/${attId}/download`, {
+      headers: { Authorization: `Bearer ${outsiderToken}` },
+    })
+    expect(outsiderRefs.status).toBe(outsiderDownload.status)
+    expect(outsiderRefs.status).toBe(404)
+    const outsiderRefsBody = await outsiderRefs.json()
+    const outsiderDownloadBody = await outsiderDownload.json()
+    expect(outsiderRefsBody).toEqual({ error: 'not_found' })
+    expect(outsiderRefsBody).toEqual(outsiderDownloadBody)
   })
 
   it('deleted-only bound attachment: authorized participant/admin → 410; outsider/cross-org → 404 (no live sibling required)', async () => {

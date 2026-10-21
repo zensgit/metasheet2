@@ -15,7 +15,7 @@
 
     <p v-if="error" class="platform-app-launcher__error">{{ error }}</p>
     <p v-else-if="loading" class="platform-app-launcher__state">Loading platform apps...</p>
-    <p v-else-if="apps.length === 0" class="platform-app-launcher__state">No platform apps discovered.</p>
+    <p v-else-if="appCards.length === 0" class="platform-app-launcher__state">No platform apps discovered.</p>
 
     <div v-else class="platform-app-launcher__grid">
       <article v-for="card in appCards" :key="card.app.id" class="platform-app-launcher__card">
@@ -101,13 +101,19 @@ import {
   usePlatformApps,
 } from '../composables/usePlatformApps'
 
-const { apps, loading, error, fetchApps } = usePlatformApps()
+const { accessibleApps, loading, error, fetchApps } = usePlatformApps()
 
 function resolveShellRoute(app: PlatformAppSummary): string {
   return `/apps/${encodeURIComponent(app.id)}`
 }
 
-const appCards = computed(() => apps.value.map((app) => {
+/**
+  * Second line, same rule as the server. `GET /api/platform/apps` already dropped the apps this
+  * caller may not see (routes/platform-apps.ts#canSeePlatformApp); `accessibleApps` re-applies the
+  * same ANY-OF-over-declared-codes decision to whatever is in the cached list, so a summary left
+  * over from another principal cannot render a card whose shell route would 404.
+  */
+const appCards = computed(() => accessibleApps.value.map((app) => {
   const primaryAction = resolvePlatformAppPrimaryAction(app)
   return {
     app,

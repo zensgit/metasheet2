@@ -1,7 +1,10 @@
 /**
  * T1-2 inbound webhook trigger — real mounted route + real DB.
  *
- * Drives the public unauthenticated route end to end:
+ * Drives the mounted route end to end. In production this route sits behind the global session gate
+ * (index.ts; it is not in api-path-policy.ts GLOBAL_GATE_EXCEPTIONS), and the handler then ignores the
+ * session: only the per-rule secret authorizes delivery. This harness mounts the router on a bare express
+ * app WITHOUT that gate, so the session requirement is not exercised here:
  *   POST /api/multitable/automation/webhooks/:ruleId
  *     → raw-body HMAC verification
  *     → AutomationService.handleInboundWebhook
@@ -82,6 +85,12 @@ describeIfDatabase('T1-2 inbound webhook trigger (real DB)', () => {
        ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
       [CREATOR, `${CREATOR}@iwh.test`],
     )
+    // F9b: the rule's send_notification recipient must be a sheet member (same loadSheetMemberUserIdSet
+    // resolver as the button route) or the step fail-closes before its durable notification write.
+    await q(
+      `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`,
+      [CREATOR],
+    )
 
     const bus = new EventBus()
     bus.subscribe('automation.notification', (payload) => notifications.push(payload as Record<string, unknown>))
@@ -101,6 +110,8 @@ describeIfDatabase('T1-2 inbound webhook trigger (real DB)', () => {
       await q('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [ruleIds]).catch(() => {})
     }
     await q('DELETE FROM users WHERE id = $1', [CREATOR]).catch(() => {})
+    // F9b: the rule path now writes durable notification rows for this sheet — clean them up too.
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
   })

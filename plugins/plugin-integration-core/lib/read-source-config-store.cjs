@@ -17,6 +17,7 @@
 const crypto = require('node:crypto')
 const { validateReadSourceConfig } = require('./read-source-config.cjs')
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { lockExternalSystemForPointerWrite, pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const CONFIG_TABLE = 'integration_read_source_configs'
 const AUDIT_TABLE = 'integration_read_source_config_audit'
@@ -103,6 +104,12 @@ function contentKeyFor(normalizedConfig) {
   return crypto.createHash('sha256').update(stableStringify(content), 'utf8').digest('hex')
 }
 
+// The S1-shaped validation tuple a mint gets when the external system it names is not there ONCE
+// THE ROW LOCK IS HELD (never existed in this tenant, or its delete committed while the mint
+// waited — deliberately not told apart). Same `{ code, field, reason }` shape the route already
+// maps to 400 READ_SOURCE_CONFIG_INVALID, so no new wire shape is introduced.
+const SYSTEM_NOT_FOUND_CODE = 'READ_SOURCE_SYSTEM_NOT_FOUND'
+
 // Postgres unique-violation routing (constraint names from migration 062).
 const CONTENT_KEY_CONSTRAINT = 'uniq_integration_read_source_configs_content'
 const FAMILY_VERSION_CONSTRAINT = 'uniq_integration_read_source_configs_family_version'
@@ -176,11 +183,16 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
     typeof db.select !== 'function' ||
-    typeof db.transaction !== 'function'
+    typeof db.transaction !== 'function' ||
+    typeof db.selectOneForKeyShare !== 'function'
   ) {
     // transaction is REQUIRED: version minting and status transitions must be atomic with their
-    // audit rows (same discipline as integration-templates.cjs).
-    throw new Error('createReadSourceConfigStore: scoped db helper (incl. transaction) is required')
+    // audit rows (same discipline as integration-templates.cjs). selectOneForKeyShare is REQUIRED
+    // for the same reason: `saveVersion` persists a POINTER (`system_id`) at an external system, and
+    // the external-system delete lock protocol (`external-system-pointer-lock.cjs`) needs the writer
+    // to pin that row inside its mint transaction — a helper that cannot lock would mint the
+    // unprotected pointer this protocol exists to refuse.
+    throw new Error('createReadSourceConfigStore: scoped db helper (incl. transaction, selectOneForKeyShare) is required')
   }
 
   // Audit runs against a caller-supplied executor so it can join the surrounding transaction.
@@ -249,6 +261,25 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
       }
       try {
         return await db.transaction(async (trx) => {
+          // READ COMMITTED IS PINNED FIRST (the protocol's isolation premise, enforced — see
+          // `external-system-pointer-lock.cjs`): the SET must be the transaction's first statement.
+          await pinLockProtocolIsolation(trx)
+          // THE EXTERNAL-SYSTEM ROW IS PINNED NEXT (writer half of the delete lock protocol): KEY
+          // SHARE on the system this version is about to point at, before the family scan and the
+          // INSERT. A delete holding FOR UPDATE makes this wait; when it resumes the row is gone,
+          // the read is null, and the mint refuses as the S1 validator's own values-free tuple
+          // (field `systemId`, reason `not_found` — never the id) with no row and no audit written.
+          // Only `saveVersion` mints a NEW live pointer; `approve` keeps a live one live and `retire`
+          // removes one, so neither needs the lock (see the design doc's coverage matrix).
+          const system = await lockExternalSystemForPointerWrite(trx, {
+            tenantId,
+            id: normalized.systemId,
+          })
+          if (!system) {
+            throw new ReadSourceConfigValidationError('read-source config is invalid', {
+              errors: [{ code: SYSTEM_NOT_FOUND_CODE, field: 'systemId', reason: 'not_found' }],
+            })
+          }
           const familyRows = await trx.select(CONFIG_TABLE, { where: family, limit: 10000 })
           const nextVersion = familyRows.reduce((max, row) => {
             const version = Number.isInteger(row.version) ? row.version : Number(row.version) || 0
@@ -433,6 +464,7 @@ module.exports = {
   ReadSourceConfigNotFoundError,
   ReadSourceConfigConflictError,
   ReadSourceConfigNotApprovedError,
+  SYSTEM_NOT_FOUND_CODE,
   createReadSourceConfigStore,
   isFirstPartyReadSourceConfigStore,
   // PUBLIC (review round 7, P2-5). The C6 B4-binding gate needs the content key on a LIVE path

@@ -9,6 +9,7 @@
  *   3. `ApprovalDetailView` fires `markApprovalRead(instance.id)` on mount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
 // ---------------------------------------------------------------------------
@@ -393,6 +394,12 @@ function registerCommonStubs(app: VueApp<Element>): void {
 // ---------------------------------------------------------------------------
 // Specs
 // ---------------------------------------------------------------------------
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalCenterView 未读红点 (WP3 slice 2)', () => {
   let app: VueApp<Element> | null = null

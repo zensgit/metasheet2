@@ -163,8 +163,20 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_dept_heads:${source.levels}`
     case 'dept_head_at_level':
       return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry (backend mirror — keep in lockstep): provably identical
+      // for the same referenced node — two branches asking "the deciders of node X" resolve the
+      // same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
+    // Lock-2 §2.5 locked entries — `<kind>:<fieldId>:<level>`, provably identical for the same
+    // field and level. Backend mirror: ApprovalAssigneeResolver.fieldDerivedAssigneeSourceKey
+    // (consumed by BOTH the backend fingerprint and the frozen-snapshot key) — keep in lockstep.
+    case 'form_field_user_manager':
+      return `form_field_user_manager:${source.fieldId.trim()}:${source.level}`
+    case 'form_field_user_dept_head':
+      return `form_field_user_dept_head:${source.fieldId.trim()}:${source.level}`
     case 'static_user':
     case 'static_role':
       return null
@@ -175,6 +187,11 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       // guard's job (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`), which sees the actual
       // chosen ids. Authoring/publish cannot, and must not block the shape.
       return null
+    case 'user_group':
+      // Lock-1 §K1 / §2.4 locked entry (backend mirror — keep in lockstep): SORTED so [a,b] and
+      // [b,a] fingerprint identically. Two branches referencing the same group set are provably
+      // identical under EAGER_EXPANSION (the SAME frozen snapshot serves both).
+      return `user_group:${[...source.groupIds].sort().join(',')}`
     default: {
       const _exhaustive: never = source
       return _exhaustive
@@ -182,7 +199,10 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
   }
 }
 
-function runtimeSuccessorTargets(
+// Exported for `approvalNodeEdit.ts`'s Lock-1 §K3 `legalPriorApproverNodeKeys` (the prior-node
+// picker's dominance walk) so both FE graph walks share ONE runtime-successor semantic — the
+// mirror of the backend's own `runtimeSuccessorTargets`.
+export function runtimeSuccessorTargets(
   node: ApprovalNode,
   edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
   outgoingBySource: Map<string, ApprovalGraph['edges']>,

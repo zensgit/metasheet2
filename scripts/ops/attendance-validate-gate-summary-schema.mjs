@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { validAcceptanceProvenance } from './attendance-acceptance-preflight.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -145,6 +146,10 @@ async function main() {
     const ok = validate(value)
     if (!ok) {
       die(`schema validation failed (${filePath}): ${formatErrors(validate.errors)}`)
+    }
+    if ((value.schemaVersion >= 2 || value.provenance !== undefined || process.env.ATTENDANCE_REQUIRE_PROVENANCE === 'true')
+      && !validAcceptanceProvenance(value.provenance)) {
+      die('ACCEPTANCE_PROVENANCE_INVALID')
     }
   }
 

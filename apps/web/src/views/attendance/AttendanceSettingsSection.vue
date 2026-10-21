@@ -13,11 +13,10 @@
       </label>
       <label class="attendance__field" for="attendance-auto-absence-run-at">
         <span>{{ tr('Run at', '执行时间') }}</span>
-        <input
+        <AttendanceLocaleTimeInput
           id="attendance-auto-absence-run-at"
           v-model="settingsForm.autoAbsenceRunAt"
           name="autoAbsenceRunAt"
-          type="time"
         />
       </label>
       <label class="attendance__field" for="attendance-auto-absence-lookback">
@@ -62,6 +61,10 @@
         <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
         <input id="attendance-geo-radius" v-model="settingsForm.geoFenceRadius" name="geoFenceRadius" type="number" min="1" />
       </label>
+      <AttendanceEmployeeQuickActionIconsField
+        v-model="settingsForm.employeeQuickActionIcons"
+        :tr="tr"
+      />
     </div>
     <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
       {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
@@ -70,7 +73,10 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import type { Ref } from 'vue'
+import AttendanceEmployeeQuickActionIconsField from './AttendanceEmployeeQuickActionIconsField.vue'
+import type { EmployeeQuickActionIcons } from './attendanceEmployeeWorkspaceCommonIcons'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -84,6 +90,7 @@ interface SettingsFormState {
   geoFenceLng: string
   geoFenceRadius: string
   minPunchIntervalMinutes: number
+  employeeQuickActionIcons: EmployeeQuickActionIcons
 }
 
 interface SettingsBindings {
@@ -128,7 +135,13 @@ const saveSettings = () => props.settings.saveSettings()
 }
 
 .attendance__field--checkbox {
-  justify-content: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
 }
 
 .attendance__btn {

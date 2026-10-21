@@ -408,6 +408,35 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toEqual([])
   })
 
+  it('Lock-2 §L2-C: flags identical form_field_user_manager field+level pairs; differing field OR level does not collide — the fingerprint mirror is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }], [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }]),
+    )).toHaveLength(1)
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }], [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }]),
+    )).toHaveLength(0)
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user_manager', fieldId: 'contact_a', level: 2 }], [{ kind: 'form_field_user_manager', fieldId: 'contact_b', level: 2 }]),
+    )).toHaveLength(0)
+  })
+  it('Lock-2 §L2-C: the two contact-extension kinds never collide with each other, with form_field_user on the same field, or with the requester-anchored level kinds', () => {
+    // Different POINTERS on the same anchor field+level — publish must not block.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }], [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }]),
+    )).toHaveLength(0)
+    // The shipped 联系人自己 (form_field_user) fingerprint has no level segment — no cross-kind collision.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user', fieldId: 'contact' }], [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }]),
+    )).toHaveLength(0)
+    // Requester-anchored manager_at_level vs contact-anchored form_field_user_manager — different kinds.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'manager_at_level', level: 2 }], [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }]),
+    )).toHaveLength(0)
+    // And the dept-head pair vs dept_head_at_level (requester-anchored) — different kinds.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'dept_head_at_level', level: 2 }], [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 2 }]),
+    )).toHaveLength(0)
+  })
   it('Lock-1 §K5-b: flags identical dept_head_at_level levels — the fingerprint mirror is in lockstep with the backend', () => {
     expect(parallelDynamicAssigneeConflicts(
       withBranchSources([{ kind: 'dept_head_at_level', level: 2 }], [{ kind: 'dept_head_at_level', level: 2 }]),
@@ -415,6 +444,32 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     // Positive control: DIFFERENT levels are NOT flagged (parameterized, not kind-blanket).
     expect(parallelDynamicAssigneeConflicts(
       withBranchSources([{ kind: 'dept_head_at_level', level: 1 }], [{ kind: 'dept_head_at_level', level: 3 }]),
+    )).toEqual([])
+  })
+
+  it('Lock-1 §K3: flags identical prior_node_approver references — the fingerprint mirror (`prior_node_approver:<nodeKey>`) is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'prior_node_approver', nodeKey: 'gate' }], [{ kind: 'prior_node_approver', nodeKey: 'gate' }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT referenced nodes are NOT flagged (parameterized, not
+    // kind-blanket — different prior nodes may have different deciders).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'prior_node_approver', nodeKey: 'gate' }], [{ kind: 'prior_node_approver', nodeKey: 'gate2' }]),
+    )).toEqual([])
+  })
+
+  it('Lock-1 §K1: flags identical user_group groupIds SORTED (order-independent) — the fingerprint mirror is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1', 'g2'] }], [{ kind: 'user_group', groupIds: ['g1', 'g2'] }]),
+    )).toHaveLength(1)
+    // SORTED: [g1,g2] and [g2,g1] fingerprint identically — provably the same resolved set
+    // regardless of authored order.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1', 'g2'] }], [{ kind: 'user_group', groupIds: ['g2', 'g1'] }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT group sets are NOT flagged (parameterized, not kind-blanket).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1'] }], [{ kind: 'user_group', groupIds: ['g3'] }]),
     )).toEqual([])
   })
 

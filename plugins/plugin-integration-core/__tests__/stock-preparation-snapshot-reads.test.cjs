@@ -285,6 +285,8 @@ async function main() {
       pathChanged: 0,
       missingChildBom: 0,
       fingerprintChanged: 0,
+      componentCodeChanged: 0,
+      materialChanged: 0,
     })
     assert.equal(result.blockingExceptionCount, 2, 'two blocking-severity exceptions (open + resolved)')
     assert.deepEqual(Object.keys(result).sort(), ['baseSnapshotBatchId', 'blockingExceptionCount', 'changeCounts', 'snapshotBatchId'])
@@ -695,6 +697,8 @@ async function main() {
       pathChanged: 0,
       missingChildBom: 0,
       fingerprintChanged: 0,
+      componentCodeChanged: 0,
+      materialChanged: 0,
     })
     assert.equal(diffResult.blockingExceptionCount, 2)
     const rowsResult = await listSnapshotDiffRows({
@@ -919,8 +923,6 @@ async function main() {
   console.log('stock-preparation-snapshot-reads.test.cjs OK')
 }
 
-main().catch((error) => {
-  console.error('stock-preparation-snapshot-reads.test.cjs FAILED')
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-snapshot-reads.test.cjs', main)

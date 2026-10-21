@@ -25,6 +25,17 @@
 const ALLOWED_PREFIX = 'integration_'
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
+// Transaction isolation levels a caller may PIN on a transaction handle
+// (`setTransactionIsolationLevel`), each mapped to the ONE fixed statement it renders. The level
+// is a lookup key, never interpolated: anything outside this table is refused before any SQL is
+// built. READ UNCOMMITTED is deliberately absent (PostgreSQL runs it as READ COMMITTED, so naming
+// it would only mislead a reader).
+const TRANSACTION_ISOLATION_STATEMENTS = Object.freeze({
+  'read committed': 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+  'repeatable read': 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ',
+  serializable: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+})
+
 class ScopeViolationError extends Error {
   constructor(message, { table, column } = {}) {
     super(message)
@@ -88,6 +99,19 @@ function prepareParamValue(value) {
   // text and let PostgreSQL cast them to JSONB.
   if (Array.isArray(value) || isPlainObject(value)) return JSON.stringify(value)
   return value
+}
+
+function transactionIsolationStatement(level) {
+  const statement = typeof level === 'string' && Object.prototype.hasOwnProperty.call(TRANSACTION_ISOLATION_STATEMENTS, level)
+    ? TRANSACTION_ISOLATION_STATEMENTS[level]
+    : null
+  if (!statement) {
+    throw new ScopeViolationError(
+      'plugin-integration-core: transaction isolation level is not one of the whitelisted levels',
+      {},
+    )
+  }
+  return statement
 }
 
 function buildWhereClause(where, startParamIndex) {
@@ -218,6 +242,45 @@ function createDb({ database, logger } = {}) {
     return rows[0] || null
   }
 
+  /**
+   * `SELECT ... LIMIT 1 FOR KEY SHARE` — the WRITER'S half of a row-existence lock protocol.
+   *
+   * Added under the module header's own extension clause ("added here as a new validated method"),
+   * not as a raw-SQL escape hatch: the table and every where column pass the same identifier
+   * whitelist as selectOneForUpdate, and every value is parameterized.
+   *
+   * WHY KEY SHARE and not FOR SHARE. A caller that is about to persist a POINTER at this row (a
+   * stock-prep source binding, a read-source config version, a pipeline endpoint) needs exactly one
+   * thing: that the row is not DELETED (nor has its key changed) between this read and the caller's
+   * own COMMIT. FOR KEY SHARE conflicts with FOR UPDATE — which is what a delete-side guard takes and
+   * what DELETE itself takes — and with nothing weaker: an ordinary UPDATE of a non-key column takes
+   * FOR NO KEY UPDATE, which KEY SHARE does NOT block. So a binding being written never stalls an
+   * admin renaming the same system, and vice versa. FOR SHARE would conflict with FOR NO KEY UPDATE
+   * too, serializing pointer writes against every config edit for no protection gained. This is the
+   * same lock PostgreSQL's own referential-integrity check takes on a referenced row, which is what
+   * makes an application-level participant exactly as strong as a foreign key for THIS purpose,
+   * on a table that deliberately carries none.
+   *
+   * Only meaningful INSIDE `transaction`: a lock taken in autocommit is released at statement end.
+   * PostgreSQL requires UPDATE privilege on at least one column for any locking clause (same rule
+   * that made migration 075 necessary for the sealed-export runtime role's FOR UPDATE).
+   */
+  async function selectOneForKeyShare(table, where) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!where || typeof where !== 'object' || Array.isArray(where)) {
+      throw new Error('selectOneForKeyShare: where clause is required')
+    }
+    const whereClause = buildWhereClause(where, 1)
+    const result = await database.query(
+      `SELECT * FROM ${tableIdent}${whereClause.sql} LIMIT 1 FOR KEY SHARE`,
+      whereClause.params,
+    )
+    const rows = Array.isArray(result)
+      ? result
+      : (result && Array.isArray(result.rows) ? result.rows : [])
+    return rows[0] || null
+  }
+
   async function insertOne(table, row) {
     const tableIdent = quoteIdent(assertTable(table))
     if (!row || typeof row !== 'object' || Array.isArray(row)) {
@@ -229,6 +292,52 @@ function createDb({ database, logger } = {}) {
     const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
     const values = cols.map((c) => prepareParamValue(row[c]))
     const sql = `INSERT INTO ${tableIdent} (${colIdents}) VALUES (${placeholders}) RETURNING *`
+    return database.query(sql, values)
+  }
+
+  /**
+   * Single-statement UPSERT on a UNIQUE key: INSERT … ON CONFLICT (cols) DO UPDATE.
+   *
+   * Added under the module header's own extension clause ("added here as a new validated method"),
+   * not as a raw-SQL escape hatch: the table, every row column and every conflict column pass the
+   * same identifier whitelist as insertOne/updateRow, and every value is parameterized.
+   *
+   * Why a real UPSERT rather than selectOne-then-insert/update: the select-then-write shape has a
+   * race window in which two concurrent writers both see "absent" and the second INSERT dies on the
+   * unique index. Ledgers that are keyed by a natural identity (see
+   * integration_stock_prep_pack_installs) need the atomic form so a re-install is idempotent under
+   * concurrency, which is exactly the discipline the after-sales install ledger uses.
+   *
+   * `conflictColumns` names the UNIQUE index columns. `updateColumns` defaults to every row column
+   * that is not a conflict column; passing it narrows what a conflict may overwrite (an
+   * insert-only-immutable column such as `created_at` stays out).
+   */
+  async function upsertOne(table, row, { conflictColumns, updateColumns } = {}) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('upsertOne: row must be a plain object')
+    }
+    if (!Array.isArray(conflictColumns) || conflictColumns.length === 0) {
+      throw new Error('upsertOne: conflictColumns must be a non-empty array (refusing an unkeyed UPSERT)')
+    }
+    const cols = Object.keys(row)
+    if (cols.length === 0) throw new Error('upsertOne: row must have at least one column')
+    const conflictIdents = conflictColumns.map((c) => quoteIdent(assertColumn(c)))
+    const colIdents = cols.map((c) => quoteIdent(assertColumn(c))).join(', ')
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
+    const values = cols.map((c) => prepareParamValue(row[c]))
+    const conflictSet = new Set(conflictColumns)
+    const updatable = Array.isArray(updateColumns)
+      ? updateColumns.filter((c) => !conflictSet.has(c))
+      : cols.filter((c) => !conflictSet.has(c))
+    if (updatable.length === 0) {
+      throw new Error('upsertOne: no updatable column remains (use insertOne for insert-only writes)')
+    }
+    const setPairs = updatable
+      .map((c) => `${quoteIdent(assertColumn(c))} = EXCLUDED.${quoteIdent(c)}`)
+      .join(', ')
+    const sql = `INSERT INTO ${tableIdent} (${colIdents}) VALUES (${placeholders})`
+      + ` ON CONFLICT (${conflictIdents.join(', ')}) DO UPDATE SET ${setPairs} RETURNING *`
     return database.query(sql, values)
   }
 
@@ -317,11 +426,79 @@ function createDb({ database, logger } = {}) {
           transaction: database.transaction.bind(database),
         },
       })
+      /**
+       * `SET TRANSACTION ISOLATION LEVEL <whitelisted level>` on THIS transaction.
+       *
+       * Added under the module header's extension clause ("added here as a new validated method"):
+       * the level is a key into TRANSACTION_ISOLATION_STATEMENTS and the statement is a fixed
+       * literal from that table — no caller text reaches the SQL, and nothing is parameterized
+       * because nothing varies.
+       *
+       * It exists so a caller whose correctness DEPENDS on an isolation level can pin it instead of
+       * inheriting whatever the server / database / role default is (a bare BEGIN inherits
+       * `default_transaction_isolation`; `ALTER DATABASE ... SET default_transaction_isolation =
+       * 'repeatable read'` silently changes every such transaction). The external-system delete
+       * lock protocol is the first such caller (`external-system-pointer-lock.cjs`
+       * pinLockProtocolIsolation).
+       *
+       * MUST be the transaction's FIRST statement. PostgreSQL enforces it where it matters: when the
+       * inherited level differs from the requested one, a SET issued after any query fails with SQLSTATE
+       * 25001 and aborts the transaction; when it already IS the requested one, a late SET is a no-op
+       * (the transaction ran at that level all along) — a caller that gets the order wrong never completes
+       * at another level. Offered ONLY on the transaction handle: outside a block PostgreSQL merely WARNS.
+       */
+      async function setTransactionIsolationLevel(level) {
+        const statement = transactionIsolationStatement(level)
+        await trx.query(statement, [])
+      }
+      /**
+       * `SELECT pg_advisory_xact_lock(hashtext($1))` on THIS transaction — a per-key mutex PostgreSQL
+       * releases at COMMIT / ROLLBACK, for "count, then insert under a cap" sequences that have no
+       * row to lock (the handoff cursor locks its row with selectOneForUpdate; a per-tenant cap has
+       * no parent row — stock-preparation-project-target-store.cjs `create` is the first caller).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal, the key
+       * is its ONE parameter and never reaches the SQL text, and `hashtext` keys the lock space by a
+       * string a caller can name (`<table>:<tenant>`) instead of an integer a caller must allocate
+       * (a hash collision only serializes two unrelated callers, it never admits one). The key must
+       * be a non-empty string. Offered ONLY on the transaction handle: `pg_advisory_xact_lock` is
+       * transaction-scoped by definition, so outside a block it would guard nothing.
+       */
+      async function advisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])
+      }
+      /**
+       * The NON-BLOCKING sibling of `advisoryXactLock`: `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS
+       * locked` on THIS transaction. `true` = the lock is now held until COMMIT / ROLLBACK; `false` = another
+       * transaction holds it, answered AT ONCE — this never queues. For a caller that must not hold a pooled
+       * connection while it waits: the stock-preparation project overview writers (S3 fix round 2, F4), whose
+       * lock holder needs MORE pool connections for its host calls, so N blocked waiters each holding one could
+       * starve the very holder they wait on. Same key rules as `advisoryXactLock` (the key is the ONE parameter
+       * of a fixed literal); only an explicit boolean `true` from PostgreSQL counts as acquired.
+       */
+      async function tryAdvisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        const result = await trx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [key])
+        const rows = Array.isArray(result)
+          ? result
+          : (result && Array.isArray(result.rows) ? result.rows : [])
+        return Boolean(rows[0] && rows[0].locked === true)
+      }
       return callback({
+        setTransactionIsolationLevel,
+        advisoryXactLock,
+        tryAdvisoryXactLock,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,
+        selectOneForKeyShare: scoped.selectOneForKeyShare,
         insertOne: scoped.insertOne,
+        upsertOne: scoped.upsertOne,
         insertMany: scoped.insertMany,
         updateRow: scoped.updateRow,
         deleteRows: scoped.deleteRows,
@@ -337,7 +514,9 @@ function createDb({ database, logger } = {}) {
     select,
     selectOne,
     selectOneForUpdate,
+    selectOneForKeyShare,
     insertOne,
+    upsertOne,
     insertMany,
     updateRow,
     deleteRows,
@@ -359,6 +538,8 @@ module.exports = {
     buildRangeClause,
     quoteIdent,
     prepareParamValue,
+    transactionIsolationStatement,
+    TRANSACTION_ISOLATION_STATEMENTS,
     IDENT_RE,
   },
 }

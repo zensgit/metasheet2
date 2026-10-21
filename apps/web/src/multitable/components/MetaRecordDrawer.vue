@@ -32,14 +32,19 @@
     :upload-fn="uploadFn"
     :delete-attachment-fn="deleteAttachmentFn"
     :can-manage-record-permissions="canManageRecordPermissions"
+    :can-submit-approval="canSubmitApproval"
     :sheet-id="sheetId"
     :api-client="apiClient"
     :ai-shortcut="aiShortcut"
+    :ai-available="aiAvailable"
     :button-run-pending="buttonRunPending"
     :mention-suggestions="mentionSuggestions"
+    :mention-search="mentionSearch"
+    :opener-el="openerEl"
     @close="emit('close')"
     @delete="emit('delete')"
     @duplicate="emit('duplicate')"
+    @copy-link="emit('copy-link')"
     @patch="(fieldId: string, value: unknown) => emit('patch', fieldId, value)"
     @toggle-lock="(payload: { recordId: string; locked: boolean }) => emit('toggle-lock', payload)"
     @toggle-comments="emit('toggle-comments')"
@@ -52,6 +57,7 @@
     @ai-preview="(field: MetaField) => emit('ai-preview', field)"
     @ai-run="(field: MetaField) => emit('ai-run', field)"
     @run-button="(payload: { recordId: string; field: MetaField }) => emit('run-button', payload)"
+    @approval-submitted="(submission: MetaRecordApprovalSubmission) => emit('approval-submitted', submission)"
   />
 </template>
 
@@ -62,11 +68,13 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
@@ -98,10 +106,17 @@ withDefaults(defineProps<{
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canManageRecordPermissions?: boolean
+  /** 记录级送审 (多维表 × 审批 阶段二 §5): forwarded 1:1 to MetaRecordInspector's own prop — see that
+   *  component's doc comment. Optional with the SAME fail-closed default (absent ⇒ no 送审 entry), so
+   *  every pre-existing consumer of this deprecated shell is unaffected. */
+  canSubmitApproval?: boolean
   sheetId?: string
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11: forwarded 1:1 to MetaRecordInspector's own prop. Optional with the SAME fail-closed
+   *  default (absent ⇒ no AI preview/run buttons), the canSubmitApproval precedent above. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) receives, so a run from either surface disables
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
@@ -109,15 +124,24 @@ withDefaults(defineProps<{
   /** B5: people-mention candidates for rich-`longText` field editing in the drawer.
    *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
+  /** Record inspector v3 (2026-09-05, PR-A §1.1): forwarded 1:1 to MetaRecordInspector's own
+   *  `openerEl` prop — see that component's doc comment. Optional; a caller that never opens this
+   *  deprecated shell via a workbench-owned `openRecord(id, opener)` simply omits it. */
+  openerEl?: HTMLElement | null
 }>(), {
   recordIds: () => [],
+  aiAvailable: false,
   buttonRunPending: () => [],
+  openerEl: null,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  (e: 'copy-link'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
@@ -138,5 +162,8 @@ const emit = defineEmits<{
    * handler — which owns the runButton call + result.status branching + the
    * shared buttonRunPending key — handles both surfaces with no extra logic. */
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
+  /** 记录级送审 (阶段二 §5): re-emitted verbatim from MetaRecordInspector so a consumer of this shell
+   * sees exactly the inspector's event surface (the compat contract this file promises). */
+  (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
 </script>

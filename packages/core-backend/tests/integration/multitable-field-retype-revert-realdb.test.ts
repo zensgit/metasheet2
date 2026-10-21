@@ -27,14 +27,15 @@ const BASE = `base_frt_${TS}`
 const SHEET = `sheet_frt_${TS}`
 const FIELD = `fld_frt_${TS}`
 const REC = `rec_frt_${TS}`
-const U_FULL = `u_frt_full_${TS}` // multitable:write -> canManageFields
+const U_FULL = `u_frt_full_${TS}` // multitable:manage-schema -> canManageFields
 const U_READ = `u_frt_read_${TS}` // read-only -> NO canManageFields
 const FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let actor: { id: string; roles: string[]; perms: string[] }
-const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
 const READONLY = { id: U_READ, roles: ['member'], perms: ['multitable:read'] }
 
 const preview = (revisionId: string, as: typeof FULL) => { actor = as; return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId }) }
@@ -138,5 +139,24 @@ describeIfDatabase('multitable field retype revert — T9-W Tier 2 (real DB)', (
     await q('UPDATE meta_fields SET type=$2 WHERE id=$1', [FIELD, 'string']) // live moved after preview (now != `after`)
     const x = await execute(rev, token, FULL)
     expect(x.status).toBe(409)
+  })
+
+  test('(f) 备料 option B: a type+property revert keeps the STORED human write lock (a pre-lock recorded property cannot unlock the column)', async () => {
+    process.env[FLAG] = 'true'
+    // The column is locked NOW (plugin provisioning marked it after the recorded change happened).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FIELD, SHEET, 'F', 'string', JSON.stringify({ humanWriteLock: 'plm_system' }), 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, SHEET, JSON.stringify({ [FIELD]: '12' })])
+    // A revision recorded BEFORE the marking: its `before.property` has no lock.
+    const rev = await craftFieldRev(['type', 'property'], { type: 'number', property: {} }, { type: 'string', property: { humanWriteLock: 'plm_system' } })
+    const p = await preview(rev, FULL)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.preview?.driftConflict).toBe(false)
+    // Disclosed target == what will be stored: the lock rides along.
+    expect(p.body?.data?.preview?.target?.property).toEqual({ humanWriteLock: 'plm_system' })
+    const x = await execute(rev, p.body?.data?.previewToken, FULL)
+    expect(x.status, JSON.stringify(x.body)).toBe(200)
+    expect(await fieldType()).toBe('number') // the revert itself happened
+    const stored = ((await q('SELECT property FROM meta_fields WHERE id=$1', [FIELD])).rows[0] as { property: Record<string, unknown> }).property
+    expect(stored.humanWriteLock).toBe('plm_system') // ...and did NOT drop the lock
   })
 })

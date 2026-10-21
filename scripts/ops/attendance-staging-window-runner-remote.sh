@@ -3,10 +3,49 @@
 #
 # Remote (deploy-host) half of .github/workflows/attendance-staging-window-runner.yml.
 # Executes ONE action per invocation against the STAGING stack only:
-#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
-#   smoke          — run one of the five window smokes in-container (bundle doc:
-#                    docs/development/attendance-staging-window-bundle-20260702.md)
+#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth.
+#                    Owner-authorized 2026-09-28: TASKS_WINDOW_ENABLED (true|false, default
+#                    false) additionally sets TASKS_ENABLED=true on the staging backend via the
+#                    SAME persistent runner override SET_WINDOW_ENV uses (one `environment:`
+#                    block, never a duplicate YAML key); redeploying with it false removes the
+#                    key again. Deploy-only — see the TASKS_WINDOW_ENABLED validation below.
+#                    Rollback rule: once a deploy has applied the new SHA's migrations, an older
+#                    image can no longer pass deploy's inline migrate (kysely refuses a DB that has
+#                    migrations the image does not know). So a tasks rollback redeploys the SAME
+#                    SHA with TASKS_WINDOW_ENABLED=false (and FORCE_RECREATE=true); roll back the
+#                    image only when no migrations were applied in the window.
+#   smoke          — run one of the five window smokes, PLUS the `tasks` id (owner-authorized
+#                    2026-09-28), in-container (bundle doc:
+#                    docs/development/attendance-staging-window-bundle-20260702.md). The smoke
+#                    script and every module it imports by relative path (smoke_deps in
+#                    action_smoke) come from the per-run runner bundle, i.e. the directory this
+#                    file runs from; copy_smoke_bundle docker-cp's exactly those files into the
+#                    backend container. action=smoke never reads, fetches or checks out a
+#                    repository on the deploy host. Rule: ae4, mp6 and otbank-v18 stay packaged
+#                    in the bundle but are not enabled in this runner until their cleanup and
+#                    fixtures match the current code; action_smoke refuses them first, before
+#                    any container access, token mint or staging write. `tasks` is
+#                    a non-admin /api/tasks smoke: requires TASKS_ENABLED=true on the running
+#                    backend (fails closed otherwise) and provisions three stamp-derived
+#                    throwaway non-admin users against org `default`: the subject
+#                    (<stamp>, own role + admission), a member (<stamp>-member, the subject's
+#                    role + admission; it authenticates only to leave a task it follows) and
+#                    an outsider (<stamp>-outsider, own tasks:read role + admission, no
+#                    relation to any smoke task). It proves the 403-before-admission /
+#                    200-after-admission gate, the P0-A create/list/complete/reopen/read
+#                    surface and the M3 parent-candidates/subtask/membership/follower-leave/
+#                    completion-mode/comment/delete surface, the outsider's 404, and always
+#                    tears the fixture
+#                    back down (guaranteed cleanup in the smoke script's own try/catch/finally,
+#                    same as ae4/rd45/mp6/hmr5). Not part of the bundle §7 fixed-format
+#                    `stamps` residue-sweep — it proves and reports its own zero-residue
+#                    instead (see action_smoke below).
 #   status         — read-only snapshot (containers, health, settings, pending migrations)
+#   (owner exclusions) migrate and deploy's inline migrate pass exactly the owner-ruled
+#                    STAGING_OWNER_EXCLUDED_MIGRATIONS list (attendance-window-runner-pipeline.lib.sh)
+#                    as MIGRATION_EXCLUDE, subtract it from the in-play set, and prove before
+#                    and after each migration step that those migrations are unapplied and
+#                    their tables absent (owner 2026-09-29: A-3 off staging until approved).
 #   migrate        — backup + clone-rehearsal + apply, per
 #                    docs/operations/staging-migration-alignment-runbook.md and
 #                    docs/development/staging-migration-alignment-runbook-verification-20260519.md.
@@ -101,12 +140,12 @@ DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
 FORCE_RECREATE="${FORCE_RECREATE:-false}"
+TASKS_WINDOW_ENABLED="${TASKS_WINDOW_ENABLED:-false}"
 STAMPS="${STAMPS:-}"
 SOAK_ORGS="${SOAK_ORGS:-}"
 SOAK_OPTS="${SOAK_OPTS:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 IMAGE_OWNER="${IMAGE_OWNER:-zensgit}"
 RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
@@ -119,6 +158,18 @@ if [[ "$ACTION" != "deploy" && "$FORCE_RECREATE" == "true" ]]; then
   fail "FORCE_RECREATE=true is only allowed for action=deploy"
 fi
 
+# Owner-authorized 2026-09-28. Same defense-in-depth shape as FORCE_RECREATE above: the
+# workflow's own choice-type input already constrains this to true/false and to action=deploy,
+# but this file also runs standalone (`bash -o pipefail -c '<script>'`, per the header comment),
+# so it re-validates its own env inputs rather than trusting the caller.
+case "$TASKS_WINDOW_ENABLED" in
+  true|false) ;;
+  *) fail "TASKS_WINDOW_ENABLED must be true or false, got: '${TASKS_WINDOW_ENABLED}'" ;;
+esac
+if [[ "$ACTION" != "deploy" && "$TASKS_WINDOW_ENABLED" == "true" ]]; then
+  fail "TASKS_WINDOW_ENABLED=true is only allowed for action=deploy (env flips happen together with the deploy, never mid-smoke — same rule as SET_WINDOW_ENV/FORCE_RECREATE)"
+fi
+
 BACKEND_CONTAINER="metasheet-staging-backend"
 WEB_CONTAINER="metasheet-staging-web"
 POSTGRES_CONTAINER="metasheet-staging-postgres"
@@ -128,6 +179,73 @@ STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
 IN_CONTAINER_BASE_URL="http://127.0.0.1:8900"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
+TARGET_MIGRATION_IMAGE=""
+TARGET_MIGRATION_IMAGE_ID=""
+TARGET_MIGRATION_REPO_DIGEST=""
+TARGET_MIGRATION_ENV_FILE=""
+# P1-1/P2-4 hardening (2026-08-24, staging-review-adjudication-20260824.md): the running
+# backend's Config.Env is NOT copied verbatim into TARGET_MIGRATION_ENV_FILE any more (that
+# copy previously carried every staging secret PLUS any inherited MIGRATION_EXCLUDE /
+# MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET straight into every migrate
+# `docker run`). Only names on THIS allowlist are written. Each entry below is the FULL
+# migrate-path env surface as read from source. CENSUS METHOD (corrected 2026-08-25 — the
+# original claim named 5 files and said "zero other reads found", but the real IMPORT CLOSURE of
+# migrate.ts is 9 files and one of the unnamed four DID read an env var; a census whose scope is
+# smaller than the code it vouches for produces honest-looking absences): walk the full import
+# closure of migrate.ts (incl. core/logger.ts, context/request-context.ts,
+# integration/metrics/metrics.ts), grep `process\.env\.` in
+# every file, plus every file under src/db/migrations|migrations/:
+#   DATABASE_URL                    - connection-pool.ts:200 secretManager.get('DATABASE_URL', ...)
+#   NODE_ENV                        - connection-pool.ts:200,207 (required/ssl gate);
+#                                      SecretManager.ts:69,74 (fallback + provider-required gate).
+#                                      Staging pins NODE_ENV=production (docker/app.staging.env.example:6)
+#                                      — dropping it would silently fall back to the image's own
+#                                      Dockerfile ENV default (also production), so this is about
+#                                      staying in explicit lockstep with the running backend, not a
+#                                      behavior change by itself.
+#   DB_SSL                          - connection-pool.ts:205 sslDisabledByEnv. MUST-HAVE: staging
+#                                      pins DB_SSL=false (docker/app.staging.env.example:28) against a
+#                                      non-SSL postgres; NODE_ENV=production is always true inside the
+#                                      migration container (image default), so omitting DB_SSL flips
+#                                      ssl ON and breaks the connection (adjudication P1-1 refinement 2).
+#   DB_SSL_REJECT_UNAUTHORIZED      - connection-pool.ts:209
+#   DB_SSL_CA                       - connection-pool.ts:210
+#   DB_SSL_CERT                     - connection-pool.ts:211
+#   DB_SSL_KEY                      - connection-pool.ts:212
+#   DB_POOL_MAX                     - connection-pool.ts:222
+#   DB_POOL_MIN                     - connection-pool.ts:223
+#   DB_IDLE_TIMEOUT                 - connection-pool.ts:226
+#   DB_CONNECT_TIMEOUT              - connection-pool.ts:227
+#   DB_QUERY_TIMEOUT                - connection-pool.ts:234
+#   DB_STATEMENT_TIMEOUT            - connection-pool.ts:235
+#   DB_SLOW_MS                      - connection-pool.ts:238 (also read directly at :58)
+#   APP_NAME                        - connection-pool.ts:242 (pg application_name)
+#   STORAGE_BASE_URL                - zzzz20260710140000_add_files_storage_key.ts:77 (backfill
+#                                      migration; already applied on staging, kept for generality
+#                                      per the adjudication — a rollback/replay could still read it)
+#   SECRET_PROVIDER                 - SecretManager.ts:74 (selects env|file|vault)
+#   SECRET_FILE_PATH                - SecretManager.ts:79 (only consulted when SECRET_PROVIDER=file;
+#                                      passed through so the migration container keeps whatever
+#                                      provider mode the running backend actually uses — NOT asserting
+#                                      env-provider, which the adjudication offers as an alternative
+#                                      but which would need its own separate verification the runner
+#                                      cannot make today)
+#   LOG_LEVEL                       - core/logger.ts:78 (in migrate.ts's import closure; unset
+#                                      falls back to 'info' — inert today, allowlisted so the
+#                                      census and the allowlist describe the same closure)
+# Deliberately NOT allowlisted: ALLOW_SECRET_FALLBACK (SecretManager.ts:69) — staging's template
+# never sets it and its absence is fail-CLOSED-safe (a genuinely missing required secret throws
+# rather than silently degrading), consistent with this allowlist's containment goal. Also never
+# allowlisted: MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET — those
+# three are handled by the separate detect-and-abort + forced -e neutralization below
+# (materialize_target_migration_env, target_migrate_exec), never by silent inclusion here.
+TARGET_MIGRATION_ENV_ALLOWLIST=(
+  DATABASE_URL NODE_ENV
+  DB_SSL DB_SSL_REJECT_UNAUTHORIZED DB_SSL_CA DB_SSL_CERT DB_SSL_KEY
+  DB_POOL_MAX DB_POOL_MIN DB_IDLE_TIMEOUT DB_CONNECT_TIMEOUT
+  DB_QUERY_TIMEOUT DB_STATEMENT_TIMEOUT DB_SLOW_MS APP_NAME
+  STORAGE_BASE_URL SECRET_PROVIDER SECRET_FILE_PATH LOG_LEVEL
+)
 # Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
 # postgres container/server as staging, never on a different host, and is always dropped
 # (created fresh each run — never assumed to persist).
@@ -188,7 +306,11 @@ SOAK_GENERATOR_SCRIPT="attendance-w4w7-soak-load-generator.mjs"
 SOAK_UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 # Manifest reference pattern — mirrors REF_PATTERN in both transition-CLI libs.
 SOAK_REF_RE='^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
-# The DEPLOYED image's own CLI copies — deliberately /app paths, NOT host-synced copies:
+# soak_seed_rotate_password's RAISE NOTICE result line (no GNU-vs-BSD `\+` trap: bash's own
+# `=~` is POSIX ERE on every platform, and the grep pre-filter below uses `-E` for the same
+# reason — neither depends on the host sed/grep BRE dialect).
+SOAK_ROTATE_NOTICE_RE='ROTATE_RESULT family_count=([0-9]+) updated_count=([0-9]+)'
+# The DEPLOYED image's own CLI copies — deliberately /app paths, NOT runner-bundle copies:
 # the CLI and the transition boundary it drives must come from the same build.
 SOAK_W4C5_CLI="/app/scripts/ops/attendance-w4c5-rollout-transition.ts"
 SOAK_W7_CLI="/app/scripts/ops/attendance-w7-context-source-transition.ts"
@@ -261,7 +383,326 @@ staging_exec_env() {
     shift
   done
   [[ "${1:-}" == "--" ]] && shift
-  docker exec "${env_flags[@]}" "$BACKEND_CONTAINER" "$@"
+  docker exec ${env_flags[@]+"${env_flags[@]}"} "$BACKEND_CONTAINER" "$@"
+}
+
+cleanup_target_migration_runtime() {
+  # The env file carries a (now allowlist-narrowed, but still real) DB DSN and possibly a
+  # secrets-file path. It is materialized only because docker run has no safe "inherit
+  # another container's env" primitive; never copy it to OUTPUT_DIR or print it.
+  # P2-4 hardening (2026-08-24): overwrite-before-unlink (shred) when available, so a crash
+  # between materialization and this cleanup does not leave forensically-recoverable
+  # plaintext disk blocks behind after the unlink. Falls back to a plain rm -f on hosts
+  # without shred(1) — still correct, just the pre-hardening guarantee (mode 0600 + rm).
+  if [[ -n "${TARGET_MIGRATION_ENV_FILE:-}" ]]; then
+    if command -v shred >/dev/null 2>&1; then
+      shred -u -z -n 1 -- "$TARGET_MIGRATION_ENV_FILE" 2>/dev/null || rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    else
+      rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    fi
+    TARGET_MIGRATION_ENV_FILE=""
+  fi
+}
+
+materialize_target_migration_env() {
+  # P1-1 hardening (2026-08-24, staging-review-adjudication-20260824.md): previously this
+  # copied the running backend's ENTIRE Config.Env verbatim into TARGET_MIGRATION_ENV_FILE,
+  # so an inherited MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL /
+  # ALLOW_DB_RESET reached the migration container's process.env unfiltered — silently
+  # shrinking the manifest `--list`/`--confirm` certify while `Pending: 0` stays green
+  # (migration-provider.ts:267-272,309-311). Two independent layers now:
+  #   (a) detect-and-FAIL-LOUD (preferred, per the adjudication's refinement 1): if the
+  #       INHERITED env carries any of the three hazard variables in a hazardous state,
+  #       abort naming ONLY the variable name(s) — never the value — before writing
+  #       anything to disk. This is either host-side env drift or an undocumented owner
+  #       ruling the runner must not silently honor (migration-provider.ts's own docblock:
+  #       "never a normal deploy switch" / staging audit 20260519:132 "do not hide this
+  #       with a broad MIGRATION_EXCLUDE until ... explicitly accepted").
+  #   (b) allowlist (defense-in-depth / least-privilege, TARGET_MIGRATION_ENV_ALLOWLIST
+  #       above): only pass through names the migrate path actually reads. The three
+  #       hazard vars are deliberately never on that allowlist, so even if (a) somehow
+  #       didn't fire they still would not reach the file this way.
+  # target_migrate_exec below ALSO forces -e MIGRATION_EXCLUDE=/…=false/…=false on every
+  # migrate-family docker run as a third, independent backstop (docker applies trailing -e
+  # after --env-file, so it always wins regardless of what (a)/(b) let through).
+  local allowlist_csv
+  allowlist_csv="$(printf '%s,' "${TARGET_MIGRATION_ENV_ALLOWLIST[@]}")"
+  # Reject multiline/NUL values: Docker's env-file grammar cannot preserve them byte-for-byte.
+  # The JSON and resulting secret file are never emitted to logs or artifacts.
+  docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" \
+    | TARGET_ENV_FILE="$TARGET_MIGRATION_ENV_FILE" TARGET_ENV_ALLOWLIST_CSV="$allowlist_csv" python3 -c '
+import json, os, sys
+
+values = json.load(sys.stdin)
+if not isinstance(values, list) or not values:
+    raise SystemExit("running backend has no Config.Env")
+
+pairs = []
+for value in values:
+    if not isinstance(value, str) or "=" not in value or any(c in value for c in ("\n", "\r", "\0")):
+        raise SystemExit("running backend has an env entry incompatible with a secure env-file")
+    name, _, val = value.partition("=")
+    pairs.append((name, val))
+
+# (a) detect-and-fail-loud: values-free by construction (only names ever reach the message).
+def is_truthy(v):
+    return v.strip().lower() == "true"
+
+hazards = []
+for name, val in pairs:
+    if name == "MIGRATION_EXCLUDE" and val.strip() != "":
+        hazards.append(name)
+    elif name == "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL" and is_truthy(val):
+        hazards.append(name)
+    elif name == "ALLOW_DB_RESET" and is_truthy(val):
+        hazards.append(name)
+if hazards:
+    names = ", ".join(sorted(set(hazards)))
+    raise SystemExit(
+        "ABORT: the running backend'"'"'s inherited environment carries hazardous "
+        "migration-control variable(s): " + names + " (value withheld). This can silently "
+        "narrow or reset the migration manifest that Pending:0 certifies. This is either "
+        "host-side env drift or an owner ruling this runner must not silently honor -- "
+        "resolve it as its own change, never by rerunning this action."
+    )
+
+# (b) allowlist: only names the migrate path actually reads (see the bash comment above
+# TARGET_MIGRATION_ENV_ALLOWLIST for the per-entry source justification).
+allowlist = set(n for n in os.environ["TARGET_ENV_ALLOWLIST_CSV"].split(",") if n)
+filtered = [f"{name}={val}" for name, val in pairs if name in allowlist]
+
+path = os.environ["TARGET_ENV_FILE"]
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    handle.write("\n".join(filtered) + "\n")
+'
+}
+
+prepare_target_migration_image() {
+  require_sha
+  TARGET_MIGRATION_IMAGE="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}"
+
+  log "target migration universe: pulling exact image ${TARGET_MIGRATION_IMAGE} (running application is not changed)"
+  docker pull "$TARGET_MIGRATION_IMAGE" 2>&1 | tee "${OUTPUT_DIR}/target-image-pull.log"
+
+  local revision
+  revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TARGET_MIGRATION_IMAGE" 2>/dev/null || true)"
+  [[ "$revision" == "$DEPLOY_SHA" ]] \
+    || fail "target migration image revision mismatch: expected ${DEPLOY_SHA}, got '${revision:-<missing>}'"
+  TARGET_MIGRATION_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$TARGET_MIGRATION_IMAGE")"
+  TARGET_MIGRATION_REPO_DIGEST="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$TARGET_MIGRATION_IMAGE" | grep '/metasheet2-backend@' | head -n 1 || true)"
+  [[ -n "$TARGET_MIGRATION_REPO_DIGEST" ]] \
+    || fail "target migration image has no metasheet2-backend repo digest after pull; refusing an unattested migration run"
+
+  mkdir -p "$RUNNER_PERSIST_DIR"
+  TARGET_MIGRATION_ENV_FILE="$(mktemp "${RUNNER_PERSIST_DIR}/.target-migrate-env.XXXXXX")"
+  chmod 0600 "$TARGET_MIGRATION_ENV_FILE"
+  materialize_target_migration_env
+
+  {
+    echo "image=${TARGET_MIGRATION_IMAGE}"
+    echo "revision=${revision}"
+    echo "image_id=${TARGET_MIGRATION_IMAGE_ID}"
+    echo "repo_digest=${TARGET_MIGRATION_REPO_DIGEST}"
+    echo "running_application_changed=no"
+  } > "${OUTPUT_DIR}/target-migration-image.txt"
+}
+
+target_migrate_exec() {
+  # target_migrate_exec ["A=1" ...] -- command args...
+  local -a env_flags=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    env_flags+=(-e "$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] && shift
+  [[ -n "$TARGET_MIGRATION_IMAGE" && -r "$TARGET_MIGRATION_ENV_FILE" ]] \
+    || fail "target migration runtime was not prepared"
+  # P1-1 hardening, layer 3 (defense-in-depth backstop behind materialize_target_migration_env's
+  # detect-and-abort + allowlist): force the three hazard vars off on EVERY migrate-family
+  # docker run, unconditionally. `docker run` applies `-e` flags AFTER `--env-file` and later
+  # `-e NAME=value` wins for a repeated NAME, so these three placed after the caller's own
+  # env_flags always have the final word — including for a hypothetical future caller that
+  # tried to pass one of these three names itself. None of the three has a legitimate runner
+  # use: this runner never invokes --reset (ALLOW_DB_RESET is only read by `migrate.ts --reset`);
+  # MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL is documented "never a normal deploy switch"
+  # (migration-provider.ts); MIGRATION_EXCLUDE changes are owner-ruled, separate-PR material
+  # (staging audit 20260519:132, precedent #4228) — so the value forced here is exactly the
+  # owner-ruled list committed in the lib (STAGING_OWNER_EXCLUDED_MIGRATIONS), never anything a
+  # caller or the container passes in.
+  local owner_exclude
+  owner_exclude="$(staging_owner_exclude_csv)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  docker run --rm --pull=never \
+    --network "container:${BACKEND_CONTAINER}" \
+    --env-file "$TARGET_MIGRATION_ENV_FILE" \
+    ${env_flags[@]+"${env_flags[@]}"} \
+    -e "MIGRATION_EXCLUDE=${owner_exclude}" \
+    -e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \
+    -e "ALLOW_DB_RESET=false" \
+    "$TARGET_MIGRATION_IMAGE" "$@"
+}
+
+list_migration_name_universe() {
+  # P1-2 hardening (2026-08-24): filesystem enumeration INSIDE the pinned target image —
+  # bypasses Kysely's getMigrations() (and therefore process.env / MIGRATION_EXCLUDE)
+  # entirely. Dockerfile.backend COPIES the whole `packages` tree — source, not just the
+  # compiled dist — into the runner image (Dockerfile.backend:9,43), so these directories
+  # are guaranteed present in TARGET_MIGRATION_IMAGE with basenames identical to what the
+  # compiled provider reads. Verified against migration-provider.ts's actual folder
+  # candidates and directory contents (2026-08-24), not assumed:
+  #   - packages/core-backend/src/db/migrations/*.ts — the TS provider folder
+  #     (getProviderFolderCandidates; compiles to the dist twin migrate.js actually loads).
+  #     Every non-underscore-prefixed .ts file there carries a real `up` export (checked);
+  #     names starting with `_` (`_patterns.ts`, `_template.ts`) are shared helper code, not
+  #     migrations, and the provider itself skips them the same way
+  #     (migration-provider.ts's addProviderMigrations: `if (name.startsWith("_")) continue`)
+  #     — the `_*` skip below exists for exactly that file, not defensively.
+  #   - packages/core-backend/src/db/migrations/*.sql — raw legacy .sql files that ALSO
+  #     live in this same directory (20250925_create_view_tables.sql,
+  #     20250926_create_audit_tables.sql) and are picked up by
+  #     getSqlFolderCandidates's `../../../src/db/migrations` candidate. Missing this glob
+  #     was caught in review: it would have silently narrowed the universe (opposite of the
+  #     canary's purpose) for these two names specifically.
+  #   - packages/core-backend/migrations/*.sql — the top-level raw-SQL folder
+  #     (getSqlFolderCandidates's `../../../migrations` candidate; 076 and its siblings).
+  #     Contains a non-.sql `claudedocs/` subdirectory the provider never loads — the .sql
+  #     glob already excludes it, no extra filtering needed.
+  # No --network, no --env-file, no credentials: this step reads nothing but filenames, so
+  # it cannot leak anything and needs no allowlist.
+  docker run --rm --pull=never "$TARGET_MIGRATION_IMAGE" sh -c '
+    for f in /app/packages/core-backend/src/db/migrations/*.ts; do
+      [ -f "$f" ] || continue
+      b=$(basename "$f")
+      case "$b" in .*|_*) continue ;; esac
+      echo "${b%.ts}"
+    done
+    for f in /app/packages/core-backend/src/db/migrations/*.sql /app/packages/core-backend/migrations/*.sql; do
+      [ -f "$f" ] || continue
+      b=$(basename "$f")
+      case "$b" in .*|_*) continue ;; esac
+      echo "${b%.sql}"
+    done
+  ' | sort -u
+}
+
+list_migration_names_applied() {
+  # list_migration_names_applied <db-name>
+  # Direct psql read of kysely_migration's own `name` column — bypasses process.env and the
+  # Node migration provider entirely (no docker run of the migration image at all here), so
+  # this is immune to the exclusion vector by construction, independently of the fixes
+  # above and of list_migration_name_universe.
+  docker exec "$POSTGRES_CONTAINER" psql -U "$MIGRATE_BACKUP_PG_USER" -d "$1" -tA \
+    -c "SELECT name FROM kysely_migration ORDER BY name;" 2>/dev/null \
+    | tr -d '\r' | sed '/^$/d' | sort -u
+}
+
+compute_in_play_migrations() {
+  # compute_in_play_migrations <real-db-name>
+  # "In play" = migration names present in the pinned image's own migrations directories
+  # (the full, env-immune filesystem manifest from list_migration_name_universe) that are
+  # NOT YET recorded in the real DB's kysely_migration ledger (also env-immune, read
+  # directly via psql). Because BOTH sources bypass process.env entirely, this set cannot
+  # be shrunk by an inherited MIGRATION_EXCLUDE the way `migrate.js --list`'s own Pending
+  # count could before materialize_target_migration_env/target_migrate_exec were hardened —
+  # which is exactly why confirm_in_play_migrations below doubles as P1-1's canary: kysely
+  # 0.28.8's Migrator.getMigrations() maps over PROVIDER ENTRIES ONLY, so a name excluded
+  # from the provider is simply absent from the result and `--confirm` returns exit 2 "not
+  # found among the known migrations" for it (migrate.ts's commandConfirm), never exit 0.
+  local real_db="$1"
+  list_migration_name_universe > "${OUTPUT_DIR}/migration-name-universe.txt"
+  [[ -s "${OUTPUT_DIR}/migration-name-universe.txt" ]] \
+    || fail "migration name universe is empty — refusing to compute an in-play set from nothing (image filesystem read failed?)"
+  list_migration_names_applied "$real_db" > "${OUTPUT_DIR}/migration-applied-before.txt"
+  # Sanity floor (review, 2026-08-24): an empty-but-successful psql read is always wrong
+  # for a live staging DB carrying 300+ historically-applied migrations, and silently
+  # treats the ENTIRE universe as in-play — hundreds of unnecessary --confirm docker runs
+  # inside the migration window, none of them informative. The caller cross-checks this
+  # same count against the provider's own Applied:N (a second, independent env-immune-ish
+  # source) before trusting either.
+  [[ -s "${OUTPUT_DIR}/migration-applied-before.txt" ]] \
+    || fail "psql read of kysely_migration returned zero applied names for a live staging DB — refusing to treat the entire migration universe as in-play"
+  comm -23 "${OUTPUT_DIR}/migration-name-universe.txt" "${OUTPUT_DIR}/migration-applied-before.txt" \
+    > "${OUTPUT_DIR}/migration-in-play-before-owner-exclusions.txt"
+  # Owner-ruled exclusions are not applied by this run, so they are not in play either;
+  # assert_owner_exclusions_hold proves separately that they stay unapplied.
+  staging_owner_excluded_names | sort -u > "${OUTPUT_DIR}/migration-owner-excluded.txt" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  comm -23 "${OUTPUT_DIR}/migration-in-play-before-owner-exclusions.txt" "${OUTPUT_DIR}/migration-owner-excluded.txt" \
+    > "${OUTPUT_DIR}/migration-in-play.txt"
+}
+
+assert_owner_exclusions_hold() {
+  # assert_owner_exclusions_hold <pg-user> <db-name> <phase>
+  # Proves, on <db-name>, that every owner-excluded migration is still UNAPPLIED (a name already
+  # in kysely_migration means the exclusion is stale and would break the provider/ledger
+  # agreement) and that none of the owner-excluded tables exists. Read-only.
+  local pg_user="$1" db="$2" phase="$3" applied names name sql present
+  local out="${OUTPUT_DIR}/owner-exclusions-${phase}.txt"
+  names="$(staging_owner_excluded_names)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  sql="$(staging_owner_excluded_tables_present_sql)" \
+    || fail "the owner-ruled excluded-table list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  applied="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
+    -c "SELECT name FROM kysely_migration ORDER BY name;")" \
+    || fail "owner exclusions (${phase}): could not read kysely_migration on ${db}"
+  : > "$out"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    if grep -qxF -- "$name" <<< "$applied"; then
+      fail "owner exclusions (${phase}): ${name} is already applied on ${db} — the exclusion is stale; remove it in the same owner-ruled change that applies it"
+    fi
+    echo "migration=${name} applied=no" >> "$out"
+  done <<< "$names"
+  present="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
+    -c "$sql" | tr -d '[:space:]')" \
+    || fail "owner exclusions (${phase}): could not check the excluded tables on ${db}"
+  [[ "$present" == "0" ]] \
+    || fail "owner exclusions (${phase}): ${present:-<unreadable>} owner-excluded table(s) exist on ${db} — STOP; the excluded migration (or an equivalent) has run"
+  echo "excluded_tables_present=0" >> "$out"
+  log "owner exclusions hold (${phase}) on ${db}: excluded migration(s) unapplied, excluded table(s) absent"
+}
+
+assert_applied_counts_agree() {
+  # assert_applied_counts_agree <psql-applied-names-file> <provider-list-output-file>
+  # Cross-check (review, 2026-08-24): the psql-derived applied count
+  # (list_migration_names_applied, env-immune) and the provider's own `Applied: N` (from a
+  # `--list` run against the SAME real DB) are two INDEPENDENT sources for "how many
+  # migrations are already applied" — they must agree. This is what makes the in-play
+  # canary trustworthy rather than merely present: a silent divergence here (a stale read,
+  # a provider-side surprise) would otherwise flow straight into
+  # confirm_in_play_migrations as either a false-empty (nothing gets confirmed) or
+  # false-huge (the whole 300+-name universe gets re-confirmed) in-play set. Also serves as
+  # the sanity floor: a live staging DB always has a large positive applied count, so a
+  # zero/unreadable psql count is treated as a hard failure, never as "nothing to compare."
+  local psql_file="$1" provider_list_file="$2"
+  local applied_count_psql applied_count_provider
+  applied_count_psql="$(wc -l < "$psql_file" | tr -d '[:space:]')"
+  applied_count_provider="$(grep -oE '^Applied: [0-9]+$' "$provider_list_file" | awk '{print $2}')"
+  [[ "$applied_count_psql" =~ ^[0-9]+$ && "$applied_count_psql" -gt 0 ]] \
+    || fail "psql-derived applied-migration count is not a positive integer ('${applied_count_psql}') — refusing to trust it for the in-play computation"
+  [[ -n "$applied_count_provider" ]] \
+    || fail "could not read a 'Applied: N' line from ${provider_list_file}"
+  [[ "$applied_count_psql" == "$applied_count_provider" ]] \
+    || fail "applied-migration count mismatch: psql (env-immune) read ${applied_count_psql}, provider --list reported ${applied_count_provider} — investigate before proceeding (see ${psql_file} vs ${provider_list_file}); refusing to trust either source alone"
+}
+
+confirm_in_play_migrations() {
+  # confirm_in_play_migrations <names-file>
+  # Per-name --confirm for EVERY migration this deploy has in play (P1-2): `--latest`/
+  # `--list` exiting 0 / Pending:0 is NOT proof any SPECIFIC migration ran (an
+  # empty/excluded/no-op/partially-applied set all reach the same green line — migrate.ts's
+  # commandConfirm docblock). Fails loud, naming the specific migration, on the first
+  # non-applied/unknown name.
+  local names_file="$1" name out
+  : > "${OUTPUT_DIR}/confirm-in-play.txt"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    out=""
+    out="$(target_migrate_exec -- node "$MIGRATE_JS" --confirm "$name" < /dev/null 2>&1 || true)"
+    printf '%s\n' "$out" >> "${OUTPUT_DIR}/confirm-in-play.txt"
+    grep -q "^migration \"${name}\" is applied\$" <<< "$out" \
+      || fail "named confirmation for in-play migration '${name}' did not pass (see confirm-in-play.txt): ${out}"
+  done < "$names_file"
 }
 
 require_sha() {
@@ -343,16 +784,57 @@ prepare_container_runner() {
     "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs"
 }
 
+# require_smoke_bundle <file>...
+# Every named file must be present in the runner bundle (HERE). Fails closed, naming every
+# missing file, before anything is copied into the container.
+require_smoke_bundle() {
+  local file
+  local -a missing=()
+  for file in "$@"; do
+    [[ -f "${HERE}/${file}" ]] || missing+=("$file")
+  done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    fail "runner bundle is missing: ${missing[*]} (looked in ${HERE}); the workflow tar list must ship every smoke script and its relative-import closure"
+  fi
+}
+
+# copy_smoke_bundle <smoke_script> [dep...]
+# Copies the smoke script and its relative-import closure from the runner bundle into
+# ${CONTAINER_RUNNER_DIR}/scripts/ops/, so every relative import resolves next to the smoke
+# script inside the container.
+copy_smoke_bundle() {
+  require_smoke_bundle "$@"
+  local file
+  for file in "$@"; do
+    docker cp "${HERE}/${file}" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/${file}"
+  done
+}
+
 find_admin_user() {
   staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" --find-admin
 }
 
 mint_token() {
-  # mint_token <user_id> <roles_csv> <perms_csv>; token printed to stdout (never logged).
-  local user_id="$1" roles="$2" perms="$3"
+  # mint_token <user_id> <roles_csv> <perms_csv> [tenant_id]; token printed to stdout (never
+  # logged). tenant_id is OPTIONAL — every pre-existing 3-arg caller is unaffected. When given,
+  # it is passed through to the mint script's --tenant-id, which embeds a `tenantId` claim.
+  # That claim is the ONLY thing that later sets req.authenticatedTenantId (AuthService
+  # verifyToken -> resolveSessionTenantId, packages/core-backend/src/auth/jwt-middleware.ts) —
+  # the x-org-id header other smokes rely on never sets it. resolveSessionTenantId itself
+  # requires an ACTIVE user_orgs row for (user_id, tenant_id) to accept the claim, so a caller
+  # minting with a tenant_id must seed that user_orgs row before the token is ever verified
+  # (minting is pure signing — no DB read — so seeding may happen either before or after this
+  # call, as long as it happens before the token's first authenticated use).
+  local user_id="$1" roles="$2" perms="$3" tenant_id="${4:-}"
   [[ "$user_id" =~ ^[A-Za-z0-9._@-]+$ ]] || fail "refusing to mint token for unsafe user id: ${user_id}"
-  staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
-    --mint --user-id "$user_id" --roles "$roles" --perms "$perms"
+  if [[ -n "$tenant_id" ]]; then
+    [[ "$tenant_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "refusing to mint token for unsafe tenant id: ${tenant_id}"
+    staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
+      --mint --user-id "$user_id" --roles "$roles" --perms "$perms" --tenant-id "$tenant_id"
+  else
+    staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
+      --mint --user-id "$user_id" --roles "$roles" --perms "$perms"
+  fi
 }
 
 capture_settings() {
@@ -368,10 +850,20 @@ capture_settings() {
 }
 
 assert_window_env_flags() {
+  # assert_window_env_flags [tasks_mode=false]
+  #
   # The digest gate must stay unset/false for the whole window (bundle §3.4); the two
-  # rd-window flags must be live when requested. Verified in the RUNNING container env.
+  # rd-window flags must be live when requested. TASKS_ENABLED is asymmetric, like the rd-window
+  # flags: tasks_mode=true FAILS closed unless TASKS_ENABLED=true is live; tasks_mode=false only
+  # WARNs when it is still live (an env set outside this runner's own override, e.g. in the host
+  # env file, is an observation, not this action's violation). That includes action=deploy with
+  # TASKS_WINDOW_ENABLED=false, so a tasks rollback must check env-flags.txt for
+  # `tasks=<unset>(requested=false)` rather than rely on the exit code. residue-sweep and status
+  # have no tasks input of their own and always pass "false". Verified in the RUNNING container env.
+  local tasks_mode="${1:-false}"
   staging_exec node -e '
 const mode = process.argv[1]
+const tasksMode = process.argv[2]
 const digest = process.env.ATTENDANCE_REPORT_DIGEST_ENABLED
 if (digest === "true") {
   console.error("FAIL: ATTENDANCE_REPORT_DIGEST_ENABLED=true in the staging backend — the window plan requires it UNSET for the whole window (bundle §3.4)")
@@ -387,31 +879,22 @@ if (mode === "rd-window") {
 } else if (sched === "true" || worker === "true") {
   console.warn(`WARN: set_window_env=none but scheduler=${sched} worker=${worker} are on (likely set in the host env file; this runner only manages its own override)`)
 }
-console.log(`env-flags ok: mode=${mode} scheduler=${sched||"<unset>"} worker=${worker||"<unset>"} digest=${digest||"<unset>"}`)
-' "$SET_WINDOW_ENV" | tee "${OUTPUT_DIR}/env-flags.txt"
+const tasksEnabled = process.env.TASKS_ENABLED
+if (tasksMode === "true") {
+  if (tasksEnabled !== "true") {
+    console.error(`FAIL: tasks_enabled=true requested but TASKS_ENABLED=${tasksEnabled} in the running container`)
+    process.exit(1)
+  }
+} else if (tasksEnabled === "true") {
+  console.warn(`WARN: tasks_enabled=false (or not requested by this action) but TASKS_ENABLED=true is on (likely set in the host env file; this runner only manages its own override)`)
+}
+console.log(`env-flags ok: mode=${mode} scheduler=${sched||"<unset>"} worker=${worker||"<unset>"} digest=${digest||"<unset>"} tasks=${tasksEnabled||"<unset>"}(requested=${tasksMode})`)
+' "$SET_WINDOW_ENV" "$tasks_mode" | tee "${OUTPUT_DIR}/env-flags.txt"
 }
 
 snapshot_staging_ps() {
   docker ps --filter 'name=metasheet-staging-' \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' > "${OUTPUT_DIR}/docker-ps-staging.txt"
-}
-
-host_sync_prod_repo() {
-  # Same discipline as attendance-remote-log-snapshot-prod.yml: the smoke scripts are
-  # docker-cp'd from the host-synced repo (main), decoupled from the deployed image SHA.
-  [[ -d "$PROD_REPO_DIR" ]] || fail "host repo missing: ${PROD_REPO_DIR} (DEPLOY_PATH)"
-  if [[ "$SKIP_HOST_SYNC" == "true" ]]; then
-    log "host-sync skipped (skip_host_sync=true)"
-    return 0
-  fi
-  if git -C "$PROD_REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$PROD_REPO_DIR" fetch origin main
-    git -C "$PROD_REPO_DIR" checkout main
-    git -C "$PROD_REPO_DIR" pull --ff-only origin main
-    log "host-sync ok: $(git -C "$PROD_REPO_DIR" rev-parse HEAD)"
-  else
-    log "host-sync: ${PROD_REPO_DIR} is not a git repo; continuing with existing files"
-  fi
 }
 
 auth_round_trip() {
@@ -432,6 +915,50 @@ auth_round_trip() {
 
 # --- actions ---------------------------------------------------------------------------
 
+# F1 (2026-08-25, gate on 5b4b38d925 + independent external review — both found it): action=deploy's
+# inline migrate runs in the RUNNING backend container via staging_exec and inherits its WHOLE
+# environment. A container-level MIGRATION_EXCLUDE narrows the manifest INVISIBLY: excluded names
+# vanish from `--list` (the provider drops them), `Pending: 0` goes green over unapplied
+# migrations, and the alignment report cannot catch it — it has no filesystem census of its own
+# and parses the SAME `--list` text, so an exclusion pushes it TOWARD the pass branch. Meanwhile
+# action=migrate aborts loud on the identical host state. Same class as the target-migrate hazard
+# handling above: detect-and-abort first (visibility — a set hazard var is a misconfiguration to
+# surface, not to silently mask), then forced `-e` neutralization OF ALL THREE NAMES at every
+# exec (belt — N3: the first shape forced only MIGRATION_EXCLUDE while this comment claimed all
+# three), so weakening either layer alone still leaves the other standing.
+assert_deploy_migrate_env_safe() {
+  # PROBE HONESTY (N2, gate on c5be6a54e8): the first shape of this helper ended the probe with
+  # `|| true`, which collapsed EVERY nonzero exit — docker exec rc=125, missing printenv rc=127 —
+  # into value="" and certified SAFE without having observed anything. That is the exact class
+  # this PR guards against elsewhere (a zero-read is not a read of zero). printenv distinguishes
+  # natively: rc=0 set (possibly empty — empty is genuinely safe, all three consumers treat only
+  # non-empty / exact-true as active), rc=1 unset, anything else = THE PROBE FAILED.
+  local name value rc probe_err probe_err_txt
+  for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
+    rc=0
+    # stdout carries the VALUE (captured, never printed); stderr carries only docker's own
+    # diagnostics — discarding it (the first shape did) left a failed probe as a bare rc with
+    # nothing to debug from. Kept, and surfaced ONLY on the failed-probe branch.
+    probe_err="$(mktemp "${OUTPUT_DIR}/.probe-err.XXXXXX")"
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>"$probe_err")" || rc=$?
+    case "$rc" in
+      0)
+        rm -f "$probe_err"
+        [[ -z "$value" ]] \
+          || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
+        ;;
+      1)
+        rm -f "$probe_err" # printenv: variable unset — besides set-empty, the only SAFE observation
+        ;;
+      *)
+        probe_err_txt="$(head -c 200 "$probe_err" | tr '\n' ' ')"
+        rm -f "$probe_err"
+        fail "could not observe ${name} on the running backend (docker exec rc=${rc}: ${probe_err_txt}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
+        ;;
+    esac
+  done
+}
+
 action_deploy() {
   require_sha
   require_compose_v2
@@ -449,8 +976,12 @@ action_deploy() {
 
   # Persistent override, written ATOMICALLY: candidate → validate → rename. The persistent path
   # (RUNNER_PERSIST_DIR under $HOME) survives the workflow's OUTPUT_DIR cleanup, so the container
-  # config_files label it stamps never dangles. set_window_env=none takes the branch that omits
-  # the flags, so redeploying with none rewrites the SAME file without them (clears the old flags).
+  # config_files label it stamps never dangles. set_window_env=none / tasks_window_enabled=false
+  # take the branch that omits their respective keys, so redeploying with both "off" rewrites the
+  # SAME file without them (clears the old flags). The environment stanza itself (0-3 keys) comes
+  # from backend_override_environment_lines (attendance-window-runner-pipeline.lib.sh) — ONE
+  # function, ONE `environment:` block, so the rd-window keys and TASKS_ENABLED can never collide
+  # into a duplicate YAML key.
   mkdir -p "$RUNNER_PERSIST_DIR"
   local override_tmp
   # mktemp requires the X placeholder run at the END of the template (a trailing suffix like
@@ -461,15 +992,12 @@ action_deploy() {
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
     echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
-    echo "# the deploy (bundle §3.4). Redeploying with set_window_env=none removes the flags."
+    echo "# the deploy (bundle §3.4). Redeploying with set_window_env=none/tasks_enabled=false"
+    echo "# removes the corresponding flags."
     echo "services:"
     echo "  backend:"
     echo "    image: ${backend_image}"
-    if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then
-      echo "    environment:"
-      echo "      ATTENDANCE_SCHEDULER_ENABLED: \"true\""
-      echo "      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: \"true\""
-    fi
+    backend_override_environment_lines "$SET_WINDOW_ENV" "$TASKS_WINDOW_ENABLED"
     echo "  web:"
     echo "    image: ${web_image}"
   } > "$override_tmp"
@@ -491,7 +1019,7 @@ action_deploy() {
   mv -f "$override_tmp" "$OVERRIDE_FILE"
   hash_value "$STAGING_COMPOSE_FILE" > "${OUTPUT_DIR}/staging-compose.sha256"
   log "staging compose installed atomically at persistent path: ${STAGING_COMPOSE_FILE}"
-  log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
+  log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV}, tasks_enabled: ${TASKS_WINDOW_ENABLED})"
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
   # NEVER recreate postgres/redis: only backend+web, --no-deps.
@@ -518,13 +1046,23 @@ action_deploy() {
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json"
   curl -fsS --max-time 10 "$STAGING_BACKEND_HEALTH_URL" > "${OUTPUT_DIR}/health-backend.json" || true
 
-  assert_window_env_flags
+  assert_window_env_flags "$TASKS_WINDOW_ENABLED"
 
   # Migration discipline (bundle §3.2): list BEFORE, classify read-only, migrate, list
   # AFTER (must end pending=0). The alignment report runs in-container from the deployed
   # image's own /app/scripts copy so its file scan matches the deployed migration set.
   prepare_container_runner
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
+  assert_deploy_migrate_env_safe
+  # Owner-ruled exclusions: the only MIGRATION_EXCLUDE value deploy's inline migrate ever sees
+  # (the container's own env is still required to carry none, above).
+  local owner_exclude deploy_pg_user deploy_pg_db deploy_db
+  owner_exclude="$(staging_owner_exclude_csv)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  read -r deploy_pg_user deploy_pg_db <<< "$(resolve_postgres_creds)"
+  deploy_db="$(dsn_database_name "$(resolve_backend_database_url)")"
+  [[ -n "$deploy_db" ]] || fail "could not resolve the staging DB name for the owner-exclusion checks"
+  assert_owner_exclusions_hold "$deploy_pg_user" "$deploy_db" deploy-before
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
   docker cp "${OUTPUT_DIR}/migrate-list-before.txt" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migrate-list-before.txt"
   staging_exec node /app/scripts/ops/staging-migration-alignment-report.mjs \
     --migrate-list-file "${CONTAINER_RUNNER_DIR}/migrate-list-before.txt" \
@@ -535,10 +1073,11 @@ action_deploy() {
     fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
   fi
 
-  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/migrate-list-after.txt" \
     || fail "migrations did not end at pending=0 (see migrate-list-after.txt)"
+  assert_owner_exclusions_hold "$deploy_pg_user" "$deploy_db" deploy-after
 
   auth_round_trip
   snapshot_staging_ps
@@ -548,6 +1087,10 @@ action_deploy() {
     echo "deploy_sha=${DEPLOY_SHA}"
     echo "set_window_env=${SET_WINDOW_ENV}"
     echo "force_recreate=${FORCE_RECREATE}"
+    echo "tasks_enabled=${TASKS_WINDOW_ENABLED}"
+    echo "owner_excluded_migrations=${owner_exclude}"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-deploy-after.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
     echo "result=ok"
@@ -560,22 +1103,31 @@ action_smoke() {
   require_sha
   [[ -n "$SMOKE_ID" ]] || fail "smoke input is required for action=smoke"
 
+  # smoke_deps names every module the smoke script imports by relative path (its whole
+  # relative-import closure, transitively); an arm without the line has none. The smoke script
+  # and smoke_deps are the exact set copy_smoke_bundle ships into the container, and every one
+  # of them must be in the workflow tar list. scripts/ops/attendance-window-runner-pipeline.test.mjs
+  # recomputes each closure from the module sources and requires it to equal smoke_deps.
   local smoke_script stamp_prefix
-  local -a extra_env=() extra_tokens=()
+  local -a extra_env=() extra_tokens=() smoke_deps=()
   case "$SMOKE_ID" in
     ae4)
       smoke_script="staging-attendance-ae4-result-edit-smoke.mjs"
       stamp_prefix="ae4-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("NON_ADMIN_TOKEN:reader:user:attendance:read")
       ;;
     rd45)
       smoke_script="staging-attendance-report-digest-rd45-smoke.mjs"
       stamp_prefix="rd45-smoke"
+      # The attendance plugin is loaded at runtime from PLUGIN_INDEX_PATH (the deployed image's
+      # own copy), not by relative import.
       extra_env=("PLUGIN_INDEX_PATH=/app/plugins/plugin-attendance/index.cjs")
       ;;
     otbank-v18)
       smoke_script="staging-attendance-overtime-bank-v18-smoke.mjs"
       stamp_prefix="otbank-v18-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=(
         "CASE1_TOKEN:case1:user:attendance:read,attendance:write"
         "CASE2_TOKEN:case2:user:attendance:read,attendance:write"
@@ -587,22 +1139,52 @@ action_smoke() {
     mp6)
       smoke_script="staging-attendance-makeup-punch-mp6-smoke.mjs"
       stamp_prefix="mp6-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("SUBJECT_TOKEN:subject:user:attendance:read,attendance:write")
       ;;
     hmr5)
       smoke_script="staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs"
       stamp_prefix="hmr5-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("SCOPED_TOKEN:scoped:user:attendance:read,attendance:write")
+      ;;
+    tasks)
+      smoke_script="staging-tasks-smoke.mjs"
+      stamp_prefix="tasks-smoke"
+      # No extra_tokens entry: the tasks subject, member and outsider need --tenant-id-bearing
+      # tokens (see mint_token's comment), which the generic extra_tokens spec format below does
+      # not carry. All three are minted in the tasks block after the generic tokens.
       ;;
     *)
       fail "unknown smoke id: ${SMOKE_ID}"
       ;;
   esac
+
+  # Rule: ae4, mp6 and otbank-v18 stay packaged (their arms above still name their bundle files,
+  # so the closure, tar-list and flat-start tests keep covering them), but they are not enabled in
+  # this runner until their own cleanup and fixtures match the current code. Their cleanups do not
+  # remove the attendance_employee user_roles row that token verification adds for each synthetic
+  # user in platform/attendance product mode, and ae4's text user ids fail its import recompute
+  # steps. Refused here, first: before the bundle check, any backend probe, the identity check, the
+  # container prep, any token mint and any staging write.
+  if [[ "$SMOKE_ID" == "ae4" || "$SMOKE_ID" == "mp6" || "$SMOKE_ID" == "otbank-v18" ]]; then
+    fail "smoke=${SMOKE_ID} is not enabled in this runner: ae4, mp6 and otbank-v18 stay packaged but are refused until their cleanup and fixtures match the current code (nothing was run, copied, minted or written)"
+  fi
   local stamp="${stamp_prefix}-${RUN_STAMP}"
 
-  host_sync_prod_repo
-  local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
-  [[ -f "$smoke_src" ]] || fail "smoke script missing in host-synced repo: ${smoke_src}"
+  # Fail closed before touching the container when the runner bundle lacks any file this
+  # smoke needs.
+  require_smoke_bundle "$smoke_script" ${smoke_deps[@]+"${smoke_deps[@]}"}
+
+  if [[ "$SMOKE_ID" == "tasks" ]]; then
+    # Owner-authorized 2026-09-28, fail-closed: the tasks smoke drives real /api/tasks routes,
+    # which the backend does not even mount unless TASKS_ENABLED=true (routes/tasks.ts). Checked
+    # before the identity check and before anything is copied into the container.
+    local tasks_live
+    tasks_live="$(soak_backend_env TASKS_ENABLED)"
+    [[ "$tasks_live" == "true" ]] \
+      || fail "smoke=tasks requires TASKS_ENABLED=true on the running staging backend (observed: '${tasks_live:-<unset>}'); deploy with tasks_enabled=true first (action=deploy)"
+  fi
 
   # The deployed build must BE the SHA the stamps will name (bundle §2). Same dual-channel
   # identity as the deploy verifier: staging /api/health build.commit is env-pinned stale
@@ -629,7 +1211,7 @@ action_smoke() {
   # Window-level settings-restore evidence (bundle §5): settings BEFORE and AFTER.
   capture_settings "$admin_token" "${OUTPUT_DIR}/settings-before.json" >/dev/null
 
-  docker cp "$smoke_src" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/${smoke_script}"
+  copy_smoke_bundle "$smoke_script" ${smoke_deps[@]+"${smoke_deps[@]}"}
 
   local -a run_env=(
     "BASE_URL=${IN_CONTAINER_BASE_URL}"
@@ -650,6 +1232,18 @@ action_smoke() {
     [[ -n "$spec" ]] || continue
     run_env+=("$spec")
   done
+  if [[ "$SMOKE_ID" == "tasks" ]]; then
+    # Tenant-scoped tokens (see mint_token's comment): tenant_id='default' — the same
+    # deterministic org every other window smoke defaults ORG_ID to (ae4/rd45/otbank/mp6/hmr5),
+    # so this smoke needs no new org concept. The smoke script itself seeds each matching
+    # user_orgs row before the token is ever used to authenticate. Each token's claims mirror
+    # the role the smoke seeds for its identity: the member shares the subject's role (it needs
+    # tasks:write only to leave a task it follows), the outsider has a tasks:read-only role.
+    # Token values only travel in run_env and are never printed.
+    run_env+=("SUBJECT_TOKEN=$(mint_token "${stamp}" 'user' 'tasks:read,tasks:write' 'default')")
+    run_env+=("MEMBER_TOKEN=$(mint_token "${stamp}-member" 'user' 'tasks:read,tasks:write' 'default')")
+    run_env+=("OUTSIDER_TOKEN=$(mint_token "${stamp}-outsider" 'user' 'tasks:read' 'default')")
+  fi
 
   # DATABASE_URL intentionally NOT passed: the container's own env already carries the
   # staging DB URL, which is exactly the API↔DB coherence the helpers assert.
@@ -670,7 +1264,7 @@ action_smoke() {
   # a failing `docker logs` must still fail this step (filtered_pipe contract, proven
   # by scripts/ops/attendance-window-runner-pipeline.test.mjs).
   filtered_pipe "${OUTPUT_DIR}/backend-log-slice.log" \
-    'attendance|digest|delivery|reminder|overtime|makeup' \
+    'attendance|digest|delivery|reminder|overtime|makeup|tasks' \
     -- docker logs --since 30m "$BACKEND_CONTAINER"
 
   snapshot_staging_ps
@@ -911,8 +1505,11 @@ action_residue_sweep() {
   # the whole window), so it flips the sweep result to FAIL like any other nonzero count —
   # but it must not abort mid-sweep and skip the remaining §7 counts, so capture the outcome
   # instead of letting `set -e` propagate it.
+  # residue-sweep has no tasks_enabled input of its own (bundle §7 predates the tasks feature),
+  # so it always passes "false" here — a live TASKS_ENABLED is only WARNed, never counted as a
+  # violation by this action (same treatment as an unrequested rd-window flag above).
   local env_flags_ok=1
-  assert_window_env_flags || env_flags_ok=0
+  assert_window_env_flags "false" || env_flags_ok=0
   if [[ "$env_flags_ok" != "1" ]]; then
     nonzero+=("env_flags_violation=1")
   fi
@@ -952,6 +1549,197 @@ action_residue_sweep() {
   log "residue-sweep OK: all 29 §7 checks are zero"
 }
 
+# Values-free classification of the persistent runner override — the read-only collection the
+# deploy-order decision depends on (owner-endorsed review, 2026-08-25). The OVERRIDE_FILE has
+# THREE writer-produced shapes plus absence, and action=deploy OVERWRITES it unconditionally with
+# only the none/rd-window shapes — so a deploy over a live soak override silently clears the W4/W7
+# allowlists. Before any deploy, the operator needs: which shape is on disk, which of the four
+# candidate flags are live in the backend container, and whether disk and container AGREE (drift
+# between them means the file was rewritten without a recreate, or vice versa — an unexplained
+# environment, so fail loud). NO VALUES are ever read into this function's output: file flags are
+# detected by KEY name only, live flags by printenv EXIT CODE only (stdout discarded unread), so
+# soak org slugs cannot leak into logs or artifacts.
+classify_runner_override() {
+  local out="${OUTPUT_DIR}/override-shape.txt"
+  # TASKS_ENABLED is probed by presence like the other candidates, so the host env file must not
+  # set TASKS_ENABLED at all (any value, even "false", reads as live and status reports a mismatch);
+  # this runner's override is the only intended writer.
+  local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME} TASKS_ENABLED"
+  local rd_set="ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ATTENDANCE_SCHEDULER_ENABLED"
+  local soak_set
+  soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
+  soak_set="${soak_set% }"
+
+  local file_present=false file_sha="" file_names="" all_upper_keys="" all_upper_count=0 backend_key_count=0
+  if [[ -f "$OVERRIDE_FILE" && ! -r "$OVERRIDE_FILE" ]]; then
+    # Present but unreadable: an environment we cannot explain. Classify as unexpected rather
+    # than letting an empty read pass as the none shape — an empty read is not a read of empty.
+    file_present=true
+    file_names="__UNREADABLE__"
+  elif [[ -f "$OVERRIDE_FILE" ]]; then
+    file_present=true
+    file_sha="$(hash_value "$OVERRIDE_FILE")"
+    # KEY names only. Env keys in every writer-produced shape are UPPER_SNAKE and indented;
+    # yaml structure keys (services/backend/web/environment/image) are lowercase; full-line
+    # comments start at column 0. A key this pattern cannot see cannot silently pass either —
+    # unknown UPPER keys land in file_names and force shape=unexpected below.
+    # grep/awk exit 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
+    # (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the left of
+    # `||` (the sole call site is `classify_runner_override || status_rc=1`), so an unguarded
+    # failing substitution would NOT abort on a host — it silently yields empty names and a calm
+    # `none`, the UNSAFE direction. Readability was checked above, so rc>=2 cannot hide an
+    # unreadable file behind the trailing `|| true`.
+    #
+    # SCOPED TO services.backend.environment (P2-2, external review of 4141c27832): the round-1
+    # grep collected EVERY indented UPPER key in the file, so two rd-window keys placed under
+    # services.web.environment classified as rd-window and matched the BACKEND's live env —
+    # certifying agreement between one service's file entry and a different service's runtime.
+    # The awk walks the writer-produced shape only; `all_upper_keys` keeps the old broad sweep,
+    # and any UPPER key OUTSIDE the backend environment block forces `unexpected` below.
+    # FULL parent path services.backend.environment (external review round 3, reproduced: a
+    # legal `x-template:` extension block containing backend.environment satisfied BOTH the set
+    # guard and the count guard, because this same mis-scoped walk fed both — `  backend:` was
+    # matched under ANY top-level key). `svc` tracks the top-level context: set only by a
+    # column-0 `services:` line, cleared by any other column-0 key.
+    file_names="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
+    ' "$OVERRIDE_FILE" | sort -u | tr '\n' ' ' || true)"
+    file_names="${file_names% }"
+    all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
+    all_upper_keys="${all_upper_keys% }"
+    # COUNTS, not only the deduped set (requal-2 P3-a, gate-measured false: a web-block key whose
+    # NAME already appears in the backend block collapses into the set comparison — both-blocks
+    # duplicates classified rd-window). Same broad pattern counted raw vs the backend-scoped walk.
+    all_upper_count="$(grep -cE '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" || true)"
+    backend_key_count="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
+      END {print c+0}
+    ' "$OVERRIDE_FILE" || true)"
+  fi
+
+  # TASKS_ENABLED is an ORTHOGONAL flag, not a fourth closed shape: it can accompany the none or
+  # rd-window shapes (both written only by action=deploy, the sole writer of TASKS_ENABLED), but
+  # never soak-w4w7 (action=soak-flags never writes TASKS_ENABLED — see its own guard against
+  # overwriting a file that already carries it). Stripped out here via a plain bash word loop
+  # (never a grep/pipe substitution — an empty result after removing the ONLY name, e.g. the
+  # none+tasks shape's `file_names == "TASKS_ENABLED"`, would exit 1 and abort this function
+  # under the caller's `set -euo pipefail`, the same P3-1 hazard the awk calls above dodge with
+  # `|| true`) so the EXISTING rd_set/soak_set/empty comparisons below stay byte-for-byte
+  # unchanged and keep classifying the base shape on the names TASKS_ENABLED-free.
+  local file_has_tasks=false file_names_sans_tasks="" name
+  for name in $file_names; do
+    if [[ "$name" == "TASKS_ENABLED" ]]; then
+      file_has_tasks=true
+    else
+      file_names_sans_tasks="${file_names_sans_tasks}${file_names_sans_tasks:+ }${name}"
+    fi
+  done
+
+  local shape
+  if [[ "$file_present" == false ]]; then shape="absent"
+  elif [[ "$all_upper_keys" != "$file_names" || "$all_upper_count" -ne "$backend_key_count" ]]; then
+    # P2-2: env-looking keys exist OUTSIDE services.backend.environment (another service, or a
+    # structure the scoped parser cannot read). Whatever this file is, it is not a writer product
+    # and its effect on the backend cannot be certified from names alone.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -qE '^[[:space:]]+environment:' "$OVERRIDE_FILE"; then
+    # P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+    # spellings this parser does not read — a hand-edited file in any of them parsed as a CALM
+    # none, inverting this function's own fail-loud principle. An environment block whose keys
+    # we cannot enumerate is an environment we cannot explain. ANCHORED as an indented mapping
+    # key (requal P3 on 4141c27832, gate-verified): the bare substring falsely tripped on a
+    # comment line saying "no environment: block on purpose" and on an image tag containing
+    # `environment:` — both classified a true none as unexpected.
+    shape="unexpected"
+  elif [[ -z "$file_names_sans_tasks" ]]; then shape="none"
+  elif [[ "$file_names_sans_tasks" == "$rd_set" ]]; then shape="rd-window"
+  elif [[ "$file_names_sans_tasks" == "$soak_set" ]]; then shape="soak-w4w7"
+  else shape="unexpected"
+  fi
+  if [[ "$file_has_tasks" == true ]]; then
+    case "$shape" in
+      none) shape="none+tasks" ;;
+      rd-window) shape="rd-window+tasks" ;;
+      # soak-w4w7+tasks has no writer (see comment above) and every already-unexpected shape
+      # stays unexpected — tasks presence never upgrades a bad shape to a calm one.
+      *) shape="unexpected" ;;
+    esac
+  fi
+
+  # Live side: NAMES only, in ONE observation (P2-1 round 2, external review of 4141c27832).
+  # The round-1 shape probed PATH first and then looped four more docker execs — so a channel
+  # that died AFTER the control (container stopped, daemon lost) made the four candidate reads
+  # return rc=1, which reads as "observed unset": zero observations, confident green, reproduced
+  # by the reviewer at that exact timing. Control and data are now the SAME invocation: PATH is
+  # checked in-container (exit 9 if even PATH is unreadable), the candidate names are enumerated
+  # in-container, and only the SET NAMES cross the boundary — printenv's value output is
+  # discarded inside the container, so no value ever reaches the host. ANY nonzero exit — daemon
+  # down, container gone, sh missing, PATH unreadable — is a failed probe, never an observation.
+  local live_names="" probe_failed=false enum_out enum_rc
+  # Names are passed as ARGV ("$@" after the `_` $0 slot), never spliced into the script TEXT
+  # (requal-2 NIT on 74dad9e0ab, gate-measured: a name containing `$(...)` really executes under
+  # the text-splice form. Both soak names are constants today, so it was unreachable — but a
+  # mechanism does not stay unreachable by promise, and killing it costs two characters).
+  enum_rc=0
+  enum_out="$(docker exec "$BACKEND_CONTAINER" sh -c '
+    printenv PATH >/dev/null 2>&1 || exit 9
+    for n in "$@"; do
+      if printenv "$n" >/dev/null 2>&1; then printf "%s\n" "$n"; fi
+    done
+  ' _ $candidates 2>/dev/null)" || enum_rc=$?
+  if [[ "$enum_rc" -ne 0 ]]; then
+    probe_failed=true
+  fi
+
+  local match live_sorted live_render
+  if [[ "$probe_failed" == true ]]; then
+    match="indeterminate"
+    live_render="unobserved"
+  else
+    # Names only — and only names we ASKED about: anything else in the output means the
+    # in-container enumerator was tampered with or the channel corrupted; refuse it.
+    live_sorted="$(printf '%s\n' $enum_out | sort -u | tr '\n' ' ')"
+    live_sorted="$(echo "$live_sorted" | tr -s ' ')"; live_sorted="${live_sorted% }"; live_sorted="${live_sorted# }"
+    local answered
+    for answered in $live_sorted; do
+      case " $candidates " in
+        *" $answered "*) : ;;
+        *) match="indeterminate"; live_render="unobserved"; probe_failed=true ;;
+      esac
+    done
+    if [[ "$probe_failed" != true ]]; then
+      [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
+      live_render="${live_sorted:-none}"
+    fi
+  fi
+
+  {
+    echo "override_shape=${shape}"
+    echo "override_file_present=${file_present}"
+    echo "override_file_sha256=${file_sha:-none}"
+    echo "file_flag_names=${file_names:-none}"
+    echo "live_flag_names=${live_render}"
+    echo "file_live_match=${match}"
+  } | tee "$out"
+
+  # FAIL LOUD, never silently: an unexpected shape, a disk/live disagreement, or a failed probe
+  # each mean the environment is not explained — the collection still WROTE everything above,
+  # but the action must not exit 0 over it.
+  [[ "$shape" != "unexpected" ]] || return 1
+  [[ "$match" == true ]] || return 1
+  return 0
+}
+
 action_status() {
   snapshot_staging_ps
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" 2>&1 \
@@ -963,10 +1751,16 @@ action_status() {
   log "live build.commit: ${live_commit:-<unreachable>}"
 
   local status_rc=0
+  # Values-free override classification FIRST: it needs no running container for the file side,
+  # and a stopped/unreachable container fails the probe's PATH positive control, degrading the
+  # verdict to file_live_match=indeterminate (never a confident green over zero observations).
+  classify_runner_override || status_rc=1
   if docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     prepare_container_runner
     staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list.txt" || status_rc=1
-    assert_window_env_flags || status_rc=1
+    # action=status is read-only and has no tasks_enabled input either — same "false" (WARN not
+    # FAIL on an unexpectedly-live flag) treatment as residue-sweep above.
+    assert_window_env_flags "false" || status_rc=1
     local admin_id admin_token
     if admin_id="$(find_admin_user)"; then
       admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:admin')"
@@ -982,9 +1776,173 @@ action_status() {
   {
     echo "action=status"
     echo "live_commit=${live_commit:-unreachable}"
+    grep '^override_shape=' "${OUTPUT_DIR}/override-shape.txt" 2>/dev/null || echo "override_shape=unrecorded"
+    # The status list is unscoped on purpose (it reports the whole ledger); these lines say which
+    # pending entries are owner-ruled exclusions rather than drift.
+    echo "owner_excluded_migrations=$(staging_owner_exclude_csv 2>/dev/null || echo '<invalid list>')"
+    if [[ -s "${OUTPUT_DIR}/migrate-list.txt" ]] && owner_excluded_only_pending "${OUTPUT_DIR}/migrate-list.txt"; then
+      echo "pending_is_owner_excluded_only=yes"
+    fi
     echo "status_rc=${status_rc}"
   } > "${OUTPUT_DIR}/summary.txt"
   return "$status_rc"
+}
+
+assert_migration_rollout_flags_off() {
+  # Values are intentionally never printed. Include the two #4556 gates explicitly and any
+  # future env whose name advertises ROLLOUT/SHADOW, so a newly-added flag fails closed too.
+  local phase="$1" name value
+  local -a names=(
+    ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+  )
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && names+=("$name")
+  done < <(
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND_CONTAINER" \
+      | sed 's/=.*//' | grep -Ei '(ROLLOUT|SHADOW)' || true
+  )
+
+  : > "${OUTPUT_DIR}/rollout-shadow-flags-${phase}.txt"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null || true)"
+    case "${value,,}" in
+      ''|0|false|off) echo "${name}=OFF" >> "${OUTPUT_DIR}/rollout-shadow-flags-${phase}.txt" ;;
+      *) fail "rollout/shadow flag ${name} is enabled during ${phase}; action=migrate requires every rollout/shadow flag OFF" ;;
+    esac
+  done < <(printf '%s\n' "${names[@]}" | sort -u)
+}
+
+action_migrate_read_only_prechecks() {
+  # Values-free prechecks for the target's data-dependent fail-loud arms. Only action names and
+  # cardinalities enter the artifact; no ids, org labels, tenant data, DSNs, or credentials.
+  local pg_user="$MIGRATE_BACKUP_PG_USER" pg_db="$MIGRATE_BACKUP_PG_DB"
+  local has_org_id org_null_predicate=''
+  has_org_id="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 \
+    -c "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='approval_instances' AND column_name='org_id');" | tr -d '[:space:]')"
+  [[ "$has_org_id" == "t" || "$has_org_id" == "f" ]] \
+    || fail "could not determine whether approval_instances.org_id exists"
+  [[ "$has_org_id" == "t" ]] && org_null_predicate='AND i.org_id IS NULL'
+
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 <<SQL \
+    | tee "${OUTPUT_DIR}/target-read-only-prechecks.txt"
+SELECT 'approval_action_histogram=' || COALESCE(jsonb_object_agg(action, n ORDER BY action), '{}'::jsonb)::text
+  FROM (SELECT action, count(*) AS n FROM approval_records GROUP BY action) h;
+SELECT 'invalid_approval_action_count=' || count(*)::text
+  FROM approval_records
+ WHERE action NOT IN ('created','approve','reject','return','revoke','transfer','sign','comment','cc','remind','jump','add_sign','reduce_sign','reassign','handle','policy_denied');
+SELECT 'attachment_org_conflict_count=' || count(*)::text FROM (
+  SELECT a.instance_id
+    FROM approval_attachments a
+    JOIN approval_instances i ON i.id = a.instance_id
+   WHERE a.instance_id IS NOT NULL
+     ${org_null_predicate}
+   GROUP BY a.instance_id
+  HAVING count(DISTINCT a.org_id) > 1
+) c;
+SELECT 'zero_membership_active_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
+SELECT 'zero_membership_no_row_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id);
+SELECT 'zero_membership_only_deactivated_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
+SELECT 'recovery09_repairable_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default');
+SELECT 'distinct_active_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE) o;
+SELECT 'directory_integration_distinct_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM directory_integrations WHERE org_id IS NOT NULL AND btrim(org_id) <> '') o;
+SELECT 'directory_integration_non_default_count=' || count(*)::text
+  FROM directory_integrations WHERE org_id <> 'default';
+SELECT 'legacy_anchor_active_membership_witness_count=' || count(*)::text
+  FROM user_orgs WHERE org_id = 'default' AND is_active = TRUE;
+SELECT 'class6_candidate_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id'
+        AND uo.is_active = TRUE
+      GROUP BY uo.user_id
+     HAVING count(*) = 1
+   );
+SELECT 'recovery09_unsupported_class6_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+      GROUP BY uo.user_id HAVING count(*) = 1
+   )
+   AND NOT (
+     NOT EXISTS (SELECT 1 FROM users u WHERE u.id = i.requester_snapshot->>'id')
+     OR EXISTS (
+       SELECT 1 FROM users u
+        WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+     )
+   );
+SQL
+
+  local invalid conflicts zero_membership zero_no_row zero_deactivated repairable_users active_orgs directory_orgs non_default_integrations anchor_witness class6 unsupported_class6 value
+  invalid="$(sed -n 's/^invalid_approval_action_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_membership="$(sed -n 's/^zero_membership_active_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_no_row="$(sed -n 's/^zero_membership_no_row_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_deactivated="$(sed -n 's/^zero_membership_only_deactivated_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  repairable_users="$(sed -n 's/^recovery09_repairable_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  active_orgs="$(sed -n 's/^distinct_active_org_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  directory_orgs="$(sed -n 's/^directory_integration_distinct_org_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  non_default_integrations="$(sed -n 's/^directory_integration_non_default_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  anchor_witness="$(sed -n 's/^legacy_anchor_active_membership_witness_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  class6="$(sed -n 's/^class6_candidate_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  unsupported_class6="$(sed -n 's/^recovery09_unsupported_class6_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  for value in "$invalid" "$conflicts" "$zero_membership" "$zero_no_row" "$zero_deactivated" "$repairable_users" "$active_orgs" "$directory_orgs" "$non_default_integrations" "$anchor_witness" "$class6" "$unsupported_class6"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || fail "target read-only precheck returned a non-numeric cardinality"
+  done
+  [[ "$invalid" == "0" ]] || fail "target precheck: ${invalid} approval_records rows carry an action outside the target constraint"
+  [[ "$conflicts" == "0" ]] || fail "target precheck: ${conflicts} attachment-bearing approval instances have cross-org conflicts"
+  # Deactivated-only rows are an explicitly disclosed non-resurrection residue. Recovery09 and
+  # the corrected provisioning migration intentionally do not write them, so they must not make a
+  # safe retry demand that the already-applied Recovery09 migration still be pending. Only the
+  # executable no-row population and unresolved class-6 rows require the repair gate.
+  if [[ "$repairable_users" -gt 0 || "$class6" -gt 0 ]]; then
+    if [[ "$active_orgs" != "1" ]]; then
+      grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+        || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
+      grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+        || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
+      [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
+        || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
+      [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
+        || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
+      [[ "$unsupported_class6" == "0" ]] \
+        || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+    fi
+  fi
+  log "target read-only prechecks OK"
 }
 
 action_migrate_backup() {
@@ -1046,7 +2004,31 @@ action_migrate_rehearse() {
 
   log "rehearsal: dropping any prior ${REHEARSAL_DB} left by an aborted run"
   cleanup_rehearsal
-  trap cleanup_rehearsal EXIT
+  trap 'cleanup_rehearsal; cleanup_target_migration_runtime' EXIT
+  # P2-4 hardening (2026-08-24): explicit HUP/INT/TERM registration, not relying on the
+  # EXIT trap alone. CORRECTION during review: on the bash versions actually tested here
+  # (3.2 and 5.3, foreground-command and pipeline cases both), a bare `trap ... EXIT` DID
+  # already run on an uncaught SIGHUP/SIGINT/SIGTERM — so this is NOT closing a demonstrated
+  # "signal leaves the secret file behind" hole on those bash builds. It ships anyway
+  # because that behavior is bash's own implementation detail, not a documented contract
+  # (the manual only promises EXIT's ACTION runs "on exit from the shell"; nothing commits
+  # bash, on every version/platform this runner may ever run on, to also invoke it on every
+  # uncaught deadly signal) — explicit registration is the portable, self-documenting
+  # contract instead of an implicit one, and OOM-kill (SIGKILL) / host reboot remain
+  # uncatchable by ANY trap regardless, EXIT included. What IS genuinely load-bearing here:
+  # bash does NOT auto-terminate a process after running a trapped signal's handler (unlike
+  # the EXIT pseudo-signal, which fires as the shell is already on its way out) — without
+  # the explicit `exit 1` below, a HUP/INT/TERM handler that only ran cleanup would leave
+  # the process hung, still consuming the migration window. Registered SEPARATELY from the
+  # EXIT trap (not combined into one `trap ... EXIT HUP INT TERM`): a handler that also
+  # covers EXIT and unconditionally calls `exit N` would clobber the script's real exit code
+  # on the ordinary successful-completion path, where only EXIT fires. The EXIT trap above
+  # fires again as part of this handler's own `exit` (harmless — cleanup_rehearsal is
+  # DROP-IF-EXISTS/rm -f, cleanup_target_migration_runtime no-ops once TARGET_MIGRATION_ENV_FILE
+  # is cleared). Mutation-proven via `trap -p` registration, not a signal-delivery A/B (that
+  # comparison is exactly what did not discriminate in the bash versions tested — see the
+  # pipeline test file for the measurement).
+  trap 'cleanup_rehearsal; cleanup_target_migration_runtime; exit 1' HUP INT TERM
 
   log "rehearsal: creating ${REHEARSAL_DB} (clearly-synthetic fixed name; same postgres server as staging)"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
@@ -1068,8 +2050,68 @@ action_migrate_rehearse() {
   # so migrations run under normal trigger semantics (faithful rehearsal).
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} SET session_replication_role = 'replica';"
-  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
-    2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore.log"
+
+  # pg_restore pins each worker's search_path to the empty string. Already-applied attendance
+  # SQL/PL/pgSQL functions call other public functions by bare name (for example
+  # attendance_w4_scheduled_name_bytes -> attendance_w4_canonical_date_text, and
+  # attendance_w4_job_proof_vector_valid -> attendance_w4c3a_exact_object_keys), so COPY of a
+  # table whose CHECK constraint invokes one fails even though every function is present (run
+  # 36539805352: attendance_import_jobs). A shim for one named function does not keep up with new
+  # ones, so the shim is general: restore pre-data, give every candidate function a clone-only
+  # search_path, restore data and post-data (expression indexes also evaluate them), then RESET
+  # the same functions so the rehearsal migration starts from the source DB's exact function
+  # configuration. Candidates are read READ-ONLY from the real staging DB: public-schema sql and
+  # plpgsql functions that are not extension members and do not already pin a search_path (a
+  # pinned one is left untouched). The real staging DB is never altered by this shim. After the
+  # RESET a digest of every public function's (signature, proconfig) must match the source, or the
+  # rehearsal stops. Limit: the shim goes on after pre-data, so a function body executed while
+  # pre-data itself is being restored is not covered.
+  local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
+  local shim_list="${OUTPUT_DIR}/rehearsal-search-path-shim.txt"
+  local shim_count
+  : > "$restore_log"
+
+  docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_candidates_sql)" \
+    > "$shim_list" \
+    || fail "rehearsal restore compatibility: candidate function query against the source DB failed"
+  shim_count="$(rehearsal_shim_validate_signatures "$shim_list")" \
+    || fail "rehearsal restore compatibility: a candidate function signature has an unexpected shape (see rehearsal-search-path-shim.txt); refusing to build ALTER statements from it"
+  log "rehearsal: ${shim_count} function(s) get a clone-only search_path during restore (list: rehearsal-search-path-shim.txt)"
+
+  log "rehearsal: restoring pre-data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=pre-data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  if [[ "$shim_count" -gt 0 ]]; then
+    log "rehearsal: applying clone-only function search_path compatibility"
+    rehearsal_shim_sql set "$shim_list" \
+      | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
+      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: applying the clone-only search_path shim failed"
+  fi
+  log "rehearsal: restoring data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  log "rehearsal: restoring post-data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=post-data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  if [[ "$shim_count" -gt 0 ]]; then
+    log "rehearsal: resetting clone-only function search_path compatibility"
+    rehearsal_shim_sql reset "$shim_list" \
+      | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
+      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: resetting the clone-only search_path shim failed"
+  fi
+  local source_fn_digest clone_fn_digest
+  source_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the source DB failed"
+  clone_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the rehearsal DB failed"
+  [[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]] \
+    || fail "rehearsal restore compatibility: the clone's public function configuration differs from the source after the shim reset (source=${source_fn_digest:-<none>} clone=${clone_fn_digest:-<none>}); refusing to rehearse on a drifted clone"
+  log "rehearsal: clone function configuration matches the source (digest ${source_fn_digest})"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} RESET session_replication_role;"
 
@@ -1098,7 +2140,7 @@ action_migrate_rehearse() {
   log "rehearsal isolation baseline: applied(real ${real_db})=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
 
   log "rehearsal: running migrate.js against the REHEARSAL DB only (staging DB untouched so far)"
-  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
+  target_migrate_exec "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/rehearsal-migrate-run.log"
 
   real_after="$(count_applied "$real_db")"
@@ -1114,36 +2156,88 @@ action_migrate_rehearse() {
     || fail "rehearsal DB applied count did not advance (${rehearsal_before}->${rehearsal_after}) — the rehearsal migrate did not actually run against ${REHEARSAL_DB}; refusing to treat rehearsal as green"
 
   log "rehearsal: confirming pending=0 against the rehearsal DB"
-  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
+  target_migrate_exec "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt" \
     || fail "rehearsal migrate run did not leave the rehearsal DB at pending=0 (see rehearsal-migrate-list-after.txt); staging DB was NOT touched, stopping per the runbook"
+  assert_owner_exclusions_hold "$REHEARSAL_PG_USER" "$REHEARSAL_DB" rehearsal
 
   log "rehearsal: green — dropping ${REHEARSAL_DB} and the in-container dump copy"
   cleanup_rehearsal
-  trap - EXIT
+  trap - EXIT HUP INT TERM
   log "rehearsal OK"
 }
 
 action_migrate_apply() {
   # Step 4: only reached if action_migrate_rehearse fully succeeded. Same before/after
   # pending-list discipline as action_deploy's migration step, against the REAL staging DB.
+  local backend_dsn real_db
+  backend_dsn="$(resolve_backend_database_url)"
+  real_db="$(dsn_database_name "$backend_dsn")"
+  [[ -n "$real_db" ]] || fail "could not resolve the real staging DB name for the in-play migration computation"
+
   log "apply: migrate-list BEFORE (real staging DB)"
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
+
+  # P1-2 (2026-08-24): compute the in-play set BEFORE running migrate, from two sources
+  # that are both immune to process.env (see compute_in_play_migrations) — done up front so
+  # the set reflects what SHOULD be applied by this run, independent of anything the apply
+  # step itself might do to the ledger.
+  log "apply: computing the in-play migration set (image filesystem manifest minus already-applied, both env-immune)"
+  compute_in_play_migrations "$real_db"
+
+  assert_applied_counts_agree "${OUTPUT_DIR}/migration-applied-before.txt" "${OUTPUT_DIR}/apply-migrate-list-before.txt"
 
   log "apply: running migrate.js against the REAL staging DB (rehearsal was green)"
-  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
+  target_migrate_exec -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
 
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/apply-migrate-list-after.txt" \
     || fail "staging migrate did not end at pending=0 after apply (see apply-migrate-list-after.txt); restore from ${MIGRATE_BACKUP_PATH} if needed (runbook §Failure modes)"
+
+  # Named invariant, independent of the mechanically-derived set below: 076 underlies the
+  # stock-prep write path and is confirmed explicitly by name regardless of whether it was
+  # already applied via the stock-prep window (and therefore absent from migration-in-play.txt).
+  target_migrate_exec -- node "$MIGRATE_JS" --confirm 076_create_integration_stock_prep_pack_installs < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/confirm-076.txt"
+  grep -q '^migration "076_create_integration_stock_prep_pack_installs" is applied$' "${OUTPUT_DIR}/confirm-076.txt" \
+    || fail "named confirmation for 076_create_integration_stock_prep_pack_installs.sql did not pass"
+
+  # P1-2: confirm EVERY migration this deploy had in play, by name, mechanically derived
+  # (never hardcoded) — this covers the 0817/0818 approval four
+  # (approval-parity-verification-report-20260818.md:431,448-449) AND the closeout-chain
+  # four (S1 org_id / Migration B backfill / provisioning / gap-closer) AND anything else
+  # added since, without maintaining a second hand-written name list.
+  log "apply: confirming $(wc -l < "${OUTPUT_DIR}/migration-in-play.txt" | tr -d '[:space:]') in-play migration(s) by name"
+  confirm_in_play_migrations "${OUTPUT_DIR}/migration-in-play.txt"
+  assert_owner_exclusions_hold "$MIGRATE_BACKUP_PG_USER" "$real_db" after-apply
+
   log "apply OK: staging migrate ended at pending=0"
 }
 
 action_migrate() {
+  require_sha
+  # P2-4: EXIT + HUP/INT/TERM registered separately — see the identical note at the clone
+  # rehearsal step's first trap, above, for why (exit-code safety on the ordinary path).
+  trap cleanup_target_migration_runtime EXIT
+  trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
   prepare_container_runner
+  prepare_target_migration_image
+  assert_migration_rollout_flags_off before
+
+  log "target migration inventory BEFORE (exact deploy_sha image; read-only)"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/target-migrate-list-before.txt"
+
+  # Resolve credentials for the read-only gates without creating a backup yet. The backup helper
+  # repeats this resolution and remains the first retentive step.
+  read -r MIGRATE_BACKUP_PG_USER MIGRATE_BACKUP_PG_DB <<< "$(resolve_postgres_creds)"
+  action_migrate_read_only_prechecks
+  assert_owner_exclusions_hold "$MIGRATE_BACKUP_PG_USER" "$MIGRATE_BACKUP_PG_DB" before
   action_migrate_backup
   action_migrate_rehearse
+  trap cleanup_target_migration_runtime EXIT
+  trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
   action_migrate_apply
 
   # Step 5: post-checks.
@@ -1153,17 +2247,31 @@ action_migrate() {
     || fail "post-apply health check did not report ok:true (see health-web.json)"
   auth_round_trip
   snapshot_staging_ps
+  assert_migration_rollout_flags_off after
 
   {
     echo "action=migrate"
+    echo "migration_image=${TARGET_MIGRATION_IMAGE}"
+    echo "migration_image_id=${TARGET_MIGRATION_IMAGE_ID}"
+    echo "migration_repo_digest=${TARGET_MIGRATION_REPO_DIGEST}"
+    echo "migration_revision=${DEPLOY_SHA}"
     echo "backup_path=${MIGRATE_BACKUP_PATH}"
     echo "backup_sha256=${MIGRATE_BACKUP_SHA256}"
     echo "backup_bytes=${MIGRATE_BACKUP_BYTES}"
     echo "rehearsal_db=${REHEARSAL_DB}"
     echo "rehearsal_result=ok"
     echo "apply_result=ok"
+    echo "target_pending_after=0"
+    echo "076_create_integration_stock_prep_pack_installs.sql=applied"
+    echo "owner_excluded_migrations=$(staging_owner_exclude_csv)"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-after-apply.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
+    echo "rollout_shadow_flags=OFF"
+    echo "application_deployed=no"
     echo "result=ok"
   } > "${OUTPUT_DIR}/summary.txt"
+  cleanup_target_migration_runtime
+  trap - EXIT HUP INT TERM
   log "migrate OK: backup=${MIGRATE_BACKUP_PATH} rehearsal=ok apply=ok"
 }
 
@@ -1211,6 +2319,21 @@ soak_opt() {
     fi
   done
   printf '%s' "$default"
+}
+
+soak_opt_present() {
+  # soak_opt_present <key> — true (rc 0) iff `key=` appears as one of the ';'-separated
+  # SOAK_OPTS pairs, regardless of value. Needed because soak_opt alone cannot distinguish
+  # "operator supplied this key" from "soak_opt returned its own default" — w7_target in
+  # particular always resolves to a value via its default, so rotate_password=true's
+  # standalone-act refusal (action_soak_seed) must check presence, not the resolved value.
+  local key="$1" pair
+  local IFS=';'
+  for pair in $SOAK_OPTS; do
+    [[ -n "$pair" ]] || continue
+    [[ "${pair%%=*}" == "$key" ]] && return 0
+  done
+  return 1
 }
 
 soak_require_orgs() {
@@ -1405,13 +2528,78 @@ FROM generate_series(1, :user_count) AS i
 JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
 
--- POST /api/attendance/punch is withPermission('attendance:write'); login tokens carry no
--- perms on staging (RBAC reads the tables), so grant the one needed permission directly.
+-- Employee attendance reads and punches are permission-gated; login tokens carry no
+-- permissions on staging (RBAC reads the tables), so grant the two self-service permissions.
 INSERT INTO user_permissions (user_id, permission_code)
 SELECT u.id, 'attendance:write'
 FROM generate_series(1, :user_count) AS i
 JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
+
+INSERT INTO user_permissions (user_id, permission_code)
+SELECT u.id, 'attendance:read'
+FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+ON CONFLICT DO NOTHING;
+
+-- Minimal self-service policy fixtures. These dedicated business keys are owned by the
+-- synthetic soak family, so a re-seed may reactivate/update them without touching tenant
+-- policy rows created through the product UI.
+INSERT INTO attendance_leave_types
+  (id, org_id, code, name, requires_approval, requires_attachment, default_minutes_per_day, is_active)
+VALUES
+  (gen_random_uuid(), :'org', 'w4w7_soak_leave', 'W4W7 soak leave', true, false, 480, true)
+ON CONFLICT (org_id, code) DO UPDATE
+  SET name = EXCLUDED.name,
+      requires_approval = EXCLUDED.requires_approval,
+      requires_attachment = EXCLUDED.requires_attachment,
+      default_minutes_per_day = EXCLUDED.default_minutes_per_day,
+      is_active = true,
+      updated_at = now();
+
+INSERT INTO attendance_overtime_rules
+  (id, org_id, name, min_minutes, rounding_minutes, max_minutes_per_day, requires_approval, is_active)
+VALUES
+  (gen_random_uuid(), :'org', 'W4W7 soak overtime', 30, 15, 600, true, true)
+ON CONFLICT (org_id, name) DO UPDATE
+  SET min_minutes = EXCLUDED.min_minutes,
+      rounding_minutes = EXCLUDED.rounding_minutes,
+      max_minutes_per_day = EXCLUDED.max_minutes_per_day,
+      requires_approval = EXCLUDED.requires_approval,
+      is_active = true,
+      updated_at = now();
+
+-- The employee shift-swap form reads the scoped assignment list. Give each synthetic user
+-- view access only to the closed user family in this synthetic org. The deterministic id
+-- makes the scope an idempotent fixture rather than an accumulating set of grants.
+INSERT INTO attendance_scheduler_scopes
+  (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+SELECT (
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 1, 8) || '-' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 9, 4) || '-4' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 14, 3) || '-8' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 18, 3) || '-' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 21, 12)
+       )::uuid,
+       :'org', 'user', u.id, ARRAY['view']::text[],
+       jsonb_build_object(
+         'userIds',
+         (
+           SELECT COALESCE(jsonb_agg(family_user.id ORDER BY family_user.username), '[]'::jsonb)
+           FROM generate_series(1, :user_count) AS family_i
+           JOIN users family_user
+             ON family_user.username = :'user_prefix' || lpad(family_i::text, 2, '0')
+         )
+       ),
+       true, 'w4w7-soak-seed-selfservice', 'w4w7-soak-seed-selfservice'
+FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+ON CONFLICT (id) DO UPDATE
+  SET actions = EXCLUDED.actions,
+      scope = EXCLUDED.scope,
+      is_active = true,
+      updated_by = EXCLUDED.updated_by,
+      updated_at = now();
 
 -- Full-day shift 00:00-23:59 in the org's timezone (task-ruled shape).
 INSERT INTO attendance_shifts (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days, late_grace_minutes, early_grace_minutes, rounding_minutes, flex_mode)
@@ -1447,14 +2635,15 @@ WHERE g.org_id = :'org' AND g.name = :'group_name'
      WHERE m.org_id = :'org' AND m.group_id = g.id
        AND m.user_id = u.id);
 
--- Published GROUP-PRODUCED assignment. producer_key spells the ONE canonical
--- implementation (plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs):
--- 'attendance_group_fixed_schedule:<groupId>:<shiftId>:<startDate>:<endDate>'.
-INSERT INTO attendance_shift_assignments (org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, publish_status)
-SELECT :'org', u.id, s.id, :'start_date'::date, :'end_date'::date, true,
+-- The group-produced assignment covers the soak window. The second SELECT adds two
+-- manual, single-day published assignments after that window for the shift-swap form.
+INSERT INTO attendance_shift_assignments
+  (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+   producer_type, producer_ref_id, producer_key, producer_run_id, publish_status, assignment_kind)
+SELECT gen_random_uuid(), :'org', u.id, s.id, 0, :'start_date'::date, :'end_date'::date, true,
        'attendance_group_fixed_schedule', g.id,
        'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date',
-       gen_random_uuid(), 'published'
+       gen_random_uuid(), 'published', 'regular'
 FROM attendance_groups g
 JOIN attendance_shifts s ON s.org_id = g.org_id AND s.name = :'shift_name'
 CROSS JOIN generate_series(1, :user_count) AS i
@@ -1465,7 +2654,35 @@ WHERE g.org_id = :'org' AND g.name = :'group_name'
      WHERE a.org_id = :'org'
        AND a.user_id = u.id
        AND a.shift_id = s.id
-       AND a.producer_key = 'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date');
+       AND a.producer_key = 'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date')
+UNION ALL
+SELECT (
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 1, 8) || '-' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 9, 4) || '-4' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 14, 3) || '-8' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 18, 3) || '-' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 21, 12)
+       )::uuid,
+       :'org', u.id, s.id, 0,
+       :'end_date'::date + 1, :'end_date'::date + 1, true,
+       NULL, NULL, NULL, NULL, 'published', 'regular'
+FROM generate_series(1, 2) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+JOIN attendance_shifts s ON s.org_id = :'org' AND s.name = :'shift_name'
+ON CONFLICT (id) DO UPDATE
+  SET user_id = EXCLUDED.user_id,
+      shift_id = EXCLUDED.shift_id,
+      slot_index = EXCLUDED.slot_index,
+      start_date = EXCLUDED.start_date,
+      end_date = EXCLUDED.end_date,
+      is_active = EXCLUDED.is_active,
+      producer_type = EXCLUDED.producer_type,
+      producer_ref_id = EXCLUDED.producer_ref_id,
+      producer_key = EXCLUDED.producer_key,
+      producer_run_id = EXCLUDED.producer_run_id,
+      publish_status = EXCLUDED.publish_status,
+      assignment_kind = EXCLUDED.assignment_kind,
+      updated_at = now();
 
 INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to, assigned_by, assigned_reason, assigned_correlation_id)
 SELECT :'org', u.id, g.id, :'start_date'::date, NULL, 'w4w7-soak-seed', 'combined-soak seed', 'w4w7-soak-' || g.id
@@ -1493,12 +2710,17 @@ soak_seed_report_org() {
     echo "users=$(soak_psql_ta "SELECT count(*) FROM users WHERE username LIKE '${prefix}%';")"
     echo "user_orgs=$(soak_psql_ta "SELECT count(*) FROM user_orgs uo WHERE uo.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${prefix}%');")"
     echo "user_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions p WHERE p.permission_code = 'attendance:write' AND EXISTS (SELECT 1 FROM users u WHERE u.id = p.user_id AND u.username LIKE '${prefix}%');")"
+    echo "user_read_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions p WHERE p.permission_code = 'attendance:read' AND EXISTS (SELECT 1 FROM users u WHERE u.id = p.user_id AND u.username LIKE '${prefix}%');")"
+    echo "active_leave_types=$(soak_psql_ta "SELECT count(*) FROM attendance_leave_types WHERE org_id = '${org}' AND code = 'w4w7_soak_leave' AND is_active = true;")"
+    echo "active_overtime_rules=$(soak_psql_ta "SELECT count(*) FROM attendance_overtime_rules WHERE org_id = '${org}' AND name = 'W4W7 soak overtime' AND is_active = true;")"
+    echo "selfservice_view_scopes=$(soak_psql_ta "SELECT count(*) FROM attendance_scheduler_scopes WHERE org_id = '${org}' AND created_by = 'w4w7-soak-seed-selfservice' AND is_active = true;")"
     echo "shifts=$(soak_psql_ta "SELECT count(*) FROM attendance_shifts WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "segments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_segments seg WHERE seg.org_id = '${org}' AND EXISTS (SELECT 1 FROM attendance_shifts s WHERE s.id = seg.shift_id AND s.name LIKE 'w4w7-soak%');")"
     echo "groups=$(soak_psql_ta "SELECT count(*) FROM attendance_groups WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "fixed_schedule_configs=$(soak_psql_ta "SELECT count(*) FROM attendance_group_fixed_schedule_configs WHERE org_id = '${org}' AND updated_by = 'w4w7-soak-seed';")"
     echo "group_members=$(soak_psql_ta "SELECT count(*) FROM attendance_group_members m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
     echo "published_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments a WHERE a.org_id = '${org}' AND a.publish_status = 'published' AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id AND u.username LIKE '${prefix}%');")"
+    echo "manual_swap_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments a WHERE a.org_id = '${org}' AND a.publish_status = 'published' AND a.assignment_kind = 'regular' AND a.producer_type IS NULL AND a.start_date = a.end_date AND a.start_date > DATE '${SOAK_SEED_END_DATE}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id AND u.username LIKE '${prefix}%');")"
     echo "calc_group_memberships=$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_group_memberships m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
   } >> "${OUTPUT_DIR}/soak-seed-report.txt"
 }
@@ -1649,13 +2871,200 @@ soak_w7_walk_org3() {
   log "soak-seed: org ${org8} W7 posture off->group_shadow applied via W7-3 CLI (correlation ${corr})"
 }
 
+soak_mint_password() {
+  # Single shared generator for BOTH the first-mint path (action_soak_seed, below) and
+  # rotate_password=true (soak_seed_rotate_password, below): 24 random bytes, hex-encoded
+  # (48 chars), from /dev/urandom.
+  local pw
+  pw="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  [[ "${#pw}" -eq 48 ]] || fail "password minting failed"
+  printf '%s' "$pw"
+}
+
+soak_hash_password_in_backend() {
+  # soak_hash_password_in_backend <password> — bcrypt the password IN-CONTAINER, reading it
+  # on STDIN (never `-e`/argv): a `docker exec -e` env or an argv value would sit in the
+  # host process table and the docker daemon's exec config for the call's duration. Stdin
+  # does not. Shared by the first-mint path (below) and rotate_password=true.
+  local pw="$1" hash
+  hash="$(printf '%s' "$pw" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
+  [[ "$hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
+  printf '%s' "$hash"
+}
+
+soak_seed_rotate_password() {
+  # Standalone act (#4556 soak-seed soak_opts rotate_password=true): rotates ONLY the
+  # host-only synthetic-user password and its DB hash for the EXISTING closed synthetic
+  # family (username LIKE '${SOAK_USER_PREFIX}%'). Never inserts, never walks posture,
+  # never touches shift/group/schedule config, never remints a retired family.
+  # action_soak_seed dispatches here BEFORE soak_require_orgs is ever called, so soak_orgs
+  # is unused by this act (it stays a REQUIRED workflow input for action=soak-seed
+  # regardless — this act just never reads it).
+  #
+  # owner_ref / entrypoint_inventory_ref asymmetry (deliberate, NOT a bug): unlike
+  # users_per_org/tz/w7_target — which action_soak_seed REFUSES when present alongside
+  # rotate_password=true, because they would otherwise silently take no effect and mislead
+  # the operator — owner_ref/entrypoint_inventory_ref are pure attestation REFERENCES with
+  # no behavioural effect of their own anywhere in this act (they only gate the transition
+  # manifests on the non-rotate path, which this act never reaches). There is nothing for
+  # them to silently "not take effect" — so they are allowed to ride along unused rather
+  # than refused. This was the original design-lock's explicit choice, not an oversight.
+  #
+  # .prev is a SINGLE generation (see the atomic-replace block below): two consecutive
+  # FAILED rotations can lose the recoverable password (documented rather than solved with
+  # a second generation, because the far more common failure mode — matching zero family
+  # rows — is handled below by auto-restoring .prev itself, which removes the repeat-
+  # failure trigger in practice).
+  [[ -f "$SOAK_CREDENTIALS_FILE" ]] \
+    || fail "rotate_password=true but no credentials file exists at ${SOAK_CREDENTIALS_FILE} — nothing to rotate (run action=soak-seed once, without rotate_password, first)"
+  soak_resolve_pg
+
+  local new_password new_hash
+  new_password="$(soak_mint_password)"
+  new_hash="$(soak_hash_password_in_backend "$new_password")"
+
+  # --- atomic credentials-file replace (tmp+mv, same dir; previous copy kept as .prev,
+  # 0600 from birth via the SAME umask idiom the first-mint path uses, so a rotation that
+  # fails partway is recoverable: mv the .prev copy back onto SOAK_CREDENTIALS_FILE to
+  # restore the host file to match the DB's still-unrotated hash) ------------------------
+  local cred_tmp
+  cred_tmp="$(mktemp "${SOAK_PERSIST_DIR}/.credentials.XXXXXX")"
+  chmod 0600 "$cred_tmp"
+  printf 'SOAK_SYNTH_PASSWORD=%s\n' "$new_password" > "$cred_tmp"
+  ( umask 077 && cp "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev" ) \
+    || { rm -f "$cred_tmp"; fail "failed to preserve the pre-rotation credentials file as ${SOAK_CREDENTIALS_FILE}.prev — refusing to rotate without a recovery copy"; }
+  mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"
+  log "soak-seed rotate_password: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, atomic replace; previous copy kept at ${SOAK_CREDENTIALS_FILE}.prev for one-generation recovery)"
+
+  # --- re-hash ONLY the existing synthetic family; no inserts, no posture walk, no
+  # group/shift/schedule seeding, no remint of retired families. Blast-radius, inside the
+  # SAME transaction, BEFORE COMMIT: (1) refuse a family bigger than a generous 999-row
+  # sanity ceiling (defense-in-depth against a mis-composed prefix — NOT a derived bound:
+  # the family accumulates across dispatches with no hard cap, so a tight ceiling would
+  # false-alarm on a legitimate multi-triple family); (2) the UPDATE's own row count must
+  # equal the family's pre-count (refuses on a concurrent write between the two); (3) the
+  # UPDATE must not have left NOTHING un-matched (the degenerate "touched every row" case a
+  # mis-composed -v user_prefix="%" would produce — the C9 static pin already forbids that
+  # composition; this is a runtime backstop for anything else that could widen it). KNOWN
+  # trade-off, verified against a real postgres, not assumed: a staging users table that
+  # happens to contain ONLY synth-w4w7-* rows and nothing else would also refuse here (it
+  # cannot be told apart from a mis-composed prefix from row counts alone) — acceptable per
+  # the reviewed design (a cheap invariant, not a completeness guarantee; staging always
+  # carries non-synthetic accounts in practice). NO `-e` on the psql invocation below
+  # (echo-queries would print the interpolated bcrypt hash into this world-downloadable
+  # OUTPUT_DIR artifact) — the result is read from an explicit RAISE NOTICE line instead of
+  # psql's own command-tag text. -----------------------------------------------------------
+  local rotate_sql="${OUTPUT_DIR}/soak-seed-rotate.sql"
+  cat > "$rotate_sql" <<'SQL'
+\set ON_ERROR_STOP on
+BEGIN;
+-- transaction-scoped: recovers RAISE NOTICE regardless of the server/session
+-- client_min_messages default (round-2 gate #5063: a session running at warning
+-- would otherwise silently drop the ROTATE_RESULT line below even though the
+-- transaction committed, which breaks the F4 recovery rule this function
+-- documents — 'markers absent' must reliably mean 'did not commit').
+SET LOCAL client_min_messages = notice;
+-- psql's `:'var'` client-side substitution does NOT reach inside a `DO $$ ... $$` body
+-- (dollar-quoted strings are opaque to it — verified empirically against a real postgres:16,
+-- not assumed: a naive `:'user_prefix'` reference inside the DO block below is a silent
+-- syntax error psql would report, not a hash leak, but IS a shipped-broken rotation). Route
+-- both values through a transaction-local GUC instead: `set_config(..., true)` scopes it to
+-- THIS transaction only (reset at COMMIT/ROLLBACK), and `\gset` into a throwaway column name
+-- suppresses psql's normal result-table PRINTOUT — `SELECT set_config(...)` bare would
+-- otherwise echo the value (including the bcrypt hash) to this same OUTPUT_DIR-bound file,
+-- recreating exactly the class of leak the missing `-e` flag (see below) fixes.
+SELECT set_config('rotate.user_prefix', :'user_prefix', true) AS _discard \gset
+SELECT set_config('rotate.pw_hash', :'pw_hash', true) AS _discard \gset
+DO $$
+DECLARE
+  v_user_prefix text := current_setting('rotate.user_prefix');
+  v_pw_hash text := current_setting('rotate.pw_hash');
+  family_count integer;
+  updated_count integer;
+  untouched_count integer;
+BEGIN
+  SELECT count(*) INTO family_count FROM users WHERE username LIKE v_user_prefix;
+  IF family_count > 999 THEN
+    RAISE EXCEPTION 'rotate_password refuses: % users match username LIKE % - exceeds the 999 sanity ceiling (defense-in-depth, not the real family size)', family_count, v_user_prefix;
+  END IF;
+
+  UPDATE users SET password_hash = v_pw_hash WHERE username LIKE v_user_prefix;
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+
+  IF updated_count <> family_count THEN
+    RAISE EXCEPTION 'rotate_password blast-radius mismatch: UPDATE touched % row(s) but the pre-count was % for username LIKE % (possible concurrent write) - refusing', updated_count, family_count, v_user_prefix;
+  END IF;
+
+  SELECT count(*) INTO untouched_count FROM users WHERE username NOT LIKE v_user_prefix;
+  IF updated_count > 0 AND untouched_count = 0 THEN
+    RAISE EXCEPTION 'rotate_password blast-radius check failed: the UPDATE touched % row(s) and left NOTHING un-matched (0 rows are NOT LIKE %) - refusing what looks like a full-table rewrite', updated_count, v_user_prefix;
+  END IF;
+
+  RAISE NOTICE 'ROTATE_RESULT family_count=% updated_count=%', family_count, updated_count;
+END $$;
+COMMIT;
+SQL
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" \
+    -v pw_hash="$new_hash" -v user_prefix="${SOAK_USER_PREFIX}%" \
+    < "$rotate_sql" > "${OUTPUT_DIR}/soak-seed-rotate.txt" 2>&1 \
+    || fail "rotate_password DB step returned a nonzero exit — this does NOT prove nothing committed (a transport/stream failure can occur AFTER a successful COMMIT): check soak-seed-rotate.txt for 'ROTATE_RESULT ...' followed by 'COMMIT' — if both are present the DB WAS rotated and ${SOAK_CREDENTIALS_FILE}.prev must NOT be restored (investigate instead); only restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} if they are absent. ${SOAK_CREDENTIALS_FILE}.prev is retained either way for that decision; see soak-seed-rotate.txt"
+
+  local notice_line rotated_users
+  notice_line="$(grep -E 'ROTATE_RESULT family_count=[0-9]+ updated_count=[0-9]+' "${OUTPUT_DIR}/soak-seed-rotate.txt" | tail -n1)"
+  if [[ "$notice_line" =~ $SOAK_ROTATE_NOTICE_RE ]]; then
+    rotated_users="${BASH_REMATCH[2]}"
+  else
+    fail "could not read the rotation result from soak-seed-rotate.txt (psql/PL/pgSQL output shape changed?)"
+  fi
+
+  # A rotation matching ZERO family rows must never report result=ok: the credentials file
+  # would hold a password matching nothing (and the DB genuinely was NOT touched — an
+  # UPDATE matching 0 rows changes nothing), so auto-restore .prev (nothing was committed
+  # for this specific failure mode, so restoring is always safe here) rather than leaving
+  # host state that silently breaks the next action=soak-run.
+  (( rotated_users > 0 )) \
+    || { mv -f "${SOAK_CREDENTIALS_FILE}.prev" "$SOAK_CREDENTIALS_FILE" \
+           || fail "rotate_password matched 0 users for username LIKE '${SOAK_USER_PREFIX}%', AND restoring ${SOAK_CREDENTIALS_FILE}.prev also failed — the credentials file may now hold a password matching nothing; restore it by hand from ${SOAK_CREDENTIALS_FILE}.prev"; \
+         fail "rotate_password matched 0 users for username LIKE '${SOAK_USER_PREFIX}%' — the synthetic family does not exist in this DB (nothing was rotated in the DB); restored the pre-rotation credentials file from ${SOAK_CREDENTIALS_FILE}.prev, so ${SOAK_CREDENTIALS_FILE} is unchanged from before this run"; }
+
+  snapshot_staging_ps
+  {
+    echo "action=soak-seed"
+    echo "rotated=1"
+    echo "rotated_users=${rotated_users}"
+    echo "result=ok"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "soak-seed rotate_password OK: ${rotated_users} existing synthetic family user(s) re-hashed (no inserts, no posture walk, no group/shift seeding); password never printed"
+}
+
 action_soak_seed() {
   soak_validate_opts
+  local rotate_password
+  rotate_password="$(soak_opt rotate_password '')"
+  if [[ -n "$rotate_password" && "$rotate_password" != "true" ]]; then
+    fail "soak_opts rotate_password only accepts 'true' (or omit the key entirely), got '${rotate_password}'"
+  fi
+  if [[ "$rotate_password" == "true" ]]; then
+    # Standalone act: refuse if any full-seed-only opt is ALSO supplied — a rotation
+    # dispatch that also carried users_per_org/tz/w7_target would otherwise silently
+    # ignore them (this branch never reaches the code that reads them), misleading the
+    # operator into thinking they took effect. soak_opt_present checks PRESENCE, not the
+    # resolved value, because w7_target in particular always resolves via its default.
+    local -a rotate_conflicts=()
+    soak_opt_present users_per_org && rotate_conflicts+=(users_per_org)
+    soak_opt_present tz && rotate_conflicts+=(tz)
+    soak_opt_present w7_target && rotate_conflicts+=(w7_target)
+    [[ "${#rotate_conflicts[@]}" -eq 0 ]] \
+      || fail "soak_opts rotate_password=true is a standalone act and refuses users_per_org/tz/w7_target in the same invocation (got: $(IFS=,; echo "${rotate_conflicts[*]}")) — rotate the password alone, or run a normal (non-rotating) soak-seed"
+    soak_seed_rotate_password
+    return 0
+  fi
   soak_require_orgs
   mkdir -p "$SOAK_PERSIST_DIR"
   local users_per_org tz_opt w7_target
   users_per_org="$(soak_opt users_per_org 10)"
-  [[ "$users_per_org" =~ ^[1-9][0-9]?$ ]] || fail "users_per_org must be 1..99, got '${users_per_org}'"
+  [[ "$users_per_org" =~ ^[1-9][0-9]?$ ]] && (( users_per_org >= 2 )) \
+    || fail "users_per_org must be 2..99 so the shift-swap fixture has two distinct users, got '${users_per_org}'"
   tz_opt="$(soak_opt tz Asia/Shanghai)"
   w7_target="$(soak_opt w7_target group_shadow)"
   if [[ "$w7_target" != "group_shadow" ]]; then
@@ -1725,8 +3134,16 @@ action_soak_seed() {
   # --- manifest-attestation preflight: verify BEFORE attesting -------------------------
   prepare_container_runner
   staging_exec node "$MIGRATE_JS" --list < /dev/null > "${OUTPUT_DIR}/seed-migrate-list.txt" 2>&1
-  grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt" \
-    || fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  # Strict on purpose: the manifests attest pendingMigrations=0 over the WHOLE ledger. An
+  # owner-ruled exclusion (STAGING_OWNER_EXCLUDED_MIGRATIONS) leaves a migration pending by
+  # design, which this gate must not paper over; it only names that cause so the operator is not
+  # sent to a migrate that cannot clear it. Scoping the attestation is an owner decision.
+  if ! grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+    if owner_excluded_only_pending "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+      fail "staging's only pending migration(s) are owner-ruled exclusions ($(staging_owner_exclude_csv)) — the transition manifests attest pendingMigrations=0 over the whole ledger, so soak-seed cannot attest until the owner lifts the exclusion or rules that the attestation may be scoped (action=migrate will not change this)"
+    fi
+    fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  fi
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true' \
     || fail "staging /api/health is not ok — the transition manifests attest serviceHealthy=true"
   local worker_env
@@ -1745,17 +3162,12 @@ action_soak_seed() {
     [[ -n "$password" ]] || fail "credentials file exists but carries no SOAK_SYNTH_PASSWORD: ${SOAK_CREDENTIALS_FILE}"
     log "soak-seed: reusing the existing synthetic-user password from ${SOAK_CREDENTIALS_FILE}"
   else
-    password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    [[ "${#password}" -eq 48 ]] || fail "password minting failed"
+    password="$(soak_mint_password)"
     ( umask 077 && printf 'SOAK_SYNTH_PASSWORD=%s\n' "$password" > "$SOAK_CREDENTIALS_FILE" )
     log "soak-seed: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, never uploaded)"
   fi
-  # Bcrypt the password in-container, reading it on STDIN (never `-e`/argv): a `docker exec -e`
-  # env or an argv value would sit in the host process table and the docker daemon's exec
-  # config for the call's duration. Stdin does not.
   local pw_hash
-  pw_hash="$(printf '%s' "$password" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
-  [[ "$pw_hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
+  pw_hash="$(soak_hash_password_in_backend "$password")"
 
   # --- one-time remint of the RETIRED TEXT-id family (identity-gate defect, 2026-08-16) --
   # The first soak seed minted users whose IDS carried the family marker
@@ -1902,10 +3314,11 @@ action_soak_flags() {
   marker_sha="$(sed -n 's/^staging_build_commit=//p' "$SOAK_BASELINE_MARKER")"
   [[ "$marker_sha" == "$DEPLOY_SHA" ]] \
     || fail "baseline marker was captured at build ${marker_sha:-<unreadable>}, but flags are being set on ${DEPLOY_SHA} — re-run action=soak-baseline against the deployed SHA (O4-2 must anchor on the same build)"
-  # Never silently drop (or silently carry) rd-window flags: env flips for those happen
-  # only together with a deploy (bundle §3.4), and this action rewrites the same file.
-  if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' "$OVERRIDE_FILE"; then
-    fail "existing runner override carries rd-window env flags; refusing to rewrite them from a soak action — redeploy with set_window_env=none first"
+  # Never silently drop (or silently carry) rd-window flags OR TASKS_ENABLED: env flips for
+  # those happen only together with a deploy (bundle §3.4; tasks_enabled owner-authorized
+  # 2026-09-28 the same way), and this action rewrites the same file.
+  if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED|TASKS_ENABLED' "$OVERRIDE_FILE"; then
+    fail "existing runner override carries rd-window env flags (and/or TASKS_ENABLED); refusing to rewrite them from a soak action — redeploy with set_window_env=none and tasks_enabled=false first"
   fi
   # This action changes ENV only, never images: deploy_sha must equal BOTH running images.
   local backend_image web_image
@@ -2393,12 +3806,21 @@ action_soak_status() {
   } >> "$SOAK_STATUS_FILE"
 
   # --- cumulative count criteria (C1-C4) -------------------------------------------------
+  # [Q1]/[Q2] count BOTH regimes (post-merge review P1: the W4-side join is structurally
+  # empty for a legacy_only org, so C1/C2 evidence was unreachable for the control arm):
+  #  - W4-postured orgs: DISTINCT clean operations (calc completed, diff NULL|equal) — the
+  #    converged unit (a transient in-only mismatch row keeps its op out until it converges);
+  #  - legacy-postured orgs (rollout row absent or state='legacy'): COMPLETED PAIR DAYS —
+  #    attendance_records with BOTH boundaries set, created in-window, synthetic-family
+  #    users only — the same one-per-user-per-day converged unit in the regime that org
+  #    actually runs. Orgs are the config CLOSED SET; posture is read at query time (this
+  #    soak's postures are constant in-window by design — org walks are seed-time acts).
   soak_status_scalar "[Q1]_clean_punch_total_cumulative" \
-    "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
-  soak_status_rows "[Q2] per-org clean punches (cumulative; weakest org first)" \
-    "SELECT c.org_id, count(DISTINCT op.operation_id) AS clean_punch_count FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id ORDER BY clean_punch_count ASC;"
+    "SELECT (SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal')) + (SELECT count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now());" >/dev/null
+  soak_status_rows "[Q2] per-org clean punches (cumulative; BOTH regimes; weakest org first)" \
+    "SELECT target.org_id, COALESCE(sum(cnt), 0)::int AS clean_punch_count FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN ( SELECT c.org_id, count(DISTINCT op.operation_id) AS cnt FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id UNION ALL SELECT r.org_id, count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now() GROUP BY r.org_id ) both_regimes ON both_regimes.org_id = target.org_id GROUP BY target.org_id ORDER BY clean_punch_count ASC;"
   soak_status_rows "[Q3] org/posture classification (three-posture buckets; investigate any 'unclassified')" \
-    "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
+    "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
   soak_status_scalar "[Q4a]_w4_legacy_arm_clean_punches_cumulative" \
     "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = op.org_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') AND COALESCE(w7.state, 'off') = 'off';" >/dev/null
   # [Q4b] MUST NOT join attendance_result_operations: a W7 group-shadow comparison row
@@ -2410,8 +3832,11 @@ action_soak_status() {
   # (uq_arc_w7_comparison_identity makes that marker operationId unique per (org,entrypoint)).
   soak_status_scalar "[Q4b]_w7_group_arm_clean_punches_cumulative" \
     "SELECT count(DISTINCT (c.input_provenance -> 'w7GroupShadowCompare' ->> 'operationId')) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.created_at >= '${window_start}'::timestamptz AND c.created_at < now() AND c.mode = 'shadow' AND (c.input_provenance ? 'w7GroupShadowCompare') AND c.context_snapshot IS NOT NULL AND (c.context_snapshot ->> 'selector') = 'group_effective' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
-  soak_status_rows "[Q14] posture-state distribution (org-count summary)" \
-    "SELECT COALESCE(w4.state,'legacy') AS w4_posture, COALESCE(w7.state,'off') AS w7_posture, count(*)::int AS org_count FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id GROUP BY w4_posture, w7_posture ORDER BY w4_posture, w7_posture;"
+  # [Q14] universe = config CLOSED SET (post-merge review P3: a posture-table-derived
+  # universe omits the legacy_only control org — no state rows — and the two-row summary
+  # misleads on-duty readers even though C1-C3 acceptance reads Q1-Q3, not Q14).
+  soak_status_rows "[Q14] posture-state distribution (org-count summary; config closed set)" \
+    "SELECT COALESCE(w4.state,'legacy') AS w4_posture, COALESCE(w7.state,'off') AS w7_posture, count(*)::int AS org_count FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id GROUP BY w4_posture, w7_posture ORDER BY w4_posture, w7_posture;"
   soak_status_rows "posture rows for the three soak orgs (W4 then W7)" \
     "SELECT 'w4' AS machine, org_id, state, version, prior_state FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') UNION ALL SELECT 'w7', org_id, state, version, prior_state FROM attendance_calculation_context_source_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') ORDER BY 1, 2;"
 
@@ -2420,8 +3845,41 @@ action_soak_status() {
     "SELECT count(*) FROM pg_constraint WHERE conname IN ('fk_arc_record', 'fk_ar_current_calculation') AND contype = 'f';")"
   [[ "$v" == "2" ]] || alerts+=("Q15a_fk_constraints_missing=${v}")
 
+  # --- [Q2b] legacy-control byte-neutrality (post-merge review P1 follow-through): for
+  # every CONFIG org still legacy-postured, ANY W4 calculation or operation row is an
+  # alert — the control arm's evidence is that the W4 machinery never touched it.
+  local ctrl_state ctrl_rows org
+  for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
+    ctrl_state="$(soak_psql_ta "SELECT COALESCE((SELECT state FROM attendance_calculation_rollout_state WHERE org_id = '${org}'), 'legacy');")"
+    if [[ "$ctrl_state" == "legacy" ]]; then
+      # Byte-neutrality = the W4 CALCULATION machinery never touched the org. An operation
+      # row with accepted_write_posture='legacy_projection_only' is the RULED ledger of a
+      # legacy write (boundary seals one per punch, resolved_calculation_id NULL, zero calc
+      # rows — pinned by attendance-w4c2-live-scheduled-boundary.db.test.ts) and is NOT
+      # contamination; #4975 gate P1 reproduced 60 such rows on the control org. Count calc
+      # rows plus only NON-legacy-posture ops (NULL posture is anomalous => counted).
+      ctrl_rows="$(soak_status_scalar "[Q2b]_legacy_control_w4_rows_${org:0:8}" \
+        "SELECT (SELECT count(*) FROM attendance_record_calculations WHERE org_id = '${org}') + (SELECT count(*) FROM attendance_result_operations WHERE org_id = '${org}' AND COALESCE(accepted_write_posture, '') <> 'legacy_projection_only');")"
+      [[ "$ctrl_rows" == "0" ]] || alerts+=("Q2b_legacy_control_w4_rows_${org:0:8}=${ctrl_rows}")
+    fi
+  done
+
+  # --- [Q3b] posture-constancy guard (#4975 gate P2-2): the dual-regime counters assume
+  # each config org's posture is CONSTANT in-window (walks are seed-time acts). A W4 row in
+  # state 'legacy' with a non-NULL prior_state is a ROLLBACK (shadow->legacy is a legal
+  # transition) — its history double-counts and Q2b false-alarms; any state outside this
+  # soak's plan (legacy|shadow) — e.g. 'suspended' — makes the org invisible to BOTH
+  # regimes. Either voids the counting assumptions => mechanical alert.
+  local pc_bad
+  # changed_at >= window_start catches the FORWARD walk too (legacy->shadow mid-window, or
+  # a round trip landing on a nominal-looking shape) — every seed-time walk precedes the
+  # window start, so this adds no false alarms (#4975 gate round-2 P3).
+  pc_bad="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND (state NOT IN ('legacy','shadow') OR (state = 'legacy' AND prior_state IS NOT NULL) OR changed_at >= '${window_start}'::timestamptz);")"
+  echo "[Q3b]_posture_constancy_violations=${pc_bad}" >> "$SOAK_STATUS_FILE"
+  [[ "$pc_bad" == "0" ]] || alerts+=("Q3b_posture_constancy_violations=${pc_bad}")
+
   # --- per-org read set ------------------------------------------------------------------
-  local org org8
+  local org8
   for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
     org8="${org:0:8}"
     echo "" >> "$SOAK_STATUS_FILE"
@@ -2459,6 +3917,18 @@ action_soak_status() {
     soak_status_rows "[Q16] full diff-code histogram 24h (incl. 'equal' denominator), org ${org8}" \
       "SELECT shadow_diff_code, count(*)::int AS n FROM attendance_record_calculations WHERE org_id = '${org}' AND created_at >= now() - interval '24 hours' AND mode = 'shadow' AND shadow_diff_code IS NOT NULL GROUP BY shadow_diff_code ORDER BY n DESC;"
   done
+
+  # --- [Q17]/[Q18] human-tail attribution (2026-08-21) — WHERE did real-browser punches land? ---
+  # Real-browser self-service punches are not guaranteed to be attributed to the soak orgs the way
+  # the generator's explicit-orgId punches are, so every per-org Q-read above can stay flat while
+  # tester rows exist elsewhere. Q17 groups synthetic-account records by the org they were actually
+  # written under (NOT restricted to the soak orgs — that restriction is the blind spot); Q18 dumps
+  # the tester accounts' (u01) rows column-agnostically (to_jsonb) so a schema rename can't silently
+  # blank the read. Read-only; no alert semantics (disposition by hand, attribution notes private).
+  soak_status_rows "[Q17] synthetic-account attendance_records by ACTUAL org_id, last 96h (tail attribution; NOT restricted to the soak orgs)" \
+    "SELECT r.org_id, count(*)::int AS n, min(r.work_date)::text AS first_work_date, max(r.work_date)::text AS last_work_date FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE '${SOAK_USER_PREFIX}%' AND r.updated_at >= now() - interval '96 hours' GROUP BY r.org_id ORDER BY n DESC;"
+  soak_status_rows "[Q18] tester (u01) attendance_records rows, last 96h, column-agnostic (to_jsonb minus ids)" \
+    "SELECT u.username, r.org_id, (to_jsonb(r) - 'id' - 'user_id' - 'org_id')::text AS row_json FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE '${SOAK_USER_PREFIX}%-u01' AND r.updated_at >= now() - interval '96 hours' ORDER BY u.username, r.work_date;"
 
   # --- [Q8] 8-cell request-snapshot defect report — the EXISTING function, never raw SQL --
   # (W8-RECONCILIATION-PACK Q8 rule: re-deriving classifyAttendanceRequestSnapshotDefectsV1

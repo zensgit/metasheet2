@@ -31,6 +31,31 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('FROM formula_dependencies')) {
       return { rows: [], rowCount: 0 }
     }
+    // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` reads `meta_sheets.deleted_at` before
+    // any sheet-addressed work; this fixture predates that query. Translate it into the existence read
+    // each handler already answers, so every test keeps its OWN notion of which sheets exist rather
+    // than being handed an enumerated list that could drift from its handler.
+    //
+    // NOTE: this file is red on `origin/main` too (10 of 20, on unrelated unhandled meta_fields /
+    // meta_records SQL) and the count is IDENTICAL with and without this branch — verified by running
+    // it against pristine sources. This is here to stop the liveness read adding 16 more spurious
+    // error logs on top, not to change the verdict.
+    if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      for (const probe of [
+        'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+        'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+      ]) {
+        try {
+          const existing = await queryHandler(probe, params)
+          const found = (existing?.rows ?? []).length > 0
+          return { rows: found ? [{ deleted_at: null }] : [], rowCount: found ? 1 : 0 }
+        } catch {
+          // this handler does not know this form — try the next
+        }
+      }
+      // Neither form known: treat as live, which is exactly the pre-change behaviour.
+      return { rows: [{ deleted_at: null }], rowCount: 1 }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -277,12 +302,16 @@ describe('Multitable record and form context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
     const response = await request(app)
       .get('/api/multitable/form-context')
       .query({ viewId: 'view_form_ops', recordId: 'rec_existing' })
       .expect(200)
+    vi.unstubAllEnvs()
 
     expect(response.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: the form never loads /context, so form-context carries the business timezone.
+    expect(response.body.data.businessTimezone).toBe('Asia/Shanghai')
     expect(response.body.data.mode).toBe('form')
     expect(response.body.data.readOnly).toBe(true)
     expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops' })
@@ -385,12 +414,17 @@ describe('Multitable record and form context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
     const formResponse = await request(app)
       .get('/api/multitable/form-context')
       .query({ viewId: 'view_public_form', publicToken: 'pub_token_123' })
       .expect(200)
+    vi.unstubAllEnvs()
 
     expect(formResponse.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: the ANONYMOUS public form learns the instance business timezone here too —
+    // the env value verbatim (a zone id, nothing actor- or tenant-derived).
+    expect(formResponse.body.data.businessTimezone).toBe('Asia/Tokyo')
     expect(formResponse.body.data.readOnly).toBe(false)
     expect(formResponse.body.data.submitPath).toBe('/api/multitable/views/view_public_form/submit?publicToken=pub_token_123')
     expect(formResponse.body.data.capabilities).toMatchObject({

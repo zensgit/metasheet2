@@ -46,6 +46,12 @@ describe('assigneeSourceSummary (single source)', () => {
     expect(assigneeSourceSummary({ kind: 'continuous_dept_heads', levels: 3 })).toBe('连续多级部门负责人（3 级）')
   })
 
+  it('form_field_user_manager: names the template-authored field id + level, never a person id (Lock-2 §L2-C)', () => {
+    expect(assigneeSourceSummary({ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 })).toBe('表单内联系人上级：contact（第 2 级）')
+  })
+  it('form_field_user_dept_head: names the template-authored field id + level, never a person id (Lock-2 §L2-C)', () => {
+    expect(assigneeSourceSummary({ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 })).toBe('表单内联系人部门负责人：contact（第 1 级）')
+  })
   it('dept_head_at_level: includes the specific level (Lock-1 §K5-b)', () => {
     expect(assigneeSourceSummary({ kind: 'dept_head_at_level', level: 2 })).toBe('指定层级部门负责人（第 2 级）')
   })
@@ -63,6 +69,16 @@ describe('assigneeSourceSummary (single source)', () => {
     })
     expect(membersScoped).toBe('提交人自选（提交时选择）')
     expect(membersScoped).not.toContain('secret_user_1')
+  })
+
+  it('prior_node_approver: names the referenced node key (template-authored, §2.6-permitted) — never a person id (Lock-1 §K3)', () => {
+    expect(assigneeSourceSummary({ kind: 'prior_node_approver', nodeKey: 'approval_1' }))
+      .toBe('节点审批人（引用节点 approval_1）')
+  })
+
+  it('user_group: joins groupIds with 、, falls back to （无） when empty (Lock-1 §K1)', () => {
+    expect(assigneeSourceSummary({ kind: 'user_group', groupIds: ['grp-1', 'grp-2'] })).toBe('用户组：grp-1、grp-2')
+    expect(assigneeSourceSummary({ kind: 'user_group', groupIds: [] })).toBe('用户组：（无）')
   })
 
   // Lock-1 §2.5 item 5: the old `JSON.stringify(source)` default leaked raw config (raw IDs
@@ -92,14 +108,14 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
     expect(nodeAssigneeSourceSummary(node)).toBe('直属上级、部门主管')
   })
 
-  it('approval node with ONLY the legacy assigneeType/assigneeIds shape: still gets a real summary', () => {
+  it('approval node with ONLY the legacy assigneeType/assigneeIds shape: still gets a real summary — count-only, never the raw ids', () => {
     const node: ApprovalNode = {
       key: 'a2',
       type: 'approval',
       name: '财务审批',
       config: { assigneeType: 'user', assigneeIds: ['user_finance'] },
     }
-    expect(nodeAssigneeSourceSummary(node)).toBe('指定成员：user_finance')
+    expect(nodeAssigneeSourceSummary(node)).toBe('指定成员（1 人）')
 
     const roleNode: ApprovalNode = {
       key: 'a3',
@@ -107,7 +123,41 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
       name: '角色审批',
       config: { assigneeType: 'role', assigneeIds: ['role_manager', 'role_finance'] },
     }
-    expect(nodeAssigneeSourceSummary(roleNode)).toBe('指定角色：role_manager、role_finance')
+    expect(nodeAssigneeSourceSummary(roleNode)).toBe('指定角色（2 个）')
+  })
+
+  it('approval node with an assigneeSources static_user/static_role entry: count-only here too, even though assigneeSourceSummary itself joins raw ids for these two kinds', () => {
+    const userNode: ApprovalNode = {
+      key: 'a6',
+      type: 'approval',
+      name: '成员节点',
+      config: { assigneeSources: [{ kind: 'static_user', userIds: ['user_9', 'user_42'] }] },
+    }
+    const summary = nodeAssigneeSourceSummary(userNode)
+    expect(summary).toBe('指定用户（2 人）')
+    expect(summary).not.toContain('user_9')
+    expect(summary).not.toContain('user_42')
+
+    const roleNode2: ApprovalNode = {
+      key: 'a7',
+      type: 'approval',
+      name: '角色节点',
+      config: { assigneeSources: [{ kind: 'static_role', roleIds: ['role_9', 'role_42'] }] },
+    }
+    const roleSummary = nodeAssigneeSourceSummary(roleNode2)
+    expect(roleSummary).toBe('指定角色（2 个）')
+    expect(roleSummary).not.toContain('role_9')
+    expect(roleSummary).not.toContain('role_42')
+
+    // Empty-array edge: honest "（无）" placeholder, matching assigneeSourceSummary's own empty
+    // fallback wording — not "（0 人）".
+    const emptyNode: ApprovalNode = {
+      key: 'a8',
+      type: 'approval',
+      name: '空节点',
+      config: { assigneeSources: [{ kind: 'static_user', userIds: [] }] },
+    }
+    expect(nodeAssigneeSourceSummary(emptyNode)).toBe('指定用户（无）')
   })
 
   it('approval node with neither shape configured: falls back to unconfigured', () => {
@@ -128,11 +178,14 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
     expect(nodeAssigneeSourceSummary(node)).toBe('发起人')
   })
 
-  it('cc node: names the target type (成员 vs 角色)', () => {
+  it('cc node: names the target type (成员 vs 角色 vs 用户组)', () => {
     const userCc: ApprovalNode = { key: 'cc1', type: 'cc', config: { targetType: 'user', targetIds: ['user_1'] } }
     const roleCc: ApprovalNode = { key: 'cc2', type: 'cc', config: { targetType: 'role', targetIds: ['role_1'] } }
+    // Lock-1 OD-L1-7(a): 'group' is the third cc target kind (registry row "user_group (cc) | 用户组").
+    const groupCc: ApprovalNode = { key: 'cc3', type: 'cc', config: { targetType: 'group', targetIds: ['grp_1'] } }
     expect(nodeAssigneeSourceSummary(userCc)).toBe('抄送成员')
     expect(nodeAssigneeSourceSummary(roleCc)).toBe('抄送角色')
+    expect(nodeAssigneeSourceSummary(groupCc)).toBe('抄送用户组')
   })
 
   it('condition node: the honest "按条件进入后续分支" label (no fabricated branch)', () => {

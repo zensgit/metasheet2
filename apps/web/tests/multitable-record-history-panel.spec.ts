@@ -87,6 +87,34 @@ describe('MetaRecordHistoryPanel (W2 S2 extraction)', () => {
   })
 
   describe('revision-list rendering', () => {
+    it('shows deleted values from the permission-filtered snapshot without offering restore', async () => {
+      const { container, app } = mountPanel({ revisions: [rev(2, 'delete', {
+        changedFieldIds: [], snapshot: { fld_t: 'Deleted title' },
+      })] })
+      await flushUi()
+      const diffs = container.querySelectorAll('[data-test="history-field-diff"]')
+      expect(diffs).toHaveLength(1)
+      expect(diffs[0].textContent).toContain('Title')
+      expect(diffs[0].textContent).toContain('Deleted title')
+      expect(container.textContent).not.toContain('Secret')
+      expect(container.querySelector('[data-test="record-history-restore"]')).toBeNull()
+      expect(container.querySelector('[data-test="history-field-select"]')).toBeNull()
+      app.unmount()
+    })
+
+    it('does not invent deleted values from current data or a neighboring revision', async () => {
+      const { container, app } = mountPanel({ revisions: [
+        rev(2, 'delete', { changedFieldIds: [], snapshot: null }),
+        rev(1, 'create', { snapshot: { fld_t: 'Older title' } }),
+      ] })
+      await flushUi()
+      const deleted = container.querySelector('.meta-record-drawer__history-item')!
+      expect(deleted.querySelectorAll('[data-test="history-field-diff"]')).toHaveLength(0)
+      expect(deleted.textContent).not.toContain('Older title')
+      expect(deleted.textContent).not.toContain('v3title')
+      app.unmount()
+    })
+
     it('fetches via apiClient.listRecordHistory on mount and renders the timeline', async () => {
       const { container, apiClient, app } = mountPanel()
       await flushUi()

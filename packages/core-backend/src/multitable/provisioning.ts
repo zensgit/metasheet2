@@ -1,5 +1,18 @@
 import { createHash } from 'crypto'
+import { Logger } from '../core/logger'
+import {
+  resolveEnsureFieldsOverwriteMode,
+  diffFieldOverwriteKinds,
+  MultitableEnsureFieldsRefusedError,
+  type EnsureFieldsOverwriteMode,
+} from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
+import { fenceWriterEntry } from './canonical-sheet-fence'
+import { isSystemSheetKind, STOCK_PREP_OVERVIEW_SHEET_KIND } from './system-sheet-predicate'
+import {
+  SheetSystemKindConflictError,
+  isStockPreparationOverviewSheetIdCandidate,
+} from './stock-preparation-overview-contract'
 import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
@@ -25,6 +38,8 @@ export type MultitableProvisioningSheet = {
   baseId: string | null
   name: string
   description: string | null
+  /** Server-owned `meta_sheets.system_kind`, read column-tolerantly (null when unset or the column is absent). */
+  systemKind: string | null
 }
 
 export type MultitableProvisioningField = {
@@ -54,6 +69,13 @@ export type EnsureSheetInput = {
   baseId?: string | null
   name: string
   description?: string | null
+  /**
+   * S3: server-owned `meta_sheets.system_kind` stamped at INSERT. Omitted / null (every caller but the
+   * gated stock-preparation overview) keeps the INSERT byte-identical to before. A value must be a
+   * recognized `isSystemSheetKind` kind or the call throws before any IO. INSERT-only: an EXISTING row's
+   * kind is never updated (P1-a, no laundering — see system-sheet-predicate.ts).
+   */
+  systemKind?: string | null
 }
 
 export type CreateSheetResult =
@@ -64,6 +86,14 @@ export type EnsureFieldsInput = {
   query: MultitableProvisioningQueryFn
   sheetId: string
   fields: MultitableProvisioningFieldDescriptor[]
+  /**
+   * P0-S S3 per-call override of the destructive-reconcile mode. Omitted (the normal case)
+   * => the fail-closed env resolution, whose default is 'refuse'. A caller that genuinely
+   * OWNS the columns it re-ensures (a plugin re-deriving its own layout) may pass
+   * 'overwrite' HERE, in code, instead of forcing an operator to set the process-global env
+   * — which would disarm the guard for every other plugin on the server.
+   */
+  overwriteMode?: EnsureFieldsOverwriteMode
 }
 
 export type EnsureObjectInput = {
@@ -71,6 +101,10 @@ export type EnsureObjectInput = {
   projectId: string
   baseId?: string | null
   descriptor: MultitableProvisioningObjectDescriptor
+  /** See EnsureFieldsInput.overwriteMode — forwarded verbatim to ensureFields. */
+  overwriteMode?: EnsureFieldsOverwriteMode
+  /** See EnsureSheetInput.systemKind — forwarded verbatim to ensureSheet. */
+  systemKind?: string | null
 }
 
 export type EnsureViewInput = {
@@ -99,14 +133,57 @@ export type CreateViewInput = {
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>
+  // S1 (adversarial review of #6091, 2026-09-26): optional created_at offset, in MICROSECONDS, added
+  // to the DATABASE clock: created_at = now() + offset. Omitted by every caller except
+  // installMultitableTemplate — COALESCE(offset, 0) below means every other call site still gets
+  // exactly `now()`, the column's own default. template-library.ts passes 0, 1, 2, ... per view so
+  // a later `ORDER BY created_at, id` reproduces install order; without it every view created
+  // inside one transaction shares now()'s transaction-start timestamp and the tie-break (a sha1
+  // view id, unrelated to template order) would win instead.
+  // N-4 (second adversarial review): an offset, NOT an app-computed timestamp. The earlier
+  // `Date.now()`-based value came from the app server's clock while every other view's created_at
+  // comes from the DB server's now(); under clock skew a view a user creates right after an install
+  // could sort BEFORE the template's views. Deriving from now() keeps one clock for all rows.
+  createdAtOffsetMicros?: number | null
 }
 
 export type CreateViewResult =
   | { created: true; view: MultitableProvisioningView }
   | { created: false; view: null }
 
+export type EnsureObjectDefaultViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  name: string
+  type?: string
+}
+
+export type EnsureObjectDefaultViewResult = {
+  created: boolean
+  viewId: string | null
+  existingViewCount: number
+}
+
+// B3 (stock-prep own base): a plugin-owned SYSTEM base — owner_id and workspace_id both NULL, like
+// `base_legacy`, but with an id the plugin derives and the plugin-scope wrapper prefix-checks.
+export type EnsureSystemBaseInput = {
+  query: MultitableProvisioningQueryFn
+  baseId: string
+  name: string
+}
+
+export type EnsureSystemBaseResult = { baseId: string; created: boolean }
+
+export type MultitableBaseAdoptionReason = 'owned' | 'workspace_scoped' | 'deleted' | 'missing'
+
 export const DEFAULT_BASE_ID = 'base_legacy'
 export const DEFAULT_BASE_NAME = 'Migrated Base'
+// The id shape `ensureSystemBase` accepts. Pure string rule, validated BEFORE any query.
+export const SYSTEM_BASE_ID_PATTERN = /^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$/
+export const SYSTEM_BASE_NAME_MAX_LENGTH = 100
+// The shared default base is never re-adopted through this API: it belongs to everyone.
+export const RESERVED_SYSTEM_BASE_IDS: ReadonlySet<string> = new Set([DEFAULT_BASE_ID])
 
 function normalizeJson(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
@@ -166,9 +243,25 @@ function buildFieldProperty(
   if ((field.type !== 'select' && field.type !== 'multiSelect') || !Array.isArray(field.options) || field.options.length === 0) {
     return base
   }
+  // options(string[])是可选值的**权威清单**;property.options 里若带着 {value,color},
+  // 只按 value 对号入座地把颜色带过来(模板保色用的就是这条)。清单本身不受影响:
+  // property 里多出来的 value 不会被装进去,少的也不会被补上;没有颜色时输出与从前逐字相同。
+  const colorByValue = new Map<string, string>()
+  const carried = Array.isArray(base.options) ? base.options : []
+  for (const option of carried) {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) continue
+    const value = (option as { value?: unknown }).value
+    const color = (option as { color?: unknown }).color
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    if (typeof color !== 'string' || color.trim().length === 0) continue
+    colorByValue.set(String(value), color)
+  }
   return {
     ...base,
-    options: field.options.map((value) => ({ value })),
+    options: field.options.map((value) => {
+      const color = colorByValue.get(value)
+      return color ? { value, color } : { value }
+    }),
   }
 }
 
@@ -209,12 +302,103 @@ export async function ensureLegacyBase(
   return DEFAULT_BASE_ID
 }
 
+/**
+ * B3: a plugin asked for a system base with an id or name the rule refuses. This is a plugin
+ * PROGRAMMING fault, not a request fault, so it carries no HTTP status; `reason` states the RULE
+ * that was broken and never echoes the offending value.
+ */
+export class MultitableSystemBaseInputError extends Error {
+  code = 'MULTITABLE_SYSTEM_BASE_INPUT_INVALID'
+
+  constructor(public readonly field: 'baseId' | 'name', reason: string) {
+    super(`ensureSystemBase refused ${field}: ${reason}`)
+    this.name = 'MultitableSystemBaseInputError'
+  }
+}
+
+/**
+ * B3 fail-closed adoption refusal: the row already exists and is NOT a system base — it has an
+ * owner, sits in a workspace, or was soft-deleted. A plugin must never "adopt" a user's or a
+ * workspace's base, so the ensure throws instead of returning it. `status = 409` is what the
+ * plugin route wrapper's `sendError` prefers, so the refusal reaches the client typed (409 +
+ * code) rather than as an untyped 500. The message names the base id and the reason token
+ * only — never the owner_id or workspace_id it collided with.
+ */
+export class MultitableBaseAdoptionError extends Error {
+  code = 'MULTITABLE_BASE_ADOPTION_REFUSED'
+  status = 409
+
+  constructor(public readonly baseId: string, public readonly reason: MultitableBaseAdoptionReason) {
+    super(`Refusing to adopt multitable base ${baseId} as a system base (${reason})`)
+    this.name = 'MultitableBaseAdoptionError'
+  }
+}
+
+/**
+ * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL).
+ *
+ * Order, deliberately: (1) id and name are validated with ZERO queries; (2) an idempotent
+ * `INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id` — `created` is whether that returned a
+ * row; (3) the row is re-read and the ensure FAILS CLOSED unless owner_id, workspace_id and
+ * deleted_at are all NULL. `base_legacy` is refused up front: the shared default base is not a
+ * plugin's to adopt. The three `input.baseId ?? ensureLegacyBase(query)` call sites are untouched
+ * — a caller that passes no baseId still lands in the shared base exactly as before.
+ */
+export async function ensureSystemBase(
+  input: EnsureSystemBaseInput,
+): Promise<EnsureSystemBaseResult> {
+  const baseId = input.baseId
+  if (typeof baseId !== 'string' || !SYSTEM_BASE_ID_PATTERN.test(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'must match ^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$')
+  }
+  if (RESERVED_SYSTEM_BASE_IDS.has(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'the shared default base cannot be adopted as a system base')
+  }
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new MultitableSystemBaseInputError('name', 'must not be blank')
+  }
+  if (name.length > SYSTEM_BASE_NAME_MAX_LENGTH) {
+    throw new MultitableSystemBaseInputError('name', `must be at most ${SYSTEM_BASE_NAME_MAX_LENGTH} characters`)
+  }
+
+  const insert = await input.query(
+    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING id`,
+    [baseId, name, 'table', '#1677ff', null, null],
+  )
+  const created = Array.isArray(insert.rows) && insert.rows.length === 1
+
+  const existing = await input.query(
+    `SELECT owner_id, workspace_id, deleted_at
+     FROM meta_bases
+     WHERE id = $1`,
+    [baseId],
+  )
+  const row = (existing.rows as any[])[0]
+  if (!row) throw new MultitableBaseAdoptionError(baseId, 'missing')
+  if (row.owner_id !== null && row.owner_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'owned')
+  }
+  if (row.workspace_id !== null && row.workspace_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'workspace_scoped')
+  }
+  if (row.deleted_at !== null && row.deleted_at !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'deleted')
+  }
+  return { baseId, created }
+}
+
 async function loadActiveSheet(
   query: MultitableProvisioningQueryFn,
   sheetId: string,
 ): Promise<MultitableProvisioningSheet | null> {
+  // S3: `system_kind` read COLUMN-TOLERANTLY (`to_jsonb(...) ->> 'system_kind'`, the form every other
+  // reader uses) so a database that has not run the column's migration answers null, not 42703.
   const result = await query(
-    `SELECT id, base_id, name, description
+    `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
      FROM meta_sheets
      WHERE id = $1 AND deleted_at IS NULL`,
     [sheetId],
@@ -226,6 +410,7 @@ async function loadActiveSheet(
     baseId: typeof row.base_id === 'string' ? row.base_id : null,
     name: String(row.name),
     description: typeof row.description === 'string' ? row.description : null,
+    systemKind: typeof row.system_kind === 'string' ? row.system_kind : null,
   }
 }
 
@@ -262,17 +447,101 @@ async function loadActiveView(
   }
 }
 
+export type FindObjectViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  viewId: string
+}
+
+/**
+ * READ-ONLY existence/content read for ONE of a provisioned object's views — the read sibling of
+ * `ensureView`, exactly as `getObjectField` is the read sibling of `patchObjectFieldProperty`.
+ *
+ * It exists because `getObjectViewId` is pure id derivation and deliberately says nothing about
+ * whether the view is there, so a caller that wants to DEEP-LINK to a provisioned view had no way
+ * to tell "provisioned" from "composed" and would hand out a link to a view id that resolves to
+ * nothing. Returns null when the view does not exist — the caller decides what to do about it.
+ *
+ * No write, no create, no merge: one SELECT by the deterministic id derived from (projectId,
+ * objectId, viewId), so it can only ever answer about a view whose id the caller could already
+ * compute for itself.
+ */
+export async function findObjectView(
+  input: FindObjectViewInput,
+): Promise<MultitableProvisioningView | null> {
+  return loadActiveView(input.query, getObjectViewId(input.projectId, input.objectId, input.viewId))
+}
+
+/**
+ * S3: the ONE place a requested `system_kind` stamp is admitted, run BEFORE any IO. Absent (undefined /
+ * null) → null, and the caller issues the pre-S3 INSERT byte-for-byte. Anything else must be a recognized
+ * server-owned kind (`isSystemSheetKind`) or the call throws — an unknown or malformed kind never reaches
+ * the table, so it can never mint a system identity the trust predicate would then honour.
+ */
+function resolveSheetSystemKindStamp(value: unknown, sheetId?: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (!isSystemSheetKind(value)) {
+    throw new Error('unknown system kind')
+  }
+  // Fix round 1 (R12 / R8): the stock-preparation overview stamp is admitted ONLY on a host-derived sheet
+  // id (`sheet_` + 24 hex). That is what lets every capability resolver skip the kind lookup for any other
+  // id (stock-preparation-overview-contract.ts, part 3) — so it is enforced here, before any IO, rather
+  // than assumed. `ensureObject` always derives the id, so a legitimate caller never trips it.
+  if (value === STOCK_PREP_OVERVIEW_SHEET_KIND && !isStockPreparationOverviewSheetIdCandidate(sheetId)) {
+    throw new Error('system kind not admitted for this sheet id')
+  }
+  return value as string
+}
+
+/**
+ * Fix round 1 (R8c): a STAMPED ensure never adopts a sheet whose stored kind differs. ON CONFLICT DO
+ * NOTHING leaves an existing row's kind untouched (P1-a), so without this an unstamped sheet that already
+ * sat at the derived id would come back from `ensureSheet` and `ensureObject` would go on to write the
+ * template's fields onto it — committed before any caller could look at the kind. Thrown here, inside the
+ * provisioning transaction, BEFORE ensureFields: the whole ensure rolls back and nothing is written.
+ */
+function assertStampedSheetAdoptable(sheet: MultitableProvisioningSheet, systemKind: string | null): void {
+  if (systemKind === null) return
+  if (sheet.systemKind !== systemKind) throw new SheetSystemKindConflictError()
+}
+
+/**
+ * The sheet INSERT shared by createSheet / ensureSheet. Without a stamp it is EXACTLY the statement both
+ * issued before S3 (pinned by tests/unit/stock-preparation-overview-host.test.ts). With one, the kind rides
+ * the same INSERT as $5 — and only the INSERT: ON CONFLICT DO NOTHING means an existing row's kind (NULL
+ * or otherwise) is never rewritten (P1-a: no backfill, no laundering of an existing sheet into a system one).
+ */
+async function insertSheetRow(
+  query: MultitableProvisioningQueryFn,
+  input: EnsureSheetInput,
+  baseId: string,
+  systemKind: string | null,
+) {
+  if (systemKind === null) {
+    return query(
+      `INSERT INTO meta_sheets (id, base_id, name, description)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO NOTHING`,
+      [input.sheetId, baseId, input.name.trim(), input.description ?? null],
+    )
+  }
+  return query(
+    `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (id) DO NOTHING`,
+    [input.sheetId, baseId, input.name.trim(), input.description ?? null, systemKind],
+  )
+}
+
 export async function createSheet(
   input: EnsureSheetInput,
 ): Promise<CreateSheetResult> {
   const query = input.query
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, input.sheetId)
   const baseId = input.baseId ?? await ensureLegacyBase(query)
-  const insert = await query(
-    `INSERT INTO meta_sheets (id, base_id, name, description)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (id) DO NOTHING`,
-    [input.sheetId, baseId, input.name.trim(), input.description ?? null],
-  )
+  await fenceWriterEntry(query, input.sheetId)
+  const insert = await insertSheetRow(query, input, baseId, systemKind)
 
   if ((insert.rowCount ?? 0) === 0) {
     return { created: false, sheet: null }
@@ -289,42 +558,97 @@ export async function ensureSheet(
   input: EnsureSheetInput,
 ): Promise<MultitableProvisioningSheet> {
   const query = input.query
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, input.sheetId)
   const baseId = input.baseId ?? await ensureLegacyBase(query)
 
-  await query(
-    `INSERT INTO meta_sheets (id, base_id, name, description)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (id) DO NOTHING`,
-    [input.sheetId, baseId, input.name.trim(), input.description ?? null],
-  )
+  await fenceWriterEntry(query, input.sheetId)
+  await insertSheetRow(query, input, baseId, systemKind)
 
   const sheet = await loadActiveSheet(query, input.sheetId)
   if (!sheet) {
     throw new Error(`Failed to ensure sheet: ${input.sheetId}`)
   }
+  assertStampedSheetAdoptable(sheet, systemKind)
   return sheet
 }
+
+const ensureFieldsLogger = new Logger('MultitableProvisioning')
 
 export async function ensureFields(
   input: EnsureFieldsInput,
 ): Promise<MultitableProvisioningField[]> {
   const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, input.sheetId)
+  // P0-S S3 — destructive-reconcile guard, FAIL-CLOSED by default (Codex round 2).
+  // Default 'refuse': an EXISTING field the descriptor would mutate aborts the whole
+  // ensureFields/ensureObject call with a typed, values-free error. Additive evolution
+  // (a field id that does not exist yet) and first installs are untouched. Only the exact
+  // literal MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE=overwrite restores the pre-P0-S SQL
+  // (and is then the ONLY mode that skips the per-field pre-read).
+  const overwriteMode = input.overwriteMode ?? resolveEnsureFieldsOverwriteMode()
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index
-    await input.query(
-      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-       ON CONFLICT (id) DO UPDATE SET
+    const nextProperty = JSON.stringify(buildFieldProperty(field))
+
+    let conflictClause =
+      `ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          property = EXCLUDED.property,
-         "order" = EXCLUDED."order"`,
+         "order" = EXCLUDED."order"`
+
+    if (overwriteMode !== 'overwrite') {
+      const existing = await input.query(
+        `SELECT name, type, property, "order" FROM meta_fields WHERE id = $1 AND sheet_id = $2`,
+        [field.id, input.sheetId],
+      )
+      const row = (existing.rows as any[])[0]
+      const stored = row
+        ? { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }
+        : null
+      const incoming = {
+        name: field.name.trim(),
+        type: field.type,
+        property: JSON.parse(nextProperty),
+        order,
+      }
+      const diffKinds = diffFieldOverwriteKinds(stored, incoming)
+      if (diffKinds.length > 0) {
+        // values-free: field id + sheet id + diff KINDS only, never names/values.
+        ensureFieldsLogger.warn(
+          `ensureFields destructive-reconcile: field ${field.id} on sheet ${input.sheetId} would be overwritten in [${diffKinds.join(', ')}] (mode=${overwriteMode})`,
+        )
+        // 'refuse' (default) aborts the whole call — an existing object is never silently
+        // reconciled. 'preserve' keeps the tenant's row untouched (add-only). 'observe'
+        // still overwrites but has now surfaced the event for audit/metrics.
+        //
+        // Partial-application note: fields EARLIER in this loop may already be written when
+        // the throw fires. Every one of them was classified 'create' or 'unchanged' (a diff
+        // would have thrown at that field instead), so whatever landed is additive-only —
+        // no tenant row was overwritten. The shipped plugin path (`ensureObjectInScope`,
+        // index.ts) additionally runs the whole ensureObject inside one transaction, so the
+        // refusal rolls those creates back too.
+        if (overwriteMode === 'refuse') {
+          throw new MultitableEnsureFieldsRefusedError({
+            fieldId: field.id,
+            sheetId: input.sheetId,
+            diffKinds,
+          })
+        }
+        if (overwriteMode === 'preserve') conflictClause = 'ON CONFLICT (id) DO NOTHING'
+      }
+    }
+
+    await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ${conflictClause}`,
       [
         field.id,
         input.sheetId,
         field.name.trim(),
         field.type,
-        JSON.stringify(buildFieldProperty(field)),
+        nextProperty,
         order,
       ],
     )
@@ -356,6 +680,7 @@ export async function patchObjectFieldProperty(
 ): Promise<MultitableProvisioningField> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
+  await fenceWriterEntry(input.query, sheetId)
   const existing = await input.query(
     `SELECT id, sheet_id, name, type, property, "order"
      FROM meta_fields
@@ -445,6 +770,7 @@ export async function ensureView(
 ): Promise<MultitableProvisioningView> {
   const descriptor = input.descriptor
   const viewId = getObjectViewId(input.projectId, descriptor.objectId, descriptor.id)
+  await fenceWriterEntry(input.query, input.sheetId)
   await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -479,9 +805,10 @@ export async function ensureView(
 export async function createView(
   input: CreateViewInput,
 ): Promise<CreateViewResult> {
+  await fenceWriterEntry(input.query, input.sheetId)
   const insert = await input.query(
-    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now() + (COALESCE($10::int, 0) * interval '1 microsecond'))
      ON CONFLICT (id) DO NOTHING`,
     [
       input.viewId,
@@ -493,6 +820,7 @@ export async function createView(
       JSON.stringify(normalizeJson(input.groupInfo)),
       JSON.stringify(Array.isArray(input.hiddenFieldIds) ? input.hiddenFieldIds : []),
       JSON.stringify(normalizeJson(input.config)),
+      input.createdAtOffsetMicros ?? null,
     ],
   )
 
@@ -505,6 +833,65 @@ export async function createView(
     throw new Error(`Failed to create view: ${input.viewId}`)
   }
   return { created: true, view }
+}
+
+// DEFAULT-VIEW primitive. A multitable base renders each sheet's default view, so a
+// sheet with ZERO views cannot be opened — and one unopenable sheet blocks the whole
+// base. Provisioning creates a sheet and its fields; nothing created a view, which is
+// why the first real deployment had to have three grid views inserted by hand.
+//
+// The guarantee this primitive is shaped around: a sheet that already has ANY view is
+// left COMPLETELY alone. Not merged, not renamed, not reordered, not added to — a pack
+// that created role views owns that sheet's view list, and this must never append a
+// fourth. That is why this is NOT `ensureView` (INSERT ... ON CONFLICT DO UPDATE by a
+// deterministic id, which WOULD append next to pack-created views): the decision is
+// taken on the sheet's view COUNT, and the write happens only from zero. Existing view
+// rows are CONSTRUCTIVELY untouchable — there is no UPDATE and no DELETE statement in
+// this function body, and the single INSERT is ON CONFLICT DO NOTHING (via createView),
+// so two concurrent ensures cannot produce two views either.
+//
+// Additive and idempotent: a re-ensure on a sheet this created a view for sees count 1
+// and writes nothing. Returns values-free evidence (an id and counts only).
+export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = 'default'
+
+export async function ensureObjectDefaultView(
+  input: EnsureObjectDefaultViewInput,
+): Promise<EnsureObjectDefaultViewResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new Error('ensureObjectDefaultView requires a non-empty view name')
+  }
+  const counted = await input.query(
+    `SELECT count(*)::int AS view_count
+     FROM meta_views
+     WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const countRow = (counted.rows as any[])[0]
+  const existingViewCount = Number(countRow?.view_count ?? 0)
+  if (existingViewCount > 0) {
+    return { created: false, viewId: null, existingViewCount }
+  }
+
+  const sheet = await loadActiveSheet(input.query, sheetId)
+  if (!sheet) {
+    throw new Error(`Cannot ensure a default view for a missing sheet: ${sheetId}`)
+  }
+
+  const viewId = getObjectViewId(input.projectId, input.objectId, DEFAULT_OBJECT_VIEW_LOGICAL_ID)
+  const result = await createView({
+    query: input.query,
+    viewId,
+    sheetId,
+    name,
+    type: input.type || 'grid',
+  })
+  return {
+    created: result.created,
+    viewId: result.created ? viewId : null,
+    existingViewCount: 0,
+  }
 }
 
 export type EnsureMissingObjectFieldsInput = {
@@ -535,6 +922,7 @@ export async function ensureMissingObjectFields(
   const addedFieldIds: string[] = []
   const skippedExistingFieldIds: string[] = []
   const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, sheetId)
   for (const [index, field] of fields.entries()) {
     const physicalId = stableMetaId('fld', input.projectId, input.objectId, field.id)
     const order = typeof field.order === 'number' ? field.order : index
@@ -678,19 +1066,23 @@ export async function ensureObject(
   sheet: MultitableProvisioningSheet
   fields: MultitableProvisioningField[]
 }> {
-  const baseId = input.baseId ?? await ensureLegacyBase(input.query)
+  // S3: refuse an unknown stamp before the legacy-base INSERT, and forward the checked value.
   const sheetId = getObjectSheetId(input.projectId, input.descriptor.id)
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, sheetId)
+  const baseId = input.baseId ?? await ensureLegacyBase(input.query)
   const sheet = await ensureSheet({
     query: input.query,
     sheetId,
     baseId,
     name: input.descriptor.name,
     description: input.descriptor.description ?? null,
+    systemKind,
   })
 
   const fields = await ensureFields({
     query: input.query,
     sheetId,
+    overwriteMode: input.overwriteMode,
     fields: (input.descriptor.fields ?? []).map((field) => ({
       ...field,
       id: stableMetaId('fld', input.projectId, input.descriptor.id, field.id),

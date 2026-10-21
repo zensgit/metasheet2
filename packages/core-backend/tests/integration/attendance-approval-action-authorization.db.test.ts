@@ -161,8 +161,9 @@ describeIfDatabase('Attendance approval action authorization — S7-0 (approve +
 
     await client.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, $5::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, 'attendance_request_approval', $5::jsonb)`,
       [
         requestId,
         requesterUserId,

@@ -29,6 +29,7 @@ import {
   type MultitableTemplate,
 } from '../../src/multitable/template-library'
 import type { MultitableProvisioningQueryFn } from '../../src/multitable/provisioning'
+import { handleTemplateInstallDedupeSql } from '../utils/template-install-dedupe-sql'
 import { usePinnedServer } from '../utils/pinned-server'
 
 type QueryResult = { rows: any[]; rowCount?: number }
@@ -65,6 +66,11 @@ function createStore(opts: StoreOptions = {}) {
   const handler = (sql: string, params: unknown[] = []): QueryResult => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
 
+    // #5861:安装路由现在还会发咨询锁 + 去重账本的读/写。本 suite 不测去重,
+    // 用共享的中性实现(锁恒成功、账本恒空)让这些语句不再落到下面的「认不出就抛」。
+    const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+    if (dedupeSql) return dedupeSql
+
     if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
       const [id] = params as [string]
       if (opts.occupyAllBases) return { rows: [{ id }] }
@@ -99,6 +105,19 @@ function createStore(opts: StoreOptions = {}) {
       fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
       return { rows: [], rowCount: 1 }
     }
+    // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+    // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+    // this branch the fake would fall through to the `Unhandled SQL` throw below.
+    if (
+      normalized.includes('FROM meta_fields') &&
+      normalized.includes('WHERE id = $1 AND sheet_id = $2')
+    ) {
+      const [fieldId, ownerSheetId] = params as [string, string]
+      return {
+        rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+      }
+    }
+
     if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
       const [sheetId, ids] = params as [string, string[]]
       const idSet = new Set(ids)

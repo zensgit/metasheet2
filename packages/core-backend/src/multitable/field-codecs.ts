@@ -2,6 +2,9 @@ import sanitizeHtml from 'sanitize-html'
 import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from './field-visibility-rule'
+import { resolveDateTimeFieldTimeZone } from './business-timezone'
+import { parseDateTimeText } from './date-time-wall-clock'
+import { withHumanWriteLockKey } from './human-write-lock'
 
 export type MultitableFieldType =
   | 'string'
@@ -236,9 +239,16 @@ export function sanitizeFieldProperty(
   //
   // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set and were
   // simply never added to it — see withLayer2VisibilityKeys. That omission is the bug it fixes.
-  return withLayer2VisibilityKeys(
-    withFieldRequiredWhenRule(
-      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The human write lock (`humanWriteLock`, human-write-lock.ts) is cross-cutting for the same reason: a
+  // closed-allowlist branch that dropped it would fail OPEN (the column turns writable for people), so it
+  // is applied here, outside the per-type switch, closed vocabulary only.
+  return withHumanWriteLockKey(
+    withLayer2VisibilityKeys(
+      withFieldRequiredWhenRule(
+        withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+        property,
+      ),
       property,
     ),
     property,
@@ -996,16 +1006,54 @@ export function validateLocationValue(value: unknown, fieldId: string): Location
   }
 }
 
-export function validateDateTimeValue(value: unknown, fieldId: string): string | null {
+/**
+ * Canonical stored form (UTC ISO) of a dateTime input, or `null` for empty.
+ *
+ * 客户反馈 2026-09-24 #4c (PR #6083 review S1): a STRING is parsed by `parseDateTimeText` — one carrying its
+ * own zone (`Z`, `±hh:mm`, `GMT`) keeps its absolute meaning; a ZONE-LESS wall clock (`2026-09-24 09:00`,
+ * `2026-09-24T09:00:00.000`, `2026年9月24日 9:30`, a bare `2026-09-24` = midnight) is read in the FIELD's zone
+ * (`resolveDateTimeFieldTimeZone(property)`: explicit non-'UTC' `property.timezone`, else the instance business
+ * timezone, default Asia/Shanghai). The former `new Date(value)` read zone-less text in the PROCESS zone, so
+ * the same grid paste / CSV / XLSX / prefill / REST string meant a different instant on a UTC container than on
+ * a China laptop. Zone-less text outside the grammar is rejected (fail-closed) rather than guessed.
+ */
+export function validateDateTimeValue(
+  value: unknown,
+  fieldId: string,
+  property?: Record<string, unknown> | null,
+): string | null {
   if (value === null || value === undefined || value === '') return null
   if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) {
     throw new Error(`DateTime value must be a string, number, or Date for ${fieldId}`)
   }
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) {
+  if (value instanceof Date || typeof value === 'number') {
+    const date = value instanceof Date ? value : new Date(value)
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
+    }
+    return date.toISOString()
+  }
+  const parsed = parseDateTimeText(value, resolveDateTimeFieldTimeZone(property))
+  if (parsed.kind === 'empty') return null
+  if (parsed.kind === 'invalid') {
     throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
   }
-  return date.toISOString()
+  return new Date(parsed.ms).toISOString()
+}
+
+/**
+ * The select cell write rule, in one place: a non-string is refused, `''` (the empty cell) is allowed, any other
+ * string must be one of the field's option values. Used by the bulk and single-record write paths
+ * (RecordWriteService.validateChanges, RecordService.patchRecord) and by the automation writers' option validation
+ * (ADR multitable-field-retype-first-batch §3.12); each caller keeps its own error text.
+ */
+export function classifySelectCellValue(
+  value: unknown,
+  options: readonly string[],
+): 'ok' | 'not_string' | 'not_in_options' {
+  if (typeof value !== 'string') return 'not_string'
+  if (value === '') return 'ok'
+  return new Set(options).has(value) ? 'ok' : 'not_in_options'
 }
 
 export function normalizeMultiSelectValue(
@@ -1134,7 +1182,8 @@ export function coerceBatch1Value(
   if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
   if (fieldType === 'qrcode') return validateQrcodeValue(value, fieldId)
   if (fieldType === 'location') return validateLocationValue(value, fieldId)
-  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId)
+  // The field property carries the (rarely set) explicit zone a zone-less wall clock is read in.
+  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId, property)
   return value
 }
 

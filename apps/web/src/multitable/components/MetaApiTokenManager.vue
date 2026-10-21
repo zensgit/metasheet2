@@ -56,7 +56,7 @@
             <div class="meta-api-mgr__token-display">
               <code data-new-token-value="true">{{ newTokenPlaintext }}</code>
               <MtButton variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary" data-copy-new-token="true" @click="onCopyNewToken">
-                {{ copiedNewToken ? a('token.action.copied') : a('token.action.copy') }}
+                {{ copiedNewToken ? a('token.action.copied') : copyNewTokenFailed ? a('token.action.copyFailed') : a('token.action.copy') }}
               </MtButton>
             </div>
             <p class="meta-api-mgr__warning">{{ a('token.saveWarning') }}</p>
@@ -111,6 +111,7 @@
           <!-- Create/Edit form -->
           <section v-if="showWebhookForm" class="meta-api-mgr__form" data-webhook-form="true">
             <div class="meta-api-mgr__form-title">{{ editingWebhookId ? a('webhook.editTitle') : a('webhook.newTitle') }}</div>
+            <p v-if="!editingWebhookId" class="meta-api-mgr__help" data-webhook-bound-to="true">{{ a('webhook.form.boundTo') }}</p>
             <label class="meta-api-mgr__label">{{ a('webhook.name') }}</label>
             <input v-model="webhookDraft.name" class="meta-api-mgr__input" type="text" :placeholder="a('webhook.namePlaceholder')" data-webhook-name="true" />
             <label class="meta-api-mgr__label">{{ a('webhook.url') }}</label>
@@ -183,7 +184,8 @@
             </div>
           </section>
 
-          <MtButton v-if="!showWebhookForm" variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" data-webhook-new="true" @click="openWebhookForm">{{ a('webhook.newButton') }}</MtButton>
+          <MtButton v-if="!showWebhookForm" variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" :disabled="!canManageCurrentSheet" data-webhook-new="true" @click="openWebhookForm">{{ a('webhook.newButton') }}</MtButton>
+          <p v-if="!canManageCurrentSheet" class="meta-api-mgr__notice" role="note" data-webhook-manage-note="true">{{ a('webhook.notice.manageRequired') }}</p>
 
           <!-- Webhook list -->
           <div v-if="webhooksLoading" class="meta-api-mgr__empty">{{ a('webhook.loading') }}</div>
@@ -198,28 +200,43 @@
             <div class="meta-api-mgr__card-meta">
               <span>{{ a('webhook.meta.url') }}: {{ wh.url }}</span>
               <span>{{ a('webhook.meta.events') }}: {{ apiWebhookEventsText(wh.events, isZh) }}</span>
+              <span :data-webhook-sheet="wh.sheetId ?? 'unbound'">{{ webhookSheetText(wh) }}</span>
               <span v-if="wh.failureCount > 0" class="meta-api-mgr__card-failures">{{ a('webhook.meta.failures') }}: {{ wh.failureCount }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
               <MtButton class="meta-api-mgr__btn" data-webhook-edit="true" @click="openEditWebhook(wh)">{{ a('webhook.action.edit') }}</MtButton>
-              <MtButton class="meta-api-mgr__btn" data-webhook-toggle="true" :disabled="busy" @click="onToggleWebhook(wh)">
+              <MtButton
+                v-if="wh.sheetId === null"
+                class="meta-api-mgr__btn"
+                data-webhook-bind="true"
+                :disabled="busy || !canManageCurrentSheet"
+                @click="onBindWebhook(wh)"
+              >
+                {{ a('webhook.action.bind') }}
+              </MtButton>
+              <MtButton class="meta-api-mgr__btn" data-webhook-toggle="true" :disabled="busy || !canToggleWebhook(wh)" @click="onToggleWebhook(wh)">
                 {{ apiToggleLabel(wh.active, isZh) }}
               </MtButton>
               <MtButton class="meta-api-mgr__btn" data-webhook-deliveries="true" @click="onViewDeliveries(wh.id)">{{ a('webhook.action.deliveries') }}</MtButton>
               <MtButton variant="danger" class="meta-api-mgr__btn meta-api-mgr__btn--danger" :disabled="busy" data-webhook-delete="true" @click="onDeleteWebhook(wh.id)">{{ m('action.delete') }}</MtButton>
             </div>
+            <p v-if="!wh.active && wh.sheetId !== null && wh.sheetId !== props.sheetId" class="meta-api-mgr__help" data-webhook-enable-hint="true">{{ a('webhook.notice.enableInBoundSheet') }}</p>
+            <p v-if="bindHintWebhookId === wh.id" class="meta-api-mgr__help" data-webhook-bind-hint="true">{{ a('webhook.notice.bindFirst') }}</p>
 
             <!-- Delivery history (inline) -->
             <div v-if="deliveriesWebhookId === wh.id && deliveries.length" class="meta-api-mgr__deliveries" data-deliveries="true">
               <strong class="meta-api-mgr__label">{{ a('webhook.delivery.recent') }}</strong>
               <div v-for="d in deliveries" :key="d.id" class="meta-api-mgr__delivery-row" :data-delivery-id="d.id">
-                <span :class="d.success ? 'meta-api-mgr__delivery--ok' : 'meta-api-mgr__delivery--fail'">
-                  {{ apiDeliveryResultLabel(d.success, isZh) }}
+                <span
+                  :class="d.status === 'success' ? 'meta-api-mgr__delivery--ok' : d.status === 'pending' ? 'meta-api-mgr__delivery--pending' : 'meta-api-mgr__delivery--fail'"
+                  :data-delivery-status="d.status"
+                >
+                  {{ apiWebhookDeliveryStatusLabel(d.status, isZh) }}
                 </span>
                 <span>{{ apiWebhookEventLabel(d.event, isZh) }}</span>
                 <span>HTTP {{ d.httpStatus ?? '-' }}</span>
-                <span v-if="d.retryCount > 0">{{ a('webhook.delivery.retries') }}: {{ d.retryCount }}</span>
-                <span>{{ formatDate(d.timestamp) }}</span>
+                <span data-delivery-attempts="true">{{ a('webhook.delivery.attempts') }}: {{ d.attemptCount }}</span>
+                <span data-delivery-time="true">{{ formatDate(d.createdAt) }}</span>
               </div>
             </div>
           </div>
@@ -423,6 +440,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
@@ -430,11 +448,13 @@ import type {
   DingTalkGroupDelivery,
   DingTalkGroupDestination,
   Webhook,
+  WebhookCreateInput,
   WebhookDelivery,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { MtButton, MtIconButton } from '../ui'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import {
   apiDeliveryResultLabel,
   apiDingTalkDeliverySourceLabel,
@@ -450,6 +470,7 @@ import {
   apiWebhookEventLabel,
   apiWebhookEventsText,
   apiWebhookStatusLabel,
+  apiWebhookDeliveryStatusLabel,
   type MetaApiTokenLabelKey,
 } from '../utils/meta-api-token-labels'
 
@@ -485,10 +506,11 @@ const tokensLoading = ref(false)
 const showTokenForm = ref(false)
 const newTokenPlaintext = ref<string | null>(null)
 const copiedNewToken = ref(false)
+const copyNewTokenFailed = ref(false)
 const tokenDraft = ref({ name: '', scopes: [] as string[], expiresAt: '' })
 // Must match the backend enum ALL_API_TOKEN_SCOPES (packages/core-backend/src/multitable/api-tokens.ts).
 // The old ['read','write','admin'] were rejected by the server (400) — a contract/UI drift.
-const availableScopes = ['records:read', 'records:write', 'fields:read', 'comments:read', 'comments:write', 'webhooks:manage']
+const availableScopes = ['records:read', 'records:write', 'fields:read', 'comments:read', 'comments:write']
 
 // ---- Webhooks ----
 const webhooks = ref<Webhook[]>([])
@@ -502,6 +524,8 @@ const WEBHOOK_RETRY_BOUNDS = {
 } as const
 
 const editingWebhookId = ref<string | null>(null)
+const editingWebhookOriginal = ref<Webhook | null>(null)
+const bindHintWebhookId = ref<string | null>(null)
 // Retry-policy fields are kept as raw strings ('' = unset → backend default).
 const webhookDraft = ref({
   name: '',
@@ -512,7 +536,8 @@ const webhookDraft = ref({
   retryBaseDelayMs: '',
   retryMaxDelayMs: '',
 })
-const availableEvents = ['record.created', 'record.updated', 'record.deleted', 'field.changed']
+// Must match the backend event types (packages/core-backend/src/multitable/webhooks.ts).
+const availableEvents = ['record.created', 'record.updated', 'record.deleted']
 const deliveriesWebhookId = ref<string | null>(null)
 const deliveries = ref<WebhookDelivery[]>([])
 
@@ -535,6 +560,9 @@ const dingTalkGroupDraft = ref({
 })
 
 const canManageDingTalkGroups = computed(() => props.canManageAutomation !== false)
+// Webhooks bind to the current sheet: creating, binding and enabling need automation management there.
+// The server re-checks; listing, turning off and deleting your own webhooks are always available.
+const canManageCurrentSheet = computed(() => !!props.sheetId && props.canManageAutomation !== false)
 const managerTitle = computed(() => apiManagerTitle(canManageDingTalkGroups.value, isZh.value))
 
 /**
@@ -604,12 +632,9 @@ const canSaveDingTalkGroup = computed(() => {
     && !dingTalkGroupSecretValidationMessage.value
 })
 
+// 客户反馈 2026-09-24 #4c follow-up: the business-timezone day, `YYYY-MM-DD` — not the browser's day / locale.
 function formatDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString()
-  } catch {
-    return iso
-  }
+  return formatBusinessTimestamp(iso, { precision: 'day' }) ?? iso
 }
 
 function maskDingTalkWebhookUrl(url: string): string {
@@ -720,9 +745,16 @@ async function onCreateToken() {
 
 function onCopyNewToken() {
   if (!newTokenPlaintext.value) return
-  void navigator.clipboard.writeText(newTokenPlaintext.value)
-  copiedNewToken.value = true
-  setTimeout(() => { copiedNewToken.value = false }, 2000)
+  // The plaintext token is never logged; on failure the button says so and the token stays visible
+  // in the <code> block above for a manual copy.
+  void copyText(newTokenPlaintext.value).then((ok) => {
+    copiedNewToken.value = ok
+    copyNewTokenFailed.value = !ok
+    setTimeout(() => {
+      copiedNewToken.value = false
+      copyNewTokenFailed.value = false
+    }, 2000)
+  })
 }
 
 async function onRevokeToken(tokenId: string) {
@@ -768,8 +800,45 @@ async function loadWebhooks() {
   }
 }
 
+function webhookSheetText(wh: Webhook): string {
+  if (wh.sheetId === null) return a('webhook.meta.unbound')
+  if (wh.sheetId === props.sheetId) return `${a('webhook.meta.sheet')}: ${a('webhook.meta.sheetCurrent')}`
+  return `${a('webhook.meta.sheet')}: ${wh.sheetId}`
+}
+
+/** Turning off is always possible; turning on only for a webhook bound to this sheet, with permission here. */
+function canToggleWebhook(wh: Webhook): boolean {
+  if (wh.active) return true
+  if (wh.sheetId === null) return true // leads to the bind action instead of enabling
+  return wh.sheetId === props.sheetId && canManageCurrentSheet.value
+}
+
+function webhookActionError(err: unknown, fallback: MetaApiTokenLabelKey): string {
+  const e = err as { status?: number; code?: string } | null
+  if (e?.code === 'WEBHOOK_SHEET_REQUIRED') return a('webhook.notice.bindFirst')
+  if (e?.status === 403) return a('webhook.notice.manageRequired')
+  return err instanceof Error ? err.message : a(fallback)
+}
+
+async function onBindWebhook(wh: Webhook) {
+  if (!props.client || busy.value || !props.sheetId || !canManageCurrentSheet.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await props.client.updateWebhook(wh.id, { sheetId: props.sheetId })
+    bindHintWebhookId.value = null
+    await loadWebhooks()
+  } catch (err) {
+    error.value = webhookActionError(err, 'error.saveWebhook')
+  } finally {
+    busy.value = false
+  }
+}
+
 function openWebhookForm() {
+  if (!canManageCurrentSheet.value) return
   editingWebhookId.value = null
+  editingWebhookOriginal.value = null
   webhookDraft.value = {
     name: '',
     url: '',
@@ -784,6 +853,7 @@ function openWebhookForm() {
 
 function openEditWebhook(wh: Webhook) {
   editingWebhookId.value = wh.id
+  editingWebhookOriginal.value = wh
   webhookDraft.value = {
     name: wh.name,
     url: wh.url,
@@ -799,6 +869,13 @@ function openEditWebhook(wh: Webhook) {
 function cancelWebhookForm() {
   showWebhookForm.value = false
   editingWebhookId.value = null
+  editingWebhookOriginal.value = null
+}
+
+function sameEventSet(a1: readonly string[], b1: readonly string[]): boolean {
+  const left = new Set(a1)
+  const right = new Set(b1)
+  return left.size === right.size && [...left].every((evt) => right.has(evt))
 }
 
 function onToggleEvent(evt: string) {
@@ -816,24 +893,38 @@ async function onSaveWebhook() {
   error.value = null
   try {
     const policy = webhookRetryPolicy.value
-    const input = {
-      name: webhookDraft.value.name.trim(),
-      url: webhookDraft.value.url.trim(),
-      events: webhookDraft.value.events,
-      secret: webhookDraft.value.secret || undefined,
-      maxRetries: policy.maxRetries.value,
-      retryBaseDelayMs: policy.retryBaseDelayMs.value,
-      retryMaxDelayMs: policy.retryMaxDelayMs.value,
-    }
-    if (editingWebhookId.value) {
-      await props.client.updateWebhook(editingWebhookId.value, input)
+    const name = webhookDraft.value.name.trim()
+    const url = webhookDraft.value.url.trim()
+    const events = webhookDraft.value.events
+    const original = editingWebhookOriginal.value
+    if (editingWebhookId.value && original) {
+      // Send only what changed: re-sending url/events unchanged must not look like a change.
+      const changes: Partial<WebhookCreateInput> = {}
+      if (name !== original.name) changes.name = name
+      if (url !== original.url) changes.url = url
+      if (!sameEventSet(events, original.events)) changes.events = [...events]
+      if ((webhookDraft.value.secret || '') !== (original.secret ?? '')) changes.secret = webhookDraft.value.secret || undefined
+      if (policy.maxRetries.value !== original.maxRetries) changes.maxRetries = policy.maxRetries.value
+      if (policy.retryBaseDelayMs.value !== original.retryBaseDelayMs) changes.retryBaseDelayMs = policy.retryBaseDelayMs.value
+      if (policy.retryMaxDelayMs.value !== original.retryMaxDelayMs) changes.retryMaxDelayMs = policy.retryMaxDelayMs.value
+      await props.client.updateWebhook(editingWebhookId.value, changes)
     } else {
-      await props.client.createWebhook(input)
+      if (!props.sheetId || !canManageCurrentSheet.value) return
+      await props.client.createWebhook({
+        name,
+        url,
+        events,
+        sheetId: props.sheetId,
+        secret: webhookDraft.value.secret || undefined,
+        maxRetries: policy.maxRetries.value,
+        retryBaseDelayMs: policy.retryBaseDelayMs.value,
+        retryMaxDelayMs: policy.retryMaxDelayMs.value,
+      })
     }
     cancelWebhookForm()
     await loadWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : a('error.saveWebhook')
+    error.value = webhookActionError(err, 'error.saveWebhook')
   } finally {
     busy.value = false
   }
@@ -841,13 +932,19 @@ async function onSaveWebhook() {
 
 async function onToggleWebhook(wh: Webhook) {
   if (!props.client || busy.value) return
+  // An unbound webhook is enabled by binding it first, never by sending active: true.
+  if (!wh.active && wh.sheetId === null) {
+    bindHintWebhookId.value = wh.id
+    return
+  }
+  if (!canToggleWebhook(wh)) return
   busy.value = true
   error.value = null
   try {
     await props.client.updateWebhook(wh.id, { active: !wh.active })
     await loadWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : a('error.toggleWebhook')
+    error.value = webhookActionError(err, 'error.toggleWebhook')
   } finally {
     busy.value = false
   }

@@ -98,7 +98,9 @@ export function verifyRestorePreviewIdentity(token: string, expected: RestorePre
 // identity binds a MULTI-record restore: the EXACT record set AND each record's per-record (masked, field-
 // filtered) `changesHash`, via an order-invariant `scopeHash`. The `type: 'restore-preview-scoped'` discriminator
 // makes single and scoped identities DISJOINT — a single-record token can never satisfy a scoped execute and
-// vice versa (BS-7 + D6). CONTRACT ONLY — not wired into any route, writes nothing (preview = BS-2, execute = BS-3).
+// vice versa (BS-7 + D6). WIRED: `univer-meta.ts`'s `POST /sheets/:sheetId/restore-batch-preview` (~L9497, BS-2
+// mint via `mintScopedRestorePreviewIdentity`) and `POST /sheets/:sheetId/restore-batch-execute` (~L9963, BS-3
+// verify via `verifyScopedRestorePreviewIdentity`) are the production callers.
 
 export interface ScopedRestorePreviewIdentityClaims {
   sheetId: string
@@ -566,6 +568,12 @@ export function hashAnchorRecoveryScope(records: Array<{ recordId: string; exist
  *  at-most-once; it is THIS binding that pins WHAT the once is. */
 export type ExactAnchorRecoveryMode = 'revert' | 'reset'
 
+/** Archive D5 keeps selection scope separate from revert/reset deletion semantics. */
+export type ExactArchiveRecoveryScopeKind =
+  | 'whole_sheet'
+  | 'selected_records'
+  | 'selected_fields'
+
 /**
  * SERVER-KEYED hash of the v1 recovery-authorization basis (owner P1-2, 2026-07-17). Whole-sheet recovery is
  * authorized by exactly one grant shape in v1 — the 4c-1 U-L8 FULL-READ gate (an actor who cannot read every
@@ -579,6 +587,44 @@ export type ExactAnchorRecoveryMode = 'revert' | 'reset'
 export function hashRecoveryAuthorizationScope(basis: { sheetId: string; actorId: string }): string {
   return createHmac('sha256', getSecret())
     .update(JSON.stringify(['recovery-auth-v1', 'full-read', basis.sheetId, basis.actorId]))
+    .digest('hex')
+}
+
+/**
+ * D5 authorization-contract hash. Selected identifiers remain HMAC-protected rather than appearing
+ * in the client-decodable archive token. Record and field arrays are ordered canonically here; the
+ * frozen plan preserves the requested execution order separately.
+ */
+export function hashArchiveRecoveryAuthorizationScope(basis: {
+  sheetId: string
+  actorId: string
+  scopeKind: ExactArchiveRecoveryScopeKind
+  recordIds?: readonly string[]
+  fieldIds?: readonly string[]
+}): string {
+  const recordIds = [...(basis.recordIds ?? [])].map(String).sort()
+  const fieldIds = [...(basis.fieldIds ?? [])].map(String).sort()
+  if (basis.scopeKind === 'whole_sheet' && (recordIds.length !== 0 || fieldIds.length !== 0)) {
+    throw new TypeError('archive recovery whole-sheet scope must not carry selected identifiers')
+  }
+  if (basis.scopeKind === 'selected_records' && (recordIds.length === 0 || fieldIds.length !== 0)) {
+    throw new TypeError('archive recovery selected-record scope is malformed')
+  }
+  if (basis.scopeKind === 'selected_fields' && (recordIds.length === 0 || fieldIds.length === 0)) {
+    throw new TypeError('archive recovery selected-field scope is malformed')
+  }
+  if (new Set(recordIds).size !== recordIds.length || new Set(fieldIds).size !== fieldIds.length) {
+    throw new TypeError('archive recovery scope contains duplicate identifiers')
+  }
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify([
+      'archive-recovery-auth-v1',
+      basis.scopeKind,
+      basis.sheetId,
+      basis.actorId,
+      recordIds,
+      fieldIds,
+    ]))
     .digest('hex')
 }
 
@@ -698,6 +744,169 @@ export interface ExactAnchorRecoveryIdentityClaims {
   authorizedScopeHash: string
 }
 
+/**
+ * D5 archive identity. A distinct JWT type makes every pre-archive token structurally unusable for
+ * archive restore. `mode` controls reset/revert semantics; `scopeKind` controls the selected surface.
+ */
+export interface ExactArchiveRecoveryIdentityClaims extends ExactAnchorRecoveryIdentityClaims {
+  archiveGenerationId: string
+  archiveRootHash: string
+  archiveSourceVectorHash: string
+  archiveKeyId: string
+  archivePlanHash: string
+  archivePlanObject?: ExactArchiveRecoveryPlanObjectClaims
+  scopeKind: ExactArchiveRecoveryScopeKind
+}
+
+export interface ExactArchiveRecoveryPlanObjectClaims {
+  objectId: string
+  version: string
+  sha256: string
+  size: string
+  expiresAt: string
+}
+
+export function mintExactArchiveRecoveryIdentity(
+  claims: ExactArchiveRecoveryIdentityClaims,
+  expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL,
+): string {
+  return jwt.sign(
+    { type: 'exact-anchor-archive-recovery-preview-v1', ...claims },
+    getSecret(),
+    { algorithm: 'HS256', expiresIn } as SignOptions,
+  )
+}
+
+export interface ExactArchiveRecoveryVerifyResult {
+  valid: boolean
+  reason?: ExactAnchorRecoveryVerifyResult['reason'] | 'malformed_archive_claims'
+  claims?: ExactArchiveRecoveryIdentityClaims
+  /** Exact JWT expiry carried into the durable burn row. */
+  expiresAt?: string
+}
+
+export function verifyExactArchiveRecoveryIdentity(
+  token: string,
+  expected: { sheetId: string; actorId: string },
+): ExactArchiveRecoveryVerifyResult {
+  let payload: Partial<ExactArchiveRecoveryIdentityClaims> & {
+    type?: string
+    exp?: number
+  }
+  try {
+    payload = jwt.verify(token, getSecret()) as typeof payload
+  } catch (error) {
+    return {
+      valid: false,
+      reason: (error as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid',
+    }
+  }
+  if (payload.type !== 'exact-anchor-archive-recovery-preview-v1') {
+    return { valid: false, reason: 'wrong_type' }
+  }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  if (payload.mode !== 'revert' && payload.mode !== 'reset') {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  if (
+    payload.scopeKind !== 'whole_sheet' &&
+    payload.scopeKind !== 'selected_records' &&
+    payload.scopeKind !== 'selected_fields'
+  ) {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  if (typeof payload.anchorSeq !== 'string' || !/^[0-9]+$/.test(payload.anchorSeq)) {
+    return { valid: false, reason: 'malformed_anchorSeq' }
+  }
+  const ordinaryClaims = [
+    payload.checkpointId,
+    payload.anchorOperationId,
+    payload.scopeHash,
+    payload.liveSetHash,
+    payload.schemaHash,
+    payload.authorizedScopeHash,
+  ]
+  if (ordinaryClaims.some((value) => typeof value !== 'string' || value.length === 0)) {
+    return { valid: false, reason: 'malformed_claims' }
+  }
+  const archiveIds = [payload.archiveGenerationId, payload.archiveKeyId]
+  const archiveHashes = [
+    payload.archiveRootHash,
+    payload.archiveSourceVectorHash,
+    payload.archivePlanHash,
+  ]
+  let archivePlanObject: ExactArchiveRecoveryPlanObjectClaims | undefined
+  try {
+    archivePlanObject = admitArchivePlanObjectClaims(payload.archivePlanObject)
+  } catch {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  if (
+    archiveIds.some((value) => typeof value !== 'string' || value.length === 0) ||
+    archiveHashes.some((value) => typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) ||
+    typeof payload.exp !== 'number' || !Number.isSafeInteger(payload.exp) || payload.exp <= 0
+  ) {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  return {
+    valid: true,
+    claims: {
+      sheetId: payload.sheetId,
+      anchorOperationId: payload.anchorOperationId as string,
+      anchorSeq: payload.anchorSeq,
+      checkpointId: payload.checkpointId as string,
+      scopeHash: payload.scopeHash as string,
+      liveSetHash: payload.liveSetHash as string,
+      schemaHash: payload.schemaHash as string,
+      actorId: payload.actorId as string,
+      mode: payload.mode,
+      authorizedScopeHash: payload.authorizedScopeHash as string,
+      archiveGenerationId: payload.archiveGenerationId as string,
+      archiveRootHash: payload.archiveRootHash as string,
+      archiveSourceVectorHash: payload.archiveSourceVectorHash as string,
+      archiveKeyId: payload.archiveKeyId as string,
+      archivePlanHash: payload.archivePlanHash as string,
+      ...(archivePlanObject ? { archivePlanObject } : {}),
+      scopeKind: payload.scopeKind,
+    },
+    expiresAt: new Date(payload.exp * 1000).toISOString(),
+  }
+}
+
+function admitArchivePlanObjectClaims(
+  value: unknown,
+): ExactArchiveRecoveryPlanObjectClaims | undefined {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('malformed archive plan object')
+  }
+  const row = value as Record<string, unknown>
+  const keys = Object.keys(row).sort()
+  const expected = ['expiresAt', 'objectId', 'sha256', 'size', 'version']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError('malformed archive plan object')
+  }
+  if (
+    typeof row.objectId !== 'string' || !/^[0-9a-f]{64}$/.test(row.objectId) ||
+    typeof row.version !== 'string' || row.version.trim().length === 0 || row.version !== row.version.trim() ||
+    typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256) ||
+    typeof row.size !== 'string' || !/^[1-9][0-9]*$/.test(row.size) ||
+    typeof row.expiresAt !== 'string' ||
+    Number.isNaN(new Date(row.expiresAt).getTime()) ||
+    new Date(row.expiresAt).toISOString() !== row.expiresAt
+  ) {
+    throw new TypeError('malformed archive plan object')
+  }
+  return Object.freeze({
+    objectId: row.objectId,
+    version: row.version,
+    sha256: row.sha256,
+    size: row.size,
+    expiresAt: row.expiresAt,
+  })
+}
+
 export function mintExactAnchorRecoveryIdentity(claims: ExactAnchorRecoveryIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
   return jwt.sign({ type: 'exact-anchor-recovery-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
 }
@@ -783,4 +992,100 @@ export function verifyExactAnchorRecoveryIdentity(
       authorizedScopeHash: payload.authorizedScopeHash,
     },
   }
+}
+
+// ── Field retype CONVERT preview-identity (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §2) ──
+// The read-only `POST /fields/:fieldId/retype-preview` (slice 2) mints this; the execute route (slice 3) will verify it
+// claim by claim (`type`, fieldId, sheetId, actorId, sourceType, targetType → 401 PREVIEW_IDENTITY_INVALID; planHash →
+// 409 PLAN_DRIFT). `type: 'field-retype-convert-preview'` keeps it DISJOINT from every other identity in this module
+// (a convert token can never drive a config-restore / record restore, and vice versa). Same HS256 + 10-minute window.
+export interface FieldRetypeConvertPreviewIdentityClaims {
+  sheetId: string
+  fieldId: string
+  /** the actor the preview was minted for — a preview minted for A is unusable by B. */
+  actorId: string
+  sourceType: 'string'
+  targetType: 'select' | 'multiSelect'
+  /** opaque SERVER-KEYED HMAC over the whole conversion plan (hashFieldRetypeConvertPlan); never a plain digest. */
+  planHash: string
+}
+
+/**
+ * Opaque, SERVER-KEYED digest of the conversion plan. HMAC (never the plain sha256), for the same reason as
+ * `hashLossSummary` / `hashUncreatePlan`: the claim rides in a client-decodable JWT, and the plan's inputs include the
+ * FULL option sequence (= cell texts) and per-record cell hashes — a plain digest would let a token holder confirm
+ * guessed cell values offline. The keyed PRF makes the claim opaque. The input is the canonical plan string built by
+ * `canonicalFieldRetypeConvertPlanInput` (field-retype-convert.ts), which carries its own `kind`/`v` domain tag.
+ */
+export function hashFieldRetypeConvertPlan(canonicalPlan: string): string {
+  return createHmac('sha256', getSecret()).update(String(canonicalPlan)).digest('hex')
+}
+
+export function mintFieldRetypeConvertPreviewIdentity(claims: FieldRetypeConvertPreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'field-retype-convert-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface FieldRetypeConvertVerifyResult {
+  valid: boolean
+  // `plan_drift` = the planHash diverged (a cell / row / trash row / option / property moved since preview) — the
+  // execute route maps it to ONE generic 409 PLAN_DRIFT; the opaque hash cannot reveal WHICH input moved.
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_fieldId' | 'mismatch_actorId' | 'mismatch_sourceType' | 'mismatch_targetType' | 'plan_drift'
+}
+
+export function verifyFieldRetypeConvertPreviewIdentity(token: string, expected: FieldRetypeConvertPreviewIdentityClaims): FieldRetypeConvertVerifyResult {
+  let payload: Partial<FieldRetypeConvertPreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret(), { algorithms: ['HS256'] }) as Partial<FieldRetypeConvertPreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'field-retype-convert-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.fieldId !== expected.fieldId) return { valid: false, reason: 'mismatch_fieldId' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  if (payload.sourceType !== expected.sourceType) return { valid: false, reason: 'mismatch_sourceType' }
+  if (payload.targetType !== expected.targetType) return { valid: false, reason: 'mismatch_targetType' }
+  if (payload.planHash !== expected.planHash) return { valid: false, reason: 'plan_drift' }
+  return { valid: true }
+}
+
+// ── Field retype CONVERT — the execute side's claim reader (slice 3, ADR §3.3) ─────────────────────────────────────
+// `POST /fields/:fieldId/retype-execute` takes `{ previewToken, confirm }` and nothing else: the target type exists
+// only as a claim inside the token. So execute cannot build the `expected` argument of
+// `verifyFieldRetypeConvertPreviewIdentity` without first reading the token. This reader AUTHENTICATES the token
+// (signature, expiry, `type`) and hands back its claims AS MINTED; it judges none of them. The comparison against the
+// request — fieldId, the field's current sheet, the requester, the first-batch pair — is the caller's
+// (`checkFieldRetypeConvertClaims`, field-retype-convert-execute.ts), one claim at a time, BEFORE a transaction is
+// opened; `verifyFieldRetypeConvertPreviewIdentity` then runs with the re-computed planHash inside the transaction,
+// under the fence. A validly signed token whose claims are not all non-empty strings reads as `invalid`.
+export interface FieldRetypeConvertPreviewIdentityRawClaims {
+  sheetId: string
+  fieldId: string
+  actorId: string
+  sourceType: string
+  targetType: string
+  planHash: string
+}
+
+export type FieldRetypeConvertPreviewIdentityRead =
+  | { ok: true; claims: FieldRetypeConvertPreviewIdentityRawClaims }
+  | { ok: false; reason: 'invalid' | 'expired' | 'wrong_type' }
+
+export function readFieldRetypeConvertPreviewIdentity(token: string): FieldRetypeConvertPreviewIdentityRead {
+  let payload: Record<string, unknown>
+  try {
+    const verified = jwt.verify(token, getSecret(), { algorithms: ['HS256'] })
+    if (!verified || typeof verified !== 'object') return { ok: false, reason: 'invalid' }
+    payload = verified as Record<string, unknown>
+  } catch (e) {
+    return { ok: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'field-retype-convert-preview') return { ok: false, reason: 'wrong_type' }
+  const claims: Record<string, string> = {}
+  for (const key of ['sheetId', 'fieldId', 'actorId', 'sourceType', 'targetType', 'planHash'] as const) {
+    const value = payload[key]
+    if (typeof value !== 'string' || value.length === 0) return { ok: false, reason: 'invalid' }
+    claims[key] = value
+  }
+  return { ok: true, claims: claims as unknown as FieldRetypeConvertPreviewIdentityRawClaims }
 }

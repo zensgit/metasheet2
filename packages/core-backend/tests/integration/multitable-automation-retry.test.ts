@@ -8,21 +8,36 @@
  * (AutomationLogService.record → getById), plus a raw-SQL check that the values
  * actually persisted. Runs only with DATABASE_URL (plugin-tests.yml real-DB job).
  */
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { EventBus } from '../../src/integration/events/event-bus'
+import { db } from '../../src/db/db'
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
+import { AutomationService } from '../../src/multitable/automation-service'
 import type { AutomationExecution } from '../../src/multitable/automation-executor'
+import { AUTOMATION_RETRY_LEDGER_RETENTION_MS } from '../../src/multitable/automation-retry-eligibility'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const TS = Date.now()
 const ORIG_ID = `axe_retry_orig_${TS}`
 const NEW_ID = `axe_retry_new_${TS}`
+const ROOT_ID = `axe_retry_root_${TS}`
+const CHILD_ID = `axe_retry_child_${TS}`
+const TEST_RUN_ID = `axe_retry_test_run_${TS}`
+const RETENTION_OLD_ID = `axe_retry_retention_old_${TS}`
+const RETENTION_BOUNDARY_ID = `axe_retry_retention_boundary_${TS}`
+const RETENTION_FRESH_ID = `axe_retry_retention_fresh_${TS}`
+const RETENTION_IDS = [RETENTION_OLD_ID, RETENTION_BOUNDARY_ID, RETENTION_FRESH_ID]
 const RULE_ID = `atr_retry_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
 const logs = new AutomationLogService()
+
+function realService(): AutomationService {
+  return new AutomationService(new EventBus(), db as never, q as never)
+}
 
 function exec(over: Partial<AutomationExecution> = {}): AutomationExecution {
   return {
@@ -38,10 +53,25 @@ function exec(over: Partial<AutomationExecution> = {}): AutomationExecution {
 
 describeIfDatabase('multitable automation retry provenance (real DB)', () => {
   beforeAll(async () => {
-    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID]])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
+    await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
+    await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+  })
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+    delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+    await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
+    await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ROOT_ID, CHILD_ID, TEST_RUN_ID]])
   })
   afterAll(async () => {
-    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID]])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
+    await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
+    await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -73,5 +103,158 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
     const raw = await q('SELECT rerun_of_execution_id, initiated_by FROM multitable_automation_executions WHERE id = $1', [ORIG_ID])
     expect(raw.rows[0].rerun_of_execution_id).toBeNull()
     expect(raw.rows[0].initiated_by).toBeNull()
+  })
+
+  test('#4196 §2.2: a persisted manual test run cannot enter the live retry namespace', async () => {
+    await logs.record(exec({
+      id: TEST_RUN_ID,
+      triggeredBy: 'manual_test',
+      status: 'failed',
+      triggerEvent: { recordId: `rec_test_run_${TS}`, data: {} },
+    }))
+    const service = realService()
+    const getRule = vi.spyOn(service, 'getRule')
+    const execute = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution(TEST_RUN_ID, `admin_${TS}`)).resolves.toMatchObject({
+      status: 409,
+      code: 'TEST_RUN_NOT_RETRYABLE',
+    })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+    const raw = await q(
+      'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+      [TEST_RUN_ID],
+    )
+    expect(raw.rows[0].first_retry_attempted_at).toBeNull()
+  })
+
+  test('#4196 §5: retention sweep deletes only rows strictly older than the retry window', async () => {
+    const nowMs = Date.parse('2026-08-30T12:00:00.000Z')
+    await q(
+      `INSERT INTO meta_automation_action_applied
+         (kind, root_execution_id, action_key, applied_at)
+       VALUES
+         ('test_run', $1, 'old', $4),
+         ('execution', $2, 'boundary', $5),
+         ('execution', $3, 'fresh', $6)`,
+      [
+        RETENTION_OLD_ID,
+        RETENTION_BOUNDARY_ID,
+        RETENTION_FRESH_ID,
+        new Date(nowMs - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1),
+        new Date(nowMs - AUTOMATION_RETRY_LEDGER_RETENTION_MS),
+        new Date(nowMs - 1_000),
+      ],
+    )
+
+    await expect(realService().sweepAutomationRetryLedger(nowMs)).resolves.toBe(1)
+    const remaining = await q(
+      `SELECT root_execution_id
+         FROM meta_automation_action_applied
+        WHERE root_execution_id = ANY($1)
+        ORDER BY root_execution_id`,
+      [RETENTION_IDS],
+    )
+    expect(remaining.rows.map((row) => row.root_execution_id)).toEqual(
+      [RETENTION_BOUNDARY_ID, RETENTION_FRESH_ID].sort(),
+    )
+    const retentionIndex = await q(
+      `SELECT indexdef
+         FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'idx_automation_action_applied_applied_at'`,
+    )
+    expect(retentionIndex.rows).toHaveLength(1)
+    expect(retentionIndex.rows[0].indexdef).toContain('(applied_at)')
+  })
+
+  test('#4196 V5: a non-first Class-A retry fails closed on zero root evidence and proceeds with an applied row', async () => {
+    process.env.AUTOMATION_CLASSA_CLAIM_ENABLED = 'true'
+    const service = realService()
+    const root = exec({ id: ROOT_ID, status: 'failed' })
+    const child = exec({
+      id: CHILD_ID,
+      status: 'failed',
+      rerunOfExecutionId: ROOT_ID,
+      triggerEvent: { recordId: `rec_retry_${TS}`, data: {} },
+    })
+    await logs.record(root)
+    await logs.record(child)
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === CHILD_ID ? child : root)
+    vi.spyOn(service, 'getRule').mockResolvedValue({
+      id: RULE_ID,
+      sheet_id: 'sheet_retry',
+      name: 'Retry rule',
+      trigger_type: 'record.created',
+      trigger_config: {},
+      action_type: 'update_record',
+      action_config: { fields: { status: 'done' } },
+      enabled: true,
+      actions: null,
+      conditions: null,
+    } as never)
+    const execute = vi.spyOn(service, 'executeRule').mockResolvedValue(exec({ id: `axe_retry_result_${TS}` }))
+
+    await expect(service.retryExecution(CHILD_ID, `admin_${TS}`)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_LEDGER_EVIDENCE_MISSING',
+    })
+    expect(execute).not.toHaveBeenCalled()
+
+    await q(
+      `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key, action_type)
+       VALUES ('execution', $1, $2, 'update_record')`,
+      [ROOT_ID, `action_${TS}`],
+    )
+    await expect(service.retryExecution(CHILD_ID, `admin_${TS}`)).resolves.toHaveProperty('execution')
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  test('#4196 V5: Class-B requires its enabled-family evidence; an unrelated Class-A row cannot mask loss', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const service = realService()
+    const root = exec({ id: ROOT_ID, status: 'failed' })
+    const child = exec({
+      id: CHILD_ID,
+      status: 'failed',
+      rerunOfExecutionId: ROOT_ID,
+      triggerEvent: { recordId: `rec_retry_${TS}`, data: {} },
+    })
+    await logs.record(root)
+    await logs.record(child)
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === CHILD_ID ? child : root)
+    vi.spyOn(service, 'getRule').mockResolvedValue({
+      id: RULE_ID,
+      sheet_id: 'sheet_retry',
+      name: 'Retry rule',
+      trigger_type: 'record.created',
+      trigger_config: {},
+      action_type: 'send_webhook',
+      action_config: { url: 'https://example.invalid' },
+      enabled: true,
+      actions: null,
+      conditions: null,
+    } as never)
+    const execute = vi.spyOn(service, 'executeRule').mockResolvedValue(exec({ id: `axe_retry_result_${TS}` }))
+    await q(
+      `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key, action_type)
+       VALUES ('execution', $1, $2, 'update_record')`,
+      [ROOT_ID, `unrelated_${TS}`],
+    )
+
+    await expect(service.retryExecution(CHILD_ID, `admin_${TS}`)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_LEDGER_EVIDENCE_MISSING',
+    })
+    expect(execute).not.toHaveBeenCalled()
+
+    await q(
+      `INSERT INTO meta_automation_outbound_intent (kind, root_execution_id, action_key, status)
+       VALUES ('execution', $1, $2, 'failed')`,
+      [ROOT_ID, `outbound_${TS}`],
+    )
+    await expect(service.retryExecution(CHILD_ID, `admin_${TS}`)).resolves.toHaveProperty('execution')
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 })

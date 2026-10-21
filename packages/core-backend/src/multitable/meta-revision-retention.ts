@@ -19,6 +19,11 @@
 
 import { Logger } from '../core/logger'
 import { query as dbQuery } from '../db/pg'
+// 缺表/缺列守卫改用 utils/database-errors 的共享实现:SQLSTATE 主判 + 只用 message 核对
+// 标识符。原来的列守卫把 code 与英文散文 `message.startsWith('column ')` 做 AND,中文
+// locale(PG lc_messages=Chinese)下散文是「字段 x 不存在」,AND 恒为 false,pre-migration
+// 的清理任务会直接抛错而不是降级返回 0。
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 
 export type RetentionQueryFn = (
   sql: string,
@@ -93,41 +98,49 @@ export async function sweepMetaRevisionRetention(
   if (!config.enabled) return 0
   const batchSize = Math.max(1, Math.floor(config.batchSize))
 
-  if (config.policy === 'keep-days') {
-    const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  try {
+    if (config.policy === 'keep-days') {
+      const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+      const result = await query(
+        `DELETE FROM ${META_REVISION_RETENTION_TABLE}
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT id, created_at, operation_id,
+                     row_number() OVER (PARTITION BY sheet_id, record_id ORDER BY version DESC, created_at DESC) AS rn
+              FROM ${META_REVISION_RETENTION_TABLE}
+            ) ranked
+            WHERE ranked.rn > 1
+              AND ranked.created_at < now() - ($1::int * interval '1 day')
+              AND ranked.operation_id IS NULL
+            LIMIT $2
+          )`,
+        [days, batchSize],
+      )
+      return result.rowCount ?? 0
+    }
+
+    // keep-last-n (default). Tagged rows stay in the ranking window (deliberate
+    // minimal D2d1 semantics) and are excluded from DELETE by operation_id IS NULL.
+    const keepN = Math.max(META_REVISION_RETENTION_MIN_KEEP_N, Math.floor(config.keepN))
     const result = await query(
       `DELETE FROM ${META_REVISION_RETENTION_TABLE}
         WHERE id IN (
           SELECT id FROM (
-            SELECT id, created_at,
+            SELECT id, operation_id,
                    row_number() OVER (PARTITION BY sheet_id, record_id ORDER BY version DESC, created_at DESC) AS rn
             FROM ${META_REVISION_RETENTION_TABLE}
           ) ranked
-          WHERE ranked.rn > 1
-            AND ranked.created_at < now() - ($1::int * interval '1 day')
+          WHERE ranked.rn > $1
+            AND ranked.operation_id IS NULL
           LIMIT $2
         )`,
-      [days, batchSize],
+      [keepN, batchSize],
     )
     return result.rowCount ?? 0
+  } catch (err) {
+    if (isUndefinedColumnError(err, 'operation_id')) return 0
+    throw err
   }
-
-  // keep-last-n (default)
-  const keepN = Math.max(META_REVISION_RETENTION_MIN_KEEP_N, Math.floor(config.keepN))
-  const result = await query(
-    `DELETE FROM ${META_REVISION_RETENTION_TABLE}
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT id,
-                 row_number() OVER (PARTITION BY sheet_id, record_id ORDER BY version DESC, created_at DESC) AS rn
-          FROM ${META_REVISION_RETENTION_TABLE}
-        ) ranked
-        WHERE ranked.rn > $1
-        LIMIT $2
-      )`,
-    [keepN, batchSize],
-  )
-  return result.rowCount ?? 0
 }
 
 export const META_CONFIG_REVISION_RETENTION_TABLE = 'meta_config_revisions'
@@ -145,51 +158,51 @@ export async function sweepConfigRevisionRetention(
   if (!config.enabled) return 0
   const batchSize = Math.max(1, Math.floor(config.batchSize))
 
-  if (config.policy === 'keep-days') {
-    const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  try {
+    if (config.policy === 'keep-days') {
+      const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+      const result = await query(
+        `DELETE FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT id, created_at, operation_id,
+                     row_number() OVER (PARTITION BY sheet_id, entity_type, entity_id ORDER BY created_at DESC, id DESC) AS rn
+              FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+            ) ranked
+            WHERE ranked.rn > 1
+              AND ranked.created_at < now() - ($1::int * interval '1 day')
+              AND ranked.operation_id IS NULL
+            LIMIT $2
+          )`,
+        [days, batchSize],
+      )
+      return result.rowCount ?? 0
+    }
+
+    const keepN = Math.max(META_REVISION_RETENTION_MIN_KEEP_N, Math.floor(config.keepN))
     const result = await query(
       `DELETE FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
         WHERE id IN (
           SELECT id FROM (
-            SELECT id, created_at,
+            SELECT id, operation_id,
                    row_number() OVER (PARTITION BY sheet_id, entity_type, entity_id ORDER BY created_at DESC, id DESC) AS rn
             FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
           ) ranked
-          WHERE ranked.rn > 1
-            AND ranked.created_at < now() - ($1::int * interval '1 day')
+          WHERE ranked.rn > $1
+            AND ranked.operation_id IS NULL
           LIMIT $2
         )`,
-      [days, batchSize],
+      [keepN, batchSize],
     )
     return result.rowCount ?? 0
+  } catch (err) {
+    if (isUndefinedColumnError(err, 'operation_id')) return 0
+    throw err
   }
-
-  const keepN = Math.max(META_REVISION_RETENTION_MIN_KEEP_N, Math.floor(config.keepN))
-  const result = await query(
-    `DELETE FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT id,
-                 row_number() OVER (PARTITION BY sheet_id, entity_type, entity_id ORDER BY created_at DESC, id DESC) AS rn
-          FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
-        ) ranked
-        WHERE ranked.rn > $1
-        LIMIT $2
-      )`,
-    [keepN, batchSize],
-  )
-  return result.rowCount ?? 0
 }
 
 export const META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE = 'meta_field_value_tombstones'
 export const META_LINK_TOMBSTONE_RETENTION_TABLE = 'meta_link_tombstones'
-
-function isUndefinedTableError(err: unknown, tableName: string): boolean {
-  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
-  const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
-  if (code === '42P01') return message.includes(tableName)
-  return message.includes(`relation "${tableName}" does not exist`)
-}
 
 /**
  * 4c-2 C6 — prune old tombstone rows (`meta_field_value_tombstones` / `meta_link_tombstones`) under the
@@ -233,16 +246,20 @@ async function sweepTombstoneTableRetention(
               WHERE tr.delete_revision_id = g.anchor::text
            )`
         : ''
-    let grouped = 0
-    try {
-      const groupedRes = await query(
-        `DELETE FROM ${table}
-          WHERE ${anchorColumn} IN (
-            SELECT g.anchor FROM (
+    const untaggedGroupSql = `
               SELECT ${anchorColumn} AS anchor, max(created_at) AS newest
                 FROM ${table}
                WHERE ${anchorColumn} IS NOT NULL
                GROUP BY ${anchorColumn}
+              HAVING bool_and(operation_id IS NULL)`
+    let grouped = 0
+    try {
+      const groupedRes = await query(
+        `DELETE FROM ${table}
+          WHERE operation_id IS NULL
+            AND ${anchorColumn} IN (
+            SELECT g.anchor FROM (
+              ${untaggedGroupSql}
             ) g
             WHERE g.newest < now() - ($1::int * interval '1 day')
             ${floorPredicate}
@@ -252,35 +269,40 @@ async function sweepTombstoneTableRetention(
       )
       grouped = groupedRes.rowCount ?? 0
     } catch (err) {
+      // Missing operation_id (deploy race): return janitor 0 rather than prune without the guard.
+      if (isUndefinedColumnError(err, 'operation_id')) return 0
       // Deploy window: meta_records_trash.delete_revision_id not yet migrated (42703) — degrade to
       // the floorless group prune rather than wedging the janitor. Old-schema trash rows have no
       // anchor to protect anyway (their delete_revision_id would be NULL ⇒ no replay ⇒ no floor).
-      const msg = err instanceof Error ? err.message : String(err)
-      const code = (err as { code?: string } | null)?.code
-      if (!(code === '42703' && msg.includes('delete_revision_id'))) throw err
-      const fallbackRes = await query(
-        `DELETE FROM ${table}
-          WHERE ${anchorColumn} IN (
-            SELECT g.anchor FROM (
-              SELECT ${anchorColumn} AS anchor, max(created_at) AS newest
-                FROM ${table}
-               WHERE ${anchorColumn} IS NOT NULL
-               GROUP BY ${anchorColumn}
-            ) g
-            WHERE g.newest < now() - ($1::int * interval '1 day')
-            LIMIT $2
-          )`,
-        [days, batchSize],
-      )
-      grouped = fallbackRes.rowCount ?? 0
+      // The fallback still requires every row in the exact anchor group to be untagged.
+      if (!isUndefinedColumnError(err, 'delete_revision_id')) throw err
+      try {
+        const fallbackRes = await query(
+          `DELETE FROM ${table}
+            WHERE operation_id IS NULL
+              AND ${anchorColumn} IN (
+              SELECT g.anchor FROM (
+                ${untaggedGroupSql}
+              ) g
+              WHERE g.newest < now() - ($1::int * interval '1 day')
+              LIMIT $2
+            )`,
+          [days, batchSize],
+        )
+        grouped = fallbackRes.rowCount ?? 0
+      } catch (fallbackErr) {
+        if (isUndefinedColumnError(fallbackErr, 'operation_id')) return 0
+        throw fallbackErr
+      }
     }
     // Anchor-less rows (nullable anchor columns) have no group to tear and no trash reference —
-    // prune them individually, exactly as before.
+    // prune them individually, exactly as before, but only when untagged.
     const looseRes = await query(
       `DELETE FROM ${table}
         WHERE id IN (
           SELECT id FROM ${table}
           WHERE ${anchorColumn} IS NULL
+            AND operation_id IS NULL
             AND created_at < now() - ($1::int * interval '1 day')
           LIMIT $2
         )`,
@@ -288,6 +310,7 @@ async function sweepTombstoneTableRetention(
     )
     return grouped + (looseRes.rowCount ?? 0)
   } catch (err) {
+    if (isUndefinedColumnError(err, 'operation_id')) return 0
     if (isUndefinedTableError(err, table)) return 0
     throw err
   }

@@ -464,6 +464,14 @@ describe('Approval RBAC boundary verification', () => {
           }
         }
 
+        // Lock-10 (S1): canReadApprovalInstance's own admission SELECT, run BEFORE this handler's
+        // getApproval — 'u-readonly' holds a real seat above (assignment_type='user',
+        // assignee_id='u-readonly'), which is exactly what admits them here too (arm 2); this
+        // mock just answers the SAME question the real predicate would answer TRUE.
+        if (sql.includes('SELECT 1 FROM approval_instances i')) {
+          return { rows: [{ '?column?': 1 }], rowCount: 1 }
+        }
+
         return { rows: [], rowCount: 0 }
       })
 
@@ -631,6 +639,68 @@ describe('Approval RBAC boundary verification', () => {
         expect(res.status).not.toBe(401)
         expect(res.status).not.toBe(403)
       }
+    })
+  })
+
+  // =========================================================================
+  // Form drafts: every /api/approvals/form-drafts* route requires approvals:write
+  // (the permission POST /api/approvals uses), the two GETs included. The router
+  // is mounted on its own app here, so a 403 can only come from its own guards.
+  // =========================================================================
+  describe('Form drafts: no write permission → 403 on every route', () => {
+    beforeEach(async () => {
+      const { approvalFormDraftsRouter } = await import('../../src/routes/approval-form-drafts')
+      app = express()
+      app.use(express.json())
+      app.use(approvalFormDraftsRouter())
+      pinned.setApp(app)
+      authState.user = readOnlyUser()
+    })
+
+    it('GET /api/approvals/form-drafts with only approvals:read → 403', async () => {
+      const res = await request(pinned.url()).get('/api/approvals/form-drafts')
+      expect(res.status).toBe(403)
+    })
+
+    it('GET /api/approvals/form-drafts/:templateId with only approvals:read → 403', async () => {
+      const res = await request(pinned.url()).get('/api/approvals/form-drafts/tpl-1')
+      expect(res.status).toBe(403)
+    })
+
+    it('PUT /api/approvals/form-drafts/:templateId with only approvals:read → 403', async () => {
+      const res = await request(pinned.url())
+        .put('/api/approvals/form-drafts/tpl-1')
+        .send({ signature: 'sig', data: { amount: 1 } })
+      expect(res.status).toBe(403)
+    })
+
+    it('DELETE /api/approvals/form-drafts/:templateId with only approvals:read → 403', async () => {
+      const res = await request(pinned.url()).delete('/api/approvals/form-drafts/tpl-1')
+      expect(res.status).toBe(403)
+    })
+
+    it('with approvals:write every route reaches its handler (positive control for the four 403s)', async () => {
+      authState.user = writerUser()
+
+      const list = await request(pinned.url()).get('/api/approvals/form-drafts')
+      expect(list.status).toBe(200)
+      expect(list.body).toEqual({ ok: true, data: { drafts: [] } })
+
+      const item = await request(pinned.url()).get('/api/approvals/form-drafts/tpl-1')
+      expect(item.status).toBe(200)
+      expect(item.body).toEqual({ ok: true, data: { draft: null } })
+
+      // The write paths open a transaction the pg mock here does not provide, so the handler
+      // fails after the guard; the point is only that the guard let the request through.
+      const put = await request(pinned.url())
+        .put('/api/approvals/form-drafts/tpl-1')
+        .send({ signature: 'sig', data: { amount: 1 } })
+      expect(put.status).not.toBe(401)
+      expect(put.status).not.toBe(403)
+
+      const del = await request(pinned.url()).delete('/api/approvals/form-drafts/tpl-1')
+      expect(del.status).not.toBe(401)
+      expect(del.status).not.toBe(403)
     })
   })
 })

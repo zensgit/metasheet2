@@ -222,6 +222,22 @@ describe('#4196 Class-A claim — retry lineage root threads into the claim key'
     const [, root] = state.claimParams[0] as [string, string]
     expect(root).toBe('axe_original_root') // …but the claim keys on the lineage root
   })
+
+  it('real-fire test run claims in kind=test_run, never the production execution namespace', async () => {
+    process.env[FLAG] = 'true'
+    const state = makeState()
+    await new AutomationExecutor(makeDeps(state)).execute(
+      ruleWith({ type: 'update_record', config: { fields: { status: 'done' } } }),
+      TRIGGER,
+      undefined,
+      'trroot_server_derived',
+      'live',
+      'test_run',
+    )
+    const [kind, root] = state.claimParams[0] as [string, string]
+    expect(kind).toBe('test_run')
+    expect(root).toBe('trroot_server_derived')
+  })
 })
 
 describe('#4196 Class-A claim — nested branch child claims on the BRANCH step-key identity', () => {

@@ -78,6 +78,43 @@ function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWor
 }
 
 describe('useAttendanceAdminImportWorkflow', () => {
+  it('binds prepare and preview to the organization in the import payload', async () => {
+    const selectedOrgId = '00000000-0000-4000-8000-000000000111'
+    const payloadOrgId = '00000000-0000-4000-8000-000000000222'
+    let preparePayload: Record<string, unknown> | null = null
+    let previewPayload: Record<string, unknown> | null = null
+    const { workflow } = createWorkflow({
+      getOrgId: () => selectedOrgId,
+      apiFetch: vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === '/api/attendance/import/prepare') {
+          preparePayload = JSON.parse(String(init?.body ?? '{}'))
+          return jsonResponse(200, {
+            ok: true,
+            data: { commitToken: 'payload-org-token', expiresAt: '2099-01-01T00:00:00.000Z' },
+          })
+        }
+        if (input === '/api/attendance/import/preview') {
+          previewPayload = JSON.parse(String(init?.body ?? '{}'))
+          return jsonResponse(200, {
+            ok: true,
+            data: { items: [], csvWarnings: [], groupWarnings: [], rowCount: 1 },
+          })
+        }
+        throw new Error(`Unexpected request: ${input}`)
+      }),
+    })
+    workflow.importForm.payload = JSON.stringify({
+      orgId: payloadOrgId,
+      source: 'manual',
+      rows: [{ userId: 'u-1', workDate: '2026-09-12' }],
+    })
+
+    await workflow.previewImport()
+
+    expect(preparePayload).toEqual({ orgId: payloadOrgId })
+    expect(previewPayload).toMatchObject({ orgId: payloadOrgId, commitToken: 'payload-org-token' })
+  })
+
   it('loads template and seeds payload, mode, and mapping profiles', async () => {
     const { workflow, apiFetch, setStatus } = createWorkflow({
       apiFetch: vi.fn(async (input: string) => {
@@ -199,6 +236,26 @@ describe('useAttendanceAdminImportWorkflow', () => {
       '\ufeffuserId,workDate,firstInAt\n,,\n',
       'text/csv;charset=utf-8',
     )
+    expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
+  })
+
+  it('downloads the built-in mapped template when the CSV endpoint and template JSON both fail', async () => {
+    const apiFetch = vi.fn(async () => jsonResponse(530, {
+      ok: false,
+      error: { code: 'ORIGIN_ERROR', message: 'tunnel error' },
+    }))
+    const { workflow, downloadText, setStatus } = createWorkflow({ apiFetch })
+
+    await workflow.downloadImportTemplateCsv()
+
+    expect(downloadText).toHaveBeenCalledWith(
+      'attendance-import-template-dingtalk_csv.csv',
+      expect.stringContaining('UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间'),
+      'text/csv;charset=utf-8',
+    )
+    const csv = String(downloadText.mock.calls.at(-1)?.[1] ?? '')
+    expect(csv.charCodeAt(0)).toBe(0xfeff)
+    expect(csv).toContain('user@example.com')
     expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
   })
 

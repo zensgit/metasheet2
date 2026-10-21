@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
+import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
 
 const apiFetchMock = vi.fn()
 
@@ -82,7 +83,14 @@ function createIntegration(overrides: Record<string, unknown> = {}) {
 }
 
 function createAccount(overrides: Record<string, unknown> = {}) {
+  // Stand-in for the server's grantOpenIdAvailable when a fixture does not set it: what the server
+  // answers for an account with no linked DingTalk-login openId on file (corp member ⇒ needs its
+  // own openId). Tests about the linked-openId path set grantOpenIdAvailable explicitly.
+  const corpId = 'corpId' in overrides ? overrides.corpId as string | null : 'dingcorp'
+  const openId = 'openId' in overrides ? overrides.openId as string | null : 'open-1'
+  const grantOpenIdAvailable = !(corpId && corpId.trim()) || Boolean(openId && openId.trim())
   return {
+    grantOpenIdAvailable,
     id: 'account-1',
     integrationId: 'dir-1',
     provider: 'dingtalk',
@@ -258,6 +266,42 @@ describe('DirectoryManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+  })
+
+  it('offers server OAuth configuration guidance before a directory integration exists', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')
+    expect(hint?.textContent).toContain('不会配置钉钉登录')
+    expect(hint?.textContent).toContain('服务端环境变量')
+    expect(hint?.querySelector('a')?.getAttribute('href')).toBe('/help/attendance/dingtalk-microapp#server-login')
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations')
+  })
+
+  it('renders the linked OAuth help without fetching or editing credentials', async () => {
+    app = createApp(AttendanceDingTalkMicroappHelpView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector('#server-login')
+    expect(section).not.toBeNull()
+    expect(Array.from(section!.querySelectorAll('code'), (node) => node.textContent)).toEqual([
+      'docker/app.env',
+      'DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY',
+      'DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET',
+      'DINGTALK_REDIRECT_URI', '/login/dingtalk/callback',
+      'DINGTALK_CORP_ID', 'DINGTALK_ALLOWED_CORP_IDS',
+    ])
+    expect(section!.textContent).toContain('保存目录集成不会同步这些变量')
+    expect(section!.textContent).toContain('不要通过清空白名单绕过限制')
+    expect(section!.querySelector('input, textarea, form')).toBeNull()
+    expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
   it('loads integrations and recent runs on mount', async () => {
@@ -554,7 +598,7 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('部门 ID 2')
     expect(container?.textContent).toContain('当前可见 1 个部门')
     const visibleDepartmentPreview = container!.querySelector('.directory-admin__visible-department-preview') as HTMLTextAreaElement | null
-    expect(visibleDepartmentPreview?.value).toBe('2')
+    expect(visibleDepartmentPreview?.value).toBe('项目组 · 信息化团队 / 项目组')
 
     const copyVisibleDepartmentIdsButton = Array.from(container!.querySelectorAll('button'))
       .find((button) => button.textContent?.includes('复制当前可见部门 ID'))
@@ -1037,8 +1081,9 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).toContain('openId 缺失，当前无法同时开通钉钉登录')
-    expect(container?.textContent).toContain('修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员')
+    expect(container?.textContent).toContain('暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐）')
+    expect(container?.textContent).toContain('修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。')
+    expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
     const userLinks = Array.from(container!.querySelectorAll('a')).filter((link) => link.textContent?.includes('前往用户管理'))
@@ -1052,6 +1097,93 @@ describe('DirectoryManagementView', () => {
       expect(input?.disabled).toBe(true)
       expect(input?.checked).toBe(false)
     }
+  })
+
+  it('follows the server verdict: a member whose openId is known only from their DingTalk login can be bound WITH the grant', async () => {
+    // directory row has no openId (通讯录 never returns one) but the member already scanned in, so
+    // the server's grant predicate says the grant is available — the page must not block it.
+    const scannedInAccount = createAccount({ openId: null, grantOpenIdAvailable: true })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([scannedInAccount])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            openId: null,
+            grantOpenIdAvailable: true,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount({
+        openId: null,
+        grantOpenIdAvailable: true,
+        linkStatus: 'linked',
+        matchStrategy: 'manual_admin',
+        localUser: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha' },
+      })])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    expect(accountsSection.textContent).not.toContain('暂时拿不到该成员的 openId')
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(false)
+    expect(grantInput?.checked).toBe(true)
+
+    const bindInput = accountsSection.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    bindInput!.value = 'alpha@example.com'
+    bindInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    Array.from(accountsSection.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('绑定用户'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-1/bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ localUserRef: 'alpha@example.com', enableDingTalkGrant: true }),
+      }),
+    )
+  })
+
+  it('a server verdict of false blocks the grant even when the row carries an openId', async () => {
+    const blockedAccount = createAccount({ grantOpenIdAvailable: false })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([blockedAccount])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
+      .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+      ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(grantInput?.disabled).toBe(true)
+    expect(accountsSection.textContent).toContain('暂时拿不到该成员的 openId')
   })
 
   it('binds an openId-missing account without enabling DingTalk grant', async () => {
@@ -1957,6 +2089,140 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('新用户临时密码：Temp#888888')
     expect(container?.textContent).toContain('账号：wangwu')
     expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
+  })
+
+  // #6259: the admit-user route answers a login-name rule failure with 400 INVALID_USERNAME +
+  // details.rule (it used to be a 500 with the English sentence). Both create-and-bind forms label
+  // the field 登录名 like the create-user form, state the rule up front, and show Chinese copy for
+  // that code; anything without the rule code keeps the server message.
+  const LOGIN_NAME_RULE_ZH = '登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏'
+  const LOGIN_NAME_HINT_ZH = '登录名：只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏。'
+  const LOGIN_NAME_RULE_EN = 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
+
+  function mockDirectoryLoadWithPendingAccount(accountId: string, withReviewItem: boolean) {
+    const account = createAccount({ id: accountId, name: '测试员', email: null, mobile: '13900000000' })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload(withReviewItem
+        ? [{
+          kind: 'pending_binding',
+          reason: '目录成员尚未绑定本地用户。',
+          account,
+          flags: { missingUnionId: false, missingOpenId: false },
+          actionable: { canBatchUnbind: false, canConfirmRecommendation: false },
+          recommendations: [],
+          recommendationStatus: { code: 'no_exact_match', message: '未匹配到本地用户' },
+        }]
+        : [])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([account], { total: 1 })))
+  }
+
+  it('labels both create-and-bind forms 登录名 with the rule hint and shows Chinese copy for INVALID_USERNAME (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-zh-login', true)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+        details: { rule: 'login_name_ascii' },
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    // Same account expanded => the review-queue form AND the account-list form are both rendered.
+    const forms = Array.from(container!.querySelectorAll('.directory-admin__review-admission'))
+      .filter((form) => form.textContent?.includes('创建本地用户') || form.querySelector('input[placeholder="例如 liqing"]'))
+    expect(forms).toHaveLength(2)
+    for (const form of forms) {
+      const labels = Array.from(form.querySelectorAll('.directory-admin__field > span')).map((span) => span.textContent?.trim())
+      expect(labels).toContain('登录名（可选）')
+      expect(labels).not.toContain('用户名（可选）')
+      const hint = form.querySelector('[data-directory-admission-rule="login-name"]')
+      expect(hint?.textContent?.trim()).toBe(LOGIN_NAME_HINT_ZH)
+      expect(form.textContent).toContain('邮箱、登录名、手机号至少填写一项')
+      expect(form.textContent).not.toContain('用户名')
+    }
+
+    const usernameInput = forms[0].querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = '测试员'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-zh-login/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '测试员',
+          username: '测试员',
+          mobile: '13900000000',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_ZH)
+    expect(container?.textContent).not.toContain('Username must be')
+    expect(container?.textContent).not.toContain('最近创建并绑定结果')
+  })
+
+  it('keeps the server message for an admission error without the login-name rule code (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-en-fallback', false)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        // Same code but no details.rule: localisation is keyed by the rule code, never by prose.
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountCard = findAccountsSection(container!).querySelector('.directory-admin__account') as HTMLElement
+    expect(accountCard).toBeTruthy()
+    const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const usernameInput = accountCard.querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = 'li qing'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-en-fallback/admit-user',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_EN)
+    expect(container?.textContent).not.toContain(LOGIN_NAME_RULE_ZH)
   })
 
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {

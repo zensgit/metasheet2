@@ -109,4 +109,54 @@ describe('DeadLetterQueueService', () => {
     expect(result.items).toHaveLength(2)
     expect(dbMock.where).toHaveBeenCalledWith('status', '=', 'pending')
   })
+
+  describe('list() limit handling', () => {
+    it('limit: 0 returns items: [] with correct total and skips the row query', async () => {
+      dbMock.executeTakeFirst.mockResolvedValueOnce({ count: 42 }) // Total count only
+
+      const result = await service.list({ status: 'pending', limit: 0 })
+
+      expect(result.total).toBe(42)
+      expect(result.items).toEqual([])
+      // The row query must never run when the caller only wants a count.
+      expect(dbMock.execute).not.toHaveBeenCalled()
+      expect(dbMock.limit).not.toHaveBeenCalled()
+    })
+
+    it('omitted limit defaults to 50', async () => {
+      dbMock.executeTakeFirst.mockResolvedValueOnce({ count: 5 })
+      dbMock.execute.mockResolvedValueOnce([])
+
+      await service.list({ status: 'pending' })
+
+      expect(dbMock.limit).toHaveBeenCalledWith(50)
+    })
+
+    it('explicit limit: 7 is passed through unmodified', async () => {
+      dbMock.executeTakeFirst.mockResolvedValueOnce({ count: 5 })
+      dbMock.execute.mockResolvedValueOnce([])
+
+      await service.list({ limit: 7 })
+
+      expect(dbMock.limit).toHaveBeenCalledWith(7)
+    })
+
+    it('NaN limit falls back to 50 (existing falsy-fallback behavior)', async () => {
+      dbMock.executeTakeFirst.mockResolvedValueOnce({ count: 5 })
+      dbMock.execute.mockResolvedValueOnce([])
+
+      await service.list({ limit: NaN })
+
+      expect(dbMock.limit).toHaveBeenCalledWith(50)
+    })
+
+    it('negative limit is passed through unmodified (existing behavior, out of scope for this fix)', async () => {
+      dbMock.executeTakeFirst.mockResolvedValueOnce({ count: 5 })
+      dbMock.execute.mockResolvedValueOnce([])
+
+      await service.list({ limit: -5 })
+
+      expect(dbMock.limit).toHaveBeenCalledWith(-5)
+    })
+  })
 })

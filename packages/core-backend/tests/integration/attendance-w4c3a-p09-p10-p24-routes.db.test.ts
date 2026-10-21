@@ -176,12 +176,22 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
     })
   }
 
-  async function mintToken(userId: string): Promise<string> {
+  async function mintToken(userId: string, orgId: string | null): Promise<string> {
+    const tenantQuery = orgId === null ? '' : `&tenantId=${encodeURIComponent(orgId)}`
     const response = await requestHttp(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}${tenantQuery}`,
     )
     const token = response.body?.token
     if (typeof token !== 'string' || !token) throw new Error(`failed to mint test token: ${response.raw}`)
+    const payload = response.body?.payload as { tenantId?: string } | undefined
+    expect(payload?.tenantId === (orgId ?? undefined), 'SIGNED_TENANT_BINDING').toBe(true)
+    const authenticated = await requestHttp(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(authenticated.status).toBe(200)
+    const data = authenticated.body?.data as { user?: { id?: string; tenantId?: string } } | undefined
+    expect(data?.user?.id === userId, 'AUTHENTICATED_ACTOR_BINDING').toBe(true)
+    expect(data?.user?.tenantId === (orgId ?? undefined), 'AUTHENTICATED_TENANT_BINDING').toBe(true)
     return token
   }
 
@@ -228,7 +238,7 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
         [orgId],
       )
     }
-    return { orgId, actorId, token: await mintToken(actorId) }
+    return { orgId, actorId, token: await mintToken(actorId, orgId) }
   }
 
   async function seedTargetUsers(orgId: string, count: number): Promise<string[]> {
@@ -882,6 +892,27 @@ describeIfDatabase('W4C-3a P09/P10/P24 route acceptance (real plugin routes, rea
       const data = response.body?.data as { items?: Array<{ id?: string }>; total?: number } | undefined
       expect(data?.items?.map((item) => item.id)).toEqual([activeRecordId])
       expect(data?.total).toBe(1)
+    }
+
+    // A signed fixture tenant is required; query selectors cannot authenticate
+    // a different organization, even with this legacy suite's existing RBAC bypass.
+    const foreignOrgId = randomUUID()
+    const unboundToken = await mintToken(fixture.actorId, null)
+    const foreignToken = await mintToken(fixture.actorId, foreignOrgId)
+    for (const pathname of ['/api/attendance/records', '/api/attendance/calendar']) {
+      for (const [token, selectedOrg] of [
+        [unboundToken, fixture.orgId],
+        [foreignToken, fixture.orgId],
+        [fixture.token, foreignOrgId],
+      ]) {
+        const refused = await requestHttp(`${baseUrl}${pathname}?orgId=${encodeURIComponent(selectedOrg)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        expect(refused.status).toBe(403)
+        expect(refused.body).toEqual({
+          ok: false, error: { code: 'FORBIDDEN', message: 'Attendance access denied' },
+        })
+      }
     }
 
     const summary = await requestHttp(`${baseUrl}/api/attendance/summary?${query}`, {

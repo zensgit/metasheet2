@@ -1,8 +1,20 @@
+import * as fs from 'fs'
+import * as path from 'path'
+import { fileURLToPath } from 'node:url'
+
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import {
+  FIELD_RETYPE_EXCLUDED_TYPES,
+  FIELD_RETYPE_NOT_LOSSLESS_CODE,
+  isLosslessFieldRetype,
+  LOSSLESS_FIELD_RETYPE,
+  losslessRetypeTargets,
+} from '../../src/multitable/field-retype-whitelist'
 import { configRevisionNoop } from './config-revision-mock'
+import { handleTemplateInstallDedupeSql } from '../utils/template-install-dedupe-sql'
 
 type QueryResult = {
   rows: any[]
@@ -13,6 +25,24 @@ type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<Q
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` now reads `meta_sheets.deleted_at`
+    // before any sheet-addressed work, and these fixtures predate that query — they answer only the
+    // EXISTENCE form. Rather than enumerate sheet ids here (which would let a fixture drift out of
+    // sync with what its own handler declares), translate the liveness read into the existence read
+    // each test already answers, so every test keeps EXACTLY its original notion of which sheets are
+    // there — including the cases that deliberately declare a sheet ABSENT and expect a 404.
+    //
+    // A handler that answers neither is treated as live: that is precisely the pre-change behaviour
+    // (the routes did not ask), so those tests keep their original intent too.
+    if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      try {
+        const existing = await queryHandler('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', params)
+        const found = (existing?.rows ?? []).length > 0
+        return { rows: found ? [{ deleted_at: null }] : [], rowCount: found ? 1 : 0 }
+      } catch {
+        return { rows: [{ deleted_at: null }], rowCount: 1 }
+      }
+    }
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }
@@ -35,6 +65,26 @@ function createMockPool(queryHandler: QueryHandler) {
     }
     if (sql.includes('source_base_id')) {
       return { rows: [], rowCount: 0 }
+    }
+    // #6089 B2: GET /context now probes the managed-sheet guard (resolveSheetDeleteRefusal) for any
+    // actor who already holds sheet-lifecycle authority, so it issues BOTH of this guard's reads on
+    // every such call, not only on DELETE — the "derives multitable capabilities from req.user role…"
+    // test (admin, no registry/system_kind branch of its own) hit the FIRST one and got an
+    // unhandled-SQL 500 before this fix; fixing only that query left the SECOND (`isSystemManagedSheet`)
+    // unhandled too, which the S1 fail-closed wrapper in the route swallows into a wrong
+    // `canDeleteSheet: false` instead of a 500 — same root cause, worth naming explicitly so a future
+    // reader does not have to rediscover it. Answering "not managed" for BOTH reads HERE, ahead of
+    // every per-test `queryHandler`, is a universal default for THIS file: no /context-reaching test
+    // here wants a MANAGED sheet (the one existing test that special-cased these two queries, the
+    // DELETE soft-delete test below, also answered "not managed" for both — this default is
+    // byte-identical to it, so that test's own now-unreachable branches are dead but not wrong). A
+    // future test that DOES want a managed sheet for /context needs its own mock pool, the same way
+    // tests/unit/multitable-manage-schema-permission-matrix.test.ts's MANAGED_SHEET_ID does.
+    if (sql.includes('FROM plugin_multitable_object_registry')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
+      return { rows: [{ system_kind: null, description: null }] }
     }
     return queryHandler(sql, params)
   })
@@ -158,12 +208,27 @@ describe('Multitable context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
     const response = await request(app)
       .get('/api/multitable/context')
       .query({ sheetId: 'sheet_ops' })
       .expect(200)
 
     expect(response.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: /context carries the instance business timezone the web shows and parses
+    // date-times in — Asia/Shanghai when MULTITABLE_BUSINESS_TIMEZONE is unset, the env value (read per
+    // request) when it names a valid zone, the default again when it does not.
+    expect(response.body.data.businessTimezone).toBe('Asia/Shanghai')
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
     expect(response.body.data.base).toMatchObject({ id: 'base_ops', name: 'Ops Base' })
     expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops', name: 'Orders' })
     expect(response.body.data.sheets).toHaveLength(2)
@@ -180,9 +245,15 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: false,
+      canSubmitApproval: false,
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
+      // whole-sheet delete authority (mirrors DELETE /sheets/:sheetId): a reader has none
+      canDeleteSheet: false,
+      // copy-sheet S1 (ADR #6094 §3): hasFullTableReadAccess ∧ resolveBaseWritable, fail-closed like
+      // canDeleteSheet — this mock pool answers no base-write lookup, so the probe throws and the entry hides.
+      canCopySheet: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -378,9 +449,18 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: true,
+      canSubmitApproval: true,
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
+      // admin role = global schema authority => may delete the selected sheet
+      canDeleteSheet: true,
+      // copy-sheet S1, CS-3 amended 2026-09-28: the target gate is resolveCopyTargetWritable = platform admin ROLE ∨
+      // resolveBaseWritable. This actor is admin by req.user.role, is NOT the base owner (owner_1) and this mock
+      // answers no base-write code lookup — so the role arm is the only thing that can admit him; it needs just the
+      // base existence read (answered above) and the source gate (one field, no scope, admin skips the row-level
+      // switch) ⇒ true. Before the amendment this was false for the same fixture (owner ∨ code only).
+      canCopySheet: true,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
@@ -703,6 +783,11 @@ describe('Multitable context API', () => {
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params = []) => {
         const normalized = sql.replace(/\s+/g, ' ').trim()
+        // #5861: the install route now also issues the advisory lock + dedupe-ledger
+        // statements. This suite does not test dedupe, so the shared neutral handler
+        // answers them (lock granted, ledger always empty = never a replay).
+        const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+        if (dedupeSql) return dedupeSql
         // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
         // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
         if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
@@ -729,6 +814,22 @@ describe('Multitable context API', () => {
           fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
           return { rows: [], rowCount: 1 }
         }
+        // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+        // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+        // this branch the fake would fall through to the `Unhandled SQL` throw below.
+        // Reads the same in-memory `fields` array the INSERT above writes, so this models the
+        // real transaction: a first install sees no row (=> create), and a genuine re-install
+        // of a mutated field would still surface the refusal instead of being masked.
+        if (
+          normalized.includes('FROM meta_fields') &&
+          normalized.includes('WHERE id = $1 AND sheet_id = $2')
+        ) {
+          const [fieldId, ownerSheetId] = params as [string, string]
+          return {
+            rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+          }
+        }
+
         if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
           const [sheetId, ids] = params as [string, string[]]
           const idSet = new Set(ids)
@@ -805,6 +906,11 @@ describe('Multitable context API', () => {
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params = []) => {
         const normalized = sql.replace(/\s+/g, ' ').trim()
+        // #5861: the install route now also issues the advisory lock + dedupe-ledger
+        // statements. This suite does not test dedupe, so the shared neutral handler
+        // answers them (lock granted, ledger always empty = never a replay).
+        const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+        if (dedupeSql) return dedupeSql
         // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
         // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
         if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
@@ -831,6 +937,22 @@ describe('Multitable context API', () => {
           fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
           return { rows: [], rowCount: 1 }
         }
+        // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+        // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+        // this branch the fake would fall through to the `Unhandled SQL` throw below.
+        // Reads the same in-memory `fields` array the INSERT above writes, so this models the
+        // real transaction: a first install sees no row (=> create), and a genuine re-install
+        // of a mutated field would still surface the refusal instead of being masked.
+        if (
+          normalized.includes('FROM meta_fields') &&
+          normalized.includes('WHERE id = $1 AND sheet_id = $2')
+        ) {
+          const [fieldId, ownerSheetId] = params as [string, string]
+          return {
+            rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+          }
+        }
+
         if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
           const [sheetId, ids] = params as [string, string[]]
           const idSet = new Set(ids)
@@ -911,7 +1033,13 @@ describe('Multitable context API', () => {
   test('logs a failed [multitable.template.install] event for an unknown template', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
-      queryHandler: async () => ({ rows: [], rowCount: 0 }),
+      // #5861: the install route takes `pg_try_advisory_xact_lock(...) AS locked` before anything
+      // else, and the module throws when the query面 does not answer with that boolean column
+      // (a blanket `{ rows: [] }` fake would otherwise look like a lock that is never granted).
+      // The shared neutral handler answers it (lock granted, ledger always empty = never a replay);
+      // everything else still falls through to the blanket empty result this case wants.
+      queryHandler: async (sql) => handleTemplateInstallDedupeSql(sql.replace(/\s+/g, ' ').trim())
+        ?? { rows: [], rowCount: 0 },
     })
 
     const { Logger } = await import('../../src/core/logger')
@@ -1017,22 +1145,38 @@ describe('Multitable context API', () => {
     })
   })
 
-  test('deletes a multitable sheet by id', async () => {
+  // F21 deletion half — this test changed DELIBERATELY, in two ways.
+  //  (1) AUTHORITY: `multitable:write` alone no longer deletes a sheet. Deleting a whole table is the
+  //      same schema authority as renaming one field header (#5357), so the actor now needs
+  //      `multitable:manage-schema`. The old actor's refusal is pinned in the sibling assertion below.
+  //  (2) SOFT DELETE: the route sets `deleted_at` instead of `DELETE FROM meta_sheets`, and no longer
+  //      destroys inbound `meta_links` — the rows stay so `POST /sheets/:sheetId/restore` is complete.
+  //      The old `DELETE FROM meta_links ...` handler is gone because the route no longer issues it;
+  //      an unhandled SQL in this harness throws, so a route that still deleted links would fail here.
+  test('soft-deletes a multitable sheet by id for a schema-authority actor', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
         }
-        if (sql.includes('DELETE FROM meta_links WHERE foreign_record_id IN')) {
-          // sheet-delete cascade: clean inbound dangling edges before the sheet's records vanish (same txn).
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [], rowCount: 0 }
-        }
-        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
+        if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
+        }
+        // Managed-sheet guard (src/multitable/sheet-delete-guard.ts), asked AFTER the authority gate and
+        // BEFORE the write: an ordinary sheet has no plugin registry row and no server-owned system_kind.
+        if (sql.includes('FROM plugin_multitable_object_registry')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        // Column-tolerant form (#6089 B1 fix): `isSystemManagedSheet` now reads `system_kind` via
+        // `to_jsonb(meta_sheets) ->> 'system_kind'`, the same tolerant shape every other reader in
+        // univer-meta.ts already uses, so a database without the column does not 500 the route.
+        if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ system_kind: null, description: null }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
@@ -1052,9 +1196,45 @@ describe('Multitable context API', () => {
     expect(response.body.data).toEqual({ deleted: 'sheet_ops' })
   })
 
-  test('returns 404 when deleting a missing multitable sheet', async () => {
+  // The severe half of the finding: before this change a write-only operator held `canManageViews`,
+  // which was all the delete route asked for — so an actor who could not rename ONE field header
+  // could destroy the WHOLE sheet. The refusal is the SERVER's, not the UI's.
+  test('refuses a sheet delete from a write-only operator, naming the authority that would be accepted', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
+        }
+        if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets\b/i.test(sql)) {
+          throw new Error('the operator must never reach the write')
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/sheets/sheet_ops')
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('FORBIDDEN')
+    // Actionable: it says what WOULD be accepted, and it says multitable:write is not it — in
+    // EITHER form, since a sheet-scoped `spreadsheet:write` grant does not qualify either.
+    expect(response.body.error.message).toContain('multitable:manage-schema')
+    expect(response.body.error.message).toContain('sheet-scoped admin grant')
+    expect(response.body.error.message).toContain('is not sufficient')
+  })
+
+  // AUTHZ-FIRST (real-DB goldens). The actor now needs schema authority to reach the 404 at all:
+  // an unauthorized caller must not be able to use 404-vs-403 to discover whether a sheet exists.
+  // The write-only actor's refusal is the sibling assertion below.
+  test('returns 404 when deleting a missing multitable sheet, for an actor who could have deleted it', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_missing'])
@@ -1080,7 +1260,82 @@ describe('Multitable context API', () => {
 
     expect(response.body.ok).toBe(false)
     expect(response.body.error.code).toBe('NOT_FOUND')
-    expect(response.body.error.message).toBe('Sheet not found: sheet_missing')
+    // VALUES-FREE: the refusal must not echo the requested id back (the #L5-wire no-leak golden).
+    expect(JSON.stringify(response.body)).not.toContain('sheet_missing')
+  })
+
+  test('ANTI-ORACLE: a write-only operator gets 403 for a MISSING sheet, same as for an existing one', async () => {
+    const handler = async (sql: string) => {
+      if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) return { rows: [], rowCount: 0 }
+      if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets\b/i.test(sql)) {
+        throw new Error('an unauthorized actor must never reach the write')
+      }
+      { const cr = configRevisionNoop(sql); if (cr) return cr }
+      if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+      if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
+      return { rows: [], rowCount: 0 }
+    }
+    const missing = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: handler })
+    const res = await request(missing.app).delete('/api/multitable/sheets/sheet_missing')
+
+    // 403, NOT 404: the operator learns nothing about whether `sheet_missing` exists — identical to
+    // the refusal it gets for a sheet that does exist (pinned above).
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(JSON.stringify(res.body)).not.toContain('sheet_missing')
+  })
+
+  // 客户反馈 2026-09-24 #4c follow-up (PR #6083 deferred list): a record opened on its own — the deep link /
+  // linked-record peek that calls GET /records/:id, possibly before (or without) /context — must carry the SAME
+  // instance business timezone, so its date-times show the grid's wall clock. Same env contract as /context.
+  test('record context (GET /records/:id) carries the instance business timezone', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_records WHERE id = $1')) {
+          return {
+            rows: [{ id: 'rec_tz', sheet_id: 'sheet_ops', version: 2, data: { fld_when: '2026-09-24T01:00:00.000Z' } }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          return params?.[0] === 'sheet_ops'
+            ? { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+            : { rows: [] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          return { rows: params?.[0] === 'sheet_ops' ? [{ id: 'sheet_ops' }] : [] }
+        }
+        if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+          return {
+            rows: [
+              { id: 'fld_when', name: 'When', type: 'dateTime', property: {}, order: 1 },
+            ],
+          }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        return { rows: [], rowCount: 0 }
+      },
+    })
+
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+      const fallback = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(fallback.body.ok).toBe(true)
+      expect(fallback.body.data.record).toMatchObject({ id: 'rec_tz', data: { fld_when: '2026-09-24T01:00:00.000Z' } })
+      expect(fallback.body.data.businessTimezone).toBe('Asia/Shanghai')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      // Storage untouched: the record still carries the raw UTC instant, only the zone id is added.
+      expect(tokyo.body.data.record.data.fld_when).toBe('2026-09-24T01:00:00.000Z')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   test('rejects context access without multitable read permission', async () => {
@@ -1168,9 +1423,11 @@ describe('Multitable context API', () => {
   test('prepares a person field preset by provisioning a people sheet and syncing users', async () => {
     let peopleSheetId = ''
     const fieldIdsByName = new Map<string, string>()
+    const insertedPayloads: Array<Record<string, unknown>> = []
 
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1200,10 +1457,13 @@ describe('Multitable context API', () => {
           fieldIdsByName.set(fieldName, fieldId)
           return { rows: [], rowCount: 1 }
         }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+        if (sql.includes('FROM users') && sql.includes('is_active = TRUE')) {
+          // #5807: the sync reads only id + name — it must not even ask for email / avatar.
+          expect(sql).not.toMatch(/\bemail\b|\bavatar_url\b/)
           return {
             rows: [
-              { id: 'user_amy', email: 'amy@example.com', name: 'Amy', avatar_url: 'https://cdn.example.com/amy.png' },
+              { id: 'user_amy', name: 'Amy' },
+              { id: 'user_nameless', name: null },
             ],
           }
         }
@@ -1213,13 +1473,7 @@ describe('Multitable context API', () => {
         }
         if (sql.includes('INSERT INTO meta_records')) {
           expect(params?.[1]).toBe(peopleSheetId)
-          const payload = JSON.parse(String(params?.[2] ?? '{}'))
-          expect(payload).toEqual({
-            [fieldIdsByName.get('User ID')!]: 'user_amy',
-            [fieldIdsByName.get('Name')!]: 'Amy',
-            [fieldIdsByName.get('Email')!]: 'amy@example.com',
-            [fieldIdsByName.get('Avatar URL')!]: 'https://cdn.example.com/amy.png',
-          })
+          insertedPayloads.push(JSON.parse(String(params?.[2] ?? '{}')))
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -1248,6 +1502,23 @@ describe('Multitable context API', () => {
       limitSingleRecord: true,
       refKind: 'user',
     })
+    // #5807: the four columns are still provisioned, but only User ID + Name are written; a user
+    // without a name is shown by id, never by email.
+    expect([...fieldIdsByName.keys()]).toEqual(['User ID', 'Name', 'Email', 'Avatar URL'])
+    expect(insertedPayloads).toEqual([
+      {
+        [fieldIdsByName.get('User ID')!]: 'user_amy',
+        [fieldIdsByName.get('Name')!]: 'Amy',
+      },
+      {
+        [fieldIdsByName.get('User ID')!]: 'user_nameless',
+        [fieldIdsByName.get('Name')!]: 'user_nameless',
+      },
+    ])
+    for (const payload of insertedPayloads) {
+      expect(payload).not.toHaveProperty([fieldIdsByName.get('Email')!])
+      expect(payload).not.toHaveProperty([fieldIdsByName.get('Avatar URL')!])
+    }
   })
 
   // Native person field (人员, design 2026-06-16): `type:'person'` is now a FIRST-CLASS native
@@ -1257,7 +1528,7 @@ describe('Multitable context API', () => {
   // remain for them + direct API callers.)
   test('creates a native person field stored as type=person (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1337,13 +1608,23 @@ describe('Multitable context API', () => {
     expect(response.body.data.field.property).not.toHaveProperty('foreignSheetId')
   })
 
-  // PATCH `{type:'person'}` converts a field to a NATIVE person (type='person', userId[]) — no
-  // People-sheet rewrite. Coexistence note: a legacy person is `type='link'`; editing its config
-  // sends `{property}` only (no type), so `requestedType` falls back to 'link' and it can NEVER
-  // be silently flipped native (verified by the route's `requestedType ?? mapFieldType(stored)`).
-  test('updates a field into a native person field stored as type=person (no People-sheet rewrite)', async () => {
+  // PATCH `{type:'person'}` on a NATIVE person field (type='person', userId[]) — property is
+  // re-normalized, no People-sheet rewrite. Coexistence note: a legacy person is `type='link'`;
+  // editing its config sends `{property}` only (no type), so `requestedType` falls back to 'link'
+  // and it can NEVER be silently flipped native (verified by the route's
+  // `requestedType ?? mapFieldType(stored)`).
+  //
+  // F8A (2026-09-11) CONTRACT CHANGE — this case used to start from `type: 'string'`, i.e. it
+  // asserted that a plain TEXT column could be converted into a person field through the API.
+  // The lossless-retype whitelist (src/multitable/field-retype-whitelist.ts) now refuses that pair
+  // with 400 FIELD_RETYPE_NOT_LOSSLESS: retyping converts NOTHING, so the stored names would sit
+  // unreadable under a userId[] type. The refusal itself is pinned below in
+  // 'F8A lossless retype whitelist'. What this case still owns — and what it always really owned —
+  // is the native-person PROPERTY normalization: the spoofed foreignSheetId is dropped,
+  // limitSingleRecord survives, and no People sheet is provisioned.
+  test('normalizes a native person field on update, dropping a spoofed foreignSheetId (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
           expect(params).toEqual(['fld_assignee'])
@@ -1356,8 +1637,8 @@ describe('Multitable context API', () => {
               id: 'fld_assignee',
               sheet_id: 'sheet_ops',
               name: 'Assignee',
-              type: 'string',
-              property: {},
+              type: 'person',
+              property: { limitSingleRecord: false },
               order: 2,
             }],
           }
@@ -1416,7 +1697,7 @@ describe('Multitable context API', () => {
 
   test('accepts date fields in create and update multitable field contracts', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1543,8 +1824,14 @@ describe('Multitable context API', () => {
   })
 
   test('accepts MF2 field types in create and update multitable field contracts', async () => {
+    // The rows this test pretends are already in meta_fields. `fld_contact` (email) exists so the
+    // update contract can be exercised on an MF2 type without crossing a lossy retype pair (F8A).
+    const storedMf2Fields: Record<string, { id: string; sheet_id: string; name: string; type: string; property: Record<string, unknown>; order: number }> = {
+      fld_amount: { id: 'fld_amount', sheet_id: 'sheet_ops', name: 'Amount', type: 'currency', property: { code: 'usd', decimals: 2 }, order: 4 },
+      fld_contact: { id: 'fld_contact', sheet_id: 'sheet_ops', name: 'Contact', type: 'email', property: {}, order: 5 },
+    }
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1574,57 +1861,39 @@ describe('Multitable context API', () => {
           }
         }
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return {
-              rows: [{
-                id: 'fld_amount',
-                name: 'Amount',
-                type: 'currency',
-                property: { code: 'usd', decimals: 2 },
-                order: 4,
-              }],
-            }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            const { sheet_id: _sheetId, ...withoutSheet } = stored
+            return { rows: [{ ...withoutSheet }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return { rows: [{ id: 'fld_amount', sheet_id: 'sheet_ops' }] }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            return { rows: [{ id: stored.id, sheet_id: stored.sheet_id }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return {
-              rows: [{
-                id: 'fld_amount',
-                sheet_id: 'sheet_ops',
-                name: 'Amount',
-                type: 'currency',
-                property: { code: 'usd', decimals: 2 },
-                order: 4,
-              }],
-            }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            return { rows: [{ ...stored }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
-          expect(params).toEqual([
-            'fld_amount',
-            'Amount',
-            'email',
-            '{}',
-            4,
-          ])
-          return {
-            rows: [{
-              id: 'fld_amount',
-              name: 'Amount',
-              type: 'email',
-              property: {},
-              order: 4,
-            }],
+          const [fieldId, name, type, property, order] = params as [string, string, string, string, number]
+          if (fieldId === 'fld_amount') {
+            // currency -> number: an MF2 type change that IS on the lossless whitelist (the stored
+            // digits stay readable), so the F8A guard lets the pre-existing update contract through.
+            expect([name, type, property, order]).toEqual(['Amount', 'number', '{"thousands":false}', 4])
+          } else if (fieldId === 'fld_contact') {
+            expect([name, type, property, order]).toEqual(['Contact', 'email', '{}', 5])
+          } else {
+            throw new Error(`Unexpected field update params: ${JSON.stringify(params)}`)
           }
+          return { rows: [{ id: fieldId, name, type, property: JSON.parse(property), order }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
@@ -1655,10 +1924,17 @@ describe('Multitable context API', () => {
       order: 4,
     })
 
+    // F8A (2026-09-11) CONTRACT CHANGE — this leg used to PATCH the currency field straight to
+    // `email`. That pair is NOT on the lossless whitelist (currency stores numbers; under an email
+    // type they are unreadable and the email write path would never take them back), so the route
+    // now answers 400 FIELD_RETYPE_NOT_LOSSLESS — pinned below in 'F8A lossless retype whitelist'.
+    // The claim this test actually makes — MF2 field types are accepted by the create AND the
+    // update field contract — is kept whole by splitting the leg in two: a whitelisted MF2 type
+    // change (currency -> number) and an MF2 type on the update contract itself (email).
     const updateResponse = await request(app)
       .patch('/api/multitable/fields/fld_amount')
       .send({
-        type: 'email',
+        type: 'number',
         property: {},
       })
       .expect(200)
@@ -1666,9 +1942,265 @@ describe('Multitable context API', () => {
     expect(updateResponse.body.data.field).toMatchObject({
       id: 'fld_amount',
       name: 'Amount',
-      type: 'email',
-      property: {},
+      type: 'number',
+      // the route normalizes a number field's property; the currency-only keys are gone
+      property: { thousands: false },
       order: 4,
     })
+
+    const emailUpdateResponse = await request(app)
+      .patch('/api/multitable/fields/fld_contact')
+      .send({
+        type: 'email',
+        property: {},
+      })
+      .expect(200)
+
+    expect(emailUpdateResponse.body.data.field).toMatchObject({
+      id: 'fld_contact',
+      name: 'Contact',
+      type: 'email',
+      property: {},
+      order: 5,
+    })
   })
+})
+
+// =================================================================================================
+// F8A (2026-09-11) — the lossless-retype whitelist, SECOND COPY in the real-DB lane.
+//
+// The full lock for this boundary lives in tests/multitable-field-retype-revert-narrowing.test.ts
+// (algebra + route matrix + the revert/backward side). CORRECTION (2026-09-11, same day): an earlier
+// version of this header said that file "is named by NO workflow ... so nothing in it executes in CI"
+// and presented the duplication below as closing a gap. That was WRONG. plugin-tests.yml:844 runs a
+// blanket `pnpm --filter @metasheet/core-backend test` in job `test:` (:174, matrix [18.x, 20.x], no
+// paths filter), core-backend's `test` script is plain `vitest`, and vitest.config.ts declares no
+// `include` — so the narrowing file is collected by the default glob and DOES run on every PR.
+// What is true: it is not named INDIVIDUALLY by any workflow, only glob-collected.
+//
+// So the copies below are a deliberate REDUNDANT re-pin of the load-bearing claims — the route
+// refuses a lossy retype BEFORE any UPDATE, the one direction this cut adds really lands, and the
+// server table has not drifted from the shared truth table — in the real-DB lane
+// (plugin-tests.yml:1306, same `test` job, 20.x + DATABASE_URL). Both copies read the SAME fixture,
+// so they cannot disagree about the table; only about which lane reds first.
+//
+// Mirror wording (same discipline as permission-match-truth-table.json, #5626): changing ONE
+// implementation WITHOUT touching the fixture turns THAT SIDE'S OWN run red; changing the fixture
+// turns the OTHER side (apps/web/tests/multitable-field-manager.spec.ts) red too.
+// =================================================================================================
+const RETYPE_TRUTH_TABLE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../fixtures/field-retype-truth-table.json',
+)
+
+interface RetypeTruthTable {
+  excludedTargetTypes: string[]
+  table: Record<string, string[]>
+  targetCases: Array<{ name: string; sourceType: string; property?: unknown; expected: string[] }>
+  pairCases: Array<{ name: string; sourceType: string; property?: unknown; targetType: string; lossless: boolean }>
+}
+
+const retypeTruthTable = JSON.parse(fs.readFileSync(RETYPE_TRUTH_TABLE_PATH, 'utf8')) as RetypeTruthTable
+
+describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const RETYPE_SHEET = 'sheet_retype_ci'
+
+  type StoredField = { id: string; sheet_id: string; name: string; type: string; property: Record<string, unknown>; order: number }
+
+  /** A one-field mock world that REMEMBERS whether the field row was actually written. */
+  function retypeWorld(stored: Partial<StoredField>) {
+    const row: StoredField = {
+      id: 'fld_retype_ci', sheet_id: RETYPE_SHEET, name: 'F', type: 'string', property: {}, order: 0,
+      ...stored,
+    }
+    const updates: Array<{ name: string; type: string; property: string; order: number }> = []
+    /**
+     * Every write that touches RECORD DATA, remembered separately from the schema write above.
+     * This cut's claim is "zero backend data rewrite", so the cell-level writes a PATCH emits have
+     * to be observable, not argued — see the `-> autoNumber` characterization below, where the
+     * route DOES rewrite the whole column.
+     */
+    const recordWrites: Array<{ sql: string; params: unknown[] }> = []
+    const queryHandler = (sql: string, params?: unknown[]) => {
+      if (/UPDATE\s+meta_records/i.test(sql)) recordWrites.push({ sql, params: params ?? [] })
+      if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) return { rows: [{ id: RETYPE_SHEET }] }
+      if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+        return { rows: params?.[0] === row.id ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
+      }
+      if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+        return { rows: params?.[0] === row.id ? [{ ...row }] : [] }
+      }
+      if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3')) {
+        const [, name, type, property, order] = params as [string, string, string, string, number]
+        updates.push({ name, type, property, order })
+        row.name = name
+        row.type = type
+        row.property = JSON.parse(property)
+        row.order = order
+        return { rows: [{ id: row.id, name, type, property: row.property, order }] }
+      }
+      { const cr = configRevisionNoop(sql); if (cr) return cr }
+      return { rows: [], rowCount: 0 }
+    }
+    return { row, updates, recordWrites, queryHandler }
+  }
+
+  const patchType = async (world: ReturnType<typeof retypeWorld>, body: Record<string, unknown>) => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
+      queryHandler: world.queryHandler,
+    })
+    return request(app).patch('/api/multitable/fields/fld_retype_ci').send(body)
+  }
+
+  test('refuses a lossy retype with 400 + the stable code, BEFORE any UPDATE reaches the table', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'number' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    // values-free: no field id, no sheet id in the message the user sees
+    expect(String(res.body.error.message)).not.toMatch(/fld[_-]/)
+    expect(String(res.body.error.message)).not.toContain(RETYPE_SHEET)
+    // fail-closed: the guard runs before the write, so the row was never touched
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('refuses text -> person: a stored name is not a userId (this pair used to be a 200)', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'person', property: { limitSingleRecord: true } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('refuses RICH long text -> text, judging the STORED property and not the request body', async () => {
+    const world = retypeWorld({ type: 'longText', property: { rich: true } })
+    // turning rich off in the same request must not buy the caller a pass
+    const res = await patchType(world, { type: 'string', property: { rich: false } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('longText')
+  })
+
+  test('POSITIVE CONTROL: plain long text -> text is accepted and really lands', async () => {
+    const world = retypeWorld({ type: 'longText', property: {} })
+    const res = await patchType(world, { type: 'string' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.field.type).toBe('string')
+    expect(world.updates.map((u) => u.type)).toEqual(['string'])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('same type -> same type is not a retype at all: a rename carrying `type` still passes', async () => {
+    const world = retypeWorld({ type: 'date', name: 'D' })
+    const res = await patchType(world, { type: 'date', name: 'Delivery' })
+
+    expect(res.status).toBe(200)
+    expect(world.row.name).toBe('Delivery')
+    expect(world.row.type).toBe('date')
+  })
+
+  test('the pre-existing side-effect path is untouched: text -> link still gets ITS specific code', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'link' })
+
+    expect(res.status).toBe(400)
+    // the older guard's reason is more specific; the whitelist only backstops when nobody else objects
+    expect(res.body.error.code).toBe('LINK_FIELD_FOREIGN_SHEET_REQUIRED')
+    expect(world.updates).toEqual([])
+  })
+
+  // CHARACTERIZATION, not an endorsement. The whitelist passes through any pair with an endpoint in
+  // FIELD_RETYPE_EXCLUDED_TYPES, and the two ends are NOT symmetric:
+  //   target in the set -> only link/formula/lookup/rollup have a guard (see the two target-seam tests below);
+  //   SOURCE in the set -> nobody takes over. Grep the PATCH body: there is no
+  //   `currentType === 'attachment' | 'lookup' | 'rollup' | 'button' | 'createdTime'` branch at all
+  //   (validateHierarchyParentFieldMutation only covers a same-sheet single-value parent LINK, and the
+  //   autoNumber sequence cleanup runs AFTER the `UPDATE meta_fields` — a side effect, not a guard).
+  // So `attachment -> text` is a plain 200 today, exactly as it was before this cut, even though the
+  // browser offers no such option (apps/web losslessRetypeTargets returns [] for an excluded source).
+  // This test exists so the seam is VISIBLE and so closing it later is a deliberate, owner-approved
+  // product tightening (attachment/link -> text would become 400) rather than an accident.
+  test('KNOWN SEAM (characterization): an EXCLUDED SOURCE is unguarded — attachment -> text is still 200', async () => {
+    const world = retypeWorld({ type: 'attachment' })
+    const res = await patchType(world, { type: 'string' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['string'])
+    expect(world.row.type).toBe('string')
+  })
+
+  // The TARGET end is a seam too, and a bigger one than the first version of this PR admitted
+  // (judged 2026-09-12). Of the 11 excluded targets only link/formula/lookup/rollup actually have a
+  // pre-existing guard. `attachment` and the four system stamps (createdTime/modifiedTime/createdBy/
+  // modifiedBy) have NO matching `nextType === ...` branch in the PATCH body at all, so the pair is a
+  // plain 200 — the whitelist passes it through and nobody else objects. Characterization of TODAY,
+  // not an endorsement: closing it would turn `text -> attachment` into a 400 (a product change).
+  test('KNOWN SEAM (characterization): an EXCLUDED TARGET can be unguarded too — text -> attachment is still 200', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'attachment' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['attachment'])
+    expect(world.row.type).toBe('attachment')
+    // and nothing rewrote the cells on this path
+    expect(world.recordWrites).toEqual([])
+  })
+
+  // `-> autoNumber` is the sharpest correction to this PR's own prose: it is NOT "a guard taking
+  // over", it is a DESTRUCTIVE SIDE EFFECT that runs AFTER the schema write. The whitelist returns
+  // early (target is excluded), `UPDATE meta_fields` lands, and then univer-meta.ts:13163-13165 calls
+  // backfillAutoNumberField(..., { overwrite: true }); its single statement
+  // (auto-number-service.ts:112-131) is
+  //   UPDATE meta_records ... SET data = jsonb_set(...) WHERE sheet_id = $3 AND ($4::boolean OR NOT (data ? $1))
+  // with $4 = true, i.e. EVERY existing cell of that column is replaced by a sequence number. This is
+  // pre-existing behaviour that this cut does not touch — the test exists so the claim "this cut
+  // rewrites no data" can never be misread as "this ROUTE rewrites no data".
+  test('KNOWN SEAM (characterization): text -> autoNumber is 200 and OVERWRITES every existing cell (not a guard, a destructive backfill)', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'autoNumber' })
+
+    expect(res.status).toBe(200)
+    expect(world.updates.map((u) => u.type)).toEqual(['autoNumber'])
+    // exactly one record-data write, and it is the overwrite-everything backfill
+    const backfills = world.recordWrites.filter((w) => w.sql.includes('jsonb_set'))
+    expect(backfills).toHaveLength(1)
+    // $4 = the `overwrite` flag: `true` drops the `NOT (data ? $1)` restriction to already-empty cells
+    expect(backfills[0].sql).toContain('$4::boolean OR NOT (data ? $1)')
+    expect(backfills[0].params[3]).toBe(true)
+  })
+
+  test('the server table IS the shared fixture table, row for row', () => {
+    expect(retypeTruthTable.targetCases.length).toBeGreaterThanOrEqual(20)
+    expect(retypeTruthTable.pairCases.length).toBeGreaterThanOrEqual(20)
+    expect(LOSSLESS_FIELD_RETYPE).toEqual(retypeTruthTable.table)
+    expect(Array.from(FIELD_RETYPE_EXCLUDED_TYPES).sort()).toEqual([...retypeTruthTable.excludedTargetTypes].sort())
+  })
+
+  test.each(retypeTruthTable.targetCases.map((row) => [row.name, row] as const))(
+    'losslessRetypeTargets: %s',
+    (_name, row) => {
+      expect(losslessRetypeTargets(row.sourceType, row.property)).toEqual(row.expected)
+    },
+  )
+
+  test.each(retypeTruthTable.pairCases.map((row) => [row.name, row] as const))(
+    'isLosslessFieldRetype: %s',
+    (_name, row) => {
+      expect(isLosslessFieldRetype(row.sourceType, row.targetType, row.property)).toBe(row.lossless)
+    },
+  )
 })

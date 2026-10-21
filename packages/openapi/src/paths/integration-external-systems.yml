@@ -1,0 +1,144 @@
+paths:
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `externalSystemsList` (~L4876) calling externalSystems.listExternalSystems
+  # (plugins/plugin-integration-core/lib/external-systems.cjs ~L1446). Read the handler/
+  # registry function themselves before touching this block.
+  /api/integration/external-systems:
+    get:
+      summary: List external systems
+      description: >-
+        Read-only external-system listing, scoped by (tenantId, workspaceId) and optionally
+        narrowed by kind/status. `data` is a plain array of IntegrationExternalSystem (the
+        credential-redacted public projection); there is no cursor or total count. A
+        workspace-scoped caller's page additionally merges in tenant-wide (null-workspace)
+        rows so a system shared across the tenant is still visible from a workspace — see
+        listExternalSystems' merge branch for the exact windowing.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Workspace scope. Omitted means the null (tenant-wide) workspace, which is never
+            widened further.
+          schema: { type: string }
+        - in: query
+          name: kind
+          required: false
+          description: >-
+            Restrict to one adapter kind (e.g. k3, data-source:sql-readonly). Not validated
+            against an enum server-side — an unknown kind simply matches zero rows.
+          schema: { type: string }
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to one status. An unrecognized value is a 400 (ExternalSystemValidationError),
+            not an empty result.
+          schema:
+            type: string
+            enum: [active, inactive, error]
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or non-positive
+            value is silently ignored (registry default applies). Capped at 500 server-side.
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or non-positive value is
+            silently ignored (registry default applies), not rejected.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/IntegrationExternalSystem' }
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: ExternalSystemValidationError
+                      message: status must be one of active, inactive, error
+                      details: { field: status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `externalSystemsGet` (~L4907) calling externalSystems.getExternalSystem
+  # (plugins/plugin-integration-core/lib/external-systems.cjs ~L978).
+  /api/integration/external-systems/{id}:
+    get:
+      summary: Get one external system
+      description: >-
+        Read-only single-system read, scoped by (tenantId, workspaceId, id). Returns the same
+        credential-redacted IntegrationExternalSystem projection as the list route. Another
+        tenant's system id and a non-existent id both raise ExternalSystemNotFoundError → 404
+        with the identical message.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: External system id.
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/IntegrationExternalSystem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            System not visible in the caller's (tenant, workspace) scope. Identical body for
+            a non-existent id and another tenant's id.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                external_system_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: ExternalSystemNotFoundError
+                      message: external system not found

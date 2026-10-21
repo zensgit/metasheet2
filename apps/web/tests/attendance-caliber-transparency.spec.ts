@@ -16,6 +16,7 @@ import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceTeamAvailabilitySection from '../src/views/attendance/AttendanceTeamAvailabilitySection.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -161,6 +162,10 @@ describe('Attendance caliber transparency — reports mode (G1 records header + 
 
   describe('G1 — records header title mirrors the field-catalog description', () => {
     it('a column whose backend field carries a description gets a matching title tooltip', async () => {
+      window.localStorage.setItem(
+        'metasheet_attendance_report_record_columns',
+        JSON.stringify({ mode: 'all', visibleCodes: [] }),
+      )
       installRecordsReportMock([
         { code: 'work_date', name: '日期', sortOrder: 1000, description: '考勤记录所属工作日期。' },
         {
@@ -218,7 +223,9 @@ describe('Attendance caliber transparency — reports mode (G1 records header + 
 
       const card = container!.querySelector('[data-attendance-caliber-guide]')
       expect(card, 'expected the caliber-guide card').toBeTruthy()
+      expect((card as HTMLDetailsElement).open).toBe(false)
       expect(card!.textContent).toContain('Caliber guide')
+      expect(card!.textContent).not.toContain('expected_attendance_days')
 
       const items = Array.from(card!.querySelectorAll<HTMLElement>('[data-attendance-caliber-guide-item]'))
       const keys = items.map(item => item.getAttribute('data-attendance-caliber-guide-item'))
@@ -272,6 +279,7 @@ describe('Attendance caliber transparency — team availability legend (G2)', ()
     const container = document.createElement('div')
     document.body.appendChild(container)
     const app = createApp(AttendanceTeamAvailabilitySection, { tr })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'synthetic-actor:org-1'))
     app.mount(container)
     return { container, app }
   }

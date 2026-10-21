@@ -1,6 +1,19 @@
 import { getApiBase } from '../utils/api'
+import { matchesPermission } from '../utils/permission-match'
+import { getCurrentScope, onScopeDispose } from 'vue'
+import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSION_ORG_KEY, installExplicitSessionOrg, ownsExplicitSessionOrgChange, restoreExplicitSessionOrg } from '../utils/explicitSessionOrg'
+// Single definitions, in a module with no dependencies of its own so a leaf that caches a
+// per-principal answer can import them without importing this whole surface. See
+// `authPrincipal.ts` for why that separation exists.
+import {
+  TOKEN_KEYS,
+  explicitSessionOrg,
+  getAuthPrincipalKey,
+  notifyAuthPrincipalChange,
+  parseJwtPayload,
+  readStoredToken,
+} from './authPrincipal'
 
-const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -24,6 +37,55 @@ type SessionBootstrapResult = {
 let sessionPromise: Promise<SessionBootstrapResult> | null = null
 let sessionToken: string | null = null
 let sessionCache: SessionBootstrapResult | null = null
+let explicitSessionRevision = 0
+let sessionIdentity: string | null = null
+let sessionWasExplicit = false
+const observedScopes = new WeakSet<object>()
+let storageSubscribers = 0
+let storageListener: ((event: StorageEvent) => void) | null = null
+let observedToken: string | null = null
+let observedMarker: string | null = null
+
+function readMarker(): string | null {
+  try { return localStorage.getItem(EXPLICIT_SESSION_ORG_KEY) } catch { return 'unavailable' }
+}
+
+function rememberSessionStorage(): void {
+  observedToken = readStoredToken()
+  observedMarker = readMarker()
+}
+
+function observeExplicitSessionStorage(): void {
+  const scope = getCurrentScope()
+  if (!scope || observedScopes.has(scope) || typeof window === 'undefined') return
+  observedScopes.add(scope)
+  storageSubscribers++
+  if (!storageListener) {
+    rememberSessionStorage()
+    storageListener = (event) => {
+      if (event.storageArea && event.storageArea !== localStorage) return
+      if (event.key !== null && event.key !== EXPLICIT_SESSION_ORG_KEY
+        && !(TOKEN_KEYS as readonly string[]).includes(event.key)) return
+      const token = readStoredToken()
+      const marker = readMarker()
+      const explicitTransition = observedMarker !== null || marker !== null
+        || (event.key === EXPLICIT_SESSION_ORG_KEY && Boolean(event.oldValue || event.newValue))
+      if (!explicitTransition || (token === observedToken && marker === observedMarker)) return
+      explicitSessionRevision++
+      // Notification and local cache invalidation, not a write lock. The
+      // principal/header guards detect changes synchronously before this event.
+      resetSessionBootstrap(true, false, true)
+    }
+    window.addEventListener('storage', storageListener)
+  }
+  onScopeDispose(() => {
+    storageSubscribers--
+    if (storageSubscribers === 0 && storageListener) {
+      window.removeEventListener('storage', storageListener)
+      storageListener = null
+    }
+  })
+}
 
 function clearStoredUserSnapshot() {
   try {
@@ -58,16 +120,26 @@ function persistUserSnapshot(user: unknown): void {
   }
 }
 
-function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false) {
+function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false, preserveExplicitSession = false) {
+  if (!preserveExplicitSession) clearExplicitSessionOrg()
   sessionPromise = null
   sessionToken = null
   sessionCache = null
+  sessionIdentity = null
+  sessionWasExplicit = false
   if (clearUserSnapshot) {
     clearStoredUserSnapshot()
   }
   if (clearTenantHint) {
     clearStoredTenantHint()
   }
+  // THE app's single "the principal may have changed" announcement. Every transition routes here:
+  // `setToken` (login, invite acceptance, DingTalk callback, forced password change, dev-token
+  // refresh), `clearToken` (sign-out, and `bootstrapSession`'s 401 branch, which clears with NO
+  // navigation), and `bootstrapSession`'s no-token branch. Subscribers can only drop their own
+  // per-principal state; see `authPrincipal.ts`.
+  rememberSessionStorage()
+  notifyAuthPrincipalChange()
 }
 
 function extractSessionUser(payload: SessionBootstrapPayload | null): unknown {
@@ -108,21 +180,7 @@ function clearStoredTenantHint(): void {
 }
 
 export function useAuth() {
-  function readStoredToken(): string | null {
-    try {
-      if (typeof localStorage === 'undefined') return null
-      for (const key of TOKEN_KEYS) {
-        const value = localStorage.getItem(key)
-        if (typeof value === 'string' && value.trim().length > 0) {
-          return value
-        }
-      }
-      return null
-    } catch {
-      return null
-    }
-  }
-
+  observeExplicitSessionStorage()
   function readStoredTenantHint(): string | null {
     try {
       if (typeof localStorage === 'undefined') return null
@@ -173,43 +231,75 @@ export function useAuth() {
   }
 
   function setToken(token: string) {
-    resetSessionBootstrap()
+    resetSessionBootstrap(false, false, true)
     try {
       if (typeof localStorage === 'undefined') return
       localStorage.setItem('auth_token', token)
       localStorage.setItem('jwt', token)
       clearStoredTenantHint()
       persistTenantHint(extractTenantHint(parseJwtPayload(token)) || readLocationTenantHint())
+      clearExplicitSessionOrg()
+      rememberSessionStorage()
     } catch (err) {
       console.warn('[auth] failed to persist token in localStorage', err)
     }
   }
 
   function clearToken() {
-    resetSessionBootstrap(true, true)
+    resetSessionBootstrap(true, true, true)
     try {
       if (typeof localStorage === 'undefined') return
       for (const key of TOKEN_KEYS) {
         localStorage.removeItem(key)
       }
+      clearExplicitSessionOrg()
+      rememberSessionStorage()
     } catch (err) {
       console.warn('[auth] failed to clear token from localStorage', err)
     }
   }
 
-  function parseJwtPayload(token: string): Record<string, unknown> | null {
+  // Only the explicit, authenticated organization-switch response uses this
+  // hook. Payload checks are consistency checks, not signature verification.
+  // Login hints and login/logout behavior are intentionally unchanged.
+  function setExplicitSessionOrg(token: string, orgId: string, expectedToken: string): boolean {
+    if (!expectedToken || getToken() !== expectedToken || !orgId
+      || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) return false
+    const previous = parseJwtPayload(expectedToken)
+    const next = parseJwtPayload(token)
+    const actor = previous?.userId ?? previous?.sub ?? previous?.id
+    if (typeof actor !== 'string' || !actor
+      || (next?.userId ?? next?.sub ?? next?.id) !== actor
+      || next?.tenantId !== orgId || typeof next?.exp !== 'number'
+      || !Number.isFinite(next.exp) || next.exp <= Date.now() / 1000
+      || typeof localStorage === 'undefined') return false
+    const originalAuth = localStorage.getItem('auth_token')
+    const originalJwt = localStorage.getItem('jwt')
+    const change = beginExplicitSessionOrgChange(expectedToken)
+    if (!change) return false
     try {
-      const parts = token.split('.')
-      if (parts.length < 2) return null
-      const normalized = parts[1]
-        .replace(/-/g, '+')
-        .replace(/_/g, '/')
-        .padEnd(Math.ceil(parts[1].length / 4) * 4, '=')
-      const json = atob(normalized)
-      return JSON.parse(json) as Record<string, unknown>
+      if (!ownsExplicitSessionOrgChange(change) || getToken() !== expectedToken) throw new Error('SESSION_ORG_SUPERSEDED')
+      localStorage.setItem('auth_token', token)
+      if (!ownsExplicitSessionOrgChange(change) || getToken() !== token) throw new Error('SESSION_ORG_SUPERSEDED')
+      localStorage.setItem('jwt', token)
+      if (!installExplicitSessionOrg(token, orgId, next, change)) throw new Error('EXPLICIT_SESSION_STORAGE_FAILED')
     } catch {
-      return null
+      if (!ownsExplicitSessionOrgChange(change)) return false
+      try {
+        for (const [key, value] of [['auth_token', originalAuth], ['jwt', originalJwt]]) {
+          if (!ownsExplicitSessionOrgChange(change)
+            || ![originalAuth, token].includes(localStorage.getItem('auth_token'))
+            || ![originalJwt, token].includes(localStorage.getItem('jwt'))) return false
+          if (value === null) localStorage.removeItem(key!)
+          else localStorage.setItem(key!, value!)
+        }
+        restoreExplicitSessionOrg(change)
+      } catch { /* Keep the barrier if rollback storage itself is unavailable. */ }
+      return false
     }
+    explicitSessionRevision++
+    resetSessionBootstrap(true, false, true)
+    return true
   }
 
   function parseStringArray(raw: unknown): string[] {
@@ -300,8 +390,24 @@ export function useAuth() {
     return refreshDevToken()
   }
 
-  async function bootstrapSession(force = false): Promise<SessionBootstrapResult> {
+  /**
+   * `keepSessionOnFailure` IS THE ONLY NEW BEHAVIOUR HERE, and it is opt-in: with the default
+   * (`false`) every branch below is byte-for-byte today's. It exists for
+   * `installPermissionSnapshotRefresh`, a refresh nobody asked for that fires while the user is
+   * sitting in the app: a transient 401/offline answer to THAT request must not sign them out,
+   * must not drop the stored snapshot, and must not poison `sessionCache` into a login redirect
+   * on the next navigation. A user-initiated bootstrap (boot, route guard) still fails exactly
+   * as it does today.
+   */
+  async function bootstrapSession(
+    force = false,
+    options: { keepSessionOnFailure?: boolean } = {},
+  ): Promise<SessionBootstrapResult> {
+    const keepSessionOnFailure = options.keepSessionOnFailure === true
     const existingToken = getToken()
+    const startedExplicitRevision = explicitSessionRevision
+    const startedExplicit = Boolean(explicitSessionOrg(existingToken))
+    const startedIdentity = getAuthPrincipalKey()
     if (!existingToken) {
       resetSessionBootstrap(true)
       return {
@@ -311,22 +417,30 @@ export function useAuth() {
       }
     }
 
-    if (!force && sessionCache && sessionToken === existingToken) {
+    const matchingIdentity = (!startedExplicit && !sessionWasExplicit) || sessionIdentity === startedIdentity
+    if (!force && sessionCache && sessionToken === existingToken && matchingIdentity) {
       return sessionCache
     }
 
-    if (!force && sessionPromise && sessionToken === existingToken) {
+    if (!force && sessionPromise && sessionToken === existingToken && matchingIdentity) {
       return sessionPromise
     }
 
     sessionToken = existingToken
+    sessionIdentity = startedIdentity
+    sessionWasExplicit = startedExplicit
     sessionPromise = (async (): Promise<SessionBootstrapResult> => {
       let resolvedToken = existingToken
+      const staleExplicitSession = () => startedExplicitRevision !== explicitSessionRevision
+        || ((startedExplicit || Boolean(explicitSessionOrg(getToken())))
+          && (resolvedToken !== getToken() || startedIdentity !== getAuthPrincipalKey()))
+      const staleResult = (): SessionBootstrapResult => ({ ok: false, status: 0, payload: null })
       let response = await fetch(`${getApiBase()}/api/auth/me`, {
         headers: buildAuthHeaders(resolvedToken),
       }).catch(() => null)
 
-      if (response?.status === 401) {
+      if (staleExplicitSession()) return staleResult()
+      if (response?.status === 401 && !startedExplicit) {
         const refreshedToken = await refreshDevToken()
         if (refreshedToken && refreshedToken !== resolvedToken) {
           resolvedToken = refreshedToken
@@ -337,7 +451,9 @@ export function useAuth() {
         }
       }
 
+      if (staleExplicitSession()) return staleResult()
       if (!response) {
+        if (keepSessionOnFailure) return { ok: false, status: 0, payload: null }
         sessionCache = {
           ok: false,
           status: 0,
@@ -353,7 +469,13 @@ export function useAuth() {
         payload = null
       }
 
+      if (staleExplicitSession()) return staleResult()
       if (!response.ok) {
+        // Reported, never acted on: no `clearToken()` (which would clear the token, the snapshot
+        // and the tenant hint, and announce a principal change) and no `sessionCache` write
+        // (which would make the next route guard redirect to the login page). The last good
+        // session stays exactly as it was before this background request.
+        if (keepSessionOnFailure) return { ok: false, status: response.status, payload }
         if (response.status === 401) {
           clearToken()
         }
@@ -366,7 +488,7 @@ export function useAuth() {
       }
 
       persistUserSnapshot(extractSessionUser(payload))
-      persistTenantHint(extractTenantHint(extractSessionUser(payload)))
+      if (!explicitSessionOrg(resolvedToken)) persistTenantHint(extractTenantHint(extractSessionUser(payload)))
       sessionCache = {
         ok: true,
         status: response.status,
@@ -375,16 +497,22 @@ export function useAuth() {
       return sessionCache
     })()
 
+    const pending = sessionPromise
     try {
-      return await sessionPromise
+      return await pending
     } finally {
-      sessionPromise = null
+      if (sessionPromise === pending) sessionPromise = null
     }
   }
 
   function primeSession(payload: SessionBootstrapPayload | null) {
     const token = getToken()
+    const explicitOrg = explicitSessionOrg(token)
+    if (explicitOrg && (extractTenantHint(extractSessionUser(payload)) !== explicitOrg
+      || extractUserId(extractSessionUser(payload)) !== extractUserId(parseJwtPayload(token!)))) return
     sessionToken = token
+    sessionIdentity = getAuthPrincipalKey()
+    sessionWasExplicit = Boolean(explicitOrg)
     sessionCache = {
       ok: true,
       status: 200,
@@ -392,14 +520,14 @@ export function useAuth() {
     }
     sessionPromise = null
     persistUserSnapshot(extractSessionUser(payload))
-    persistTenantHint(extractTenantHint(extractSessionUser(payload)))
+    if (!explicitOrg) persistTenantHint(extractTenantHint(extractSessionUser(payload)))
   }
 
   function buildAuthHeaders(tokenOverride?: string | null): Record<string, string> {
     const headers: Record<string, string> = {}
     const token = tokenOverride || getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
-    const tenantHint = readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
+    const tenantHint = explicitSessionOrg(token) || readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
     if (tenantHint) headers['x-tenant-id'] = tenantHint
     // Dev/test fallback aligns with backend flag behaviour
     if (!headers['Authorization']) headers['x-user-id'] = 'dev-user'
@@ -410,6 +538,13 @@ export function useAuth() {
     return getAccessSnapshot().isAdmin
   }
 
+  /**
+   * Unchanged behaviour, one owner: the admin/roles short-circuit stays here (it needs the session
+   * snapshot), and the code algebra below it now lives in `utils/permission-match.ts`, which the
+   * server's `packages/core-backend/src/auth/permission-match.ts` mirrors against a shared truth
+   * table. Before this, the server had no matcher at all and App Center shipped zero server-side
+   * filtering; inlining the algebra a second time on the server would have been the drift.
+   */
   function hasPermission(requiredPermission: string): boolean {
     const normalized = String(requiredPermission || '').trim()
     if (!normalized) return true
@@ -417,18 +552,13 @@ export function useAuth() {
     const snapshot = getAccessSnapshot()
     if (snapshot.isAdmin || snapshot.roles.includes('admin')) return true
 
-    const permissions = snapshot.permissions
-    if (permissions.includes(normalized) || permissions.includes('*:*')) return true
-
-    const [resource, action] = normalized.split(':')
-    if (!resource || !action) return false
-    if (permissions.includes(`${resource}:*`)) return true
-    if (permissions.includes(`${resource}:admin`) && action !== 'admin') return true
-    if (action === 'read' && permissions.includes(`${resource}:write`)) return true
-    return false
+    return matchesPermission(snapshot.permissions, normalized)
   }
 
   function getCurrentUser(): SessionUserRecord | null {
+    try {
+      if ((sessionWasExplicit || Boolean(explicitSessionOrg(getToken()))) && sessionIdentity !== getAuthPrincipalKey()) return null
+    } catch { return null }
     return (extractSessionUser(sessionCache?.payload ?? null) as SessionUserRecord | null) ?? null
   }
 
@@ -442,6 +572,7 @@ export function useAuth() {
   return {
     getToken,
     setToken,
+    setExplicitSessionOrg,
     clearToken,
     bootstrapSession,
     primeSession,
@@ -456,4 +587,132 @@ export function useAuth() {
     getCurrentUser,
     getCurrentUserId,
   }
+}
+
+/*
+ * HOW A TAB THAT IS ALREADY OPEN LEARNS IT WAS GRANTED A PERMISSION.
+ *
+ * Every permission read in this app answers from the snapshot `persistUserSnapshot` writes into
+ * `localStorage` (`getAccessSnapshot`), and that snapshot was written once per page load: the
+ * route guard calls `bootstrapSession()` unforced, which serves `sessionCache` for the rest of
+ * the tab's life. The listeners that already re-read the snapshot on `storage` / `focus`
+ * (`src/approvals/permissions.ts`) therefore had nothing new to read, and an administrator's
+ * grant only surfaced after a page reload. This is the missing writer, not a new permission
+ * model: the server remains the only authority, this just re-asks it.
+ *
+ * WHY `focus` AND NOT ALSO `visibilitychange`: the snapshot consumers in this app listen on
+ * `focus` (plus `storage`); `visibilitychange` is used once, for an unrelated dialog concern in
+ * `multitable/views/MultitableWorkbench.vue`. Binding both would double-fire on every tab
+ * switch for no extra coverage.
+ */
+
+/**
+ * Hard minimum spacing between focus-driven refreshes.
+ *
+ * 60s IS THE SERVER'S OWN NUMBER, not a guess: `listUserPermissions` memoises a user's
+ * permission codes for `RBAC_CACHE_TTL_MS` (default `60000`) in
+ * `packages/core-backend/src/rbac/service.ts`, and `/api/auth/me` re-hydrates through it
+ * (`routes/auth.ts` -> `AuthService.verifyToken` -> `getUserById` -> `resolveRbacProfile`). Two
+ * refreshes inside one TTL window can only return the SAME permission set, so a shorter
+ * interval buys nothing and costs a request per alt-tab. If the server TTL ever changes, this
+ * should follow it.
+ */
+const PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS = 60_000
+
+let permissionSnapshotRefreshBound = false
+let lastPermissionSnapshotRefreshAt = Number.NEGATIVE_INFINITY
+let permissionSnapshotRefreshInFlight = false
+
+function readUserSnapshotEntries(): Record<string, string | null> {
+  const entries: Record<string, string | null> = {}
+  for (const key of USER_SNAPSHOT_KEYS) {
+    try {
+      entries[key] = typeof localStorage === 'undefined' ? null : localStorage.getItem(key)
+    } catch {
+      entries[key] = null
+    }
+  }
+  return entries
+}
+
+/**
+ * Re-emit the `storage` event this document's own write did NOT produce.
+ *
+ * A same-document `localStorage` write notifies other documents only, so without this the
+ * in-tab snapshot listeners would not observe the refreshed permissions until some later focus.
+ * Only genuinely changed keys are announced. Every `storage` listener in this app either filters
+ * on `key` (`useAuth` above, `useLocale`) or re-reads storage idempotently (`usePlmAuthStatus`,
+ * `ElearningAppInstallationSection`, `approvals/permissions`), so this is a notification, never
+ * a new input: it carries no value a listener could not read for itself.
+ */
+function announceUserSnapshotChange(
+  before: Record<string, string | null>,
+  after: Record<string, string | null>,
+): void {
+  if (typeof window === 'undefined' || typeof StorageEvent === 'undefined') return
+  let storageArea: Storage | undefined
+  try {
+    storageArea = typeof Storage !== 'undefined' && typeof localStorage !== 'undefined'
+      && localStorage instanceof Storage
+      ? localStorage
+      : undefined
+  } catch {
+    storageArea = undefined
+  }
+  for (const key of USER_SNAPSHOT_KEYS) {
+    if (before[key] === after[key]) continue
+    try {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key,
+        oldValue: before[key],
+        newValue: after[key],
+        ...(storageArea ? { storageArea } : {}),
+      }))
+    } catch (err) {
+      console.warn('[auth] failed to announce refreshed user snapshot', err)
+    }
+  }
+}
+
+async function refreshUserSnapshotOnFocus(): Promise<void> {
+  // No session: return BEFORE touching `bootstrapSession` at all. Its no-token branch clears the
+  // stored snapshot and announces a principal change, which a background refresh must never do.
+  if (!readStoredToken()) return
+  // `focus` can reach a document that is not actually on screen; a hidden document is not "the
+  // user came back to the tab".
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  if (permissionSnapshotRefreshInFlight) return
+  const now = Date.now()
+  // Charged at ATTEMPT time, not on success, so a failing or slow server cannot turn rapid
+  // alt-tabbing into a request storm.
+  if (now - lastPermissionSnapshotRefreshAt < PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS) return
+  lastPermissionSnapshotRefreshAt = now
+  permissionSnapshotRefreshInFlight = true
+  const before = readUserSnapshotEntries()
+  try {
+    // `keepSessionOnFailure`: a 401 or an offline answer to a refresh the user never asked for
+    // leaves the session exactly as it was. See `bootstrapSession`.
+    const result = await useAuth().bootstrapSession(true, { keepSessionOnFailure: true })
+    if (!result.ok) return
+    announceUserSnapshotChange(before, readUserSnapshotEntries())
+  } catch (err) {
+    console.warn('[auth] permission snapshot refresh failed', err)
+  } finally {
+    permissionSnapshotRefreshInFlight = false
+  }
+}
+
+/**
+ * Bind the focus refresh once per document. Module-level flag, same idiom as
+ * `bindApprovalAccessRefresh` in `src/approvals/permissions.ts`: calling this from several places
+ * (or from a component that mounts many times) still installs exactly one listener and therefore
+ * still produces at most one refresh per interval. Called once from the app entry point; there is
+ * deliberately no uninstall, because the listener lives as long as the document does.
+ */
+export function installPermissionSnapshotRefresh(): void {
+  if (permissionSnapshotRefreshBound || typeof window === 'undefined') return
+  permissionSnapshotRefreshBound = true
+  window.addEventListener('focus', () => {
+    void refreshUserSnapshotOnFocus()
+  })
 }

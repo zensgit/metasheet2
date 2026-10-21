@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalOrgMembership } from '../helpers/approval-schema-bootstrap'
 
 // tests/setup.ts replaces global fetch in its beforeAll. Capture Node's real implementation while
 // this module is evaluated so this real-HTTP suite cannot silently call the empty test stub.
@@ -22,6 +22,7 @@ const realFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis)
 // DB-provisioned plugin-tests `test:integration` step.
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const REQUESTER_USER_ID = 'uat-requester'
+const APPROVER_USER_ID = 'uat-approver-42'
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -121,6 +122,16 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
        ON CONFLICT DO NOTHING`,
       [REQUESTER_USER_ID],
     )
+    // Lock-11 §10 arm (a) fixture delta (§11): dev-token writes no `user_orgs` row; the requester
+    // needs exactly one active membership or the real `POST /api/approvals` call below 422s
+    // (APPROVAL_ORG_UNRESOLVED) before this suite's own authoring/publish/start assertions run.
+    await grantApprovalOrgMembership(REQUESTER_USER_ID)
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'x', TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [APPROVER_USER_ID, `${APPROVER_USER_ID}@x.test`],
+    )
     adminToken = await authToken(baseUrl, 'uat-admin')
     requesterToken = await authToken(baseUrl, REQUESTER_USER_ID)
   })
@@ -145,6 +156,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
         await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
       }
+      await pool.query('DELETE FROM users WHERE id = $1', [APPROVER_USER_ID])
     } catch {
       // ignore cleanup failures
     }
@@ -192,7 +204,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     //    the reviewer field — the form_field_user source must resolve to THAT value.
     const startResp = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
       method: 'POST',
-      body: { templateId: template.id, formData: { amount: 1200, reviewer: 'uat-approver-42' } },
+      body: { templateId: template.id, formData: { amount: 1200, reviewer: APPROVER_USER_ID } },
     })
     expect(startResp.status).toBe(201)
     const approval = await startResp.json() as {
@@ -207,7 +219,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(approval.status).toBe('pending')
     expect(approval.currentNodeKey).toBe('approval_1')
     const activeAssignees = approval.assignments.filter((a) => a.isActive).map((a) => a.assigneeId)
-    expect(activeAssignees).toEqual(['uat-approver-42'])
+    expect(activeAssignees).toEqual([APPROVER_USER_ID])
   })
 
   it('restores a historical version into one new draft under concurrent requests without changing the active version', async () => {
@@ -253,6 +265,16 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     const v2Id = updated.latestVersionId
     expect(v2Id).not.toBe(v1Id)
 
+    // FS-4: two genuinely concurrent restore requests against the SAME template, dispatched with
+    // Promise.all over two real HTTP connections into the real running server (not two sequential
+    // awaits narrated as a race) — each side opens its own DB transaction inside
+    // ApprovalProductService.restoreTemplateVersion. `await Promise.all` only resolves once BOTH
+    // HTTP responses have been written, which only happens after each request's transaction has
+    // already committed or rolled back — so by the time this line continues, both sides are
+    // settled, not merely "first row appeared". Mutation evidence below shows both the
+    // expectedLatestVersionId comparison and the initial row's FOR UPDATE lock are load-bearing for
+    // the win/lose outcome asserted next; this test does not observe (and does not claim) which of
+    // the two transactions actually blocked on the lock at the DB level.
     const restorePath = `/api/approval-templates/${created.id}/versions/${v1Id}/restore`
     const [left, right] = await Promise.all([
       jsonRequest(baseUrl, restorePath, adminToken, {
@@ -264,6 +286,11 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
         body: { expectedLatestVersionId: v2Id },
       }),
     ])
+    // Exactly one request wins (201, the new draft) and exactly one loses (409 STALE). Mutation
+    // evidence (PR body) shows this reds to [201, 201] both when the staleness comparison is
+    // neutered (deterministic) and, separately, when the FOR UPDATE lock is dropped from the
+    // restore path's initial read (observed locally; timing-dependent, not a guaranteed red on
+    // every scheduler).
     expect([left.status, right.status].sort()).toEqual([201, 409])
     const success = left.status === 201 ? left : right
     const stale = left.status === 409 ? left : right
@@ -319,6 +346,27 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
       status: 'draft',
       restored_from_version_id: v1Id,
     })
+
+    // FS-4 invariant: restoreTemplateVersion never writes approval_published_definitions (it only
+    // ever inserts a 'draft' version row — publishing stays a separate, explicit operation), so the
+    // partial unique index `idx_approval_published_definitions_active_template
+    // ON (template_id) WHERE is_active = TRUE` must still show exactly one active row for this
+    // template after the race, unmoved from the version-1 publish above. This is a containment
+    // check, not a discriminator for THIS race (no restore-path mutation can move it, since restore
+    // never touches this table) — it exists so a future change that makes restore touch publish
+    // state cannot silently duplicate or orphan the active published definition without a red here.
+    const publishedDefinitions = await pool.query<{
+      id: string
+      template_version_id: string
+      is_active: boolean
+    }>(
+      `SELECT id, template_version_id, is_active
+       FROM approval_published_definitions
+       WHERE template_id = $1 AND is_active = TRUE`,
+      [created.id],
+    )
+    expect(publishedDefinitions.rows).toHaveLength(1)
+    expect(publishedDefinitions.rows[0]).toMatchObject({ template_version_id: v1Id, is_active: true })
   })
 
   // P2-1 (review 20260717c): the restore-time snapshot revalidation is a PR-body Safety claim, so

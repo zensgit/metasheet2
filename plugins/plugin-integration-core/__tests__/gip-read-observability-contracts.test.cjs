@@ -392,7 +392,9 @@ function latentByEnumeration() {
       const full = path.join(dir, entry.name)
       let text
       try { text = fs.readFileSync(full, 'utf8') } catch (_error) { continue }
-      if (text.includes(moduleBasename)) hits.push(path.relative(repoRoot, full))
+      if (text.includes(moduleBasename)) {
+        hits.push(path.relative(repoRoot, full).split(path.sep).join('/'))
+      }
     }
   }
   walk(repoRoot)

@@ -73,20 +73,89 @@
           @click="selectField(fields[index].localId)"
           @focusin="selectField(fields[index].localId)"
         >
-          <div class="approval-form-builder__card-main">
-            <span
-              v-if="selectedLocalId === fields[index].localId"
-              class="approval-form-builder__card-selected-mark"
-              data-testid="approval-form-builder-card-selected-mark"
+          <div class="approval-form-builder__card-content">
+            <div class="approval-form-builder__card-main">
+              <span
+                v-if="selectedLocalId === fields[index].localId"
+                class="approval-form-builder__card-selected-mark"
+                data-testid="approval-form-builder-card-selected-mark"
+              >
+                已选
+              </span>
+              <span class="approval-form-builder__card-label">
+                {{ fields[index].label.trim() || typeLabels[fields[index].type] }}
+              </span>
+              <span class="approval-form-builder__card-summary">
+                {{ cardSummary(fields[index]) }}
+              </span>
+            </div>
+
+            <!-- The requester form already renders detail fields as an editable table. Mirror that
+                 shape here so configuring columns immediately produces a faithful authoring
+                 preview instead of the previous opaque "N 个子字段" summary. Controls stay
+                 disabled: values belong to approval instances, not template authoring. -->
+            <div
+              v-if="fields[index].type === 'detail'"
+              class="approval-form-builder__detail-preview"
+              data-testid="approval-form-builder-detail-preview"
             >
-              已选
-            </span>
-            <span class="approval-form-builder__card-label">
-              {{ fields[index].label.trim() || typeLabels[fields[index].type] }}
-            </span>
-            <span class="approval-form-builder__card-summary">
-              {{ cardSummary(fields[index]) }}
-            </span>
+              <table
+                v-if="fields[index].detailColumns.length > 0"
+                class="approval-form-builder__detail-table"
+                :aria-label="`${fields[index].label.trim() || '明细'}子表格预览`"
+              >
+                <thead>
+                  <tr>
+                    <th
+                      v-for="column in fields[index].detailColumns"
+                      :key="column.localId"
+                      scope="col"
+                      :data-column-local-id="column.localId"
+                    >
+                      {{ detailColumnLabel(column) }}
+                      <span
+                        v-if="column.required"
+                        class="approval-form-builder__detail-required"
+                        aria-label="必填"
+                      >*</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td
+                      v-for="column in fields[index].detailColumns"
+                      :key="column.localId"
+                    >
+                      <textarea
+                        v-if="column.type === 'textarea'"
+                        disabled
+                        rows="1"
+                        :aria-label="`${detailColumnLabel(column)}输入预览`"
+                        :placeholder="detailPreviewPlaceholder(column)"
+                      />
+                      <select
+                        v-else-if="column.type === 'select' || column.type === 'multi-select' || column.type === 'user'"
+                        disabled
+                        :aria-label="`${detailColumnLabel(column)}选择预览`"
+                      >
+                        <option>{{ detailPreviewPlaceholder(column) }}</option>
+                      </select>
+                      <input
+                        v-else
+                        disabled
+                        :type="column.type === 'number' ? 'number' : 'text'"
+                        :aria-label="`${detailColumnLabel(column)}输入预览`"
+                        :placeholder="detailPreviewPlaceholder(column)"
+                      />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="approval-form-builder__detail-empty">
+                请在右侧添加子字段
+              </p>
+            </div>
           </div>
           <div v-if="!readOnly" class="approval-form-builder__card-actions">
             <button
@@ -144,6 +213,8 @@
       :visibility-options="visibilityOptions"
       :read-only="readOnly"
       :execute="runInspectorCommand"
+      :record-link-catalog="recordLinkCatalog"
+      @retry-record-link-catalog="emit('retry-record-link-catalog')"
     />
   </div>
 </template>
@@ -163,10 +234,11 @@ export const GENERIC_RETRY_MESSAGE = '操作未完成，请重试。'
 /**
  * F2 Designer 2.0 form canvas (delta §3.2/§3.3, FB-D1..D4, FB-D8) — the NEW
  * builder, SEPARATE from the extracted flag-OFF `ApprovalFormInlineEditor`
- * fallback. It has NO production mount in this slice: F4 performs the first
- * mount in `TemplateAuthoringView.vue` behind the existing `approvalCanvasV2`
- * flag. Until then it is fully exercisable standalone (mounted tests + the
- * owned browser harness under `apps/web/verification/`).
+ * fallback. F4 mounts it in `TemplateAuthoringView.vue` behind the existing
+ * `approvalCanvasV2` flag (default ON) — the explicit flag-OFF operator rollback renders only
+ * the legacy inline editor. Exercisable standalone (mounted
+ * tests + the owned browser harness under `apps/web/verification/`) and, once
+ * hydrated with the flag ON, as the production form surface.
  *
  * Contract highlights:
  * - ONE command path (FB-D4): palette click (`appendField`), palette drag,
@@ -219,11 +291,14 @@ import {
   type ApprovalFormDragPayload,
   type ApprovalFormDragSession,
 } from '../approvalFormDragPayload'
-import type {
-  AuthorableFieldType,
-  FieldAuthoringDraft,
-  TemplateAuthoringDraft,
+import {
+  conditionValueFieldFromDraft,
+  type AuthorableFieldType,
+  type DetailColumnDraft,
+  type FieldAuthoringDraft,
+  type TemplateAuthoringDraft,
 } from '../templateAuthoring'
+import type { RecordLinkAuthoringCatalog } from '../recordLinkField'
 import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
@@ -247,8 +322,19 @@ const props = withDefaults(
     dragSession?: ApprovalFormDragSession
     /** FB-D4/FB-D5 seam: the ONE production adapter; injectable in tests. */
     adapter?: FormAuthoringAdapter
+    /**
+     * Delta §3.4 / parity ledger deferral (3): the PARENT-OWNED record-link catalog snapshot (F0
+     * gate #2), passed through read-only to the inspector's typed base/sheet pickers. The builder
+     * never fetches it; a load/retry request is re-emitted to the owner.
+     */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   }>(),
-  { readOnly: false, dragSession: undefined, adapter: undefined },
+  {
+    readOnly: false,
+    dragSession: undefined,
+    adapter: undefined,
+    recordLinkCatalog: null,
+  },
 )
 
 const emit = defineEmits<{
@@ -257,6 +343,8 @@ const emit = defineEmits<{
     draft: TemplateAuthoringDraft,
     focusLocalId: string | null,
   ): void
+  /** The inspector asked the catalog owner to (re)load the record-link catalog. */
+  (e: 'retry-record-link-catalog'): void
 }>()
 
 const adapter: FormAuthoringAdapter =
@@ -309,6 +397,13 @@ const selectedFieldReferences = computed(() =>
  * Visibility depends-on candidates: other fields with an id, excluding
  * `record-link`/`detail` (server fail-closed as visibility dependencies).
  * Option TEXT is the business label only — ids ride the non-visible value.
+ *
+ * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, MS-9): `explanation` joins the
+ * exclusion — it carries no value at all, so offering it here would be an M7 inert control
+ * (always selectable, never publishable; the server rejects it unconditionally regardless of
+ * which authoring surface produced the reference). NOTE: `date_range` is NOT excluded here — this
+ * F2 track's own predicate predates it and stayed unaddressed by L8-B, out of this slice's scope;
+ * not re-fixed here to avoid an unrelated-scope edit riding along.
  */
 const visibilityOptions = computed(() => {
   const current = selectedField.value
@@ -319,11 +414,15 @@ const visibilityOptions = computed(() => {
         field.localId !== current.localId &&
         field.id.trim().length > 0 &&
         field.type !== 'record-link' &&
-        field.type !== 'detail',
+        field.type !== 'detail' &&
+        field.type !== 'explanation' &&
+        field.type !== 'department',
     )
     .map((field) => ({
       id: field.id.trim(),
       label: field.label.trim() || typeLabels[field.type],
+      // R-43 (B): the inspector's value control follows the dependency's type / options.
+      ...conditionValueFieldFromDraft(field),
     }))
 })
 
@@ -425,6 +524,20 @@ function cardSummary(field: FieldAuthoringDraft): string {
   return parts.join(' · ')
 }
 
+function detailColumnLabel(column: DetailColumnDraft): string {
+  return column.label.trim() || (column.type === 'attachment' ? '附件' : typeLabels[column.type])
+}
+
+function detailPreviewPlaceholder(column: DetailColumnDraft): string {
+  const label = detailColumnLabel(column)
+  if (column.type === 'select' || column.type === 'multi-select' || column.type === 'user') {
+    return `请选择${label}`
+  }
+  if (column.type === 'date' || column.type === 'datetime') return `请选择${label}`
+  if (column.type === 'number') return `请输入${label}`
+  return column.original?.placeholder?.trim() || `请输入${label}`
+}
+
 function cardAccessibleName(field: FieldAuthoringDraft, index: number): string {
   const label = field.label.trim() || typeLabels[field.type]
   return `${label}，${typeLabels[field.type]}字段，位置 ${index + 1}`
@@ -513,6 +626,36 @@ function onMoveByOffset(localId: string, offset: -1 | 1): void {
   if (props.readOnly) return
   if (!settleInspector()) return
   applyResult(adapter.moveFieldByOffset(sessionRef.value, localId, offset))
+}
+
+/**
+ * F4 production mount (delta §5 F4 / §9.5): the undo/redo AFFORDANCE. F1
+ * built the session history mechanics and F3 made committed inspector edits
+ * undoable, but neither F2 nor F3 wired a trigger — this component had no
+ * consumer-facing undo/redo path before F4. The integrating view (
+ * `TemplateAuthoringView.vue`) reuses its existing 撤销/重做 toolbar buttons,
+ * redirected to these exposed methods while `approvalCanvasV2` is mounted,
+ * so there is exactly ONE undo/redo control — never a second, divergent
+ * history stack (M7).
+ */
+function undo(): boolean {
+  if (props.readOnly) return false
+  if (!settleInspector()) return false
+  return applyResult(adapter.undo(sessionRef.value))
+}
+
+function redo(): boolean {
+  if (props.readOnly) return false
+  if (!settleInspector()) return false
+  return applyResult(adapter.redo(sessionRef.value))
+}
+
+function canUndo(): boolean {
+  return adapter.canUndo(sessionRef.value)
+}
+
+function canRedo(): boolean {
+  return adapter.canRedo(sessionRef.value)
 }
 
 // --- insertion slot interactions -------------------------------------------
@@ -758,6 +901,10 @@ defineExpose({
   insertFieldAt,
   moveFieldToAnchor,
   removeField,
+  undo,
+  redo,
+  canUndo,
+  canRedo,
   getSession: () => sessionRef.value,
   getDragSession: () => dragSession,
 })
@@ -884,7 +1031,7 @@ defineExpose({
 
 .approval-form-builder__card {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   min-height: 56px;
@@ -893,6 +1040,11 @@ defineExpose({
   border-radius: 10px;
   background: var(--el-bg-color);
   cursor: pointer;
+}
+
+.approval-form-builder__card-content {
+  flex: 1;
+  min-width: 0;
 }
 
 .approval-form-builder__card.is-selected {
@@ -910,6 +1062,59 @@ defineExpose({
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.approval-form-builder__detail-preview {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+.approval-form-builder__detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--el-bg-color);
+  font-size: 12px;
+}
+
+.approval-form-builder__detail-table th,
+.approval-form-builder__detail-table td {
+  min-width: 128px;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  text-align: left;
+}
+
+.approval-form-builder__detail-table th {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-weight: 500;
+}
+
+.approval-form-builder__detail-table input,
+.approval-form-builder__detail-table select,
+.approval-form-builder__detail-table textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 4px;
+  background: var(--el-fill-color-lighter);
+  color: var(--el-text-color-placeholder);
+  resize: none;
+}
+
+.approval-form-builder__detail-required {
+  margin-left: 2px;
+  color: var(--el-color-danger);
+}
+
+.approval-form-builder__detail-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--el-border-color);
+  color: var(--el-text-color-placeholder);
+  text-align: center;
 }
 
 .approval-form-builder__card-selected-mark {

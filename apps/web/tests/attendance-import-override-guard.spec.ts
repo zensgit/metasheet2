@@ -307,6 +307,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(importBtn.disabled).toBe(false))
     expect(importBtn.disabled).toBe(false)
     expect(importSection.textContent).not.toContain('override mode requires a fresh Preview')
   })
@@ -331,6 +332,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     const importSection = findImportSection(container!)
     findButton(importSection, 'Preview').click()
     await flushUi(6)
+    await vi.waitFor(() => expect(importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.disabled).toBe(false))
     importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
     await flushUi(4)
 
@@ -406,6 +408,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
     const importBtn = importSection.querySelector<HTMLButtonElement>('[data-import-run]')!
+    await vi.waitFor(() => expect(importBtn.disabled).toBe(false))
     expect(importBtn.disabled).toBe(false)
 
     setInput(importSection, '#attendance-import-user', 'a-different-user')
@@ -553,6 +556,7 @@ describe('Attendance override-import guard (wired UI)', () => {
 
       findButton(importSection, 'Preview').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.disabled).toBe(false))
       importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
       await flushUi(4)
 
@@ -604,6 +608,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     // preview means there is no single honest backup target.
     findButton(importSection, 'Preview').click()
     await flushUi(6)
+    await vi.waitFor(() => expect(importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.disabled).toBe(false))
     importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
     await flushUi(4)
 
@@ -706,6 +711,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     const importSection = findImportSection(container!)
     findButton(importSection, 'Preview').click()
     await flushUi(6)
+    await vi.waitFor(() => expect(importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.disabled).toBe(false))
     importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
     await flushUi(4)
 
@@ -721,6 +727,7 @@ describe('Attendance override-import guard (wired UI)', () => {
     setInput(importSection, '#attendance-import-user', 'user-1')
     findButton(importSection, 'Preview').click()
     await flushUi(6)
+    await vi.waitFor(() => expect(importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.disabled).toBe(false))
     importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
     await flushUi(4)
     const modal2 = container!.querySelector('[data-import-override-confirm]')!

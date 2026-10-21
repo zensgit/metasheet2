@@ -1,7 +1,9 @@
 import { reactive } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import type { FormSchema, UnifiedApprovalDTO } from '../types/approval'
 import { getTemplate } from './api'
-import { formatSummaryLine, summaryFields } from './detailField'
+import { collectFormUserIds, formatSummaryLine, summaryFields } from './detailField'
+import { ensureUserNamesResolved, getResolvedUserName } from './directoryResolve'
 
 /**
  * B2-01 (待办列表关键字段摘要) — row-level glue: resolve `row.templateId` against a templateId ->
@@ -15,12 +17,15 @@ import { formatSummaryLine, summaryFields } from './detailField'
 export function resolveRowSummaryLine(
   schemas: Map<string, FormSchema> | undefined,
   row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>,
+  isZh: boolean,
   limit = 3,
 ): string {
   const templateId = row.templateId
   const schema = templateId ? schemas?.get(templateId) : undefined
   if (!schema) return ''
-  return formatSummaryLine(summaryFields(schema, row.formSnapshot, limit))
+  // Test report 2026-10-08 T4b: a `user` (人员) field in the summary renders the directory-resolved
+  // name (ensured by `ensureLoadedForRows` below), never the stored id.
+  return formatSummaryLine(summaryFields(schema, row.formSnapshot, limit, isZh, getResolvedUserName), isZh)
 }
 
 /**
@@ -52,6 +57,9 @@ export function resolveRowSummaryLine(
  */
 export function useApprovalListFieldSummary() {
   const schemas: Map<string, FormSchema> = reactive(new Map())
+  // O-8 / F8-1: the summary line follows the shell locale (read at render time, so a locale switch
+  // re-renders it through the same reactive dependency the template already tracks).
+  const { isZh } = useLocale()
   const attempted = new Set<string>()
   const inflight = new Map<string, Promise<void>>()
 
@@ -79,18 +87,36 @@ export function useApprovalListFieldSummary() {
    * ids are skipped, and concurrent calls sharing a not-yet-settled id share the same in-flight
    * fetch instead of double-firing.
    */
-  async function ensureLoadedForRows(rows: Array<Pick<UnifiedApprovalDTO, 'templateId'>>): Promise<void> {
+  async function ensureLoadedForRows(
+    rows: Array<Pick<UnifiedApprovalDTO, 'templateId'> & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot'>>>,
+  ): Promise<void> {
     const distinctIds = new Set(
       rows
         .map((row) => row.templateId)
         .filter((id): id is string => !!id && !attempted.has(id)),
     )
     await Promise.all(Array.from(distinctIds, (id) => loadOne(id)))
+    // T4b: once the schemas are in, queue the member ids of the rows' top-level `user` values for
+    // the shared batch resolve, so the summary line can show names. Runs here (an async side effect
+    // the caller's watch triggers), never from the render-time `summaryLineFor`.
+    ensureUserNamesResolved(rows.flatMap((row) => summaryUserIdsFor(row)))
+  }
+
+  /**
+   * T4b — the member ids a row's summary line names: its top-level `user` values, read against the
+   * CACHED schema only (this never fetches a template). It reads the reactive cache, so a caller's
+   * watch over it re-fires once the schema lands (gate r1 P3-4: the master-detail pane's row).
+   */
+  function summaryUserIdsFor(
+    row: (Pick<UnifiedApprovalDTO, 'templateId'> & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot'>>) | null | undefined,
+  ): string[] {
+    const schema = row?.templateId ? schemas.get(row.templateId) : undefined
+    return row && schema ? collectFormUserIds(schema, row.formSnapshot ?? null, { includeDetailColumns: false }) : []
   }
 
   function summaryLineFor(row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>): string {
-    return resolveRowSummaryLine(schemas, row)
+    return resolveRowSummaryLine(schemas, row, isZh.value)
   }
 
-  return { schemas, ensureLoadedForRows, summaryLineFor }
+  return { schemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor }
 }

@@ -53,13 +53,40 @@ function presetSystem() {
 const identityMappings = (record) => Object.keys(record).map((k) => ({ sourceField: k, targetField: k }))
 const presetSchema = () => getK3WiseMaterialProfile(PROFILE_ID).schema
 
-// Capture the exact Save body the adapter sends for a record under the customer profile.
+// G-4 CONVERSION (permanent K3 external-write fence). This helper used to drive `adapter.upsert()`
+// and read the Save body back off a capturing fetch mock. `upsert` now refuses permanently before
+// `login()`, so no Save body ever reaches the wire and that capture is structurally impossible.
+//
+// The property this file exists to prove is UNCHANGED and is NOT weakened by the switch: it
+// compares the http-routes preview composer against the ADAPTER'S OWN `buildSaveBody` — the exact
+// function the (now retired) Save leg called, on the exact same merged `objectConfig`, reached
+// through the adapter's own `previewUpsert`. Two independent composers are still being compared;
+// only the transport that used to carry the second one is gone. `previewUpsert` is deliberately
+// NOT fenced (composing a body and sending nothing is not a write), which is what keeps this
+// contract observable at all.
+//
+// The zero-Save fact is asserted here too, so the file also pins the fence it was converted for.
 async function adapterSaveBody(record) {
   const { calls, fetchImpl } = mockFetchCapturing()
   const adapter = createK3WiseWebApiAdapter({ system: presetSystem(), fetchImpl })
-  const result = await adapter.upsert({ object: 'material', records: [record], keyFields: ['FNumber'] })
-  const save = calls.find((c) => c.pathname === '/K3API/Material/Save')
-  return { result, body: save ? save.body : null }
+  const preview = await adapter.previewUpsert({ object: 'material', records: [record], keyFields: ['FNumber'] })
+  assert.equal(calls.length, 0, 'composing a Save body must put NOTHING on the wire — no login, no Save')
+  const row = preview.records[0]
+  return { preview, body: row ? row.body : null, savePath: row ? row.path : null }
+}
+
+// The write leg the helper above replaced: prove it is permanently refused, with zero wire calls,
+// for the same record shape the parity cases use. Without this, the conversion would read as a
+// silent retreat from the write path rather than the deliberate consequence of G-4.
+async function testAdapterSaveIsPermanentlyRefused() {
+  const { calls, fetchImpl } = mockFetchCapturing()
+  const adapter = createK3WiseWebApiAdapter({ system: presetSystem(), fetchImpl })
+  const refusal = await adapter
+    .upsert({ object: 'material', records: [{ FNumber: 'MAT-1', FName: 'Bolt' }], keyFields: ['FNumber'] })
+    .then(() => null, (error) => error)
+  assert.ok(refusal, 'G-4: adapter.upsert must refuse, never write')
+  assert.equal(refusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.length, 0, 'G-4: zero login calls, zero Save calls')
 }
 
 function previewPayload(record) {
@@ -95,13 +122,17 @@ async function testObjectPassthroughParity() {
   assert.deepEqual(preview.payload, body, 'preview ≡ adapter Save with object passthrough')
 }
 
-// ---- Parity 3: placeholder — same detection, dispositions differ (Save throws, preview valid:false) ----
+// ---- Parity 3: placeholder — same detection, dispositions differ (composer throws, preview valid:false) ----
 async function testPlaceholderParity() {
   const record = { FNumber: 'MAT-3', FName: 'X', FUnitGroupID: '<unit-group-number>' }
-  const { result, body } = await adapterSaveBody(record)
-  assert.equal(body, null, 'adapter made NO Save call — fail-closed before HTTP')
-  assert.equal(result.written, 0)
-  assert.equal(result.errors[0].code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', 'Save throws the placeholder code')
+  // G-4 CONVERSION: the placeholder fail-closed lives in `buildSaveBody`, which the adapter's
+  // preview leg calls unchanged. It used to be observed as a COLLECTED per-row error from
+  // `upsert` (`result.errors[0].code`); reached through `previewUpsert` the identical throw
+  // propagates instead of being collected. Same guard, same code, same composed body — only the
+  // caller that catches it differs, because the caller that used to catch it is now fenced off.
+  const thrown = await adapterSaveBody(record).then(() => null, (error) => error)
+  assert.ok(thrown, 'the placeholder guard must fail closed, not compose a half-configured body')
+  assert.equal(thrown.details.code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', 'composer throws the placeholder code')
 
   const preview = previewPayload(record)
   assert.equal(preview.valid, false, 'preview reports invalid for the same placeholder')
@@ -229,10 +260,13 @@ async function testNonResolvedFailClosedParity() {
     const { record: resolved } = resolveReferenceRulesIntoRecord({ FNumber: 'MAT-X', FName: 'Y', unitGroupSourceCode: 'STD' }, [REF_RULE], indexes)
     assert.equal(resolved.FUnitGroupID, UNRESOLVED_PLACEHOLDER, `${label}: target field carries the sentinel`)
 
-    const { result, body } = await adapterSaveBody(resolved)
-    assert.equal(body, null, `${label}: adapter made NO Save call (fail-closed before HTTP)`)
-    assert.equal(result.written, 0, `${label}: nothing written`)
-    assert.equal(result.errors[0].code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', `${label}: Save throws the placeholder code`)
+    // G-4 CONVERSION (same reasoning as testPlaceholderParity): the fail-closed guard is
+    // `buildSaveBody`'s and is reached identically through the adapter's preview leg; the throw
+    // propagates rather than being collected into `result.errors`, because the collecting caller
+    // (`upsert`) is now permanently fenced off.
+    const thrown = await adapterSaveBody(resolved).then(() => null, (error) => error)
+    assert.ok(thrown, `${label}: composition must fail closed (no body composed)`)
+    assert.equal(thrown.details.code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', `${label}: composer throws the placeholder code`)
 
     const preview = previewPayload(resolved)
     assert.equal(preview.valid, false, `${label}: preview reports invalid`)
@@ -309,7 +343,8 @@ async function main() {
   await testResolvedRecordParity()
   await testNonResolvedFailClosedParity()
   await testDesyncNegativeControl()
-  console.log('✓ k3-save-body-composer.parity: preview ≡ adapter Save (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate, customer-profile drops FBaseUnitID, DF-T3b-2a resolved-record parity + 3-state fail-closed + desync neg-control')
+  await testAdapterSaveIsPermanentlyRefused()
+  console.log('✓ k3-save-body-composer.parity: route preview ≡ adapter buildSaveBody (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate, customer-profile drops FBaseUnitID, DF-T3b-2a resolved-record parity + 3-state fail-closed + desync neg-control, G-4 adapter Save permanently refused')
 }
 
 main().catch((err) => {

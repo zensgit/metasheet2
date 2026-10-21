@@ -12,17 +12,17 @@
     />
 
     <div v-else-if="needsLogin" class="card-decision__login" data-testid="card-decision-login">
-      <p class="card-decision__meta">{{ launchMessage || '需要登录后处理该审批待办。' }}</p>
+      <p class="card-decision__meta">{{ launchMessage || t.loginRequired }}</p>
       <el-button type="primary" size="large" data-testid="card-decision-launch" @click="startDingTalkLaunch">
-        使用钉钉登录
+        {{ t.loginWithDingTalk }}
       </el-button>
     </div>
 
     <template v-else-if="summary">
       <header class="card-decision__header">
-        <h1 data-testid="card-decision-title">{{ summary.approval.title ?? '审批待办' }}</h1>
-        <p v-if="summary.approval.requestNo" class="card-decision__meta">编号：{{ summary.approval.requestNo }}</p>
-        <p class="card-decision__meta">节点：<code class="card-decision__code">{{ summary.nodeKey }}</code></p>
+        <h1 data-testid="card-decision-title">{{ summary.approval.title ?? t.titleFallback }}</h1>
+        <p v-if="summary.approval.requestNo" class="card-decision__meta">{{ t.requestNo }}{{ summary.approval.requestNo }}</p>
+        <p class="card-decision__meta">{{ t.node }}<code class="card-decision__code">{{ summary.nodeKey }}</code></p>
       </header>
 
       <!-- Terminal / stale states render the REAL ledger state instead of dead buttons. -->
@@ -38,20 +38,20 @@
       <template v-else>
         <el-alert
           v-if="!summary.viewerIsRecipient"
-          title="此待办的受理人不是当前账号；提交将按服务端受理校验执行。"
+          :title="t.notRecipient"
           type="warning"
           show-icon
           :closable="false"
         />
         <div class="card-decision__comment">
           <label class="card-decision__label">
-            处理意见<span v-if="summary.approval.rejectCommentRequired">（驳回必填）</span>
+            {{ t.commentLabel }}<span v-if="cardCommentRequired === 'always'">{{ t.commentRequired }}</span><span v-else-if="cardCommentRequired === 'reject_only'">{{ t.commentRequiredOnReject }}</span>
           </label>
           <el-input
             v-model="comment"
             type="textarea"
             :rows="3"
-            placeholder="填写处理意见"
+            :placeholder="t.commentPlaceholder"
             data-testid="card-decision-comment"
           />
         </div>
@@ -68,11 +68,11 @@
             type="success"
             size="large"
             :loading="submitting === 'approve'"
-            :disabled="submitting !== ''"
+            :disabled="submitting !== '' || approveBlocked"
             data-testid="card-decision-approve"
             @click="submit('approve')"
           >
-            同意
+            {{ t.approve }}
           </el-button>
           <el-button
             type="danger"
@@ -82,11 +82,14 @@
             data-testid="card-decision-reject"
             @click="submit('reject')"
           >
-            驳回
+            {{ t.reject }}
           </el-button>
         </div>
         <p v-if="rejectBlocked" class="card-decision__hint" data-testid="card-decision-reject-hint">
-          驳回前请先填写处理意见。
+          {{ t.rejectHint }}
+        </p>
+        <p v-if="approveBlocked" class="card-decision__hint" data-testid="card-decision-approve-hint">
+          {{ t.approveHint }}
         </p>
       </template>
     </template>
@@ -108,11 +111,23 @@ import {
   type ApprovalCardSummary,
 } from '../../approvals/cardDecision'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
+import { CARD_EN, CARD_ZH, type CardOwnErrorKey } from './approvalCardDecisionLabels'
 
 const route = useRoute()
 
+// O-8 / F8-1: this page follows the shell locale (module-scope `useLocale()` singleton); its copy
+// lives in approvalCardDecisionLabels.ts. Its own error copy is kept as a label KEY (a server
+// message is kept verbatim), so a later locale switch re-renders it in the new language.
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? CARD_ZH : CARD_EN))
+
 const loading = ref(true)
-const loadError = ref('')
+const loadErrorKey = ref<CardOwnErrorKey | ''>('')
+const loadErrorServerMessage = ref('')
+const loadError = computed(() =>
+  loadErrorServerMessage.value || (loadErrorKey.value ? t.value[loadErrorKey.value] : ''),
+)
 // Lock §5: unauthenticated deep link auto-launches DingTalk OAuth ONCE per delivery; a bounce-back
 // still unauthenticated (cancelled/failed OAuth) renders a manual retry button instead of looping.
 const needsLogin = ref(false)
@@ -120,28 +135,44 @@ const launchMessage = ref('')
 const summary = ref<ApprovalCardSummary | null>(null)
 const comment = ref('')
 const submitting = ref<'' | 'approve' | 'reject'>('')
-const submitError = ref('')
+const submitErrorKey = ref<CardOwnErrorKey | ''>('')
+const submitErrorServerMessage = ref('')
+const submitError = computed(() =>
+  submitErrorServerMessage.value || (submitErrorKey.value ? t.value[submitErrorKey.value] : ''),
+)
 
 const deliveryId = computed(() => (typeof route.query.d === 'string' ? route.query.d : ''))
 const token = computed(() => (typeof route.query.t === 'string' ? route.query.t : ''))
 
+// Lock-5 §1.3 / gate CR-3 — both sides now derive from the EFFECTIVE node requirement the server
+// resolved at THIS delivery's node (it joins the frozen runtime graph for exactly this). The
+// three-valued field is optional so an older server degrades to the shipped reject-only reading.
+const cardCommentRequired = computed<'never' | 'reject_only' | 'always'>(() => {
+  const resolved = summary.value?.approval.commentRequired
+  if (resolved) return resolved
+  return (summary.value?.approval.rejectCommentRequired ?? true) ? 'reject_only' : 'never'
+})
 const rejectBlocked = computed(() =>
-  (summary.value?.approval.rejectCommentRequired ?? true) && comment.value.trim().length === 0,
+  cardCommentRequired.value !== 'never' && comment.value.trim().length === 0,
+)
+const approveBlocked = computed(() =>
+  cardCommentRequired.value === 'always' && comment.value.trim().length === 0,
 )
 
 const staleTitle = computed(() => {
   const s = summary.value
   if (!s) return ''
   if (s.cardState === 'acted') {
-    return `该待办已处理（${s.actedAction === 'approve' ? '同意' : s.actedAction === 'reject' ? '驳回' : s.actedAction ?? ''}）。`
+    const acted = s.actedAction === 'approve' ? t.value.approve : s.actedAction === 'reject' ? t.value.reject : s.actedAction ?? ''
+    return isZh.value ? `该待办已处理（${acted}）。` : `This task has already been handled (${acted}).`
   }
-  if (s.approval.status !== 'pending') return '该审批已办结，无需处理。'
+  if (s.approval.status !== 'pending') return t.value.staleClosed
   // outcome_unknown deliberately NOT here (PR #4046 Phase B): such a card MAY have been
   // delivered, so while its instance is pending the server marks it actionable and this stale
   // branch never renders; if it is non-actionable for another reason the generic 已流转 message
   // below is the accurate one — not "未成功投递".
-  if (s.sendStatus === 'pending' || s.sendStatus === 'failed') return '该卡片未成功投递，无法在此处理。'
-  return '该待办已流转（转办/新一轮），此卡片不再有效。'
+  if (s.sendStatus === 'pending' || s.sendStatus === 'failed') return t.value.staleUndelivered
+  return t.value.staleMoved
 })
 
 function cardErrorOf(error: unknown): ApprovalCardActionError | null {
@@ -165,11 +196,12 @@ async function startDingTalkLaunch(): Promise<void> {
 
 async function load() {
   loading.value = true
-  loadError.value = ''
+  loadErrorKey.value = ''
+  loadErrorServerMessage.value = ''
   needsLogin.value = false
   if (!deliveryId.value || !token.value) {
     loading.value = false
-    loadError.value = '链接无效：缺少必要参数。'
+    loadErrorKey.value = 'invalidLink'
     return
   }
   // Lock §5: session check BEFORE any api call — missing session drives the DingTalk launch flow
@@ -197,9 +229,9 @@ async function load() {
     summary.value = await fetchApprovalCardSummary(deliveryId.value, token.value)
   } catch (error) {
     const cardError = cardErrorOf(error)
-    loadError.value = cardError?.code === 'APPROVAL_CARD_DELIVERY_NOT_FOUND'
-      ? '链接无效或已失效。'
-      : cardError?.message ?? '加载失败，请稍后重试。'
+    if (cardError?.code === 'APPROVAL_CARD_DELIVERY_NOT_FOUND') loadErrorKey.value = 'linkExpired'
+    else if (typeof cardError?.message === 'string') loadErrorServerMessage.value = cardError.message
+    else loadErrorKey.value = 'loadFailed'
   } finally {
     loading.value = false
   }
@@ -207,7 +239,8 @@ async function load() {
 
 async function submit(decision: 'approve' | 'reject') {
   if (submitting.value) return
-  submitError.value = ''
+  submitErrorKey.value = ''
+  submitErrorServerMessage.value = ''
   submitting.value = decision
   try {
     summary.value = await submitApprovalCardDecision(
@@ -220,7 +253,8 @@ async function submit(decision: 'approve' | 'reject') {
     const cardError = cardErrorOf(error)
     // A stale/terminal response carries the REAL summary — render it instead of a dead form.
     if (cardError?.summary) summary.value = cardError.summary
-    submitError.value = cardError?.message ?? '提交失败，请重试。'
+    if (typeof cardError?.message === 'string') submitErrorServerMessage.value = cardError.message
+    else submitErrorKey.value = 'submitFailed'
   } finally {
     submitting.value = ''
   }

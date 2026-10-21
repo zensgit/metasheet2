@@ -18,6 +18,12 @@ const CHANGE_TYPES = Object.freeze({
   VERSION_CHANGED: 'version_changed',
   PATH_CHANGED: 'path_changed',
   PARENT_CHANGED: 'parent_changed',
+  // Fingerprint decomposition (docs/development/platform-overall-design/stock-prep-change-adjudication-
+  // 20260901.md): an in-place material substitution / component-code swap at unchanged
+  // path/parent/version used to surface only as the opaque source_fingerprint_changed. For 备料 those
+  // are exactly the changes a reviewer must see by name.
+  MATERIAL_CHANGED: 'material_changed',
+  COMPONENT_CODE_CHANGED: 'component_code_changed',
   SOURCE_FINGERPRINT_CHANGED: 'source_fingerprint_changed',
   INVALID_QTY: 'invalid_qty',
   MISSING_CHILD_BOM: 'missing_child_bom',
@@ -38,6 +44,8 @@ const BLOCKING_CHANGE_TYPES = Object.freeze([
   CHANGE_TYPES.VERSION_CHANGED,
   CHANGE_TYPES.PATH_CHANGED,
   CHANGE_TYPES.PARENT_CHANGED,
+  CHANGE_TYPES.MATERIAL_CHANGED,
+  CHANGE_TYPES.COMPONENT_CODE_CHANGED,
   CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED,
   CHANGE_TYPES.INVALID_QTY,
   CHANGE_TYPES.MISSING_CHILD_BOM,
@@ -128,6 +136,17 @@ function quantityChanged(previous, current) {
   return left !== right
 }
 
+// BACKWARD COMPATIBILITY: `material` only became a persisted snapshot-line field with the fingerprint
+// decomposition — batches persisted earlier carry NO material field. Compare ONLY when BOTH sides carry
+// a value; a one-sided material must never surface as a spurious substitution, and that dimension keeps
+// today's sourceFingerprint fallback (material stays inside the hash either way).
+function materialChanged(previous, current) {
+  const left = optionalString(previous && previous.material)
+  const right = optionalString(current && current.material)
+  if (left === null || right === null) return false
+  return left.toLowerCase() !== right.toLowerCase()
+}
+
 function currentHasInvalidQty(current) {
   const qty = numberOrNull(current && current.designQty)
   return qty === null || qty <= 0
@@ -202,6 +221,14 @@ function compareMatchedRows(previous, current) {
   if (!sameText(previous.parentDrawingNo, current.parentDrawingNo) || !sameText(previous.parentVersion, current.parentVersion)) {
     changeTypes.push(CHANGE_TYPES.PARENT_CHANGED)
   }
+  // childDrawingNo has been persisted on snapshot lines all along (expansion-snapshot-mapper
+  // toSnapshotLine) but was never compared first-class — a same-position component-code swap hid
+  // inside the fingerprint. Identity-matched rows share childDrawingNo by construction, so this only
+  // fires on path-matched rows, which is exactly the in-place swap.
+  if (!sameText(previous.childDrawingNo, current.childDrawingNo)) {
+    changeTypes.push(CHANGE_TYPES.COMPONENT_CODE_CHANGED)
+  }
+  if (materialChanged(previous, current)) changeTypes.push(CHANGE_TYPES.MATERIAL_CHANGED)
   if (!sameValue(previous.sourceFingerprint, current.sourceFingerprint)) {
     changeTypes.push(CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED)
   }
@@ -553,6 +580,7 @@ module.exports = {
     currentHasInvalidQty,
     currentHasMissingChildBom,
     identityKey,
+    materialChanged,
     quantityChanged,
     snapshotPathKey,
     stableDiffId,

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
 
@@ -240,6 +241,14 @@ function createApiState(): UserFixture[] {
 interface ApiImplementationOptions {
   /** Limit the default user list to the first N rows so deep-link pinning can be exercised. */
   paginatedPageSize?: number
+  /** W1-6: org ids GET /api/auth/session-orgs returns, or 'fail' for a 503. Default: one org. */
+  sessionOrgs?: string[] | 'fail'
+  /** W1-6: the currentOrgId GET /api/auth/session-orgs reports (the token's org). Default: null. */
+  sessionCurrentOrgId?: string | null
+  /** W1-6 ⑥: the `orgId` the attendance group list reports for its group. Default: no `orgId` field. */
+  attendanceGroupOrgId?: string
+  /** W1-6 ⑥: the `orgId` the shift list reports for its shift. Default: no `orgId` field. */
+  attendanceShiftOrgId?: string
 }
 
 function createApiImplementation(
@@ -423,6 +432,16 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/auth/session-orgs') {
+      if (options.sessionOrgs === 'fail') {
+        return createJsonResponse({ success: false, error: 'Organization list unavailable', code: 'SESSION_ORGS_UNAVAILABLE' }, 503)
+      }
+      return createJsonResponse({
+        success: true,
+        data: { orgs: options.sessionOrgs ?? ['org-alpha'], currentOrgId: options.sessionCurrentOrgId ?? null },
+      })
+    }
+
     if (pathname === '/api/attendance/groups') {
       return createJsonResponse({
         ok: true,
@@ -432,6 +451,7 @@ function createApiImplementation(
               id: '11111111-1111-4111-8111-111111111111',
               name: '总装一组',
               code: 'ASM-1',
+              ...(options.attendanceGroupOrgId !== undefined ? { orgId: options.attendanceGroupOrgId } : {}),
             },
           ],
         },
@@ -448,6 +468,7 @@ function createApiImplementation(
               name: '早班',
               workStartTime: '09:00',
               workEndTime: '18:00',
+              ...(options.attendanceShiftOrgId !== undefined ? { orgId: options.attendanceShiftOrgId } : {}),
             },
           ],
         },
@@ -880,7 +901,8 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Union ID：user-2-union')
     expect(container?.textContent).toContain('Open ID：未记录')
     expect(container?.textContent).toContain('最近目录同步：')
-    expect(container?.textContent).toContain('修复建议：先回到目录同步查看该成员是否已补齐 openId')
+    expect(container?.textContent).toContain('修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。')
+    expect(container?.textContent).not.toContain('重新同步目录')
     const enableButton = findButtonByText(container!, '开通钉钉扫码')
     expect(enableButton.disabled).toBe(true)
     const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
@@ -1046,7 +1068,7 @@ describe('UserManagementView', () => {
       expect(exportedText).toContain('- 已收口：1')
       expect(exportedText).toContain('## 结果回填')
       expect(exportedText).toContain('缺 OpenID 成员清单与预期一致')
-      expect(exportedText).toContain('目录同步可补齐 openId / 或确认仍缺失原因')
+      expect(exportedText).toContain('成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因')
       expect(exportedText).toContain('最近 7 天收口审计可看到时间、处理人和动作')
       expect(exportedText).toContain('## 执行后结论')
       expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
@@ -1402,7 +1424,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
@@ -1507,7 +1529,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
@@ -1559,7 +1581,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
@@ -1606,7 +1628,7 @@ describe('UserManagementView', () => {
 
     const inputs = Array.from(container!.querySelectorAll('.user-admin__panel--create input'))
     const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名') as HTMLInputElement | undefined
-    const usernameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '用户名（可选）') as HTMLInputElement | undefined
+    const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）') as HTMLInputElement | undefined
     const mobileInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '手机号（可选）') as HTMLInputElement | undefined
     const employeeNoInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '员工号（可选）') as HTMLInputElement | undefined
     const departmentInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '部门（可选）') as HTMLInputElement | undefined
@@ -1685,7 +1707,7 @@ describe('UserManagementView', () => {
     expect(nextStepLinks).toEqual([
       {
         text: '考勤组成员',
-        href: '/attendance?tab=admin&section=attendance-admin-group-members&userId=user-created&q=E-2026-010',
+        href: '/attendance?tab=admin&section=attendance-admin-groups&userId=user-created&q=E-2026-010',
       },
       {
         text: '班次分配',
@@ -1697,6 +1719,345 @@ describe('UserManagementView', () => {
       },
     ])
     expect(container?.textContent).not.toContain('首次设置密码链接：')
+  })
+
+  describe('create-user validation copy (customer feedback 20261008 #1)', () => {
+    async function submitCreateUserAgainst(error: Record<string, unknown>, fields: { name: string; username: string; password: string }): Promise<void> {
+      const fallback = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (url.pathname === '/api/admin/users' && (init?.method || 'GET').toUpperCase() === 'POST') {
+          callLog.push(String(input))
+          return createJsonResponse({ ok: false, error }, 400)
+        }
+        return fallback(input, init)
+      })
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      const passwordInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '可选：初始密码')
+      if (!nameInput || !usernameInput || !passwordInput) throw new Error('Create-user form inputs not found')
+      for (const [input, value] of [[nameInput, fields.name], [usernameInput, fields.username], [passwordInput, fields.password]] as const) {
+        input.value = value
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => Boolean(container!.querySelector('.user-admin__status--error')))
+    }
+
+    function errorBannerText(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() || ''
+    }
+
+    it('states both rules in the create form and labels the login-name field', async () => {
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const loginNameRule = container!.querySelector('[data-create-user-rule="login-name"]')?.textContent || ''
+      const passwordRule = container!.querySelector('[data-create-user-rule="password"]')?.textContent || ''
+      expect(loginNameRule).toContain('小写字母、数字和 . _ -')
+      expect(loginNameRule).toContain('中文姓名请填「姓名」栏')
+      expect(passwordRule).toContain('8–128 位')
+      expect(passwordRule).toContain('大写字母、小写字母和数字')
+      expect(passwordRule).toContain('不能包含 123456、password')
+      const usernameInput = container!.querySelector<HTMLInputElement>('.user-admin__panel--create input[aria-label="登录名（可选）"]')
+      expect(usernameInput?.getAttribute('placeholder')).toBe('登录名（可选，小写字母/数字）')
+    })
+
+    it('renders the weak-pattern password failure as a Chinese sentence instead of the English server message', async () => {
+      await submitCreateUserAgainst({
+        code: 'PASSWORD_POLICY_FAILED',
+        message: 'Password does not meet requirements',
+        details: {
+          details: ['Password contains a common weak pattern'],
+          reasons: ['weak_pattern'],
+        },
+      }, { name: '测试员', username: 'operator.a', password: '123456Asd' })
+
+      expect(errorBannerText()).toBe('密码不符合要求：不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(errorBannerText()).not.toContain('Password')
+    })
+
+    it('renders the non-ASCII login-name failure as a Chinese sentence that points at the 姓名 field', async () => {
+      await submitCreateUserAgainst({
+        code: 'INVALID_USERNAME',
+        message: 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed',
+        details: { rule: 'login_name_ascii' },
+      }, { name: '测试员', username: '测试员', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏')
+      expect(errorBannerText()).not.toContain('Username')
+    })
+
+    it('falls back to the server message for an unmapped code', async () => {
+      await submitCreateUserAgainst({
+        code: 'USERNAME_ALREADY_EXISTS',
+        message: 'User with this username already exists',
+      }, { name: '测试员', username: 'operator.a', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('User with this username already exists')
+    })
+
+    it('maps every password reason in order, keeps an en variant, and falls back when it cannot map', () => {
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'too_long', 'no_lowercase', 'no_uppercase', 'no_digit', 'weak_pattern'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；不超过 128 位；要有小写字母；要有大写字母；要有数字；不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'no_digit'] },
+      }, 'en')).toBe('Password does not meet requirements: at least 8 characters; at least one number')
+      expect(describeCreateUserError({
+        code: 'INVALID_USERNAME',
+        details: { rule: 'login_name_ascii' },
+      }, 'en')).toContain('put a Chinese name in the Name field')
+      // An unknown reason next to a known one keeps the server's index-aligned English string.
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { details: ['Password must be at least 8 characters long', 'Some future rule'], reasons: ['too_short', 'future_rule'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；Some future rule')
+      // No mapping at all -> null, so the view keeps the server message.
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { details: ['x'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { reasons: ['future_rule'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME', details: { rule: 'something_else' } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'USER_ALREADY_EXISTS', message: 'x' }, 'zh')).toBeNull()
+      expect(describeCreateUserError(undefined, 'zh')).toBeNull()
+    })
+  })
+
+  describe('W1-6: create-form org selector (owner ruling 2026-10-10)', () => {
+    function mountWith(options: ApiImplementationOptions): void {
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, createApiState(), options))
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+    }
+
+    function orgSelect(): HTMLSelectElement {
+      const select = container!.querySelector<HTMLSelectElement>('select[aria-label="所属组织（可选）"]')
+      if (!select) throw new Error('Org select not found')
+      return select
+    }
+
+    async function fillRequiredAndSubmit(): Promise<Record<string, unknown>> {
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      if (!nameInput || !usernameInput) throw new Error('Create-user form inputs not found')
+      nameInput.value = '组织测试'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      usernameInput.value = 'org.tester'
+      usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
+      await flushUi(8)
+      const createCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST')
+      if (!createCall) throw new Error('Create-user request not found')
+      return JSON.parse(String((createCall[1] as RequestInit | undefined)?.body)) as Record<string, unknown>
+    }
+
+    it('lists the session orgs but never pre-selects one, even when it is the only option', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'] })
+      await flushUi(20)
+
+      expect(callLog).toContain('/api/auth/session-orgs')
+      const select = orgSelect()
+      expect(Array.from(select.options).map((option) => option.value)).toEqual(['', 'org-alpha'])
+      expect(select.options[0].textContent?.trim()).toBe('不指定组织（不写入组织归属）')
+      expect(select.value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    // Gate r1 P2-2: "never silently default" must hold for every option count, and also when the
+    // session reports a current org (a single-org install's admin token carries one).
+    for (const [label, sessionOrgs, sessionCurrentOrgId] of [
+      ['two options, no current org', ['org-alpha', 'org-beta'], null],
+      ['one option that is also the current org', ['org-alpha'], 'org-alpha'],
+      ['several options, the current org listed second', ['org-alpha', 'org-beta', 'org-gamma'], 'org-beta'],
+    ] as const) {
+      it(`does not pre-select or send an org without a choice (${label})`, async () => {
+        mountWith({ sessionOrgs: [...sessionOrgs], sessionCurrentOrgId })
+        await flushUi(20)
+
+        const select = orgSelect()
+        expect(Array.from(select.options).map((option) => option.value)).toEqual(['', ...sessionOrgs])
+        expect(select.value).toBe('')
+        expect(select.selectedIndex).toBe(0)
+        expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+        const body = await fillRequiredAndSubmit()
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+    }
+
+    // Reconcile §5.3 acceptance: picking only an attendance group must not drag an org along (on an
+    // anchorless upgrade install an added attendanceOrgId would turn today's 200 into a 404).
+    it('does not add attendanceOrgId when only an attendance group is picked', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'], sessionCurrentOrgId: 'org-alpha' })
+      await flushUi(20)
+
+      const groupSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+      if (!groupSelect) throw new Error('Attendance group select not found')
+      await setSelectValue(groupSelect, '11111111-1111-4111-8111-111111111111')
+      expect(orgSelect().value).toBe('')
+
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceGroupId).toBe('11111111-1111-4111-8111-111111111111')
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('sends attendanceOrgId only when an org is chosen, and the clear button drops it again', async () => {
+      mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta' })
+      await flushUi(20)
+      expect(orgSelect().value).toBe('')
+
+      await setSelectValue(orgSelect(), 'org-beta')
+      const clear = container!.querySelector<HTMLButtonElement>('[data-create-user-org-clear]')
+      expect(clear?.textContent?.trim()).toBe('清除组织')
+      clear!.click()
+      await flushUi(2)
+      expect(orgSelect().value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      await setSelectValue(orgSelect(), 'org-alpha')
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceOrgId).toBe('org-alpha')
+      // The form resets after a successful create: the org choice does not leak into the next user.
+      expect(orgSelect().value).toBe('')
+    })
+
+    it('keeps the form usable with no org when the org list cannot be loaded', async () => {
+      mountWith({ sessionOrgs: 'fail' })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('组织列表暂不可用；不指定组织时不会写入组织归属。')
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('says so when the signed-in admin has no org to offer', async () => {
+      mountWith({ sessionOrgs: [] })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('当前账号没有可选的组织；不指定组织时不会写入组织归属。')
+    })
+
+    // W1-6 ⑥ (owner ruling 2026-10-10): show which org a picked attendance group / default shift puts
+    // the new user in -- display only, never an implicit attendanceOrgId.
+    describe('⑥ the org an attendance group / default shift puts the new user in', () => {
+      const GROUP_ID = '11111111-1111-4111-8111-111111111111'
+      const SHIFT_ID = '22222222-2222-4222-8222-222222222222'
+
+      function groupSelect(): HTMLSelectElement {
+        const select = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+        if (!select) throw new Error('Attendance group select not found')
+        return select
+      }
+
+      function shiftSelect(): HTMLSelectElement {
+        const select = container!.querySelector<HTMLSelectElement>('select[aria-label="默认班次（可选）"]')
+        if (!select) throw new Error('Default shift select not found')
+        return select
+      }
+
+      function note(): string | null {
+        return container!.querySelector('[data-create-user-attendance-org-note]')?.textContent?.trim() ?? null
+      }
+
+      it('shows nothing while no group or shift is picked', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha', attendanceShiftOrgId: 'org-alpha' })
+        await flushUi(20)
+        expect(note()).toBeNull()
+      })
+
+      it('group picked: names the group\'s org, leaves the org selector empty and sends no attendanceOrgId', async () => {
+        mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta', attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选考勤组所属的组织）。')
+        expect(orgSelect().value).toBe('')
+        expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+        const body = await fillRequiredAndSubmit()
+        expect(body.attendanceGroupId).toBe(GROUP_ID)
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+
+      it('shift only: names the shift\'s org and still sends no attendanceOrgId', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceShiftOrgId: 'org-alpha' })
+        await flushUi(20)
+
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选默认班次所属的组织）。')
+        expect(orgSelect().value).toBe('')
+
+        const body = await fillRequiredAndSubmit()
+        expect(body.defaultShiftId).toBe(SHIFT_ID)
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+
+      it('the note disappears again when the group is cleared', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).not.toBeNull()
+        await setSelectValue(groupSelect(), '')
+        expect(note()).toBeNull()
+      })
+
+      it('says the create will be refused when the chosen org differs from the group\'s org', async () => {
+        mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        await setSelectValue(orgSelect(), 'org-beta')
+        expect(note()).toBe('所选考勤组属于组织 org-alpha，与上面选择的组织不一致，创建会被拒绝；请改选组织或清除组织。')
+        await setSelectValue(orgSelect(), 'org-alpha')
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选考勤组所属的组织）。')
+      })
+
+      it('says the create will be refused when the group and the shift belong to different orgs', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha', attendanceShiftOrgId: 'org-beta' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBe('所选考勤组和默认班次属于不同的组织，创建会被拒绝；请改选其中之一。')
+      })
+
+      it('shows nothing (never a guessed default) when the group list carries no org', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'] })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).toBeNull()
+        const body = await fillRequiredAndSubmit()
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+    })
+
+    it('renders the org validation failures as values-free Chinese sentences', () => {
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND', message: 'attendanceOrgId does not match a known org' }, 'zh'))
+        .toBe('所选组织尚未在目录中建立，未创建用户；请改选其他组织或不指定组织')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_CONFLICT' }, 'zh'))
+        .toBe('所选组织与考勤组/默认班次所属的组织不一致，未创建用户')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND' }, 'en')).toContain('not set up in the directory')
+    })
   })
 
   it('can auto-focus a user from directory query params', async () => {
@@ -1822,5 +2183,989 @@ describe('UserManagementView', () => {
     await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
 
     expect(container?.textContent).toContain('Delta')
+  })
+
+  describe('slice B: read-only 所属组织 in the member-admission block (owner ruling on #6079)', () => {
+    const NONE_NOTICE = '未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐'
+    const MULTIPLE_NOTICE = '属于多个组织：登录后需在页面顶部选择组织'
+
+    // `organizations: undefined` leaves the field out of the payload entirely (an older backend).
+    function installOrganizations(organizations: unknown, overrides: { accountEnabled?: boolean } = {}): void {
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const response = await base(input, init)
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (!/^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data, ...overrides }
+        if (organizations !== undefined) data.organizations = organizations
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    function orgBlock(): HTMLElement | null {
+      return container!.querySelector('[data-testid="member-admission-organizations"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('one active organization: shows that org as a chip under 所属组织 and no warning', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }], hasTenantContext: true })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgBlock()!.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim()).toBe('成员准入')
+      expect(orgBlock()!.textContent).toContain('所属组织')
+      expect(orgChips()).toEqual(['org-alpha'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(true)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('no active organization: no chips and the 未归属任何组织 sentence', async () => {
+      installOrganizations({ active: [], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual([])
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')!.textContent!.trim()).toBe(NONE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('two active organizations: both chips and the 属于多个组织 sentence', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }, { orgId: 'org-bravo' }], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual(['org-alpha', 'org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(false)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')!.textContent!.trim()).toBe(MULTIPLE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+    })
+
+    it('older backend without the field: renders nothing for organizations, the rest of the block still renders', async () => {
+      installOrganizations(undefined)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(orgChips()).toEqual([])
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+      expect(container!.textContent).not.toContain(MULTIPLE_NOTICE)
+    })
+
+    it('a malformed field (no active list) is treated like an absent one, not as "no organization"', async () => {
+      installOrganizations({ hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    it('organizations: null from the server (its read failed, "unknown") renders nothing, not 「未归属任何组织」', async () => {
+      installOrganizations(null)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    for (const [label, organizations] of [
+      ['an item without a string orgId', { active: [{ orgId: 42 }], hasTenantContext: false }],
+      ['an item with a whitespace-only orgId', { active: [{ orgId: '   ' }], hasTenantContext: false }],
+      ['a good item next to a bad one', { active: [{ orgId: 'org-alpha' }, {}], hasTenantContext: false }],
+      ['a non-boolean hasTenantContext', { active: [{ orgId: 'org-alpha' }], hasTenantContext: 'yes' }],
+    ] as const) {
+      it(`a malformed payload (${label}) renders nothing instead of a wrong claim`, async () => {
+        installOrganizations(organizations)
+        await mountPage()
+        await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+        expect(orgBlock()).toBeNull()
+        expect(orgChips()).toEqual([])
+        expect(container!.textContent).not.toContain(NONE_NOTICE)
+      })
+    }
+
+    it('disabled account: renders nothing for organizations (the login predicate reads it as none, which is not the remedy)', async () => {
+      installOrganizations({ active: [], hasTenantContext: false }, { accountEnabled: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号未启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+  })
+
+  describe('slice C: 加入默认组织 for a zero-org user (owner 2026-10-13)', () => {
+    const JOIN_PATH = '/api/admin/directory/local/accounts'
+    const ADMISSION_PATH = '/api/admin/users/user-1/member-admission'
+    // What a server might put in an error body; it must never reach the page.
+    const SERVER_TEXT = 'MKSLICEC a local directory account already exists for this user in this org'
+    const GENERIC_FAILURE = '加入默认组织失败，请稍后重试'
+    const CONFLICT_MESSAGE = '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看'
+    const HISTORY_MESSAGE = '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。'
+    const USER_GONE_MESSAGE = '该账号已不存在，请刷新列表'
+    const ZERO_ORG_CLEAR = { active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false }
+
+    type JoinResponder = () => ReturnType<typeof createJsonResponse> | Promise<ReturnType<typeof createJsonResponse>>
+    let joinCalls: Array<{ method: string | undefined; body: unknown }> = []
+
+    // Before any successful POST the member-admission read answers `organizations` (left out when undefined, an
+    // older backend); after one it answers the `default` membership the route creates.
+    function installJoin(
+      organizations: unknown,
+      options: {
+        accountEnabled?: boolean
+        respond?: JoinResponder
+        // Per-user `organizations` overriding the shared one.
+        organizationsFor?: Record<string, unknown>
+        // Overrides the `userId` the admission payload claims (a malformed / mismatched answer).
+        admissionUserId?: string
+        // Lets a test hold (or fail) a given user's n-th admission read.
+        holdAdmission?: (userId: string, callIndex: number) => Promise<void> | undefined
+      } = {},
+    ): void {
+      joinCalls = []
+      const joinedUserIds = new Set<string>()
+      const admissionCalls = new Map<string, number>()
+      const respond: JoinResponder = options.respond
+        ?? (() => createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (pathname === JOIN_PATH) {
+          callLog.push(String(input))
+          const body = init?.body ? JSON.parse(String(init.body)) as { localUserId?: string } : undefined
+          joinCalls.push({ method: init?.method, body })
+          const response = await respond()
+          if (response.ok && body?.localUserId) joinedUserIds.add(body.localUserId)
+          return response
+        }
+        const isAdmission = pathname.startsWith('/api/admin/users/') && pathname.endsWith('/member-admission')
+        const admissionUser = isAdmission ? decodeURIComponent(pathname.split('/')[4]) : ''
+        if (isAdmission) {
+          const callIndex = admissionCalls.get(admissionUser) ?? 0
+          admissionCalls.set(admissionUser, callIndex + 1)
+          const hold = options.holdAdmission?.(admissionUser, callIndex)
+          if (hold) await hold
+        }
+        const response = await base(input, init)
+        if (!isAdmission) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data }
+        if (options.accountEnabled !== undefined) data.accountEnabled = options.accountEnabled
+        if (options.admissionUserId !== undefined) data.userId = options.admissionUserId
+        const ownOrganizations = options.organizationsFor && admissionUser in options.organizationsFor
+          ? options.organizationsFor[admissionUser]
+          : organizations
+        if (joinedUserIds.has(admissionUser)) {
+          data.organizations = { active: [{ orgId: 'default' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false }
+        } else if (ownOrganizations !== undefined) {
+          data.organizations = ownOrganizations
+        }
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    function deferred(): { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } {
+      let resolve!: () => void
+      let reject!: (error: Error) => void
+      const promise = new Promise<void>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      return { promise, resolve, reject }
+    }
+
+    async function openUser(name: string, userId: string): Promise<void> {
+      const row = findUserRow(container!, name)
+      const detailButton = Array.from(row.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes(name))
+      detailButton!.click()
+      await waitForCondition(() => callLog.includes(`/api/admin/users/${userId}/member-admission`))
+      await flushUi(12)
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+      await waitForCondition(() => container!.textContent?.includes('平台账号') ?? false)
+    }
+
+    function joinButton(): HTMLButtonElement | null {
+      return container!.querySelector('[data-testid="join-default-org-button"]')
+    }
+
+    function confirmPanel(): HTMLElement | null {
+      return container!.querySelector('[data-testid="join-default-org-confirm"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    function admissionLoads(): number {
+      return callLog.filter((url) => url.includes(ADMISSION_PATH)).length
+    }
+
+    function errorStatus(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() ?? ''
+    }
+
+    async function confirmJoin(): Promise<void> {
+      joinButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-submit"]')!.click()
+      await waitForCondition(() => joinCalls.length === 1)
+      await flushUi(12)
+    }
+
+    for (const [label, organizations, accountEnabled] of [
+      ['an older backend without organizations', undefined, true],
+      ['organizations without the two slice-C booleans', { active: [], hasTenantContext: false }, true],
+      ['hasAnyRow missing', { active: [], hasTenantContext: false, deprovisionApplied: false }, true],
+      ['deprovisionApplied missing', { active: [], hasTenantContext: false, hasAnyRow: false }, true],
+      ['hasAnyRow as a non-boolean', { ...ZERO_ORG_CLEAR, hasAnyRow: 'false' }, true],
+      ['hasAnyRow: null (its read failed)', { ...ZERO_ORG_CLEAR, hasAnyRow: null }, true],
+      ['deprovisionApplied: null (its read failed)', { ...ZERO_ORG_CLEAR, deprovisionApplied: null }, true],
+      ['both slice-C booleans null', { ...ZERO_ORG_CLEAR, hasAnyRow: null, deprovisionApplied: null }, true],
+      ['one active organization', { ...ZERO_ORG_CLEAR, active: [{ orgId: 'org-alpha' }] }, true],
+      ['a prior membership row (hasAnyRow)', { ...ZERO_ORG_CLEAR, hasAnyRow: true }, true],
+      ['an applied deprovision', { ...ZERO_ORG_CLEAR, deprovisionApplied: true }, true],
+      ['a disabled account', ZERO_ORG_CLEAR, false],
+    ] as const) {
+      it(`hides 加入默认组织 for ${label}`, async () => {
+        installJoin(organizations, { accountEnabled })
+        await mountPage()
+
+        expect(joinButton()).toBeNull()
+        expect(container!.textContent).not.toContain('加入默认组织')
+      })
+    }
+
+    it('shows 加入默认组织 only when all conditions are positively clear, and asks before writing', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      expect(joinButton()!.textContent!.trim()).toBe('加入默认组织')
+      expect(confirmPanel()).toBeNull()
+
+      joinButton()!.click()
+      await flushUi()
+      const panel = confirmPanel()
+      expect(panel).not.toBeNull()
+      expect(panel!.getAttribute('role')).toBe('dialog')
+      const items = Array.from(panel!.querySelectorAll('li')).map((item) => item.textContent?.trim())
+      expect(items).toEqual([
+        '会为该账号创建一条本地目录账号与链接（目录管理里可见）；',
+        '加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；',
+        '用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。',
+      ])
+      expect(panel!.querySelector('[data-testid="join-default-org-confirm-undo"]')!.textContent!.trim())
+        .toBe('此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。')
+      expect(joinCalls).toEqual([])
+
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-cancel"]')!.click()
+      await flushUi()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    it('on confirm posts the user id, reloads the admission and shows the default chip', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      const loadsBefore = admissionLoads()
+
+      await confirmJoin()
+
+      expect(joinCalls).toEqual([{ method: 'POST', body: { localUserId: 'user-1' } }])
+      await waitForCondition(() => orgChips().length > 0)
+      expect(admissionLoads()).toBeGreaterThan(loadsBefore)
+      expect(orgChips()).toEqual(['default'])
+      expect(joinButton()).toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.textContent).toContain('已加入默认组织')
+      expect(errorStatus()).toBe('')
+    })
+
+    it('disables the button while the request is in flight', async () => {
+      let release: (() => void) | null = null
+      installJoin(ZERO_ORG_CLEAR, {
+        respond: () => new Promise((resolve) => {
+          release = () => resolve(createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+        }),
+      })
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      await confirmJoin()
+
+      expect(joinButton()!.disabled).toBe(true)
+      expect(joinButton()!.textContent!.trim()).toBe('加入中...')
+      release!()
+      await waitForCondition(() => orgChips().length > 0)
+      expect(joinButton()).toBeNull()
+    })
+
+    it('a confirm panel opened for one user is not shown for another user', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      joinButton()!.click()
+      await flushUi()
+      expect(confirmPanel()).not.toBeNull()
+
+      const bravoRow = findUserRow(container!, 'Bravo')
+      const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+      bravoDetailButton!.click()
+      await waitForCondition(() => callLog.includes('/api/admin/users/user-2/member-admission'))
+      await flushUi(12)
+
+      expect(joinButton()).not.toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    async function mountWithHeldFirstAdmission(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => container!.querySelector('.user-admin__user') !== null)
+    }
+
+    it("refuter scenario: user-1's slow admission landing while user-2 is shown neither replaces user-2's panel nor offers a join", async () => {
+      const heldAlpha = deferred()
+      installJoin(ZERO_ORG_CLEAR, {
+        organizationsFor: { 'user-2': { active: [{ orgId: 'org-bravo' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false } },
+        holdAdmission: (userId, callIndex) => (userId === 'user-1' && callIndex === 0 ? heldAlpha.promise : undefined),
+      })
+      await mountWithHeldFirstAdmission()
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => orgChips().length > 0)
+      expect(orgChips()).toEqual(['org-bravo'])
+
+      heldAlpha.resolve()
+      await waitForCondition(() => callLog.includes(ADMISSION_PATH))
+      await flushUi(12)
+
+      expect(orgChips()).toEqual(['org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(joinButton()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    it("user-1's slow admission failing while user-2 is shown does not wipe user-2's panel", async () => {
+      const heldAlpha = deferred()
+      installJoin(ZERO_ORG_CLEAR, {
+        organizationsFor: { 'user-2': { active: [{ orgId: 'org-bravo' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false } },
+        holdAdmission: (userId, callIndex) => (userId === 'user-1' && callIndex === 0 ? heldAlpha.promise : undefined),
+      })
+      await mountWithHeldFirstAdmission()
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => orgChips().length > 0)
+
+      heldAlpha.reject(new Error('MKSLICEC late failure'))
+      await flushUi(20)
+
+      expect(orgChips()).toEqual(['org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-load-failure"]')).toBeNull()
+    })
+
+    it('an admission whose userId is not the selected user never offers a join', async () => {
+      installJoin(ZERO_ORG_CLEAR, { admissionUserId: 'user-other' })
+      await mountPage()
+      await waitForCondition(() => container!.querySelector('[data-testid="member-admission-org-none"]') !== null)
+
+      expect(joinButton()).toBeNull()
+    })
+
+    it('a confirm clicked after the selection moved (before the page re-rendered) posts nothing and says so', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      joinButton()!.click()
+      await flushUi()
+      const submit = container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-submit"]')!
+
+      const bravoRow = findUserRow(container!, 'Bravo')
+      Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))!.click()
+      submit.click()
+      await waitForCondition(() => callLog.includes('/api/admin/users/user-2/member-admission'))
+      await flushUi(12)
+
+      expect(joinCalls).toEqual([])
+      expect(errorStatus()).toBe(GENERIC_FAILURE)
+    })
+
+    it("a join in flight for user-1 does not mark user-2's button, and its success is not announced under user-2", async () => {
+      let release: (() => void) | null = null
+      installJoin(ZERO_ORG_CLEAR, {
+        respond: () => new Promise((resolve) => {
+          release = () => resolve(createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+        }),
+      })
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      await confirmJoin()
+      expect(joinButton()!.disabled).toBe(true)
+
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => joinButton() !== null)
+      expect(joinButton()!.disabled).toBe(false)
+      expect(joinButton()!.textContent!.trim()).toBe('加入默认组织')
+      const alphaLoadsBefore = admissionLoads()
+
+      release!()
+      await flushUi(20)
+
+      expect(container!.textContent).not.toContain('已加入默认组织')
+      expect(admissionLoads()).toBe(alphaLoadsBefore)
+      expect(joinButton()).not.toBeNull()
+      expect(joinButton()!.disabled).toBe(false)
+    })
+
+    for (const [label, respond, expected] of [
+      [
+        '404 DIRECTORY_LOCAL_NOT_FOUND (the user was deleted meanwhile)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_NOT_FOUND', message: SERVER_TEXT } }, 404),
+        USER_GONE_MESSAGE,
+      ],
+      [
+        'the not-found code on a non-404 status',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_NOT_FOUND', message: SERVER_TEXT } }, 400),
+        GENERIC_FAILURE,
+      ],
+      [
+        '404 with another code',
+        () => createJsonResponse({ ok: false, error: { code: 'NOT_FOUND', message: SERVER_TEXT } }, 404),
+        GENERIC_FAILURE,
+      ],
+      [
+        '409 DIRECTORY_LOCAL_CONFLICT (existing account / inactive user)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 409),
+        CONFLICT_MESSAGE,
+      ],
+      [
+        '409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY (prior membership or deprovision)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY', message: SERVER_TEXT } }, 409),
+        HISTORY_MESSAGE,
+      ],
+      [
+        '409 with an unknown code',
+        () => createJsonResponse({ ok: false, error: { code: 'SOMETHING_ELSE', message: SERVER_TEXT } }, 409),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a known conflict code on a non-409 status',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 400),
+        GENERIC_FAILURE,
+      ],
+      [
+        '500',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_INTERNAL_ERROR', message: SERVER_TEXT } }, 500),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a 2xx without the created account',
+        () => createJsonResponse({ ok: true, data: { message: SERVER_TEXT } }),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a network failure',
+        () => Promise.reject(new Error(SERVER_TEXT)),
+        GENERIC_FAILURE,
+      ],
+    ] as const) {
+      it(`maps ${label} to this page's sentence, never the server text, and does not reload`, async () => {
+        installJoin(ZERO_ORG_CLEAR, { respond })
+        await mountPage()
+        await waitForCondition(() => joinButton() !== null)
+        const loadsBefore = admissionLoads()
+
+        await confirmJoin()
+
+        expect(errorStatus()).toBe(expected)
+        expect(container!.textContent).not.toContain('MKSLICEC')
+        expect(container!.textContent).not.toContain('已加入默认组织')
+        expect(admissionLoads()).toBe(loadsBefore)
+        expect(joinButton()).not.toBeNull()
+      })
+    }
+  })
+
+  describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
+    // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
+    const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'
+    const DINGTALK_NOTICE = '钉钉扫码登录信息暂时无法加载，请刷新页面后重试。'
+    const ADMISSION_NOTICE = '成员准入信息暂时无法加载，请刷新页面后重试。'
+    const NAMESPACE_NOTICE = '插件使用准入信息暂时无法加载，请刷新页面后重试。'
+
+    type SidePanelFailure = 'none' | 'server-500' | 'server-500-no-id' | 'server-500-bad-id' | 'network'
+
+    function installSidePanelFailures(failures: { dingtalk: SidePanelFailure; admission: SidePanelFailure }) {
+      const base = createApiImplementation(callLog)
+      const respond = (kind: SidePanelFailure, code: string, correlationId: string) => {
+        if (kind === 'network') throw new TypeError('Failed to fetch')
+        const error: Record<string, unknown> = { code, message: SERVER_TEXT }
+        if (kind === 'server-500') error.correlationId = correlationId
+        if (kind === 'server-500-bad-id') error.correlationId = `${SERVER_TEXT} id`
+        return createJsonResponse({ ok: false, error }, 500)
+      }
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (failures.dingtalk !== 'none' && /^\/api\/admin\/users\/[^/]+\/dingtalk-access$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.dingtalk, 'DINGTALK_ACCESS_FAILED', 'probe-corr-6163-dingtalk')
+        }
+        if (failures.admission !== 'none' && /^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.admission, 'MEMBER_ADMISSION_FAILED', 'probe-corr-6163-admission')
+        }
+        return base(input, init)
+      })
+      return failures
+    }
+
+    function topBanner(): HTMLElement | null {
+      return container!.querySelector('section.user-admin > p.user-admin__status')
+    }
+
+    function blockNotice(testId: string): HTMLElement | null {
+      return container!.querySelector(`[data-testid="${testId}"]`)
+    }
+
+    function sectionTitleOf(element: HTMLElement): string {
+      return element.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim() ?? ''
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/dingtalk-access'))
+        && callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('shows each failure in its own block with the page sentence and the reference number; the top banner is not written and the server text appears nowhere', async () => {
+      installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      const dingtalkNotice = blockNotice('dingtalk-access-load-failure')!
+      expect(sectionTitleOf(dingtalkNotice)).toBe('钉钉扫码登录')
+      expect(dingtalkNotice.textContent).toContain(DINGTALK_NOTICE)
+      expect(dingtalkNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-dingtalk')
+
+      const admissionNotice = blockNotice('member-admission-load-failure')!
+      expect(sectionTitleOf(admissionNotice)).toBe('成员准入')
+      expect(admissionNotice.textContent).toContain(ADMISSION_NOTICE)
+      expect(admissionNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-admission')
+
+      // The plugin-usage block does not claim that there is no data.
+      const namespaceNotice = blockNotice('namespace-admission-load-failure')!
+      expect(sectionTitleOf(namespaceNotice)).toBe('插件使用')
+      expect(namespaceNotice.textContent).toContain(NAMESPACE_NOTICE)
+      expect(container!.textContent).not.toContain('暂无插件使用准入信息')
+
+      // A load failure, not a configuration state: no "not configured" wording in the notices.
+      for (const notice of [dingtalkNotice, admissionNotice, namespaceNotice]) {
+        expect(notice.textContent).not.toMatch(/未配置|未开通|不可用/)
+      }
+
+      expect(topBanner()).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('Unsupported state')
+      expect(container!.textContent).not.toContain('DINGTALK_ACCESS_FAILED')
+      expect(container!.textContent).not.toContain('MEMBER_ADMISSION_FAILED')
+    })
+
+    it('leaves the top banner exactly as it was when a refresh of either block fails', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'none', admission: 'none' })
+      await mountPage()
+
+      // Put a known message in the banner first (a successful plugin-usage change).
+      const namespaceCard = container!.querySelector('.user-admin__role-card--namespace')
+      const openButton = Array.from(namespaceCard?.querySelectorAll('button') ?? []).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
+      if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
+      openButton.click()
+      await waitForCondition(() => topBanner()?.textContent?.includes('已开通 crm 插件使用') ?? false)
+      const bannerBefore = { text: topBanner()!.textContent, className: topBanner()!.className }
+
+      failures.dingtalk = 'server-500'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+
+      failures.admission = 'server-500'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') !== null)
+      await flushUi(8)
+
+      expect({ text: topBanner()!.textContent, className: topBanner()!.className }).toEqual(bannerBefore)
+      expect(container!.textContent).not.toContain('MK6163')
+    })
+
+    it('a successful reload after a failure clears the block notice and shows the data again', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+      expect(container!.textContent).toContain('服务端已启用钉钉登录')
+      expect(container!.textContent).not.toContain(DINGTALK_NOTICE)
+      // The other block's failure is its own: still shown.
+      expect(blockNotice('member-admission-load-failure')).not.toBeNull()
+
+      failures.admission = 'none'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') === null)
+      expect(blockNotice('namespace-admission-load-failure')).toBeNull()
+      expect(container!.textContent).toContain('平台账号已启用')
+      expect(container!.textContent).toContain('插件使用未开通')
+      expect(container!.textContent).not.toContain(ADMISSION_NOTICE)
+      expect(container!.textContent).not.toContain(NAMESPACE_NOTICE)
+      expect(topBanner()).toBeNull()
+    })
+
+    it('shows no reference number when the body has none or a malformed one, and a network failure gets the same sentence', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500-no-id', admission: 'server-500-bad-id' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(blockNotice('member-admission-load-failure')!.textContent).toContain(ADMISSION_NOTICE)
+      expect(blockNotice('member-admission-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('排查编号')
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+
+      failures.dingtalk = 'network'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('Failed to fetch')
+      expect(topBanner()).toBeNull()
+    })
+  })
+
+  describe('admin reset-password inline rule', () => {
+    const RULE_COPY = '至少 8 位。留空则自动生成临时密码。'
+    const SHORT_COPY = '临时密码不足 8 位，未重置。'
+    const SERVER_SHORT_ENGLISH = 'Password must be at least 8 characters long'
+
+    type ResetOutcome = 'ok' | 'short' | 'other-400' | 'failed'
+    const resets: Array<{ userId: string; passwordLength: number | null }> = []
+    const revokes: string[] = []
+    let resetOutcome: ResetOutcome = 'ok'
+    let resetGate: Promise<void> | null = null
+
+    function marks(length: number): string {
+      return 'x'.repeat(length)
+    }
+
+    function installResetApi(): void {
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const rawUrl = String(input)
+        const method = (init?.method || 'GET').toUpperCase()
+        const pathname = new URL(rawUrl, 'http://localhost').pathname
+        if (method === 'POST' && pathname.endsWith('/reset-password')) {
+          const match = pathname.match(/\/users\/([^/]+)\/reset-password$/)
+          const rawBody = typeof init?.body === 'string' ? init.body : ''
+          let passwordLength: number | null = null
+          if (rawBody) {
+            const parsed = JSON.parse(rawBody) as { password?: unknown }
+            if (typeof parsed.password === 'string') passwordLength = parsed.password.length
+          }
+          resets.push({
+            userId: match ? decodeURIComponent(match[1]) : '',
+            passwordLength,
+          })
+          if (resetGate) await resetGate
+          if (resetOutcome === 'short') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'PASSWORD_TOO_SHORT', message: SERVER_SHORT_ENGLISH },
+            }, 400)
+          }
+          if (resetOutcome === 'other-400') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'USER_ID_REQUIRED', message: 'userId is required' },
+            }, 400)
+          }
+          if (resetOutcome === 'failed') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'PASSWORD_RESET_FAILED', message: 'Failed to reset password' },
+            }, 500)
+          }
+          return createJsonResponse({
+            ok: true,
+            data: { userId: match ? decodeURIComponent(match[1]) : '', temporaryPassword: 'issued' },
+          })
+        }
+        if (method === 'POST' && pathname.endsWith('/revoke-sessions')) {
+          const match = pathname.match(/\/users\/([^/]+)\/revoke-sessions$/)
+          revokes.push(match ? decodeURIComponent(match[1]) : '')
+          return createJsonResponse({ ok: true, data: {} })
+        }
+        return base(input, init)
+      })
+    }
+
+    function ruleEl(): HTMLElement | null {
+      const node = container?.querySelector('[data-testid="admin-temporary-password-rule"]')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function errorEl(): HTMLElement | null {
+      const node = container?.querySelector('[data-testid="admin-temporary-password-error"]')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function passwordInput(): HTMLInputElement {
+      const node = container!.querySelector('[data-testid="admin-temporary-password"]')
+      if (!(node instanceof HTMLInputElement)) throw new Error('temporary password input missing')
+      return node
+    }
+
+    function pageBanner(): HTMLElement | null {
+      const node = container!.querySelector('.user-admin > p.user-admin__status')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function sessionHint(): HTMLElement | null {
+      const node = Array.from(container!.querySelectorAll('p.user-admin__hint')).find((candidate) => candidate.textContent?.includes('现有会话失效'))
+      return node instanceof HTMLElement ? node : null
+    }
+
+    async function typeManual(value: string): Promise<void> {
+      const input = passwordInput()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function clickReset(): Promise<void> {
+      findButtonByText(container!, '重置密码').click()
+      await flushUi()
+    }
+
+    async function openNamedUser(name: string): Promise<void> {
+      const button = findUserRow(container!, name).querySelector('button.user-admin__user-body')
+      if (!(button instanceof HTMLButtonElement)) throw new Error(`User button missing: ${name}`)
+      button.click()
+      await waitForCondition(() => container!.querySelector('[data-testid="selected-user-heading"]')?.textContent?.includes(name) ?? false)
+    }
+
+    async function mountAdmin(): Promise<void> {
+      resets.length = 0
+      revokes.length = 0
+      resetOutcome = 'ok'
+      resetGate = null
+      installResetApi()
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await waitForCondition(() => ruleEl() !== null)
+    }
+
+    it('shows the length rule beside the input and blocks a trimmed short value before POST', async () => {
+      await mountAdmin()
+      const input = passwordInput()
+      const rule = ruleEl()
+      expect(rule?.textContent?.trim()).toBe(RULE_COPY)
+      expect(rule?.textContent).not.toMatch(/大写|小写|弱口令/)
+      expect(input.compareDocumentPosition(rule!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(sessionHint()?.textContent).toContain('现有会话失效')
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+
+      await typeManual(marks(1))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(errorEl()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('true')
+      expect(findButtonByText(container!, '重置密码').disabled).toBe(false)
+      expect(findButtonByText(container!, '停用账号').disabled).toBe(false)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(errorEl()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+
+      await typeManual(`  ${marks(7)}  `)
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+    })
+
+    it('posts a trimmed 8-character value that has no other character classes', async () => {
+      await mountAdmin()
+      await typeManual(`  ${marks(8)}  `)
+      await clickReset()
+      await waitForCondition(() => resets.length === 1 && pageBanner()?.textContent?.includes('密码已重置') === true)
+      expect(resets).toEqual([{ userId: 'user-1', passwordLength: 8 }])
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().value).toBe('')
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(false)
+      const issued = container!.querySelector('[data-testid="admin-reset-temporary-password"]')
+      expect(issued?.textContent?.trim().startsWith('临时密码：')).toBe(true)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+    })
+
+    it('posts a blank or whitespace value with the password field omitted', async () => {
+      await mountAdmin()
+      await clickReset()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets[0]).toEqual({ userId: 'user-1', passwordLength: null })
+
+      await typeManual('   ')
+      await clickReset()
+      await waitForCondition(() => resets.length === 2)
+      expect(resets[1]).toEqual({ userId: 'user-1', passwordLength: null })
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(pageBanner()?.textContent).toContain('密码已重置')
+    })
+
+    it('maps server PASSWORD_TOO_SHORT to the inline sentence and leaves other reset failures on the page error', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      await typeManual(marks(8))
+      await clickReset()
+      await waitForCondition(() => errorEl() !== null)
+      expect(resets).toEqual([{ userId: 'user-1', passwordLength: 8 }])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(errorEl()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().value).toHaveLength(8)
+
+      resetOutcome = 'other-400'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('userId is required') === true)
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(pageBanner()?.textContent).not.toContain(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+
+      resetOutcome = 'failed'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('Failed to reset password') === true)
+      expect(resets).toHaveLength(3)
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(pageBanner()?.textContent).not.toContain('密码已重置')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+    })
+
+    it('clears the inline error on success and keeps the rule', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      await typeManual(marks(8))
+      await clickReset()
+      await waitForCondition(() => errorEl()?.textContent?.includes(SHORT_COPY) === true)
+
+      resetOutcome = 'ok'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('密码已重置') === true)
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(false)
+    })
+
+    it('does not carry a short-password error onto the next account', async () => {
+      await mountAdmin()
+      await typeManual(marks(7))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+
+      await openNamedUser('Bravo')
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(errorEl()).toBeNull()
+      expect(passwordInput().value).toBe('')
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+
+      await clickReset()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets).toEqual([{ userId: 'user-2', passwordLength: null }])
+      expect(pageBanner()?.textContent).toContain('密码已重置')
+    })
+
+    it('does not paint a late short-password response onto the account selected afterward', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      let releaseReset = (): void => {}
+      resetGate = new Promise<void>((resolve) => {
+        releaseReset = resolve
+      })
+      await typeManual(marks(8))
+      findButtonByText(container!, '重置密码').click()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets[0]).toEqual({ userId: 'user-1', passwordLength: 8 })
+
+      await openNamedUser('Bravo')
+      releaseReset()
+      await flushUi(8)
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SHORT_COPY)
+      expect(pageBanner()?.textContent || '').not.toContain('密码已重置')
+      expect(resets).toHaveLength(1)
+    })
+
+    it('still logs the current account out after a short password was refused', async () => {
+      await mountAdmin()
+      await typeManual(marks(4))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+
+      findButtonByText(container!, '全部下线').click()
+      await waitForCondition(() => revokes.length === 1 && pageBanner()?.textContent?.includes('该用户现有会话已失效') === true)
+      expect(revokes).toEqual(['user-1'])
+      expect(resets).toEqual([])
+      expect(pageBanner()?.textContent).not.toContain('密码已重置')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(sessionHint()?.textContent).toContain('现有会话失效')
+    })
   })
 })

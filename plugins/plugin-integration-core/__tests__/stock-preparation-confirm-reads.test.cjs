@@ -437,7 +437,11 @@ async function main() {
     assert.equal(second.exceptionCount, 2)
     for (const row of result.rows) {
       for (const key of Object.keys(row)) {
-        assert.ok(!['childDrawingNo', 'designQty', 'designUnit', 'issueQtyFinal', 'issueQtyRaw', 'issueUnit', 'conversionFactor', 'lossRate', 'erpMaterialCode', 'erpMaterialInternalId'].includes(key), `value-bearing key ${key} must never cross (owner-gated)`)
+        // The seven-field pull put 父组件名称 / 当前组件名称 / 规格 / 材料 / 总数量 onto the SNAPSHOT
+        // line. They are business values, so the prep-line read boundary must keep refusing them
+        // exactly as it refuses childDrawingNo — a new snapshot column is not a licence to widen
+        // this projection.
+        assert.ok(!['childDrawingNo', 'designQty', 'designUnit', 'issueQtyFinal', 'issueQtyRaw', 'issueUnit', 'conversionFactor', 'lossRate', 'erpMaterialCode', 'erpMaterialInternalId', 'parentName', 'childName', 'material', 'spec', 'totalQuantity'].includes(key), `value-bearing key ${key} must never cross (owner-gated)`)
       }
     }
     assert.equal(JSON.stringify(result).includes(SECRET), false)
@@ -458,7 +462,6 @@ async function main() {
   console.log('✓ stock-preparation-confirm-reads')
 }
 
-main().catch((error) => {
-  console.error(error && error.stack ? error.stack : error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-confirm-reads.test.cjs', main)

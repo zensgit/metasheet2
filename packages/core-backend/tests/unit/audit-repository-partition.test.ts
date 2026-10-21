@@ -72,6 +72,68 @@ describe('AuditRepository audit_logs partition lifecycle', () => {
     expect(queryMock).toHaveBeenCalledTimes(1)
   })
 
+  it('self-heals on a Chinese-locale missing-partition error identified by SQLSTATE 23514', async () => {
+    // Reproduces the 222 test host: lc_messages = Chinese (Simplified)_China.936,
+    // so PostgreSQL's own wording is untranslatable by the English regex.
+    const error = Object.assign(new Error('没有为关系"audit_logs"找到分区'), {
+      code: '23514',
+      table: 'audit_logs',
+    })
+    queryMock
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: 601 }], rowCount: 1 })
+
+    const repository = new AuditRepository()
+
+    await expect(repository.createAuditLog(buildAuditLogData())).resolves.toBe(601)
+    expect(queryMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('self-heals on code+table alone even when the message text is unrecognizable', async () => {
+    const error = Object.assign(new Error('some other language entirely, not matched by any regex'), {
+      code: '23514',
+      table: 'audit_logs',
+    })
+    queryMock
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: 602 }], rowCount: 1 })
+
+    const repository = new AuditRepository()
+
+    await expect(repository.createAuditLog(buildAuditLogData())).resolves.toBe(602)
+    expect(queryMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not treat a real CHECK constraint violation (23514 with a constraint name) as a missing partition', async () => {
+    const error = Object.assign(new Error('new row for relation "audit_logs" violates check constraint "chk_x"'), {
+      code: '23514',
+      table: 'audit_logs',
+      constraint: 'chk_x',
+    })
+    queryMock.mockRejectedValueOnce(error)
+
+    const repository = new AuditRepository()
+
+    await expect(repository.createAuditLog(buildAuditLogData())).rejects.toThrow(error)
+    expect(queryMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry on an unrelated SQLSTATE such as 23505 (unique violation)', async () => {
+    const error = Object.assign(new Error('duplicate key value violates unique constraint "audit_logs_pkey"'), {
+      code: '23505',
+      table: 'audit_logs',
+      constraint: 'audit_logs_pkey',
+    })
+    queryMock.mockRejectedValueOnce(error)
+
+    const repository = new AuditRepository()
+
+    await expect(repository.createAuditLog(buildAuditLogData())).rejects.toThrow(error)
+    expect(queryMock).toHaveBeenCalledTimes(1)
+  })
+
   it('throws a clear error if INSERT RETURNING produces no row', async () => {
     queryMock.mockResolvedValueOnce({ rows: [], rowCount: 0 })
 

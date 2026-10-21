@@ -52,6 +52,9 @@ function mountManager(options: HarnessOptions = {}): { container: HTMLElement; a
         sheets: [],
         fields: fields.value,
         currentRecordId: options.currentRecordId ?? null,
+        // A11: this suite covers the AVAILABLE state (the prop is fail-closed; the hidden state
+        // is covered by multitable-ai-availability-gate.spec.ts).
+        aiAvailable: true,
         ...(options.aiPreviewFn ? { aiPreviewFn: options.aiPreviewFn } : {}),
         ...(options.aiPreviewBusy !== undefined ? { aiPreviewBusy: options.aiPreviewBusy } : {}),
         ...(options.aiUsageSummaryFn ? { aiUsageSummaryFn: options.aiUsageSummaryFn } : {}),

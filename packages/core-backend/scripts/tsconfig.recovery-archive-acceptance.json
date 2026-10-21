@@ -1,0 +1,21 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "noEmit": true,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "../src/**/*",
+    "../core/**/*",
+    "../types/**/*",
+    "./verify-recovery-archive-server.mts",
+    "./verify-recovery-local-backup.mts",
+    "./verify-recovery-local-startup.mts",
+    "./verify-recovery-manual-source.mts",
+    "./private-db-backend-drain.d.ts",
+    "./verify-recovery-manual-checkpoint.mts",
+    "./verify-recovery-attachment-stage.mts",
+    "./start-recovery-local.mts"
+  ]
+}

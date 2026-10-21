@@ -6,9 +6,10 @@
  * as an async, resumable workflow job — generate the column in the background,
  * suspend for review, then resume to commit the confirmed subset.
  *
- * Reuse, do not reinvent (BJ-1): the job carries the SAME workflow-job-contract
- * status vocabulary (queued | running | suspended | resolved | failed | …; no
- * new enum), the SAME reserve-then-settle generation core (`runShortcutCore` in
+ * Reuse, do not reinvent (BJ-1): the job carries the workflow-job-contract
+ * status vocabulary (queued | running | suspended | resolved | failed | …) plus the ONE
+ * bulk-job-only phase status `committing` (#5842, see {@link BulkJobStatus}), the SAME
+ * reserve-then-settle generation core (`runShortcutCore` in
  * ai-bulk-shared.ts — identical to the inline path), and the SAME per-record
  * write discipline (`commitOneRecord` in the route). It persists to TWO new
  * tables (header + durable per-row state) so review / progress / commit survive
@@ -35,12 +36,30 @@
  * (an in-process plan loss) it marks the header `errored`, leaving the persisted partial
  * committable (BJ-5).
  *
+ * CANCEL vs COMMIT (#5842): the commit phase has its OWN status, `committing` — it no longer
+ * re-uses `running`, which is the GENERATE phase and the only status the worker generates in.
+ * Before the fix, a commit issued right after a cancel flipped the header `rejected` → `running`,
+ * so the worker's next-row check saw "still running" and kept sending (and billing) rows the user
+ * had cancelled; the worker's wrap-up then flipped the commit's `running` → `suspended`, letting a
+ * SECOND commit be claimed. The commit claim is a single conditional UPDATE … RETURNING (see
+ * {@link claimBulkJobCommit}), so it can be taken exactly once; the worker also re-reads each row's
+ * own state before sending it and only marks a row `generated` while it is still `pending`.
+ *
+ * SHEET LIVENESS (#5832): the plan's prompts carry the sheet's record content, so the worker
+ * re-checks the job's own sheet (multitable/sheet-liveness.ts) before EVERY provider call and stops
+ * — remainder `pending_not_generated`, header `errored` — once the sheet is soft-deleted, gone, or
+ * the lookup fails. The commit route refuses a non-live sheet on its own (route-level liveness 404,
+ * plus requireRecordReadable's per-row liveness refusal inside commitOneRecord).
+ *
  * SCOPE (Slice 1): crash coverage is the IN-PROCESS exception path — runJob wraps the
  * worker body after the claim and maps any unexpected throw to `errored` (see runJob). A
- * HARD process restart is NOT auto-reconciled here: the in-memory queue + plan registry are
- * gone, so runJob is never re-invoked, and a job left `queued`/`running` stays active until
- * reconciled. That startup/poll reconciliation (stale `queued`/`running` → `errored`) is a
- * B-4 follow-up, not implemented in Slice 1.
+ * HARD process restart is NOT auto-reconciled in-process: the in-memory queue + plan registry
+ * are gone, so runJob is never re-invoked, and a job left `queued`/`running` would stay active
+ * until reconciled. That reconciliation is implemented (B-4 follow-up, `reconcileOrphanedBulkJobs`
+ * below) and wired to run once at boot (see packages/core-backend/src/index.ts, ~:3758-3768).
+ * Residual gap: only the STARTUP sweep exists — there is no periodic sweep, so a long-lived
+ * instance never re-sweeps between restarts; a job orphaned mid-uptime stays stuck until the
+ * next process restart.
  */
 
 import { randomUUID, createHash } from 'crypto'
@@ -48,6 +67,7 @@ import { randomUUID, createHash } from 'crypto'
 import { AiProviderClient } from './ai-provider-client'
 import { runShortcutCore, type PoolLike, type ShortcutRequestContext } from './ai-bulk-shared'
 import type { AiUsageQueryFn } from './ai-usage-ledger'
+import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import type { WorkflowJobStatus, WorkflowJobSuspendReason } from '../multitable/workflow-job-contract'
 import type { QueueService } from '../types/plugin'
 
@@ -62,11 +82,78 @@ export const AI_BULK_JOB_QUEUE = 'multitable-ai-bulk-fill'
 export const AI_BULK_JOB_PROCESSOR = 'generate'
 
 /**
+ * Bulk-job header status (#5842). The workflow-job-contract vocabulary PLUS the one
+ * bulk-job-only phase status `committing`. The contract enum
+ * (multitable/workflow-job-contract.ts) is NOT widened: `committing` is a phase of THIS
+ * job type, not of the converged engine's contract.
+ *
+ * The full set a bulk job can hold, and the ONLY transitions that write it:
+ *
+ *   status       | meaning                                   | entered by                                   | leaves to
+ *   -------------|-------------------------------------------|----------------------------------------------|----------------------------
+ *   queued       | seeded + enqueued, worker not started     | insertBulkJobHeader                          | running, rejected, errored
+ *   running      | GENERATE phase (the ONLY generating one)  | runJob claim (WHERE status='queued')         | suspended, errored, rejected
+ *   suspended    | generation done/paused, awaiting review   | suspendIfRunning (WHERE status='running')    | committing, rejected
+ *   rejected     | cancelled (BJ-4)                          | cancelBulkJob (queued/running/suspended, or a STALE committing) | committing
+ *   errored      | crash / plan loss / sheet not live / orphan | markErroredIfRunning, reconcileOrphanedBulkJobs, releaseBulkJobCommitClaim | committing
+ *   committing   | a commit claim is IN FLIGHT (no worker)   | claimBulkJobCommit (suspended/errored/rejected, or a STALE committing) | resolved, errored, rejected
+ *   resolved     | committed (terminal)                      | finishBulkJobCommit (committing + our own claim id) | —
+ *
+ * `failed` / `skipped` exist in the contract enum but are never written by this job type.
+ *
+ * Invariants the transitions above encode:
+ *  · the worker generates ONLY in `running` ({@link isGeneratingBulkJobStatus}); a commit no longer
+ *    puts a cancelled/errored job back into a generating status (that was #5842);
+ *  · a LIVE `committing` is NOT committable, so a commit can be claimed exactly once;
+ *  · `committing` holds the BJ-7 active-job slot (the partial unique index covers it), so no new
+ *    job for the same (actor, sheet, field) can start while a commit is writing;
+ *  · `committing` is never a DEAD END: a commit request that dies without releasing its claim
+ *    stops heartbeating, and after {@link BULK_JOB_COMMIT_CLAIM_STALE_MS} the next commit
+ *    ({@link claimBulkJobCommit}) or the user's cancel ({@link cancelBulkJob}) reclaims it —
+ *    no restart required;
+ *  · every write that ADVANCES a claim carries the claimant's `commit_claim_id`, so a request
+ *    whose claim was reclaimed cannot resolve, release or heartbeat someone else's claim;
+ *  · `resolved` is terminal — nothing re-claims it.
+ */
+export type BulkJobStatus = WorkflowJobStatus | 'committing'
+
+/**
+ * The statuses in which the WORKER may still call the provider. Exactly one: the generate
+ * phase. Everything else (cancelled, suspended-for-review, committing, terminal) means STOP.
+ */
+const BULK_JOB_GENERATING_STATUSES: ReadonlySet<string> = new Set<BulkJobStatus>(['running'])
+
+/**
+ * The COMMITTABLE set (BJ-4 / BJ-5): the statuses in which the worker is no longer mutating the
+ * job and a commit may be claimed. `suspended` = generated & awaiting review; `errored` = crashed
+ * mid-generate (the persisted partial is still committable); `rejected` = cancelled (the rows that
+ * were already generated and charged stay committable). NOT `queued`/`running` (the worker is
+ * still generating), NOT `committing` (a commit is already in flight), NOT `resolved` (done).
+ */
+export const BULK_JOB_COMMITTABLE_STATUSES = ['suspended', 'errored', 'rejected'] as const
+
+/** SQL list literal for the committable set — one source for the route's 409 and the claim. */
+const COMMITTABLE_SQL_LIST = BULK_JOB_COMMITTABLE_STATUSES.map((s) => `'${s}'`).join(', ')
+
+/** true when the worker may still generate in this status (#5842). */
+export function isGeneratingBulkJobStatus(status: BulkJobStatus | null | undefined): boolean {
+  return status != null && BULK_JOB_GENERATING_STATUSES.has(status)
+}
+
+/** true when a commit MAY be claimed on this status (the route's 409 pre-check reads this). */
+export function isCommittableBulkJobStatus(status: BulkJobStatus | null | undefined): boolean {
+  return status != null && (BULK_JOB_COMMITTABLE_STATUSES as readonly string[]).includes(status)
+}
+
+/**
  * Per-row state (BJ-1). A SUPERSET of the inline cache's confirmable outputs:
  *  - pending               — seeded, not yet generated.
  *  - generated             — provider-called + charged; has proposed_value (confirmable).
  *  - skipped               — gated out (not writable) BEFORE generation; UNCHARGED.
- *  - failure               — CHARGED but no usable output (provider error w/ usage); NOT confirmable.
+ *  - failure               — CHARGED but no usable output OFFERED; NOT confirmable. Two reasons:
+ *                            `provider_error_charged` (provider errored with usage) and, since #5842,
+ *                            `cancelled_after_charge` (the row was at the provider when the cancel
+ *                            landed: the money is real, the output is NOT offered for commit).
  *  - committed             — written at commit (terminal success).
  *  - pending_not_generated — quota hit before this row was reached; UNCHARGED, no proposal, NOT committable.
  */
@@ -122,7 +209,7 @@ export interface BulkJobHeader {
   sheetId: string
   fieldId: string
   scopeFingerprint: string
-  status: WorkflowJobStatus
+  status: BulkJobStatus
   total: number
   generated: number
   settledCost: number
@@ -166,9 +253,11 @@ const toIso = (v: unknown): string => {
 // ── Header data-access ──────────────────────────────────────────────────────
 
 /**
- * BJ-7: the active job (queued/running/suspended) for (actor, sheet, field), if
+ * BJ-7: the active job (queued/running/suspended/committing) for (actor, sheet, field), if
  * any. Read BEFORE the expensive scope resolution so a matching-fingerprint
- * start short-circuits and a different one 409s.
+ * start short-circuits and a different one 409s. `committing` is in the set (#5842) — it is the
+ * commit phase, so the target is still busy — and the partial unique index
+ * (uq_mt_ai_bulk_job_active) covers the SAME four statuses, so this read and the index agree.
  */
 export async function findActiveBulkJob(
   query: AiUsageQueryFn,
@@ -179,7 +268,7 @@ export async function findActiveBulkJob(
   const res = await query(
     `SELECT * FROM ${AI_BULK_JOB_TABLE}
       WHERE actor_id = $1 AND sheet_id = $2 AND field_id = $3
-        AND status IN ('queued', 'running', 'suspended')
+        AND status IN ('queued', 'running', 'suspended', 'committing')
       ORDER BY created_at DESC
       LIMIT 1`,
     [actorId, sheetId, fieldId],
@@ -201,7 +290,7 @@ function mapHeaderRow(row: Record<string, unknown>): BulkJobHeader {
     sheetId: String(row.sheet_id),
     fieldId: String(row.field_id),
     scopeFingerprint: String(row.scope_fingerprint),
-    status: String(row.status) as WorkflowJobStatus,
+    status: String(row.status) as BulkJobStatus,
     total: Number(row.total ?? 0),
     generated: Number(row.generated ?? 0),
     settledCost: Number(row.settled_cost ?? 0),
@@ -336,14 +425,90 @@ interface GeneratedRowUpdate {
   costUsd: number
 }
 
-async function markRowGenerated(query: AiUsageQueryFn, jobId: string, recordId: string, u: GeneratedRowUpdate): Promise<void> {
-  await query(
+/**
+ * Record a generated row — CONDITIONAL on the row still being `pending` (#5842).
+ *
+ * The provider call happens outside any lock, so a cancel can land while THIS row is at the
+ * provider; the cancel flips every still-`pending` row (including this one) to
+ * `pending_not_generated`. An UNCONDITIONAL update would then resurrect the row as `generated`
+ * — committable — after the user cancelled it. The `state = 'pending'` predicate makes the
+ * cancel win the race; the caller reads the returned flag and books the (real, already settled)
+ * charge on the row instead, via {@link markRowChargedAfterCancel}, so the money stays visible.
+ *
+ * Returns true when the row WAS still pending and is now `generated`.
+ */
+async function markRowGenerated(query: AiUsageQueryFn, jobId: string, recordId: string, u: GeneratedRowUpdate): Promise<boolean> {
+  const res = await query(
     `UPDATE ${AI_BULK_JOB_ROWS_TABLE}
         SET state = 'generated', preview_version = $3, proposed_value = $4, masked = $5,
             usage_tokens = $6, cost_usd = $7, updated_at = NOW()
-      WHERE job_id = $1 AND record_id = $2`,
+      WHERE job_id = $1 AND record_id = $2 AND state = 'pending'`,
     [jobId, recordId, Math.max(0, Math.round(u.previewVersion)), u.proposedValue, u.masked, Math.max(0, Math.round(u.usageTokens)), u.costUsd],
   )
+  return (res.rowCount ?? 0) > 0
+}
+
+/**
+ * Row `reason` for a row that was at the provider when the USER'S CANCEL landed (#5842) — the
+ * header is `rejected`, so the provenance shown on the review page is "you cancelled this".
+ */
+export const BULK_ROW_CANCELLED_AFTER_CHARGE = 'cancelled_after_charge'
+
+/**
+ * Row `reason` for a row that was at the provider when something OTHER than a cancel moved it out
+ * of `pending` — an orphan sweep (`reconcileOrphanedBulkJobs`), or any other reconcile. Same
+ * money shape as {@link BULK_ROW_CANCELLED_AFTER_CHARGE} (charged, not offered), but the two are
+ * NOT interchangeable: the reason is user-visible provenance for a real charge, so a row nobody
+ * cancelled must not read as cancelled (#5842 refuter, race lens).
+ */
+export const BULK_ROW_INTERRUPTED_AFTER_CHARGE = 'interrupted_after_charge'
+
+/** The two `failure` reasons that mean "charged while at the provider, nothing offered". */
+export type BulkRowChargedNotOfferedReason =
+  | typeof BULK_ROW_CANCELLED_AFTER_CHARGE
+  | typeof BULK_ROW_INTERRUPTED_AFTER_CHARGE
+
+/**
+ * The row left `pending` while it was at the provider — book the charge TRUTHFULLY without making
+ * the row committable (#5842).
+ *
+ * The spend is real (charge-on-generation, never released), so leaving the row
+ * `pending_not_generated` — documented as UNCHARGED — would under-report what the user paid and
+ * would break the keystone invariant "no row is charged yet shown pending_not_generated".
+ * `failure` is the existing CHARGED-but-not-confirmable state; `reason` distinguishes it from a
+ * provider error AND says WHICH transition took the row away (the caller re-reads the header to
+ * decide — a cancel and an orphan sweep are not the same story to tell the user). Guarded on the
+ * two states a racing cancel/reconcile can have left behind, so it can never overwrite
+ * `generated` / `committed` / `skipped`. The proposed value is deliberately NOT stored: the row
+ * is not offered for commit.
+ */
+async function markRowChargedAfterCancel(
+  query: AiUsageQueryFn,
+  jobId: string,
+  recordId: string,
+  u: { usageTokens: number; costUsd: number; reason: BulkRowChargedNotOfferedReason },
+): Promise<void> {
+  await query(
+    `UPDATE ${AI_BULK_JOB_ROWS_TABLE}
+        SET state = 'failure', reason = $5,
+            usage_tokens = $3, cost_usd = $4, updated_at = NOW()
+      WHERE job_id = $1 AND record_id = $2 AND state IN ('pending', 'pending_not_generated')`,
+    [jobId, recordId, Math.max(0, Math.round(u.usageTokens)), u.costUsd, u.reason],
+  )
+}
+
+/**
+ * Read ONE row's durable state — the worker's per-row "is this row still mine to send?" check
+ * (#5842), the row-level twin of the per-row cancel check on the header. Returns null when the
+ * row is absent (nothing to send).
+ */
+async function readBulkJobRowState(query: AiUsageQueryFn, jobId: string, recordId: string): Promise<BulkJobRowState | null> {
+  const res = await query(
+    `SELECT state FROM ${AI_BULK_JOB_ROWS_TABLE} WHERE job_id = $1 AND record_id = $2`,
+    [jobId, recordId],
+  )
+  const row = res.rows[0] as { state?: string } | undefined
+  return (row?.state as BulkJobRowState | undefined) ?? null
 }
 
 async function markRowState(
@@ -376,37 +541,141 @@ async function setHeaderProgress(query: AiUsageQueryFn, jobId: string, generated
   )
 }
 
-/** Persist the durable commit aggregate on the header (BJ-10). Clears suspend_reason for a non-suspended status. */
-export async function setHeaderAggregate(query: AiUsageQueryFn, jobId: string, aggregate: unknown, status: WorkflowJobStatus): Promise<void> {
-  const suspendReason: WorkflowJobSuspendReason | null = status === 'suspended' ? 'manual_task' : null
-  await query(
-    `UPDATE ${AI_BULK_JOB_TABLE} SET aggregate = $2::jsonb, status = $3, suspend_reason = $4, updated_at = NOW() WHERE job_id = $1`,
-    [jobId, JSON.stringify(aggregate), status, suspendReason],
-  )
+/**
+ * How long a `committing` header may go WITHOUT a heartbeat before it is treated as an abandoned
+ * commit (#5842 refuter, race lens: "`committing` is a dead end").
+ *
+ * A commit is an in-REQUEST phase: a pod restart / OOM / SIGKILL between the claim and the finish
+ * leaves nobody to release it, and `committing` is neither cancellable-while-live nor claimable,
+ * so without a reclaim the job would hold its BJ-7 active slot until the next BOOT sweep (10 min
+ * of staleness, and only on a restart). This window is what {@link claimBulkJobCommit} and
+ * {@link cancelBulkJob} use to reclaim such a corpse, and {@link heartbeatBulkJobCommit} is what
+ * keeps a LIVE commit outside it: the route beats once per BJ-10 chunk (≤ 200 rows), so a live
+ * commit stays fresh unless a single chunk takes longer than this whole window.
+ */
+export const BULK_JOB_COMMIT_CLAIM_STALE_MS = 2 * 60 * 1000
+
+/**
+ * Staleness in whole seconds for the SQL interval, floored at 30s. The floor matters because both
+ * users of this value are exported helpers: a caller that passed 0 would otherwise reclaim a
+ * just-claimed, still-live commit.
+ */
+function commitStaleSeconds(staleAfterMs: number | undefined): number {
+  return Math.max(30, Math.round((staleAfterMs ?? BULK_JOB_COMMIT_CLAIM_STALE_MS) / 1000))
 }
 
 /**
- * Flip a COMMITTABLE job into the commit phase (`running`), GUARDED. The committable
- * set is the worker-no-longer-mutating states — `suspended` (awaiting review),
- * `errored` (BJ-5: crashed mid-generate, partial committable), and `rejected`
- * (BJ-4: cancelled, generated rows still committable). Returns false if the job is
- * NOT committable (queued/running = worker active; resolved = already committed; or
- * another commit already claimed it) so two commits can never both proceed.
+ * CLAIM the commit phase (#5842). Flips a COMMITTABLE job into `committing` — a status the
+ * worker never generates in and no second commit can claim — and STAMPS the claimant's own id on
+ * the header, so every later write by this request can prove it still holds the claim.
+ *
+ * CONCURRENCY GUARANTEE — exactly once, by ONE conditional `UPDATE … WHERE … RETURNING`, never
+ * select-then-update. Under PostgreSQL READ COMMITTED two concurrent claims serialize on the
+ * header row: the loser re-evaluates its WHERE against the winner's committed row, sees a FRESH
+ * `committing`, matches nothing and returns zero rows. There is no window between the read and
+ * the write for both to pass, and no advisory lock is needed.
+ *
+ * SECOND DISJUNCT — the lazy reclaim. A `committing` header whose `updated_at` has been quiet
+ * longer than {@link BULK_JOB_COMMIT_CLAIM_STALE_MS} belongs to a commit request that died (the
+ * live one heartbeats per chunk), so the next commit attempt HEALS the job instead of waiting for
+ * a process restart. The reclaim overwrites `commit_claim_id`, which is exactly what makes the
+ * zombie's later `finishBulkJobCommit` / `releaseBulkJobCommitClaim` no-ops.
+ *
+ * Returns false when the job is NOT committable (queued/running = the worker is still
+ * generating; a FRESH `committing` = a commit is already in flight; resolved = already
+ * committed). Before this fix the claim set `running`, which BOTH re-armed the worker on a job
+ * the user had just cancelled AND let the worker's own wrap-up (`suspendIfRunning`) hand the job
+ * back to a second commit.
  */
-export async function setHeaderRunning(query: AiUsageQueryFn, jobId: string): Promise<boolean> {
+export async function claimBulkJobCommit(
+  query: AiUsageQueryFn,
+  jobId: string,
+  claimId: string,
+  opts: { staleAfterMs?: number } = {},
+): Promise<boolean> {
   const res = await query(
-    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'running', suspend_reason = NULL, updated_at = NOW()
-      WHERE job_id = $1 AND status IN ('suspended', 'errored', 'rejected')`,
-    [jobId],
+    `UPDATE ${AI_BULK_JOB_TABLE}
+        SET status = 'committing', commit_claim_id = $2, suspend_reason = NULL, updated_at = NOW()
+      WHERE job_id = $1
+        AND (status IN (${COMMITTABLE_SQL_LIST})
+             OR (status = 'committing' AND updated_at < NOW() - ($3::int * INTERVAL '1 second')))
+      RETURNING job_id`,
+    [jobId, claimId, commitStaleSeconds(opts.staleAfterMs)],
   )
-  return (res.rowCount ?? 0) > 0
+  return (res.rows?.length ?? 0) > 0
+}
+
+/**
+ * KEEP a live commit claim fresh (#5842). Touches `updated_at` only, guarded on the claimant's own
+ * id, so the staleness-based reclaims ({@link claimBulkJobCommit}'s second disjunct,
+ * {@link cancelBulkJob}'s, {@link reconcileOrphanedBulkJobs}) can never reach a commit that is
+ * still writing. Returns false once the claim is no longer ours — the caller may stop early
+ * instead of writing on behalf of a claim someone else now holds.
+ */
+export async function heartbeatBulkJobCommit(query: AiUsageQueryFn, jobId: string, claimId: string): Promise<boolean> {
+  const res = await query(
+    `UPDATE ${AI_BULK_JOB_TABLE} SET updated_at = NOW()
+      WHERE job_id = $1 AND status = 'committing' AND commit_claim_id = $2
+      RETURNING job_id`,
+    [jobId, claimId],
+  )
+  return (res.rows?.length ?? 0) > 0
+}
+
+/**
+ * FINISH the commit phase (BJ-10): persist the durable aggregate and resolve the job — GUARDED on
+ * `committing` AND on the caller's OWN claim id (#5842), so only the request that still holds the
+ * claim can resolve it. Returns false if the claim was lost meanwhile (an orphan sweep or a
+ * staleness reclaim took it); the caller reports the job's real status rather than claiming
+ * `resolved`.
+ */
+export async function finishBulkJobCommit(
+  query: AiUsageQueryFn,
+  jobId: string,
+  aggregate: unknown,
+  claimId: string,
+): Promise<boolean> {
+  const res = await query(
+    `UPDATE ${AI_BULK_JOB_TABLE}
+        SET aggregate = $2::jsonb, status = 'resolved', suspend_reason = NULL,
+            commit_claim_id = NULL, updated_at = NOW()
+      WHERE job_id = $1 AND status = 'committing' AND commit_claim_id = $3
+      RETURNING job_id`,
+    [jobId, JSON.stringify(aggregate), claimId],
+  )
+  return (res.rows?.length ?? 0) > 0
+}
+
+/**
+ * RELEASE a commit claim that failed (#5842): `committing` → `errored`, which is committable
+ * again, so a commit that 500s does not strand the job's generated rows until the next process
+ * restart. Rows already written in the failed attempt are `committed` and are not re-written by a
+ * retry.
+ *
+ * Guarded on `committing` AND on the caller's OWN claim id. The id is NOT belt-and-braces: a
+ * status-only guard can release a claim the caller does not hold — a sweep (or the staleness
+ * reclaim above) can hand the job to a SECOND commit while the first is still running, and the
+ * first request's catch would then flip the second one's live claim to `errored`, letting a third
+ * commit start while the second is still writing. (That is the #5842 refuter's `C_release_steals_
+ * a_claim_it_does_not_hold` probe; the doc here used to assert the opposite.) Returns false when
+ * the claim was no longer ours — nothing was written.
+ */
+export async function releaseBulkJobCommitClaim(query: AiUsageQueryFn, jobId: string, claimId: string): Promise<boolean> {
+  const res = await query(
+    `UPDATE ${AI_BULK_JOB_TABLE}
+        SET status = 'errored', suspend_reason = NULL, commit_claim_id = NULL, updated_at = NOW()
+      WHERE job_id = $1 AND status = 'committing' AND commit_claim_id = $2
+      RETURNING job_id`,
+    [jobId, claimId],
+  )
+  return (res.rows?.length ?? 0) > 0
 }
 
 /** Read just the job's current status — the worker's per-row cancel check (BJ-4). */
-export async function readJobStatus(query: AiUsageQueryFn, jobId: string): Promise<WorkflowJobStatus | null> {
+export async function readJobStatus(query: AiUsageQueryFn, jobId: string): Promise<BulkJobStatus | null> {
   const res = await query(`SELECT status FROM ${AI_BULK_JOB_TABLE} WHERE job_id = $1`, [jobId])
   const row = res.rows[0] as { status?: string } | undefined
-  return (row?.status as WorkflowJobStatus | undefined) ?? null
+  return (row?.status as BulkJobStatus | undefined) ?? null
 }
 
 /**
@@ -426,9 +695,16 @@ async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPause
 /**
  * Mark the job `errored` (BJ-5) — GUARDED on `running` so a concurrent cancel (→ rejected)
  * is never clobbered. Generated rows are untouched and stay committable (errored ∈ the
- * commit committable set). Used for the plan-absent case (an in-process plan loss) and any
- * unexpected worker crash after the queued→running claim. (Does NOT cover a hard process
- * restart — runJob is never re-invoked then; that reconciliation is a B-4 follow-up.)
+ * commit committable set). Three callers:
+ *  · the plan-absent case (an in-process plan loss);
+ *  · any unexpected worker crash after the queued→running claim — rows are left as the crash
+ *    found them (typically the remainder still raw `pending`);
+ *  · DELIBERATELY, the sheet-not-live stop in runGeneratePhase (#5832, `jobSheetIsLive`): the
+ *    worker returns normally, and it has already flipped the remainder to
+ *    `pending_not_generated` before this call.
+ * So `errored` does not by itself mean "crashed".
+ * (Does NOT cover a hard process restart — runJob is never re-invoked then; that
+ * reconciliation is a B-4 follow-up.)
  */
 async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
   await query(
@@ -447,8 +723,9 @@ export const DEFAULT_BULK_JOB_RECONCILE_STALE_MS = 10 * 60 * 1000
  *
  * `runJob` is an in-process worker (QueueService); a hard restart drops the queue
  * and the in-process plan registry, so any job still `queued`/`running` has no live
- * worker and can never progress — yet it stays "active" (the BJ-7 partial unique
- * index counts queued/running/suspended), blocking a fresh start for its
+ * worker and can never progress — and a job left `committing` (#5842) has no live commit
+ * REQUEST — yet each stays "active" (the BJ-7 partial unique index counts
+ * queued/running/suspended/committing), blocking a fresh start for its
  * (actor, sheet, field) until expires_at GC. Flip those orphans to `errored` AND, in
  * the SAME atomic statement, convert their still-`pending` rows to
  * `pending_not_generated` so the header and its rows can never disagree. (Leaving rows
@@ -459,8 +736,10 @@ export const DEFAULT_BULK_JOB_RECONCILE_STALE_MS = 10 * 60 * 1000
  * `suspended` jobs are EXCLUDED — they are intentionally paused awaiting review,
  * not orphaned. The `staleAfterMs` age guard avoids racing a just-claimed job in a
  * multi-instance deploy: only jobs whose `updated_at` has been quiet longer than
- * the guard are reconciled (a live worker advances `updated_at` per row). Run at
- * startup and/or on a periodic sweep. Returns the number of jobs reconciled.
+ * the guard are reconciled (a live worker advances `updated_at` per row). Wired to run at
+ * startup (see packages/core-backend/src/index.ts, ~:3758-3768); there is no periodic sweep,
+ * so a long-lived instance never re-sweeps between restarts. Returns the number of jobs
+ * reconciled.
  */
 export async function reconcileOrphanedBulkJobs(
   query: AiUsageQueryFn,
@@ -475,11 +754,18 @@ export async function reconcileOrphanedBulkJobs(
   // reconciled job's header and rows can never disagree. `generated` rows are untouched
   // (committable); other row states (skipped/failure) are left as-is; `suspended` jobs
   // are excluded by the header status filter.
+  // `committing` is included (#5842): a commit is an in-REQUEST phase, so a restart leaves no one
+  // to finish it, and without this the job would hold the active slot with no committable status
+  // until expires_at. Reconciling it to `errored` re-opens the commit for the rows that were not
+  // written (committed rows are terminal and are not re-written). The staleness window is what
+  // keeps this off a live commit — a live commit heartbeats `updated_at` per chunk — and
+  // clearing `commit_claim_id` is what stops a reconciled-but-still-running commit from later
+  // finishing or releasing a claim that is no longer its own.
   const res = await query(
     `WITH reconciled AS (
        UPDATE ${AI_BULK_JOB_TABLE}
-          SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
-        WHERE status IN ('queued', 'running')
+          SET status = 'errored', suspend_reason = NULL, commit_claim_id = NULL, updated_at = NOW()
+        WHERE status IN ('queued', 'running', 'committing')
           AND updated_at < NOW() - ($1::int * INTERVAL '1 second')
         RETURNING job_id
      ), orphaned_rows AS (
@@ -521,15 +807,81 @@ export async function setRowCommitOutcome(
  * BJ-4 cancel: stop generating; rows already `generated` stay charged+committable;
  * still-`pending` rows → `pending_not_generated` (uncharged); job → `rejected`.
  * Only an ACTIVE (queued/running/suspended) job is cancellable.
+ *
+ * A LIVE `committing` job is deliberately NOT cancellable (#5842): a commit request is writing
+ * records at that moment, and flipping the header to `rejected` under it would both misreport
+ * what was written and hand a second commit the claim. The cancel returns false and the caller
+ * sees the job's real status. (Before the fix the commit phase WAS `running`, so a cancel could
+ * land in the middle of a commit.) A cancel racing a row that is already at the provider is
+ * handled at the ROW level — see {@link markRowGenerated} / {@link markRowChargedAfterCancel}.
+ *
+ * A STALE `committing` job IS cancellable — that is the user's exit from a commit request that
+ * died mid-write (#5842 refuter, race lens). Without it the header would sit in a status that is
+ * neither cancellable nor claimable while still holding the BJ-7 active slot, so the user could
+ * neither finish nor abandon nor re-start the fill until a process restart. `updated_at` is
+ * heartbeaten per chunk by a live commit ({@link heartbeatBulkJobCommit}), so this disjunct can
+ * only match a commit that has been silent for {@link BULK_JOB_COMMIT_CLAIM_STALE_MS}; clearing
+ * `commit_claim_id` makes the zombie's own finish/release no-ops if it ever wakes up.
  */
-export async function cancelBulkJob(query: AiUsageQueryFn, jobId: string): Promise<boolean> {
+export async function cancelBulkJob(
+  query: AiUsageQueryFn,
+  jobId: string,
+  opts: { commitStaleAfterMs?: number } = {},
+): Promise<boolean> {
   const res = await query(
-    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'rejected', suspend_reason = NULL, updated_at = NOW()
-      WHERE job_id = $1 AND status IN ('queued', 'running', 'suspended')`,
-    [jobId],
+    `UPDATE ${AI_BULK_JOB_TABLE}
+        SET status = 'rejected', suspend_reason = NULL, commit_claim_id = NULL, updated_at = NOW()
+      WHERE job_id = $1
+        AND (status IN ('queued', 'running', 'suspended')
+             OR (status = 'committing' AND updated_at < NOW() - ($2::int * INTERVAL '1 second')))`,
+    [jobId, commitStaleSeconds(opts.commitStaleAfterMs)],
   )
   if ((res.rowCount ?? 0) === 0) return false
   await markRemainingPendingNotGenerated(query, jobId)
+  return true
+}
+
+// ── Sheet liveness (soft delete, #5832) ─────────────────────────────────────
+
+/**
+ * SHEET LIVENESS for the generate loop (#5832). The plan holds prompts that were assembled from the
+ * sheet's record content when the job started, so nothing downstream of this loop reads the sheet
+ * again: a soft delete (or a hard one) does not stop those prompts from reaching the provider. The
+ * loop therefore asks, before EVERY provider call, whether the JOB'S OWN sheet is still live — with
+ * the one shared definition (multitable/sheet-liveness.ts `loadSheetLiveness`).
+ *
+ * Returns true ONLY on positive proof that the sheet is live:
+ *  · `deleted` → false. The point of the fix.
+ *  · `absent`  → false. Deliberately stricter than the automation lanes (which refuse exactly
+ *    `deleted`): the job was created by a route that required a LIVE sheet, so `absent` here means the
+ *    `meta_sheets` row disappeared mid-run, and the in-memory prompts would still go out — there is no
+ *    record read downstream that a hard delete would make fail. Both non-live verdicts mean "no sheet
+ *    here to act on".
+ *  · lookup THROWS → false (FAIL-CLOSED). This is an egress path: a failed lookup is not proof the
+ *    sheet is live, and the cost of stopping is small and recoverable — generated rows stay committable,
+ *    the job leaves the active set, and the user can run AI fill again. (The approval-automation lanes
+ *    in automation-service.ts chose fail-open because their completion events are one-shot and
+ *    authorization gates downstream of them fail closed; neither holds here — this loop has no
+ *    downstream gate, and a stopped job can simply be run again.) Logged values-free.
+ */
+async function jobSheetIsLive(query: AiUsageQueryFn, jobId: string, sheetId: string): Promise<boolean> {
+  let liveness: SheetLiveness
+  try {
+    liveness = await loadSheetLiveness(query, sheetId)
+  } catch (err) {
+    console.error(
+      `[ai-bulk-job] runJob ${jobId}: sheet liveness lookup failed; stopping generation before the next provider call (fail-closed, #5832)`,
+      { reason: 'liveness_lookup_failed', ...describeLivenessLookupError(err) },
+    )
+    return false
+  }
+  if (liveness !== 'live') {
+    console.warn(
+      `[ai-bulk-job] runJob ${jobId}: the job's sheet is not live; stopping generation before the next provider call (#5832)`,
+      { reason: liveness === 'deleted' ? 'sheet_deleted' : 'sheet_absent' },
+    )
+    return false
+  }
   return true
 }
 
@@ -634,9 +986,10 @@ export class BulkFillJobService {
   /**
    * The generate phase, extracted so `runJob` can wrap it in ONE try/catch and map any
    * unexpected failure to `errored` (BJ-5). The deliberate stop paths (cancel / quota /
-   * provider-error / blocked / complete) suspend the header and return normally; an
-   * UNHANDLED throw propagates to runJob, which marks the header errored without touching
-   * the already-generated rows. Plan cleanup is owned by runJob's `finally`.
+   * provider-error / blocked / complete) suspend the header and return normally; the
+   * sheet-not-live stop (#5832, see `jobSheetIsLive`) marks it `errored` and returns
+   * normally; an UNHANDLED throw propagates to runJob, which marks the header errored
+   * without touching the already-generated rows. Plan cleanup is owned by runJob's `finally`.
    */
   private async runGeneratePhase(query: AiUsageQueryFn, jobId: string): Promise<void> {
     const plan = this.plans.get(jobId)
@@ -644,7 +997,8 @@ export class BulkFillJobService {
       // runJob was invoked with NO registered plan (an in-process plan loss) → mark errored;
       // the persisted partial (any seeded/generated rows) stays committable (BJ-5). NOTE: this
       // does NOT fire on a hard process restart — the queue is empty then, so runJob is never
-      // re-invoked; reconciling stale queued/running jobs is a B-4 follow-up (startup/poll sweep).
+      // re-invoked; reconciling stale queued/running jobs after a restart is instead handled by
+      // reconcileOrphanedBulkJobs, wired at boot (B-4 follow-up, implemented — no periodic sweep).
       await markErroredIfRunning(query, jobId)
       return
     }
@@ -653,12 +1007,56 @@ export class BulkFillJobService {
     let settledCost = 0
 
     for (const row of plan.rows) {
-      // BJ-4: honor a cancel at the next row boundary. Re-read the live status; if the
-      // job is no longer `running` (a concurrent cancel set it `rejected`), STOP — do not
-      // generate further and do NOT overwrite the terminal status. Rows already generated
-      // stay `generated` (charged); the still-`pending` remainder was flipped to
-      // `pending_not_generated` by the cancel.
-      if ((await readJobStatus(query, jobId)) !== 'running') {
+      // BJ-4: honor a cancel at the next row boundary. Re-read the live status; if the job is no
+      // longer in a GENERATING status (a concurrent cancel set it `rejected`; a commit claimed it
+      // into `committing`; it suspended or errored), STOP — do not generate further and do NOT
+      // overwrite the terminal status. Rows already generated stay `generated` (charged); the
+      // still-`pending` remainder was flipped to `pending_not_generated` by the cancel.
+      // #5842: the generating set is `running` ALONE. The commit phase used to re-use `running`,
+      // so a commit issued right after a cancel put the job back here and the worker resumed
+      // sending — and billing — rows the user had already cancelled.
+      if (!isGeneratingBulkJobStatus(await readJobStatus(query, jobId))) {
+        return
+      }
+
+      // #5842 per-ROW twin of the check above: the header says "generate", but THIS row may have
+      // already left `pending` (a cancel that landed between rows flipped it to
+      // `pending_not_generated`; an orphan sweep did the same; a resumed plan may carry a row that
+      // is already `generated`). Only a still-`pending` row may be sent to the provider — a row
+      // the user cancelled must never be re-sent and re-charged. `continue`, not `return`: the
+      // header-level checks above own STOPPING; this one owns SKIPPING one row.
+      const liveRowState = await readBulkJobRowState(query, jobId, row.recordId)
+      if (liveRowState !== 'pending') {
+        // A row that is ALREADY `generated` (a re-driven plan) still counts toward the header's
+        // `generated` figure: that counter is "how many of this plan's rows are offered for
+        // commit", and it is written from this loop-local tally, so skipping the increment would
+        // make the header under-report rows the DB really holds as generated. Every other
+        // non-pending state (pending_not_generated / failure / skipped / committed) is NOT
+        // offered, so it must NOT be counted.
+        if (liveRowState === 'generated') {
+          generated += 1
+          await setHeaderProgress(query, jobId, generated, settledCost)
+        }
+        continue
+      }
+
+      // #5832: re-check the job's own sheet before EVERY provider call (after the cancel check, so a
+      // cancel keeps its `rejected`). Not live, or the lookup failed → send nothing more: the remainder
+      // becomes `pending_not_generated` (uncharged), and the job goes `errored`, a terminal state the
+      // UI already shows, whose generated rows stay committable once the sheet is restored.
+      // `markErroredIfRunning` is guarded on `running`, so a cancel landing meanwhile still wins.
+      // RESIDUAL WINDOW: a delete that commits after this check answers live still lets THIS row out.
+      // The window is not just check-to-send: it spans runShortcutCore's whole quota reservation
+      // transaction, including the wait for the instance-wide advisory lock that serializes every AI
+      // reservation, so it grows with concurrent AI use. Narrowing it does not need a lock held across
+      // the provider call: re-checking liveness inside runShortcutCore after the reservation and right
+      // before `aiClient.complete` would leave the lock wait outside the window (ai-bulk-shared.ts,
+      // not changed here, so the residual window is the same on both lanes). The inline bulk-preview
+      // loop now makes the same per-row check (#5838, routes/multitable-ai.ts `bulkPreviewSheetIsLive`).
+      if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) {
+        await markRemainingPendingNotGenerated(query, jobId)
+        await setHeaderProgress(query, jobId, generated, settledCost)
+        await markErroredIfRunning(query, jobId)
         return
       }
 
@@ -685,13 +1083,33 @@ export class BulkFillJobService {
           return
         }
         const usageTokens = outcome.usage.promptTokens + outcome.usage.completionTokens
-        await markRowGenerated(query, jobId, row.recordId, {
+        const recorded = await markRowGenerated(query, jobId, row.recordId, {
           previewVersion: row.version,
           proposedValue: outcome.result.text ?? '',
           masked: row.masked,
           usageTokens,
           costUsd: outcome.result.estimatedCostUsd,
         })
+        if (!recorded) {
+          // #5842: the row left `pending` WHILE it was at the provider. The charge is real and
+          // already settled in the ledger, so book it on the row as CHARGED-but-not-confirmable
+          // instead of resurrecting a row that is no longer the user's to commit. Not counted in
+          // `generated` (nothing is offered for commit), but the cost IS carried into the header
+          // below, so the user sees what could not be un-spent.
+          //
+          // WHICH transition took the row decides the reason: a user cancel leaves the header
+          // `rejected`, anything else (an orphan sweep flipping still-pending rows) did not
+          // cancel anything, and the reason is user-visible provenance for a real charge — so it
+          // must not tell the user they cancelled a row they did not.
+          const statusNow = await readJobStatus(query, jobId)
+          await markRowChargedAfterCancel(query, jobId, row.recordId, {
+            usageTokens,
+            costUsd: outcome.result.estimatedCostUsd,
+            reason: statusNow === 'rejected' ? BULK_ROW_CANCELLED_AFTER_CHARGE : BULK_ROW_INTERRUPTED_AFTER_CHARGE,
+          })
+          await setHeaderProgress(query, jobId, generated, settledCost)
+          continue
+        }
         generated += 1
         await setHeaderProgress(query, jobId, generated, settledCost)
         continue

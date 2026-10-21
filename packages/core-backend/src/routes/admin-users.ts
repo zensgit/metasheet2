@@ -7,23 +7,39 @@ import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
 import { recordInvite } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
+import { LOGIN_NAME_RULE_CODE, validateLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { getUserSession, listUserSessions, revokeUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
+import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
   deriveDelegatedAdminNamespace,
+  deriveGrantNamespaces,
   disableNamespaceAdmissionsWithoutRoles,
+  grantNamespaceAdmissions,
   isNamespaceAdmissionControlledResource,
   listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots,
+  lockNamespaceAdmissionWrites,
   normalizeNamespace,
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
+import {
+  assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
+  delegatedRoleCodeRefusal,
+  reviewDelegatedRoleCodes,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentResult,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
@@ -50,13 +66,96 @@ import {
   type AccessGraphTransactionClient,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
-import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import { readOrgMembershipHistory } from '../directory/org-membership-history'
+import {
+  classifyRecoveryConflict,
+  RECOVERY_CONFLICT_HTTP_CODE,
+  RECOVERY_CONFLICT_HTTP_MESSAGE,
+  RECOVERY_CONFLICT_HTTP_STATUS,
+  sendIfRecoveryConflict,
+} from '../db/recovery-conflict'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
 } from '../attendance/w4c0-identity'
+import { Logger } from '../core/logger'
+import { getCorrelationId } from '../context/request-context'
+import { isValidCorrelationId } from '../middleware/correlation'
+
+const logger = new Logger('AdminUsersRoutes')
+
+/**
+ * #6163 — how a 500 branch of this router answers.
+ *
+ * The RESPONSE keeps the router's jsonError shape `{ ok: false, error: { code, message } }` with the
+ * branch's own error code and a FIXED sentence written here, plus one additional field,
+ * `error.correlationId`: the id the correlation middleware gave this request (the same value it
+ * returns in the X-Correlation-ID response header and writes on every log line). Once the raw text
+ * is gone, that id is the one thing an administrator can hand to support.
+ *
+ * The LOG gets exactly one line per failed request: a fixed event name, the response's error code,
+ * the class name of the caught value, and the correlation id. The caught value itself is never
+ * handed to the logger (the repo logger copies `error.message` and `error.stack` into the line when
+ * it is given an error object), and nothing read from it but its class name is written anywhere: a
+ * crypto, driver or library message can carry a host, a role or a stored value (the demo-server
+ * fault behind #6163 put Node's GCM text on /admin/users).
+ */
+const ADMIN_USERS_FAILURE_EVENT = 'admin-users.server-failure'
+const SAFE_ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+
+function describeCaughtClass(error: unknown): string {
+  try {
+    if (error === null) return 'null'
+    if (typeof error !== 'object' && typeof error !== 'function') return typeof error
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name
+    return typeof name === 'string' && SAFE_ERROR_CLASS.test(name) ? name : 'unknown'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+/**
+ * The request's correlation id, only when it has the shape the correlation middleware gives it: the
+ * value on `req`, else the one in the request context. Anything else (e.g. a raw header another
+ * middleware copied onto `req`) is never echoed into a body.
+ */
+function readFailureCorrelationId(req: Request): string | undefined {
+  for (const candidate of [req.correlationId, getCorrelationId()]) {
+    if (isValidCorrelationId(candidate)) return candidate
+  }
+  return undefined
+}
+
+function sendAdminUsersServerFailure(
+  req: Request,
+  res: Response,
+  code: string,
+  message: string,
+  error: unknown,
+): void {
+  const correlationId = readFailureCorrelationId(req)
+  try {
+    logger.error(
+      `${ADMIN_USERS_FAILURE_EVENT} code=${code} errorClass=${describeCaughtClass(error)}`
+      + (correlationId ? ` correlationId=${correlationId}` : ''),
+    )
+  } catch {
+    // Logging must never keep the fixed 500 from being sent.
+  }
+  res.status(500).json({
+    ok: false,
+    error: correlationId ? { code, message, correlationId } : { code, message },
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:userId/dingtalk-grant can fail AFTER its transaction committed and its
+ * audit row was written (the snapshot read that builds the reply comes last), so its 500 must not
+ * claim the change failed. The page shows this sentence verbatim in its (Chinese) status banner.
+ */
+const DINGTALK_GRANT_UNCONFIRMED_MESSAGE = '钉钉扫码登录的更新结果未能确认，请刷新页面后查看当前状态'
 
 type AdminUserProfile = {
   id: string
@@ -83,6 +182,8 @@ type AdminRoleCatalogRow = {
   name: string
   permissions: string[] | null
   member_count: number | string
+  /** Optimistic-concurrency token for PUT /api/roles/:id (`expectedUpdatedAt`). */
+  updated_at: string | Date | null
 }
 
 type AdminAuditLogRow = {
@@ -336,11 +437,27 @@ type AttendanceOnboardingResponse = {
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
-  'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
+  'User is missing DingTalk openId and cannot enable DingTalk login grant yet: with the account bound to its DingTalk member and activated, have them sign in with DingTalk once, then refresh and enable DingTalk login'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DEFAULT_ATTENDANCE_ORG_ID = 'default'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+/**
+ * Attendance role ids, derived from the exported access-preset table.
+ *
+ * Deriving keeps this set and the preset table as one registry: an attendance preset added to
+ * the table is in this set on the same commit, with nothing to update by hand. It is also why
+ * the boundary in `rbac/role-assignment.ts` constrains by namespace derivation rather than by a
+ * set like this one — the boundary must admit every attendance role id, present and future,
+ * without depending on any registry staying in step.
+ *
+ * Cross-checked against the router's own template registry by
+ * `tests/unit/role-assignment-boundary.test.ts`.
+ */
+export const ATTENDANCE_ROLE_IDS = new Set(
+  listAccessPresets()
+    .filter((preset) => preset.productMode === 'attendance' && Boolean(preset.roleId))
+    .map((preset) => String(preset.roleId)),
+)
 const ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED =
   'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
 
@@ -393,16 +510,12 @@ const ADMIN_USER_PROFILE_SELECT = `
 // Reuses the SAME discriminator (isRecoveryAuthorityBusyError) and error code
 // (RECOVERY_AUTHORITY_BUSY) as univer-meta.ts — no new marker/constant is introduced.
 // Body is values-free: fixed code/message/retryable flag, no user- or request-derived data.
+// O2-S2: now delegates to the ONE shared classifier/adapter (db/recovery-conflict.ts).
+// Status/code/message/details are byte-identical to the previous inline body; the
+// discriminator is additive-only (it also recognises the named retryable service errors
+// of the same family — RecoveryConflictError / UserRoleAssignmentRecoveryBusyError).
 function sendIfRecoveryAuthorityBusy(res: Response, error: unknown): boolean {
-  if (!isRecoveryAuthorityBusyError(error)) return false
-  jsonError(
-    res,
-    409,
-    'RECOVERY_AUTHORITY_BUSY',
-    'Recovery is stabilizing permissions; retry this change.',
-    { retryable: true },
-  )
-  return true
+  return sendIfRecoveryConflict(res, error)
 }
 
 function getRequestUserId(req: Request): string {
@@ -411,21 +524,19 @@ function getRequestUserId(req: Request): string {
   return typeof userId === 'string' ? userId.trim() : ''
 }
 
-function hasLegacyAdminClaim(req: Request): boolean {
-  const raw = req.user as Record<string, unknown> | undefined
-  if (!raw) return false
-  if (raw.role === 'admin') return true
-  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
-  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
-  return false
-}
+// `hasLegacyAdminClaim` used to be a private copy right here. It moved VERBATIM to
+// ../rbac/platform-admin.ts (and is imported above) when routes/roles.ts needed the same
+// question answered on its write path: a second, independently drifting admin predicate is an
+// auth bug, and the roles editor would have refused a principal that THIS file's
+// `GET /api/admin/roles` serves as an administrator. Behaviour here is unchanged — same
+// function body, same call sites.
 
-// Exported IN PLACE (not extracted to a shared guard module — there is no such module today;
-// the sibling `requireOrgMemberAccess` is itself a local function in routes/api-tokens.ts) so the
-// attendance-admin redelivery route can reuse the SAME platform-admin check rather than
-// reimplementing it. Two drifting admin checks would be an auth bug. Behavior and the ~20 existing
-// in-file call sites are unchanged. Contract: returns the userId on success, or null AFTER already
-// writing the 401/403 response — callers MUST return early on null.
+// Exported IN PLACE (the sibling `requireOrgMemberAccess` is itself a local function in
+// routes/api-tokens.ts) so the attendance-admin redelivery route can reuse the SAME
+// platform-admin check rather than reimplementing it. Two drifting admin checks would be an auth
+// bug. Behavior and the ~20 existing in-file call sites are unchanged. Contract: returns the
+// userId on success, or null AFTER already writing the 401/403 response — callers MUST return
+// early on null.
 export async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
   const userId = getRequestUserId(req)
   if (!userId) {
@@ -468,12 +579,13 @@ async function fetchRoleCatalog() {
     `SELECT
         r.id,
         r.name,
+        r.updated_at,
         COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions,
         COUNT(DISTINCT ur.user_id)::int AS member_count
      FROM roles r
      LEFT JOIN role_permissions rp ON rp.role_id = r.id
      LEFT JOIN user_roles ur ON ur.role_id = r.id
-     GROUP BY r.id, r.name
+     GROUP BY r.id, r.name, r.updated_at
      ORDER BY r.id ASC`,
   )
 
@@ -482,6 +594,11 @@ async function fetchRoleCatalog() {
     name: row.name,
     permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
     memberCount: Number(row.member_count || 0),
+    // Additive field: the role editor echoes it back as `expectedUpdatedAt` so a stale tab
+    // cannot silently replay a grid that has since been revoked (routes/roles.ts).
+    updatedAt: row.updated_at instanceof Date
+      ? row.updated_at.toISOString()
+      : (row.updated_at ?? null),
   }))
 }
 
@@ -590,12 +707,10 @@ function todayUtcDate(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+// #6259: the login-name rule (regex + English message) lives in auth/login-name-rule.ts, shared
+// with the DingTalk directory admission writer; do not inline a copy here.
 function validateUsername(username: string | null): string | null {
-  if (!username) return null
-  if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
-    return 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
-  }
-  return null
+  return validateLoginName(username)
 }
 
 function resolveUserAccountLabel(options: {
@@ -883,7 +998,159 @@ function roleIdMatchesNamespaces(roleId: string, namespaces: string[]): boolean 
   return matchRoleIdToNamespaces(roleId, namespaces)
 }
 
+/**
+ * Owner ruling 2026-10-10 「只有平台管理员能任命 *_admin」: a role whose id derives a
+ * delegated-admin namespace makes its holders delegated admins of that namespace, so only a
+ * platform administrator may assign or revoke it — for EVERY namespace, not one product's.
+ *
+ * Deliberately `deriveDelegatedAdminNamespace` itself, the predicate `deriveDelegableNamespaces`
+ * (and so `ensureRoleDelegationAdmin`) uses to GRANT delegated-admin identity: the refusal and
+ * the identity it protects are measured by one function, so a role id cannot be "not an admin
+ * role" here and "an admin role" there.
+ */
+function isNamespaceMainAdminRoleId(roleId: string): boolean {
+  return deriveDelegatedAdminNamespace(roleId) !== null
+}
+
+/**
+ * The delegated-admin code rule for one role and one direction, as a typed route refusal (or
+ * null). The classification and the rule are the write boundary's own pure functions
+ * (`reviewDelegatedRoleCodes` / `delegatedRoleCodeRefusal` in rbac/role-assignment.ts), so the
+ * typed 403 answered here and the boundary's backstop refusal cannot disagree:
+ *  - an admin-level code of the namespace the role id matched (`<ns>:admin`, `<ns>:*`) makes
+ *    the role admin-equivalent → ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN, both directions;
+ *  - assign: any code outside the matched namespaces (non-admission-controlled resources such as
+ *    `multitable:*` / `approvals:*` / `roles:*` / `workflow:*` / `admin:*`, the `*:*` wildcard,
+ *    malformed codes, another namespace's codes) → ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN;
+ *  - unassign: only an ADMIN-LEVEL code outside them refuses (removing an ordinary role only
+ *    lowers privilege).
+ */
+function delegatedRoleCodeRefusalFor(
+  roleId: string,
+  permissionCodes: readonly unknown[],
+  delegableNamespaces: string[],
+  action: 'assign' | 'unassign',
+): DelegatedRoleRefusal | null {
+  const refusal = delegatedRoleCodeRefusal(reviewDelegatedRoleCodes(roleId, permissionCodes, delegableNamespaces), action)
+  if (!refusal) return null
+  return new DelegatedRoleRefusal(
+    refusal.reason === 'admin_equivalent_role'
+      ? 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'
+      : 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN',
+    refusal.count,
+  )
+}
+
+/**
+ * Whether a delegated (non-platform) admin may assign — or, with `action: 'unassign'`, revoke —
+ * this role: the route's own role-id match plus the SAME predicates its refusals use
+ * (`isNamespaceMainAdminRoleId`, `delegatedRoleCodeRefusalFor`). The assignable catalog and the
+ * "current delegable roles" a delegate is shown are filtered by it, so the UI never offers a role
+ * the route refuses in that direction.
+ */
+function isRoleManageableByDelegatedAdmin(
+  role: { id: string; permissions: readonly string[] },
+  delegableNamespaces: string[],
+  action: 'assign' | 'unassign',
+): boolean {
+  if (!roleIdMatchesNamespaces(role.id, delegableNamespaces)) return false
+  if (isNamespaceMainAdminRoleId(role.id)) return false
+  return delegatedRoleCodeRefusalFor(role.id, role.permissions, delegableNamespaces, action) === null
+}
+
+type DelegatedRoleRefusalCode =
+  | 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'
+  | 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN'
+  | 'ROLE_NOT_FOUND'
+
+/**
+ * A delegated-role request refused by a rule that only a platform administrator may cross (or,
+ * for ROLE_NOT_FOUND, a role deleted between the existence check and the row lock). Thrown from
+ * inside the assignment transaction (the platform-code read lives there) and answered — and, for
+ * the two policy refusals, audited — by the route; the response carries the code and a fixed
+ * sentence, never the role's codes.
+ */
+class DelegatedRoleRefusal extends Error {
+  readonly code: DelegatedRoleRefusalCode
+  readonly offendingCount?: number
+
+  constructor(code: DelegatedRoleRefusalCode, offendingCount?: number) {
+    super(code)
+    this.name = 'DelegatedRoleRefusal'
+    this.code = code
+    this.offendingCount = offendingCount
+  }
+}
+
+/** Fixed status and sentence per refusal; nothing from the refused role reaches the body. */
+function sendDelegatedRoleRefusal(res: Response, refusal: DelegatedRoleRefusal): void {
+  switch (refusal.code) {
+    case 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN':
+      return jsonError(res, 403, 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN', 'Only a platform administrator can assign or revoke a namespace admin role')
+    case 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN':
+      return jsonError(res, 403, 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN', 'Only a platform administrator can assign or revoke a role that carries permissions outside your delegated namespace')
+    default:
+      return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+  }
+}
+
+async function auditDelegatedRoleRefusal(options: {
+  actorId: string
+  userId: string
+  roleId: string
+  action: string
+  delegableNamespaces: string[]
+  refusal: DelegatedRoleRefusal
+}): Promise<void> {
+  await auditLog({
+    actorId: options.actorId,
+    actorType: 'user',
+    action: options.action === 'assign' ? 'grant_denied' : 'revoke_denied',
+    resourceType: 'user-role',
+    resourceId: `${options.userId}:${options.roleId}`,
+    meta: {
+      adminUserId: options.actorId,
+      userId: options.userId,
+      roleId: options.roleId,
+      delegated: true,
+      delegableNamespaces: options.delegableNamespaces,
+      refusalCode: options.refusal.code,
+      ...(options.refusal.offendingCount !== undefined ? { offendingCount: options.refusal.offendingCount } : {}),
+    },
+  })
+}
+
+/**
+ * The target user's roles a delegate may act on: exactly those present in the given (already
+ * filtered) catalog. Fed the REVOCABLE catalog, so the "current delegable roles" a delegate sees
+ * are exactly the target's roles the route lets it revoke.
+ */
+function filterRoleIdsToCatalog(roleIds: string[], roleCatalog: Array<{ id: string }>): string[] {
+  const manageable = new Set(roleCatalog.map((role) => role.id))
+  return roleIds.filter((roleId) => manageable.has(roleId))
+}
+
+/**
+ * A delegate's two views of its namespaces' roles: what it may ASSIGN (the catalog it picks
+ * from) and what it may REVOKE (which the target's "current delegable roles" are cut to). They
+ * differ only by the unassign relaxation — a role carrying non-admin codes outside the namespace
+ * may be revoked but not granted. A platform admin (`namespaces` undefined) gets the unfiltered
+ * catalog for both.
+ */
+async function fetchDelegatedRoleCatalogs(namespaces?: string[]) {
+  const catalog = await fetchDelegatedRoleCatalogRows(namespaces)
+  if (!Array.isArray(namespaces)) return { assignable: catalog, revocable: catalog }
+  return {
+    assignable: catalog.filter((role) => isRoleManageableByDelegatedAdmin(role, namespaces, 'assign')),
+    revocable: catalog.filter((role) => isRoleManageableByDelegatedAdmin(role, namespaces, 'unassign')),
+  }
+}
+
 async function fetchDelegatedRoleCatalog(namespaces?: string[]) {
+  return (await fetchDelegatedRoleCatalogs(namespaces)).assignable
+}
+
+async function fetchDelegatedRoleCatalogRows(namespaces?: string[]) {
   if (Array.isArray(namespaces) && namespaces.length === 0) return []
 
   const result = Array.isArray(namespaces)
@@ -1711,7 +1978,16 @@ async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
     }
   }
 
-  const roleIds = await fetchUserRoleIds(actorId)
+  // This pre-check runs BEFORE the handler's own try/catch and Express 4 does not await handlers: a rejected
+  // role read here used to leave the request unanswered (no 5xx, the client waits for its own timeout).
+  // Answer the fixed 500 through the same helper as every other 500 of this file; the error text goes to the log.
+  let roleIds: string[]
+  try {
+    roleIds = await fetchUserRoleIds(actorId)
+  } catch (error) {
+    sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_CHECK_FAILED', 'Failed to verify delegated role-admin access', error)
+    return null as never
+  }
   const delegableNamespaces = deriveDelegableNamespaces(roleIds)
   if (delegableNamespaces.length === 0) {
     jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')
@@ -1780,6 +2056,114 @@ async function fetchDirectoryMemberships(userId: string) {
   }))
 }
 
+// Read-only view of the user's active organization rows (user_orgs), for the admin detail panel.
+// The predicate MUST stay identical to the session tenant claim in AuthService
+// (src/auth/AuthService.ts resolveSessionTenantId, no-requested-org branch, and
+// listActiveMembershipOrgIds): `uo.is_active = true AND u.is_active = true`, and a login gets a
+// tenant claim only when EXACTLY ONE such row exists. If that predicate changes there, change it
+// here too, otherwise this panel would tell an admin a user has a tenant context that login does
+// not give them (or the reverse). Never writes. Org ids are returned as stored: there is no
+// org-name table (directory_integrations.name names an integration, not an organization).
+type ActiveOrganizations = {
+  active: Array<{ orgId: string }>
+  hasTenantContext: boolean
+}
+
+async function fetchActiveOrganizations(userId: string): Promise<ActiveOrganizations> {
+  const result = await query<{ org_id: unknown }>(
+    `SELECT uo.org_id
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.is_active = true
+       AND u.is_active = true
+     ORDER BY uo.org_id ASC`,
+    [userId],
+  )
+  // `hasTenantContext` is decided on the RAW rows, exactly like login: login counts every matching
+  // row (two rows = no claim, even if one id is blank) and then drops a blank id as "no tenant"
+  // (AuthService login only sets tenantId when the resolved id is truthy). The `active` list below
+  // omits blank ids for display only; it must not feed the count.
+  const rawOrgIds = result.rows.map((row) => row.org_id)
+  const hasTenantContext = rawOrgIds.length === 1
+    && typeof rawOrgIds[0] === 'string'
+    && rawOrgIds[0].length > 0
+  const active = rawOrgIds
+    .filter((orgId): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+    .map((orgId) => ({ orgId }))
+  return { active, hasTenantContext }
+}
+
+// Fail-soft wrapper: login swallows a failure of the same read (AuthService resolveSessionTenantId
+// catch -> no tenant), so a failure here must not 500 the whole member-admission answer (plugin
+// toggles included). `null` means "unknown"; the panel renders nothing for it. The log line is
+// values-free like ADMIN_USERS_FAILURE_EVENT: only the error's class name and a validated
+// correlation id, never the error text.
+async function fetchActiveOrganizationsOrUnknown(userId: string): Promise<ActiveOrganizations | null> {
+  try {
+    return await fetchActiveOrganizations(userId)
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organizations-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
+}
+
+// Slice C (#6079): the `organizations` payload also says whether the local-account guard of
+// `POST /api/admin/directory/local/accounts` would refuse this user — `hasAnyRow` (any user_orgs row
+// for the user, any org, active or deactivated) and `deprovisionApplied` (an applied deprovision
+// event or effect for the user), read by the SAME statement the guard runs
+// (directory/org-membership-history.ts). Read-only and advisory: the guard stays the enforcement
+// point. `active` / `hasTenantContext` above are unchanged; when the active read fails the whole
+// `organizations` stays `null` as before and the history read is not attempted. When only the
+// history read fails, `hasAnyRow` / `deprovisionApplied` are `null` ("unknown") and the line below is
+// logged, values-free like the one above.
+type MemberAdmissionOrganizations = ActiveOrganizations & {
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
+}
+
+async function fetchOrgMembershipHistoryOrUnknown(
+  userId: string,
+): Promise<{ hasAnyRow: boolean; deprovisionApplied: boolean } | null> {
+  try {
+    const history = await readOrgMembershipHistory(
+      { query: (statement, params) => query(statement, params) },
+      { userId, orgId: null },
+    )
+    return { hasAnyRow: history.hasAnyRow, deprovisionApplied: history.deprovisionApplied }
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organization-history-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
+}
+
+async function fetchMemberAdmissionOrganizations(userId: string): Promise<MemberAdmissionOrganizations | null> {
+  const organizations = await fetchActiveOrganizationsOrUnknown(userId)
+  if (!organizations) return null
+  const history = await fetchOrgMembershipHistoryOrUnknown(userId)
+  return {
+    ...organizations,
+    hasAnyRow: history ? history.hasAnyRow : null,
+    deprovisionApplied: history ? history.deprovisionApplied : null,
+  }
+}
+
 async function fetchMemberAdmissionSnapshot(userId: string) {
   const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups, namespaceAdmissions] = await Promise.all([
     fetchUserProfile(userId),
@@ -1790,6 +2174,9 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     listUserNamespaceAdmissionSnapshots(userId),
   ])
   if (!profile) return null
+  // Read after the profile check (not inside the Promise.all above) so an unknown user stays a
+  // plain 404 and the order of the existing reads is unchanged.
+  const organizations = await fetchMemberAdmissionOrganizations(userId)
 
   return {
     userId,
@@ -1801,6 +2188,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     directoryMemberships,
     dingtalk: dingtalkAccess,
     namespaceAdmissions,
+    organizations,
   }
 }
 
@@ -1879,6 +2267,13 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
     status: 409,
     message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
   },
+  // 409 (DT-HARDEN-02): a state the caller can fix — activate without the DingTalk grant, let the
+  // now-active member sign in with DingTalk once (which records their openId), then grant. (A
+  // pending member's scan records nothing: the login activation gate runs before the backfill.)
+  ACTIVATE_DINGTALK_OPEN_ID_REQUIRED: {
+    status: 409,
+    message: 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>
@@ -1955,6 +2350,18 @@ export const ACTIVATE_ERROR_POLICY: Readonly<Record<ActivateErrorCode, ActivateP
  *   3. a TypeScript-AST scan of the `throwCoded` call sites, set-equal against this table's keys.
  */
 export function mapActivateError(error: unknown): { status: number; code: string; message: string } {
+  // O2-S2: activation writes users (a recovery-authority table). A recovery conflict —
+  // the marker 40001, re-raised by activatePendingUser as the named retryable
+  // RecoveryConflictError — is a retryable 409, not the ACTIVATE_FAILED 500 fallback.
+  // The classifier reads nothing that is published: status/code/message here are fixed
+  // constants, so the "never echo driver text" contract holds on this branch too.
+  if (classifyRecoveryConflict(error) === 'recovery_conflict') {
+    return {
+      status: RECOVERY_CONFLICT_HTTP_STATUS,
+      code: RECOVERY_CONFLICT_HTTP_CODE,
+      message: RECOVERY_CONFLICT_HTTP_MESSAGE,
+    }
+  }
   const rawCode = (error as { code?: unknown } | null)?.code
   // Exact membership, never a prefix. `.code` is the only property read off the thrown value.
   if (typeof rawCode === 'string') {
@@ -2123,7 +2530,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SUMMARY_FAILED', 'Failed to load delegated role summary', error)
     }
   })
 
@@ -2140,7 +2547,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', 'Failed to list delegation departments', error)
     }
   })
 
@@ -2157,7 +2564,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', (error as Error)?.message || 'Failed to list platform member groups')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', 'Failed to list platform member groups', error)
     }
   })
 
@@ -2199,7 +2606,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'PLATFORM_MEMBER_GROUP_NAME_CONFLICT', 'Platform member group name already exists')
       }
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', (error as Error)?.message || 'Failed to create platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', 'Failed to create platform member group', error)
     }
   })
 
@@ -2219,7 +2626,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_READ_FAILED', (error as Error)?.message || 'Failed to load platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_READ_FAILED', 'Failed to load platform member group', error)
     }
   })
 
@@ -2236,7 +2643,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', (error as Error)?.message || 'Failed to list scope templates')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', 'Failed to list scope templates', error)
     }
   })
 
@@ -2278,7 +2685,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT', 'Scope template name already exists')
       }
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', (error as Error)?.message || 'Failed to create scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', 'Failed to create scope template', error)
     }
   })
 
@@ -2298,7 +2705,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', (error as Error)?.message || 'Failed to load scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', 'Failed to load scope template', error)
     }
   })
 
@@ -2376,7 +2783,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', 'Failed to update scope template departments', error)
     }
   })
 
@@ -2452,7 +2859,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template member groups')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', 'Failed to update scope template member groups', error)
     }
   })
 
@@ -2482,7 +2889,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_READ_FAILED', (error as Error)?.message || 'Failed to load delegated admin scopes')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_READ_FAILED', 'Failed to load delegated admin scopes', error)
     }
   })
 
@@ -2568,7 +2975,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin scope', error)
     }
   })
 
@@ -2646,7 +3053,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin member-group scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin member-group scope', error)
     }
   })
 
@@ -2711,7 +3118,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', (error as Error)?.message || 'Failed to update platform member group membership')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', 'Failed to update platform member group membership', error)
     }
   })
 
@@ -2818,7 +3225,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', (error as Error)?.message || 'Failed to apply scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', 'Failed to apply scope template', error)
     }
   })
 
@@ -2876,7 +3283,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_USER_LIST_FAILED', 'Failed to list delegation users', error)
     }
   })
 
@@ -2917,7 +3324,7 @@ export function adminUsersRouter(): Router {
       ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const roleCatalog = await fetchDelegatedRoleCatalog(
+      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
       )
 
@@ -2932,12 +3339,13 @@ export function adminUsersRouter(): Router {
         roles: snapshot.roles,
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot.roles
-          : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot.roles, revocable),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ACCESS_FAILED', (error as Error)?.message || 'Failed to load delegated user access')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACCESS_FAILED', 'Failed to load delegated user access', error)
     }
   })
 
@@ -3015,7 +3423,7 @@ export function adminUsersRouter(): Router {
           : namespaceAdmissions.filter((admission) => delegation.delegableNamespaces.includes(admission.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update delegated namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ADMISSION_FAILED', 'Failed to update delegated namespace admission', error)
     }
   })
 
@@ -3039,6 +3447,22 @@ export function adminUsersRouter(): Router {
       if (!delegation.isPlatformAdmin && !roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)) {
         return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Role is outside your delegated namespaces')
       }
+      // After body validation and the existence checks, so an empty or invalid body still
+      // answers its 400 and an unknown id its 404; before the audience reads, because the
+      // answer does not depend on the target user. Both directions: a delegate must not
+      // appoint a peer main admin, and must not demote one.
+      if (!delegation.isPlatformAdmin && isNamespaceMainAdminRoleId(roleId)) {
+        const refusal = new DelegatedRoleRefusal('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
+        await auditDelegatedRoleRefusal({
+          actorId: delegation.actorId,
+          userId,
+          roleId,
+          action,
+          delegableNamespaces: delegation.delegableNamespaces,
+          refusal,
+        })
+        return sendDelegatedRoleRefusal(res, refusal)
+      }
 
       const [scopeAssignments, groupAssignments] = delegation.isPlatformAdmin
         ? await Promise.all([Promise.resolve([]), Promise.resolve([])])
@@ -3057,31 +3481,81 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId],
-        )
-      } else {
-        await query(
-          `DELETE FROM user_roles
-           WHERE user_id = $1 AND role_id = $2`,
-          [userId, roleId],
-        )
+      // The authority is the delegation this actor holds. A platform admin is unbounded here,
+      // matching the `delegation.isPlatformAdmin` short-circuit on the `roleIdMatchesNamespaces`
+      // check above; a delegated admin is bounded by the namespaces that check already computed,
+      // so the boundary re-states the route's own rule at the write rather than adding a
+      // second, separately-maintained one.
+      const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
+        ? { kind: 'platform-admin' }
+        : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
+      let membership: RoleAssignmentResult
+      let disabledNamespaces: string[] = []
+      try {
+        membership = await transaction(async (client) => {
+          if (!delegation.isPlatformAdmin) {
+            // The role's codes are read INSIDE the transaction that writes the membership, with
+            // the role row held FOR SHARE: the role editor (`PUT`/`POST /api/roles`) takes the
+            // same row FOR UPDATE before it touches `role_permissions`, so a platform code cannot
+            // be added between this check and the write. Two statements on purpose — the code
+            // read runs after the lock is granted and therefore sees what a just-committed editor
+            // wrote, which a single joined statement locking `roles` would not.
+            const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+            if (!locked.rows.length) throw new DelegatedRoleRefusal('ROLE_NOT_FOUND')
+            const codes = await client.query(
+              'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+              [roleId],
+            )
+            const permissionCodes = (codes.rows as Array<{ permission_code: string | null }>)
+              .map((row) => (typeof row.permission_code === 'string' ? row.permission_code : ''))
+            // Admin-equivalent (an admin-level code of its own namespace) → refused both ways;
+            // codes outside the namespace → refused on assign, and on unassign only when
+            // admin-level (see `delegatedRoleCodeRefusalFor`).
+            const refusal = delegatedRoleCodeRefusalFor(
+              roleId,
+              permissionCodes,
+              delegation.delegableNamespaces,
+              action === 'assign' ? 'assign' : 'unassign',
+            )
+            if (refusal) throw refusal
+          }
+          if (action === 'assign') {
+            return assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          }
+          await lockNamespaceAdmissionWrites(client, userId)
+          const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
+            userId,
+            namespaces: await listRoleNamespaces(roleId, client.query),
+            actorId: delegation.actorId,
+            source: 'role_unassigned',
+            revokedRoleId: roleId,
+          }, client.query)
+          return removed
+        })
+      } catch (error) {
+        if (!(error instanceof DelegatedRoleRefusal)) throw error
+        if (error.code !== 'ROLE_NOT_FOUND') {
+          await auditDelegatedRoleRefusal({
+            actorId: delegation.actorId,
+            userId,
+            roleId,
+            action,
+            delegableNamespaces: delegation.delegableNamespaces,
+            refusal: error,
+          })
+        }
+        return sendDelegatedRoleRefusal(res, error)
       }
+      await auditDelegatedAdminScopeCleanup({
+        actorId: delegation.actorId,
+        roleId,
+        trigger: action === 'assign' ? 'role_appointed' : 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
       }
-      const disabledNamespaces = action === 'assign'
-        ? []
-        : await disableNamespaceAdmissionsWithoutRoles({
-          userId,
-          namespaces: await listRoleNamespaces(roleId),
-          actorId: delegation.actorId,
-          source: 'role_unassigned',
-        })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -3108,7 +3582,7 @@ export function adminUsersRouter(): Router {
           delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
         ),
       ])
-      const roleCatalog = await fetchDelegatedRoleCatalog(
+      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
       )
 
@@ -3123,13 +3597,19 @@ export function adminUsersRouter(): Router {
         roles: snapshot?.roles ?? [],
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot?.roles ?? []
-          : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot?.roles ?? [], revocable),
       })
     } catch (error) {
+      // A boundary refusal is a permission outcome, so it answers with its own status and code
+      // rather than reaching the generic handler below. The route's pre-check and the boundary
+      // do not compute the same set — the boundary drops namespaces that are not
+      // admission-controlled — so this arm is reachable and is the seam's real answer for it.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_UPDATE_FAILED', 'Failed to update delegated role', error)
     }
   })
 
@@ -3208,7 +3688,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_LIST_FAILED', (error as Error)?.message || 'Failed to list users')
+      return sendAdminUsersServerFailure(req, res, 'USER_LIST_FAILED', 'Failed to list users', error)
     }
   })
 
@@ -3318,7 +3798,7 @@ export function adminUsersRouter(): Router {
           degraded: true,
         })
       }
-      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', (error as Error)?.message || 'Failed to load invite ledger')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_LEDGER_LIST_FAILED', 'Failed to load invite ledger', error)
     }
   })
 
@@ -3372,7 +3852,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_REVOKE_FAILED', 'Failed to revoke invite', error)
     }
   })
 
@@ -3485,7 +3965,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_RESEND_FAILED', (error as Error)?.message || 'Failed to resend invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_RESEND_FAILED', 'Failed to resend invite', error)
     }
   })
 
@@ -3531,7 +4011,11 @@ export function adminUsersRouter(): Router {
 
       const usernameValidationError = validateUsername(cleanUsername)
       if (usernameValidationError) {
-        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError)
+        // `details.rule` is the stable machine-readable code clients localise by; the English
+        // message stays as-is for existing callers.
+        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError, {
+          rule: LOGIN_NAME_RULE_CODE,
+        })
       }
 
       if (cleanName.length < 2 || cleanName.length > 100) {
@@ -3558,6 +4042,7 @@ export function adminUsersRouter(): Router {
       if (!passwordValidation.valid) {
         return jsonError(res, 400, 'PASSWORD_POLICY_FAILED', 'Password does not meet requirements', {
           details: passwordValidation.errors,
+          reasons: passwordValidation.reasons,
         })
       }
 
@@ -3693,6 +4178,13 @@ export function adminUsersRouter(): Router {
       // (not a second/competing one — every write below moved from `query()` to `client.query()`
       // inside this one call).
       await transaction(async (client) => {
+        if (attendanceOrgId && attendanceOnboarding && (cleanAttendanceGroupId || cleanDefaultShiftId)) {
+          // Only a new subject is admitted here. Serialize its source writes
+          // before shift/user/role locks; no existing subject is reassigned.
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+            buildAttendanceTimezoneRuntimeOrgLockKeyV1(attendanceOrgId),
+          ])
+        }
         if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
           // W3 safety erratum: this core route is a reference producer outside the
           // attendance plugin. Lock the same parent row that canonical shift delete
@@ -3774,12 +4266,33 @@ export function adminUsersRouter(): Router {
         })
 
         if (roleId) {
-          await client.query(
-            `INSERT INTO user_roles (user_id, role_id)
-             VALUES ($1, $2)
-             ON CONFLICT DO NOTHING`,
-            [userId, roleId],
-          )
+          await assignUserRoles({
+            userIds: [userId],
+            roleId,
+            // This route is behind `ensurePlatformAdmin`; creating administrators is one of
+            // the things it exists to do, so the scope is unbounded — and stated, not implied.
+            scope: { kind: 'platform-admin' },
+            executor: client,
+          })
+        }
+
+        // Namespace admission is the second half of a namespace-scoped grant: without an
+        // enabled row the permission codes written just below are filtered out of every
+        // effective-permission read, so a delegated role provisioned here would carry a role
+        // id and permission rows that resolve to nothing. Enable exactly the namespaces the
+        // grant derives, in this same transaction, so the two halves cannot diverge.
+        //
+        // Derived from the role id and the permission codes actually being granted — not
+        // from a list of namespaces to special-case. Grants that touch no
+        // admission-controlled resource derive an empty list and write nothing.
+        const grantedNamespaces = deriveGrantNamespaces({ roleId, permissionCodes: directPermissions })
+        if (grantedNamespaces.length > 0) {
+          await grantNamespaceAdmissions(client, {
+            userId,
+            namespaces: grantedNamespaces,
+            actorId: adminUserId,
+            source: 'admin_create',
+          })
         }
 
         if (directPermissions.length > 0) {
@@ -3932,7 +4445,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+      return sendAdminUsersServerFailure(req, res, 'USER_CREATE_FAILED', 'Failed to create user', error)
     }
   })
 
@@ -4186,7 +4699,7 @@ export function adminUsersRouter(): Router {
         }
         return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
       }
-      return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
+      return sendAdminUsersServerFailure(req, res, 'USER_PROFILE_UPDATE_FAILED', 'Failed to update user profile', error)
     }
   })
 
@@ -4203,7 +4716,7 @@ export function adminUsersRouter(): Router {
 
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
-      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+      return sendAdminUsersServerFailure(req, res, 'USER_ACCESS_FAILED', 'Failed to load user access', error)
     }
   })
 
@@ -4224,7 +4737,7 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_ACCESS_FAILED', 'Failed to load DingTalk access', error)
     }
   })
 
@@ -4244,7 +4757,7 @@ export function adminUsersRouter(): Router {
         ...snapshot,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_ADMISSION_FAILED', (error as Error)?.message || 'Failed to load member admission snapshot')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_ADMISSION_FAILED', 'Failed to load member admission snapshot', error)
     }
   })
 
@@ -4295,7 +4808,7 @@ export function adminUsersRouter(): Router {
         namespaceAdmissions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_FAILED', 'Failed to update namespace admission', error)
     }
   })
 
@@ -4360,7 +4873,7 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', (error as Error)?.message || 'Failed to update namespace admission in bulk')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', 'Failed to update namespace admission in bulk', error)
     }
   })
 
@@ -4407,7 +4920,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_GRANT_UPDATE_FAILED', DINGTALK_GRANT_UNCONFIRMED_MESSAGE, error)
     }
   })
 
@@ -4460,7 +4973,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', 'Failed to update DingTalk access in bulk', error)
     }
   })
 
@@ -4481,12 +4994,20 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, roleId],
-      )
+      // One transaction so that a fresh main-admin appointment and the removal of any audience
+      // left over from an earlier tenure land together (see `assignUserRoles`).
+      const membership = await transaction((client) => assignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'platform-admin' },
+        executor: client,
+      }))
+      await auditDelegatedAdminScopeCleanup({
+        actorId: adminUserId,
+        roleId,
+        trigger: 'role_appointed',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, true)
       }
@@ -4512,10 +5033,12 @@ export function adminUsersRouter(): Router {
         ...snapshot,
         changedRoleId: roleId,
         actorId: adminUserId,
+        roleHeld: Boolean(snapshot?.roles?.includes(roleId)),
+        membershipChanged: (membership?.rowCount ?? 0) > 0,
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_ASSIGN_FAILED', 'Failed to assign role', error)
     }
   })
 
@@ -4532,20 +5055,34 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, roleId],
-      )
+      // The role, scoped audience and revoke witness commit together. Bootstrap uses the
+      // same subject lock before reading eligibility, including when admission is absent.
+      const { membership, disabledNamespaces } = await transaction(async (client) => {
+        await lockNamespaceAdmissionWrites(client, userId)
+        const membership = await unassignUserRoles({
+          userIds: [userId],
+          roleId,
+          scope: { kind: 'platform-admin' },
+          executor: client,
+        })
+        const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
+          userId,
+          namespaces: await listRoleNamespaces(roleId, client.query),
+          actorId: adminUserId,
+          source: 'role_unassigned',
+          revokedRoleId: roleId,
+        }, client.query)
+        return { membership, disabledNamespaces }
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: adminUserId,
+        roleId,
+        trigger: 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }
-      const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
-        userId,
-        namespaces: await listRoleNamespaces(roleId),
-        actorId: adminUserId,
-        source: 'role_unassigned',
-      })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -4567,10 +5104,12 @@ export function adminUsersRouter(): Router {
         ...snapshot,
         changedRoleId: roleId,
         actorId: adminUserId,
+        roleHeld: Boolean(snapshot?.roles?.includes(roleId)),
+        membershipChanged: (membership?.rowCount ?? 0) > 0,
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_UNASSIGN_FAILED', 'Failed to unassign role', error)
     }
   })
 
@@ -4658,7 +5197,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
+      return sendAdminUsersServerFailure(req, res, 'USER_STATUS_FAILED', 'Failed to update user status', error)
     }
   })
 
@@ -4714,7 +5253,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', (error as Error)?.message || 'Failed to reset password')
+      return sendAdminUsersServerFailure(req, res, 'PASSWORD_RESET_FAILED', 'Failed to reset password', error)
     }
   })
 
@@ -4758,7 +5297,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke user sessions', error)
     }
   })
 
@@ -4774,7 +5313,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_LIST_FAILED', (error as Error)?.message || 'Failed to list roles')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_LIST_FAILED', 'Failed to list roles', error)
     }
   })
 
@@ -4867,7 +5406,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', (error as Error)?.message || 'Failed to load admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_LIST_FAILED', 'Failed to load admin audit activity', error)
     }
   })
 
@@ -4963,7 +5502,7 @@ export function adminUsersRouter(): Router {
 
       return res.end()
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', (error as Error)?.message || 'Failed to export admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_EXPORT_FAILED', 'Failed to export admin audit activity', error)
     }
   })
 
@@ -4984,7 +5523,7 @@ export function adminUsersRouter(): Router {
         items: sessions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_LIST_FAILED', (error as Error)?.message || 'Failed to load user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_LIST_FAILED', 'Failed to load user sessions', error)
     }
   })
 
@@ -5042,7 +5581,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke session')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke session', error)
     }
   })
 
@@ -5127,7 +5666,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOCATION_LIST_FAILED', 'Failed to load session revocations', error)
     }
   })
 
@@ -5259,7 +5798,7 @@ export function adminUsersRouter(): Router {
         cutoverEnabled: isAuthLoginAliasCutoverEnabled(),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ALIAS_BACKFILL_FAILED', (error as Error)?.message || 'Backfill failed')
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_BACKFILL_FAILED', 'Backfill failed', error)
     }
   })
 
@@ -5295,7 +5834,7 @@ export function adminUsersRouter(): Router {
           message: (error as Error).message,
         })
       }
-      return jsonError(res, 500, 'ALIAS_CUTOVER_STATUS_FAILED', (error as Error)?.message || 'Status failed')
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_CUTOVER_STATUS_FAILED', 'Status failed', error)
     }
   })
 

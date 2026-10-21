@@ -4,7 +4,7 @@
  * `now` is always passed explicitly here so the matrix is independent of wall-clock time.
  */
 import { describe, expect, it } from 'vitest'
-import { formatRelativeWait, waitSeverity } from '../src/approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../src/approvals/relativeWait'
 
 const NOW = new Date('2026-07-05T12:00:00Z')
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60 * 1000).toISOString()
@@ -14,35 +14,35 @@ const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60 * 1000)
 describe('approvals/relativeWait', () => {
   describe('formatRelativeWait', () => {
     it('renders 刚刚 under an hour (boundary: 59m)', () => {
-      expect(formatRelativeWait(minutesAgo(59), NOW)).toBe('刚刚')
+      expect(formatRelativeWait(minutesAgo(59), true, NOW)).toBe('刚刚')
     })
 
     it('renders whole hours from 1h up to (not including) 24h', () => {
-      expect(formatRelativeWait(hoursAgo(1), NOW)).toBe('1 小时')
-      expect(formatRelativeWait(hoursAgo(23), NOW)).toBe('23 小时')
+      expect(formatRelativeWait(hoursAgo(1), true, NOW)).toBe('1 小时')
+      expect(formatRelativeWait(hoursAgo(23), true, NOW)).toBe('23 小时')
     })
 
     it('renders whole days (rounded down) from 24h onward (boundary: 24h -> 1 天)', () => {
-      expect(formatRelativeWait(hoursAgo(24), NOW)).toBe('1 天')
-      expect(formatRelativeWait(daysAgo(3), NOW)).toBe('3 天')
-      expect(formatRelativeWait(daysAgo(7), NOW)).toBe('7 天')
+      expect(formatRelativeWait(hoursAgo(24), true, NOW)).toBe('1 天')
+      expect(formatRelativeWait(daysAgo(3), true, NOW)).toBe('3 天')
+      expect(formatRelativeWait(daysAgo(7), true, NOW)).toBe('7 天')
     })
 
     it('rounds a partial day down (e.g. 3 天 5 小时 -> 3 天)', () => {
-      expect(formatRelativeWait(hoursAgo(3 * 24 + 5), NOW)).toBe('3 天')
+      expect(formatRelativeWait(hoursAgo(3 * 24 + 5), true, NOW)).toBe('3 天')
     })
 
     it('returns "" for an invalid/unparseable createdAt', () => {
-      expect(formatRelativeWait('not-a-date', NOW)).toBe('')
-      expect(formatRelativeWait('', NOW)).toBe('')
+      expect(formatRelativeWait('not-a-date', true, NOW)).toBe('')
+      expect(formatRelativeWait('', true, NOW)).toBe('')
     })
 
     it('treats a future createdAt (clock skew) as 刚刚 rather than a negative duration', () => {
-      expect(formatRelativeWait(minutesAgo(-5), NOW)).toBe('刚刚')
+      expect(formatRelativeWait(minutesAgo(-5), true, NOW)).toBe('刚刚')
     })
 
     it('defaults `now` to the current wall clock when omitted', () => {
-      expect(formatRelativeWait(new Date().toISOString())).toBe('刚刚')
+      expect(formatRelativeWait(new Date().toISOString(), true)).toBe('刚刚')
     })
   })
 
@@ -65,5 +65,24 @@ describe('approvals/relativeWait', () => {
     it('is normal for an invalid/unparseable createdAt (fail-quiet, pairs with formatRelativeWait\'s "")', () => {
       expect(waitSeverity('not-a-date', NOW)).toBe('normal')
     })
+  })
+})
+
+// O-8 / F8-1: the same matrix in English, plus the whole-phrase builder that keeps the label and the
+// duration in ONE locale (no "Waiting 3 天").
+describe('approvals/relativeWait — en (O-8 / F8-1)', () => {
+  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
+  it('formats under an hour / hours / days in English, singular and plural', () => {
+    expect(formatRelativeWait(minutesAgo(59), false, NOW)).toBe('< 1 hour')
+    expect(formatRelativeWait(hoursAgo(1), false, NOW)).toBe('1 hour')
+    expect(formatRelativeWait(hoursAgo(23), false, NOW)).toBe('23 hours')
+    expect(formatRelativeWait(hoursAgo(24), false, NOW)).toBe('1 day')
+    expect(formatRelativeWait(daysAgo(3), false, NOW)).toBe('3 days')
+    expect(formatRelativeWait('not-a-date', false, NOW)).toBe('')
+  })
+  it('waitingPhrase builds the whole phrase in one locale', () => {
+    expect(waitingPhrase(formatRelativeWait(daysAgo(3), false, NOW), false)).toBe('Waiting 3 days')
+    expect(waitingPhrase(formatRelativeWait(daysAgo(3), true, NOW), true)).toBe('已等待 3 天')
+    expect(waitingPhrase(formatRelativeWait(hoursAgo(5), false, NOW), false)).not.toMatch(CJK)
   })
 })

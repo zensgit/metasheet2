@@ -148,14 +148,23 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
+  explanation: '说明',
 }
 
 const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
   Object.keys(FIELD_LABELS) as AuthorableFieldType[],
 )
+
+const DATE_RANGE_DATE_TYPES = new Set<FieldAuthoringDraft['dateRangeDateType']>([
+  '',
+  'date',
+  'date_half_day',
+  'date_minute',
+])
 
 function successful(
   draft: TemplateAuthoringDraft,
@@ -311,23 +320,31 @@ export function addFormField(
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
-    // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above — this
-    // command layer feeds the Designer 2.0 canvas track (ApprovalFormFieldInspector.vue), which is
-    // unmounted in production (not imported by any live view) and out of Lock-8's citation scope
-    // (§1.3 names ApprovalFormInlineEditor.vue). No authoring affordance for these three keys exists
-    // here; a freshly-added `number` field simply carries no display props, same as today.
+    // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above. Both the
+    // Canvas V2 inspector and the inline fallback author these display properties through the typed
+    // property-update command; precision/min/max/derived formulas remain outside this contract.
     numberCurrencySymbol: '',
     numberThousandsSeparator: false,
     numberUppercaseCny: false,
-    // L8-B: same neutral-defaults discipline as the L8-C keys above — no authoring affordance for
-    // date_range's four keys exists on this command layer's (unmounted) canvas track; a freshly-
-    // added date_range field simply carries an unset dateType (matching §1.2's no-absent-default:
-    // it stays publish-rejected until the OTHER, live authoring surface — ApprovalFormInlineEditor
-    // — sets a granularity), same posture as recordLinkBaseId/numberCurrencySymbol above.
+    // L8-B: an unset granularity remains an explicit draft state and publish rejects it. Both live
+    // authoring surfaces can select a valid granularity and edit the three labels.
     dateRangeDateType: '',
     dateRangeStartLabel: '',
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
+    // L8-A: an empty explanation body is a draft-only state; both authoring surfaces expose the
+    // multiline body and publish keeps the non-empty boundary.
+    explanationText: '',
+    departmentSelection: 'single',
+    departmentDisplay: 'leaf_only',
+    departmentDefaultMode: '',
+    departmentDefaultIds: [],
+    departmentMaxSelectionsText: '',
+    userAllowSelf: false,
+    userSelection: 'single',
+    userDefaultMode: '',
+    userDefaultIds: [],
+    userMaxSelectionsText: '',
   }
 
   const fields = [...draft.fields]
@@ -651,9 +668,15 @@ export function removeFormField(
  * Typed property patch for `updateFormFieldProperties`. Deliberately EXCLUDES
  * identity (`id`/`localId` — FB-D5: commands never re-mint or accept identity
  * edits), `type` (that is `retypeFormField`), `detailColumns` (the dedicated
- * column commands), `original` (round-trip preservation is serializer-owned),
- * and the record-link base/sheet pins (their typed pickers arrive with the F4
- * production mount, where the parent-owned catalog lives).
+ * column commands), and `original` (round-trip preservation is
+ * serializer-owned).
+ *
+ * The record-link base/sheet pins are patchable on `record-link` fields only
+ * (delta §3.4 typed pickers; parity ledger deferral (3)). Their values come
+ * from the inspector's typed pickers over the PARENT-OWNED catalog — never
+ * from free text. This command has no catalog, so it does not decide whether
+ * a sheet still belongs to a new base: the caller resolves that and submits
+ * both pins in ONE patch, which the adapter records as ONE history entry.
  */
 export interface FormFieldPropertyPatch {
   readonly label?: string
@@ -663,6 +686,28 @@ export interface FormFieldPropertyPatch {
   readonly visibility?: FieldVisibilityDraft
   readonly minRowsText?: string
   readonly maxRowsText?: string
+  readonly numberCurrencySymbol?: string
+  readonly numberThousandsSeparator?: boolean
+  readonly numberUppercaseCny?: boolean
+  readonly dateRangeDateType?: FieldAuthoringDraft['dateRangeDateType']
+  readonly dateRangeStartLabel?: string
+  readonly dateRangeEndLabel?: string
+  readonly dateRangeDurationLabel?: string
+  readonly explanationText?: string
+  readonly departmentSelection?: FieldAuthoringDraft['departmentSelection']
+  readonly departmentDisplay?: FieldAuthoringDraft['departmentDisplay']
+  readonly departmentDefaultMode?: FieldAuthoringDraft['departmentDefaultMode']
+  readonly departmentDefaultIds?: readonly string[]
+  readonly departmentMaxSelectionsText?: string
+  readonly userAllowSelf?: boolean
+  readonly userSelection?: FieldAuthoringDraft['userSelection']
+  readonly userDefaultMode?: FieldAuthoringDraft['userDefaultMode']
+  readonly userDefaultIds?: readonly string[]
+  readonly userMaxSelectionsText?: string
+  /** `record-link` only: target base pin (typed picker value; '' clears). */
+  readonly recordLinkBaseId?: string
+  /** `record-link` only: target sheet pin (typed picker value; '' clears). */
+  readonly recordLinkSheetId?: string
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -700,6 +745,52 @@ export function updateFormFieldProperties(
     current.type !== 'detail'
   )
     return rejected('unsupported_field_type')
+  if (
+    (patch.userAllowSelf !== undefined ||
+      patch.userSelection !== undefined ||
+      patch.userDefaultMode !== undefined ||
+      patch.userDefaultIds !== undefined ||
+      patch.userMaxSelectionsText !== undefined) &&
+    current.type !== 'user'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.numberCurrencySymbol !== undefined ||
+      patch.numberThousandsSeparator !== undefined ||
+      patch.numberUppercaseCny !== undefined) &&
+    current.type !== 'number'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.dateRangeDateType !== undefined ||
+      patch.dateRangeStartLabel !== undefined ||
+      patch.dateRangeEndLabel !== undefined ||
+      patch.dateRangeDurationLabel !== undefined) &&
+    current.type !== 'date_range'
+  )
+    return rejected('unsupported_field_type')
+  if (patch.explanationText !== undefined && current.type !== 'explanation')
+    return rejected('unsupported_field_type')
+  if (
+    (patch.departmentSelection !== undefined ||
+      patch.departmentDisplay !== undefined ||
+      patch.departmentDefaultMode !== undefined ||
+      patch.departmentDefaultIds !== undefined ||
+      patch.departmentMaxSelectionsText !== undefined) &&
+    current.type !== 'department'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.recordLinkBaseId !== undefined ||
+      patch.recordLinkSheetId !== undefined) &&
+    current.type !== 'record-link'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    patch.dateRangeDateType !== undefined &&
+    !DATE_RANGE_DATE_TYPES.has(patch.dateRangeDateType)
+  )
+    return rejected('unsupported_field_type')
   const next: FieldAuthoringDraft = {
     ...current,
     ...(patch.label !== undefined ? { label: patch.label } : {}),
@@ -718,6 +809,66 @@ export function updateFormFieldProperties(
       : {}),
     ...(patch.maxRowsText !== undefined
       ? { maxRowsText: patch.maxRowsText }
+      : {}),
+    ...(patch.numberCurrencySymbol !== undefined
+      ? { numberCurrencySymbol: patch.numberCurrencySymbol }
+      : {}),
+    ...(patch.numberThousandsSeparator !== undefined
+      ? { numberThousandsSeparator: patch.numberThousandsSeparator }
+      : {}),
+    ...(patch.numberUppercaseCny !== undefined
+      ? { numberUppercaseCny: patch.numberUppercaseCny }
+      : {}),
+    ...(patch.dateRangeDateType !== undefined
+      ? { dateRangeDateType: patch.dateRangeDateType }
+      : {}),
+    ...(patch.dateRangeStartLabel !== undefined
+      ? { dateRangeStartLabel: patch.dateRangeStartLabel }
+      : {}),
+    ...(patch.dateRangeEndLabel !== undefined
+      ? { dateRangeEndLabel: patch.dateRangeEndLabel }
+      : {}),
+    ...(patch.dateRangeDurationLabel !== undefined
+      ? { dateRangeDurationLabel: patch.dateRangeDurationLabel }
+      : {}),
+    ...(patch.explanationText !== undefined
+      ? { explanationText: patch.explanationText }
+      : {}),
+    ...(patch.departmentSelection !== undefined
+      ? { departmentSelection: patch.departmentSelection }
+      : {}),
+    ...(patch.departmentDisplay !== undefined
+      ? { departmentDisplay: patch.departmentDisplay }
+      : {}),
+    ...(patch.departmentDefaultMode !== undefined
+      ? { departmentDefaultMode: patch.departmentDefaultMode }
+      : {}),
+    ...(patch.departmentDefaultIds !== undefined
+      ? { departmentDefaultIds: [...patch.departmentDefaultIds] }
+      : {}),
+    ...(patch.departmentMaxSelectionsText !== undefined
+      ? { departmentMaxSelectionsText: patch.departmentMaxSelectionsText }
+      : {}),
+    ...(patch.userAllowSelf !== undefined
+      ? { userAllowSelf: patch.userAllowSelf }
+      : {}),
+    ...(patch.userSelection !== undefined
+      ? { userSelection: patch.userSelection }
+      : {}),
+    ...(patch.userDefaultMode !== undefined
+      ? { userDefaultMode: patch.userDefaultMode }
+      : {}),
+    ...(patch.userDefaultIds !== undefined
+      ? { userDefaultIds: [...patch.userDefaultIds] }
+      : {}),
+    ...(patch.userMaxSelectionsText !== undefined
+      ? { userMaxSelectionsText: patch.userMaxSelectionsText }
+      : {}),
+    ...(patch.recordLinkBaseId !== undefined
+      ? { recordLinkBaseId: patch.recordLinkBaseId }
+      : {}),
+    ...(patch.recordLinkSheetId !== undefined
+      ? { recordLinkSheetId: patch.recordLinkSheetId }
       : {}),
   }
   const fields = [...draft.fields]

@@ -3,6 +3,9 @@ import {
   scanBlockingTimeCorrectionRequests,
   selectAvailableSmokeWorkDate,
 } from './attendance-smoke-workdate.mjs'
+import { pathToFileURL } from 'node:url'
+import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './attendance-acceptance-preflight.mjs'
+import { scopeAttendanceImportUrl } from './attendance-import-scope.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -89,19 +92,21 @@ async function refreshAuthToken() {
         log('WARN: refreshed token missing user id claim; keeping existing token')
         return false
       }
+      await verifyAcceptanceTokenTenant(apiBase, nextToken)
       token = nextToken
       return true
     }
     log('WARN: token refresh response missing token')
     return false
   } catch (error) {
+    if (error instanceof AcceptanceTenantError) throw error
     log(`WARN: token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
 }
 
 async function apiFetch(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -121,7 +126,7 @@ async function apiFetch(path, init = {}) {
 }
 
 async function apiFetchRaw(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -219,6 +224,28 @@ function makeUuidV4() {
 
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim())
+}
+
+export function buildAttendanceAdminDirectoryRequests(searchQuery, resolvedUserId, missingUserId) {
+  const search = new URLSearchParams({
+    q: searchQuery,
+    pageSize: '5',
+    scope: 'global',
+  })
+
+  return {
+    searchPath: `/attendance-admin/users/search?${search.toString()}`,
+    batchResolve: {
+      path: '/attendance-admin/users/batch/resolve',
+      init: {
+        method: 'POST',
+        body: JSON.stringify({
+          userIds: [resolvedUserId, missingUserId],
+          scope: 'global',
+        }),
+      },
+    },
+  }
 }
 
 function makeCsv(workDate, userId, groupName) {
@@ -326,6 +353,7 @@ async function fetchWithRetry(url, init = {}, options = {}) {
       }
       return res
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       if (attempt >= apiRetryAttempts) throw error
       const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
       log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
@@ -375,6 +403,7 @@ async function run() {
 
   log(`API_BASE=${apiBase}`)
   await refreshAuthToken()
+  await verifyAcceptanceTokenTenant(apiBase, token)
 
   // 1) auth/me
   const me = await apiFetch('/auth/me', { method: 'GET' })
@@ -413,7 +442,8 @@ async function run() {
     log(`role templates ok: count=${templates.length}`)
 
     const searchQuery = String(user?.email || userId).slice(0, 64)
-    const userSearch = await apiFetch(`/attendance-admin/users/search?q=${encodeURIComponent(searchQuery)}&pageSize=5`, { method: 'GET' })
+    const directoryRequests = buildAttendanceAdminDirectoryRequests(searchQuery, '', '')
+    const userSearch = await apiFetch(directoryRequests.searchPath, { method: 'GET' })
     assertOk(userSearch, 'GET /attendance-admin/users/search')
     const searchItems = userSearch.body?.data?.items
     if (!Array.isArray(searchItems)) die('user search response missing items')
@@ -422,10 +452,8 @@ async function run() {
     const resolvedUserId = String(searchItems.find((item) => isUuid(item?.id))?.id || '')
     if (resolvedUserId) {
       const missingUserId = makeUuidV4()
-      const resolveRes = await apiFetch('/attendance-admin/users/batch/resolve', {
-        method: 'POST',
-        body: JSON.stringify({ userIds: [resolvedUserId, missingUserId] }),
-      })
+      const batchResolve = buildAttendanceAdminDirectoryRequests(searchQuery, resolvedUserId, missingUserId).batchResolve
+      const resolveRes = await apiFetch(batchResolve.path, batchResolve.init)
       if (resolveRes.res.status === 404) {
         if (requireBatchResolve) die('attendance-admin batch resolve API missing (404)')
         log('WARN: attendance-admin batch resolve API missing (404); skipping batch resolve check')
@@ -485,7 +513,7 @@ async function run() {
   log(`plugins ok: active=${active.length}`)
 
   // 3) prepare token (preview)
-  const prepare1 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+  const prepare1 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
   assertOk(prepare1, 'POST /attendance/import/prepare (preview)')
   const token1 = prepare1.body?.data?.commitToken
   if (!token1) die('prepare did not return commitToken')
@@ -554,7 +582,7 @@ async function run() {
 
   // 5.1) async preview gate (optional): validates preview enqueue + poll + idempotency retry.
   if (requirePreviewAsync) {
-    const preparePreviewAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const preparePreviewAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(preparePreviewAsync, 'POST /attendance/import/prepare (preview-async)')
     const previewAsyncToken = preparePreviewAsync.body?.data?.commitToken
     if (!previewAsyncToken) die('prepare (preview-async) did not return commitToken')
@@ -610,7 +638,7 @@ async function run() {
   }
 
   // 6) prepare token (commit) - preview consumes tokens by design
-  const prepare2 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+  const prepare2 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
   assertOk(prepare2, 'POST /attendance/import/prepare (commit)')
   const token2 = prepare2.body?.data?.commitToken
   if (!token2) die('prepare (commit) did not return commitToken')
@@ -628,7 +656,7 @@ async function run() {
     const attemptPayload = { ...commitPayload }
     if (attempt > 1) {
       // Prepare a fresh token in case the previous attempt consumed/invalidated it before failing.
-      const prepareRetry = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+      const prepareRetry = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
       assertOk(prepareRetry, 'POST /attendance/import/prepare (commit retry)')
       const retryToken = prepareRetry.body?.data?.commitToken
       if (!retryToken) die('prepare (commit retry) did not return commitToken')
@@ -698,7 +726,7 @@ async function run() {
   }
 
   // 6.2) export endpoint should return CSV (items or anomalies).
-  const exportUrl = `${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`
+  const exportUrl = scopeAttendanceImportUrl(`${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`, orgId)
   const exportRes = await fetchWithRetry(exportUrl, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
@@ -717,7 +745,7 @@ async function run() {
 
   // 6.3) async commit gate (optional): validates job enqueue + poll + rollback + idempotency.
   if (requireImportAsync) {
-    const prepareAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const prepareAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(prepareAsync, 'POST /attendance/import/prepare (commit-async)')
     const asyncToken = prepareAsync.body?.data?.commitToken
     if (!asyncToken) die('prepare (commit-async) did not return commitToken')
@@ -887,8 +915,10 @@ async function run() {
   log('SMOKE PASS')
 }
 
-run().catch((error) => {
-  const msg = error instanceof Error ? error.message : String(error)
-  console.error(`[attendance-smoke-api] Failed: ${msg}`)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((error) => {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`[attendance-smoke-api] Failed: ${msg}`)
+    process.exit(1)
+  })
+}

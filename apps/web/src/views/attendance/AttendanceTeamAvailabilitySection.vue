@@ -2,11 +2,6 @@
   <div class="attendance__admin-section" data-attendance-team-availability>
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Team availability', '团队可用性') }}</h4>
-      <div class="attendance__admin-actions">
-        <button class="attendance__btn attendance__btn--primary" :disabled="loading || !canLoad" @click="reload">
-          {{ loading ? tr('Loading...', '加载中...') : tr('Load', '加载') }}
-        </button>
-      </div>
     </div>
 
     <p class="attendance__hint">
@@ -16,19 +11,49 @@
       ) }}
     </p>
 
-    <div class="attendance__admin-grid">
-      <label class="attendance__field" for="attendance-ta-group">
-        <span>{{ tr('Group ID', '考勤组 ID') }}</span>
-        <input id="attendance-ta-group" v-model.trim="groupId" type="text" :placeholder="tr('attendance group UUID', '考勤组 UUID')" @keydown.enter.prevent="reload" />
+    <div class="attendance-ta__filters" data-attendance-team-availability-filters>
+      <label class="attendance-ta__field attendance-ta__group" for="attendance-ta-group">
+        <span>{{ tr('Attendance group', '考勤组') }}</span>
+        <input
+          id="attendance-ta-group"
+          :value="groupDraft"
+          type="search"
+          autocomplete="off"
+          :placeholder="tr('Search by group name', '按考勤组名称搜索')"
+          data-attendance-team-availability-group
+          @input="onGroupInput"
+          @focus="menuOpen = true"
+          @keydown.enter.prevent="reload"
+        />
+        <ul
+          v-if="menuOpen && (groupMatches.length > 0 || groupSearchEmpty)"
+          class="attendance-ta__group-menu"
+          data-attendance-team-availability-group-menu
+        >
+          <li v-for="group in groupMatches" :key="group.id">
+            <button type="button" @click="chooseGroup(group)">{{ group.name }}</button>
+          </li>
+          <li v-if="groupSearchEmpty" class="attendance-ta__group-empty" data-attendance-search-empty>
+            {{ tr('No matches', '搜索不到') }}
+          </li>
+        </ul>
       </label>
-      <label class="attendance__field" for="attendance-ta-from">
+      <label class="attendance-ta__field" for="attendance-ta-from">
         <span>{{ tr('From', '起') }}</span>
-        <input id="attendance-ta-from" v-model="from" type="date" />
+        <AttendanceLocaleDateInput id="attendance-ta-from" v-model="from" />
       </label>
-      <label class="attendance__field" for="attendance-ta-to">
+      <label class="attendance-ta__field" for="attendance-ta-to">
         <span>{{ tr('To', '止') }}</span>
-        <input id="attendance-ta-to" v-model="to" type="date" />
+        <AttendanceLocaleDateInput id="attendance-ta-to" v-model="to" />
       </label>
+      <button
+        class="attendance__btn attendance__btn--primary attendance-ta__load"
+        type="button"
+        :disabled="loading || !canLoad"
+        @click="reload"
+      >
+        {{ loading ? tr('Loading...', '加载中...') : tr('Load', '加载') }}
+      </button>
     </div>
 
     <p v-if="errorText" class="attendance__error" data-attendance-team-availability-error>{{ errorText }}</p>
@@ -65,13 +90,24 @@
         <table class="attendance__table attendance-ta__matrix" data-attendance-team-availability-matrix>
           <thead>
             <tr>
-              <th>{{ tr('Member', '成员') }}</th>
+              <th>{{ tr('Name', '姓名') }}</th>
               <th v-for="d in dates" :key="d">{{ d }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="member in memberIds" :key="member">
-              <td class="attendance-ta__member">{{ member }}</td>
+            <tr v-for="member in members" :key="member">
+              <td class="attendance-ta__member">
+                <span class="attendance-ta__member-identity">
+                  <strong
+                    v-if="memberPrimaryLabel(member)"
+                    data-attendance-team-availability-member-label
+                  >{{ memberPrimaryLabel(member) }}</strong>
+                  <span
+                    data-attendance-team-availability-member-id
+                    :class="{ 'attendance-ta__id-clip': Boolean(memberPrimaryLabel(member)) }"
+                  >{{ member }}</span>
+                </span>
+              </td>
               <td v-for="d in dates" :key="d">
                 <span
                   v-if="metaAt(member, d)"
@@ -106,21 +142,119 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { TranslateFn } from './useAttendanceAdminRail'
 import { useTeamAvailability } from './useTeamAvailability'
-import { teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
+import { fetchTeamAvailability, teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { apiFetch } from '../../utils/api'
 
-const props = defineProps<{ tr: TranslateFn }>()
+const props = defineProps<{
+  tr: TranslateFn
+  /** Same directory scope the group-member name resolver sends. Null skips the lookup. */
+  userScope?: { scope: 'global' } | { orgId: string } | null
+}>()
 const tr = props.tr
 
+interface AttendanceGroupChoice { id: string; name: string }
+interface ResolvedMemberLabel { name: string | null; email: string }
+
 const groupId = ref('')
+const groupDraft = ref('')
+const menuOpen = ref(false)
+const groups = ref<AttendanceGroupChoice[]>([])
+const groupsLoaded = ref(false)
+let groupsRequest: Promise<void> | null = null
 const from = ref('')
 const to = ref('')
 
-const { data, loading, errorStatus, errorMessage, load } = useTeamAvailability()
+const sessionGuard = useAttendanceSessionGuard()
+const guardedFetch = sessionGuard.wrapFetch(apiFetch)
+const { data, loading, errorStatus, errorMessage, load } = useTeamAvailability({
+  fetchAvailability: options => fetchTeamAvailability(options, guardedFetch),
+  isSessionCurrent: sessionGuard.isCurrent,
+})
 
 const canLoad = computed(() => Boolean(groupId.value && from.value && to.value))
+const groupMatches = computed(() => {
+  const query = groupDraft.value.trim().toLowerCase()
+  const source = groups.value.filter(group => group.name.trim())
+  if (!query) return source.slice(0, 8)
+  return source.filter(group => group.name.toLowerCase().includes(query)).slice(0, 8)
+})
+const groupSearchEmpty = computed(() => (
+  menuOpen.value
+  && groupDraft.value.trim().length > 0
+  && groupMatches.value.length === 0
+  && groupsLoaded.value
+))
+
+async function loadGroupChoices(): Promise<void> {
+  if (groups.value.length > 0) {
+    groupsLoaded.value = true
+    return
+  }
+  if (!groupsRequest) {
+    groupsRequest = (async () => {
+      try {
+        const response = await guardedFetch('/api/attendance/groups?pageSize=200')
+        const payload = await response.json()
+        const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+        groups.value = items
+          .map((item: { id?: string; name?: string }) => ({
+            id: String(item?.id || '').trim(),
+            name: String(item?.name || '').trim(),
+          }))
+          .filter((item: AttendanceGroupChoice) => item.id && item.name)
+      } catch {
+        groups.value = []
+      } finally {
+        groupsLoaded.value = true
+        groupsRequest = null
+      }
+    })()
+  }
+  await groupsRequest
+}
+
+function applyKnownGroup(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  const byName = groups.value.find(group => group.name === trimmed)
+  if (byName) {
+    groupDraft.value = byName.name
+    groupId.value = byName.id
+    return true
+  }
+  const byId = groups.value.find(group => group.id === trimmed)
+  if (byId) {
+    groupDraft.value = byId.name
+    groupId.value = byId.id
+    return true
+  }
+  return false
+}
+
+function onGroupInput(event: Event): void {
+  const text = (event.target as HTMLInputElement).value
+  groupDraft.value = text
+  if (!applyKnownGroup(text)) groupId.value = text.trim()
+  menuOpen.value = true
+  void loadGroupChoices()
+}
+
+function chooseGroup(group: AttendanceGroupChoice): void {
+  groupDraft.value = group.name
+  groupId.value = group.id
+  menuOpen.value = false
+}
+
+watch(groups, () => {
+  if (groupDraft.value.trim()) applyKnownGroup(groupDraft.value)
+})
+
+onMounted(() => { void loadGroupChoices() })
 const pendingTooltip = computed(() => tr('Pending approval, not yet effective', '待审批，未生效'))
 
 const errorText = computed(() => {
@@ -132,11 +266,70 @@ const errorText = computed(() => {
 
 // unique sorted dates (from the summary) + unique members (from items).
 const dates = computed(() => (data.value?.summary ?? []).map((s) => s.date))
-const memberIds = computed(() => {
+const memberLabels = ref<Record<string, ResolvedMemberLabel>>({})
+let resolveSeq = 0
+
+function memberPrimaryLabel(userId: string): string {
+  const item = memberLabels.value[userId]
+  if (!item) return ''
+  const name = item.name?.trim() || ''
+  if (name) return name
+  return item.email.trim()
+}
+
+const members = computed(() => {
   const seen = new Set<string>()
-  for (const it of data.value?.items ?? []) seen.add(it.userId)
-  return Array.from(seen).sort()
+  for (const it of data.value?.items ?? []) {
+    if (it.userId) seen.add(it.userId)
+  }
+  return Array.from(seen).sort((a, b) => {
+    const left = memberPrimaryLabel(a) || a
+    const right = memberPrimaryLabel(b) || b
+    const byLabel = left.localeCompare(right, 'zh')
+    return byLabel || a.localeCompare(b)
+  })
 })
+
+async function resolveMemberLabels(userIds: string[], seq: number): Promise<void> {
+  const scope = props.userScope
+  if (!scope || userIds.length === 0) {
+    if (seq === resolveSeq) memberLabels.value = {}
+    return
+  }
+  try {
+    const response = await guardedFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds, ...scope }),
+    })
+    if (seq !== resolveSeq) return
+    if (!response || response.status === 403 || response.status === 404) {
+      memberLabels.value = {}
+      return
+    }
+    const payload = await response.json().catch(() => null)
+    if (seq !== resolveSeq) return
+    if (!response.ok || !payload?.ok) {
+      memberLabels.value = {}
+      return
+    }
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const requested = new Set(userIds)
+    const next: Record<string, ResolvedMemberLabel> = {}
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = String((raw as { id?: string }).id || '').trim()
+      if (!id || !requested.has(id) || next[id]) continue
+      const record = raw as { name?: unknown; email?: unknown }
+      next[id] = {
+        name: record.name == null ? null : String(record.name),
+        email: String(record.email || ''),
+      }
+    }
+    memberLabels.value = next
+  } catch {
+    if (seq === resolveSeq) memberLabels.value = {}
+  }
+}
 
 const metaIndex = computed(() => {
   const map = new Map<string, TeamAvailabilityStateMeta>()
@@ -154,13 +347,140 @@ function chipTitle(meta: TeamAvailabilityStateMeta): string {
 
 async function reload(): Promise<void> {
   if (!canLoad.value) return
+  const seq = ++resolveSeq
+  memberLabels.value = {}
   await load(groupId.value, from.value, to.value)
+  if (seq !== resolveSeq) return
+  const userIds = Array.from(new Set((data.value?.items ?? []).map(item => item.userId).filter(Boolean)))
+  await resolveMemberLabels(userIds, seq)
 }
 </script>
 
 <style scoped>
+.attendance-ta__filters {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 12px;
+}
+.attendance-ta__field {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ms-text-2, #555);
+}
+.attendance-ta__group {
+  flex: 1 1 16rem;
+}
+.attendance-ta__field:not(.attendance-ta__group) {
+  flex: 0 0 auto;
+}
+.attendance-ta__field > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.attendance-ta__field > input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  width: auto;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 10px;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-bg-card, #fff);
+  color: var(--ms-text-1, inherit);
+  font: inherit;
+  font-weight: 400;
+}
+.attendance-ta__filters :deep(.attendance-locale-date) {
+  flex: 0 0 auto;
+  width: 11rem;
+  max-width: 11rem;
+  min-width: 0;
+}
+.attendance-ta__filters :deep(.attendance-locale-date__input) {
+  width: 8.25rem;
+  max-width: 8.25rem;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 8px;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-bg-card, #fff);
+}
+.attendance-ta__load {
+  flex: 0 0 auto;
+  align-self: center;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 14px;
+  border: 1px solid var(--ms-color-primary, #2563eb);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-color-primary, #2563eb);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.attendance-ta__load:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.attendance-ta__group { position: relative; }
+.attendance-ta__group-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% - 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+}
+.attendance-ta__group-menu button {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.attendance-ta__group-empty {
+  padding: 6px 8px;
+  color: #667085;
+  font-size: 12px;
+}
 .attendance-ta__matrix-wrap { overflow-x: auto; }
-.attendance-ta__member { font-family: var(--font-mono, monospace); font-size: 0.85em; white-space: nowrap; }
+.attendance-ta__member { font-size: 13px; white-space: nowrap; }
+.attendance-ta__member-identity {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.attendance-ta__member-identity strong {
+  font-weight: 600;
+}
+.attendance-ta__id-clip {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .attendance-ta__col--provisional { color: #b45309; }
 .attendance-ta__chip {
   display: inline-block;

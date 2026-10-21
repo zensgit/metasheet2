@@ -208,7 +208,14 @@ async function main() {
     'sandbox sync without config_info still seeds the contract decision options only',
   )
   assert.equal(sandboxDefaultCalls.patchObjectFieldProperty[0].fieldId, 'lastPlmRefreshDecision')
-  assert.equal(sandboxDefaultResult.evidence.skipped.length, 3, 'sandbox sync records config_info fields as skipped when not supplied')
+  // 3 -> 4: `makeOrBuy` (自制/外购) joined the template's config_info-backed selects
+  // beside materialType / blankType / stockPreparationStatus. Nothing was added to the
+  // option-sync CONTRACT to make that happen — the sync derives its option fields from
+  // the template's own `optionSource` declarations, so a deployment that has not supplied
+  // a 自制/外购 dictionary gets `config_info_not_supplied` rather than a vocabulary the
+  // platform invented for it. That is the whole reason no default option set is frozen
+  // into the template.
+  assert.equal(sandboxDefaultResult.evidence.skipped.length, 4, 'sandbox sync records config_info fields as skipped when not supplied')
   assert.ok(
     sandboxDefaultResult.evidence.skipped.every((entry) => entry.reason === 'config_info_not_supplied'),
     'sandbox sync skip evidence is reason/count metadata only',
@@ -320,7 +327,6 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-option-sync.test.cjs', main)

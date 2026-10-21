@@ -1,33 +1,12 @@
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
-import { checkTableExists, createIndexIfNotExists } from './_patterns'
+import { ensureCanonicalUserOrgsTable } from './_ensure-user-orgs'
+import { checkTableExists } from './_patterns'
 
 const DEFAULT_ORG_ID = 'default'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
-  const exists = await checkTableExists(db, 'user_orgs')
-  if (!exists) {
-    await db.schema
-      .createTable('user_orgs')
-      .ifNotExists()
-      .addColumn('user_id', 'text', col => col.notNull())
-      .addColumn('org_id', 'text', col => col.notNull())
-      .addColumn('is_active', 'boolean', col => col.notNull().defaultTo(true))
-      .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql`now()`).notNull())
-      .execute()
-  }
-
-  await sql`
-    DO $$ BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'user_orgs_pkey' AND conrelid = 'user_orgs'::regclass
-      ) THEN
-        ALTER TABLE user_orgs ADD PRIMARY KEY (user_id, org_id);
-      END IF;
-    END $$;
-  `.execute(db)
-
-  await createIndexIfNotExists(db, 'idx_user_orgs_org', 'user_orgs', 'org_id')
+  await ensureCanonicalUserOrgsTable(db)
 
   const usersExists = await checkTableExists(db, 'users')
   if (usersExists) {

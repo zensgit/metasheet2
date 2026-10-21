@@ -1,0 +1,6 @@
+{
+  "policyId": "e2e-mock-local-ai",
+  "policyVersion": 1,
+  "activeProvider": { "tier": "local" },
+  "localHosts": ["127.0.0.1", "localhost"]
+}

@@ -1,9 +1,13 @@
 import { Router, type Request, type Response } from 'express'
 import { poolManager } from '../integration/db/connection-pool'
 import { tenantContext } from '../db/sharding/tenant-context'
+import { isElearningGlobalAdminRequest } from './elearning-admin-access'
+import { isElearningEnabled } from '../elearning/feature-flags'
+import { matchesAnyPermission, normalizePermissionCodes } from '../auth/permission-match'
 import type { PluginLoader } from '../core/plugin-loader'
 import {
   collectPlatformApps,
+  type PlatformAppCatalogFeaturePredicate,
   type PlatformAppPluginState,
   type PlatformAppSummary,
 } from '../platform/app-registry'
@@ -16,10 +20,69 @@ import {
 export interface PlatformAppsRouterOptions {
   pluginLoader: PluginLoader
   pluginStatus?: Map<string, PlatformAppPluginState>
+  isCatalogFeatureEnabled?: PlatformAppCatalogFeaturePredicate
 }
 
 type PlatformAppResponse = PlatformAppSummary & {
   instance: PlatformAppInstanceRecord | null
+}
+
+/**
+ * 云课堂 visibility. The master switch comes first and has no exception: while ELEARNING_ENABLED is
+ * not exactly 'true' every /api/elearning/* route is unmounted (index.ts), so a card would lead
+ * nowhere -- for a global administrator exactly as for anyone else. Keyed on the app id, so it holds
+ * whatever the manifest declares and whether or not a catalog predicate was injected.
+ */
+function visibleInstallation(req: Request, app: PlatformAppResponse): boolean {
+  if (app.id !== 'elearning') return true
+  if (!isElearningEnabled()) return false
+  const orgId = req.authenticatedTenantId
+  if (typeof orgId !== 'string' || !orgId) return false
+  if (isElearningGlobalAdminRequest(req)) return true
+  return app.instance?.tenantId === orgId && app.instance.workspaceId === orgId
+    && app.instance.status === 'active'
+    && typeof app.instance.config.notificationsEnabled === 'boolean'
+}
+
+/**
+ * Platform-admin bypass, read ONLY from what the auth middleware hydrated onto `req.user`
+ * (`auth/jwt-middleware.ts` → `AuthService#verifyToken` → `mapAuthUserRow`, whose `role` is already
+ * resolved through `rbac/service#isAdmin` and whose `permissions` are already resolved through
+ * `rbac/service#listUserPermissions`). **In production** raw token claims are NOT consulted — same discipline, and the
+ * same three markers, as `isElearningGlobalAdminRequest` in `elearning-admin-access.ts`.
+ * `elearning-admin-access.ts`. The one NON-PRODUCTION exception (verified 2026-09-11 — an
+ * unqualified absolute invites someone to rely on it): `AuthService#buildTrustedTokenUser` DOES
+ * build the user straight from `payload.roles` / `payload.perms` when `RBAC_TOKEN_TRUST` is
+ * `true`/`1` AND `NODE_ENV !== 'production'`. Production is unaffected; a dev/CI box with that
+ * flag on can hand this filter token-supplied permission codes.
+ *
+ * `is_admin` is the users-table column (`db/types.ts:761`); today's `mapAuthUserRow` does not project
+ * it onto `req.user`, so it is inert on this path — it is honoured here so that a hydration which
+ * later does project it cannot silently demote a platform admin.
+ */
+function isPlatformAppAdminRequest(req: Request): boolean {
+  if (req.user?.role === 'admin') return true
+  if (normalizePermissionCodes(req.user?.roles).includes('admin')) return true
+  if (req.user?.is_admin === true) return true
+  return normalizePermissionCodes(req.user?.permissions).includes('*:*')
+}
+
+/**
+ * THE App Center visibility gate. Before it, `GET /` and `GET /:appId` did zero permission work:
+ * any authenticated account saw every app and every app's full manifest projection, while the
+ * manifests had been declaring their `permissions` codes all along and `app-registry.ts` had been
+ * projecting them to the browser. This consumes that already-parsed data; it introduces no new
+ * source of truth and issues no new SQL.
+ *
+ * ANY-OF over `app.permissions` (see `matchesAnyPermission`): the array names the codes the app
+ * uses, not a set its users must all hold. Admins bypass. An app that declares no codes is public.
+ */
+function canSeePlatformApp(req: Request, app: PlatformAppSummary): boolean {
+  if (isPlatformAppAdminRequest(req)) return true
+  return matchesAnyPermission(
+    normalizePermissionCodes(req.user?.permissions),
+    Array.isArray(app.permissions) ? app.permissions : [],
+  )
 }
 
 function resolveTenantId(req: Request): string {
@@ -78,17 +141,30 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
 
   router.get('/', async (req: Request, res: Response) => {
     try {
-      const apps = await collectPlatformApps({
+      // The injected predicate is authoritative for every caller. No role may turn its `false` into
+      // `true`: that override once showed global admins the elearning card with the switch off.
+      const catalog = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
+      // Permission filter FIRST, before any instance lookup: an app the caller may not see must not
+      // even reach the tenant-scoped `platform_app_instances` query as an id.
+      const apps = catalog.filter((item) => canSeePlatformApp(req, item))
+      if (apps.length === 0) {
+        // Not an optimisation — a scope guard. `listPlatformAppInstances` with an EMPTY appIds list
+        // falls back to "every instance in this workspace"
+        // (services/PlatformAppInstanceRegistryService.ts:142-149). A caller permitted to see no app
+        // must not be the one who widens that read.
+        return res.json({ list: [] })
+      }
       const tenantId = resolveTenantId(req)
       if (!tenantId) {
         return res.json({
           list: apps.map((item) => ({
             ...item,
             instance: null,
-          })),
+          })).filter((app) => visibleInstallation(req, app)),
         })
       }
 
@@ -104,7 +180,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
         list: apps.map((item) => ({
           ...item,
           instance: instanceByAppId.get(item.id) ?? null,
-        })),
+        })).filter((app) => visibleInstallation(req, app)),
       })
     } catch (error) {
       return res.status(500).json({
@@ -118,12 +194,18 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
       const app = apps.find((item) => item.id === req.params.appId)
-      if (!app) {
+      // No existence oracle: "you may not see it" and "it is not there" are the SAME 404 with the
+      // same body, so the detail route cannot be used to enumerate installed apps. Checked before
+      // `attachInstance`, so a refused caller triggers no instance query either.
+      if (!app || !canSeePlatformApp(req, app)) {
         return res.status(404).json({ error: 'Platform app not found' })
       }
-      return res.json(await attachInstance(req, app))
+      const attached = await attachInstance(req, app)
+      if (!visibleInstallation(req, attached)) return res.status(404).json({ error: 'Platform app not found' })
+      return res.json(attached)
     } catch (error) {
       return res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to load platform app',

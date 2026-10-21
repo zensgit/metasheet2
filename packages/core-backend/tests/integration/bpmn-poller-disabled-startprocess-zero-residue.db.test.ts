@@ -151,6 +151,7 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
     databaseUrl: process.env.DATABASE_URL,
     skipPlugins: process.env.SKIP_PLUGINS,
     enablePoller: process.env.ENABLE_BPMN_TIMER_POLLER,
+    enableRuntime: process.env.ENABLE_BPMN_RUNTIME,
   }
 
   async function mintToken(userId: string): Promise<string> {
@@ -242,6 +243,12 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
     process.env.SKIP_PLUGINS = 'true'
     // Default-off, unset — the exact shipped state this fix targets.
     delete process.env.ENABLE_BPMN_TIMER_POLLER
+    // P0-S S1 gate: the runtime is fail-closed by default, so the whole /api/workflow
+    // surface (deploy + start) 503s unless ENABLE_BPMN_RUNTIME is the exact string 'true'.
+    // THIS suite's subject is the TIMER POLLER gate, not the runtime gate: it must reach
+    // the real deploy/start handlers to prove the poller-disabled zero-residue claim.
+    // The disabled-runtime 503 behavior is covered by bpmnRuntimeConfig.test.ts.
+    process.env.ENABLE_BPMN_RUNTIME = 'true'
 
     // Import AFTER DATABASE_URL is rebound so poolManager binds to the scratch DB.
     const loaded = await import('../../src/index')
@@ -295,6 +302,7 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
         DATABASE_URL: priorEnv.databaseUrl,
         SKIP_PLUGINS: priorEnv.skipPlugins,
         ENABLE_BPMN_TIMER_POLLER: priorEnv.enablePoller,
+        ENABLE_BPMN_RUNTIME: priorEnv.enableRuntime,
       })) {
         if (value === undefined) delete process.env[key]
         else process.env[key] = value

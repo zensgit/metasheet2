@@ -1,5 +1,9 @@
 <template>
-  <div class="attendance">
+  <section v-if="attendanceSessionStale" role="alert" data-attendance-session-stale>
+    <p>{{ tr('Your session changed. This page belongs to the previous session; actions are disabled and unsaved drafts remain here until you reload.', '会话已变化。本页面属于原会话，操作已停用；未保存草稿保留在此，直到您重新加载。') }}</p>
+    <button type="button" @click="reloadAttendanceSession">{{ tr('Discard unsaved drafts and reload', '放弃未保存草稿并重新加载') }}</button>
+  </section>
+      <div class="attendance" :class="{ 'attendance--overview': showOverview, 'attendance--reports': showReports }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -11,29 +15,34 @@
       <p class="attendance__empty" v-else>{{ tr('Enable the attendance plugin to use this page.', '启用考勤插件后可使用此页面。') }}</p>
     </div>
     <template v-else>
-      <header class="attendance__header" v-if="showOverview || showReports">
-        <div>
+      <header class="attendance__header" v-if="showOverview || showReports" data-attendance-overview-header>
+        <div class="attendance__header-copy">
           <h2 class="attendance__title">
             {{ showReports ? tr('Attendance Reports', '考勤报表') : tr('Attendance', '考勤') }}
           </h2>
           <p class="attendance__subtitle">
             {{
               showReports
-                ? tr('Review records, exports, and request totals in one place.', '集中查看记录、导出与申请汇总。')
+                ? tr('Filter a date range, scan the records table, and export.', '选定区间后查看记录表并导出。')
                 : tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。')
             }}
           </p>
         </div>
-        <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
-          <span class="attendance__status-chip">
-            {{ tr('Records', '记录') }} {{ recordsTotal }}
-          </span>
-          <span class="attendance__status-chip">
-            {{ tr('Requests', '申请') }} {{ requestReportTotal }}
-          </span>
-          <span class="attendance__status-chip">
-            {{ tr('Minutes', '分钟') }} {{ requestReportMinutesTotal }}
-          </span>
+        <div
+          v-if="showOverview"
+          class="attendance__header-aside"
+          data-attendance-overview-header-aside
+        >
+          <AttendanceSessionOrgSwitcher
+            :tr="tr"
+            :orgs="sessionOrgIds"
+            :model-value="sessionOrgId ?? ''"
+            :loading="sessionOrgLoading"
+            :switching="sessionOrgSwitching"
+            :error-message="sessionOrgError"
+            :has-usable-claim="Boolean(sessionOrgId)"
+            @change="switchSessionOrg"
+          />
         </div>
       </header>
 
@@ -45,29 +54,107 @@
       <section class="attendance__filters" v-if="showReports">
         <label class="attendance__field" for="attendance-from-date">
           <span>{{ tr('From', '开始') }}</span>
-          <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
+          <AttendanceLocaleDateInput
+            id="attendance-from-date"
+            name="fromDate"
+            v-model="fromDate"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
+          />
         </label>
         <label class="attendance__field" for="attendance-to-date">
           <span>{{ tr('To', '结束') }}</span>
-          <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
-        </label>
-        <label class="attendance__field" for="attendance-org-id">
-          <span>{{ tr('Org ID', '组织 ID') }}</span>
-          <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
-        </label>
-        <label class="attendance__field" for="attendance-user-id">
-          <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
-          <input
-            id="attendance-user-id"
-            name="targetUserId"
-            v-model="targetUserId"
-            type="text"
-            :placeholder="tr('Current user', '当前用户')"
+          <AttendanceLocaleDateInput
+            id="attendance-to-date"
+            name="toDate"
+            v-model="toDate"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
         </label>
+        <div class="attendance__filter-pills attendance__filter-pills--range" data-report-filter-group="range-preset">
+          <button
+            v-for="preset in reportRangePresetOptions"
+            :key="preset.id"
+            class="attendance__filter-pill"
+            :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
+            type="button"
+            :data-report-filter-value="preset.id"
+            @click="applyReportRangePreset(preset.id)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <small class="attendance__field-hint" data-report-period-label>{{ reportRangeLabel }}</small>
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
+        <div class="attendance__reports-toolbar">
+          <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
+            <summary>{{ tr('Columns', '显示字段') }}</summary>
+            <div class="attendance__records-column-actions">
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
+                {{ tr('Show all', '全部显示') }}
+              </button>
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
+                {{ tr('Restore default', '恢复默认') }}
+              </button>
+            </div>
+            <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
+              <strong>{{ group.label }}</strong>
+              <label v-for="column in group.columns" :key="column.code">
+                <input
+                  type="checkbox"
+                  :data-record-column-code="column.code"
+                  :checked="visibleRecordReportCodeSet.has(column.code)"
+                  :disabled="recordReportColumnPinned(column.code)"
+                  @change="onToggleRecordReportColumn(column.code, $event)"
+                />
+                {{ column.label }}
+              </label>
+            </div>
+          </details>
+          <button class="attendance__btn" type="button" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
+            {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
+          </button>
+          <button class="attendance__btn" type="button" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+            {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
+          </button>
+        </div>
+        <details class="attendance__filters-more">
+          <summary>{{ tr('More filters', '更多筛选') }}</summary>
+          <label class="attendance__field" for="attendance-org-id">
+            <span>{{ tr('Org ID', '组织 ID') }}</span>
+            <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
+          </label>
+          <!-- A6 (A-class batch 2, 2026-08-22): considered swapping for AttendanceUserPickerField
+               (as done at the annual-leave-balance site) but did NOT — this filter renders on the
+               Reports tab, which `AttendanceExperienceView.vue` never gates by role ("'overview'/
+               'reports' are never gated"), while the picker's `useAttendanceAdminUsers` composable
+               defaults to `/api/admin/users` (`ensurePlatformAdmin`-gated) and fires on mount. Every
+               non-platform-admin visiting Reports would get a background 403 the moment the tab
+               loads. The other 8 existing picker usages are all admin-tab-only, so this reachability
+               gap is new here, not a pre-existing pattern. Left as the original text input; the
+               empty/"current user" semantics are unchanged. -->
+          <label class="attendance__field" for="attendance-user-id">
+            <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
+            <input
+              id="attendance-user-id"
+              name="targetUserId"
+              v-model="targetUserId"
+              type="text"
+              :placeholder="tr('Current user', '当前用户')"
+            />
+          </label>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
+                '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
+              )
+            }}
+          </p>
+        </details>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
@@ -95,14 +182,16 @@
         :tr="tr"
         :hero-clock-time="heroClockTime"
         :hero-clock-date="heroClockDate"
+        :hero-clock-timezone="heroClockTimezone"
         :punching="punching"
+        :refreshing-after-punch="refreshingAfterPunch"
         :hero-timeline="heroTodayTimeline"
+        :today-state-hint="todayStateHint"
         :punch-outdoor-note-required="punchOutdoorNoteRequired"
         :punch-outdoor-note-draft="punchOutdoorNoteDraft"
         :workbench-status-description="activeWorkbenchStatusDescription"
         :workbench-record-status="workbenchRecordStatus"
         :workbench-focus-date-label="workbenchFocusDateLabel"
-        :workbench-latest-punch-label="activeWorkbenchLatestPunchLabel"
         :workbench-work-minutes="workbenchWorkMinutes"
         :workbench-late-early-label="activeWorkbenchLateEarlyLabel"
         :workbench-has-late-early="activeWorkbenchHasLateEarly"
@@ -128,6 +217,7 @@
         :request-decision-comment-label="requestDecisionCommentLabel"
         :describe-request-status="describeRequestStatus"
         :self-service-quick-action-hint="selfServiceQuickActionHint"
+        :employee-quick-action-icons="employeeOverviewQuickActionIcons"
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
@@ -146,6 +236,10 @@
         :self-rules-configured-rule-summary="selfRulesConfiguredRuleSummary"
         :self-rules-warning-codes="selfRulesWarningCodes"
         :format-self-rules-warning="formatSelfRulesWarning"
+        :history-from-date="fromDate"
+        :history-to-date="toDate"
+        :history-org-id="orgId"
+        :history-user-id="targetUserId"
         :attendance-status-guide-items="attendanceStatusGuideItems"
         @punch="punch"
         @retry-punch-note="retryPunchWithOutdoorNote"
@@ -155,20 +249,113 @@
         @change-balance-leave-type="handleChangeSelfBalanceLeaveType"
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
+        <template #afterCommon>
+          <AttendanceEmployeeLeaveRequestCard
+            v-if="leaveRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :leave-types="leaveTypes"
+            :can-quick-fill="canQuickFillLeave"
+            :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
+            :resolve-times="requestTimezone.times"
+            @cancel="closeDedicatedLeaveRequestCard"
+            @submit="submitDedicatedLeaveRequestCard"
+            @quick-fill="applyLeaveQuickFill"
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeLeaveRequestCard>
+          <AttendanceEmployeeMakeupRequestCard
+            v-if="makeupRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :anomalies="eligibleMakeupAnomalies"
+            :today-work-date="todayWorkDateKey"
+            :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
+            @cancel="closeDedicatedMakeupRequestCard"
+            @submit="submitDedicatedMakeupRequestCard"
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeMakeupRequestCard>
+          <AttendanceEmployeeOvertimeRequestCard
+            v-if="overtimeRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :overtime-rules="overtimeRules"
+            :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
+            @cancel="closeDedicatedOvertimeRequestCard"
+            @submit="submitDedicatedOvertimeRequestCard"
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :error-code="requestTimezone.errorCode.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeOvertimeRequestCard>
+          <AttendanceEmployeeShiftSwapRequestCard
+            v-if="shiftSwapRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :requester-assignments="requesterShiftSwapCardOptions"
+            :counterparty-assignments="counterpartyShiftSwapCardOptions"
+            :has-published-assignments="shiftSwapAssignmentOptions.length > 0"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedShiftSwapRequestCard"
+            @submit="submitDedicatedShiftSwapRequestCard"
+          />
+        </template>
         <template #historyFilters>
-          <label class="attendance__field" for="attendance-from-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
             <span>{{ tr('From', '开始') }}</span>
-            <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
+            <AttendanceLocaleDateInput id="attendance-from-date" name="fromDate" v-model="fromDate" />
           </label>
-          <label class="attendance__field" for="attendance-to-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-to-date">
             <span>{{ tr('To', '结束') }}</span>
-            <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
+            <AttendanceLocaleDateInput id="attendance-to-date" name="toDate" v-model="toDate" />
           </label>
-          <label class="attendance__field" for="attendance-org-id">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-org-id">
             <span>{{ tr('Org ID', '组织 ID') }}</span>
             <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
           </label>
-          <label class="attendance__field" for="attendance-user-id">
+          <!-- A6: same reachability problem as the report-export filter row above — the Overview
+               tab is even less gated (self-service, open to every authenticated user by design),
+               so the admin-only-by-default AttendanceUserPickerField was NOT swapped in here
+               either. See the report-export block's comment for the full reasoning. -->
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-user-id">
             <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
             <input
               id="attendance-user-id"
@@ -178,7 +365,7 @@
               :placeholder="tr('Current user', '当前用户')"
             />
           </label>
-          <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
+          <button class="attendance__btn attendance-ew__history-filter-control" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
             {{ tr('Refresh', '刷新') }}
           </button>
         </template>
@@ -194,235 +381,85 @@
         keeps the status guide last). This first extraction does not move
         this handler-dense block into AttendanceEmployeeWorkspace — see the
         component's file header comment.
+
+        Below-the-fold (2026-08-25): overview uses a single-column history
+        grid so the calendar is the primary historical surface. The request/
+        makeup form stays the same DOM (same ids, one copy) but is a
+        collapsed-by-default details — not an equal-weight sibling of the
+        calendar. Quick actions and approval-center deep links open it.
       -->
-      <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
-        <div class="attendance__requests-header">
-          <h3>{{ tr('Report Period', '报表区间') }}</h3>
-          <small class="attendance__field-hint" data-report-period-label>
-            {{ reportRangeLabel }}
-          </small>
+      <section v-if="showReports" class="attendance__reports-brief" data-reports-layout="table-first">
+        <div
+          v-if="reportsUnavailable"
+          class="attendance__empty"
+          data-reports-state="unavailable"
+        >
+          {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
         </div>
-        <div class="attendance__filter-pills attendance__filter-pills--range" data-report-filter-group="range-preset">
+        <p
+          v-else-if="reportsDataStale"
+          class="attendance__field-hint attendance__field-hint--strong"
+          data-reports-state="stale"
+        >
+          {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
+        </p>
+        <div
+          v-if="!reportsUnavailable"
+          class="attendance__kpi-strip"
+          data-reports-insight="snapshot"
+        >
           <button
-            v-for="preset in reportRangePresetOptions"
-            :key="preset.id"
-            class="attendance__filter-pill"
-            :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'all' }"
             type="button"
-            :data-report-filter-value="preset.id"
-            @click="applyReportRangePreset(preset.id)"
+            data-report-kpi="records"
+            :aria-pressed="recordStatusFilter === 'all'"
+            @click="applyReportRecordKpi('all')"
           >
-            {{ preset.label }}
+            <span>{{ tr('Records', '记录') }}</span>
+            <strong>{{ records.length }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'flagged' }"
+            type="button"
+            data-report-kpi="flagged"
+            :aria-pressed="recordStatusFilter === 'flagged'"
+            @click="applyReportRecordKpi('flagged')"
+          >
+            <span>{{ tr('Flagged', '异常') }}</span>
+            <strong>{{ reportPageFlaggedCount }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'early_leave' }"
+            type="button"
+            data-report-kpi="early-leave"
+            :aria-pressed="recordStatusFilter === 'early_leave'"
+            @click="applyReportRecordKpi('early_leave')"
+          >
+            <span>{{ tr('Early leave', '早退') }}</span>
+            <strong>{{ reportPageEarlyLeaveCount }}</strong>
+          </button>
+          <button
+            v-if="reportsFiltersActive"
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            @click="clearReportsFilters"
+          >
+            {{ tr('Clear filters', '清除筛选') }}
           </button>
         </div>
-        <p class="attendance__field-hint attendance__field-hint--strong">
-          {{
-            tr(
-              'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
-              '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
-            )
-          }}
-        </p>
-      </section>
-
-      <section v-if="showReports" class="attendance__grid attendance__grid--reports-insights">
-        <div class="attendance__card" data-reports-insight="snapshot">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Report Snapshot', '报表快照') }}</h3>
-            <button
-              v-if="reportsFiltersActive"
-              class="attendance__btn attendance__btn--inline"
-              type="button"
-              @click="clearReportsFilters"
-            >
-              {{ tr('Clear filters', '清除筛选') }}
-            </button>
-          </div>
-          <small class="attendance__field-hint">
-            {{ tr('Snapshot combines filtered request totals with the current records page.', '快照结合了筛选后的申请汇总与当前记录页。') }}
-          </small>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{ reportRangeLabel }}
+        <details class="attendance__reports-caliber" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
+          <summary>{{ tr('Caliber guide', '口径说明') }}</summary>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                'Plain-language definitions for the headline attendance numbers above.',
+                '对上方考勤关键数字做一句话口径说明。',
+              )
+            }}
           </p>
-          <div
-            v-if="reportsUnavailable"
-            class="attendance__empty"
-            data-reports-state="unavailable"
-          >
-            {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
-          </div>
-          <p
-            v-else-if="reportsDataStale"
-            class="attendance__field-hint attendance__field-hint--strong"
-            data-reports-state="stale"
-          >
-            {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
-          </p>
-          <div class="attendance__summary attendance__summary--reports">
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible requests', '筛选后申请') }}</span>
-              <strong>{{ filteredRequestReportTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible minutes', '筛选后分钟') }}</span>
-              <strong>{{ filteredRequestReportMinutesTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible groups', '筛选后分组') }}</span>
-              <strong>{{ filteredRequestReport.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible records', '筛选后记录') }}</span>
-              <strong>{{ filteredRecords.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Flagged records', '异常记录') }}</span>
-              <strong>{{ filteredFlaggedRecordsCount }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ filteredRecordsWorkMinutes }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="trend">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Range totals from the attendance summary API.', '来自汇总接口的区间总量。') }}
-            </small>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportTrendItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.count }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="metrics">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Range-level attendance totals for quick manager review.', '用于经理快速查看的区间级考勤总量。') }}
-            </small>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportMetricItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Filter the request report table locally.', '本地筛选申请报表表格。') }}
-            </small>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-type">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Use this to focus on leave, overtime, or corrections.', '用它聚焦请假、加班或补卡类型。') }}
-            </small>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-type">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportTypeFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportTypeBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportTypeFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="record-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Current page only, so filters stay lightweight.', '仅针对当前页，保持筛选轻量。') }}
-            </small>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="record-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="recordStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ records.length }}
-            </button>
-            <button
-              v-for="item in recordStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="recordStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('Caliber guide', '口径说明') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  tr(
-                    'Plain-language definitions for the headline attendance numbers above.',
-                    '对上方考勤关键数字做一句话口径说明。',
-                  )
-                }}
-              </small>
-            </div>
-          </div>
           <ul class="attendance__status-guide">
             <li
               v-for="item in attendanceCaliberGuideItems"
@@ -432,15 +469,19 @@
             >
               <div class="attendance__status-guide-header">
                 <strong>{{ item.label }}</strong>
-                <span class="attendance__field-hint">{{ item.code }}</span>
               </div>
               <p>{{ item.description }}</p>
             </li>
           </ul>
-        </div>
+        </details>
       </section>
 
-      <section class="attendance__grid" v-if="showOverview || showReports">
+      <section
+        class="attendance__grid"
+        :class="{ 'attendance__grid--overview-history': showOverview }"
+        :data-attendance-overview-history="showOverview ? 'true' : undefined"
+        v-if="showOverview"
+      >
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
           <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
@@ -525,6 +566,7 @@
             </div>
           </div>
           <small class="attendance__field-hint">{{ calendarTimezoneContextHint }}</small>
+          <p v-if="calendarTimezoneError" role="status" data-calendar-timezone-error>{{ calendarTimezoneError }}</p>
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
           </div>
@@ -567,8 +609,32 @@
           </div>
         </div>
 
-        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
-          <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+        <!-- 请假撤销 —— 考勤侧「待我审批的撤销」列表: its own card, never inside the collapsed request tools. -->
+        <AttendanceCancelRoundApproverPanel
+          v-if="showOverview"
+          class="attendance__card"
+          :can-decide="cancelRoundApproverVisible"
+          :org-id="normalizedOrgId()"
+          :focus-request-id="focusedAttendanceRequestId"
+          :format-date-time="formatDateTime"
+          :format-request-type="formatRequestType"
+          @focused-row-shown="cancelRoundApproverLandedFor = $event"
+        />
+
+        <details
+          v-if="showOverview"
+          class="attendance__card attendance__card--request-tools"
+          data-attendance-request-tools
+          :open="overviewRequestToolsOpen"
+          @toggle="onOverviewRequestToolsToggle"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)"
+        >
+          <summary class="attendance__details-summary attendance__request-tools-summary">
+            <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+            <span class="attendance__field-hint">
+              {{ tr('Leave, overtime, swap, and makeup punch', '请假、加班、换班与补卡') }}
+            </span>
+          </summary>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'self-request-center' context
                help — the ④「查看计算依据/审计记录」deep link into the W5-1 decision-trace surface
@@ -579,14 +645,25 @@
             context-id="self-request-center"
             @evidence-link-click="handleAttendanceContextHelpEvidenceLink"
           />
+          <AttendanceBusinessTripRequestCard :tr="tr" :refresh-requests="loadRequests" />
           <div class="attendance__request-form">
+          <AttendanceRequestTimezoneFields v-if="!isShiftSwapRequest"
+            :tr="tr"
+            :target="requestTimezone.target.value"
+            :loading="requestTimezone.loading.value"
+            :failed="requestTimezone.failed.value"
+            :error-code="requestTimezone.errorCode.value"
+            :selected="requestTimezone.selected"
+            :resolved="requestTimezone.resolved.value"
+            @refresh="requestTimezone.refresh"
+            @select="(key, value) => { requestTimezone.selected[key] = value }"
+          />
             <label class="attendance__field" for="attendance-request-work-date">
               <span>{{ tr('Work date', '工作日期') }}</span>
-              <input
+              <AttendanceLocaleDateInput
                 id="attendance-request-work-date"
                 name="requestWorkDate"
                 v-model="requestForm.workDate"
-                type="date"
               />
             </label>
             <label class="attendance__field" for="attendance-request-type">
@@ -714,7 +791,11 @@
                 name="requestedInAt"
                 v-model="requestForm.requestedInAt"
                 type="datetime-local"
+                :step="recordRequestPrefill ? 0.001 : 60"
               />
+              <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
+                {{ requestTimezone.target.value?.timezone }}
+              </small>
             </label>
             <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-out">
               <span>{{ isLeaveOrOvertimeRequest ? tr('End', '结束') : tr('Requested out', '申请打卡出') }}</span>
@@ -723,8 +804,15 @@
                 name="requestedOutAt"
                 v-model="requestForm.requestedOutAt"
                 type="datetime-local"
+                :step="recordRequestPrefill ? 0.001 : 60"
               />
+              <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
+                {{ requestTimezone.target.value?.timezone }}
+              </small>
             </label>
+            <p v-if="recordRequestPrefill" class="attendance__field-hint attendance__field--full" data-record-request-time-policy>
+              {{ tr('Times use the frozen target shift timezone. Unchanged times retain the original instant; edited repeated times require an offset choice.', '时间按冻结的目标班次时区显示。未修改的时间保留原始时刻；修改后的重复时间需要选择偏移。') }}
+            </p>
             <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
               <span>{{ tr('Duration (min)', '时长（分钟）') }}</span>
               <input
@@ -762,7 +850,7 @@
                 :placeholder="tr('Optional', '可选')"
               />
             </label>
-            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting" @click="submitRequest">
+            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting || (!isShiftSwapRequest && !requestTimezone.ready.value)" @click="submitRequest">
               {{ requestSubmitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
             </button>
           </div>
@@ -783,7 +871,7 @@
                 :data-attendance-request-focused="isFocusedAttendanceRequest(item) ? 'true' : undefined"
               >
                 <div>
-                  <strong>{{ item.work_date }}</strong> · {{ formatRequestType(item.request_type) }}
+                  <strong>{{ formatDate(item.work_date) }}</strong> · {{ formatRequestType(item.request_type) }}
                   <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
                     {{ formatStatus(item.status) }}
                   </span>
@@ -808,13 +896,21 @@
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
                   <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id, item.request_type)">{{ tr('Cancel', '取消') }}</button>
-                  <template v-if="canReviewFocusedAttendanceRequest(item)">
+                  <template v-if="canReviewAttendanceRequest(item)">
                     <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
                     <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">
                       {{ tr('Reject', '驳回') }}
                     </button>
                   </template>
                 </div>
+                <!-- 请假撤销入口(撤销锁 P-1):only on LEAVE rows of this list — never the shift-swap list below. -->
+                <AttendanceCancelRoundPanel
+                  v-if="item.request_type === 'leave' || item.request_type === 'business_trip'"
+                  :request="item"
+                  :org-id="orgId"
+                  :current-user-id="currentUserId"
+                  :format-date-time="formatDateTime"
+                />
               </li>
             </ul>
           </div>
@@ -902,7 +998,7 @@
               </li>
             </ul>
           </div>
-        </div>
+        </details>
 
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
           <div class="attendance__requests-header">
@@ -1045,54 +1141,6 @@
             </table>
           </div>
         </div>
-
-        <div
-          v-if="showReports"
-          class="attendance__card"
-          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
-          data-reports-surface="reports"
-          data-report-card="request-report"
-        >
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Report', '申请报表') }}</h3>
-            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
-              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
-            </button>
-          </div>
-          <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{
-              tr(
-                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
-                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
-              )
-            }}
-          </p>
-          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
-          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
-            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
-          </div>
-          <div v-else class="attendance__table-wrapper">
-            <table class="attendance__table">
-              <thead>
-                <tr>
-                  <th>{{ tr('Type', '类型') }}</th>
-                  <th>{{ tr('Status', '状态') }}</th>
-                  <th>{{ tr('Total', '总数') }}</th>
-                  <th>{{ tr('Minutes', '分钟') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
-                  <td>{{ formatRequestType(row.requestType) }}</td>
-                  <td>{{ formatStatus(row.status) }}</td>
-                  <td>{{ row.total }}</td>
-                  <td>{{ row.minutes }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
       <section v-if="showOverview" class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
@@ -1154,7 +1202,7 @@
           </label>
           <label v-if="selfTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-self-date">
             <span>{{ tr('Work date', '工作日期') }}</span>
-            <input id="attendance-decision-trace-self-date" v-model="selfTraceWorkDate" type="date" data-decision-trace-self-date />
+            <AttendanceLocaleDateInput id="attendance-decision-trace-self-date" v-model="selfTraceWorkDate" data-decision-trace-self-date />
           </label>
           <label v-if="selfTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-self-request">
             <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
@@ -1199,37 +1247,36 @@
         data-report-card="records"
       >
         <div class="attendance__records-header">
-          <h3>{{ tr('Records', '记录') }}</h3>
-          <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
-            <label class="attendance__field attendance__field--compact" for="attendance-record-export-header">
-              <span>{{ tr('CSV header', 'CSV 表头') }}</span>
-              <select
-                id="attendance-record-export-header"
-                name="recordExportHeader"
-                v-model="exportCsvHeaderMode"
-              >
-                <option value="label">{{ tr('Field names', '字段名称') }}</option>
-                <option value="code">{{ tr('Field codes', '字段编码') }}</option>
-              </select>
-            </label>
-            <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
-              {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
-            </button>
-            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
-              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
-            </button>
+          <div class="attendance__records-heading">
+            <h3>{{ tr('Records', '记录') }}</h3>
+            <p class="attendance__records-summary attendance__reports-quiet">
+              {{ recordsTimezoneContextHint }}
+              ·
+              {{
+                tr(
+                  `${filteredRecords.length} of ${records.length} on this page`,
+                  `本页 ${filteredRecords.length} / ${records.length} 条`,
+                )
+              }}
+            </p>
           </div>
         </div>
-        <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
-        <p class="attendance__field-hint attendance__field-hint--strong">
-          {{
-            tr(
-              `Showing ${filteredRecords.length} of ${records.length} loaded records on this page.`,
-              `当前页已加载 ${records.length} 条记录，当前显示 ${filteredRecords.length} 条。`,
-            )
-          }}
-        </p>
+        <details
+          class="attendance__report-tech"
+          data-record-report-tech
+        >
+          <summary>{{ tr('Technical details', '技术信息') }}</summary>
+          <label class="attendance__records-header-mode" for="attendance-record-export-header">
+            <span>{{ tr('CSV header', 'CSV 表头') }}</span>
+            <select
+              id="attendance-record-export-header"
+              name="recordExportHeader"
+              v-model="exportCsvHeaderMode"
+            >
+              <option value="label">{{ tr('Field names', '字段名称') }}</option>
+              <option value="code">{{ tr('Field codes', '字段编码') }}</option>
+            </select>
+          </label>
         <div
           v-if="recordReportConfigDetails.length > 0"
           class="attendance__report-config"
@@ -1262,6 +1309,7 @@
             <span v-else>{{ detail.value }}</span>
           </span>
         </div>
+        </details>
         <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
         <div v-else-if="filteredRecords.length === 0" class="attendance__empty">
           {{ tr('No records match the current filters on this page.', '当前页筛选条件下没有匹配的记录。') }}
@@ -1271,8 +1319,9 @@
             <thead>
               <tr>
                 <th
-                  v-for="column in recordReportColumns"
+                  v-for="column in visibleRecordReportColumns"
                   :key="column.code"
+                  :class="recordReportColumnClass(column)"
                   :title="column.description || undefined"
                 >
                   {{ column.label }}
@@ -1283,8 +1332,13 @@
             <tbody>
               <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
-                  <td v-for="column in recordReportColumns" :key="`${record.id}-${column.code}`">
-                    {{ formatRecordReportCell(record, column) }}
+                  <td
+                    v-for="column in visibleRecordReportColumns"
+                    :key="`${record.id}-${column.code}`"
+                    :class="recordReportColumnClass(column)"
+                    :title="recordReportCellTitle(record, column)"
+                  >
+                    {{ recordReportCellText(record, column) }}
                   </td>
                   <td class="attendance__table-actions">
                     <button
@@ -1320,7 +1374,7 @@
                       >
                         <div class="attendance__timeline-primary">
                           <strong>{{ formatPunchEventType(event.eventType) }}</strong>
-                          <span>{{ formatDateTime(event.occurredAt) }}</span>
+                          <span>{{ formatDateTime(event.occurredAt, normalizeAttendanceTimeZone(event.timezone) ?? attendanceRecordTimezone(record)) }}</span>
                         </div>
                         <small v-if="formatPunchEventMeta(event)" class="attendance__field-hint">
                           {{ formatPunchEventMeta(event) }}
@@ -1354,14 +1408,273 @@
         </div>
       </section>
 
+      <details
+        v-if="showReports"
+        class="attendance__reports-more"
+        data-reports-insight="more-stats"
+      >
+        <summary>{{ tr('Breakdown / more stats', '分布 / 更多统计') }}</summary>
+
+        <section data-reports-insight="trend">
+          <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
+          <p v-if="visibleReportTrendItems.length === 0" class="attendance__empty" data-reports-empty="trend">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportTrendItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="metrics">
+          <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
+          <p v-if="visibleReportMetricItems.length === 0" class="attendance__empty" data-reports-empty="metrics">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportMetricItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-status">
+          <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-type">
+          <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-type">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-type">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportTypeFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportTypeBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportTypeFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="record-status">
+          <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
+          <p v-if="records.length === 0" class="attendance__empty" data-reports-empty="record-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="record-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="recordStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ records.length }}
+            </button>
+            <button
+              v-for="item in recordStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="recordStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <div
+          class="attendance__card"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
+          data-reports-surface="reports"
+          data-report-card="request-report"
+        >
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Request Report', '申请报表') }}</h3>
+            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
+              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
+            </button>
+          </div>
+          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
+                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
+              )
+            }}
+          </p>
+          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
+          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
+            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
+          </div>
+          <div v-else class="attendance__table-wrapper">
+            <table class="attendance__table">
+              <thead>
+                <tr>
+                  <th>{{ tr('Type', '类型') }}</th>
+                  <th>{{ tr('Status', '状态') }}</th>
+                  <th>{{ tr('Total', '总数') }}</th>
+                  <th>{{ tr('Minutes', '分钟') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
+                  <td>{{ formatRequestType(row.requestType) }}</td>
+                  <td>{{ formatStatus(row.status) }}</td>
+                  <td>{{ row.total }}</td>
+                  <td>{{ row.minutes }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+
       <section class="attendance__grid" v-if="showAdmin">
-        <div class="attendance__card attendance__card--admin">
-          <div class="attendance__admin-header">
+        <div ref="adminConsoleRef" class="attendance__card attendance__card--admin">
+          <div v-if="adminTaskHomeOpen" class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <div class="attendance__admin-actions">
-              <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-                {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
-              </button>
+            <div class="attendance__admin-header-tools">
+              <div class="attendance__admin-actions">
+                <div class="attendance__admin-page-search" data-admin-page-search="true">
+                  <button
+                    v-if="!adminPageSearchOpen"
+                    class="attendance__btn"
+                    type="button"
+                    data-admin-page-search-toggle="true"
+                    @click="openAdminPageSearch"
+                  >
+                    {{ tr('Search this page', '搜索本页') }}
+                  </button>
+                  <div v-else class="attendance__admin-page-search-field" role="search">
+                    <div
+                      class="attendance__admin-page-search-scope"
+                      role="group"
+                      :aria-label="tr('Search scope', '搜索范围')"
+                    >
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                        type="button"
+                        data-admin-page-search-scope="page"
+                        :aria-pressed="adminPageSearchScope === 'page'"
+                        @click="setAdminPageSearchScope('page')"
+                      >
+                        {{ tr('This page', '本页') }}
+                      </button>
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                        type="button"
+                        data-admin-page-search-scope="workbench"
+                        :aria-pressed="adminPageSearchScope === 'workbench'"
+                        @click="setAdminPageSearchScope('workbench')"
+                      >
+                        {{ tr('All workbench', '全部工作台') }}
+                      </button>
+                    </div>
+                    <div class="attendance__admin-page-search-combo">
+                      <input
+                        ref="adminPageSearchInputRef"
+                        v-model="adminPageSearchQuery"
+                        class="attendance__admin-page-search-input"
+                        type="search"
+                        data-admin-page-search-input="true"
+                        :placeholder="adminPageSearchPlaceholder"
+                        :aria-label="adminPageSearchAriaLabel"
+                        @keydown="onAdminPageSearchKeydown"
+                      />
+                      <ul
+                        v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
+                        class="attendance__admin-page-search-results"
+                        data-admin-page-search-results
+                        role="listbox"
+                      >
+                        <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                          <button
+                            class="attendance__admin-page-search-result"
+                            type="button"
+                            role="option"
+                            :data-admin-page-search-result="item.id"
+                            @click="openAdminWorkbenchSearchHit(item.id)"
+                          >
+                            {{ item.contextLabel }}
+                          </button>
+                        </li>
+                        <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                          {{ tr('No matches', '搜索不到') }}
+                        </li>
+                      </ul>
+                    </div>
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      data-admin-page-search-clear="true"
+                      @click="clearAdminPageSearchQuery"
+                    >
+                      {{ tr('Clear', '清除') }}
+                    </button>
+                    <span
+                      v-if="adminPageSearchStatusText"
+                      class="attendance__admin-page-search-status"
+                      data-admin-page-search-status
+                      :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
+                    >
+                      {{ adminPageSearchStatusText }}
+                    </span>
+                  </div>
+                </div>
+                <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                  {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                </button>
+              </div>
+              <AttendanceAdminGuide :tr="tr" @select-section="selectAdminSection" />
             </div>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -1384,7 +1697,7 @@
               {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
             </button>
           </div>
-          <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
+          <div v-if="adminSurfaceBlocked" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
           <template v-else>
             <div
               v-show="adminTaskHomeOpen"
@@ -1424,6 +1737,7 @@
                 :tr="tr"
                 :groups="adminTaskHomeGroups"
                 @select-section="selectAdminSection"
+                @navigate="onAdminTaskHomeNavigate"
               />
             </div>
             <div
@@ -1436,9 +1750,11 @@
               :active-admin-section-context-label="activeAdminSectionContextLabel"
               :is-compact-admin-nav="isCompactAdminNav"
               :admin-compact-nav-open="adminCompactNavOpen"
+              :admin-section-filter="adminSectionFilter"
               :visible-admin-section-nav-groups="visibleAdminSectionNavGroups"
               :admin-active-section-id="adminActiveSectionId"
               @update:compact-nav-open="adminCompactNavOpen = $event"
+              @update:section-filter="adminSectionFilter = $event"
               @toggle-group="toggleAdminSectionGroup"
               @select-section="selectAdminSection"
             />
@@ -1451,71 +1767,106 @@
               class="attendance__admin-current-section"
               data-admin-current-section="true"
             >
-              <div class="attendance__admin-current-section-copy">
-                <button
-                  class="attendance__btn attendance__btn--inline attendance__admin-home-action"
-                  type="button"
-                  data-admin-task-home-return="true"
-                  @click="showAdminTaskHome"
-                >
-                  <ArrowLeft class="attendance__admin-home-action-icon" aria-hidden="true" />
-                  <span>{{ tr('Management home', '管理首页') }}</span>
-                </button>
-                <span class="attendance__admin-current-section-eyebrow">
-                  {{ tr('Current section', '当前区块') }}
-                </span>
-                <strong>{{ activeAdminSectionContextLabel }}</strong>
-              </div>
-              <div class="attendance__admin-current-section-actions">
-                <button
-                  class="attendance__btn attendance__btn--inline attendance__admin-current-section-nav"
-                  :class="{ 'attendance__admin-current-section-nav--disabled': !previousAdminSectionNavItem }"
-                  type="button"
-                  data-admin-prev-section
-                  :data-admin-prev-section-id="previousAdminSectionNavItem?.id || ''"
-                  :disabled="!previousAdminSectionNavItem"
-                  :title="previousAdminSectionNavItem?.contextLabel || ''"
-                  @click="previousAdminSectionNavItem && selectAdminSection(previousAdminSectionNavItem.id)"
-                >
-                  <span class="attendance__admin-current-section-nav-direction">{{ tr('Prev', '上一个') }}</span>
-                  <strong>{{ previousAdminSectionNavItem?.label || tr('Start', '起点') }}</strong>
-                </button>
-                <label class="attendance__admin-current-section-jump">
-                  <span>{{ tr('Quick jump', '快速跳转') }}</span>
-                  <select
-                    class="attendance__admin-current-section-select"
-                    :value="resolvedAdminSectionId()"
-                    data-admin-quick-jump="true"
-                    @change="handleAdminQuickJumpChange"
-                  >
-                    <optgroup
-                      v-for="group in adminQuickJumpGroups"
-                      :key="group.label"
-                      :label="group.label"
+              <strong class="attendance__admin-current-section-title">{{ activeAdminSectionContextLabel }}</strong>
+              <div v-if="!adminTaskHomeOpen" class="attendance__admin-current-section-tools">
+                <div class="attendance__admin-actions">
+                  <div class="attendance__admin-page-search" data-admin-page-search="true">
+                    <button
+                      v-if="!adminPageSearchOpen"
+                      class="attendance__btn"
+                      type="button"
+                      data-admin-page-search-toggle="true"
+                      @click="openAdminPageSearch"
                     >
-                      <option
-                        v-for="item in group.items"
-                        :key="item.id"
-                        :value="item.id"
+                      {{ tr('Search this page', '搜索本页') }}
+                    </button>
+                    <div v-else class="attendance__admin-page-search-field" role="search">
+                      <div
+                        class="attendance__admin-page-search-scope"
+                        role="group"
+                        :aria-label="tr('Search scope', '搜索范围')"
                       >
-                        {{ item.label }}
-                      </option>
-                    </optgroup>
-                  </select>
-                </label>
-                <button
-                  class="attendance__btn attendance__btn--inline attendance__admin-current-section-nav"
-                  :class="{ 'attendance__admin-current-section-nav--disabled': !nextAdminSectionNavItem }"
-                  type="button"
-                  data-admin-next-section
-                  :data-admin-next-section-id="nextAdminSectionNavItem?.id || ''"
-                  :disabled="!nextAdminSectionNavItem"
-                  :title="nextAdminSectionNavItem?.contextLabel || ''"
-                  @click="nextAdminSectionNavItem && selectAdminSection(nextAdminSectionNavItem.id)"
-                >
-                  <span class="attendance__admin-current-section-nav-direction">{{ tr('Next', '下一个') }}</span>
-                  <strong>{{ nextAdminSectionNavItem?.label || tr('End', '终点') }}</strong>
-                </button>
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                          type="button"
+                          data-admin-page-search-scope="page"
+                          :aria-pressed="adminPageSearchScope === 'page'"
+                          @click="setAdminPageSearchScope('page')"
+                        >
+                          {{ tr('This page', '本页') }}
+                        </button>
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                          type="button"
+                          data-admin-page-search-scope="workbench"
+                          :aria-pressed="adminPageSearchScope === 'workbench'"
+                          @click="setAdminPageSearchScope('workbench')"
+                        >
+                          {{ tr('All workbench', '全部工作台') }}
+                        </button>
+                      </div>
+                      <div class="attendance__admin-page-search-combo">
+                        <input
+                          ref="adminPageSearchInputRef"
+                          v-model="adminPageSearchQuery"
+                          class="attendance__admin-page-search-input"
+                          type="search"
+                          data-admin-page-search-input="true"
+                          :placeholder="adminPageSearchPlaceholder"
+                          :aria-label="adminPageSearchAriaLabel"
+                          @keydown="onAdminPageSearchKeydown"
+                        />
+                        <ul
+                          v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
+                          class="attendance__admin-page-search-results"
+                          data-admin-page-search-results
+                          role="listbox"
+                        >
+                          <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                            <button
+                              class="attendance__admin-page-search-result"
+                              type="button"
+                              role="option"
+                              :data-admin-page-search-result="item.id"
+                              @click="openAdminWorkbenchSearchHit(item.id)"
+                            >
+                              {{ item.contextLabel }}
+                            </button>
+                          </li>
+                          <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                            {{ tr('No matches', '搜索不到') }}
+                          </li>
+                        </ul>
+                      </div>
+                      <button
+                        class="attendance__btn attendance__btn--inline"
+                        type="button"
+                        data-admin-page-search-clear="true"
+                        @click="clearAdminPageSearchQuery"
+                      >
+                        {{ tr('Clear', '清除') }}
+                      </button>
+                      <span
+                        v-if="adminPageSearchStatusText"
+                        class="attendance__admin-page-search-status"
+                        data-admin-page-search-status
+                        :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
+                      >
+                        {{ adminPageSearchStatusText }}
+                      </span>
+                    </div>
+                  </div>
+                  <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                    {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                  </button>
+                </div>
+                <AttendanceAdminGuide
+                  :tr="tr"
+                  :active-section-id="adminActiveSectionId"
+                  @select-section="selectAdminSection"
+                />
               </div>
             </div>
             <div
@@ -1597,7 +1948,7 @@
                 </label>
                 <label v-if="adminTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-admin-date">
                   <span>{{ tr('Work date', '工作日期') }}</span>
-                  <input id="attendance-decision-trace-admin-date" v-model="adminTraceWorkDate" type="date" data-decision-trace-admin-date />
+                  <AttendanceLocaleDateInput id="attendance-decision-trace-admin-date" v-model="adminTraceWorkDate" data-decision-trace-admin-date />
                 </label>
                 <label v-if="adminTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-admin-request">
                   <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
@@ -1663,6 +2014,9 @@
                     name="attendanceSchedulerScopeSubject"
                     :search-placeholder="tr('Search the subject user', '搜索主体用户')"
                     input-id="attendance-scheduler-scope-subject-ref"
+                    endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                   />
                   <label v-else class="attendance__field" for="attendance-scheduler-scope-subject-ref">
                     <span>{{ tr('Subject (role / role tag)', '主体（角色 / 角色标签）') }}</span>
@@ -1770,6 +2124,9 @@
                       :search-placeholder="tr('Search a target user', '搜索目标员工')"
                       input-id="attendance-scheduler-scope-target-users"
                       full-width
+                      endpoint="/api/attendance-admin/users/search"
+                      :org-id="orgId"
+                      :global-scope="attendanceAdminGlobalUserScope"
                     />
                     <button
                       type="button"
@@ -1942,11 +2299,11 @@
                 <div class="attendance__missed-reminder-toolbar" data-missed-punch-reminder-toolbar>
                   <label class="attendance__field" for="attendance-missed-reminder-from">
                     <span>{{ tr('From', '开始日期') }}</span>
-                    <input id="attendance-missed-reminder-from" v-model="missedPunchReminderForm.from" type="date" data-missed-punch-reminder-from />
+                    <AttendanceLocaleDateInput id="attendance-missed-reminder-from" v-model="missedPunchReminderForm.from" data-missed-punch-reminder-from />
                   </label>
                   <label class="attendance__field" for="attendance-missed-reminder-to">
                     <span>{{ tr('To', '结束日期') }}</span>
-                    <input id="attendance-missed-reminder-to" v-model="missedPunchReminderForm.to" type="date" data-missed-punch-reminder-to />
+                    <AttendanceLocaleDateInput id="attendance-missed-reminder-to" v-model="missedPunchReminderForm.to" data-missed-punch-reminder-to />
                   </label>
                   <label class="attendance__field" for="attendance-missed-reminder-user">
                     <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
@@ -2129,13 +2486,19 @@
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy)"
               data-attendance-report-digest-policy
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Report digest subscription', '统计通知订阅') }}</h4>
               </div>
+              <AttendanceScheduledFeatureStatus
+                :tr="tr"
+                feature="reportDigest"
+                :configured="reportDigestConfiguredState"
+                :gate="attendanceRuntimeGates?.reportDigest ?? null"
+              />
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-enabled">
                   <span>{{ tr('Enable report digest subscription', '启用统计通知订阅') }}</span>
@@ -2148,11 +2511,10 @@
                 </label>
                 <label class="attendance__field" for="attendance-report-digest-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <AttendanceTimezoneSelect
                     id="attendance-report-digest-timezone"
-                    v-model.trim="reportDigestPolicyForm.timezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
+                    v-model="reportDigestPolicyForm.timezone"
+                    :options="timezoneOptions"
                     data-report-digest="timezone"
                   />
                 </label>
@@ -2177,7 +2539,7 @@
                   </label>
                   <label class="attendance__field" for="attendance-report-digest-daily-send-at">
                     <span>{{ tr('Send at', '发送时间') }}</span>
-                    <input id="attendance-report-digest-daily-send-at" v-model="reportDigestPolicyForm.cadences.daily.sendAt" type="time" data-report-digest-daily="send-at" />
+                    <AttendanceLocaleTimeInput id="attendance-report-digest-daily-send-at" v-model="reportDigestPolicyForm.cadences.daily.sendAt" data-report-digest-daily="send-at" />
                   </label>
                   <fieldset class="attendance__field">
                     <legend>{{ tr('Recipients', '收件人') }}</legend>
@@ -2209,7 +2571,7 @@
                   </label>
                   <label class="attendance__field" for="attendance-report-digest-weekly-send-at">
                     <span>{{ tr('Send at', '发送时间') }}</span>
-                    <input id="attendance-report-digest-weekly-send-at" v-model="reportDigestPolicyForm.cadences.weekly.sendAt" type="time" data-report-digest-weekly="send-at" />
+                    <AttendanceLocaleTimeInput id="attendance-report-digest-weekly-send-at" v-model="reportDigestPolicyForm.cadences.weekly.sendAt" data-report-digest-weekly="send-at" />
                   </label>
                   <fieldset class="attendance__field">
                     <legend>{{ tr('Recipients', '收件人') }}</legend>
@@ -2241,7 +2603,7 @@
                   </label>
                   <label class="attendance__field" for="attendance-report-digest-monthly-send-at">
                     <span>{{ tr('Send at', '发送时间') }}</span>
-                    <input id="attendance-report-digest-monthly-send-at" v-model="reportDigestPolicyForm.cadences.monthly.sendAt" type="time" data-report-digest-monthly="send-at" />
+                    <AttendanceLocaleTimeInput id="attendance-report-digest-monthly-send-at" v-model="reportDigestPolicyForm.cadences.monthly.sendAt" data-report-digest-monthly="send-at" />
                   </label>
                   <fieldset class="attendance__field">
                     <legend>{{ tr('Recipients', '收件人') }}</legend>
@@ -2271,7 +2633,7 @@
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy)"
               data-attendance-makeup-punch-policy
             >
@@ -2293,20 +2655,24 @@
                 </label>
                 <label class="attendance__field" for="attendance-makeup-punch-timezone">
                   <span>{{ tr('Policy timezone', '规则时区') }}</span>
-                  <input
+                  <AttendanceTimezoneSelect
                     id="attendance-makeup-punch-timezone"
-                    v-model.trim="makeupPunchPolicyForm.timezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
+                    v-model="makeupPunchPolicyForm.timezone"
+                    :options="timezoneOptions"
                     data-makeup-punch="timezone"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-makeup-punch-cycle-type">
+                <!-- A9 (A-class batch 2, 2026-08-22): this used to be a disabled <select> offering
+                     exactly one option — the backend schema genuinely only accepts one value here
+                     (`cycle.type: z.enum(['calendar_month'])`, `index.cjs:26318`) and the save
+                     payload always hardcodes the literal `'calendar_month'` regardless of any UI
+                     state (`saveMakeupPunchPolicy`), so the disabled dropdown never bound to form
+                     state at all. Presented as plain read-only text instead of a fake control. -->
+                <div class="attendance__field" data-makeup-punch="cycle-type-fixed">
                   <span>{{ tr('Cycle type', '周期类型') }}</span>
-                  <select id="attendance-makeup-punch-cycle-type" disabled data-makeup-punch="cycle-type">
-                    <option value="calendar_month">{{ tr('Calendar month', '自然月') }}</option>
-                  </select>
-                </label>
+                  <strong>{{ tr('Calendar month', '自然月') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts calendar-month cycles in v1.', '固定 — v1 后端仅接受自然月周期。') }}</small>
+                </div>
                 <label class="attendance__field" for="attendance-makeup-punch-cycle-start">
                   <span>{{ tr('Cycle start day', '周期起始日') }}</span>
                   <input
@@ -2345,18 +2711,21 @@
                     <span>{{ option.label }}</span>
                   </label>
                 </fieldset>
-                <label class="attendance__field" for="attendance-makeup-punch-quota-principal">
+                <!-- A9: same reasoning as cycle-type above — `quota.principal: z.enum(['self_service_user'])`
+                     (`index.cjs:26323`) and the save payload hardcodes the literal
+                     `'self_service_user'`; the disabled select never bound to form state. -->
+                <div class="attendance__field" data-makeup-punch="quota-principal-fixed">
                   <span>{{ tr('Quota principal', '额度主体') }}</span>
-                  <select id="attendance-makeup-punch-quota-principal" disabled data-makeup-punch="quota-principal">
-                    <option value="self_service_user">{{ tr('Self-service user', '自助申请人') }}</option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-makeup-punch-window-unit">
+                  <strong>{{ tr('Self-service user', '自助申请人') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts self-service-user quotas in v1.', '固定 — v1 后端仅接受自助申请人额度。') }}</small>
+                </div>
+                <!-- A9: same reasoning again — `submitWindow.unit: z.enum(['calendar_day'])`
+                     (`index.cjs:26326`) and the save payload hardcodes the literal `'calendar_day'`. -->
+                <div class="attendance__field" data-makeup-punch="window-unit-fixed">
                   <span>{{ tr('Submit-window unit', '提交窗口单位') }}</span>
-                  <select id="attendance-makeup-punch-window-unit" disabled data-makeup-punch="window-unit">
-                    <option value="calendar_day">{{ tr('Calendar day', '自然日') }}</option>
-                  </select>
-                </label>
+                  <strong>{{ tr('Calendar day', '自然日') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts calendar-day submit windows in v1.', '固定 — v1 后端仅接受自然日提交窗口。') }}</small>
+                </div>
                 <label class="attendance__field" for="attendance-makeup-punch-window-days">
                   <span>{{ tr('Submit window (calendar days)', '提交时限（自然日）') }}</span>
                   <input
@@ -2432,11 +2801,17 @@
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
             >
               <h4>{{ tr('Settings', '设置') }}</h4>
-              <div class="attendance__admin-grid">
+              <div class="attendance__form-stack">
+              <section class="attendance__form-card">
+                <AttendanceTimezonePolicyPanel :tr="tr" />
+              </section>
+              <section class="attendance__form-card">
+                <h5>{{ tr('Auto absence', '自动缺勤') }}</h5>
+                <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
                   <span>{{ tr('Auto absence', '自动缺勤') }}</span>
                   <input
@@ -2446,25 +2821,32 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-auto-absence-run-at">
+                <label class="attendance__field attendance__field--compact-control" for="attendance-auto-absence-run-at">
                   <span>{{ tr('Run at', '执行时间') }}</span>
-                  <input
+                  <AttendanceLocaleTimeInput
                     id="attendance-auto-absence-run-at"
                     name="autoAbsenceRunAt"
                     v-model="settingsForm.autoAbsenceRunAt"
-                    type="time"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-auto-absence-lookback">
+                <label class="attendance__field attendance__field--compact-control" for="attendance-auto-absence-lookback">
                   <span>{{ tr('Lookback days', '回溯天数') }}</span>
-                  <input
-                    id="attendance-auto-absence-lookback"
-                    name="autoAbsenceLookbackDays"
-                    v-model.number="settingsForm.autoAbsenceLookbackDays"
-                    type="number"
-                    min="1"
-                  />
+                  <span class="attendance__control-with-unit">
+                    <input
+                      id="attendance-auto-absence-lookback"
+                      name="autoAbsenceLookbackDays"
+                      v-model.number="settingsForm.autoAbsenceLookbackDays"
+                      type="number"
+                      min="1"
+                    />
+                    <span class="attendance__control-unit">{{ tr('days', '天') }}</span>
+                  </span>
                 </label>
+                </div>
+              </section>
+              <section class="attendance__form-card">
+                <h5>{{ tr('Holiday hours', '节假日工时') }}</h5>
+                <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
                   <span>{{ tr('Holiday first-day base hours', '节假日首日基准工时') }}</span>
                   <input
@@ -2474,16 +2856,19 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-holiday-first-day-hours">
+                <label class="attendance__field attendance__field--compact-control" for="attendance-holiday-first-day-hours">
                   <span>{{ tr('First-day base hours', '首日基准工时') }}</span>
-                  <input
-                    id="attendance-holiday-first-day-hours"
-                    name="holidayFirstDayBaseHours"
-                    v-model.number="settingsForm.holidayFirstDayBaseHours"
-                    type="number"
-                    min="0"
-                    step="0.5"
-                  />
+                  <span class="attendance__control-with-unit">
+                    <input
+                      id="attendance-holiday-first-day-hours"
+                      name="holidayFirstDayBaseHours"
+                      v-model.number="settingsForm.holidayFirstDayBaseHours"
+                      type="number"
+                      min="0"
+                      step="0.5"
+                    />
+                    <span class="attendance__control-unit">{{ tr('hours', '小时') }}</span>
+                  </span>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-overtime-adds">
                   <span>{{ tr('Overtime adds on holiday', '节假日计入加班') }}</span>
@@ -2494,7 +2879,7 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-holiday-overtime-source">
+                <label class="attendance__field attendance__field--compact-control" for="attendance-holiday-overtime-source">
                   <span>{{ tr('Overtime source', '加班来源') }}</span>
                   <select
                     id="attendance-holiday-overtime-source"
@@ -2506,13 +2891,18 @@
                     <option value="both">{{ tr('Both', '两者') }}</option>
                   </select>
                 </label>
-                <div class="attendance__field attendance__field--full">
-                  <div class="attendance__admin-subsection">
+                </div>
+              </section>
+              <section class="attendance__form-card">
+                    <div class="attendance__admin-subsection">
                     <div class="attendance__admin-subsection-header">
                       <h5>{{ tr('Holiday overrides', '节假日覆盖规则') }}</h5>
-                      <button class="attendance__btn" type="button" @click="addHolidayOverride">
-                        {{ tr('Add override', '新增覆盖') }}
-                      </button>
+                      <div class="attendance__override-header-tools">
+                        <AttendanceHolidayIndexHelp :tr="tr" />
+                        <button class="attendance__btn" type="button" @click="addHolidayOverride">
+                          {{ tr('Add override', '新增覆盖') }}
+                        </button>
+                      </div>
                     </div>
                     <div v-if="settingsForm.holidayOverrides.length === 0" class="attendance__empty">
                       {{ tr('No overrides configured.', '暂无覆盖规则。') }}
@@ -2576,51 +2966,13 @@
                             </tr>
                             <tr class="attendance__table-row--meta">
                               <td colspan="7">
-                                <div class="attendance__override-filters">
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
-                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
-                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
-                                    </small>
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Roles', '角色') }}</span>
-                                    <input v-model="override.roles" type="text" placeholder="司机,工段长" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Role tags', '角色标签') }}</span>
-                                    <input v-model="override.roleTags" type="text" placeholder="车间,仓储" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User IDs', '用户ID') }}</span>
-                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User names', '用户名') }}</span>
-                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
-                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
-                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
-                                    <input v-model.number="override.dayIndexStart" type="number" min="1" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
-                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
-                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
-                                  </label>
-                                </div>
+                                <AttendanceOverrideAudienceFields
+                                  :override="override"
+                                  :group-options="attendanceGroupOptions"
+                                  :role-options="audienceRoleOptions"
+                                  :tr="tr"
+                                  :search-user-names="searchAudienceUserNames"
+                                />
                               </td>
                             </tr>
                           </template>
@@ -2628,156 +2980,26 @@
                       </table>
                     </div>
                   </div>
+              </section>
+              <aside class="attendance__form-callout" data-attendance-calendar-policy-jump>
+                <div class="attendance__form-callout-copy">
+                  <strong>{{ tr('Calendar overrides', '日历覆盖规则') }}</strong>
+                  <p>
+                    {{ tr('Group holiday-length quick add and effective calendar overrides now live on the Holidays page.', '班组节假日时长快捷配置与有效日历覆盖规则已移至节假日页面。') }}
+                  </p>
                 </div>
-                <div class="attendance__field attendance__field--full">
-                  <div class="attendance__admin-subsection">
-                    <div class="attendance__admin-subsection-header">
-                      <h5>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</h5>
-                      <button class="attendance__btn" type="button" @click="addCalendarPolicyOverride">
-                        {{ tr('Add calendar override', '新增日历覆盖') }}
-                      </button>
-                    </div>
-                    <p class="attendance__field-hint">
-                      {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
-                    </p>
-                    <p class="attendance__field-hint attendance__field-hint--warn">
-                      {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
-                    </p>
-                    <AttendanceCalendarPolicyQuickAdd
-                      :attendance-group-options="attendanceGroupOptions"
-                      :tr="tr"
-                      @append="appendCalendarPolicyQuickAdd"
-                    />
-                    <AttendanceCalendarPolicyPreviewPanel
-                      :tr="tr"
-                      :draft-overrides="calendarPolicyPreviewDraftOverrides"
-                    />
-                    <div
-                      v-if="calendarPolicyOverrideDiagnostics.length"
-                      class="attendance__calendar-policy-diagnostics"
-                      data-attendance-calendar-policy-diagnostics
-                      role="alert"
-                    >
-                      <strong>{{ tr('Calendar rule checks', '日历规则检查') }}</strong>
-                      <ul>
-                        <li
-                          v-for="diagnostic in calendarPolicyOverrideDiagnostics"
-                          :key="diagnostic.key"
-                          :data-calendar-policy-diagnostic="diagnostic.code"
-                        >
-                          {{ calendarPolicyDiagnosticMessage(diagnostic) }}
-                        </li>
-                      </ul>
-                    </div>
-                    <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">
-                      {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
-                    </div>
-                    <div v-else class="attendance__table-wrapper">
-                      <table class="attendance__table">
-                        <thead>
-                          <tr>
-                            <th>{{ tr('Date / range', '日期 / 范围') }}</th>
-                            <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
-                            <th>{{ tr('Scope', '范围') }}</th>
-                            <th>{{ tr('Effective day', '生效日类型') }}</th>
-                            <th>{{ tr('Label', '标签') }}</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
-                            <tr>
-                              <td>
-                                <div class="attendance__inline-fields">
-                                  <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
-                                  <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
-                                  <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
-                                </div>
-                              </td>
-                              <td>
-                                <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
-                                <select v-model="override.match" class="attendance__table-input">
-                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
-                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
-                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
-                                </select>
-                              </td>
-                              <td>
-                                <select v-model="override.source" class="attendance__table-input">
-                                  <option value="org">{{ tr('Organization', '组织') }}</option>
-                                  <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
-                                  <option value="user">{{ tr('User', '用户') }}</option>
-                                  <option value="role">{{ tr('Role', '角色') }}</option>
-                                </select>
-                              </td>
-                              <td>
-                                <select v-model="override.isWorkingDay" class="attendance__table-input">
-                                  <option :value="true">{{ tr('Working day', '工作日') }}</option>
-                                  <option :value="false">{{ tr('Rest day', '休息日') }}</option>
-                                </select>
-                              </td>
-                              <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
-                              <td>
-                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
-                                  {{ tr('Remove', '移除') }}
-                                </button>
-                              </td>
-                            </tr>
-                            <tr class="attendance__table-row--meta">
-                              <td colspan="6">
-                                <div class="attendance__override-filters">
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
-                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
-                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
-                                    </small>
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Roles', '角色') }}</span>
-                                    <input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Role tags', '角色标签') }}</span>
-                                    <input v-model="override.roleTags" type="text" placeholder="attendance_admin,班组长" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User IDs', '用户ID') }}</span>
-                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User names', '用户名') }}</span>
-                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
-                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
-                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
-                                    <input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
-                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
-                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
-                                  </label>
-                                </div>
-                              </td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
+                <a
+                  class="attendance__btn"
+                  href="#attendance-admin-holidays"
+                  data-attendance-calendar-policy-open-holidays
+                  @click.prevent="openHolidayCalendarPolicyFromSettings"
+                >
+                  {{ tr('Open on Holidays', '前往节假日') }}
+                </a>
+              </aside>
+              <section class="attendance__form-card">
+                <h5>{{ tr('Punch and geofence', '打卡与围栏') }}</h5>
+                <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>{{ tr('Min punch interval (min)', '最小打卡间隔（分钟）') }}</span>
                   <input
@@ -2786,6 +3008,16 @@
                     v-model.number="settingsForm.minPunchIntervalMinutes"
                     type="number"
                     min="0"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-geo-radius">
+                  <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
+                  <input
+                    id="attendance-geo-radius"
+                    name="geoFenceRadius"
+                    v-model="settingsForm.geoFenceRadius"
+                    type="number"
+                    min="1"
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-ip-allowlist">
@@ -2818,20 +3050,20 @@
                     step="0.000001"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-geo-radius">
-                  <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
-                  <input
-                    id="attendance-geo-radius"
-                    name="geoFenceRadius"
-                    v-model="settingsForm.geoFenceRadius"
-                    type="number"
-                    min="1"
-                  />
-                </label>
-              </div>
+                </div>
+              </section>
+              <section class="attendance__form-card">
+                <AttendanceEmployeeQuickActionIconsField
+                  v-model="adminConfig.settingsForm.employeeQuickActionIcons"
+                  :tr="tr"
+                />
+              </section>
+              <div class="attendance__form-actions">
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
               </button>
+              </div>
+              </div>
 
               <div class="attendance__admin-subsection" data-admin-card="shift-compliance">
                 <h4>{{ tr('Shift compliance', '排班合规') }}</h4>
@@ -3234,19 +3466,17 @@
                 <div class="attendance__admin-grid">
                   <label class="attendance__field" for="attendance-auto-shift-from">
                     <span>{{ tr('From', '开始日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-auto-shift-from"
                       v-model="autoShiftPreviewForm.from"
-                      type="date"
                       data-auto-shift="from"
                     />
                   </label>
                   <label class="attendance__field" for="attendance-auto-shift-to">
                     <span>{{ tr('To', '结束日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-auto-shift-to"
                       v-model="autoShiftPreviewForm.to"
-                      type="date"
                       data-auto-shift="to"
                     />
                   </label>
@@ -3904,7 +4134,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
             >
               <div class="attendance__admin-section-header">
@@ -3960,24 +4190,20 @@
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-run">
                   <span>{{ tr('Auto sync time', '自动同步时间') }}</span>
-                  <input
+                  <AttendanceLocaleTimeInput
                     id="attendance-holiday-sync-auto-run"
                     name="holidaySyncAutoRunAt"
                     v-model="settingsForm.holidaySyncAutoRunAt"
-                    type="time"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
                   <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-holiday-sync-auto-tz"
                     name="holidaySyncAutoTimezone"
                     v-model="settingsForm.holidaySyncAutoTimezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`holiday-sync-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ holidaySyncAutoTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
@@ -4050,7 +4276,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
             >
               <div class="attendance__admin-section-header">
@@ -4066,33 +4292,28 @@
                 </label>
                 <label class="attendance__field" for="attendance-rule-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-rule-timezone"
                     name="ruleTimezone"
                     v-model="ruleForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`rule-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ ruleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-rule-start">
                   <span>{{ tr('Work start', '上班时间') }}</span>
-                  <input
+                  <AttendanceLocaleTimeInput
                     id="attendance-rule-start"
                     name="ruleWorkStartTime"
                     v-model="ruleForm.workStartTime"
-                    type="time"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-end">
                   <span>{{ tr('Work end', '下班时间') }}</span>
-                  <input
+                  <AttendanceLocaleTimeInput
                     id="attendance-rule-end"
                     name="ruleWorkEndTime"
                     v-model="ruleForm.workEndTime"
-                    type="time"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-late-grace">
@@ -4125,14 +4346,12 @@
                     min="0"
                   />
                 </label>
-                <label class="attendance__field attendance__field--full" for="attendance-rule-working-days">
-                  <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
-                  <input
+                <label class="attendance__field" for="attendance-rule-working-days">
+                  <span>{{ tr('Working days', '工作日') }}</span>
+                  <AttendanceWeekdayChipField
                     id="attendance-rule-working-days"
                     name="ruleWorkingDays"
                     v-model="ruleForm.workingDays"
-                    type="text"
-                    placeholder="1,2,3,4,5"
                   />
                 </label>
               </div>
@@ -4143,7 +4362,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
             >
               <div class="attendance__admin-section-header">
@@ -4152,8 +4371,8 @@
                   {{ ruleSetLoading ? tr('Loading...', '加载中...') : tr('Reload rule sets', '重载规则集') }}
                 </button>
               </div>
-              <div class="attendance__rule-set-workbench">
-                <section class="attendance__rule-set-basics">
+              <div class="attendance__rule-set-workbench attendance__form-stack">
+                <section class="attendance__rule-set-basics attendance__form-card">
                   <div class="attendance__subheading-row">
                     <h5 class="attendance__subheading">{{ tr('Rule set basics', '规则集基础信息') }}</h5>
                     <span class="attendance__field-hint">
@@ -4207,7 +4426,7 @@
                   </div>
                 </section>
 
-                <section class="attendance__rule-builder-shell">
+                <section class="attendance__rule-builder-shell attendance__form-card">
                   <div class="attendance__rule-builder-overview">
                     <div class="attendance__rule-builder-intro">
                       <div class="attendance__subheading-row">
@@ -4242,19 +4461,19 @@
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-timezone">
                       <span>{{ tr('Timezone', '时区') }}</span>
-                      <select id="attendance-rule-builder-timezone" v-model="ruleBuilderTimezone">
-                        <option v-for="option in timezoneOptions" :key="`rule-builder-${option.value}`" :value="option.value">
-                          {{ option.label }}
-                        </option>
-                      </select>
+                      <AttendanceTimezoneSelect
+                        id="attendance-rule-builder-timezone"
+                        v-model="ruleBuilderTimezone"
+                        :options="timezoneOptions"
+                      />
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-start">
                       <span>{{ tr('Work start time', '上班时间') }}</span>
-                      <input id="attendance-rule-builder-start" v-model="ruleBuilderWorkStartTime" type="time" />
+                      <AttendanceLocaleTimeInput id="attendance-rule-builder-start" v-model="ruleBuilderWorkStartTime" />
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-end">
                       <span>{{ tr('Work end time', '下班时间') }}</span>
-                      <input id="attendance-rule-builder-end" v-model="ruleBuilderWorkEndTime" type="time" />
+                      <AttendanceLocaleTimeInput id="attendance-rule-builder-end" v-model="ruleBuilderWorkEndTime" />
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-late-grace">
                       <span>{{ tr('Late grace minutes', '迟到宽限分钟') }}</span>
@@ -4365,7 +4584,7 @@
                                 <input v-model="event.occurredAt" type="datetime-local" />
                               </td>
                               <td>
-                                <input v-model="event.workDate" type="date" />
+                                <AttendanceLocaleDateInput v-model="event.workDate" />
                               </td>
                               <td>
                                 <input v-model="event.userId" type="text" :placeholder="tr('user-1', 'user-1')" />
@@ -4597,7 +4816,7 @@
                   </div>
                 </section>
 
-                <section class="attendance__rule-set-advanced">
+                <section class="attendance__rule-set-advanced attendance__form-card">
                   <div class="attendance__subheading-row">
                     <h5 class="attendance__subheading">{{ tr('Advanced JSON config', '高级 JSON 配置') }}</h5>
                     <span class="attendance__field-hint">
@@ -4667,7 +4886,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
             >
               <div class="attendance__admin-section-header">
@@ -4845,8 +5064,8 @@
                       </button>
                     </div>
                   </div>
-                  <div v-if="attendanceGroups.length === 0" class="attendance__empty">
-                    {{ tr('No attendance groups yet. Create one to start configuring members.', '暂无考勤组。先新建一个考勤组，再配置成员。') }}
+                  <div v-if="attendanceGroups.length === 0" class="attendance__empty" data-attendance-group-empty="true">
+                    {{ attendanceGroupEmptyCopy }}
                   </div>
                   <div v-else-if="filteredAttendanceGroups.length === 0" class="attendance__empty">
                     {{ tr('No groups match the current filters.', '当前筛选条件下没有考勤组。') }}
@@ -4862,7 +5081,7 @@
                       <button class="attendance__group-list-main" type="button" @click="selectAttendanceGroup(item)">
                         <span class="attendance__group-list-name">
                           <strong>{{ item.name }}</strong>
-                          <small>{{ item.code || item.id }}</small>
+                          <small class="attendance__id-clip">{{ item.code || item.id }}</small>
                         </span>
                         <span class="attendance__group-list-meta">
                           <span data-attendance-group-list-member-count>{{ attendanceGroupListMemberCountLabel(item) }}</span>
@@ -4911,7 +5130,10 @@
                     </div>
                     <div v-if="attendanceGroupEditingId" class="attendance__group-detail-actions">
                       <div class="attendance__admin-meta">
-                        <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        <details class="attendance__tech-details">
+                          <summary>{{ tr('Technical info', '技术信息') }}</summary>
+                          <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        </details>
                         <span>{{ tr('People', '考勤人员') }}: {{ attendanceGroupListMemberCountLabel(selectedAttendanceGroup) }}</span>
                         <span>{{ tr('Type', '类型') }}: {{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</span>
                         <span>{{ tr('Timezone', '时区') }}: {{ displayTimezone(attendanceGroupForm.timezone) }}</span>
@@ -4989,14 +5211,39 @@
                         <span>{{ tr('Code', '编码') }}</span>
                         <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
                       </label>
+                      <!-- A2 (A-class batch 2, 2026-08-22): confirmed the server accepts a timezone
+                           change on an existing group unconditionally (index.cjs's PATCH handler),
+                           while the SAME handler 409s a group-type change with "protect schedule
+                           semantics" as the reason (see the type field's hint one below). Deliberately
+                           did NOT add `:disabled` here the way the type field has it — the server does
+                           not reject this, so disabling it client-side would be inventing a product
+                           restriction ("can an admin fix a mistyped timezone on a saved group") this
+                           task was told not to decide, not mirroring one that exists. Left editable.
+                           GATE-5097 P2-3: the hint below was rewritten after review traced the LIVE
+                           calculation path — resolveWorkContext() (index.cjs:15366-15386) resolves
+                           `profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? defaultRule`;
+                           attendance_groups is never consulted there, so shift/punch times are NOT
+                           reinterpreted by a group timezone change on the path production runs today
+                           (the group's timezone reaches a live calculation only as a last-resort
+                           fallback inside resolveCalendarTimezone's effective-calendar read, and only
+                           if EVERY other candidate — rotation, shift, AND the default rule, which
+                           always has a timezone — is empty, which does not happen in practice; see
+                           also the flagged-off W7 group-effective-facts resolver, which explicitly
+                           treats group timezone as new policy the legacy per-user path never had).
+                           The prior copy claimed the opposite and would have taught an admin fixing a
+                           mistyped timezone that they were about to corrupt historical calculations. -->
                       <label class="attendance__field" for="attendance-group-timezone">
                         <span>{{ tr('Timezone', '时区') }}</span>
-                        <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
-                          <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
-                            {{ option.label }}
-                          </option>
-                        </select>
+                        <AttendanceTimezoneSelect
+                          id="attendance-group-timezone"
+                          v-model="attendanceGroupForm.timezone"
+                          :options="timezoneOptions"
+                          data-attendance-group-timezone
+                        />
                         <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
+                        <small v-if="attendanceGroupEditingId" class="attendance__field-hint" data-attendance-group-timezone-change-warning>
+                          {{ tr('This is stored as group policy. Shift and punch calculations use each shift\'s own timezone (or the default rule\'s), not this value — changing it here does not retime existing shifts.', '此项仅作为考勤组策略保存。打卡与工时计算使用各班次（或默认规则）自身的时区，不使用此值——在此修改不会重新计算已有排班的工时。') }}
+                        </small>
                       </label>
                       <label class="attendance__field" for="attendance-group-rule-set">
                         <span>{{ tr('Rule policy', '规则策略') }}</span>
@@ -5072,22 +5319,30 @@
                         <AttendanceUserPickerField
                           v-model="attendanceGroupMemberSelectedUserId"
                           :tr="tr"
+                          typeahead
                           :label="tr('User picker', '用户选择器')"
                           name="attendanceGroupMemberUserPicker"
-                          :help-text="tr('Pick one user and add them directly, or stage several users / paste multiple IDs for bulk changes.', '选择一个用户可直接添加；也可以暂存多个用户或粘贴多个 ID 批量处理。')"
-                          :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
+                          :help-text="tr('Search by name and add that person. Paste ids only when you already have them.', '按姓名搜索后添加。已有 ID 时再粘贴。')"
+                          :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                           input-id="attendance-group-member-user-picker"
+                          endpoint="/api/attendance-admin/users/search"
+                          :org-id="orgId"
+                          :global-scope="attendanceAdminGlobalUserScope"
+                          @update:display-name="rememberAttendanceGroupMemberPickerLabel"
                         />
-                        <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
-                          <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
-                          <textarea
-                            id="attendance-group-member-user-ids"
-                            v-model="attendanceGroupMemberUserIds"
-                            rows="2"
-                            :placeholder="tr('userId1, userId2', 'userId1, userId2')"
-                          ></textarea>
-                          <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas, spaces, or new lines. They will be staged with the chips before submit.', '多个 ID 请用逗号、空格或换行分隔。提交前会与标签一起暂存。') }}</small>
-                        </label>
+                        <details class="attendance__tech-details attendance__field attendance__field--full">
+                          <summary>{{ tr('Paste user IDs', '粘贴用户 ID') }}</summary>
+                          <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
+                            <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
+                            <textarea
+                              id="attendance-group-member-user-ids"
+                              v-model="attendanceGroupMemberUserIds"
+                              rows="2"
+                              :placeholder="tr('userId1, userId2', 'userId1, userId2')"
+                            ></textarea>
+                            <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas, spaces, or new lines. They will be staged with the chips before submit.', '多个 ID 请用逗号、空格或换行分隔。提交前会与标签一起暂存。') }}</small>
+                          </label>
+                        </details>
                       </div>
                       <div
                         v-if="attendanceGroupPendingMemberIds.length > 0"
@@ -5101,10 +5356,11 @@
                           class="attendance__group-pending-member"
                           data-attendance-group-pending-member
                         >
-                          <span>{{ userId }}</span>
+                          <span>{{ attendanceGroupPendingMemberLabel(userId) }}</span>
+                          <span v-if="attendanceGroupPendingMemberLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
                           <button
                             type="button"
-                            :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                            :aria-label="tr(`Remove ${attendanceGroupPendingMemberLabel(userId)}`, `移除 ${attendanceGroupPendingMemberLabel(userId)}`)"
                             data-attendance-group-pending-remove
                             @click="removeAttendanceGroupPendingMember(userId)"
                           >
@@ -5157,7 +5413,10 @@
                                   >
                                     {{ attendanceGroupMemberPrimaryLabel(member.userId) }}
                                   </strong>
-                                  <span data-attendance-group-member-user-id>{{ member.userId }}</span>
+                                  <span
+                                    data-attendance-group-member-user-id
+                                    :class="{ 'attendance__id-clip': Boolean(attendanceGroupMemberPrimaryLabel(member.userId)) }"
+                                  >{{ member.userId }}</span>
                                   <small
                                     v-if="attendanceGroupMemberSecondaryLabel(member.userId)"
                                     class="attendance__field-hint"
@@ -5190,7 +5449,7 @@
                       <div>
                         <h6>{{ tr('Owners', '负责人') }}</h6>
                         <span class="attendance__field-hint">
-                          {{ tr('Owner and sub-owner roster only; delegated permissions are not granted in this slice.', '仅维护负责人/子负责人名单；本切片不授予委托权限。') }}
+                          {{ tr('Owner roster writes stay admin-only. Group owners can manage members of their own group.', '负责人名单仍由管理员维护。组负责人可以管理自己组内的考勤人员。') }}
                         </span>
                       </div>
                       <button
@@ -5215,11 +5474,15 @@
                         <AttendanceUserPickerField
                           v-model="attendanceGroupManagerSelectedUserId"
                           :tr="tr"
+                          typeahead
                           :label="tr('Owner user', '负责人用户')"
                           name="attendanceGroupManagerUserPicker"
-                          :help-text="tr('Pick a user to maintain the owner roster. This does not change group membership.', '选择用户维护负责人名单；不会改变考勤人员名单。')"
-                          :search-placeholder="tr('Search users to add as owner', '搜索要添加为负责人的用户')"
+                          :help-text="tr('Search by name. This does not change group membership.', '按姓名搜索。不会改变考勤人员名单。')"
+                          :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                           input-id="attendance-group-manager-user-picker"
+                          endpoint="/api/attendance-admin/users/search"
+                          :org-id="orgId"
+                          :global-scope="attendanceAdminGlobalUserScope"
                         />
                         <label class="attendance__field" for="attendance-group-manager-role">
                           <span>{{ tr('Role', '角色') }}</span>
@@ -5237,7 +5500,7 @@
                             </option>
                           </select>
                           <small class="attendance__field-hint">
-                            {{ tr('Role labels are stored for display; route permissions remain admin-only.', '角色仅用于展示存储；路由权限仍保持管理员限定。') }}
+                            {{ tr('Adding or removing owners stays admin-only. Member add/remove is allowed for this group\'s owner or sub-owner.', '添加或移除负责人仍仅限管理员。本组 owner/sub_owner 可以增删考勤人员。') }}
                           </small>
                         </label>
                       </div>
@@ -5274,7 +5537,10 @@
                                   >
                                     {{ attendanceGroupManagerPrimaryLabel(manager.userId) }}
                                   </strong>
-                                  <span data-attendance-group-manager-user-id>{{ manager.userId }}</span>
+                                  <span
+                                    data-attendance-group-manager-user-id
+                                    :class="{ 'attendance__id-clip': Boolean(attendanceGroupManagerPrimaryLabel(manager.userId)) }"
+                                  >{{ manager.userId }}</span>
                                   <small
                                     v-if="attendanceGroupManagerSecondaryLabel(manager.userId)"
                                     class="attendance__field-hint"
@@ -5494,32 +5760,21 @@
                         </small>
                       </div>
 
-                      <div
-                        v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
-                        class="attendance__fixed-schedule-week-matrix"
-                        data-attendance-group-work-time-week-matrix
-                      >
-                        <div class="attendance__admin-section-header">
-                          <div>
-                            <h6>{{ tr('Weekly shift matrix', '周班次矩阵') }}</h6>
-                            <span class="attendance__field-hint">{{ attendanceGroupFixedScheduleWeekMatrixHint }}</span>
-                          </div>
-                        </div>
-                        <div class="attendance__fixed-schedule-week-grid">
-                          <div
-                            v-for="day in attendanceGroupFixedScheduleWeekMatrix"
-                            :key="`drawer-${day.value}`"
-                            class="attendance__fixed-schedule-week-day"
-                            :class="{ 'attendance__fixed-schedule-week-day--rest': !day.isWorkingDay }"
-                            data-attendance-group-work-time-week-day
-                          >
-                            <span>{{ day.label }}</span>
-                            <strong>{{ day.assignmentLabel }}</strong>
-                            <small>{{ day.timeLabel }}</small>
-                          </div>
-                        </div>
-                      </div>
-
+                      <!-- A8 (A-class batch 2, 2026-08-22): a "Weekly shift matrix" preview used to be
+                           rendered here too, reading the exact same
+                           attendanceGroupFixedScheduleWeekMatrix / …Hint computeds (keyed off the
+                           SHARED attendanceGroupFixedSchedulePreviewForm.shiftId) as the "schedule"
+                           wizard stage's own panel below (data-attendance-group-fixed-schedule-week-matrix)
+                           — duplicated, byte-for-byte, the stage's fuller panel (which also has the
+                           actual shift/date fields and the "Preview fixed schedule" action). GATE-5097
+                           P3-1 corrected the record: this drawer has no shift picker of its own, but
+                           loadShifts() auto-defaults this SAME shiftId to the org's first shift whenever
+                           one exists (:26645-26647 `if (!…shiftId && shifts.value.length > 0) { … =
+                           shifts.value[0].id }`), so the drawer's copy was POPULATED — not an empty "No
+                           shift selected" placeholder — in any org with at least one shift, which is the
+                           common case, not the exception. The duplication itself is still the reason for
+                           removing it; the canonical, functional matrix lives in the "schedule" stage
+                           below and stays reachable via the jump-off buttons underneath. -->
                       <div
                         v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
                         class="attendance__work-time-holiday-callout"
@@ -5677,20 +5932,18 @@
                       </label>
                       <label class="attendance__field" for="attendance-group-fixed-schedule-start">
                         <span>{{ tr('Start date', '开始日期') }}</span>
-                        <input
+                        <AttendanceLocaleDateInput
                           id="attendance-group-fixed-schedule-start"
                           v-model="attendanceGroupFixedSchedulePreviewForm.startDate"
-                          type="date"
                           :disabled="attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-start
                         />
                       </label>
                       <label class="attendance__field" for="attendance-group-fixed-schedule-end">
                         <span>{{ tr('End date', '结束日期') }}</span>
-                        <input
+                        <AttendanceLocaleDateInput
                           id="attendance-group-fixed-schedule-end"
                           v-model="attendanceGroupFixedSchedulePreviewForm.endDate"
-                          type="date"
                           :disabled="attendanceGroupFixedScheduleFormBusy"
                           data-attendance-group-fixed-schedule-end
                         />
@@ -5839,24 +6092,8 @@
             </div>
 
             <div
-              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
-              class="attendance__admin-section"
-              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
-            >
-              <div class="attendance__admin-section-header">
-                <h4>{{ tr('Group members', '分组成员') }}</h4>
-                <button class="attendance__btn attendance__btn--primary" type="button" @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
-                  {{ tr('Open Attendance groups', '打开考勤组') }}
-                </button>
-              </div>
-              <div class="attendance__empty" data-attendance-group-members-redirect>
-                {{ tr('Group members now live inside the selected attendance group detail. Use Attendance groups to select a group, then edit People.', '分组成员已并入所选考勤组详情。请打开考勤组，选择分组后在“考勤人员”中维护。') }}
-              </div>
-            </div>
-
-            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.import)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)"
             >
               <div class="attendance__admin-section-header">
@@ -5877,7 +6114,7 @@
               <small v-if="!importTemplateGuide" class="attendance__field-hint attendance__import-template-hint">
                 {{ tr('Click "Load template" to pick fields and generate an import template.', '点击「加载模板」可勾选字段生成导入模板。') }}
               </small>
-              <div v-if="importTemplateGuide" class="attendance__template-guide">
+              <div v-if="importTemplateGuide" class="attendance__template-guide attendance__form-card">
                 <div class="attendance__template-guide-header">
                   <strong>{{ tr('Template guide', '模板说明') }}</strong>
                   <span>
@@ -6234,15 +6471,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-group-timezone">
                   <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-import-group-timezone"
                     v-model="importGroupTimezone"
-                  >
-                    <option value="">{{ tr('Use import timezone', '使用导入时区') }}</option>
-                    <option v-for="option in timezoneOptions" :key="`import-group-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                    :empty-label="tr('Use import timezone', '使用导入时区')"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current effective timezone', '当前生效时区') }}: {{ importGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user">
@@ -6257,15 +6491,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-import-timezone"
                     name="importTimezone"
                     v-model="importForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`import-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ importTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-import-payload">
@@ -6510,7 +6741,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
             >
               <AttendanceImportBatchesSection
@@ -6526,10 +6757,10 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
             >
-              <AttendanceTeamAvailabilitySection :tr="tr" />
+              <AttendanceTeamAvailabilitySection :tr="tr" :user-scope="attendanceTeamAvailabilityUserScope" />
             </div>
 
             <div
@@ -6545,14 +6776,17 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
-                <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
-                  {{ payrollTemplateLoading ? tr('Loading...', '加载中...') : tr('Reload templates', '重载模板') }}
-                </button>
+                <div class="attendance__override-header-tools">
+                  <AttendancePayrollTemplateHelp :tr="tr" />
+                  <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
+                    {{ payrollTemplateLoading ? tr('Loading...', '加载中...') : tr('Reload templates', '重载模板') }}
+                  </button>
+                </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-payroll-template-name">
@@ -6566,15 +6800,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-payroll-template-timezone"
                     name="payrollTemplateTimezone"
                     v-model="payrollTemplateForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`payroll-template-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ payrollTemplateTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-start">
@@ -6610,24 +6841,26 @@
                     <option :value="1">{{ tr('Next month', '次月') }}</option>
                   </select>
                 </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-auto">
-                  <span>{{ tr('Auto generate', '自动生成') }}</span>
-                  <input
-                    id="attendance-payroll-template-auto"
-                    name="payrollTemplateAuto"
-                    v-model="payrollTemplateForm.autoGenerate"
-                    type="checkbox"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-default">
-                  <span>{{ tr('Default', '默认') }}</span>
-                  <input
-                    id="attendance-payroll-template-default"
-                    name="payrollTemplateDefault"
-                    v-model="payrollTemplateForm.isDefault"
-                    type="checkbox"
-                  />
-                </label>
+                <div class="attendance__payroll-flags">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-auto">
+                    <input
+                      id="attendance-payroll-template-auto"
+                      name="payrollTemplateAuto"
+                      v-model="payrollTemplateForm.autoGenerate"
+                      type="checkbox"
+                    />
+                    <span>{{ tr('Auto generate', '自动生成') }}</span>
+                  </label>
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-default">
+                    <input
+                      id="attendance-payroll-template-default"
+                      name="payrollTemplateDefault"
+                      v-model="payrollTemplateForm.isDefault"
+                      type="checkbox"
+                    />
+                    <span>{{ tr('Default', '默认') }}</span>
+                  </label>
+                </div>
                 <label class="attendance__field attendance__field--full" for="attendance-payroll-template-config">
                   <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
                   <textarea
@@ -6767,14 +7000,17 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
-                <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
-                  {{ payrollCycleLoading ? tr('Loading...', '加载中...') : tr('Reload cycles', '重载周期') }}
-                </button>
+                <div class="attendance__override-header-tools">
+                  <AttendancePayrollCycleHelp :tr="tr" />
+                  <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
+                    {{ payrollCycleLoading ? tr('Loading...', '加载中...') : tr('Reload cycles', '重载周期') }}
+                  </button>
+                </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-payroll-cycle-template">
@@ -6803,31 +7039,28 @@
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-anchor">
                   <span>{{ tr('Anchor date', '锚点日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-payroll-cycle-anchor"
                     name="payrollCycleAnchor"
                     v-model="payrollCycleForm.anchorDate"
-                    type="date"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-start">
                   <span>{{ tr('Start date', '开始日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-payroll-cycle-start"
                     name="payrollCycleStartDate"
                     v-model="payrollCycleForm.startDate"
-                    type="date"
                     :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.startDate }"
                     :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.startDate ? 'true' : 'false'"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-end">
                   <span>{{ tr('End date', '结束日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-payroll-cycle-end"
                     name="payrollCycleEndDate"
                     v-model="payrollCycleForm.endDate"
-                    type="date"
                     :class="{ 'attendance__input--invalid': payrollCycleManualPeriodRequired && !payrollCycleForm.endDate }"
                     :aria-invalid="payrollCycleManualPeriodRequired && !payrollCycleForm.endDate ? 'true' : 'false'"
                   />
@@ -6898,11 +7131,10 @@
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-anchor">
                     <span>{{ tr('Anchor date', '锚点日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-payroll-cycle-gen-anchor"
                       name="payrollCycleGenAnchor"
                       v-model="payrollCycleGenerateForm.anchorDate"
-                      type="date"
                     />
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-count">
@@ -7029,7 +7261,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
             >
               <div class="attendance__admin-section-header">
@@ -7058,14 +7290,25 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-approval">
-                  <span>{{ tr('Requires approval', '需要审批') }}</span>
+                  <span>
+                    {{ tr('Requires approval', '需要审批') }}
+                    <span class="attendance__shift-preview-badge" data-attendance-approval-option-badge="leave">{{ leaveApprovalOptionCopy.badge }}</span>
+                  </span>
                   <input
                     id="attendance-leave-approval"
                     name="leaveRequiresApproval"
                     v-model="leaveTypeForm.requiresApproval"
                     type="checkbox"
+                    aria-describedby="attendance-leave-approval-note"
                   />
                 </label>
+                <p
+                  id="attendance-leave-approval-note"
+                  class="attendance__field-hint attendance__field-hint--warning attendance__admin-grid-note"
+                  data-attendance-approval-option-hint="leave"
+                >
+                  {{ leaveApprovalOptionCopy.hint }}
+                </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-attachment">
                   <span>{{ tr('Requires attachment', '需要附件') }}</span>
                   <input
@@ -7105,7 +7348,7 @@
                     <tr>
                       <th>{{ tr('Code', '编码') }}</th>
                       <th>{{ tr('Name', '名称') }}</th>
-                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th data-attendance-approval-option-column="leave">{{ leaveApprovalOptionCopy.columnHeader }}</th>
                       <th>{{ tr('Attachment', '附件') }}</th>
                       <th>{{ tr('Minutes', '分钟') }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
@@ -7134,17 +7377,51 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance)"
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Annual leave balance', '年假余额') }}</h4>
               </div>
               <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-annual-balance-user">
-                  <span>{{ tr('User ID', '用户 ID') }}</span>
-                  <input id="attendance-annual-balance-user" v-model="annualBalanceUserId" type="text" />
-                </label>
+                <!-- A6: raw UUID text input swapped for AttendanceUserPickerField. Semantics
+                     unchanged — a user ID is still required to load a balance
+                     (loadAnnualLeaveBalance still rejects an empty value with the same error).
+                     GATE-5097 P1-1: this section's DATA read (GET /api/attendance/leave-balances)
+                     is gated by withPermission('attendance:admin', …) (index.cjs:49859-49862) —
+                     the SAME permission that opens the admin tab (auth.ts:286). The picker's
+                     DEFAULT search endpoint (/api/admin/users) requires the platform-wide
+                     ensurePlatformAdmin instead — a strictly narrower authority a delegated
+                     attendance admin does not have, which would 403 on mount and leave the
+                     picker's <select> with no options and no way to set a value at all (single
+                     v-model setter in this file). The attendance-admin route instead accepts
+                     delegated attendance admins while limiting them to active members of the
+                     selected organization; platform admins opt into global scope explicitly.
+                     GATE-5097 P3-5: that route's gate and the data read's gate are NOT proven
+                     byte-identical, despite sharing the `attendance:admin` permission name —
+                     core-backend's rbacGuard('attendance','admin') resolves through
+                     userHasPermission, which applies isPermissionAllowedByNamespaceAdmission
+                     (rbac/service.ts:39-41; `attendance` is not in
+                     NON_NAMESPACED_PERMISSION_RESOURCES, namespace-admission.ts:11-38), while the
+                     PLUGIN's own withPermission('attendance:admin', …) (index.cjs:23452-23467)
+                     does not consult namespace admission at all. So a delegated admin with
+                     attendance:admin but no ENABLED user_namespace_admissions row for the
+                     attendance namespace still passes the data read and 403s this search — a
+                     smaller, pre-existing population than before this fix (every delegated admin
+                     was blocked outright), not a fully closed one. Tracked as a follow-up, not
+                     fixed here. -->
+                <AttendanceUserPickerField
+                  v-model="annualBalanceUserId"
+                  v-model:display-name="annualBalanceUserDisplayName"
+                  :tr="tr"
+                  :label="tr('User ID', '用户 ID')"
+                  name="annualBalanceUserId"
+                  :search-placeholder="tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索')"
+                  input-id="attendance-annual-balance-user"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
+                />
                 <!-- W5-1 / OD-W5-7: leave-type select drives the #4562-parameterized read path.
                      Closed set only (annual | comp_time); the handler re-validates before any
                      fetch (UI 输入自验). Default 'annual' keeps the pre-parameterization query
@@ -7164,7 +7441,7 @@
                 </button>
               </div>
               <div v-if="annualBalanceData" class="attendance__annual-balance">
-                <h5>{{ tr('Balance for', '余额 ·') }} {{ annualBalanceData.userId }}</h5>
+                <h5 data-annual-balance-subject>{{ tr('Balance for', '余额 ·') }} {{ annualBalanceSubjectLabel }}</h5>
                 <div class="attendance__annual-balance-summary">
                   <span>{{ tr('Granted', '已发放') }}: {{ annualBalanceData.summary.grantedMinutes }} {{ tr('min', '分钟') }}</span>
                   <span>{{ tr('Remaining', '剩余') }}: {{ annualBalanceData.summary.remainingMinutes }} {{ tr('min', '分钟') }}</span>
@@ -7222,19 +7499,22 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy)"
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Annual leave policy', '年假策略') }}</h4>
-                <button class="attendance__btn" :disabled="annualPolicyLoading" @click="() => loadAnnualPolicy()">
-                  {{ annualPolicyLoading ? tr('Loading...', '加载中...') : tr('Reload policy', '重载策略') }}
-                </button>
+                <div class="attendance__override-header-tools">
+                  <AttendanceAnnualPolicyHelp :tr="tr" />
+                  <button class="attendance__btn" :disabled="annualPolicyLoading" @click="() => loadAnnualPolicy()">
+                    {{ annualPolicyLoading ? tr('Loading...', '加载中...') : tr('Reload policy', '重载策略') }}
+                  </button>
+                </div>
               </div>
               <div class="attendance__admin-grid">
-                <label class="attendance__field">
+                <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-enabled">
                   <span>{{ tr('Enabled', '启用') }}</span>
-                  <input type="checkbox" v-model="annualPolicyForm.enabled" />
+                  <input id="attendance-annual-policy-enabled" type="checkbox" v-model="annualPolicyForm.enabled" />
                 </label>
                 <label class="attendance__field" for="attendance-annual-policy-tenure">
                   <span>{{ tr('Tenure mode', '工龄口径') }}</span>
@@ -7249,17 +7529,37 @@
                 </label>
                 <label class="attendance__field" for="attendance-annual-policy-tz">
                   <span>{{ tr('Timezone (IANA)', '时区 (IANA)') }}</span>
-                  <input id="attendance-annual-policy-tz" type="text" v-model="annualPolicyForm.timezone" placeholder="Asia/Shanghai" />
+                  <AttendanceTimezoneSelect
+                    id="attendance-annual-policy-tz"
+                    v-model="annualPolicyForm.timezone"
+                    :options="timezoneOptions"
+                    :empty-label="tr('Select timezone', '选择时区')"
+                  />
+                  <small class="attendance__field-hint">
+                    {{
+                      tr(
+                        'Saved as an IANA id. It sets annual-leave expiry and the scheduler calendar, not shift time.',
+                        '保存的是 IANA 标识。只用于年假到期和自动发放日历，不改变班次时间。',
+                      )
+                    }}
+                    <template v-if="annualPolicyForm.timezone"> {{ tr('Current', '当前') }}: {{ displayTimezone(annualPolicyForm.timezone) }}</template>
+                  </small>
                 </label>
-                <label class="attendance__field">
+                <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-carryover">
                   <span>{{ tr('Carryover', '跨年结转') }}</span>
-                  <input type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
+                  <input id="attendance-annual-policy-carryover" type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
                 </label>
               </div>
               <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
-                <p class="attendance__field-hint">
-                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                <p class="attendance__field-hint" data-annual-policy-scheduled-hint>
+                  {{ annualAccrualSwitchHintText }}
                 </p>
+                <AttendanceScheduledFeatureStatus
+                  :tr="tr"
+                  feature="annualLeaveAccrualScheduled"
+                  :configured="annualAccrualConfiguredState"
+                  :gate="attendanceRuntimeGates?.annualLeaveAccrualScheduled ?? null"
+                />
                 <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
                   <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
                   <input
@@ -7270,7 +7570,7 @@
                   />
                 </label>
               </div>
-              <h5>{{ tr('Tier ladder (cumulative years → days)', '工龄阶梯 (累计工龄 → 天数)') }}</h5>
+              <h5>{{ tr('Tier ladder (years → days)', '工龄阶梯（年数 → 天数）') }}</h5>
               <div class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -7302,11 +7602,12 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Annual leave operations', '年假操作') }}</h4>
+                <AttendanceAnnualOpsHelp :tr="tr" />
               </div>
               <p v-if="!annualOpsPolicyEnabled" class="attendance__hint" data-annual-ops-policy-off>
                 {{ tr('The annual leave engine is disabled — accrual is blocked until you enable it in', '年假引擎未启用——发放将被拦截，请先在') }}
@@ -7316,9 +7617,39 @@
               <div class="attendance__admin-subsection" data-annual-ops-card="adjust">
                 <h5>{{ tr('Manual adjustment', '手工调整') }}</h5>
                 <div class="attendance__admin-grid">
-                  <label class="attendance__field"><span>{{ tr('User ID', '用户 ID') }}</span><input v-model="annualAdjustForm.userId" type="text" /></label>
+                  <label class="attendance__field attendance__person-field">
+                    <span>{{ tr('Person', '人员') }}</span>
+                    <input
+                      :value="annualAdjustPersonText"
+                      type="search"
+                      autocomplete="off"
+                      :placeholder="tr('Name or email', '姓名或邮箱')"
+                      data-annual-ops-adjust-person
+                      @input="onAnnualAdjustPersonInput"
+                    />
+                    <ul
+                      v-if="annualAdjustPersonHits.length > 0 || annualAdjustPersonSearchEmpty"
+                      class="attendance__typeahead-menu"
+                      data-annual-ops-adjust-person-menu
+                    >
+                      <li v-for="person in annualAdjustPersonHits" :key="person.id">
+                        <button type="button" @click="chooseAnnualAdjustPerson(person)">
+                          {{ annualAdjustPersonLabel(person) }}
+                        </button>
+                      </li>
+                      <li v-if="annualAdjustPersonSearchEmpty" class="attendance__typeahead-empty" data-attendance-search-empty>
+                        {{ tr('No matches', '搜索不到') }}
+                      </li>
+                    </ul>
+                  </label>
                   <label class="attendance__field"><span>{{ tr('Delta (minutes, ±)', '变动(分钟,±)') }}</span><input v-model.number="annualAdjustForm.deltaMinutes" type="number" /></label>
-                  <label class="attendance__field"><span>{{ tr('Reason', '原因') }}</span><input v-model="annualAdjustForm.reason" type="text" maxlength="500" /></label>
+                  <label class="attendance__field">
+                    <span>{{ tr('Reason', '原因') }}</span>
+                    <input v-model="annualAdjustForm.reason" type="text" maxlength="500" list="annual-adjust-reason-presets" />
+                    <datalist id="annual-adjust-reason-presets">
+                      <option v-for="preset in annualAdjustReasonPresets" :key="preset" :value="preset" />
+                    </datalist>
+                  </label>
                 </div>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" @click="() => previewAnnualAdjust()">{{ tr('Preview', '预览') }}</button>
@@ -7346,12 +7677,17 @@
                   <AttendanceUserPickerField
                     v-model="annualBulkAdjustUserPickerValue"
                     :tr="tr"
+                    typeahead
                     :label="tr('Add user', '添加用户')"
                     name="annualBulkAdjustUserPicker"
-                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
-                    :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
+                    :help-text="tr('Search by name, then add. The chip shows the name; the request still sends the user id.', '按姓名搜索后添加。标签显示姓名，请求仍提交用户 ID。')"
+                    :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                     :full-width="false"
                     input-id="attendance-annual-bulk-adjust-user-picker"
+                    endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
+                    @update:display-name="rememberAnnualBulkAdjustLabel"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -7365,7 +7701,13 @@
                     </button>
                   </div>
                   <label class="attendance__field"><span>{{ tr('Delta (minutes, ±, shared)', '变动(分钟,±,共享)') }}</span><input v-model.number="annualBulkAdjustForm.deltaMinutes" type="number" data-attendance-annual-bulk-adjust-delta /></label>
-                  <label class="attendance__field"><span>{{ tr('Reason (shared)', '原因(共享)') }}</span><input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" data-attendance-annual-bulk-adjust-reason /></label>
+                  <label class="attendance__field">
+                    <span>{{ tr('Reason (shared)', '原因(共享)') }}</span>
+                    <input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" list="annual-bulk-adjust-reason-presets" data-attendance-annual-bulk-adjust-reason />
+                    <datalist id="annual-bulk-adjust-reason-presets">
+                      <option v-for="preset in annualAdjustReasonPresets" :key="preset" :value="preset" />
+                    </datalist>
+                  </label>
                 </div>
                 <div
                   v-if="annualBulkAdjustUserIds.length > 0"
@@ -7378,7 +7720,8 @@
                     class="attendance__scheduler-scope-chip"
                     data-attendance-annual-bulk-adjust-user-chip
                   >
-                    {{ userId }}
+                    <span>{{ annualBulkAdjustUserLabel(userId) }}</span>
+                    <span v-if="annualBulkAdjustUserLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
                     <button
                       class="attendance__btn attendance__btn--inline"
                       type="button"
@@ -7480,7 +7823,7 @@
                 <h5>{{ tr('Accrual run', '发放') }}</h5>
                 <div class="attendance__admin-grid">
                   <label class="attendance__field"><span>{{ tr('Period (year)', '年度') }}</span><input v-model.number="annualAccrualForm.period" type="number" /></label>
-                  <label class="attendance__field"><span>{{ tr('As-of (optional)', 'as-of(可选)') }}</span><input v-model="annualAccrualForm.asOf" type="date" /></label>
+                  <label class="attendance__field"><span>{{ tr('As-of (optional)', 'as-of(可选)') }}</span><AttendanceLocaleDateInput v-model="annualAccrualForm.asOf" /></label>
                 </div>
                 <p v-if="annualAccrualOffYear" class="attendance__hint" data-annual-ops-accrual-offyear>⚠ {{ tr('Period is not the current or next year — committing requires an extra confirmation.', '年度非当前或次年——提交需要额外确认。') }}</p>
                 <div class="attendance__admin-actions">
@@ -7522,7 +7865,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
             >
               <div class="attendance__admin-section-header">
@@ -7567,14 +7910,25 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-approval">
-                  <span>{{ tr('Requires approval', '需要审批') }}</span>
+                  <span>
+                    {{ tr('Requires approval', '需要审批') }}
+                    <span class="attendance__shift-preview-badge" data-attendance-approval-option-badge="overtime">{{ overtimeApprovalOptionCopy.badge }}</span>
+                  </span>
                   <input
                     id="attendance-overtime-approval"
                     name="overtimeRequiresApproval"
                     v-model="overtimeRuleForm.requiresApproval"
                     type="checkbox"
+                    aria-describedby="attendance-overtime-approval-note"
                   />
                 </label>
+                <p
+                  id="attendance-overtime-approval-note"
+                  class="attendance__field-hint attendance__field-hint--warning attendance__admin-grid-note"
+                  data-attendance-approval-option-hint="overtime"
+                >
+                  {{ overtimeApprovalOptionCopy.hint }}
+                </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-active">
                   <span>{{ tr('Active', '启用') }}</span>
                   <input
@@ -7611,7 +7965,7 @@
                       <th>{{ tr('Min', '最小') }}</th>
                       <th>{{ tr('Rounding', '取整') }}</th>
                       <th>{{ tr('Max', '上限') }}</th>
-                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th data-attendance-approval-option-column="overtime">{{ overtimeApprovalOptionCopy.columnHeader }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
@@ -7638,7 +7992,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
             >
               <div class="attendance__admin-section-header">
@@ -7677,6 +8031,8 @@
                   <AttendanceApprovalFlowStepsEditor
                     v-model="approvalFlowSteps"
                     :tr="tr"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                     :max-manager-chain-levels="approvalMaxManagerChainLevels"
                   />
                   <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
@@ -7963,11 +8319,11 @@
                     </label>
                     <label class="attendance__field" for="attendance-small-org-member-from">
                       <span>{{ tr('Effective from', '生效开始') }}</span>
-                      <input id="attendance-small-org-member-from" v-model="scheduleGroupMemberForm.effectiveFrom" type="date" />
+                      <AttendanceLocaleDateInput id="attendance-small-org-member-from" v-model="scheduleGroupMemberForm.effectiveFrom" />
                     </label>
                     <label class="attendance__field" for="attendance-small-org-member-to">
                       <span>{{ tr('Effective to', '生效结束') }}</span>
-                      <input id="attendance-small-org-member-to" v-model="scheduleGroupMemberForm.effectiveTo" type="date" />
+                      <AttendanceLocaleDateInput id="attendance-small-org-member-to" v-model="scheduleGroupMemberForm.effectiveTo" />
                     </label>
                   </div>
                   <div class="attendance__admin-actions">
@@ -8050,11 +8406,11 @@
                   </label>
                   <label class="attendance__field" for="attendance-schedule-dispatch-start">
                     <span>{{ tr('Start date', '开始日期') }}</span>
-                    <input id="attendance-schedule-dispatch-start" v-model="scheduleDispatchForm.startDate" type="date" data-attendance-schedule-dispatch-start />
+                    <AttendanceLocaleDateInput id="attendance-schedule-dispatch-start" v-model="scheduleDispatchForm.startDate" data-attendance-schedule-dispatch-start />
                   </label>
                   <label class="attendance__field" for="attendance-schedule-dispatch-end">
                     <span>{{ tr('End date', '结束日期') }}</span>
-                    <input id="attendance-schedule-dispatch-end" v-model="scheduleDispatchForm.endDate" type="date" data-attendance-schedule-dispatch-end />
+                    <AttendanceLocaleDateInput id="attendance-schedule-dispatch-end" v-model="scheduleDispatchForm.endDate" data-attendance-schedule-dispatch-end />
                   </label>
                   <label v-if="multiShiftDayForm.enabled" class="attendance__field" for="attendance-schedule-dispatch-slot">
                     <span>{{ tr('Slot index', '槽位') }}</span>
@@ -8168,7 +8524,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet attendance__ch-preview"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
               data-attendance-comprehensive-hours-preview
             >
@@ -8176,29 +8532,12 @@
                 <div>
                   <h4>{{ tr('Comprehensive hours preview', '综合工时预览') }}</h4>
                   <small class="attendance__field-hint">
-                    {{ tr('Read-only cap comparison for explicit users. It does not save policies or block schedule changes.', '面向指定员工的只读工时上限对比，不保存策略，也不会阻断排班变更。') }}
+                    {{ tr('Read-only cap check. Nothing is saved or blocked.', '只读对比工时上限，不保存，也不拦截排班。') }}
                   </small>
                 </div>
-                <button
-                  class="attendance__btn"
-                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
-                  @click="previewComprehensiveHours"
-                  data-attendance-comprehensive-hours-preview-run
-                >
-                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
-                </button>
               </div>
 
-              <div class="attendance__admin-meta">
-                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
-                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
-                </span>
-                <span class="attendance__status-chip">
-                  {{ comprehensiveHoursPreviewPeriodLabel }}
-                </span>
-              </div>
-
-              <div class="attendance__admin-grid">
+              <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field" for="attendance-comprehensive-hours-user-mode">
                   <span>{{ tr('Scope', '范围') }}</span>
                   <select
@@ -8207,41 +8546,39 @@
                     data-attendance-comprehensive-hours-user-mode
                   >
                     <option value="single">{{ tr('Single user', '单个员工') }}</option>
-                    <option value="multiple">{{ tr('User IDs', '多个员工 ID') }}</option>
+                    <option value="multiple">{{ tr('Several employees', '多名员工') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr('Preview v1 intentionally requires explicit users; all-users batch remains out of scope.', '预览 v1 必须显式指定员工；全员批量仍不在本次范围。') }}
-                  </small>
                 </label>
-                <label
+                <AttendanceUserPickerField
                   v-if="comprehensiveHoursPreviewForm.userMode === 'single'"
-                  class="attendance__field"
-                  for="attendance-comprehensive-hours-user-id"
-                >
-                  <span>{{ tr('User ID', '员工 ID') }}</span>
-                  <input
-                    id="attendance-comprehensive-hours-user-id"
-                    v-model="comprehensiveHoursPreviewForm.userId"
-                    type="text"
-                    placeholder="user-1"
-                    data-attendance-comprehensive-hours-user-id
-                  />
-                </label>
+                  v-model="comprehensiveHoursPreviewForm.userId"
+                  :tr="tr"
+                  typeahead
+                  :label="tr('Employee name', '员工姓名')"
+                  name="comprehensiveHoursUserId"
+                  input-id="attendance-comprehensive-hours-user-id"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
+                  :search-placeholder="tr('Type a name', '输入姓名')"
+                  :help-text="tr('Type a name. Matches appear as you type.', '输入姓名，输入时自动匹配。')"
+                  @update:display-name="comprehensiveHoursPreviewUserLabel = $event"
+                />
                 <label
                   v-else
                   class="attendance__field"
                   for="attendance-comprehensive-hours-user-ids"
                 >
-                  <span>{{ tr('User IDs', '员工 ID 列表') }}</span>
+                  <span>{{ tr('Employees', '员工') }}</span>
                   <textarea
                     id="attendance-comprehensive-hours-user-ids"
                     v-model="comprehensiveHoursPreviewForm.userIds"
-                    rows="3"
-                    placeholder="user-1, user-2"
+                    rows="2"
+                    :placeholder="tr('Separate with commas', '用逗号分隔')"
                     data-attendance-comprehensive-hours-user-ids
                   />
                   <small class="attendance__field-hint">
-                    {{ tr('Comma, space, or newline separated. The backend caps preview scope at 100 users.', '可用逗号、空格或换行分隔；后端最多预览 100 人。') }}
+                    {{ tr('Comma or newline. Up to 100.', '逗号或换行，最多 100 人。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-metric">
@@ -8276,29 +8613,6 @@
                     <option value="warn">{{ tr('Warn preview', '预警预览') }}</option>
                     <option value="block">{{ tr('Strict preview', '严格预览') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'Mode only changes preview status. It is not persisted. See \'Save-time strong control\' below to enable save blocking.',
-                      '模式只影响预览状态，不会持久化。如需保存时拦截，请使用下方“保存时强管控”。'
-                    ) }}
-                  </small>
-                </label>
-                <label
-                  class="attendance__field attendance__field--checkbox"
-                  data-attendance-comprehensive-hours-save-block-mode
-                >
-                  <input
-                    type="checkbox"
-                    id="attendance-comprehensive-hours-save-block-mode"
-                    v-model="comprehensiveHoursSaveBlockMode"
-                  />
-                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'When enabled, shift and rotation assignment saves are blocked if the comprehensive-hours preview returns a violation. Preview errors and degraded data never block saves.',
-                      '启用后，若综合工时预览返回违规，将拦截班次和轮班分配保存；预览失败或降级数据不会拦截保存。'
-                    ) }}
-                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-period-type">
                   <span>{{ tr('Period', '周期') }}</span>
@@ -8367,10 +8681,9 @@
                   for="attendance-comprehensive-hours-from"
                 >
                   <span>{{ tr('From', '开始日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-comprehensive-hours-from"
                     v-model="comprehensiveHoursPreviewForm.from"
-                    type="date"
                     data-attendance-comprehensive-hours-from
                   />
                 </label>
@@ -8380,10 +8693,9 @@
                   for="attendance-comprehensive-hours-to"
                 >
                   <span>{{ tr('To', '结束日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-comprehensive-hours-to"
                     v-model="comprehensiveHoursPreviewForm.to"
-                    type="date"
                     data-attendance-comprehensive-hours-to
                   />
                 </label>
@@ -8403,6 +8715,32 @@
                 </label>
               </div>
 
+              <div class="attendance__ch-save-row" data-attendance-comprehensive-hours-save-block-mode>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-comprehensive-hours-save-block-mode">
+                  <input
+                    type="checkbox"
+                    id="attendance-comprehensive-hours-save-block-mode"
+                    v-model="comprehensiveHoursSaveBlockMode"
+                  />
+                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
+                </label>
+                <small class="attendance__field-hint">
+                  {{ tr('Blocks shift and rotation saves on a violation. A failed preview does not block.', '违规时拦截班次和轮班保存。预览失败不拦截。') }}
+                </small>
+              </div>
+
+              <div class="attendance__form-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  type="button"
+                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
+                  data-attendance-comprehensive-hours-preview-run
+                  @click="previewComprehensiveHours"
+                >
+                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
+                </button>
+              </div>
+
               <p
                 v-if="comprehensiveHoursPreviewStatus.message"
                 class="attendance__status"
@@ -8412,22 +8750,39 @@
                 {{ comprehensiveHoursPreviewStatus.message }}
               </p>
 
-              <div class="attendance__summary attendance__summary--workbench" data-attendance-comprehensive-hours-aggregate>
-                <div
-                  v-for="item in comprehensiveHoursPreviewAggregateItems"
+              <p
+                v-if="!comprehensiveHoursPreview"
+                class="attendance__ch-empty"
+                data-attendance-comprehensive-hours-empty
+              >
+                {{ tr('Not previewed yet', '尚未预览') }}
+              </p>
+              <div
+                v-else
+                class="attendance__kpi-strip attendance__ch-results"
+                data-attendance-comprehensive-hours-aggregate
+              >
+                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
+                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
+                </span>
+                <span class="attendance__status-chip">
+                  {{ comprehensiveHoursPreviewPeriodLabel }}
+                </span>
+                <span
+                  v-for="item in comprehensiveHoursPreviewVisibleAggregateItems"
                   :key="item.key"
-                  class="attendance__summary-item"
+                  class="attendance__kpi attendance__kpi--static"
                   :data-attendance-comprehensive-hours-aggregate-item="item.key"
                 >
                   <span>{{ item.label }}</span>
                   <strong>{{ item.value }}</strong>
-                </div>
+                </span>
               </div>
 
-              <div v-if="comprehensiveHoursPreviewRows.length === 0" class="attendance__empty" data-attendance-comprehensive-hours-empty>
-                {{ tr('Run a read-only preview to compare comprehensive-hours caps.', '运行只读预览以对比综合工时上限。') }}
+              <div v-if="comprehensiveHoursPreview && comprehensiveHoursPreviewRows.length === 0" class="attendance__empty">
+                {{ tr('No employee rows in this preview.', '这次预览没有员工结果。') }}
               </div>
-              <div v-else class="attendance__table-wrapper">
+              <div v-else-if="comprehensiveHoursPreviewRows.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table" data-attendance-comprehensive-hours-rows>
                   <thead>
                     <tr>
@@ -8443,7 +8798,8 @@
                   <tbody>
                     <tr v-for="row in comprehensiveHoursPreviewRows" :key="row.userId">
                       <td>
-                        <strong>{{ row.userId }}</strong>
+                        <strong>{{ comprehensiveHoursRowPrimaryLabel(row.userId) || tr('Employee', '员工') }}</strong>
+                        <span class="attendance__id-clip">{{ row.userId }}</span>
                         <div v-if="row.days !== undefined" class="attendance__field-hint">
                           {{ tr(`${row.workingDays ?? 0}/${row.days ?? 0} working days`, `${row.workingDays ?? 0}/${row.days ?? 0} 个工作日`) }}
                         </div>
@@ -8466,7 +8822,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
             >
               <div class="attendance__admin-section-header">
@@ -8487,15 +8843,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-rotation-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-rotation-timezone"
                     name="rotationTimezone"
                     v-model="rotationRuleForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`rotation-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ rotationRuleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
@@ -8616,7 +8969,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
             >
               <div class="attendance__admin-section-header">
@@ -8714,11 +9067,15 @@
                 <AttendanceUserPickerField
                   v-model="rotationAssignmentForm.userId"
                   :tr="tr"
+                  typeahead
                   :label="tr('User', '用户')"
                   name="rotationUserId"
-                  :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
-                  :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+                  :help-text="tr('Type a name or email. Matches appear as you type.', '输入姓名或邮箱，输入时自动匹配。')"
+                  :search-placeholder="tr('Name or email', '姓名或邮箱')"
                   input-id="attendance-rotation-user"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
                 />
                 <label class="attendance__field" for="attendance-rotation-rule">
                   <span>{{ tr('Rotation rule', '轮班规则') }}</span>
@@ -8736,20 +9093,18 @@
                 </label>
                 <label class="attendance__field" for="attendance-rotation-start">
                   <span>{{ tr('Start date', '开始日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-rotation-start"
                     name="rotationStartDate"
                     v-model="rotationAssignmentForm.startDate"
-                    type="date"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rotation-end">
                   <span>{{ tr('End date', '结束日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-rotation-end"
                     name="rotationEndDate"
                     v-model="rotationAssignmentForm.endDate"
-                    type="date"
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
@@ -8904,7 +9259,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
             >
               <div class="attendance__admin-section-header">
@@ -8920,15 +9275,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-shift-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-shift-timezone"
                     name="shiftTimezone"
                     v-model="shiftForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`shift-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ shiftTimezoneLabel }}</small>
                 </label>
                 <AttendanceShiftSegmentsEditor
@@ -8971,14 +9323,12 @@
                     min="0"
                   />
                 </label>
-                <label class="attendance__field attendance__field--full" for="attendance-shift-working-days">
-                  <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
-                  <input
+                <label class="attendance__field" for="attendance-shift-working-days">
+                  <span>{{ tr('Working days', '工作日') }}</span>
+                  <AttendanceWeekdayChipField
                     id="attendance-shift-working-days"
                     name="shiftWorkingDays"
                     v-model="shiftForm.workingDays"
-                    type="text"
-                    :placeholder="tr('1,2,3,4,5', '1,2,3,4,5')"
                   />
                 </label>
               </div>
@@ -9140,6 +9490,9 @@
                   :help-text="tr('Search by email, name, or user ID, then pick a user for this shift assignment.', '按邮箱、姓名或用户 ID 搜索，然后为该班次选择用户。')"
                   :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
                   input-id="attendance-assignment-user-id"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
                 />
                 <label class="attendance__field" for="attendance-assignment-shift-id">
                   <span>{{ tr('Shift', '班次') }}</span>
@@ -9157,20 +9510,18 @@
                 </label>
                 <label class="attendance__field" for="attendance-assignment-start-date">
                   <span>{{ tr('Start date', '开始日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-assignment-start-date"
                     name="assignmentStartDate"
                     v-model="assignmentForm.startDate"
-                    type="date"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-assignment-end-date">
                   <span>{{ tr('End date', '结束日期') }}</span>
-                  <input
+                  <AttendanceLocaleDateInput
                     id="attendance-assignment-end-date"
                     name="assignmentEndDate"
                     v-model="assignmentForm.endDate"
-                    type="date"
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-assignment-active">
@@ -9276,10 +9627,9 @@
                   </label>
                   <label class="attendance__field" for="attendance-temporary-shift-work-date">
                     <span>{{ tr('Work date', '工作日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-temporary-shift-work-date"
                       v-model="temporaryAssignmentForm.workDate"
-                      type="date"
                       :min="selectedTemporaryReplacementAssignment?.assignment.startDate"
                       :max="selectedTemporaryReplacementAssignment?.assignment.endDate || undefined"
                     />
@@ -9320,6 +9670,9 @@
                     :search-placeholder="tr('Search users for bulk apply', '搜索批量套用用户')"
                     :full-width="false"
                     input-id="attendance-bulk-apply-user-picker"
+                    endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -9349,21 +9702,19 @@
                   </label>
                   <label class="attendance__field" for="attendance-bulk-apply-start-date">
                     <span>{{ tr('Start date', '开始日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-bulk-apply-start-date"
                       v-model="bulkApplyForm.startDate"
                       name="bulkApplyStartDate"
-                      type="date"
                       data-attendance-bulk-apply-start-date
                     />
                   </label>
                   <label class="attendance__field" for="attendance-bulk-apply-end-date">
                     <span>{{ tr('End date', '结束日期') }}</span>
-                    <input
+                    <AttendanceLocaleDateInput
                       id="attendance-bulk-apply-end-date"
                       v-model="bulkApplyForm.endDate"
                       name="bulkApplyEndDate"
-                      type="date"
                       data-attendance-bulk-apply-end-date
                     />
                   </label>
@@ -9584,7 +9935,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
             >
               <AttendanceHolidayDataSection
@@ -9593,6 +9944,140 @@
                 :show-lunar-calendar="showLunarLabel"
                 :tr="tr"
               />
+                <div
+                  id="attendance-effective-calendar-overrides"
+                  class="attendance__form-stack"
+                  data-attendance-calendar-policy-host="holidays"
+                >
+                    <section class="attendance__form-card">
+                    <div class="attendance__admin-subsection-header">
+                      <div>
+                        <h5>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</h5>
+                        <AttendanceHolidayIndexHelp :tr="tr" />
+                        <p class="attendance__field-hint">
+                          {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
+                        </p>
+                      </div>
+                      <button class="attendance__btn" type="button" @click="addCalendarPolicyOverride">
+                        {{ tr('Add calendar override', '新增日历覆盖') }}
+                      </button>
+                    </div>
+                    <p class="attendance__field-hint attendance__field-hint--warn">
+                      {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
+                    </p>
+                    </section>
+                    <AttendanceCalendarPolicyQuickAdd
+                      :attendance-group-options="attendanceGroupOptions"
+                      :tr="tr"
+                      @append="appendCalendarPolicyQuickAdd"
+                    />
+                    <AttendanceCalendarPolicyPreviewPanel
+                      :tr="tr"
+                      :draft-overrides="calendarPolicyPreviewDraftOverrides"
+                    />
+                    <div
+                      v-if="calendarPolicyOverrideDiagnostics.length"
+                      class="attendance__calendar-policy-diagnostics"
+                      data-attendance-calendar-policy-diagnostics
+                      role="alert"
+                    >
+                      <strong>{{ tr('Calendar rule checks', '日历规则检查') }}</strong>
+                      <ul>
+                        <li
+                          v-for="diagnostic in calendarPolicyOverrideDiagnostics"
+                          :key="diagnostic.key"
+                          :data-calendar-policy-diagnostic="diagnostic.code"
+                        >
+                          {{ calendarPolicyDiagnosticMessage(diagnostic) }}
+                        </li>
+                      </ul>
+                    </div>
+                    <section v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__form-card">
+                      <p class="attendance__empty">
+                        {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
+                      </p>
+                    </section>
+                    <div v-else class="attendance__form-card attendance__table-wrapper">
+                      <table class="attendance__table">
+                        <thead>
+                          <tr>
+                            <th>{{ tr('Date / range', '日期 / 范围') }}</th>
+                            <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
+                            <th>{{ tr('Scope', '范围') }}</th>
+                            <th>{{ tr('Effective day', '生效日类型') }}</th>
+                            <th>{{ tr('Label', '标签') }}</th>
+                            <th></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
+                            <tr>
+                              <td>
+                                <div class="attendance__inline-fields">
+                                  <AttendanceLocaleDateInput v-model="override.date" class="attendance__table-input" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
+                                  <AttendanceLocaleDateInput v-model="override.from" class="attendance__table-input" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
+                                  <AttendanceLocaleDateInput v-model="override.to" class="attendance__table-input" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
+                                </div>
+                              </td>
+                              <td>
+                                <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
+                                <select v-model="override.match" class="attendance__table-input">
+                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
+                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
+                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.source" class="attendance__table-input">
+                                  <option value="org">{{ tr('Organization', '组织') }}</option>
+                                  <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
+                                  <option value="user">{{ tr('User', '用户') }}</option>
+                                  <option value="role">{{ tr('Role', '角色') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.isWorkingDay" class="attendance__table-input">
+                                  <option :value="true">{{ tr('Working day', '工作日') }}</option>
+                                  <option :value="false">{{ tr('Rest day', '休息日') }}</option>
+                                </select>
+                              </td>
+                              <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
+                              <td>
+                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                            <tr class="attendance__table-row--meta">
+                              <td colspan="6">
+                                <AttendanceOverrideAudienceFields
+                                  :override="override"
+                                  :group-options="attendanceGroupOptions"
+                                  :role-options="audienceRoleOptions"
+                                  :tr="tr"
+                                  :search-user-names="searchAudienceUserNames"
+                                  mark-calendar-policy
+                                />
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div class="attendance__form-actions">
+                    <button
+                      class="attendance__btn attendance__btn--primary"
+                      type="button"
+                      data-attendance-calendar-policy-save
+                      :disabled="settingsLoading"
+                      @click="saveSettings"
+                    >
+                      {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
+                    </button>
+                    </div>
+                </div>
+
             </div>
             </div>
             </div>
@@ -9928,15 +10413,30 @@
 </template>
 
 <script setup lang="ts">
-import { ArrowLeft } from '@element-plus/icons-vue'
+import { copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { getAuthPrincipalKey } from '../composables/authPrincipal'
+import { randomUuid } from '../utils/uuid'
+import {
+  ATTENDANCE_RECORD_REQUEST_PREFILL_KEY,
+  formatRecordRequestTime,
+  readAttendanceRecordRequestPrefill,
+  type AttendanceRecordRequestPrefill,
+} from './attendance/attendanceRecordRequestPrefill'
+import { formatCalendarDate } from './attendance/dateOnlyFormat'
+import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
+import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
 import AttendanceShiftFlexPolicyEditor from './attendance/AttendanceShiftFlexPolicyEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 // W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
 import AttendanceDecisionTrace from './attendance/AttendanceDecisionTrace.vue'
+import AttendanceCancelRoundPanel from './attendance/AttendanceCancelRoundPanel.vue'
+import AttendanceCancelRoundApproverPanel from './attendance/AttendanceCancelRoundApproverPanel.vue'
+import { canDecideCancelRoundWith } from '../approvals/cancelRound'
 import {
   ATTENDANCE_DECISION_TRACE_CATEGORIES,
   attendanceTraceCategoryLabel,
@@ -9952,6 +10452,27 @@ import { useAttendanceDecisionTrace } from './attendance/useAttendanceDecisionTr
 import AttendanceContextHelp from './attendance/AttendanceContextHelp.vue'
 import type { AttendanceContextHelpEvidenceLink } from './attendance/attendanceContextHelp'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+// A1 「提示与实际状态」: honest status for options that are stored but not enforced / org switches that also need
+// an ops env gate. Pure modules + one display component; no behaviour change (see the module headers).
+import AttendanceScheduledFeatureStatus from './attendance/AttendanceScheduledFeatureStatus.vue'
+import AttendanceTimezonePolicyPanel from './attendance/AttendanceTimezonePolicyPanel.vue'
+import { attendanceTimezoneErrorMessage } from './attendance/attendanceTimezoneError'
+import AttendanceBusinessTripRequestCard from './attendance/AttendanceBusinessTripRequestCard.vue'
+import AttendanceRequestTimezoneFields from './attendance/AttendanceRequestTimezoneFields.vue'
+import { useAttendanceRequestTimezone } from './attendance/useAttendanceRequestTimezone'
+import {
+  attendanceApprovalOptionCopy,
+  withApprovalOptionSaveNotice,
+} from './attendance/attendanceApprovalOptionHint'
+import {
+  annualAccrualSwitchHint,
+  attendanceAnnualAccrualConfiguredState,
+  attendanceReportDigestConfiguredState,
+  parseAttendanceRuntimeGates,
+  withScheduledFeatureSaveNotice,
+  type AttendanceAnnualPolicySaved,
+  type AttendanceRuntimeGates,
+} from './attendance/attendanceScheduledFeatureStatus'
 import {
   analyzeAttendanceShiftFlexPolicy,
   analyzeAttendanceShiftSegments,
@@ -9995,6 +10516,26 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
+import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
+import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
+import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
+import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
+import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
+import {
+  alignDefaultHistoryRangeToRuleToday,
+  buildHeroTodayTimeline,
+  resolveDedicatedRequestWorkDate,
+  selectTodayAttendanceRecord,
+  canReuseAttendanceHistoryForToday,
+  type AttendanceHistoryScope,
+} from './attendance/attendanceTodayWorkbench'
+import {
+  DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+  resolveEmployeeQuickActionIcons,
+  type EmployeeQuickActionIcons,
+} from './attendance/attendanceEmployeeWorkspaceCommonIcons'
+import { useAttendanceAdminConfig } from './attendance/useAttendanceAdminConfig'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -10029,6 +10570,7 @@ import {
 import {
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
+  buildCanonicalAttendanceImportTemplateCsv,
   buildImportColumnFormatRows,
   buildTemplateExampleRow,
   buildTemplateHeaderFromSelection,
@@ -10051,6 +10593,7 @@ import {
 } from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -10110,6 +10653,16 @@ import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupR
 import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
+  deriveAdminTaskHomeGroupStatus,
+  type AttendanceAdminTaskHomeStatus,
+} from './attendance/attendanceAdminTaskHomeStatus'
+import {
+  attendanceGroupEmptyListCopy,
+  filterAdminTaskHomeGroupsForCatalogScope,
+  resolveAttendanceGroupCatalogScope,
+  type AttendanceGroupCatalogScope,
+} from './attendance/attendanceAdminTaskHomeAccess'
+import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
   extractPayrollSummaryFieldCodes,
@@ -10118,6 +10671,31 @@ import {
 } from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { useSessionOrg } from '../composables/useSessionOrg'
+import AttendanceSessionOrgSwitcher from './attendance/AttendanceSessionOrgSwitcher.vue'
+import AttendanceLocaleTimeInput from './attendance/AttendanceLocaleTimeInput.vue'
+import AttendanceLocaleDateInput from './attendance/AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './attendance/AttendanceTimezoneSelect.vue'
+import {
+  RECORD_REPORT_PINNED_COLUMN_CODES,
+  loadRecordReportColumnPrefs,
+  resetRecordReportColumns,
+  resolveVisibleRecordReportCodes,
+  saveRecordReportColumnPrefs,
+  showAllRecordReportColumns,
+  toggleRecordReportColumn,
+  type RecordReportColumnPrefs,
+} from './attendance/recordReportColumnVisibility'
+import AttendanceWeekdayChipField from './attendance/AttendanceWeekdayChipField.vue'
+import AttendanceHolidayIndexHelp from './attendance/AttendanceHolidayIndexHelp.vue'
+import AttendanceAnnualPolicyHelp from './attendance/AttendanceAnnualPolicyHelp.vue'
+import AttendancePayrollTemplateHelp from './attendance/AttendancePayrollTemplateHelp.vue'
+import AttendancePayrollCycleHelp from './attendance/AttendancePayrollCycleHelp.vue'
+import AttendanceAnnualOpsHelp from './attendance/AttendanceAnnualOpsHelp.vue'
+import AttendanceAdminGuide from './attendance/AttendanceAdminGuide.vue'
+import AttendanceOverrideAudienceFields from './attendance/AttendanceOverrideAudienceFields.vue'
+import { formatAnnualBalanceSubject } from './attendance/annualBalanceSubject'
+
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -10154,10 +10732,31 @@ import {
   type AttendanceLeaveQuickFillKind,
   type AttendanceLeaveQuickFillShiftWindow,
 } from './attendance/halfDayLeaveHelper'
+import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
+import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
+import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
-import { apiFetch } from '../utils/api'
+import { apiFetch as sendApiFetch } from '../utils/api'
+import { permissionUserPayloadUnavailable } from './adminPermissionGrantDisplay'
+import { readAttendanceLegacyPermissionPayload } from './attendance/readAttendanceLegacyPermissionPayload'
+import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
+import {
+  formatAttendanceClockTime,
+  formatAttendanceDateKey,
+  formatAttendanceDateTime,
+  formatAttendanceWeekday,
+  normalizeAttendanceTimeZone,
+} from './attendance/attendanceDateTimePresentation'
+import {
+  applyAdminPageContentSearch,
+  clearAdminPageContentSearch,
+} from './attendance/adminPageContentSearch'
+import { presentRecordInstantClock, presentRecordReportCell } from './attendance/recordReportPresentation'
+import { createAttendanceServerClock, ATTENDANCE_CLOCK_RESAMPLE_MS } from './attendance/attendanceServerClock'
+import { parseAttendanceCurrentTimeContext, currentAttendanceTimezone } from './attendance/attendanceCurrentTimeContext'
+import { attendanceDayTimezoneLabel, parseAttendanceDayTimeContext, type AttendanceDayTimeContext } from './attendance/attendanceDayTimeContext'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -10216,6 +10815,7 @@ type AttendanceAdminTaskHomeGroup = {
   key: string
   title: string
   detail: string
+  status?: AttendanceAdminTaskHomeStatus
   actions: AttendanceAdminTaskHomeAction[]
   linkActions: AttendanceAdminTaskHomeLinkAction[]
   buttonActions: AttendanceAdminTaskHomeSectionAction[]
@@ -10259,6 +10859,10 @@ const emit = defineEmits<{
 
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+// A1: copy for the leave-type / overtime-rule 「需要审批」 option, which is stored but not enforced.
+const leaveApprovalOptionCopy = computed(() => attendanceApprovalOptionCopy(tr, 'leave'))
+const overtimeApprovalOptionCopy = computed(() => attendanceApprovalOptionCopy(tr, 'overtime'))
+const annualAccrualSwitchHintText = computed(() => annualAccrualSwitchHint(tr))
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
 
 interface AttendanceCalendarDisplayPrefs {
@@ -10335,6 +10939,7 @@ interface AttendanceRecord {
   reportValues?: Record<string, unknown>
   workday_context?: {
     shiftName?: string | null
+    timezone?: string | null
   } | null
 }
 
@@ -10498,6 +11103,11 @@ interface AttendanceRequest {
   reason?: string | null
   status: string
   metadata?: Record<string, any>
+  // Navigability audit fix 2: the backend's `mapAttendanceRequestRow` spreads the raw
+  // `attendance_requests` row (`{ ...row }`) before shaping the response, so `user_id` has always
+  // been present on the wire — just not previously declared here. Used to decide row-level
+  // approve/reject entitlement (see attendanceRequestReviewEntitlement.ts).
+  user_id?: string | null
 }
 
 interface AttendanceShiftSwapRequest {
@@ -10714,6 +11324,7 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  employeeQuickActionIcons?: EmployeeQuickActionIcons
   multiShiftDay?: {
     enabled?: boolean
     maxSlots?: number
@@ -11695,28 +12306,82 @@ function readImportDebugOptions(): AttendanceImportDebugOptions {
 
 const loading = ref(false)
 const punching = ref(false)
+// Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+// `punching` now covers ONLY the punch POST itself — it is released as soon
+// as that call settles and the outcome banner/state is shown, so the button
+// never blocks on the post-punch refresh (up to 11 requests: refreshAll()'s
+// 10 overview tasks plus the 2-step loadSelfAttendanceRules). This counter
+// (never negative; a plain boolean would let an overlapping second punch's
+// refresh clear the indicator while the first punch's refresh is still in
+// flight) drives a separate, non-blocking "Updating..." indicator instead.
+const refreshingAfterPunchCount = ref(0)
+const refreshingAfterPunch = computed(() => refreshingAfterPunchCount.value > 0)
 
 // UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
 // clock, display-only — punch handlers/copy/classes above are untouched.
-const heroClockNow = ref(new Date())
+const serverClock = createAttendanceServerClock()
+const heroClockNow = ref<Date | null>(null)
 let heroClockTimer: ReturnType<typeof setInterval> | null = null
+let serverClockTimer: ReturnType<typeof setInterval> | null = null
+function updateHeroClock(): void {
+  heroClockNow.value = attendanceSessionGuard.isCurrent() && !document.hidden
+    ? serverClock.now(performance.now()) : null
+  const boundary = currentTimeContext.value?.nextEffectiveBoundary
+  if (boundary && heroClockNow.value && heroClockNow.value.getTime() >= Date.parse(boundary)
+    && !selfRulesLoading.value && showOverview.value && attendancePluginActive.value
+    && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+}
+function recoverServerClock(): void {
+  invalidateServerClock()
+  if (showOverview.value && attendancePluginActive.value && !document.hidden
+    && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules()
+}
+function onClockVisibility(): void {
+  if (document.hidden) invalidateServerClock()
+  else recoverServerClock()
+}
+function onClockPageShow(event: PageTransitionEvent): void {
+  if (event.persisted) recoverServerClock()
+}
 onMounted(() => {
-  heroClockTimer = setInterval(() => { heroClockNow.value = new Date() }, 1000)
+  heroClockTimer = setInterval(updateHeroClock, 1000)
+  serverClockTimer = setInterval(() => {
+    if (showOverview.value && attendancePluginActive.value && !document.hidden
+      && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+  }, ATTENDANCE_CLOCK_RESAMPLE_MS)
+  document.addEventListener('visibilitychange', onClockVisibility)
+  window.addEventListener('pageshow', onClockPageShow)
 })
 onUnmounted(() => {
   if (heroClockTimer) clearInterval(heroClockTimer)
+  if (serverClockTimer) clearInterval(serverClockTimer)
+  document.removeEventListener('visibilitychange', onClockVisibility)
+  window.removeEventListener('pageshow', onClockPageShow)
+  invalidateServerClock()
+})
+const heroClockTimezone = computed(() => {
+  const zone = resolvedAttendanceTimezone.value
+  const context = currentTimeContext.value
+  if (!zone || !context) return tr('Attendance timezone unavailable', '考勤时区不可用')
+  const sources = {
+    system_default: tr('System default', '系统默认'),
+    trip: tr('Approved business trip', '已批准出差'),
+    employee_override: tr('Employee configuration', '员工配置'),
+    calculation_group: tr('Attendance group', '考勤组'),
+  }
+  const label = tr(`Attendance timezone: ${zone}`, `考勤时区：${zone}`) + ' · ' + sources[context.timezoneSource]
+  const boundary = context.nextEffectiveBoundary ? formatAttendanceDateTime(context.nextEffectiveBoundary, isZh.value ? 'zh-CN' : 'en-US', zone) : null
+  return boundary ? label + ' · ' + tr(`Refresh at ${boundary}`, `生效边界：${boundary}`) : label
 })
 const heroClockTime = computed(() => {
-  const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? tr('Server time unavailable', '服务器时间不可用')
 })
 const heroClockDate = computed(() => {
   const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const weekdayZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
-  const weekdayEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.getDay()]
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} · ${tr(weekdayEn, weekdayZh)}`
+  const weekdayLocale = isZh.value ? 'zh-CN' : 'en-US'
+  const dateKey = formatAttendanceDateKey(now, resolvedAttendanceTimezone.value)
+  const weekday = formatAttendanceWeekday(now, weekdayLocale, resolvedAttendanceTimezone.value)
+  return dateKey && weekday ? `${dateKey} · ${weekday}` : tr('Server date unavailable', '服务器日期不可用')
 })
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
@@ -11813,6 +12478,15 @@ const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
+// A1: the env half of the two scheduled features' double gate - a read-only sibling of `data` on GET
+// /api/attendance/settings (never persisted, never on the PUT response). null = not reported; the status
+// component then shows "unknown" and the cards do not assume the feature can run.
+const attendanceRuntimeGates = ref<AttendanceRuntimeGates | null>(null)
+// A1: the annual policy as the server last returned it (load or save response) - NOT the live form - so the
+// 「已配置」 status never moves before something is saved.
+const annualPolicySaved = ref<AttendanceAnnualPolicySaved | null>(null)
+const reportDigestConfiguredState = computed(() => attendanceReportDigestConfiguredState(attendanceSettings.value))
+const annualAccrualConfiguredState = computed(() => attendanceAnnualAccrualConfiguredState(annualPolicySaved.value))
 const holidaySyncLoading = ref(false)
 const provisionLoading = ref(false)
 const provisionHasLoaded = ref(false)
@@ -11916,6 +12590,13 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
+const attendanceGroupCatalogScope = ref<AttendanceGroupCatalogScope>('unknown')
+const adminSurfaceBlocked = computed(() =>
+  adminForbidden.value && attendanceGroupCatalogScope.value !== 'managed',
+)
+const attendanceGroupEmptyCopy = computed(() =>
+  attendanceGroupEmptyListCopy(attendanceGroupCatalogScope.value, tr),
+)
 type AttendanceSchedulerScopeTargets = {
   scheduleGroupIds: string[]
   attendanceGroupIds: string[]
@@ -11977,9 +12658,52 @@ watch(() => schedulerScopeForm.subjectType, () => {
 })
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
-  buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
+  buildTimezoneOptions(
+    [defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'],
+    new Date(),
+    isZh.value ? 'zh' : 'en',
+  ),
 )
-const overviewTimezoneLabel = computed(() => displayTimezone(defaultTimezone))
+function selfServiceRuleTimezone(): string | null {
+  const instant = heroClockNow.value ? serverClock.now(performance.now()) : null
+  return !document.hidden && attendanceSessionGuard.isCurrent()
+    ? currentAttendanceTimezone(currentTimeContext.value, instant) : null
+}
+const reportRecordTimezoneValues = computed(() => Array.from(new Set(
+  records.value
+    .map(record => String(record.workday_context?.timezone ?? '').trim()),
+)))
+const reportRecordTimezones = computed(() => Array.from(new Set(
+  reportRecordTimezoneValues.value
+    .map(timezone => normalizeAttendanceTimeZone(timezone))
+    .filter((timezone): timezone is string => Boolean(timezone)),
+)))
+const reportHasInvalidRecordTimezone = computed(() =>
+  reportRecordTimezoneValues.value.some(timezone => !normalizeAttendanceTimeZone(timezone)))
+function attendanceRecordTimezone(record: AttendanceRecord): string | null {
+  return normalizeAttendanceTimeZone(record.workday_context?.timezone)
+}
+const resolvedAttendanceTimezone = computed<string | null>(() => {
+  if (showReports.value) {
+    return !reportHasInvalidRecordTimezone.value && reportRecordTimezones.value.length === 1
+      ? reportRecordTimezones.value[0]!
+      : null
+  }
+  return normalizeAttendanceTimeZone(selfServiceRuleTimezone())
+})
+const overviewTimezoneLabel = computed(() => {
+  if (showReports.value && reportHasInvalidRecordTimezone.value) {
+    return tr('Some report record timezones are unavailable', '部分报告记录时区不可用')
+  }
+  if (showReports.value && reportRecordTimezones.value.length > 1) {
+    return tr('Multiple report record timezones', '多个报告记录时区')
+  }
+  return resolvedAttendanceTimezone.value
+    ? displayTimezone(resolvedAttendanceTimezone.value)
+    : showReports.value
+      ? tr('Report record timezone unavailable', '报告记录时区不可用')
+      : tr('Rule timezone unavailable', '规则时区不可用')
+})
 const overviewRefreshTimezoneContextHint = computed(() =>
   `${tr('Overview timezone context', '总览时区上下文')}: ${overviewTimezoneLabel.value}`
 )
@@ -11987,7 +12711,7 @@ const calendarTimezoneContextHint = computed(() =>
   `${tr('Calendar timezone context', '日历时区上下文')}: ${overviewTimezoneLabel.value}`
 )
 const requestTimezoneContextHint = computed(() =>
-  `${tr('Request timezone context', '申请时区上下文')}: ${overviewTimezoneLabel.value}`
+  `${tr('Request timezone context', '申请时区上下文')}: ${requestTimezone.target.value?.timezone ?? tr('Awaiting target confirmation', '等待确认目标班次')}`
 )
 const summaryTimezoneContextHint = computed(() =>
   `${tr('Summary timezone context', '汇总时区上下文')}: ${overviewTimezoneLabel.value}`
@@ -12092,6 +12816,7 @@ const holidays = ref<AttendanceHoliday[]>([])
 // expose source + layer chain + overlays without polluting the admin CRUD
 // payload. Mixing them would break edit/delete (admin edits raw rows by id).
 const calendarEffectiveChips = ref<CalendarEffectiveChip[]>([])
+const calendarDayTimeContexts = ref(new Map<string, AttendanceDayTimeContext | null>())
 const currentUserId = ref<string | null>(null)
 // PR2 review fix (Codex Blocking #1): `committedCalendarUserId` is the userId
 // the overview is currently rendered against. It is set ONLY by refreshAll()
@@ -12108,7 +12833,32 @@ let calendarEffectiveCacheKey: string | null = null
 // counter advanced (rapid month/user switches) so older responses can never
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
+const calendarTimezoneError = ref<string | null>(null)
 const auth = useAuth()
+const attendanceSessionGuard = provideAttendanceSessionGuard(
+  String(typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders()['x-tenant-id'] || '' : ''),
+)
+const attendanceSessionStale = attendanceSessionGuard.stale
+const apiFetch = attendanceSessionGuard.wrapFetch(sendApiFetch)
+function reloadAttendanceSession() { window.location.reload() }
+const attendanceAdminGlobalUserScope = computed(() => (
+  typeof auth.getAccessSnapshot === 'function' && auth.getAccessSnapshot().isAdmin
+))
+// 请假撤销 —— 考勤侧「待我审批的撤销」列表(owner 2026-09-29 16:5x 「Attendance-side list」): shown to the
+// holders of the grant its route checks, through the same display predicate the approval surfaces use.
+const cancelRoundApproverVisible = computed(() => (
+  typeof auth.getAccessSnapshot === 'function' && canDecideCancelRoundWith(auth.getAccessSnapshot())
+))
+// The deep-linked request id whose row the approver list brought into view (P-11 (a): a cancel round's todo
+// item links here). That row is where this viewer decides, so the deep-link section scroll leaves it in view.
+const cancelRoundApproverLandedFor = ref('')
+// Navigability audit fix 4: `useRouter()` resolves via Vue's provide/inject up to the app root
+// regardless of whether THIS component is the routed match — always available when the real app
+// mounts AttendanceView anywhere under its router-installed tree. Only `undefined` in isolated
+// component tests that construct a bare `createApp(AttendanceView, …)` with no router plugin;
+// `onAdminTaskHomeNavigate` below is written defensively for that case (falls back to a normal
+// same-document navigation rather than throwing).
+const router = useRouter()
 const requestReport = ref<AttendanceRequestReportItem[]>([])
 const requestReportTotal = computed(() =>
   requestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
@@ -12417,7 +13167,8 @@ function scheduleDispatchGroupLabel(groupId: string): string {
 function scheduleDispatchShiftLabel(item: AttendanceScheduleDispatchRequest): string {
   if (item.targetShiftLabel) return item.targetShiftLabel
   if (item.targetShiftId) {
-    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name ?? item.targetShiftId
+    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name
+      ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
   }
   return tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
@@ -12589,6 +13340,70 @@ const recordReportColumns = computed(() => {
       return left.code.localeCompare(right.code)
     })
 })
+
+const recordReportColumnPrefs = ref<RecordReportColumnPrefs>(
+  loadRecordReportColumnPrefs(typeof localStorage === 'undefined' ? null : localStorage),
+)
+
+watch(recordReportColumnPrefs, (prefs) => {
+  saveRecordReportColumnPrefs(typeof localStorage === 'undefined' ? null : localStorage, prefs)
+}, { deep: true })
+
+const visibleRecordReportCodeSet = computed(() => new Set(
+  resolveVisibleRecordReportCodes(
+    recordReportColumns.value.map(column => column.code),
+    recordReportColumnPrefs.value,
+  ),
+))
+
+const visibleRecordReportColumns = computed(() =>
+  recordReportColumns.value.filter(column => visibleRecordReportCodeSet.value.has(column.code)),
+)
+
+function recordReportCategoryLabel(category: string): string {
+  switch (category) {
+    case 'fixed': return tr('Fixed fields', '固定字段')
+    case 'basic': return tr('People', '人员')
+    case 'attendance': return tr('Attendance', '出勤')
+    case 'anomaly': return tr('Exceptions', '异常')
+    case 'leave': return tr('Leave', '请假')
+    case 'overtime': return tr('Overtime', '加班')
+    default: return tr('Other', '其他')
+  }
+}
+
+const recordReportColumnGroups = computed(() => {
+  const order = ['fixed', 'basic', 'attendance', 'anomaly', 'leave', 'overtime']
+  const groups = new Map<string, typeof recordReportColumns.value>()
+  for (const column of recordReportColumns.value) {
+    const id = column.category || 'other'
+    const list = groups.get(id) ?? []
+    list.push(column)
+    groups.set(id, list)
+  }
+  const ids = [
+    ...order.filter(id => groups.has(id)),
+    ...Array.from(groups.keys()).filter(id => !order.includes(id)),
+  ]
+  return ids.map(id => ({
+    id,
+    label: recordReportCategoryLabel(id),
+    columns: groups.get(id) ?? [],
+  }))
+})
+
+function recordReportColumnPinned(code: string): boolean {
+  return (RECORD_REPORT_PINNED_COLUMN_CODES as readonly string[]).includes(code)
+}
+
+function onToggleRecordReportColumn(code: string, event: Event): void {
+  recordReportColumnPrefs.value = toggleRecordReportColumn(
+    recordReportColumns.value.map(column => column.code),
+    recordReportColumnPrefs.value,
+    code,
+    (event.target as HTMLInputElement).checked,
+  )
+}
 
 const recordReportConfigDetails = computed<AttendanceRecordReportConfigDetail[]>(() => {
   const config = recordReportFieldConfig.value
@@ -12850,10 +13665,15 @@ const lastRecordCsvExportDetails = computed<AttendanceRecordReportConfigDetail[]
   return rows
 })
 
-const recordsTableColumnCount = computed(() => Math.max(1, recordReportColumns.value.length) + 1)
+const recordsTableColumnCount = computed(() => Math.max(1, visibleRecordReportColumns.value.length) + 1)
+
+function isFlaggedAttendanceRecord(record: AttendanceRecord): boolean {
+  return !['normal', 'off'].includes(String(record.status || ''))
+}
 
 const filteredRecords = computed(() =>
   records.value.filter((record) => {
+    if (recordStatusFilter.value === 'flagged') return isFlaggedAttendanceRecord(record)
     if (recordStatusFilter.value !== 'all' && record.status !== recordStatusFilter.value) {
       return false
     }
@@ -12861,12 +13681,12 @@ const filteredRecords = computed(() =>
   })
 )
 
-const filteredFlaggedRecordsCount = computed(() =>
-  filteredRecords.value.filter(record => !['normal', 'off'].includes(record.status)).length
+const reportPageFlaggedCount = computed(() =>
+  records.value.filter(record => isFlaggedAttendanceRecord(record)).length
 )
 
-const filteredRecordsWorkMinutes = computed(() =>
-  filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
+const reportPageEarlyLeaveCount = computed(() =>
+  records.value.filter(record => record.status === 'early_leave').length
 )
 
 const reportTrendItems = computed(() => {
@@ -12892,6 +13712,14 @@ const reportMetricItems = computed(() => {
     { key: 'off-days', label: tr('Off days', '休息日'), value: current?.off_days ?? 0 },
   ]
 })
+
+const visibleReportTrendItems = computed(() =>
+  reportTrendItems.value.filter(item => Number(item.count) > 0)
+)
+
+const visibleReportMetricItems = computed(() =>
+  reportMetricItems.value.filter(item => Number(item.value) > 0)
+)
 
 // #3575 caliber-transparency lock (G3): one-sentence definitions for the headline attendance
 // numbers, reusing the same field codes + labels as the record-report column catalog
@@ -12965,64 +13793,67 @@ const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() =>
   }))
 })
 
-const todayWorkDateKey = computed(() => toDateInput(new Date()))
+const todayWorkDateKey = computed(() => formatAttendanceDateKey(heroClockNow.value, resolvedAttendanceTimezone.value) ?? '')
 
-const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
-  if (records.value.length === 0) return null
-  return [...records.value].sort((left, right) => right.work_date.localeCompare(left.work_date))[0] ?? null
+// Today's self state has its own date/session scope; history filters never own it.
+const todayRecord = ref<AttendanceRecord | null>(null)
+const loadedTodayDate = ref('')
+const todayRecordState = ref<'loading' | 'ready' | 'error'>('loading')
+let todayRecordLoadVersion = 0
+let loadedHistoryScope: AttendanceHistoryScope | null = null
+let historyRecordsLoadVersion = 0
+const todayStateHint = computed(() => {
+  if (attendanceSessionStale.value) return tr('Reload to load today’s status.', '请重新加载页面以获取今日状态。')
+  if (!todayWorkDateKey.value) return tr('Today’s status unavailable: rule timezone unavailable.', '今日状态不可用：规则时区不可用。')
+  if (todayRecordState.value === 'error') return tr('Unable to load today’s status. Refresh to retry.', '无法加载今日状态，请刷新重试。')
+  if (todayRecordState.value !== 'ready' || loadedTodayDate.value !== todayWorkDateKey.value) {
+    return tr('Loading today’s status…', '正在加载今日状态…')
+  }
+  return ''
 })
+const todayAttendanceRecord = computed(() => todayStateHint.value ? null : todayRecord.value)
 
-const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
-  records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
-)
-
-// UI-P1 (ui-p1-remainder design-lock D1): today's two-node punch timeline for
-// the hero card — reuses activeWorkbenchRecord, renders only for TODAY's row.
 const heroTodayTimeline = computed(() => {
-  const record = activeWorkbenchRecord.value
-  if (!record || record.work_date !== todayWorkDateKey.value) return null
-  const timeOf = (value: string | null | undefined) => {
-    if (!value) return null
-    const parsed = new Date(value)
-    if (Number.isNaN(parsed.getTime())) return null
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
-  }
-  return {
-    checkIn: timeOf(record.first_in_at),
-    checkOut: timeOf(record.last_out_at),
-  }
+  const record = todayAttendanceRecord.value
+  if (!record) return null
+  return buildHeroTodayTimeline(record, value => formatAttendanceClockTime(
+    value,
+    attendanceRecordTimezone(record),
+  ))
 })
 
-const activeWorkbenchLatestPunchLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
-  if (!record) return '--'
-  return formatDateTime(record.last_out_at || record.first_in_at)
-})
-
-const activeWorkbenchStatusDescription = computed(() =>
-  selfServiceNeedsSetupHint.value
-    ? tr(
+const activeWorkbenchStatusDescription = computed(() => {
+  if (todayStateHint.value) return todayStateHint.value
+  if (selfServiceNeedsSetupHint.value) {
+    return tr(
       'No attendance data is available in this range yet.',
       '当前区间内还没有考勤数据。',
     )
-    : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
-)
+  }
+  const record = todayAttendanceRecord.value
+  if (!record) {
+    return tr(
+      'No attendance record for today yet.',
+      '今天还没有考勤记录。',
+    )
+  }
+  return describeAttendanceStatus(record.status)
+})
 
 const activeWorkbenchHasLateEarly = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   return Boolean(record && ((record.late_minutes ?? 0) > 0 || (record.early_leave_minutes ?? 0) > 0))
 })
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   if (!record) return '--'
   return `${record.late_minutes ?? 0} / ${record.early_leave_minutes ?? 0}`
 })
 
 const activeWorkbenchAttentionCount = computed(() => {
   if (anomalies.value.length === 0) return 0
-  const focusDate = activeWorkbenchRecord.value?.work_date
+  const focusDate = todayAttendanceRecord.value?.work_date
   if (!focusDate) return anomalies.value.length
   return anomalies.value.filter(item => item.workDate === focusDate).length
 })
@@ -13048,6 +13879,7 @@ function attendanceSummaryHasSignal(value: AttendanceSummary | null): boolean {
 }
 
 const selfServiceNeedsSetupHint = computed(() => {
+  if (todayStateHint.value || todayAttendanceRecord.value) return false
   if (!summary.value) return false
   if (records.value.length > 0 || requests.value.length > 0 || anomalies.value.length > 0) {
     return false
@@ -13204,14 +14036,15 @@ const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem
 // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
 // canonical "Needs attention" item, built from the same facts the retired
 // selfServiceFocusItems/selfServicePrimaryAction computeds used to derive
-// (activeWorkbenchRecord, anomalies, requests, the setup gate) plus the
+// (today's attendance row, anomalies, requests, the setup gate) plus the
 // shared status banner. See attendanceOverviewPriority.ts for the pure,
-// independently-tested first-match table.
-const workbenchRecordStatus = computed<string | null>(() => activeWorkbenchRecord.value?.status ?? null)
+// independently-tested first-match table. Historical rows do not supply
+// today's status (#5986).
+const workbenchRecordStatus = computed<string | null>(() => todayAttendanceRecord.value?.status ?? null)
 const workbenchFocusDateLabel = computed<string | null>(() =>
-  activeWorkbenchRecord.value ? formatDate(activeWorkbenchRecord.value.work_date) : null
+  todayAttendanceRecord.value ? formatDate(todayAttendanceRecord.value.work_date) : null
 )
-const workbenchWorkMinutes = computed(() => activeWorkbenchRecord.value?.work_minutes ?? 0)
+const workbenchWorkMinutes = computed(() => todayAttendanceRecord.value?.work_minutes ?? 0)
 
 const attendanceOverviewAttentionItem = computed(() => resolveAttendanceOverviewAttention(
   {
@@ -13246,6 +14079,11 @@ const selfServiceQuickActionHint = computed(() => {
   )
 })
 
+// Employee overview icons come from the employee-readable channel, not admin settings.
+const employeeOverviewQuickActionIcons = ref<EmployeeQuickActionIcons>({
+  ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+})
+
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
   || requestReportTypeFilter.value !== 'all'
@@ -13256,6 +14094,10 @@ function clearReportsFilters(): void {
   requestReportStatusFilter.value = 'all'
   requestReportTypeFilter.value = 'all'
   recordStatusFilter.value = 'all'
+}
+
+function applyReportRecordKpi(filter: 'all' | 'flagged' | 'early_leave'): void {
+  recordStatusFilter.value = filter === 'all' || recordStatusFilter.value === filter ? 'all' : filter
 }
 
 function clearReportsDataset(): void {
@@ -13441,6 +14283,8 @@ const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupActiveStage = ref<AttendanceGroupWorkflowStage>('basics')
 const attendanceGroupMemberGroupId = ref('')
 const attendanceGroupMemberSelectedUserId = ref('')
+const attendanceGroupMemberPickerLabel = ref('')
+const attendanceGroupPendingMemberLabels = ref<Record<string, string>>({})
 const attendanceGroupMemberUserIds = ref('')
 const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
@@ -13564,6 +14408,32 @@ const selectedImportProfileGuide = computed(() => buildImportProfileGuide(select
 const attendanceGroupOptions = computed(() =>
   attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
 )
+const audienceRoleOptions = computed(() => {
+  const values = provisionRoleTemplates.value.flatMap((template) => {
+    const roleId = typeof template.roleId === 'string' ? template.roleId.trim() : ''
+    const id = typeof template.id === 'string' ? template.id.trim() : ''
+    return [roleId, id].filter(Boolean)
+  })
+  return Array.from(new Set(values))
+})
+
+async function searchAudienceUserNames(query: string): Promise<string[]> {
+  const trimmed = query.trim()
+  if (!trimmed) return []
+  try {
+    const params = new URLSearchParams({ q: trimmed, page: '1', pageSize: '8' })
+    Object.entries(attendanceAdminUserScopePayload()).forEach(([key, value]) => params.set(key, value))
+    const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (!response.ok) return []
+    const data = await response.json().catch(() => null)
+    const items = Array.isArray(data?.data?.items) ? data.data.items : []
+    return items
+      .map((item: { name?: string | null }) => (typeof item?.name === 'string' ? item.name.trim() : ''))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
 const scheduledAttendanceGroupOptions = computed(() =>
   attendanceGroups.value.filter(group => readAttendanceGroupType(group) === 'scheduled_shift')
 )
@@ -13663,6 +14533,16 @@ function attendanceGroupMemberResolverUserIds(members: AttendanceGroupMember[]):
     userIds.push(userId)
   }
   return userIds
+}
+
+function rememberAttendanceGroupMemberPickerLabel(name: string): void {
+  attendanceGroupMemberPickerLabel.value = name
+}
+
+function attendanceGroupPendingMemberLabel(userId: string): string {
+  return attendanceGroupPendingMemberLabels.value[userId]
+    || attendanceGroupMemberPrimaryLabel(userId)
+    || userId
 }
 
 function attendanceGroupMemberPrimaryLabel(userId: string): string {
@@ -14037,7 +14917,7 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'advanced-controls',
       title: tr('Advanced controls', '高级控制'),
-      value: tr('Owner roster is editable; delegated permissions stay deferred', '负责人名单可维护；委托权限仍暂缓'),
+      value: tr('Group owners can manage members of their group; owner roster and org policy stay admin-only', '组负责人可管理本组人员；负责人名单与组织级策略仍仅限管理员'),
       detail: tr('No disabled fake controls are rendered for unsupported group-owned capabilities.', '不会为尚未支持的考勤组能力渲染假的禁用控件。'),
       actions: [],
     },
@@ -14093,7 +14973,21 @@ function openAttendanceGroupRoute(
   surface: AttendanceGroupRouteSurface | null,
 ): void {
   const groupId = String(props.routeGroupContext?.group.id || attendanceGroupEditingId.value || '').trim()
-  if (!groupId) return
+  if (!groupId) {
+    // A3 (A-class batch 2, 2026-08-22, narrowed): A3 as originally worded — "the schedule STAGE
+    // silently does nothing on an unsaved group" — is not real; that stage already shows a
+    // "Save basic info to unlock schedule preview and assignment actions" placeholder with a
+    // "Complete basic info" button (runtime-confirmed). What WAS silent: this function is also
+    // reached from the group-editing DRAWERS' jump-off buttons ("Open Shifts" /
+    // "Open Assignments" / "Open Advanced scheduling" / "Open Rule sets" / "Open Holidays"),
+    // which stay reachable on an unsaved group (opened from the policies-stage summary cards,
+    // which don't gate on attendanceGroupEditingId) and used to return here with zero feedback.
+    setStatus(
+      tr('Save the attendance group before opening this.', '请先保存考勤组，再执行此操作。'),
+      'error',
+    )
+    return
+  }
   emit('open-group-route', { groupId, step, surface })
 }
 
@@ -14575,7 +15469,13 @@ const importPreviewSummaryCards = computed(() => [
   },
 ])
 
-const orgId = ref('')
+const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
+const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
+const {
+  loading: sessionOrgLoading, switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError, orgs: sessionOrgIds, currentOrgId: sessionOrgId,
+  loadSessionOrgs, switchSessionOrg,
+} = useSessionOrg()
 const targetUserId = ref('')
 
 const {
@@ -14663,10 +15563,54 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
   }
 }
 
+const overviewRequestToolsOpen = ref(false)
+const leaveRequestCardOpen = ref(false)
+const makeupRequestCardOpen = ref(false)
+const overtimeRequestCardOpen = ref(false)
+const shiftSwapRequestCardOpen = ref(false)
+
+const eligibleMakeupAnomalies = computed(() =>
+  anomalies.value.filter(item => item.state !== 'pending'),
+)
+
+function onOverviewRequestToolsToggle(event: Event): void {
+  const target = event.currentTarget
+  if (target instanceof HTMLDetailsElement) {
+    overviewRequestToolsOpen.value = target.open
+  }
+}
+
+function revealOverviewHistoryDetails(target: Element | null): void {
+  if (target instanceof HTMLDetailsElement && !target.open) {
+    target.open = true
+  }
+}
+
+function revealOverviewRequestTools(): void {
+  overviewRequestToolsOpen.value = true
+  if (typeof document === 'undefined') return
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  revealOverviewHistoryDetails(tools)
+}
+
+function overviewRequestToolsElement(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  return tools instanceof HTMLElement ? tools : null
+}
+
 async function scrollToOverviewSection(id: AttendanceOverviewSectionId, focusTargetId?: string): Promise<void> {
   if (typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(id) ?? document.getElementById(id)
+  if (shouldRevealOverviewRequestTools(id)) {
+    revealOverviewRequestTools()
+  }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    id === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(id) ?? document.getElementById(id)
   if (target instanceof HTMLElement) {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -14699,11 +15643,11 @@ const {
   isCompactAdminNav,
   isKnownAdminSectionId,
   nextAdminSectionNavItem,
-  orderedAdminSectionNavItems,
   previousAdminSectionNavItem,
   readLastAdminSection,
   collapseAllAdminSectionGroups,
   toggleAdminSectionGroup,
+  orderedAdminSectionNavItems,
   visibleAdminSectionNavGroups,
   visibleRecentAdminSectionNavItems,
 } = useAttendanceAdminRail({
@@ -14728,6 +15672,120 @@ function hasExplicitAdminSectionTarget(): boolean {
 
 const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
 const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
+const adminConsoleRef = ref<HTMLElement | null>(null)
+const adminPageSearchOpen = ref(false)
+const adminPageSearchQuery = ref('')
+const adminPageSearchScope = ref<'page' | 'workbench'>('page')
+const adminPageSearchInputRef = ref<HTMLInputElement | null>(null)
+const adminPageSearchMatched = ref(0)
+const ADMIN_WORKBENCH_SEARCH_LIMIT = 8
+
+const adminWorkbenchSearchMatches = computed(() => {
+  const query = adminPageSearchQuery.value.trim().toLowerCase()
+  if (adminPageSearchScope.value !== 'workbench' || !query) return []
+  return orderedAdminSectionNavItems.value.filter(item =>
+    `${item.matchText ?? ''}\n${item.contextLabel}`.toLowerCase().includes(query),
+  )
+})
+const adminWorkbenchSearchHits = computed(() => adminWorkbenchSearchMatches.value.slice(0, ADMIN_WORKBENCH_SEARCH_LIMIT))
+const adminPageSearchEmpty = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return false
+  if (adminPageSearchScope.value === 'workbench') return adminWorkbenchSearchMatches.value.length === 0
+  return adminPageSearchMatched.value === 0
+})
+const adminPageSearchPlaceholder = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search workbench sections', '搜索工作台区块')
+    : tr('Search titles, fields, and rows', '搜索标题、字段和列表')
+))
+const adminPageSearchAriaLabel = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search all workbench sections', '搜索全部工作台')
+    : tr('Search this page', '搜索本页')
+))
+const adminPageSearchStatusText = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return ''
+  if (adminPageSearchScope.value === 'workbench') {
+    const count = adminWorkbenchSearchMatches.value.length
+    return count === 0
+      ? tr('No matches', '搜索不到')
+      : `${tr('Workbench matches', '工作台匹配')}: ${count}`
+  }
+  return adminPageSearchMatched.value === 0
+    ? tr('No matches', '搜索不到')
+    : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched.value}`
+})
+
+function adminPageSearchRoot(): HTMLElement | null {
+  const host = adminConsoleRef.value
+  if (!host) return null
+  if (adminTaskHomeOpen.value) {
+    return host.querySelector<HTMLElement>('[data-admin-home-context="true"]')
+  }
+  return host.querySelector<HTMLElement>('[data-admin-content="true"]')
+}
+
+function syncAdminPageContentSearch(): void {
+  const host = adminConsoleRef.value
+  if (!host) return
+  clearAdminPageContentSearch(host)
+  const query = adminPageSearchQuery.value.trim()
+  if (!query || adminPageSearchScope.value !== 'page') {
+    adminPageSearchMatched.value = 0
+    return
+  }
+  const root = adminPageSearchRoot()
+  if (!root) {
+    adminPageSearchMatched.value = 0
+    return
+  }
+  adminPageSearchMatched.value = applyAdminPageContentSearch(root, query).matched
+}
+
+function openAdminPageSearch(): void {
+  adminPageSearchOpen.value = true
+  void nextTick(() => adminPageSearchInputRef.value?.focus())
+}
+
+function setAdminPageSearchScope(scope: 'page' | 'workbench'): void {
+  adminPageSearchScope.value = scope
+  void nextTick(() => adminPageSearchInputRef.value?.focus())
+}
+
+function clearAdminPageSearchQuery(): void {
+  adminPageSearchQuery.value = ''
+}
+
+function closeAdminPageSearch(): void {
+  adminPageSearchQuery.value = ''
+  adminPageSearchOpen.value = false
+}
+
+function openAdminWorkbenchSearchHit(id: string): void {
+  selectAdminSection(id)
+}
+
+function onAdminPageSearchKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeAdminPageSearch()
+    return
+  }
+  if (event.key !== 'Enter' || adminPageSearchScope.value !== 'workbench') return
+  const first = adminWorkbenchSearchHits.value[0]
+  if (!first) return
+  event.preventDefault()
+  openAdminWorkbenchSearchHit(first.id)
+}
+
+watch([adminPageSearchQuery, adminPageSearchScope], () => {
+  syncAdminPageContentSearch()
+}, { flush: 'post' })
+
+watch([adminActiveSectionId, adminTaskHomeOpen], () => {
+  if (!adminPageSearchQuery.value.trim()) return
+  syncAdminPageContentSearch()
+}, { flush: 'post' })
 const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 
 // W4-1 (Wave 4 onboarding design-lock §6/§9 W4-1): seven-step setup-readiness wizard shell.
@@ -14735,12 +15793,13 @@ const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 // (charter §6.2 "暂留父层: section 权限过滤、active id、数据加载").
 const {
   state: setupReadinessState,
+  input: setupReadinessInput,
   steps: setupReadinessSteps,
   summary: setupReadinessSummary,
   needsAttention: setupReadinessNeedsAttention,
   lastOrgId: setupReadinessLastOrgId,
   loadReadiness: loadSetupReadiness,
-} = useAttendanceSetupReadiness()
+} = useAttendanceSetupReadiness({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 
 // §3① role contract (W4-1 强制): the step① remediation branches on the viewer being a PLATFORM
 // admin (the /api/admin/users surface is ensurePlatformAdmin-gated). Same client-side signal as
@@ -14761,7 +15820,7 @@ const setupSectionActive = computed(() =>
 // surface (wizard section or task home) is on screen and the org changes, and re-opening the
 // task home refreshes when the loaded org no longer matches (org changed while it was closed).
 const setupTaskHomeVisible = computed(() =>
-  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+  showAdmin.value && adminTaskHomeOpen.value && !adminSurfaceBlocked.value,
 )
 
 watch(setupSectionActive, (active) => {
@@ -14777,6 +15836,7 @@ watch(setupTaskHomeVisible, (open) => {
 }, { immediate: true })
 
 watch(orgId, () => {
+  clearRecordRequestPrefill()
   if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
 })
 
@@ -14804,7 +15864,7 @@ function decisionTraceTargetKind(category: AttendanceDecisionTraceCategory): 'wo
 }
 
 // --- admin face (consumes GET /api/attendance-admin/decision-trace) ---
-const adminTrace = useAttendanceDecisionTrace()
+const adminTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const adminTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
 const adminTraceUserId = ref('')
 const adminTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
@@ -14831,7 +15891,7 @@ function loadAdminDecisionTrace(): void {
 // --- self face (consumes GET /api/attendance/decision-trace; subject = token, NEVER a userId
 // parameter — §4.1; multi-org members pick an org only after the endpoint answers
 // 400 ORG_ID_REQUIRED, self four-leg contract P2-d) ---
-const selfTrace = useAttendanceDecisionTrace()
+const selfTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const selfTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
 const selfTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
 const selfTraceRequestId = ref('')
@@ -15146,20 +16206,6 @@ function resolvedAdminSectionId(): string {
     : ATTENDANCE_ADMIN_SECTION_IDS.settings
 }
 
-const adminQuickJumpGroups = computed(() => {
-  const groups = new Map<string, { label: string; items: typeof orderedAdminSectionNavItems.value }>()
-  for (const item of orderedAdminSectionNavItems.value) {
-    const groupLabel = item.groupLabel ?? tr('Sections', '区块')
-    const existing = groups.get(groupLabel)
-    if (existing) {
-      existing.items.push(item)
-      continue
-    }
-    groups.set(groupLabel, { label: groupLabel, items: [item] })
-  }
-  return Array.from(groups.values())
-})
-
 function buildAdminTaskHomeGroup(
   group: Omit<AttendanceAdminTaskHomeGroup, 'linkActions' | 'buttonActions'>,
 ): AttendanceAdminTaskHomeGroup {
@@ -15174,10 +16220,19 @@ function buildAdminTaskHomeGroup(
   }
 }
 
-const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
+const adminTaskHomePeopleGroupsStatusInput = computed(() => ({
+  loadState: setupReadinessState.value,
+  readiness: setupReadinessInput.value,
+  steps: setupReadinessSteps.value,
+}))
+
+const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => {
+  const peopleInput = adminTaskHomePeopleGroupsStatusInput.value
+  const catalog = [
   {
     key: 'daily-operations',
     title: tr('Daily operations', '日常运营'),
+    status: deriveAdminTaskHomeGroupStatus('daily-operations', peopleInput),
     detail: tr(
       'Approvals, anomalies, imports, and audit follow-up.',
       '审批、异常、导入与审计跟进。',
@@ -15185,14 +16240,30 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
     actions: [
       {
         key: 'pending-attendance-approvals',
-        label: tr('Pending approvals', '待处理审批'),
-        href: '/attendance?section=attendance-overview-requests',
+        // Navigability audit fix 2: `tab=overview` made explicit (was implicit-via-absence) —
+        // Fix 3 gives Overview an explicit, linkable `?tab=overview`, and this link should not
+        // rely on "no tab param" happening to default there.
+        //
+        // Label corrected per independent review GATE-5086 (P2-1/P3-5): this link's destination
+        // (`loadRequests()`) sends `userId: normalizedUserId()`, which is empty by default — the
+        // server (GET /api/attendance/requests) then scopes to the REQUESTER's own rows, i.e.
+        // this admin's own attendance requests, not a queue of requests awaiting their review.
+        // The destination section already labels itself honestly ("Recent requests" /
+        // "最近申请", `:783`) — this task-home shortcut previously did not, calling itself
+        // "Pending approvals" and implying an org-wide review queue that no backend query
+        // provides (see attendanceRequestReviewEntitlement.ts's header comment). `key` is left
+        // unchanged (it is not user-facing) to avoid rippling into every test/data-attribute
+        // that targets this action by id. Building a real org-wide "requests awaiting my
+        // approval" queue is a backend/business-logic feature, out of scope for this
+        // navigation-only fix.
+        label: tr('My requests', '我的申请'),
+        href: '/attendance?tab=overview&section=attendance-overview-requests',
         primary: true,
       },
       {
         key: 'attendance-anomalies',
         label: tr('Anomalies', '异常'),
-        href: '/attendance?section=attendance-overview-anomalies',
+        href: '/attendance?tab=overview&section=attendance-overview-anomalies',
       },
       {
         key: 'daily-import',
@@ -15209,6 +16280,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'people-groups',
     title: tr('People and attendance groups', '人员与考勤组'),
+    status: deriveAdminTaskHomeGroupStatus('people-groups', peopleInput),
     detail: tr(
       'Groups, members, owners, access, and availability.',
       '考勤组、成员、负责人、权限与可用性。',
@@ -15230,11 +16302,14 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
         label: tr('Attendance groups', '考勤组'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
       },
-      {
-        key: 'group-members',
-        label: tr('Members', '成员'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
-      },
+      // Navigability audit fix 5(b) (2026-08-22): the standalone "Members" task-home entry was
+      // removed — it duplicated this SAME group's "Attendance groups" entry, landing on a section
+      // whose only content was "open Attendance groups instead". A-class batch 2 (2026-08-22,
+      // A4) finished the job: the waystation section (`attendance-admin-group-members`) and its
+      // rail entry are now deleted outright, and UserManagementView.vue's post-create-user "下一
+      // 步" deep-link (`buildAttendanceAdminSectionLocation(...)`, tested in
+      // userManagementView.spec.ts) now points straight at `attendance-admin-groups` instead of
+      // through the removed waystation, so there is no dangling deep link.
       {
         key: 'user-access',
         label: tr('Access', '权限'),
@@ -15250,6 +16325,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'work-time-policies',
     title: tr('Work time and policies', '工时与策略'),
+    status: deriveAdminTaskHomeGroupStatus('work-time-policies', peopleInput),
     detail: tr(
       'Shifts, schedules, holidays, rule sets, overtime, and leave policies.',
       '班次、排班、节假日、规则集、加班与请假策略。',
@@ -15291,6 +16367,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'reporting-payroll',
     title: tr('Reporting and payroll', '报表与计薪'),
+    status: deriveAdminTaskHomeGroupStatus('reporting-payroll', peopleInput),
     detail: tr(
       'Import batches, report fields, payroll templates, and payroll cycles.',
       '导入批次、统计字段、计薪模板与计薪周期。',
@@ -15319,10 +16396,28 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
       },
     ],
   },
-].map(buildAdminTaskHomeGroup))
+  ]
+  return filterAdminTaskHomeGroupsForCatalogScope(catalog, attendanceGroupCatalogScope.value)
+    .map(buildAdminTaskHomeGroup)
+})
 
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
+}
+
+// Navigability audit fix 4: AttendanceAdminTaskHome's linkActions ("My requests" — relabeled
+// from "Pending approvals" per GATE-5086 P3-5, see adminTaskHomeGroups above — "Anomalies") used
+// to be plain `<a href>` anchors that forced a full SPA page reload. That
+// component stays router-agnostic (charter §6.2: "does not… hold route/admin state") and now
+// only emits the href; this handler performs the actual client-side navigation.
+function onAdminTaskHomeNavigate(href: string): void {
+  if (router) {
+    void router.push(href)
+    return
+  }
+  // Defensive fallback for a router-less mount (see the `router` declaration above) — same
+  // destination, just a real navigation instead of a silent no-op.
+  if (typeof window !== 'undefined') window.location.assign(href)
 }
 
 function selectAdminSection(id: string): void {
@@ -15335,21 +16430,10 @@ function selectAdminSection(id: string): void {
   })
 }
 
-function showAdminTaskHome(): void {
-  adminTaskHomeOpen.value = true
-  adminCompactNavOpen.value = false
-  if (typeof window !== 'undefined') {
-    const url = new URL(window.location.href)
-    const querySection = url.searchParams.get('section')
-    if (isKnownAdminSectionId(querySection)) {
-      url.searchParams.delete('section')
-    }
-    url.hash = ''
-    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
-  }
-  emit('clear-section')
+function openHolidayCalendarPolicyFromSettings(): void {
+  selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)
   void nextTick(() => {
-    document.getElementById('attendance-admin-task-home-title')?.focus({ preventScroll: true })
+    document.getElementById('attendance-effective-calendar-overrides')?.scrollIntoView({ behavior: 'auto', block: 'start' })
   })
 }
 
@@ -15359,6 +16443,13 @@ async function focusInitialAttendanceSection(): Promise<void> {
     return
   }
   const targetId = props.initialSectionId.trim()
+  const revealRequests = showOverview.value
+    && attendancePluginActive.value
+    && shouldRevealOverviewRequestTools(targetId, props.initialRequestId)
+  if (revealRequests) {
+    await nextTick()
+    revealOverviewRequestTools()
+  }
   if (!targetId || !attendancePluginActive.value) return
 
   if (showAdmin.value && !adminForbidden.value && isKnownAdminSectionId(targetId)) {
@@ -15368,16 +16459,25 @@ async function focusInitialAttendanceSection(): Promise<void> {
 
   if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
-  if (target instanceof HTMLElement) {
-    target.scrollIntoView({ behavior: 'auto', block: 'start' })
+  if (showReports.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport) {
+    const moreStats = document.querySelector('[data-reports-insight="more-stats"]')
+    if (moreStats instanceof HTMLDetailsElement) moreStats.open = true
   }
-}
-
-function handleAdminQuickJumpChange(event: Event): void {
-  const value = event.target instanceof HTMLSelectElement ? event.target.value : ''
-  if (!isKnownAdminSectionId(value)) return
-  selectAdminSection(value)
+  if (revealRequests) {
+    revealOverviewRequestTools()
+  }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    showOverview.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
+  if (target instanceof HTMLElement) {
+    revealOverviewHistoryDetails(target)
+    const approverRowShown = Boolean(cancelRoundApproverLandedFor.value)
+      && cancelRoundApproverLandedFor.value === props.initialRequestId.trim()
+    if (!approverRowShown) target.scrollIntoView({ behavior: 'auto', block: 'start' })
+  }
 }
 
 const statusCode = computed(() => statusMeta.value?.code || '')
@@ -15429,6 +16529,10 @@ const statusActionBusy = computed(() => {
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
+const initialHistoryFromDate = fromDate.value
+const initialHistoryToDate = toDate.value
+let defaultHistoryRangeAligned = false
+const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
 const recordsPageSize = 20
@@ -15486,6 +16590,7 @@ async function loadEffectiveCalendarForOverview(
   range: { from: string; to: string },
   options?: { force?: boolean },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const from = String(range.from || '').trim()
   const to = String(range.to || '').trim()
   if (!from || !to) return
@@ -15499,18 +16604,23 @@ async function loadEffectiveCalendarForOverview(
   if (!options?.force && calendarEffectiveCacheKey === cacheKey) return
   calendarEffectiveCacheKey = cacheKey
   const loadVersion = ++calendarEffectiveLoadVersion
+  calendarTimezoneError.value = null
+  calendarDayTimeContexts.value = new Map()
   try {
     const result = await fetchEffectiveCalendar({
       from,
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
+    }, apiFetch)
     // Stale-response guard (Codex Blocking #2): if another call started after
     // this one (e.g. user switched months or clicked Refresh during await),
     // drop this result so the newer one wins.
-    if (loadVersion !== calendarEffectiveLoadVersion) return
+    if (loadVersion !== calendarEffectiveLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
+    calendarDayTimeContexts.value = new Map(items.map(item => [
+      item.date, parseAttendanceDayTimeContext(item.attendanceTimeContext, item.date),
+    ]))
     calendarEffectiveChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
@@ -15518,12 +16628,14 @@ async function loadEffectiveCalendarForOverview(
     // Failure must not block calendar grid rendering — clear chips, bust the
     // cache key so a later auth/retry succeeds. Only the most recent failed
     // version mutates state so older failures cannot blank a newer success.
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === calendarEffectiveLoadVersion) {
       calendarEffectiveChips.value = []
+      calendarDayTimeContexts.value = new Map()
       calendarEffectiveCacheKey = null
-    }
-    if (error instanceof EffectiveCalendarFetchError) {
-      console.debug('[AttendanceView] effective-calendar load failed', error.status, error.message)
+      calendarTimezoneError.value = attendanceTimezoneErrorMessage(
+        error instanceof EffectiveCalendarFetchError ? error.code : null, tr,
+      ) ?? tr('Attendance calendar unavailable. Refresh to try again.', '考勤日历不可用，请刷新重试。')
     }
   }
 }
@@ -15537,6 +16649,7 @@ watch(committedCalendarUserId, (next) => {
 async function loadEffectiveCalendarForRotationAssignment(
   range: { userId: string; from: string; to: string },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const userId = range.userId.trim()
   const from = range.from.trim()
   const to = range.to.trim()
@@ -15551,13 +16664,14 @@ async function loadEffectiveCalendarForRotationAssignment(
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
-    if (loadVersion !== rotationAssignmentEffectiveCalendarLoadVersion) return
+    }, apiFetch)
+    if (loadVersion !== rotationAssignmentEffectiveCalendarLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
     rotationAssignmentEffectiveCalendarChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
   } catch (error) {
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === rotationAssignmentEffectiveCalendarLoadVersion) {
       rotationAssignmentEffectiveCalendarChips.value = []
       rotationAssignmentEffectiveCalendarCacheKey = null
@@ -15571,6 +16685,7 @@ async function loadEffectiveCalendarForRotationAssignment(
 async function loadEffectiveCalendarForShiftAssignment(
   range: { userId: string; from: string; to: string },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const userId = range.userId.trim()
   const from = range.from.trim()
   const to = range.to.trim()
@@ -15585,13 +16700,14 @@ async function loadEffectiveCalendarForShiftAssignment(
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
-    if (loadVersion !== shiftAssignmentEffectiveCalendarLoadVersion) return
+    }, apiFetch)
+    if (loadVersion !== shiftAssignmentEffectiveCalendarLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
     shiftAssignmentEffectiveCalendarChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
   } catch (error) {
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === shiftAssignmentEffectiveCalendarLoadVersion) {
       shiftAssignmentEffectiveCalendarChips.value = []
       shiftAssignmentEffectiveCalendarCacheKey = null
@@ -15619,7 +16735,6 @@ const calendarDays = computed<CalendarDay[]>(() => {
   const weekStartsOn = 1
   const startOffset = (firstDay.getDay() - weekStartsOn + 7) % 7
   const totalCells = Math.ceil((lastDay.getDate() + startOffset) / 7) * 7
-  const now = new Date()
 
   return Array.from({ length: totalCells }, (_, index) => {
     const date = new Date(year, month, index - startOffset + 1)
@@ -15651,10 +16766,13 @@ const calendarDays = computed<CalendarDay[]>(() => {
     } else if (calendarDisplay?.tooltip) {
       tooltip = calendarDisplay.tooltip
     }
+    if (calendarDayTimeContexts.value.has(key)) {
+      tooltip += '\n' + attendanceDayTimezoneLabel(calendarDayTimeContexts.value.get(key) ?? null, isZh.value)
+    }
     return {
       key,
       day: date.getDate(),
-      isToday: date.toDateString() === now.toDateString(),
+      isToday: Boolean(todayWorkDateKey.value && key === todayWorkDateKey.value),
       isCurrentMonth: date.getMonth() === month,
       status,
       statusLabel,
@@ -15679,6 +16797,21 @@ const requestForm = reactive({
   attachmentUrl: '',
 })
 
+const recordRequestPrefill = ref<AttendanceRecordRequestPrefill | null>(null)
+
+const requestTimezone = useAttendanceRequestTimezone({
+  workDate: () => requestForm.workDate,
+  userId: () => currentUserId.value ?? '',
+  enabled: () => showOverview.value && requestForm.requestType !== 'shift_swap',
+  inAt: () => requestForm.requestedInAt,
+  outAt: () => requestForm.requestedOutAt,
+  originals: () => readAttendanceRecordRequestPrefill(
+    recordRequestPrefill.value, getAuthPrincipalKey(), attendanceSessionGuard.orgId,
+  ),
+  guard: attendanceSessionGuard,
+  fetch: apiFetch,
+})
+
 const scheduleDispatchForm = reactive({
   userId: '',
   targetScheduleGroupId: '',
@@ -15698,6 +16831,24 @@ const isMakeupRequest = computed(() =>
 const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
 const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
 const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
+
+const adminConfig = useAttendanceAdminConfig({
+  adminForbidden,
+  apiFetchWithTimeout,
+  buildQuery,
+  createApiError,
+  createForbiddenError,
+  defaultTimezone,
+  getOrgId: () => normalizedOrgId(),
+  setStatus,
+  setStatusFromError: (error, fallbackMessage, context) => {
+    const mapped = context === 'save-settings' || context === 'save-rule' || context === 'admin'
+      ? context
+      : 'admin'
+    setStatusFromError(error, fallbackMessage, mapped)
+  },
+  tr,
+})
 
 const settingsForm = reactive({
   autoAbsenceEnabled: false,
@@ -16120,7 +17271,7 @@ const {
   hasLinkedDirectoryAccounts: approvalDirectoryHasLinked,
   maxManagerChainLevels: approvalMaxManagerChainLevels,
   loadReadiness: loadApprovalDirectoryReadiness,
-} = useAttendanceApprovalDirectoryReadiness()
+} = useAttendanceApprovalDirectoryReadiness({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value, {
   hasLinkedDirectoryAccounts: approvalDirectoryHasLinked.value,
 }))
@@ -16349,6 +17500,8 @@ const comprehensiveHoursPreviewForm = reactive({
   capHours: 160,
   enforcement: 'warn' as AttendanceComprehensiveHoursEnforcement,
 })
+const comprehensiveHoursPreviewUserLabel = ref('')
+const comprehensiveHoursPreviewNames = ref<Record<string, string>>({})
 
 function comprehensiveHoursUserIds(): string[] {
   if (comprehensiveHoursPreviewForm.userMode === 'multiple') {
@@ -16432,6 +17585,48 @@ const comprehensiveHoursPreviewAggregateItems = computed(() => {
   ]
 })
 
+const comprehensiveHoursPreviewVisibleAggregateItems = computed(() =>
+  comprehensiveHoursPreviewAggregateItems.value.filter(item => Number(item.value) !== 0),
+)
+
+function comprehensiveHoursRowPrimaryLabel(userId: string): string {
+  const picked = comprehensiveHoursPreviewUserLabel.value.trim()
+  const selectedId = comprehensiveHoursPreviewForm.userId.trim()
+  if (picked && selectedId && userId === selectedId && picked !== userId) return picked
+  const resolved = comprehensiveHoursPreviewNames.value[userId]?.trim() || ''
+  if (resolved && resolved !== userId) return resolved
+  return ''
+}
+
+async function resolveComprehensiveHoursPreviewNames(userIds: string[]): Promise<void> {
+  const ids = Array.from(new Set(userIds.map(id => id.trim()).filter(Boolean)))
+  const scope = attendanceTeamAvailabilityUserScope.value
+  if (!scope || ids.length === 0) return
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: ids, ...scope }),
+    })
+    if (!response.ok) return
+    const payload = await response.json().catch(() => null)
+    if (!payload?.ok) return
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const next: Record<string, string> = { ...comprehensiveHoursPreviewNames.value }
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = String((raw as { id?: string }).id || '').trim()
+      if (!id) continue
+      const name = (raw as { name?: unknown }).name == null ? '' : String((raw as { name?: unknown }).name).trim()
+      const email = String((raw as { email?: unknown }).email || '').trim()
+      const label = name || (email && email !== id ? email : '')
+      if (label) next[id] = label
+    }
+    comprehensiveHoursPreviewNames.value = next
+  } catch {
+    // A failed lookup leaves the preview in place. The raw id stays out of the name cell.
+  }
+}
+
 function toDateKey(date: Date): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -16449,24 +17644,27 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   return date.toISOString().slice(0, 10)
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '--'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--'
-  return date.toLocaleString(locale.value)
+function formatDateTime(value: string | null | undefined, timeZone?: string | null): string {
+  if (!showOverview.value && !showReports.value && timeZone === undefined) {
+    if (!value) return '--'
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString(locale.value)
+  }
+  return formatAttendanceDateTime(
+    value,
+    locale.value,
+    timeZone === undefined ? resolvedAttendanceTimezone.value : timeZone,
+  )
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) return '--'
-  const direct = String(value).trim()
-  if (!direct) return '--'
-  const date = new Date(direct)
-  if (Number.isNaN(date.getTime())) return direct
-  return date.toLocaleDateString(locale.value)
+  // Date-only values (e.g. work_date = 'YYYY-MM-DD') are rendered from local y/m/d
+  // components so they never round-trip through UTC parsing; see dateOnlyFormat.ts.
+  return formatCalendarDate(value, locale.value)
 }
 
 function displayTimezone(value: string | null | undefined): string {
-  return formatTimezoneLabel(value)
+  return formatTimezoneLabel(value, new Date(), isZh.value ? 'zh' : 'en')
 }
 
 function formatStatus(value: string): string {
@@ -16600,6 +17798,7 @@ function formatRequestType(value: string): string {
         missed_check_out: '漏打下班卡',
         time_correction: '时间更正',
         leave: '请假申请',
+        business_trip: '出差申请',
         overtime: '加班申请',
         outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
@@ -16610,6 +17809,7 @@ function formatRequestType(value: string): string {
         missed_check_out: 'Missed check-out',
         time_correction: 'Time correction',
         leave: 'Leave request',
+        business_trip: 'Business trip request',
         overtime: 'Overtime request',
         outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
@@ -16665,8 +17865,17 @@ function isFocusedAttendanceRequest(item: AttendanceRequest): boolean {
   return Boolean(focusedAttendanceRequestId.value && item.id === focusedAttendanceRequestId.value)
 }
 
-function canReviewFocusedAttendanceRequest(item: AttendanceRequest): boolean {
-  return isFocusedAttendanceRequest(item) && String(item.status || '').toLowerCase() === 'pending'
+// Navigability audit fix 2: previously gated ONLY on `isFocusedAttendanceRequest` — a viewer who
+// reached this list any other way (e.g. the task home's "My requests" entry — labeled "Pending
+// approvals" before GATE-5086's P3-5 relabel — which carries no `?requestId=`) never saw
+// approve/reject on any row. `canReviewAttendanceRequestRow` (pure,
+// unit-tested in attendanceRequestReviewEntitlement.spec.ts) keeps the deep-link-focus case
+// working unconditionally and additionally allows any OTHER pending row this list already proved
+// the viewer has read access to (owner id differs from the viewer's own id) — see that module's
+// header comment for the full entitlement-signal reasoning. The server's own W4 request-decision
+// authorization still runs on every approve/reject POST; this only controls button visibility.
+function canReviewAttendanceRequest(item: AttendanceRequest): boolean {
+  return canReviewAttendanceRequestRow(item, currentUserId.value, isFocusedAttendanceRequest(item))
 }
 
 function requestTypeCtaLabel(value: string): string {
@@ -16783,38 +17992,127 @@ function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
   requestType: string
   requestedInAt: string
   requestedOutAt: string
-} {
+  inTimeZone: string
+  outTimeZone: string
+} | null {
   const items = recordTimelineItems(record.id)
   const requestType = inferRequestTypeFromRecordTimeline(items)
   const checkIn = items.find(item => item.eventType === 'check_in')
   const checkOut = [...items].reverse().find(item => item.eventType === 'check_out')
+  const recordZone = attendanceRecordTimezone(record)
+  const inTimeZone = normalizeAttendanceTimeZone(checkIn?.timezone) ?? recordZone
+  const outTimeZone = normalizeAttendanceTimeZone(checkOut?.timezone) ?? recordZone
+  if (!inTimeZone || !outTimeZone) return null
   const requestedInAtSource = checkIn?.occurredAt
     ?? (requestType === 'missed_check_in' ? null : record.first_in_at)
     ?? null
   const requestedOutAtSource = checkOut?.occurredAt
     ?? (requestType === 'missed_check_out' ? null : record.last_out_at)
     ?? null
+  if ([requestedInAtSource, requestedOutAtSource].some(value => value && (
+    !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) || Number.isNaN(new Date(value).getTime())
+  ))) return null
   return {
     requestType,
-    requestedInAt: requestedInAtSource ? formatDateTimeLocal(new Date(requestedInAtSource)) : '',
-    requestedOutAt: requestedOutAtSource ? formatDateTimeLocal(new Date(requestedOutAtSource)) : '',
+    requestedInAt: requestedInAtSource ?? '',
+    requestedOutAt: requestedOutAtSource ?? '',
+    inTimeZone,
+    outTimeZone,
   }
 }
 
-async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
-  const draft = resolveRecordTimelineRequestDraft(record)
-  requestForm.workDate = record.work_date
+function clearRecordRequestPrefill(): void {
+  if (!recordRequestPrefill.value) return
+  recordRequestPrefill.value = null
+  requestForm.requestedInAt = ''
+  requestForm.requestedOutAt = ''
+}
+
+async function applyRecordRequestPrefill(draft: AttendanceRecordRequestPrefill): Promise<void> {
+  clearRequestSubmitStatus()
+  requestForm.workDate = draft.workDate
   requestForm.requestType = draft.requestType
-  requestForm.requestedInAt = draft.requestedInAt
-  requestForm.requestedOutAt = draft.requestedOutAt
-  setStatus(
-    appendStatusContext(
-      tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'),
-      requestTimezoneContextHint.value,
-    ),
-  )
+  recordRequestPrefill.value = draft
+  const expectedPrefill = recordRequestPrefill.value
+  const beforeIn = requestForm.requestedInAt
+  const beforeOut = requestForm.requestedOutAt
+  await requestTimezone.refresh()
+  // An older prefill must not overwrite a newer draft or a manual time edit.
+  if (recordRequestPrefill.value !== expectedPrefill
+    || requestForm.workDate !== draft.workDate || requestForm.requestType !== draft.requestType
+    || requestForm.requestedInAt !== beforeIn || requestForm.requestedOutAt !== beforeOut) return
+  const target = requestTimezone.target.value
+  if (!target || target.workDate !== draft.workDate || !requestTimezone.ready.value
+    || !attendanceSessionGuard.isCurrent()) {
+    setStatus(tr('Target shift timezone could not be confirmed.', '无法确认目标班次时区。'), 'error')
+    return
+  }
+  requestForm.requestedInAt = formatRecordRequestTime(draft.requestedInAt, target.timezone)
+  requestForm.requestedOutAt = formatRecordRequestTime(draft.requestedOutAt, target.timezone)
+  setStatus(tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'))
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
+
+function consumeRecordRequestPrefill(): void {
+  if (!showOverview.value || !router?.options?.history) return
+  const history = router.options.history
+  const value = history.state[ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]
+  if (value == null) return
+  // Clear before validation/application: reload and back must not replay a draft.
+  history.replace(router.currentRoute.value.fullPath, {
+    ...history.state,
+    [ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]: null,
+  })
+  const draft = readAttendanceRecordRequestPrefill(value, getAuthPrincipalKey(), attendanceSessionGuard.orgId)
+  if (draft && attendanceSessionGuard.isCurrent()) void applyRecordRequestPrefill(draft)
+}
+
+async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
+  // Bind to the query that produced this row, never the editable filter draft.
+  const scope = loadedHistoryScope
+  const selfUserId = currentUserId.value
+  if (!scope || scope.orgId !== attendanceSessionGuard.orgId
+    || (scope.userId && scope.userId !== selfUserId)
+    || (record.user_id !== undefined && record.user_id !== selfUserId)
+    || recordTimelineItems(record.id).some(item => item.userId !== selfUserId)) {
+    setStatus(tr(
+      'Only your records in the current session organization can prefill a request.',
+      '仅可使用当前会话组织中您本人的记录预填申请。',
+    ), 'error')
+    return
+  }
+  const resolved = resolveRecordTimelineRequestDraft(record)
+  if (!resolved) {
+    setStatus(tr('Historical punch timezone or timestamp is unavailable.', '历史打卡时区或时间戳不可用。'), 'error')
+    return
+  }
+  const principalKey = getAuthPrincipalKey()
+  const draft = readAttendanceRecordRequestPrefill({
+    ...resolved,
+    workDate: record.work_date,
+    principalKey,
+    orgId: attendanceSessionGuard.orgId,
+  }, principalKey, attendanceSessionGuard.orgId)
+  if (!draft) return
+  if (showReports.value && router) {
+    await router.push({
+      path: '/attendance',
+      query: { section: ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies },
+      state: { [ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]: { ...draft } },
+    })
+    return
+  }
+  await applyRecordRequestPrefill(draft)
+}
+
+watch(
+  () => [requestForm.workDate, requestForm.requestType, attendanceSessionStale.value] as const,
+  ([date, type, stale]) => {
+    const source = recordRequestPrefill.value
+    if (source && (stale || source.workDate !== date || source.requestType !== type)) clearRecordRequestPrefill()
+  },
+)
 
 // MP-5 stale-error gate: a fresh prefill must not keep showing a prior
 // request-submit policy rejection (e.g. a previous date's MAKEUP_PUNCH_* banner),
@@ -16845,6 +18143,7 @@ watch(
 )
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
+  clearRecordRequestPrefill()
   clearRequestSubmitStatus()
   if (item.state === 'pending') {
     setStatus(
@@ -16868,22 +18167,26 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
 }
 
 async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
-  if (action === 'missing-punch') {
-    await openMissingPunchQuickAction()
+  if (action === 'leave') {
+    await openDedicatedLeaveRequestCard()
     return
   }
-  if (action === 'leave') {
-    await openQuickRequestDraft('leave')
+  if (action === 'missing-punch') {
+    await openDedicatedMakeupRequestCard()
     return
   }
   if (action === 'overtime') {
-    await openQuickRequestDraft('overtime')
+    await openDedicatedOvertimeRequestCard()
     return
   }
   if (action === 'shift_swap') {
-    await openQuickRequestDraft('shift_swap')
+    await openDedicatedShiftSwapRequestCard()
     return
   }
+  if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
+  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
+  if (overtimeRequestCardOpen.value) closeDedicatedOvertimeRequestCard()
+  if (shiftSwapRequestCardOpen.value) closeDedicatedShiftSwapRequestCard()
   if (action === 'records') {
     await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)
     return
@@ -16891,26 +18194,162 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)
 }
 
-async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
-  requestForm.workDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
-  requestForm.requestType = requestType
+async function openDedicatedLeaveRequestCard(): Promise<void> {
+  prepareRequestDraft('leave', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
+  leaveRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
-      tr(`Request form ready for ${formatRequestType(requestType)}.`, `已为${formatRequestType(requestType)}准备申请表单。`),
+      tr(`Request form ready for ${formatRequestType('leave')}.`, `已为${formatRequestType('leave')}准备申请表单。`),
       requestTimezoneContextHint.value,
     ),
   )
-  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-leave-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const typeField = document.getElementById('attendance-leave-card-type')
+  if (typeField instanceof HTMLElement && typeof typeField.focus === 'function') {
+    typeField.focus()
+  }
 }
 
-async function openMissingPunchQuickAction(): Promise<void> {
-  clearRequestSubmitStatus()
-  const anomaly = anomalies.value.find(item => item.state !== 'pending')
-  if (anomaly) {
-    await prefillRequestFromAnomaly(anomaly)
-    return
+function closeDedicatedLeaveRequestCard(): void {
+  leaveRequestCardOpen.value = false
+}
+
+async function submitDedicatedLeaveRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedLeaveRequestCard()
+}
+
+function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
+  clearRecordRequestPrefill()
+  const typeChanged = requestForm.requestType !== requestType
+  const dateChanged = requestForm.workDate !== workDate
+  requestForm.workDate = workDate
+  if (dateChanged || typeChanged) {
+    requestForm.requestedInAt = ''
+    requestForm.requestedOutAt = ''
+    requestForm.minutes = ''
   }
-  await openQuickRequestDraft('missed_check_in')
+  if (!typeChanged) return
+  if (requestType !== 'leave') requestForm.leaveTypeId = ''
+  if (requestType !== 'overtime') requestForm.overtimeRuleId = ''
+  if (requestType !== 'shift_swap') {
+    requestForm.requesterAssignmentId = ''
+    requestForm.counterpartyAssignmentId = ''
+  }
+  requestForm.requestType = requestType
+}
+
+async function openDedicatedMakeupRequestCard(): Promise<void> {
+  clearRequestSubmitStatus()
+  const fallbackWorkDate = resolveDedicatedRequestWorkDate(todayWorkDateKey.value)
+  const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
+  prepareRequestDraft(draft.requestType, draft.workDate)
+  leaveRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
+  makeupRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      draft.anomaly
+        ? tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。')
+        : tr(`Request form ready for ${formatRequestType('missed_check_in')}.`, `已为${formatRequestType('missed_check_in')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-makeup-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const focusId = draft.anomaly ? 'attendance-makeup-card-anomaly' : 'attendance-makeup-card-time'
+  const focusField = document.getElementById(focusId)
+  if (focusField instanceof HTMLElement && typeof focusField.focus === 'function') {
+    focusField.focus()
+  }
+}
+
+function closeDedicatedMakeupRequestCard(): void {
+  makeupRequestCardOpen.value = false
+}
+
+async function submitDedicatedMakeupRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedMakeupRequestCard()
+}
+
+async function openDedicatedOvertimeRequestCard(): Promise<void> {
+  prepareRequestDraft('overtime', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('overtime')}.`, `已为${formatRequestType('overtime')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-overtime-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const ruleField = document.getElementById('attendance-overtime-card-rule')
+  if (ruleField instanceof HTMLElement && typeof ruleField.focus === 'function') {
+    ruleField.focus()
+  }
+}
+
+function closeDedicatedOvertimeRequestCard(): void {
+  overtimeRequestCardOpen.value = false
+}
+
+async function submitDedicatedOvertimeRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedOvertimeRequestCard()
+}
+
+async function openDedicatedShiftSwapRequestCard(): Promise<void> {
+  prepareRequestDraft('shift_swap', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('shift_swap')}.`, `已为${formatRequestType('shift_swap')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-shift-swap-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const requesterField = document.getElementById('attendance-shift-swap-card-requester')
+  if (requesterField instanceof HTMLElement && typeof requesterField.focus === 'function') {
+    requesterField.focus()
+  }
+}
+
+function closeDedicatedShiftSwapRequestCard(): void {
+  shiftSwapRequestCardOpen.value = false
+}
+
+async function submitDedicatedShiftSwapRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedShiftSwapRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -16924,6 +18363,33 @@ function buildQuery(params: Record<string, string | undefined>): URLSearchParams
 function normalizedOrgId(): string | undefined {
   const value = orgId.value.trim()
   return value.length > 0 ? value : undefined
+}
+
+function requiredAttendanceAdminOrgId(): string {
+  const value = normalizedOrgId()
+  if (!value) throw new Error(tr('Select an organization first.', '请先选择组织。'))
+  return value
+}
+
+function attendanceAdminUserScopePayload(): { scope: 'global' } | { orgId: string } {
+  return attendanceAdminGlobalUserScope.value
+    ? { scope: 'global' }
+    : { orgId: requiredAttendanceAdminOrgId() }
+}
+
+const attendanceTeamAvailabilityUserScope = computed<{ scope: 'global' } | { orgId: string } | null>(() => {
+  if (attendanceAdminGlobalUserScope.value) return { scope: 'global' }
+  const org = normalizedOrgId()
+  return org ? { orgId: org } : null
+})
+
+function attendanceAdminUserScopeQuery(): string {
+  return new URLSearchParams(attendanceAdminUserScopePayload()).toString()
+}
+
+function canUseAttendanceAdminLegacyGlobalFallback(status: number, payload: unknown): boolean {
+  return attendanceAdminGlobalUserScope.value
+    && isAttendanceAdminEndpointUnavailable(status, payload)
 }
 
 function normalizedUserId(): string | undefined {
@@ -16969,24 +18435,7 @@ async function ensureAttendanceResultEditCapability(): Promise<boolean> {
 }
 
 function attendanceResultEditIdempotencyKey(): string {
-  const cryptoApi = globalThis.crypto as {
-    randomUUID?: () => string
-    getRandomValues?: <T extends ArrayBufferView>(array: T) => T
-  } | undefined
-  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
-
-  const bytes = new Uint8Array(16)
-  if (typeof cryptoApi?.getRandomValues === 'function') {
-    cryptoApi.getRandomValues(bytes)
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256)
-    }
-  }
-  bytes[6] = (bytes[6] & 0x0f) | 0x40
-  bytes[8] = (bytes[8] & 0x3f) | 0x80
-  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  return randomUuid()
 }
 
 function normalizeAttendanceResultStatus(value: unknown): string {
@@ -17440,7 +18889,7 @@ function firstRecordValue(...values: unknown[]): string {
     const normalized = String(value ?? '').trim()
     if (normalized) return normalized
   }
-  return '--'
+  return ''
 }
 
 function recordMetaMinutes(record: AttendanceRecord, keys: string[]): number {
@@ -17451,12 +18900,12 @@ function recordMetaMinutes(record: AttendanceRecord, keys: string[]): number {
 
 function formatRecordMinutes(value: unknown): string {
   const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed === 0) return '--'
+  if (!Number.isFinite(parsed) || parsed === 0) return ''
   return String(parsed)
 }
 
 function formatRecordReportValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '--'
+  if (value === null || value === undefined || value === '') return ''
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '--'
   if (typeof value === 'boolean') return value ? tr('Yes', '是') : tr('No', '否')
   return String(value)
@@ -17550,8 +18999,14 @@ function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecor
       )
     case 'attendance_group':
       return firstRecordValue(recordMetaValue(record, ['attendanceGroup', 'attendance_group', '考勤组']))
-    case 'punch_times':
-      return [formatDateTime(record.first_in_at), formatDateTime(record.last_out_at)].filter(item => item !== '--').join(' / ') || '--'
+    case 'punch_times': {
+      const zone = attendanceRecordTimezone(record)
+      if (!zone) return '--'
+      const parts = [record.first_in_at, record.last_out_at]
+        .map(value => (value ? formatAttendanceClockTime(value, zone) : null))
+        .filter((item): item is string => Boolean(item))
+      return parts.join(' / ') || '--'
+    }
     case 'punch_result':
     case 'attendance_result':
       return formatStatus(status)
@@ -17605,9 +19060,32 @@ function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecor
       return formatRecordMinutes(!isWorkday ? overtimeMinutes : 0)
     case 'holiday_overtime_duration':
       return formatRecordMinutes(recordMetaMinutes(record, ['holiday_overtime_minutes', 'holidayOvertimeMinutes']))
-    default:
-      return serverValue !== undefined ? formatRecordReportValue(serverValue) : '--'
+    default: {
+      if (serverValue === undefined) return '--'
+      const text = formatRecordReportValue(serverValue)
+      if (!text) return ''
+      return presentRecordInstantClock(text, attendanceRecordTimezone(record)) ?? text
+    }
   }
+}
+
+function recordReportColumnClass(column: { code: string }): string {
+  if (column.code === 'work_date') return 'attendance__record-col attendance__record-col--date'
+  if (column.code === 'employee_name') return 'attendance__record-col attendance__record-col--name'
+  return 'attendance__record-col'
+}
+
+function recordReportCellPresentation(record: AttendanceRecord, column: AttendanceRecordReportField) {
+  return presentRecordReportCell(formatRecordReportCell(record, column), attendanceRecordTimezone(record))
+}
+
+function recordReportCellText(record: AttendanceRecord, column: AttendanceRecordReportField): string {
+  return recordReportCellPresentation(record, column).text
+}
+
+function recordReportCellTitle(record: AttendanceRecord, column: AttendanceRecordReportField): string | undefined {
+  const presented = recordReportCellPresentation(record, column)
+  return presented.title || column.description || undefined
 }
 
 function parseJsonConfig(value: string): Record<string, any> | null {
@@ -19034,52 +20512,63 @@ async function loadImportTemplate() {
   }
 }
 
-async function downloadImportTemplateCsv() {
-  // One-click (import-section-ux design-lock D2): auto-load the template first
-  // instead of erroring, so the download works from a cold panel. Guard: only
-  // when the payload is untouched — loadImportTemplate overwrites
-  // importForm.payload, and a hand-edited (or mid-edit, unparseable) payload
-  // must never be silently destroyed by a template download.
-  if (!importTemplateGuide.value) {
-    const rawPayload = String(importForm.payload ?? '').trim()
-    if (rawPayload && rawPayload !== '{}') {
-      setStatus(
-        tr(
-          'Payload JSON has content but no template columns — fix or clear it, or click "Load template" to replace it.',
-          '负载 JSON 已有内容但无法生成模板——请修正/清空后再试，或点「加载模板」覆盖当前负载。',
-        ),
-        'error',
-      )
-      return
-    }
-    await loadImportTemplate()
-  }
-  const guide = importTemplateGuide.value
-  if (!guide) {
-    setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
-    return
-  }
-  const columns = guide.columns.length > 0
-    ? guide.columns
-    : guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
-  if (columns.length === 0) {
-    setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
-    return
-  }
-  // Harmonized with the selected-fields download (#3793 review NIT-3): ship a
-  // concrete example row instead of an empty line.
-  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
-  const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+function triggerAttendanceTemplateDownload(filename: string, csv: string) {
   const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
-  const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
   link.href = url
-  link.download = `${source}-attendance-template.csv`
+  link.download = filename
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+async function downloadImportTemplateCsv() {
+  // Prefer the CSV endpoint so the file matches the importer's mapped headers.
+  // A tunnel/origin failure (including HTTP 530) must still produce a file:
+  // fall back to the loaded guide, then to the built-in mapped template.
+  // Do not call loadImportTemplate here — that overwrites a hand-edited payload.
+  const profileId = importProfileId.value.trim()
+  const query = new URLSearchParams()
+  if (profileId) query.set('profileId', profileId)
+  const endpoint = query.size > 0
+    ? `/api/attendance/import/template.csv?${query.toString()}`
+    : '/api/attendance/import/template.csv'
+  try {
+    const response = await apiFetch(endpoint, { headers: { Accept: 'text/csv' } })
+    if (response.ok) {
+      const csvText = await response.text()
+      if (csvText.trim()) {
+        const source = normalizeText(selectedImportProfile.value?.source ?? 'dingtalk_csv') || 'dingtalk_csv'
+        triggerAttendanceTemplateDownload(`${source}-attendance-template.csv`, csvText)
+        setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+        return
+      }
+    }
+  } catch {
+    // Fall through to a local file. The button must not stop at a network error.
+  }
+
+  const guide = importTemplateGuide.value
+  const columns = guide && guide.columns.length > 0
+    ? guide.columns
+    : guide
+      ? guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
+      : []
+  if (columns.length > 0 && guide) {
+    const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
+    const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+    const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
+    triggerAttendanceTemplateDownload(`${source}-attendance-template.csv`, csv)
+    setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+    return
+  }
+
+  triggerAttendanceTemplateDownload(
+    'dingtalk_csv-attendance-template.csv',
+    buildCanonicalAttendanceImportTemplateCsv(),
+  )
   setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
 }
 
@@ -19123,11 +20612,9 @@ async function copyImportTemplateHeader() {
     setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
     return
   }
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-    await navigator.clipboard.writeText(headerLine)
+  if (await copyText(headerLine)) {
     setStatus(tr('Template header copied.', '模板表头已复制。'))
-  } catch {
+  } else {
     setStatus(tr('Copy failed — please copy the header preview manually.', '复制失败——请手动复制表头预览。'), 'error')
   }
 }
@@ -19445,14 +20932,20 @@ function isImportCommitTokenValid(): boolean {
   return Number.isFinite(expiresAt) && expiresAt - Date.now() > 60 * 1000
 }
 
-async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+async function ensureImportCommitToken(options: { forceRefresh?: boolean; orgId?: unknown } = {}): Promise<boolean> {
   if (options.forceRefresh) {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   }
   if (isImportCommitTokenValid()) return true
   try {
-    const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    const targetOrgId = typeof options.orgId === 'string' && options.orgId.trim()
+      ? options.orgId.trim()
+      : normalizedOrgId()
+    const response = await apiFetch('/api/attendance/import/prepare', {
+      method: 'POST',
+      body: JSON.stringify(targetOrgId ? { orgId: targetOrgId } : {}),
+    })
     if (response.status === 404) {
       // Legacy backend: commit token endpoints not available.
       importCommitToken.value = ''
@@ -19504,7 +20997,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
 
     const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
     const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: chunkPayload.orgId })
     if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
     if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
@@ -19596,7 +21089,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     message: tr('Queued async preview job.', '已排队异步预览任务。'),
   }
 
-  const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+  const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
   if (!tokenOk) return true
   if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -19613,7 +21106,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
-      const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+      const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!refreshed || !importCommitToken.value) {
         throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
       }
@@ -19726,7 +21219,7 @@ async function previewImport() {
       message: null,
     }
 
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) {
       if (importPreviewTask.value) {
         importPreviewTask.value = {
@@ -19932,7 +21425,7 @@ async function runImport() {
   applyImportScalabilityHints(payload, { mode: 'commit' })
   importLoading.value = true
   try {
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) return
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -19953,7 +21446,7 @@ async function runImport() {
         } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
-          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
           if (!refreshed || !importCommitToken.value) {
             throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
           }
@@ -20022,7 +21515,7 @@ async function runImport() {
       } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
         if (!refreshed || !importCommitToken.value) {
           throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
         }
@@ -20433,6 +21926,8 @@ function classifyStatusError(
     message = makeupCopy.message
     if (makeupCopy.hint) meta.hint = makeupCopy.hint
     if (makeupCopy.action) meta.action = makeupCopy.action
+  } else if (code === 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT') {
+    message = tr('This leave spans multiple attendance dates or shifts. Please split it into separate requests.', '该请假跨越多个考勤日期或班次，请拆分申请')
   } else if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
     message = tr('Import token expired before request completed.', '导入令牌已过期，请重试。')
     meta.hint = tr('Click retry to refresh commit token and submit again.', '点击重试以刷新导入令牌并重新提交。')
@@ -20854,6 +22349,8 @@ async function searchProvisionUsers(page: number) {
       page: String(page),
       pageSize: String(provisionSearchPageSize),
     })
+    const scope = attendanceAdminUserScopePayload()
+    Object.entries(scope).forEach(([key, value]) => params.set(key, value))
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -20881,24 +22378,61 @@ function selectProvisionUser(user: AttendanceAdminUserSearchItem) {
   void loadProvisioningUser()
 }
 
+function clearProvisioningReadState(): void {
+  provisionPermissions.value = []
+  provisionRoles.value = []
+  provisionUserIsAdmin.value = false
+  provisionHasLoaded.value = false
+}
+
 async function fetchProvisioningUser(userId: string) {
   provisionRoles.value = []
-  const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
+  let response: Response
+  try {
+    response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
+  } catch (error) {
+    clearProvisioningReadState()
+    throw error
+  }
   if (response.status === 403) {
     adminForbidden.value = true
+    clearProvisioningReadState()
     throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
-  const data: PermissionUserResponse = await response.json()
-  if (!response.ok) {
+  let data: PermissionUserResponse | null = null
+  try {
+    data = await response.json() as PermissionUserResponse
+  } catch {
+    clearProvisioningReadState()
+    throw new Error(tr('Failed to load permissions', '加载权限失败'))
+  }
+  if (!response.ok || !data) {
+    clearProvisioningReadState()
     throw new Error(readErrorMessage(data, tr('Failed to load permissions', '加载权限失败')))
   }
-  provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
-  provisionUserIsAdmin.value = Boolean(data.isAdmin)
+  if (permissionUserPayloadUnavailable(data)) {
+    clearProvisioningReadState()
+    throw new Error(tr(
+      'Permission source is unavailable; an empty list is not a loaded grant set.',
+      '权限来源暂时不可用，空列表不能当作已加载的权限。',
+    ))
+  }
+  const parsed = readAttendanceLegacyPermissionPayload(data, userId)
+  if (!parsed) {
+    clearProvisioningReadState()
+    throw new Error(tr(
+      'Permission payload does not match the requested user or is not a permission array.',
+      '权限回读与所请求用户不一致，或不是权限数组，不能当作已加载。',
+    ))
+  }
+  provisionPermissions.value = parsed.permissions
+  provisionUserIsAdmin.value = parsed.isAdmin
 }
 
 async function fetchProvisioningUserAccess(userId: string) {
-  const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access`)
-  if (response.status === 404) {
+  const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access?${attendanceAdminUserScopeQuery()}`)
+  const data = await response.json().catch(() => null)
+  if (canUseAttendanceAdminLegacyGlobalFallback(response.status, data)) {
     // Backward compatibility: old deployments only support /api/permissions/user/:id
     await fetchProvisioningUser(userId)
     return
@@ -20907,7 +22441,6 @@ async function fetchProvisioningUserAccess(userId: string) {
     adminForbidden.value = true
     throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
-  const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load user access', '加载用户访问权限失败')))
   }
@@ -20926,6 +22459,7 @@ async function loadProvisioningUser() {
     await fetchProvisioningUserAccess(userId)
     setProvisionStatus(tr(`Loaded ${provisionPermissions.value.length} permission(s).`, `已加载 ${provisionPermissions.value.length} 项权限。`))
   } catch (error: any) {
+    clearProvisioningReadState()
     setProvisionStatus(readErrorMessage(error, tr('Failed to load permissions', '加载权限失败')), 'error')
   } finally {
     provisionLoading.value = false
@@ -20945,14 +22479,14 @@ async function grantProvisioningRole() {
     // Prefer attendance-scoped role assignment (role templates) when available.
     const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
       method: 'POST',
-      body: JSON.stringify({ template: role }),
+      body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (modern.status !== 404) {
+    const modernData = await modern.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
       if (modern.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
         throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
       }
@@ -20999,14 +22533,14 @@ async function revokeProvisioningRole() {
     // Prefer attendance-scoped role unassignment when available.
     const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
       method: 'POST',
-      body: JSON.stringify({ template: role }),
+      body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (modern.status !== 404) {
+    const modernData = await modern.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
       if (modern.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
         throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
       }
@@ -21058,10 +22592,11 @@ async function previewProvisionBatchUsers() {
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid }),
+      body: JSON.stringify({ userIds: valid, ...attendanceAdminUserScopePayload() }),
     })
 
-    if (response.status === 404) {
+    const data = await response.json().catch(() => null)
+    if (canUseAttendanceAdminLegacyGlobalFallback(response.status, data)) {
       // Backward compatibility: old deployments may not expose this endpoint.
       clearProvisionBatchPreview()
       provisionBatchPreviewRequested.value = valid.length
@@ -21073,7 +22608,6 @@ async function previewProvisionBatchUsers() {
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
 
-    const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to preview batch users', '批量预览用户失败')))
     }
@@ -21108,14 +22642,14 @@ async function grantProvisioningRoleBatch() {
   try {
     const batch = await apiFetch('/api/attendance-admin/users/batch/roles/assign', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid, template: role }),
+      body: JSON.stringify({ userIds: valid, template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (batch.status !== 404) {
+    const batchData = await batch.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(batch.status, batchData)) {
       if (batch.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
         throw new Error(readErrorMessage(batchData, tr('Failed to batch assign role', '批量分配角色失败')))
       }
@@ -21137,14 +22671,14 @@ async function grantProvisioningRoleBatch() {
       try {
         const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
           method: 'POST',
-          body: JSON.stringify({ template: role }),
+          body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
         })
-        if (modern.status !== 404) {
+        const modernData = await modern.json().catch(() => null)
+        if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
           if (modern.status === 403) {
             adminForbidden.value = true
             throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
-          const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
             throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
           }
@@ -21201,14 +22735,14 @@ async function revokeProvisioningRoleBatch() {
   try {
     const batch = await apiFetch('/api/attendance-admin/users/batch/roles/unassign', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid, template: role }),
+      body: JSON.stringify({ userIds: valid, template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (batch.status !== 404) {
+    const batchData = await batch.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(batch.status, batchData)) {
       if (batch.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
         throw new Error(readErrorMessage(batchData, tr('Failed to batch remove role', '批量移除角色失败')))
       }
@@ -21230,14 +22764,14 @@ async function revokeProvisioningRoleBatch() {
       try {
         const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
           method: 'POST',
-          body: JSON.stringify({ template: role }),
+          body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
         })
-        if (modern.status !== 404) {
+        const modernData = await modern.json().catch(() => null)
+        if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
           if (modern.status === 403) {
             adminForbidden.value = true
             throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
-          const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
             throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
           }
@@ -21439,19 +22973,50 @@ function resetPunchOutdoorNote() {
   punchOutdoorNoteDraft.value = ''
 }
 
+// Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+// runs the post-punch refresh (refreshAll() or, for G1, loadRequests())
+// AFTER `punching` has already been released, tracked by
+// `refreshingAfterPunchCount` instead so it can drive a non-blocking
+// indicator without holding the punch button. Non-fatal by construction:
+// refreshAll() already catches all of its own task failures internally and
+// reports them via its own setStatusFromError, so it never rejects; the G1
+// loadRequests() call here gets the same best-effort `catch` the old
+// in-try `.catch(() => {})` gave it, preserving identical error semantics.
+async function runPostPunchRefresh(task: () => Promise<unknown>): Promise<void> {
+  refreshingAfterPunchCount.value += 1
+  try {
+    await task()
+  } catch {
+    // best-effort — see comment above; nothing else observes this rejection.
+  } finally {
+    refreshingAfterPunchCount.value = Math.max(0, refreshingAfterPunchCount.value - 1)
+  }
+}
+
 async function punch(eventType: PunchEventType, retryNote?: string) {
+  // Check before touching the unsaved note as well as at the final HTTP send.
+  try { attendanceSessionGuard.assertCurrent() } catch { return }
   punching.value = true
   // A fresh direct punch (not a G2 note retry) starts clean; the retry call
   // itself (retryNote set) must NOT clear the form it is trying to resolve.
   if (typeof retryNote !== 'string') {
     resetPunchOutdoorNote()
   }
+  // Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+  // set below ONLY on the success path, to the post-punch refresh (if any)
+  // this attempt's outcome calls for. `punching` is released in `finally`
+  // right after the outcome banner/state is set — BEFORE this refresh
+  // starts running (see call site after the try/catch/finally) — so the
+  // button never blocks on it. Left null on the error path: no refresh
+  // happens on a punch failure, unchanged from before.
+  let postPunchRefresh: (() => Promise<unknown>) | null = null
   try {
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     const orgValue = normalizedOrgId()
-    const basePayload: PunchRetryBasePayload = orgValue
-      ? { eventType, timezone, orgId: orgValue }
-      : { eventType, timezone }
+    const basePayload: PunchRetryBasePayload = buildPunchBasePayload(
+      eventType,
+      selfServiceRuleTimezone(),
+      orgValue,
+    )
     // Hard boundary (design-lock §4): no geolocation collected, no injected
     // meta.outdoor — the only extra field ever sent is the backend-accepted
     // meta.note string, and only as part of a G2 user-initiated retry.
@@ -21475,13 +23040,14 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       // message into an unrelated "refresh failed" error), instead of the
       // full refreshAll() a normal recorded punch still triggers below.
       if (showOverview.value) {
-        await loadRequests().catch(() => {})
+        postPunchRefresh = () => loadRequests()
       }
     } else {
-      await refreshAll()
+      postPunchRefresh = () => refreshAll()
     }
   } catch (error: any) {
     const apiError = error as { status?: number; code?: string } | null
+    if (!attendanceSessionGuard.isCurrent()) return
     const errorOutcome = classifyPunchErrorOutcome({ status: apiError?.status, code: apiError?.code }, tr)
     if (errorOutcome?.kind === 'noteRequired') {
       // G2: enum-strict — only this exact code opens the inline note form.
@@ -21501,7 +23067,14 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh', 'punch')
     }
   } finally {
+    // Release the button now — the POST has settled and the outcome
+    // banner/state above is already shown. This is the ONLY place
+    // `punching` is written back to false, and it always runs before
+    // `postPunchRefresh` (assigned above, executed below) starts.
     punching.value = false
+  }
+  if (postPunchRefresh) {
+    await runPostPunchRefresh(postPunchRefresh)
   }
 }
 
@@ -21531,15 +23104,21 @@ async function loadSummary() {
 }
 
 async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
+  const scope = loadedHistoryScope
+  if (!scope) return
+  const version = historyRecordsLoadVersion
+  const isCurrentScope = () => scope === loadedHistoryScope && version === historyRecordsLoadVersion
   recordTimelineLoadingId.value = record.id
   try {
     const query = buildQuery({
       from: record.work_date,
       to: record.work_date,
-      userId: normalizedUserId(),
+      orgId: scope.orgId || undefined,
+      userId: scope.userId,
     })
     const response = await apiFetch(`/api/attendance/punch/events?${query.toString()}`)
     const data = await response.json().catch(() => null)
+    if (!isCurrentScope()) return
     if (response.status === 404 || response.status === 405) {
       recordTimelineSupported.value = false
       recordTimelineErrorById.value = {
@@ -21568,6 +23147,7 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
       recordTimelineErrorById.value = next
     }
   } catch (error: any) {
+    if (!isCurrentScope()) return
     recordTimelineErrorById.value = {
       ...recordTimelineErrorById.value,
       [record.id]: readErrorMessage(error, tr('Failed to load raw punch timeline', '加载原始打卡时间线失败')),
@@ -21580,24 +23160,75 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
 }
 
 async function loadRecords() {
-  const query = buildQuery({
+  const recordsStartedAt = heroClockNow.value
+  const version = ++historyRecordsLoadVersion
+  loadedHistoryScope = null
+  const scope = {
     from: fromDate.value,
     to: toDate.value,
-    page: String(recordsPage.value),
-    pageSize: String(recordsPageSize),
-    orgId: normalizedOrgId(),
+    page: recordsPage.value,
+    orgId: normalizedOrgId() ?? '',
     userId: normalizedUserId(),
+  }
+  const query = buildQuery({
+    ...scope,
+    page: String(scope.page),
+    pageSize: String(recordsPageSize),
+    orgId: scope.orgId || undefined,
   })
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
   }
+  if (version !== historyRecordsLoadVersion) return
   resetRecordTimelineState()
   records.value = data.data.items
   recordsTotal.value = data.data.total
+  loadedHistoryScope = { ...scope, total: data.data.total }
   recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
   recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
+  if (showOverview.value && !loading.value) {
+    const reuseHistory = !recordsStartedAt || formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    await loadTodayAttendanceRecord(reuseHistory)
+  }
+}
+
+
+async function loadTodayAttendanceRecord(reuseHistory = true): Promise<boolean> {
+  const version = ++todayRecordLoadVersion
+  const date = todayWorkDateKey.value
+  todayRecordState.value = 'loading'
+  todayRecord.value = null
+  loadedTodayDate.value = ''
+  if (!showOverview.value || !date || !attendanceSessionGuard.isCurrent()) return false
+  const isCurrent = () => version === todayRecordLoadVersion
+    && date === todayWorkDateKey.value && attendanceSessionGuard.isCurrent()
+  try {
+    const fromHistory = selectTodayAttendanceRecord(records.value, date)
+    let record = fromHistory
+    if (!reuseHistory || !canReuseAttendanceHistoryForToday(
+      loadedHistoryScope, date, attendanceSessionGuard.orgId, currentUserId.value,
+      records.value.length, Boolean(fromHistory),
+    )) {
+      const query = buildQuery({
+        from: date, to: date, page: '1', pageSize: '1',
+        orgId: attendanceSessionGuard.orgId || undefined,
+      })
+      const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
+      const data = await response.json()
+      if (!response.ok || !data.ok) throw createApiError(response, data, 'TODAY_RECORD_UNAVAILABLE')
+      record = selectTodayAttendanceRecord(data.data.items, date)
+    }
+    if (!isCurrent()) return false
+    todayRecord.value = record
+    loadedTodayDate.value = date
+    todayRecordState.value = 'ready'
+    return true
+  } catch {
+    if (isCurrent()) todayRecordState.value = 'error'
+    return false
+  }
 }
 
 async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
@@ -21726,7 +23357,8 @@ function employeeScheduleDispatchTargetShift(item: AttendanceRequest): string {
   if (label) return label
   const shiftId = String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '').trim()
   if (!shiftId) return tr('Deleted or unavailable shift', '班次已删除或不可用')
-  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
+  return shifts.value.find(shift => shift.id === shiftId)?.name
+    ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
 
 function employeeScheduleDispatchSlot(item: AttendanceRequest): number {
@@ -21850,7 +23482,8 @@ async function loadFocusedAttendanceRequest(): Promise<AttendanceRequest | null>
   const requestId = focusedAttendanceRequestId.value
   if (!requestId) return null
 
-  const response = await apiFetch(`/api/attendance/requests/${encodeURIComponent(requestId)}`)
+  const query = buildQuery({ orgId: normalizedOrgId() })
+  const response = await apiFetch(`/api/attendance/requests/${encodeURIComponent(requestId)}?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load focused request', '加载待处理申请失败')))
@@ -22058,9 +23691,43 @@ async function loadRequestReport() {
   }
 }
 
+function validateReportDateRange(): boolean {
+  if (isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return true
+
+  setStatus(
+    tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
+    'error',
+  )
+  return false
+}
+
+function consumeDefaultHistoryRangeAlignment(): boolean {
+  if (defaultHistoryRangeAligned) return false
+  const todayKey = todayWorkDateKey.value
+  if (!todayKey) return false
+  defaultHistoryRangeAligned = true
+  const aligned = alignDefaultHistoryRangeToRuleToday({
+    fromDate: fromDate.value,
+    toDate: toDate.value,
+    todayKey,
+    initialFromDate: initialHistoryFromDate,
+    initialToDate: initialHistoryToDate,
+  })
+  if (!aligned.changed) return false
+  fromDate.value = aligned.fromDate
+  toDate.value = aligned.toDate
+  if (lastCalendarEffectiveRange.value) {
+    lastCalendarEffectiveRange.value = { from: aligned.fromDate, to: aligned.toDate }
+  }
+  return true
+}
+
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
+  const refreshStartedAt = heroClockNow.value
   loading.value = true
+  todayRecordLoadVersion += 1
+  todayRecordState.value = 'loading'
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   // PR2 review fix (Codex Blocking #1): commit the userId for the overview
@@ -22074,8 +23741,11 @@ async function refreshAll(): Promise<boolean> {
   try {
     const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
     if (showOverview.value) {
+      tasks.push(loadSelfAttendanceRules())
+    }
+    if (showOverview.value) {
       tasks.push(
-        loadSelfAttendanceRules(),
+        loadEmployeeQuickActionIcons(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),
         loadShiftSwapRequests(),
@@ -22084,6 +23754,18 @@ async function refreshAll(): Promise<boolean> {
     const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
+    if (consumeDefaultHistoryRangeAlignment()) {
+      calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+      const reloaded = await Promise.allSettled([
+        loadSummary(),
+        loadRecords(),
+        loadAnomalies(),
+        loadRequestReport(),
+        loadHolidays(),
+      ])
+      const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (reloadFailed) throw reloadFailed.reason
+    }
     if (showReports.value) {
       markReportsDatasetLoaded()
     }
@@ -22097,6 +23779,8 @@ async function refreshAll(): Promise<boolean> {
     }
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
+    const reuseHistory = !refreshStartedAt || formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    if (showOverview.value && !await loadTodayAttendanceRecord(reuseHistory)) success = false
     loading.value = false
   }
   return success
@@ -22111,6 +23795,8 @@ async function refreshOverviewWithStatus() {
 }
 
 async function reloadReportsWithStatus() {
+  if (!validateReportDateRange()) return
+
   loading.value = true
   recordsPage.value = 1
   beginReportsDatasetRefresh()
@@ -22172,6 +23858,8 @@ async function reloadAnomaliesWithStatus() {
 }
 
 async function reloadRequestReportWithStatus() {
+  if (!validateReportDateRange()) return
+
   try {
     await loadRequestReport()
     setStatus(
@@ -22185,25 +23873,6 @@ async function reloadRequestReportWithStatus() {
       error,
       tr('Failed to load request report', '加载申请报表失败'),
       requestReportTimezoneContextHint.value,
-      'refresh',
-    )
-  }
-}
-
-async function reloadRecordsWithStatus() {
-  try {
-    await loadRecords()
-    setStatus(
-      appendStatusContext(
-        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
-        recordsTimezoneContextHint.value,
-      ),
-    )
-  } catch (error: any) {
-    setStatusFromErrorWithContext(
-      error,
-      tr('Failed to load records', '加载记录失败'),
-      recordsTimezoneContextHint.value,
       'refresh',
     )
   }
@@ -22252,9 +23921,11 @@ function validateRequestForm(): string | null {
   const hasIn = Boolean(requestForm.requestedInAt)
   const hasOut = Boolean(requestForm.requestedOutAt)
 
+  const times = recordRequestTimes()
+  if (!times) return tr('Confirm the target shift timezone and any repeated time offset; skipped local times are unavailable.', '请确认目标班次时区及重复时间的偏移；不存在的当地时间不可用。')
   if (hasIn && hasOut) {
-    const inTime = new Date(requestForm.requestedInAt).getTime()
-    const outTime = new Date(requestForm.requestedOutAt).getTime()
+    const inTime = new Date(times.requestedInAt).getTime()
+    const outTime = new Date(times.requestedOutAt).getTime()
     if (Number.isFinite(inTime) && Number.isFinite(outTime) && outTime <= inTime) {
       return tr('End time must be after start time', '结束时间必须晚于开始时间')
     }
@@ -22301,6 +23972,14 @@ function validateRequestForm(): string | null {
   return null
 }
 
+function recordRequestTimes(): { requestedInAt: string; requestedOutAt: string; expectedTimezoneContextFingerprint?: string } | null {
+  if (requestForm.requestType === 'shift_swap') return { requestedInAt: '', requestedOutAt: '' }
+  const source = recordRequestPrefill.value
+  if (source && (!attendanceSessionGuard.isCurrent()
+    || !readAttendanceRecordRequestPrefill(source, getAuthPrincipalKey(), attendanceSessionGuard.orgId))) return null
+  return requestTimezone.times()
+}
+
 async function submitRequest() {
   if (requestSubmitting.value) return
   requestSubmitting.value = true
@@ -22333,11 +24012,14 @@ async function submitRequest() {
     }
     const minutesValue = String(requestForm.minutes ?? '').trim()
     const minutes = minutesValue.length > 0 ? Number(minutesValue) : undefined
+    const times = recordRequestTimes()
+    if (!times) return
     const payload = {
       workDate: requestForm.workDate,
       requestType: requestForm.requestType,
-      requestedInAt: requestForm.requestedInAt || undefined,
-      requestedOutAt: requestForm.requestedOutAt || undefined,
+      requestedInAt: times.requestedInAt || undefined,
+      requestedOutAt: times.requestedOutAt || undefined,
+      expectedTimezoneContextFingerprint: times.expectedTimezoneContextFingerprint,
       reason: requestForm.reason || undefined,
       leaveTypeId: requestForm.leaveTypeId || undefined,
       overtimeRuleId: requestForm.overtimeRuleId || undefined,
@@ -22749,6 +24431,11 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
   settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
   settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
+  const quickIcons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
+  adminConfig.settingsForm.employeeQuickActionIcons.makeup = quickIcons.makeup
+  adminConfig.settingsForm.employeeQuickActionIcons.leave = quickIcons.leave
+  adminConfig.settingsForm.employeeQuickActionIcons.overtime = quickIcons.overtime
+  adminConfig.settingsForm.employeeQuickActionIcons.swap = quickIcons.swap
 }
 
 function addHolidayOverride() {
@@ -22796,6 +24483,7 @@ async function loadSettings() {
       adminForbidden.value = true
       attendanceResultEditAdminCapability.value = 'forbidden'
       attendanceSettings.value = null
+      attendanceRuntimeGates.value = null
       return
     }
     const data = await response.json()
@@ -22805,6 +24493,7 @@ async function loadSettings() {
     adminForbidden.value = false
     attendanceResultEditAdminCapability.value = 'allowed'
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
+    attendanceRuntimeGates.value = parseAttendanceRuntimeGates(data.runtimeGates)
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
     applyOvertimeBankPolicyToForm(data.data || {})
@@ -22820,6 +24509,7 @@ async function loadSettings() {
     applyAnnualPolicyToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
+    attendanceRuntimeGates.value = null
     attendanceResultEditAdminCapability.value = 'unknown'
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
   } finally {
@@ -23062,7 +24752,19 @@ async function saveReportDigestPolicy(): Promise<void> {
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
     applyReportDigestPolicyToForm(savedSettings)
-    setStatus(tr('Report digest subscription saved', '统计通知订阅已保存'), 'info')
+    // A1: saving the subscription must not read as "digests are now being sent" - append the env-gate fact.
+    setStatus(
+      withScheduledFeatureSaveNotice(
+        tr,
+        {
+          feature: 'reportDigest',
+          configured: reportDigestConfiguredState.value,
+          gate: attendanceRuntimeGates.value?.reportDigest ?? null,
+        },
+        tr('Report digest subscription saved', '统计通知订阅已保存'),
+      ),
+      'info',
+    )
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save report digest subscription', '保存统计通知订阅失败'), 'save-settings')
   } finally {
@@ -23177,6 +24879,18 @@ const counterpartyShiftSwapAssignmentOptions = computed(() => {
     && (!requesterUserId || item.assignment.userId !== requesterUserId),
   )
 })
+
+function toShiftSwapCardOption(item: AttendanceAssignmentItem): { id: string; label: string } {
+  return { id: item.assignment.id, label: formatShiftSwapAssignmentOption(item) }
+}
+
+const requesterShiftSwapCardOptions = computed(() =>
+  requesterShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
+
+const counterpartyShiftSwapCardOptions = computed(() =>
+  counterpartyShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
 
 function applyTemporaryReplacementDefaults(item: AttendanceAssignmentItem | null): void {
   if (!item) return
@@ -24054,6 +25768,7 @@ async function saveSettings() {
       ipAllowlist,
       geoFence,
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
+      employeeQuickActionIcons: resolveEmployeeQuickActionIcons(adminConfig.settingsForm.employeeQuickActionIcons),
     }
 
     const response = await apiFetchWithTimeout('/api/attendance/settings', {
@@ -24072,6 +25787,7 @@ async function saveSettings() {
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
     applySettingsToForm(savedSettings)
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(savedSettings.employeeQuickActionIcons)
     setStatus(tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
@@ -24320,6 +26036,8 @@ interface AttendanceSelfRulesData {
   userId?: string
   orgId?: string
   resolvedForDate?: string
+  resolvedAt?: string
+  attendanceTimeContext?: unknown
   assignment?: {
     attendanceGroups?: AttendanceSelfRulesGroupSummary[]
     scheduleGroups?: AttendanceSelfRulesGroupSummary[]
@@ -24354,10 +26072,25 @@ interface AttendanceSelfRulesData {
 }
 
 const annualBalanceUserId = ref('')
+const annualBalanceUserDisplayName = ref('')
+const annualBalanceQueriedName = ref('')
 const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
+const annualBalanceSubjectLabel = computed(() => formatAnnualBalanceSubject(
+  annualBalanceData.value?.userId,
+  annualBalanceQueriedName.value,
+))
 
-const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
+const selfRulesSnapshot = ref<AttendanceSelfRulesData | null>(null)
+const currentTimeContext = computed(() => parseAttendanceCurrentTimeContext(selfRulesSnapshot.value?.attendanceTimeContext))
+const lastAlignedRuleZone = ref<string | null>(null)
+let selfRulesRoundVersion = 0
+const selfRulesData = computed(() => {
+  const snapshot = selfRulesSnapshot.value
+  const zone = currentAttendanceTimezone(currentTimeContext.value, heroClockNow.value)
+  const date = formatAttendanceDateKey(heroClockNow.value, zone)
+  return snapshot && date && date === snapshot.resolvedForDate ? snapshot : null
+})
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
@@ -24477,8 +26210,9 @@ const selectedLeaveType = computed<AttendanceLeaveType | null>(
 )
 
 const leaveQuickFillShiftWindow = computed<AttendanceLeaveQuickFillShiftWindow | null>(() => {
-  const rule = selfRulesData.value?.runtimeRule
-  if (!rule) return null
+  const rule = requestTimezone.target.value?.rule
+  if (!requestTimezone.ready.value || !rule
+    || typeof rule.workStartTime !== 'string' || typeof rule.workEndTime !== 'string') return null
   return { workStartTime: rule.workStartTime, workEndTime: rule.workEndTime }
 })
 
@@ -24588,23 +26322,84 @@ async function loadAnnualSelfBalance(leaveTypeCode: string = 'annual'): Promise<
   }
 }
 
-async function loadSelfAttendanceRules(): Promise<void> {
-  selfRulesData.value = null
+async function loadEmployeeQuickActionIcons(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/attendance/employee-quick-action-icons')
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) return
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(data.data)
+  } catch {
+    // Visual-only channel: keep last known / defaults. Do not fail overview refresh.
+  }
+}
+
+function invalidateServerClock(): void {
+  selfRulesRoundVersion += 1
+  serverClock.invalidate()
+  heroClockNow.value = null
+  selfRulesSnapshot.value = null
+  selfRulesLoading.value = false
+  selfRulesError.value = null
+  calendarTimezoneError.value = null
+}
+
+async function loadSelfAttendanceRules(background = false): Promise<void> {
+  const round = ++selfRulesRoundVersion
+  const current = () => round === selfRulesRoundVersion && !document.hidden
+    && attendanceSessionGuard.isCurrent()
+  if (!current()) return
+  const initialDate = formatAttendanceDateKey(serverClock.now(performance.now()), lastAlignedRuleZone.value)
+  if (!background) {
+    selfRulesSnapshot.value = null
+    serverClock.invalidate()
+    heroClockNow.value = null
+  }
   selfRulesLoading.value = true
   selfRulesError.value = null
+  let asOf = initialDate
+  let timezoneFailure: string | null = null
   try {
-    const response = await apiFetch('/api/attendance/rules/me')
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.ok) {
-      throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+    for (let leg = 0; leg < 2; leg += 1) {
+      const sample = serverClock.beginSample()
+      const sent = performance.now()
+      const response = await apiFetch(`/api/attendance/rules/me${asOf ? `?asOf=${asOf}` : ''}`, {
+        // Self subject/org come from the token, including on the corrective read.
+        omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
+      })
+      const received = performance.now()
+      const data = await response.json().catch(() => null)
+      if (!current()) return
+      if (!response.ok || !data?.ok) {
+        timezoneFailure = attendanceTimezoneErrorMessage(data?.error?.code, tr)
+        serverClock.fail(sample)
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      const snapshot = data.data as AttendanceSelfRulesData | null
+      const timeContext = parseAttendanceCurrentTimeContext(snapshot?.attendanceTimeContext)
+      if (!timeContext || timeContext.resolvedForInstant !== snapshot?.resolvedAt
+        || !serverClock.accept(sample, snapshot?.resolvedAt, sent, received)) {
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      updateHeroClock()
+      const zone = currentAttendanceTimezone(timeContext, heroClockNow.value)
+      const target = formatAttendanceDateKey(heroClockNow.value, zone)
+      if (target && snapshot?.resolvedForDate === target) {
+        lastAlignedRuleZone.value = zone
+        selfRulesSnapshot.value = snapshot
+        return
+      }
+      selfRulesSnapshot.value = null
+      if (!target || leg === 1) throw new Error('ATTENDANCE_RULES_DATE_UNAVAILABLE')
+      asOf = target
     }
-    selfRulesData.value = data.data && typeof data.data === 'object'
-      ? data.data as AttendanceSelfRulesData
-      : null
-  } catch (error: any) {
-    selfRulesError.value = readErrorMessage(error, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+  } catch (error) {
+    if (!current()) return
+    if (!(error instanceof Error) || error.message !== 'ATTENDANCE_RULES_DATE_UNAVAILABLE') serverClock.invalidate()
+    updateHeroClock()
+    selfRulesSnapshot.value = null
+    selfRulesError.value = timezoneFailure ?? tr('Server time or today’s attendance rules unavailable. Refresh to try again; punch availability must be confirmed by the server.', '服务器时间或今日考勤规则不可用，请刷新重试；能否打卡需由服务器确认。')
   } finally {
-    selfRulesLoading.value = false
+    if (current()) selfRulesLoading.value = false
   }
 }
 
@@ -24614,6 +26409,7 @@ async function loadAnnualLeaveBalance(leaveTypeCode: string = 'annual') {
   // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
   // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
   annualBalanceData.value = null
+  annualBalanceQueriedName.value = ''
   const targetUser = annualBalanceUserId.value.trim()
   if (!targetUser) {
     setStatus(tr('Enter a user ID to view the annual leave balance', '请输入用户 ID 查询年假余额'), 'error')
@@ -24632,6 +26428,7 @@ async function loadAnnualLeaveBalance(leaveTypeCode: string = 'annual') {
       throw new Error(readErrorMessage(data, tr('Failed to load annual leave balance', '加载年假余额失败')))
     }
     adminForbidden.value = false
+    annualBalanceQueriedName.value = annualBalanceUserDisplayName.value.trim()
     annualBalanceData.value = data.data as AnnualLeaveBalanceData
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load annual leave balance', '加载年假余额失败')), 'error')
@@ -24691,15 +26488,25 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
     annualPolicyForm.timezone = p.timezone || ''
     annualPolicyForm.scheduledTriggerEnabled = !!p.scheduledTrigger?.enabled
   }
+  // A1: remember what the SERVER returned (load or save response), separate from the editable form above.
+  annualPolicySaved.value = {
+    engineEnabled: !!p?.enabled,
+    scheduledTriggerEnabled: !!p?.scheduledTrigger?.enabled,
+  }
   annualPolicyLoaded.value = true
 }
 
+// A1: this card's own "Reload policy" reads the same GET /api/attendance/settings as loadSettings(), so it follows the
+// same rule: a denied (403) or failed read is "not loaded" and the previous gate report must not survive it - a stale
+// "server run switches are on" would otherwise read as current. Only the gate report is dropped; the saved annual
+// policy and the settings document stay as last loaded, like the annual form beside the card.
 async function loadAnnualPolicy() {
   annualPolicyLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/settings?${buildQuery({ orgId: normalizedOrgId() }).toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceRuntimeGates.value = null
       return
     }
     const data = await response.json()
@@ -24707,8 +26514,10 @@ async function loadAnnualPolicy() {
       throw new Error(readErrorMessage(data, tr('Failed to load annual leave policy', '加载年假策略失败')))
     }
     adminForbidden.value = false
+    attendanceRuntimeGates.value = parseAttendanceRuntimeGates(data.runtimeGates)
     applyAnnualPolicyToForm((data.data || {}) as AttendanceSettings)
   } catch (error: any) {
+    attendanceRuntimeGates.value = null
     setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
   } finally {
     annualPolicyLoading.value = false
@@ -24787,7 +26596,19 @@ async function saveAnnualPolicy() {
     // Backfill from the server's normalized response (falling back to the payload), mirroring the other policy
     // cards — so the form reflects exactly what persisted (e.g. a malformed ladder the backend reverted).
     applyAnnualPolicyToForm((data.data || payload) as AttendanceSettings)
-    setStatus(tr('Annual leave policy saved', '年假策略已保存'), 'info')
+    // A1: saving the switch must not read as "it now runs" - append the env-gate fact, if any.
+    setStatus(
+      withScheduledFeatureSaveNotice(
+        tr,
+        {
+          feature: 'annualLeaveAccrualScheduled',
+          configured: annualAccrualConfiguredState.value,
+          gate: attendanceRuntimeGates.value?.annualLeaveAccrualScheduled ?? null,
+        },
+        tr('Annual leave policy saved', '年假策略已保存'),
+      ),
+      'info',
+    )
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
   } finally {
@@ -24877,20 +26698,98 @@ async function annualOpsPost(path: string, body: Record<string, unknown>, fallba
   return data.data
 }
 function annualOpsIdempotencyKey(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  } catch { /* fall through */ }
-  return `annual-adjust-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+  return randomUuid()
 }
 
 // -- Card 1: manual adjustment (client preview; backend 422 final; returns {id,delta,applied,alreadyApplied}) --
+interface AnnualAdjustPersonHit { id: string; email: string; name: string | null }
 interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alreadyApplied: boolean }
 const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
+const annualAdjustPersonText = ref('')
+const annualAdjustPersonHits = ref<AnnualAdjustPersonHit[]>([])
+const annualAdjustPersonSearchPending = ref(false)
+const annualAdjustPersonSearchSettled = ref(false)
+let annualAdjustPersonSearchSeq = 0
+const annualAdjustPersonSearchEmpty = computed(() => (
+  annualAdjustPersonText.value.trim().length > 0
+  && annualAdjustPersonHits.value.length === 0
+  && annualAdjustPersonSearchSettled.value
+  && !annualAdjustPersonSearchPending.value
+))
+const annualAdjustReasonPresets = computed(() => [
+  tr('Grant', '补发'),
+  tr('Reversal', '冲正'),
+  tr('Manual correction', '手工更正'),
+])
 const annualAdjustSubmitting = ref(false)
 const annualAdjustResult = ref<AnnualAdjustResult | null>(null)
 const annualAdjustError = ref<string | null>(null)
 const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
 const annualAdjustIdemKey = ref('')
+
+function annualAdjustPersonLabel(person: AnnualAdjustPersonHit): string {
+  const name = person.name?.trim() || ''
+  const email = person.email.trim()
+  if (name && email && email !== name) return `${name}（${email}）`
+  return name || email || person.id
+}
+
+function onAnnualAdjustPersonInput(event: Event): void {
+  const value = (event.target as HTMLInputElement).value
+  annualAdjustPersonText.value = value
+  annualAdjustForm.userId = value.trim()
+  annualAdjustPersonHits.value = []
+  annualAdjustPersonSearchSettled.value = false
+  void searchAnnualAdjustPeople(value)
+}
+
+function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
+  annualAdjustForm.userId = person.id
+  annualAdjustPersonText.value = person.name?.trim() || person.email.trim() || person.id
+  annualAdjustPersonHits.value = []
+  annualAdjustPersonSearchPending.value = false
+  annualAdjustPersonSearchSettled.value = false
+}
+
+async function searchAnnualAdjustPeople(query: string): Promise<void> {
+  const q = query.trim()
+  const seq = ++annualAdjustPersonSearchSeq
+  if (!q) {
+    annualAdjustPersonHits.value = []
+    annualAdjustPersonSearchPending.value = false
+    annualAdjustPersonSearchSettled.value = false
+    return
+  }
+  annualAdjustPersonSearchPending.value = true
+  annualAdjustPersonSearchSettled.value = false
+  try {
+    const params = new URLSearchParams({ q, ...attendanceAdminUserScopePayload() })
+    const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (seq !== annualAdjustPersonSearchSeq) return
+    if (!response.ok) {
+      annualAdjustPersonHits.value = []
+      return
+    }
+    const data = await response.json()
+    if (seq !== annualAdjustPersonSearchSeq) return
+    const items = data?.data?.items
+    annualAdjustPersonHits.value = Array.isArray(items)
+      ? items.slice(0, 8).map((item: { id?: string; email?: string | null; name?: string | null }) => ({
+        id: String(item?.id || '').trim(),
+        email: typeof item?.email === 'string' ? item.email.trim() : '',
+        name: typeof item?.name === 'string' ? item.name : null,
+      })).filter((item: AnnualAdjustPersonHit) => item.id)
+      : []
+  } catch {
+    if (seq !== annualAdjustPersonSearchSeq) return
+    annualAdjustPersonHits.value = []
+  } finally {
+    if (seq === annualAdjustPersonSearchSeq) {
+      annualAdjustPersonSearchPending.value = false
+      annualAdjustPersonSearchSettled.value = Boolean(q)
+    }
+  }
+}
 
 // OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
 // byte identical to the prior hardcoded literal for every existing (arg-less) caller.
@@ -24899,7 +26798,7 @@ async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<vo
   annualAdjustError.value = null
   annualAdjustPreview.value = null
   if (!userId) {
-    annualAdjustError.value = tr('Enter a user ID first', '请先输入用户 ID')
+    annualAdjustError.value = tr('Choose a person first', '请先选择人员')
     return
   }
   try {
@@ -24987,6 +26886,8 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
 // shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
 // the bulk-apply-schedule / batch-anomaly two-step precedent.
 const annualBulkAdjustUserPickerValue = ref('')
+const annualBulkAdjustPendingLabel = ref('')
+const annualBulkAdjustUserLabels = ref<Record<string, string>>({})
 const annualBulkAdjustUserIds = ref<string[]>([])
 const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
 const annualBulkAdjustError = ref<string | null>(null)
@@ -24996,17 +26897,33 @@ const annualBulkAdjust = reactive<{
   results: Record<string, BulkBalanceAdjustRowResult>
 }>({ submitting: false, rows: [], results: {} })
 
+function rememberAnnualBulkAdjustLabel(name: string): void {
+  annualBulkAdjustPendingLabel.value = name
+}
+
+function annualBulkAdjustUserLabel(userId: string): string {
+  return annualBulkAdjustUserLabels.value[userId] || userId
+}
+
 function addAnnualBulkAdjustUser(): void {
   const userId = annualBulkAdjustUserPickerValue.value.trim()
   if (!userId) return
   if (!annualBulkAdjustUserIds.value.includes(userId)) {
     annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
+    const label = annualBulkAdjustPendingLabel.value.trim()
+    if (label && label !== userId) {
+      annualBulkAdjustUserLabels.value = { ...annualBulkAdjustUserLabels.value, [userId]: label }
+    }
   }
   annualBulkAdjustUserPickerValue.value = ''
+  annualBulkAdjustPendingLabel.value = ''
 }
 
 function removeAnnualBulkAdjustUser(userId: string): void {
   annualBulkAdjustUserIds.value = annualBulkAdjustUserIds.value.filter(id => id !== userId)
+  const labels = { ...annualBulkAdjustUserLabels.value }
+  delete labels[userId]
+  annualBulkAdjustUserLabels.value = labels
 }
 
 const annualBulkAdjustSubmitDisabledReason = computed(() => {
@@ -25326,7 +27243,13 @@ async function saveLeaveType() {
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
-    setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
+    // A1: the 「需要审批」 option is stored but not enforced; saving it unticked must not read as "approval skipped".
+    setStatus(withApprovalOptionSaveNotice(
+      tr,
+      'leave',
+      payload.requiresApproval,
+      isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'),
+    ))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save leave type', '保存请假类型失败')), 'error')
   } finally {
@@ -25433,11 +27356,15 @@ async function saveOvertimeRule() {
     adminForbidden.value = false
     await loadOvertimeRules()
     resetOvertimeRuleForm()
-    setStatus(
+    // A1: same as the leave-type save above - the option is stored but not enforced.
+    setStatus(withApprovalOptionSaveNotice(
+      tr,
+      'overtime',
+      payload.requiresApproval,
       isEditing
         ? tr('Overtime rule updated.', '加班规则已更新。')
-        : tr('Overtime rule created.', '加班规则已创建。')
-    )
+        : tr('Overtime rule created.', '加班规则已创建。'),
+    ))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save overtime rule', '保存加班规则失败')), 'error')
   } finally {
@@ -25957,7 +27884,7 @@ async function previewComprehensiveHours() {
   if (userIds.length === 0) {
     comprehensiveHoursPreviewStatus.value = {
       kind: 'error',
-      message: tr('Enter at least one user ID before previewing.', '请先填写至少一个员工 ID。'),
+      message: tr('Choose an employee before previewing.', '请先选择员工。'),
     }
     return
   }
@@ -25991,6 +27918,9 @@ async function previewComprehensiveHours() {
     }
     adminForbidden.value = false
     comprehensiveHoursPreview.value = data.data ?? null
+    void resolveComprehensiveHoursPreviewNames(
+      (data.data?.rows ?? []).map((row: { userId?: string }) => String(row.userId || '')),
+    )
     comprehensiveHoursPreviewStatus.value = {
       kind: data.data?.degraded ? 'warn' : 'info',
       message: data.data?.degraded
@@ -27410,6 +29340,7 @@ async function loadAttendanceGroups() {
     if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceGroupCatalogScope.value = 'unknown'
       return
     }
     const data = await response.json()
@@ -27418,6 +29349,8 @@ async function loadAttendanceGroups() {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
+    const parsedScope = resolveAttendanceGroupCatalogScope(data.data?.scope)
+    attendanceGroupCatalogScope.value = parsedScope === 'unknown' ? 'org' : parsedScope
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     if (props.routeGroupContext) {
@@ -27760,7 +29693,7 @@ async function resolveAttendanceGroupMemberLabels(groupId: string, members: Atte
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403 || response.status === 404) {
@@ -27792,7 +29725,7 @@ async function resolveAttendanceGroupManagerLabels(groupId: string, managers: At
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403 || response.status === 404) {
@@ -27823,7 +29756,7 @@ async function resolveAttendanceAssignmentUserLabels() {
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (seq !== attendanceAssignmentResolveSeq) return
     if (response.status === 403 || response.status === 404) {
@@ -27881,6 +29814,7 @@ async function addAttendanceGroupMembers() {
     }
     adminForbidden.value = false
     attendanceGroupPendingMemberIds.value = []
+    attendanceGroupPendingMemberLabels.value = {}
     attendanceGroupMemberDuplicateNotice.value = ''
     await loadAttendanceGroupMembers()
     setStatus(tr('Group members added.', '分组成员已添加。'))
@@ -27894,14 +29828,24 @@ async function addAttendanceGroupMembers() {
 function appendAttendanceGroupMemberSelectedUser() {
   const userId = attendanceGroupMemberSelectedUserId.value.trim()
   if (!userId) return
+  const label = attendanceGroupMemberPickerLabel.value.trim()
+  if (label && label !== userId) {
+    attendanceGroupPendingMemberLabels.value = {
+      ...attendanceGroupPendingMemberLabels.value,
+      [userId]: label,
+    }
+  }
   stageAttendanceGroupMemberIds([userId])
   attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberPickerLabel.value = ''
 }
 
 function resetAttendanceGroupMemberDraft() {
   attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberPickerLabel.value = ''
   attendanceGroupMemberUserIds.value = ''
   attendanceGroupPendingMemberIds.value = []
+  attendanceGroupPendingMemberLabels.value = {}
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
@@ -27934,6 +29878,9 @@ function stageAttendanceGroupMemberIds(userIds: string[]) {
 
 function removeAttendanceGroupPendingMember(userId: string) {
   attendanceGroupPendingMemberIds.value = attendanceGroupPendingMemberIds.value.filter(item => item !== userId)
+  const labels = { ...attendanceGroupPendingMemberLabels.value }
+  delete labels[userId]
+  attendanceGroupPendingMemberLabels.value = labels
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
@@ -29068,8 +31015,9 @@ onMounted(() => {
   // already typed a targetUserId — refreshAll will commit that the next
   // time it runs.
   auth.getCurrentUserId().then((id) => {
-    if (!id) return
+    if (!attendanceSessionGuard.isCurrent() || !id) return
     currentUserId.value = id
+    if (showOverview.value) void loadSessionOrgs()
     if (!committedCalendarUserId.value && !normalizedUserId()) {
       committedCalendarUserId.value = id
     }
@@ -29079,8 +31027,10 @@ onMounted(() => {
   })
   fetchPlugins()
     .then(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
       if (attendancePluginActive.value) {
+        consumeRecordRequestPrefill()
         refreshAll()
         if (showAdmin.value) {
           loadAdminData()
@@ -29091,9 +31041,33 @@ onMounted(() => {
       }
     })
     .catch(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
     })
 })
+
+watch(attendanceSessionStale, (stale) => { if (stale) invalidateServerClock() }, { flush: 'sync' })
+const serverCalendarDate = computed(() => formatAttendanceDateKey(heroClockNow.value, lastAlignedRuleZone.value))
+watch(serverCalendarDate, (date, previous) => {
+  if (date && previous && date !== previous && !selfRulesLoading.value
+    && showOverview.value && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+}, { flush: 'sync' })
+
+let lastAvailableTodayDate = ''
+watch([todayWorkDateKey, attendanceSessionStale, showOverview], ([date]) => {
+  const dayChanged = Boolean(date && lastAvailableTodayDate && date !== lastAvailableTodayDate)
+  if (date) lastAvailableTodayDate = date
+  todayRecordLoadVersion += 1
+  todayRecordState.value = 'loading'
+  todayRecord.value = null
+  loadedTodayDate.value = ''
+  // Refresh already waits for rules and history. Midnight needs a fresh self read,
+  // even when an older history response happened to include the new date range.
+  if (showOverview.value && date && attendanceSessionGuard.isCurrent()
+    && (!loading.value || dayChanged)) {
+    void loadTodayAttendanceRecord(false)
+  }
+}, { flush: 'sync' })
 
 watch(orgId, () => {
   resetAttendanceResultEditCapability()
@@ -29125,7 +31099,7 @@ watch(requestReportTypeBreakdown, (items) => {
 }, { immediate: true })
 
 watch(recordStatusBreakdown, (items) => {
-  if (recordStatusFilter.value === 'all') return
+  if (recordStatusFilter.value === 'all' || recordStatusFilter.value === 'flagged') return
   if (!items.some(item => item.key === recordStatusFilter.value)) {
     recordStatusFilter.value = 'all'
   }
@@ -29254,25 +31228,53 @@ defineExpose({
 .attendance {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 24px;
-  color: #2b2b2b;
+  gap: var(--ms-space-5);
+  padding: var(--ms-space-5);
+  color: var(--ms-text-1);
+  background: var(--ms-bg-page);
+  min-width: 0;
+}
+
+.attendance--overview {
+  gap: var(--ms-space-4);
+  padding: var(--ms-space-4) var(--ms-space-5) var(--ms-space-5);
+  background: var(--ms-bg-page);
 }
 
 .attendance__header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance__header-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.attendance__header-aside {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .attendance__title {
-  font-size: 22px;
-  margin-bottom: 4px;
+  font-size: var(--ms-font-size-page-title);
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.25;
+  margin: 0 0 var(--ms-space-1);
+  color: var(--ms-text-1);
 }
 
 .attendance__subtitle {
-  color: #666;
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .attendance__actions {
@@ -29310,6 +31312,18 @@ defineExpose({
   border: 1px solid #d0d0d0;
   border-radius: 6px;
   min-width: 180px;
+}
+
+/* Parent-owned slotted history filters: the 180px input min-width above
+   would overflow a 390px card. These classes live in this file so they
+   actually win over the slot content (child scoped CSS cannot). */
+.attendance-ew__history-filter-control,
+.attendance-ew__history-filter-control input,
+.attendance-ew__history-filter-control select {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .attendance__input--invalid {
@@ -29516,15 +31530,16 @@ defineExpose({
 
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid #d0d0d0;
-  background: #fff;
+  border-radius: var(--ms-radius-md);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
 }
 
 .attendance__btn--primary {
-  background: #1976d2;
-  border-color: #1976d2;
+  background: var(--ms-color-primary);
+  border-color: var(--ms-color-primary);
   color: #fff;
 }
 
@@ -29578,12 +31593,23 @@ defineExpose({
   gap: 20px;
 }
 
+.attendance__grid--overview-history {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__grid--overview-history > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .attendance__card {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 12px;
-  padding: 16px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: var(--ms-space-4);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__card--empty {
@@ -29648,13 +31674,13 @@ defineExpose({
 }
 
 .attendance__selfservice-callout {
-  border: 1px solid #dbe4f0;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #f8fbff, #eef6ff);
-  padding: 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-page);
+  padding: var(--ms-space-3);
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ms-space-3);
   align-items: center;
 }
 
@@ -29703,10 +31729,10 @@ defineExpose({
 }
 
 .attendance__status-guide-item {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #f8fafc;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-3);
+  background: var(--ms-bg-page);
 }
 
 .attendance__status-guide-item p {
@@ -29732,15 +31758,146 @@ defineExpose({
 .attendance__summary-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  background: #f7f9fb;
-  border-radius: 8px;
-  padding: 10px;
+  gap: var(--ms-space-1);
+  background: var(--ms-bg-page);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-3);
 }
 
 .attendance__summary-item span {
   font-size: 12px;
-  color: #666;
+  color: var(--ms-text-3);
+}
+
+.attendance__summary-item strong {
+  color: var(--ms-text-1);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__reports-brief {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.attendance__reports-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.attendance__kpi strong {
+  color: var(--ms-text-1);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__kpi--active {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+}
+
+.attendance--reports [data-report-card="records"] {
+  margin-top: 0;
+}
+
+.attendance__reports-more {
+  margin-top: 12px;
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+}
+
+.attendance__reports-more > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.attendance__reports-more > section {
+  margin-top: 14px;
+}
+
+.attendance__reports-more h3 {
+  margin: 16px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.attendance__reports-more .attendance__card {
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  background: transparent;
+}
+
+.attendance__reports-quiet {
+  color: var(--ms-text-3, #667085);
+  font-size: 12px;
+}
+
+.attendance__reports-caliber {
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+}
+
+.attendance__reports-caliber summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.attendance__filters-more {
+  flex: 1 1 100%;
+}
+
+.attendance__filters-more[open] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+}
+
+.attendance__records-columns {
+  min-width: 16rem;
+}
+
+.attendance__records-column-actions,
+.attendance__records-column-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.attendance__records-column-group strong {
+  min-width: 4.5rem;
+  font-size: 12px;
 }
 
 .attendance__grid--reports-insights {
@@ -29763,9 +31920,9 @@ defineExpose({
 }
 
 .attendance__filter-pill {
-  border: 1px solid #d6dbe3;
-  background: #f8fafc;
-  color: #334155;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
   border-radius: 999px;
   padding: 6px 12px;
   font-size: 12px;
@@ -29774,15 +31931,44 @@ defineExpose({
 }
 
 .attendance__filter-pill--active {
-  border-color: #1976d2;
-  background: #e3f2fd;
-  color: #0f4c81;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .attendance__card--calendar {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance--overview .attendance__card--calendar {
+  grid-column: 1 / -1;
+}
+
+.attendance__card--request-tools {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__card--request-tools:not([open]) {
+  box-shadow: none;
+  background: var(--ms-bg-page);
+}
+
+.attendance__request-tools-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ms-space-2, 8px) var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+.attendance__request-tools-summary h3 {
+  margin: 0;
 }
 
 .attendance__calendar-header {
@@ -29790,6 +31976,11 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.attendance--overview .attendance__calendar-header {
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .attendance__calendar-nav {
@@ -29840,13 +32031,13 @@ defineExpose({
 
 .attendance__calendar-cell {
   min-height: 72px;
-  border: 1px solid #e3e3e3;
-  border-radius: 10px;
-  padding: 8px;
-  background: #fafafa;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-2);
+  background: var(--ms-bg-page);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ms-space-1);
   font-size: 12px;
 }
 
@@ -30070,76 +32261,89 @@ defineExpose({
 }
 
 .attendance__status-chip {
-  margin-left: 8px;
+  margin-left: var(--ms-space-2);
   font-size: 12px;
+  font-weight: 500;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #f0f0f0;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  border: 1px solid var(--ms-border-light);
 }
 
 .attendance__status-chip--pending {
-  background: #fff3e0;
-  color: #ef6c00;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--focus {
-  background: #e3f2fd;
-  color: #1565c0;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--approved {
-  background: #e8f5e9;
-  color: #2e7d32;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--normal {
-  background: #e8f5e9;
-  color: #2e7d32;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--late {
-  background: #fff3e0;
-  color: #ef6c00;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--early_leave {
-  background: #ede7f6;
-  color: #6a1b9a;
+  background: var(--el-color-info-light-9);
+  color: var(--el-color-info-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--late_early {
-  background: #ffebee;
-  color: #c62828;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--partial {
-  background: #e3f2fd;
-  color: #1565c0;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--adjusted {
-  background: #e0f7fa;
-  color: #006064;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--off {
-  background: #eceff1;
-  color: #546e7a;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__status-chip--absent {
-  background: #f5f5f5;
-  color: #616161;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__status-chip--rejected {
-  background: #ffebee;
-  color: #c62828;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--cancelled {
-  background: #eceff1;
-  color: #546e7a;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__table {
@@ -30149,7 +32353,45 @@ defineExpose({
 }
 
 .attendance__table--records {
-  min-width: 860px;
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.attendance__table--records th,
+.attendance__table--records td {
+  white-space: nowrap;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.attendance__table--records thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--ms-bg-card, #fff);
+}
+
+.attendance__table--records .attendance__record-col--date,
+.attendance__table--records .attendance__record-col--name {
+  position: sticky;
+  z-index: 1;
+  background: var(--ms-bg-card, #fff);
+}
+
+.attendance__table--records .attendance__record-col--date {
+  left: 0;
+  min-width: 92px;
+}
+
+.attendance__table--records .attendance__record-col--name {
+  left: 92px;
+}
+
+.attendance__table--records thead .attendance__record-col--date,
+.attendance__table--records thead .attendance__record-col--name {
+  z-index: 3;
 }
 
 .attendance__table-wrapper {
@@ -30267,6 +32509,25 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+}
+
+.attendance__records-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attendance__records-heading h3 {
+  margin: 0;
+}
+
+.attendance__records-summary {
+  margin: 0;
+  color: var(--ms-text-3, #667085);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .attendance__records-actions {
@@ -30274,6 +32535,33 @@ defineExpose({
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.attendance__records-header-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  color: var(--ms-text-2, #475467);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__records-header-mode select {
+  width: auto;
+  min-width: 0;
+  max-width: 9rem;
+}
+
+.attendance__report-tech {
+  margin: 4px 0 8px;
+  color: var(--ms-text-3, #667085);
+  font-size: 12px;
+}
+
+.attendance__report-tech summary {
+  width: fit-content;
+  cursor: pointer;
 }
 
 .attendance__report-config {
@@ -30434,26 +32722,173 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ms-space-3);
+  margin-bottom: var(--ms-space-4);
+}
+
+.attendance__admin-header-tools,
+.attendance__admin-current-section-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.attendance__admin-header-tools .attendance__admin-actions,
+.attendance__admin-current-section-tools .attendance__admin-actions {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.attendance__admin-header-tools :deep(.admin-guide),
+.attendance__admin-current-section-tools :deep(.admin-guide) {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
+.attendance__admin-header h3,
+.attendance__admin-section-header h4 {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__admin-page-search {
+  position: relative;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.attendance__admin-page-search-field {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attendance__admin-page-search-scope {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.attendance__admin-page-search-scope-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1;
+  min-height: 32px;
+  padding: 6px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-scope-btn + .attendance__admin-page-search-scope-btn {
+  border-left: 1px solid var(--ms-border);
+}
+
+.attendance__admin-page-search-scope-btn--active {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__admin-page-search-combo {
+  position: relative;
+  min-width: 0;
+}
+
+.attendance__admin-page-search-input {
+  width: 168px;
+  max-width: 32vw;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+
+.attendance__admin-page-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  width: max(240px, 100%);
+  max-height: 240px;
+  margin: 0;
+  padding: 4px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__admin-page-search-result {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ms-text-1);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-result:hover,
+.attendance__admin-page-search-result:focus {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+}
+
+.attendance__admin-page-search-empty {
+  padding: 6px 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.attendance__admin-page-search-status {
+  max-width: 148px;
+  overflow: hidden;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attendance__admin-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  gap: var(--ms-space-5);
   align-items: start;
 }
 
 .attendance__admin-shortcuts {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border: 1px solid #dbeafe;
-  border-radius: 16px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  gap: var(--ms-space-3);
+  margin-bottom: var(--ms-space-4);
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__admin-shortcuts-header {
@@ -30471,14 +32906,15 @@ defineExpose({
 }
 
 .attendance__admin-shortcuts-title strong {
-  color: #1f2937;
-  font-size: 13px;
+  color: var(--ms-text-1);
+  font-size: 14px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-shortcuts-title span {
-  color: #6b7280;
+  color: var(--ms-text-3);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .attendance__admin-shortcuts-items {
@@ -30489,27 +32925,26 @@ defineExpose({
 
 .attendance__admin-shortcut {
   padding: 8px 12px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 999px;
-  background: #ffffff;
-  color: #334155;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
 .attendance__admin-shortcut:hover {
-  border-color: #93c5fd;
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .attendance__admin-shortcut--active {
-  border-color: #93c5fd;
-  background: #dbeafe;
-  color: #1d4ed8;
-  font-weight: 600;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-home-context {
@@ -30522,107 +32957,27 @@ defineExpose({
 
 .attendance__admin-current-section {
   position: sticky;
-  top: 12px;
+  top: var(--ms-space-3);
   z-index: 6;
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border: 1px solid #bfdbfe;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-  backdrop-filter: blur(10px);
+  align-items: center;
+  gap: 12px;
+  margin-bottom: var(--ms-space-4);
+  padding: var(--ms-space-2) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
-.attendance__admin-current-section-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.attendance__admin-current-section-title {
   min-width: 0;
-}
-
-.attendance__admin-current-section-copy strong {
-  color: #0f172a;
-  font-size: 15px;
-}
-
-.attendance__admin-current-section-eyebrow {
-  color: #2563eb;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.attendance__admin-home-action {
-  display: inline-flex;
-  width: fit-content;
-  align-items: center;
-  gap: 6px;
-}
-
-.attendance__admin-home-action-icon {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-}
-
-.attendance__admin-current-section-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.attendance__admin-current-section-jump {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 164px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.attendance__admin-current-section-select {
-  min-width: 164px;
-  padding: 7px 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 10px;
-  background: #ffffff;
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.attendance__admin-current-section-nav {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 112px;
-}
-
-.attendance__admin-current-section-nav strong {
-  font-size: 12px;
-}
-
-.attendance__admin-current-section-nav-direction {
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.attendance__admin-current-section-nav--disabled {
-  opacity: 0.62;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-content--focused .attendance__admin-current-section {
@@ -31078,6 +33433,12 @@ defineExpose({
   margin-top: 12px;
 }
 
+/* A1: a hint that sits inside an .attendance__admin-grid but belongs to the control above it. */
+.attendance__admin-grid-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .attendance__group-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -31351,6 +33712,59 @@ defineExpose({
 .attendance__group-member-identity strong {
   color: var(--ms-text-1);
   font-size: 13px;
+}
+
+.attendance__id-clip {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.attendance__tech-details {
+  font-size: 12px;
+  color: #667085;
+}
+
+.attendance__tech-details summary {
+  cursor: pointer;
+  color: #475569;
+}
+
+.attendance__person-field {
+  position: relative;
+}
+
+.attendance__typeahead-menu {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 2px;
+}
+
+.attendance__typeahead-menu button {
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__typeahead-empty {
+  padding: 4px 8px;
+  color: #667085;
+  font-size: 12px;
 }
 
 .attendance__group-role-badge {
@@ -31686,21 +34100,22 @@ defineExpose({
 
   .attendance__admin-current-section {
     top: 8px;
-    flex-direction: column;
-    align-items: stretch;
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
-  .attendance__admin-current-section-actions {
-    width: 100%;
+  .attendance__admin-header,
+  .attendance__admin-header-tools,
+  .attendance__admin-current-section-tools,
+  .attendance__admin-header-tools .attendance__admin-actions,
+  .attendance__admin-current-section-tools .attendance__admin-actions,
+  .attendance__admin-page-search-field {
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
-  .attendance__admin-home-action {
-    width: fit-content;
-  }
-
-  .attendance__admin-current-section-jump,
-  .attendance__admin-current-section-select {
-    min-width: 100%;
+  .attendance__admin-page-search-input {
+    width: min(168px, 70vw);
   }
 
   .attendance__missed-reminder-toolbar {
@@ -32274,6 +34689,994 @@ defineExpose({
 
   .attendance__hero-timeline {
     flex-wrap: wrap;
+  }
+}
+
+/* Deep admin form chrome. Holidays and Settings set the card, 2-column,
+   label-above, --ms-control-height treatment. The same sheet now covers the
+   other deep editors (rules, payroll, import, and the policy forms that were
+   still raw grids). Employee overview stays outside this selector.
+   Density sits one step down the --ms-space scale, and controls use
+   --ms-control-height, so the cards read as finished rather than loose. */
+.attendance__form-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+}
+
+.attendance__form-sheet > h4,
+.attendance__form-sheet :deep(h4) {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.3;
+}
+
+.attendance__form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+}
+
+.attendance__form-card,
+.attendance__form-sheet > .attendance__admin-subsection,
+.attendance__form-sheet :deep(.attendance__admin-subsection),
+.attendance__form-sheet :deep(.attendance__calendar-preview) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3) var(--ms-space-4);
+  margin: 0;
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+#attendance-admin-settings.attendance__form-sheet .attendance__form-card > .attendance__admin-subsection {
+  display: flex;
+  gap: var(--ms-space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > h4,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__admin-section-header,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__field-hint,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__admin-grid,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__table-wrapper,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__empty,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__actions,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > fieldset,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > [data-leave-offset-rule] {
+  grid-column: 1 / -1;
+}
+
+.attendance__form-sheet h5,
+.attendance__form-sheet :deep(h5) {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.35;
+}
+
+.attendance__form-sheet .attendance__admin-subsection-header,
+.attendance__form-sheet :deep(.attendance__admin-subsection-header),
+.attendance__form-sheet :deep(.attendance__calendar-preview-header) {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ms-space-3);
+}
+
+.attendance__form-sheet .attendance__admin-grid,
+.attendance__form-sheet :deep(.attendance__admin-grid),
+.attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+.attendance__form-sheet .attendance__override-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
+}
+
+.attendance__form-sheet .attendance__admin-grid--thirds {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* Payroll templates pack short fields three across. Other deep forms stay
+   on the two-column rhythm. Full-width rows still span the grid. */
+#attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__payroll-flags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-self: start;
+  width: max-content;
+  max-width: 100%;
+  gap: 8px;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__payroll-flags .attendance__field--checkbox {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  width: max-content;
+  max-width: 100%;
+  gap: 8px;
+}
+
+#attendance-admin-payroll-cycles.attendance__form-sheet .attendance-locale-date__input,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance-locale-date__input {
+  min-width: 0;
+}
+
+.attendance__form-sheet .attendance__field,
+.attendance__form-sheet :deep(.attendance__field),
+.attendance__form-sheet .attendance__override-field {
+  min-width: 0;
+  gap: var(--ms-space-1);
+}
+
+.attendance__form-sheet .attendance__field > span,
+.attendance__form-sheet :deep(.attendance__field > span),
+.attendance__form-sheet .attendance__override-field > span {
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.attendance__form-sheet .attendance__field--full,
+.attendance__form-sheet :deep(.attendance__field--full) {
+  grid-column: 1 / -1;
+}
+
+.attendance__form-sheet .attendance__field input:not([type="checkbox"]):not([type="radio"]),
+.attendance__form-sheet .attendance__field select,
+.attendance__form-sheet .attendance__field textarea,
+.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+.attendance__form-sheet :deep(.attendance__field select),
+.attendance__form-sheet :deep(.attendance__field textarea),
+.attendance__form-sheet .attendance__override-field input,
+.attendance__form-sheet .attendance__table input:not([type="checkbox"]),
+.attendance__form-sheet .attendance__table select,
+.attendance__form-sheet [data-leave-offset-rule] input,
+.attendance__form-sheet [data-leave-offset-rule] select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.attendance__form-sheet .attendance__field textarea,
+.attendance__form-sheet :deep(.attendance__field textarea) {
+  min-height: calc(var(--ms-control-height) * 2 + var(--ms-space-2));
+  resize: vertical;
+}
+
+.attendance__form-sheet .attendance__field input:not([type="checkbox"]):focus,
+.attendance__form-sheet .attendance__field select:focus,
+.attendance__form-sheet .attendance__field textarea:focus,
+.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):focus),
+.attendance__form-sheet :deep(.attendance__field select:focus),
+.attendance__form-sheet :deep(.attendance__field textarea:focus) {
+  outline: none;
+  border-color: var(--ms-color-primary);
+  box-shadow: 0 0 0 3px var(--el-color-primary-light-9);
+}
+
+.attendance__form-sheet .attendance__field--checkbox,
+.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  box-sizing: border-box;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  align-self: center;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
+  min-height: var(--ms-control-height);
+  margin: 0;
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.attendance__form-sheet .attendance__field--checkbox > span,
+.attendance__form-sheet .attendance__field--checkbox > input,
+.attendance__form-sheet :deep(.attendance__field--checkbox > span),
+.attendance__form-sheet :deep(.attendance__field--checkbox > input) {
+  flex: 0 0 auto;
+}
+
+.attendance__form-sheet .attendance__field--inline,
+.attendance__form-sheet :deep(.attendance__field--inline) {
+  box-sizing: border-box;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-2);
+  min-height: var(--ms-control-height);
+  margin: 0;
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.attendance__form-sheet .attendance__field--checkbox input,
+.attendance__form-sheet .attendance__field--inline input[type="checkbox"],
+.attendance__form-sheet :deep(.attendance__field--checkbox input),
+.attendance__form-sheet :deep(.attendance__field--inline input[type="checkbox"]) {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--ms-color-primary);
+}
+
+.attendance__form-sheet fieldset.attendance__field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+}
+
+.attendance__form-sheet fieldset.attendance__field legend {
+  padding: 0 6px;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__form-sheet .attendance__field-hint,
+.attendance__form-sheet :deep(.attendance__field-hint) {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.attendance__form-sheet .attendance__field-hint--warn,
+.attendance__form-sheet :deep(.attendance__field-hint--warn) {
+  color: var(--ms-color-warning);
+}
+
+.attendance__form-sheet .attendance__empty,
+.attendance__form-sheet :deep(.attendance__empty) {
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-3);
+}
+
+.attendance__form-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3) var(--ms-space-4);
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: var(--ms-radius-lg);
+  background: var(--el-color-primary-light-9);
+}
+
+.attendance__form-callout-copy {
+  min-width: 0;
+}
+
+.attendance__form-callout-copy strong {
+  display: block;
+  margin-bottom: var(--ms-space-1);
+  color: var(--ms-text-1);
+  font-size: 14px;
+}
+
+.attendance__form-callout-copy p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.attendance__form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.attendance__ch-save-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox {
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox > span {
+  white-space: nowrap;
+}
+
+.attendance__ch-save-row .attendance__field-hint {
+  margin: 0;
+  flex: 1 1 220px;
+}
+
+.attendance__ch-preview .attendance__form-actions {
+  margin-top: 8px;
+}
+
+.attendance__ch-empty {
+  margin: 12px 0 0;
+  color: var(--ms-text-3);
+  font-size: 13px;
+}
+
+.attendance__ch-results {
+  margin-top: 12px;
+}
+
+.attendance__kpi--static {
+  cursor: default;
+}
+
+.attendance__form-sheet .attendance__btn,
+.attendance__form-sheet :deep(.attendance__btn) {
+  align-self: flex-start;
+  width: auto;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+
+.attendance__form-sheet .attendance__btn--primary,
+.attendance__form-sheet :deep(.attendance__btn--primary) {
+  border-color: var(--ms-color-primary);
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
+}
+
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead select),
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead .attendance__user-picker-controls button) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  white-space: nowrap;
+}
+
+.attendance__form-sheet .attendance__btn--danger,
+.attendance__form-sheet :deep(.attendance__btn--danger) {
+  border-color: var(--ms-color-danger);
+  color: var(--ms-color-danger);
+  background: var(--ms-bg-card);
+}
+
+#attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule] {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--ms-space-2);
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-side .attendance__admin-grid) {
+  grid-template-columns: 1fr;
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  grid-column: 1 / -1;
+}
+
+/* Child scoped styles repeat the looser control metrics. Section ids beat
+   those rules inside Holidays and Settings only. */
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-section),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-subsection),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__admin-subsection),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview) {
+  gap: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-layout),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview-header),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview-header) {
+  gap: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-calendar),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-side) {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-panel),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-day-list) {
+  gap: var(--ms-space-2);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-day-item) {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-2);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-grid),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__admin-grid),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview-controls) {
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field) {
+  gap: var(--ms-space-1);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field select),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field select) {
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  box-sizing: border-box;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__btn),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__btn) {
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__inline-fields,
+#attendance-admin-settings.attendance__form-sheet .attendance__inline-fields {
+  gap: var(--ms-space-1);
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__table,
+#attendance-admin-settings.attendance__form-sheet .attendance__table {
+  margin-top: 0;
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__table td.attendance__table-actions > .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet .attendance__table td.attendance__table-actions > .attendance__btn,
+#attendance-admin-holidays.attendance__form-sheet .attendance__table-actions .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet .attendance__table-actions .attendance__btn {
+  min-height: var(--ms-control-height);
+  margin-right: var(--ms-space-2);
+  margin-bottom: var(--ms-space-1);
+}
+
+/* Flat editors (default rule, payroll, import, leave, shifts, and the other
+   policy forms) keep their markup. The sheet turns each top-level group into
+   the same card the Holidays and Settings pages already use. */
+.attendance__form-sheet > .attendance__admin-grid,
+.attendance__form-sheet > .attendance__details,
+.attendance__form-sheet > fieldset.attendance__field,
+.attendance__form-sheet > .attendance__field,
+.attendance__form-sheet > .attendance__admin-meta {
+  margin: 0;
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__form-sheet > .attendance__admin-actions {
+  justify-content: flex-end;
+}
+
+.attendance__form-sheet > .attendance__btn {
+  align-self: flex-end;
+}
+
+.attendance__form-sheet .attendance__admin-subsection .attendance__admin-subsection {
+  padding: var(--ms-space-3);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  box-shadow: none;
+}
+
+.attendance__form-sheet label.attendance__field:has(> input[type="checkbox"]) {
+  box-sizing: border-box;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  align-self: center;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
+  min-height: var(--ms-control-height);
+  margin: 0;
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.attendance__form-sheet .attendance__field :deep(input.attendance-locale-time__value) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  max-width: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  box-shadow: none;
+}
+
+.attendance__form-sheet label.attendance__field:has(> input[type="checkbox"]) > span,
+.attendance__form-sheet label.attendance__field:has(> input[type="checkbox"]) > input {
+  flex: 0 0 auto;
+}
+
+.attendance__form-sheet .attendance__field--compact-control,
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control,
+#attendance-admin-holidays.attendance__form-sheet .attendance__field--compact-control {
+  justify-self: start;
+  align-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 4px;
+}
+
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control input:not([type="checkbox"]),
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control select,
+#attendance-admin-holidays.attendance__form-sheet .attendance__field--compact-control input:not([type="checkbox"]),
+#attendance-admin-holidays.attendance__form-sheet .attendance__field--compact-control select,
+.attendance__form-sheet .attendance__field--compact-control input:not([type="checkbox"]),
+.attendance__form-sheet .attendance__field--compact-control select {
+  width: auto;
+  max-width: 9.5rem;
+  min-width: 0;
+}
+
+.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint),
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint) {
+  width: auto;
+  max-width: 3rem;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.attendance__control-with-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.attendance__form-sheet .attendance__field--compact-control .attendance__control-with-unit input,
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control .attendance__control-with-unit input,
+#attendance-admin-holidays.attendance__form-sheet .attendance__field--compact-control .attendance__control-with-unit input {
+  width: 5.5rem;
+  max-width: 5.5rem;
+}
+
+.attendance__control-unit {
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.attendance__override-header-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__form-sheet label.attendance__field:has(> input[type="checkbox"]) > input {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--ms-color-primary);
+}
+
+.attendance__form-sheet .attendance__admin-section-header .attendance__field,
+.attendance__form-sheet .attendance__admin-section-header .attendance__field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-2);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.attendance__form-sheet .attendance__admin-section-header .attendance__field select,
+.attendance__form-sheet .attendance__admin-section-header .attendance__field input,
+.attendance__form-sheet .attendance__admin-section-header .attendance__field--inline select,
+.attendance__form-sheet .attendance__admin-section-header .attendance__field--inline input {
+  width: auto;
+  min-width: 140px;
+  min-height: var(--ms-control-height);
+}
+
+.attendance__form-sheet .attendance__subheading,
+.attendance__form-sheet h6 {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__form-sheet .attendance__field-label {
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__form-sheet .attendance__rule-builder-overview {
+  gap: var(--ms-space-3);
+}
+
+.attendance__form-sheet .attendance__rule-builder-summary span {
+  min-width: 0;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+}
+
+.attendance__form-sheet .attendance__rule-builder-summary strong,
+.attendance__form-sheet .attendance__preview-summary strong,
+.attendance__form-sheet .attendance__preview-result-meta strong {
+  color: var(--ms-text-1);
+}
+
+.attendance__form-sheet .attendance__rule-builder-day {
+  box-sizing: border-box;
+  min-height: var(--ms-control-height);
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+}
+
+.attendance__form-sheet .attendance__rule-builder-day-grid {
+  gap: var(--ms-space-2);
+}
+
+.attendance__form-sheet .attendance__rule-builder-preview,
+.attendance__form-sheet .attendance__template-version-panel {
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  box-shadow: none;
+}
+
+.attendance__form-sheet .attendance__rule-set-json-panel textarea,
+.attendance__form-sheet #attendance-rule-template-system,
+.attendance__form-sheet #attendance-rule-template-library,
+.attendance__form-sheet #attendance-rule-preview-events,
+.attendance__form-sheet #attendance-payroll-template-config,
+.attendance__form-sheet #attendance-payroll-cycle-gen-metadata,
+.attendance__form-sheet #attendance-import-payload {
+  min-height: 160px;
+  font-family: ui-monospace, SFMono-Regular, 'Cascadia Mono', 'Segoe UI Mono', monospace;
+}
+
+.attendance__form-sheet .attendance__preview-scorecard,
+.attendance__form-sheet .attendance__scenario-card,
+.attendance__form-sheet .attendance__preview-recommendation {
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: none;
+}
+
+.attendance__form-sheet .attendance__preview-scorecard span,
+.attendance__form-sheet .attendance__preview-scorecard small,
+.attendance__form-sheet .attendance__scenario-card span {
+  color: var(--ms-text-3);
+}
+
+.attendance__form-sheet .attendance__preview-scorecard strong,
+.attendance__form-sheet .attendance__scenario-card strong,
+.attendance__form-sheet .attendance__preview-recommendation strong {
+  color: var(--ms-text-1);
+}
+
+.attendance__form-sheet .attendance__scenario-card--active {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  box-shadow: none;
+}
+
+.attendance__form-sheet .attendance__template-guide-grid,
+.attendance__form-sheet .attendance__summary-field-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ms-space-3);
+}
+
+/* Summary-field choices are a tight 4-across row: checkbox and label share
+   one line. The import template guide stays at two. */
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-options {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--ms-space-1) var(--ms-space-2);
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-1);
+  width: 100%;
+  height: var(--ms-control-height);
+  min-height: var(--ms-control-height);
+  max-height: var(--ms-control-height);
+  margin: 0;
+  padding: 0 var(--ms-space-2);
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option input {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option > span {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option strong,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option code,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option strong {
+  flex: 0 1 auto;
+  color: var(--ms-text-1);
+  font-weight: 600;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option code,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option small {
+  flex: 1 1 auto;
+}
+
+.attendance__form-sheet .attendance__template-guide-card,
+.attendance__form-sheet .attendance__payroll-summary-fields {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  box-shadow: none;
+}
+
+.attendance__form-sheet .attendance__template-guide-title {
+  color: var(--ms-text-1);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__form-sheet .attendance__template-chip {
+  border: 1px solid var(--ms-border-light);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+}
+
+.attendance__form-sheet .attendance__field-picker-option,
+.attendance__form-sheet .attendance__summary-field-option {
+  box-sizing: border-box;
+  align-items: center;
+  min-height: var(--ms-control-height);
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+}
+
+.attendance__form-sheet .attendance__summary-field-option code,
+.attendance__form-sheet .attendance__summary-field-order code {
+  color: var(--ms-text-3);
+}
+
+.attendance__form-sheet .attendance__import-advanced-toggle,
+.attendance__form-sheet .attendance__import-advanced,
+.attendance__form-sheet > .attendance__details {
+  margin: 0;
+}
+
+.attendance__form-sheet .attendance__details .attendance__admin-grid--compact {
+  margin-top: 0;
+}
+
+.attendance__form-sheet .attendance__details[open] {
+  background: var(--ms-bg-card);
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex) {
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  box-shadow: none;
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__grid) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__field),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__field) {
+  gap: var(--ms-space-1);
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__field input),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__field select),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__field input),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__field select) {
+  box-sizing: border-box;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__icon-button),
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__actions) {
+  width: var(--ms-control-height);
+  min-height: var(--ms-control-height);
+  height: var(--ms-control-height);
+}
+
+#attendance-admin-shifts.attendance__form-sheet :deep(.shift-segments__actions) {
+  width: auto;
+}
+
+#attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__approvers) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
+}
+
+#attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__item) {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+}
+
+@media (max-width: 900px) {
+  .attendance__form-sheet .attendance__admin-grid,
+  .attendance__form-sheet .attendance__admin-grid--thirds,
+  .attendance__form-sheet :deep(.attendance__admin-grid),
+  .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+  .attendance__form-sheet .attendance__template-guide-grid,
+  .attendance__form-sheet .attendance__summary-field-options,
+  .attendance__form-sheet .attendance__rule-builder-overview,
+  #attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection,
+  #attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule],
+  #attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__grid),
+  #attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__approvers),
+  #attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid,
+  #attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-options {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance__form-callout {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

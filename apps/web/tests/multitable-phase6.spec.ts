@@ -26,6 +26,7 @@ describe('group-by from toolbar', () => {
           id: 'v1',
           fields: [{ id: 'f1', name: 'Status', type: 'select' }],
           rows: [],
+          view: { id: 'v1' },
           page: { offset: 0, limit: 50, total: 0, hasMore: false },
         },
       }), { status: 200 }),
@@ -33,6 +34,8 @@ describe('group-by from toolbar', () => {
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(
@@ -47,16 +50,28 @@ describe('group-by from toolbar', () => {
     expect(body.groupInfo).toEqual({ fieldIds: ['f1'], fieldId: 'f1' })
   })
 
-  it('setGroupField(null) sends undefined groupInfo', async () => {
+  // #6075 round 3 (N5) originally recorded this as the pre-existing bug #6084: a view-less load fixture meant
+  // syncFromView never ran, the "only into the view it was loaded from" gate dropped the write, and the test
+  // passed while sending NOTHING. It now loads a real grouped view and asserts what is ACTUALLY sent — fixed
+  // for #6084: an explicit empty groupInfo (`{}`), never an absent key, so ungrouping is actually saved.
+  it('setGroupField(null) sends a PATCH with an explicit empty groupInfo ({}), not an absent key (#6084 fix)', async () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: {
+          id: 'v1',
+          fields: [{ id: 'f1', name: 'Status', type: 'select' }],
+          rows: [],
+          view: { id: 'v1', groupInfo: { fieldIds: ['f1'], fieldId: 'f1' } },
+          page: { offset: 0, limit: 50, total: 0, hasMore: false },
+        },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
-    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    // Precondition: the view really is grouped, so the null below clears something.
+    expect(grid.groupFieldId.value).toBe('f1')
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(
@@ -65,6 +80,48 @@ describe('group-by from toolbar', () => {
 
     await grid.setGroupField(null)
     expect(grid.groupFieldId.value).toBeNull()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchFn.mock.calls[0]
+    expect(url).toContain('/api/multitable/views/v1')
+    expect(init.method).toBe('PATCH')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ groupInfo: {} })
+  })
+
+  // #6084: the fix above only proves what is SENT; this proves the server actually persisted it — a reload
+  // (a fresh loadViewData, as a page refresh / view switch would do) must come back with no grouping, not the
+  // pre-clear grouping the mock "server" stored before setGroupField(null) ran.
+  it('setGroupField(null) persists the cleared grouping so a reload stays ungrouped (#6084)', async () => {
+    let storedGroupInfo: Record<string, unknown> = { fieldIds: ['f1'], fieldId: 'f1' }
+    const fetchFn = vi.fn(async (_url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(init.body ?? '{}')
+        if ('groupInfo' in body) storedGroupInfo = body.groupInfo
+        return new Response(JSON.stringify({ ok: true, data: { view: { id: 'v1' } } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          id: 'v1',
+          fields: [{ id: 'f1', name: 'Status', type: 'select' }],
+          rows: [],
+          view: { id: 'v1', groupInfo: storedGroupInfo },
+          page: { offset: 0, limit: 50, total: 0, hasMore: false },
+        },
+      }), { status: 200 })
+    })
+    const client = mockClientWithFn(fetchFn)
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    expect(grid.groupFieldId.value).toBe('f1')
+
+    await grid.setGroupField(null)
+    expect(grid.groupFieldId.value).toBeNull()
+    expect(storedGroupInfo).toEqual({})
+
+    // Reload — a fresh syncFromView must read back "no grouping", not resurrect the pre-clear group.
+    await grid.loadViewData(0)
+    await vi.waitFor(() => expect(grid.groupFieldId.value).toBeNull())
   })
 })
 

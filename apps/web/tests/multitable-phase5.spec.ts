@@ -24,7 +24,7 @@ describe('hidden field persistence via updateView', () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [{ id: 'f1', name: 'A', type: 'string' }, { id: 'f2', name: 'B', type: 'number' }], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: { id: 'v1', fields: [{ id: 'f1', name: 'A', type: 'string' }, { id: 'f2', name: 'B', type: 'number' }], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
@@ -32,6 +32,8 @@ describe('hidden field persistence via updateView', () => {
 
     // Wait for initial load
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     // Mock updateView response
@@ -194,13 +196,15 @@ describe('grid groupBy', () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [{ id: 'f1', name: 'Status', type: 'select' }], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: { id: 'v1', fields: [{ id: 'f1', name: 'Status', type: 'select' }], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
 
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(
@@ -215,17 +219,27 @@ describe('grid groupBy', () => {
     expect(body.groupInfo).toEqual({ fieldIds: ['f1'], fieldId: 'f1' })
   })
 
-  it('setGroupField(null) clears grouping', async () => {
+  // #6075 round 3 (N5): formerly a view-less load fixture — the write gate then sent nothing and this passed vacuously.
+  // Now a real grouped view is loaded, and the write it makes is asserted. Fixed for #6084: the PATCH carries an
+  // explicit empty groupInfo (`{}`), not an absent key, so the server actually clears the stored grouping.
+  it('setGroupField(null) clears grouping locally and PATCHes an explicit empty groupInfo ({}) into the view it was loaded from (#6084 fix)', async () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: {
+          id: 'v1',
+          fields: [{ id: 'f1', name: 'Status', type: 'select' }],
+          rows: [],
+          view: { id: 'v1', groupInfo: { fieldIds: ['f1'], fieldId: 'f1' } },
+          page: { offset: 0, limit: 50, total: 0, hasMore: false },
+        },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
 
-    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    expect(grid.groupFieldId.value).toBe('f1')
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(
@@ -234,5 +248,8 @@ describe('grid groupBy', () => {
 
     await grid.setGroupField(null)
     expect(grid.groupFieldId.value).toBeNull()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toContain('/api/multitable/views/v1')
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toEqual({ groupInfo: {} })
   })
 })

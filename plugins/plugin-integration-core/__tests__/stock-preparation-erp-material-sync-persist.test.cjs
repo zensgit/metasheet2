@@ -33,6 +33,9 @@ const {
   RUN_OBJECT_ID,
   RUN_KEY_FIELD,
   ERP_MATERIAL_SYNC_RUN_TYPE,
+  ACCEPTED_ERP_MATERIAL_STATUSES,
+  CANONICAL_ERP_MATERIAL_STATUSES,
+  canonicalErpMaterialStatus,
   __internals: { MVP_OBJECT_ID_SET, MATERIAL_FIELD_IDS },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-erp-material-sync-persist.cjs'))
 const {
@@ -569,6 +572,95 @@ async function main() {
     assert.equal(mappingRow.matchMethod, 'exact_code_candidate')
   })
 
+  // ---- materialStatus canonicalization at the persist boundary ----------------------------------
+  //
+  // The incident this closes: the intake normalizer defaults materialStatus to 'imported'
+  // (readonly-intake.cjs :252), no seeded select vocabulary contains that token, and the multitable
+  // validator refuses anything outside the vocabulary — so the FIRST ERP material sync on a freshly
+  // provisioned deployment died on `Invalid select option for materialStatus: imported`, on both the
+  // flag-gated auto-persist and the T2 commit path. The fix is canonicalization at this boundary (the
+  // shape the PLM leg already uses), not a wider vocabulary: the source's spellings are an OPEN set.
+  await run('the intake default status is canonicalized instead of reaching the validator', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // EXACTLY what normalizeErpMaterial produces for a source row with no status of its own.
+    await persistStockPreparationErpMaterialSync({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...baseSyncInputs({ erpMaterials: [{ ...baseMaterialRow(), materialStatus: 'imported' }] }),
+    })
+    const written = logicalOf(recordsApi.createCalls.find((call) => call.sheetId === MATERIAL_SHEET_ID))
+    assert.ok(written, 'the material row was written')
+    assert.equal(
+      written.materialStatus,
+      'active',
+      "'imported' is a statement about our sync, not a material state — it canonicalizes to 'active', the same mapping the PLM leg makes for the same token",
+    )
+  })
+
+  await run('every accepted status maps onto the seeded vocabulary, and canonical values pass through', () => {
+    assert.deepEqual(ACCEPTED_ERP_MATERIAL_STATUSES.slice(), ['active', 'disabled', 'imported', 'inactive'])
+    assert.deepEqual(CANONICAL_ERP_MATERIAL_STATUSES.slice(), ['active', 'disabled', 'inactive'])
+    for (const input of ACCEPTED_ERP_MATERIAL_STATUSES) {
+      const { supported, status } = canonicalErpMaterialStatus(input)
+      assert.equal(supported, true, `${input} is accepted`)
+      assert.ok(CANONICAL_ERP_MATERIAL_STATUSES.includes(status), `${input} -> a canonical value`)
+    }
+    // An ABSENT status stays absent: the column is optional, and an empty select is legal.
+    for (const empty of [undefined, null, '', '   ']) {
+      assert.deepEqual(canonicalErpMaterialStatus(empty), { supported: true, status: null })
+    }
+  })
+
+  await run('a raw source status the mapping does not know refuses the run, values-free, with no writes', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // intake passes RAW source strings straight through, so this is what a real K3 row can carry.
+    const SOURCE_STATUS = '已启用-A7'
+    await assert.rejects(
+      () => persistStockPreparationErpMaterialSync({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...baseSyncInputs({ erpMaterials: [{ ...baseMaterialRow(), materialStatus: SOURCE_STATUS }] }),
+      }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationErpMaterialSyncError)
+        assert.equal(error.status, 422)
+        assert.equal(error.code, 'ERP_MATERIAL_STATUS_UNSUPPORTED')
+        assert.equal(error.details.unsupportedRowCount, 1)
+        assert.deepEqual(error.details.acceptedInput, ACCEPTED_ERP_MATERIAL_STATUSES.slice())
+        // The offending string is a CUSTOMER VALUE and never crosses into the details.
+        assert.equal(JSON.stringify(error.details).includes(SOURCE_STATUS), false)
+        return true
+      },
+    )
+    // ALL-OR-NOTHING: a partial ERP cache is worse than an unrefreshed one.
+    assert.equal(recordsApi.createCalls.length, 0, 'no row is written on a refused run')
+    assert.equal(recordsApi.patchCalls.length, 0)
+  })
+
+  await run('one unusable status refuses the whole batch rather than half-persisting it', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationErpMaterialSync({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...baseSyncInputs({
+          erpMaterials: [
+            { ...baseMaterialRow(), materialStatus: 'imported' },
+            { ...baseMaterialRow(), erpMaterialId: 'other', materialStatus: 'ZZ' },
+          ],
+        }),
+      }),
+      (error) => error.code === 'ERP_MATERIAL_STATUS_UNSUPPORTED' && error.details.unsupportedRowCount === 1,
+    )
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
   console.log(`\nstock-preparation-erp-material-sync-persist.test.cjs: ${passed} passed, ${failed} failed`)
   if (failed > 0) {
     for (const { name } of failures) console.error(`  - ${name}`)
@@ -577,8 +669,6 @@ async function main() {
   console.log('stock-preparation-erp-material-sync-persist.test.cjs OK')
 }
 
-main().catch((error) => {
-  console.error('stock-preparation-erp-material-sync-persist.test.cjs FAILED')
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-erp-material-sync-persist.test.cjs', main)

@@ -6,6 +6,7 @@
  * cannot drift into calling the raw per-instance approval action route (locked by a tripwire spec).
  */
 import { apiFetch } from '../utils/api'
+import { useLocale } from '../composables/useLocale'
 
 export interface ApprovalCardSummary {
   deliveryId: string
@@ -22,7 +23,11 @@ export interface ApprovalCardSummary {
     requestNo: string | null
     status: string
     currentNodeKey: string | null
+    /** Lock-5 §1.3 / CR-3 — derived server-side from the effective NODE policy (`!== 'never'`). */
     rejectCommentRequired: boolean
+    /** Lock-5 §1.3 — the full three-valued effective requirement at this delivery's node. Optional
+     *  so an older server (which does not send it) degrades to the reject-only reading above. */
+    commentRequired?: 'never' | 'reject_only' | 'always'
   }
   actedAction: string | null
   actedAt: string | null
@@ -36,15 +41,17 @@ export interface ApprovalCardActionError {
 }
 
 async function parseError(response: Response): Promise<ApprovalCardActionError> {
+  // O-8 / F8-1: fallback copy (only when the server sent no message) follows the shell locale.
+  const { isZh } = useLocale()
   try {
     const payload = await response.json() as { error?: { code?: string; message?: string }; data?: ApprovalCardSummary }
     return {
       code: payload.error?.code ?? `HTTP_${response.status}`,
-      message: payload.error?.message ?? `请求失败（${response.status}）`,
+      message: payload.error?.message ?? (isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`),
       summary: payload.data,
     }
   } catch {
-    return { code: `HTTP_${response.status}`, message: `请求失败（${response.status}）` }
+    return { code: `HTTP_${response.status}`, message: isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})` }
   }
 }
 
@@ -55,6 +62,7 @@ async function parseError(response: Response): Promise<ApprovalCardActionError> 
  * when the launch is unavailable so the page can render a manual retry button.
  */
 export async function launchDingTalkLoginForDecision(fullPath: string): Promise<{ ok: boolean; message?: string }> {
+  const { isZh } = useLocale()
   try {
     const response = await apiFetch(`/api/auth/dingtalk/launch?redirect=${encodeURIComponent(fullPath)}`, {
       method: 'GET',
@@ -63,12 +71,12 @@ export async function launchDingTalkLoginForDecision(fullPath: string): Promise<
     const payload = await response.json().catch(() => null) as { success?: boolean; data?: { url?: string }; error?: { message?: string } } | null
     const launchUrl = typeof payload?.data?.url === 'string' ? payload.data.url : ''
     if (!response.ok || payload?.success !== true || !launchUrl) {
-      return { ok: false, message: payload?.error?.message ?? '钉钉登录暂不可用，请稍后重试。' }
+      return { ok: false, message: payload?.error?.message ?? (isZh.value ? '钉钉登录暂不可用，请稍后重试。' : 'DingTalk sign-in is unavailable right now. Please try again later.') }
     }
     window.location.href = launchUrl
     return { ok: true }
   } catch {
-    return { ok: false, message: '钉钉登录暂不可用，请稍后重试。' }
+    return { ok: false, message: isZh.value ? '钉钉登录暂不可用，请稍后重试。' : 'DingTalk sign-in is unavailable right now. Please try again later.' }
   }
 }
 

@@ -9,6 +9,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../src/approvals/addSignHonestyCopy'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -43,6 +45,28 @@ vi.mock('vue-router', async () => {
       query: routeQuery,
       path: routePath,
       meta: {},
+    }),
+  }
+})
+
+// ---------------------------------------------------------------------------
+// ElMessage stub. A real ElMessage mounts its own toast into document.body (outside `app`, so the
+// afterEach unmount never reaches it) with a ~3 s auto-close timer. On a slow runner that timer
+// fires after this file's jsdom environment is torn down; the toast's leave transition then calls
+// requestAnimationFrame, which no longer exists, and vitest records an unhandled ReferenceError
+// that fails the whole lane although every test passed. No test here asserts on toast DOM, so
+// only ElMessage is replaced; every other export (ElMessageBox, ElSkeleton, ElIcon, …) stays real.
+// ---------------------------------------------------------------------------
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
     }),
   }
 })
@@ -109,6 +133,17 @@ vi.mock('../src/approvals/store', () => ({
 // assertions further down keep working unchanged. `vi.importActual` keeps every OTHER export
 // (dispatchAction, ApprovalApiError, ...) real — only this one function is overridden.
 // ---------------------------------------------------------------------------
+// raw-id-exposure-fix (20260819): `user_9` has a blank `name` — the same shape
+// `searchApprovalDirectoryUsers` (api.ts) produces for a real backend directory record whose
+// `name` field is missing/non-string (defaulted to `''`, not omitted). Appended rather than
+// replacing any of the three named fixtures above, so every pre-existing assertion that reads
+// user_2/3/4 stays byte-identical; `toBeGreaterThanOrEqual(3)` / `>= 3` option-count assertions
+// elsewhere in this file are unaffected by the fourth entry.
+// member-display-identity (2026-08-19): `resolveApprovalDirectoryUsersMock` defaults to "nothing
+// resolves" — this file's raw-id-shaped fixtures (user_current/user_secret_777/manager-*/...) have
+// no producer of `metadata.assigneeName`, and this default keeps them staying unresolved (matching
+// their pre-existing pinned assertions) unless a specific test overrides it.
+const resolveApprovalDirectoryUsersMock = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -117,7 +152,9 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_2', name: '李四', email: '' },
       { id: 'user_3', name: '王五', email: '' },
       { id: 'user_4', name: '赵六', email: '' },
+      { id: 'user_9', name: '', email: '' },
     ]),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersMock(...args),
   }
 })
 
@@ -135,7 +172,11 @@ const mockTemplateLoading = ref(false)
 const mockTemplateError = ref<string | null>(null)
 const mockTemplateTotal = ref(0)
 
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
 const loadVersionSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -530,6 +571,11 @@ describe('Approval E2E Lifecycle', () => {
     // relying on jsdom's default `navigator.language`.
     useLocale().setLocale('zh-CN')
 
+    // member-display-identity (2026-08-19): the resolver cache is a module singleton — reset it
+    // (and its controllable mock) every test, or an earlier test's resolved name leaks forward.
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+
     // Reset all reactive state
     mockActiveApproval.value = null
     mockHistory.value = []
@@ -635,7 +681,7 @@ describe('Approval E2E Lifecycle', () => {
     it('renders template center with header', async () => {
       await mountTemplateCenterView()
       const header = container!.querySelector('.template-center__header h1')
-      expect(header?.textContent).toBe('审批模板')
+      expect(header?.textContent).toBe('审批表单')
     })
 
     it('renders status tabs (all / published / draft / archived)', async () => {
@@ -1176,11 +1222,24 @@ describe('Approval E2E Lifecycle', () => {
         sourceStep: 1,
         nodeKey: 'approval_1',
         isActive: true,
-        metadata: { addSign: true, addedBy: 'user_current' },
+        // member-display-identity (2026-08-19): `assigneeName` present -- this fixture's seat is
+        // RESOLVABLE, matching the ordinary production case, so the 减签 option this test submits
+        // through stays selectable (an unresolvable option is now `disabled` and the submit
+        // handler itself refuses it). The deliberately-UNRESOLVABLE shape is exercised by
+        // approval-member-bar-operation-policy.spec.ts's own dedicated fixtures.
+        metadata: { addSign: true, addedBy: 'user_current', assigneeName: '九号经理' },
       }
     }
 
-    it('clicking "加签" opens the add-sign dialog with a mode radio', async () => {
+    // Lock-5 gate B-2 (`'before'` honesty) RE-POINTED this test. The dialog used to ship a two-arm
+    // 加签方式 radio whose `前加签` label claimed corpus C-3 node-insertion semantics that no shipped
+    // path implements — §0.1: both arms seat co-signers at the CURRENT node in the SAME epoch, so
+    // outside a parallel region they were byte-identical (now pinned by a real-DB test). A radio
+    // whose arms cannot be told apart is a fake switch, so the arm is retired and the dialog states
+    // what add-sign really does. Asserting the `前加签` arm still exists would be asserting the defect.
+    // F4-S1 (Lock-5 L5-B, OD-L5-4(b)) brings the choice back with the two arms that genuinely differ
+    // — 并加签 (`'parallel'`, the default) and 后加签 (`'after'`) — and STILL no 前加签 arm.
+    it('clicking "加签" opens the add-sign dialog with the honest mode hint, a 并加签/后加签 choice, and NO 前加签 arm (B-2, F4-S1)', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1193,12 +1252,21 @@ describe('Approval E2E Lifecycle', () => {
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')
       expect(dialog).toBeTruthy()
-      // parallel + before mode radios present.
-      const radios = dialog!.querySelectorAll('[data-el-radio-value]')
-      expect(radios.length).toBe(2)
+      // B-2: the inert 前加签 arm is gone; F4-S1: exactly the two arms that differ at runtime.
+      const arms = Array.from(dialog!.querySelectorAll('[data-el-radio-value]'))
+        .map((arm) => arm.getAttribute('data-el-radio-value'))
+      expect(arms).toEqual(['parallel', 'after'])
+      expect(dialog!.textContent).not.toContain('前加签')
+      // …replaced by copy that describes the ONE semantic we implement (corpus C-5 并加签).
+      const hint = dialog!.querySelector('[data-testid="approval-add-sign-mode-hint"]')
+      expect(hint).toBeTruthy()
+      expect(hint!.textContent).toBe(ADD_SIGN_MODE_HINT)
+      // M8 honesty, pinned on the string itself: it must not claim node insertion or a skip.
+      expect(ADD_SIGN_MODE_HINT).toContain('不会插入新的审批节点')
+      expect(ADD_SIGN_MODE_HINT).toContain('不会跳过当前节点')
     })
 
-    it('confirming 加签 calls executeAction with action=add_sign, targetUserIds (array) and addSignMode', async () => {
+    it('confirming 加签 calls executeAction with action=add_sign, targetUserIds (array) and the pinned addSignMode (B-2)', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
@@ -1219,22 +1287,20 @@ describe('Approval E2E Lifecycle', () => {
       select.dispatchEvent(new Event('change', { bubbles: true }))
       await flushUi()
 
-      // Pick the 前加签 (before) mode radio to assert it round-trips.
-      const beforeRadio = Array.from(dialog.querySelectorAll('[data-el-radio-value]'))
-        .find((r) => r.getAttribute('data-el-radio-value') === 'before') as HTMLButtonElement
-      beforeRadio.click()
-      await flushUi()
-
       const confirmBtn = Array.from(dialog.querySelectorAll('button'))
         .find((b) => b.textContent?.includes('确认加签'))
       confirmBtn!.click()
       await flushUi()
 
+      // B-2: the WIRE CONTRACT is unchanged — `addSignMode` is still sent, pinned to the one
+      // semantic this client implements. The server's accepted set is untouched (widen-only), so no
+      // other client breaks; only the FE's inert CHOICE is gone.
       expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', expect.objectContaining({
         action: 'add_sign',
         targetUserIds: ['user_2'],
-        addSignMode: 'before',
+        addSignMode: CLIENT_ADD_SIGN_MODE,
       }))
+      expect(CLIENT_ADD_SIGN_MODE).toBe('parallel')
     })
 
     it('hides "减签" when no add-signed rows exist at the current node', async () => {
@@ -1345,6 +1411,109 @@ describe('Approval E2E Lifecycle', () => {
       // friendly name, not the raw id, proving the `select` event's richer option payload wired
       // through to the label map.
       expect(dialog.querySelector('[data-testid="approval-add-sign-chips"]')?.textContent).toContain('李四')
+    })
+
+    // Discriminating negative (raw-id-exposure-fix, 20260819): `onAddSignUserSelected`
+    // (ApprovalDetailView.vue) used to store `option.name || option.id` — when the picked
+    // directory user has no name (`user_9` below, the exact shape a real backend record with a
+    // missing/non-string `name` produces — see the api.ts mock comment above), the chip rendered
+    // the raw directory user id verbatim. Goes through the REAL ApprovalUserPicker + REAL
+    // directory search mock, not a hand-rolled stub payload.
+    it('a picked user with no directory name never renders the raw id as the chip label (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'user_9'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const chips = dialog.querySelector('[data-testid="approval-add-sign-chips"]')
+      expect(chips?.textContent).not.toContain('user_9')
+      // Values-free but still distinguishable — a stable ordinal, not a blank chip.
+      expect(chips?.textContent?.trim()).toBe('成员 1')
+    })
+
+    // Discriminating negative (raw-id-exposure-fix FOLLOW-UP, 20260819): ApprovalUserPicker's OWN
+    // `optionLabel()` used to fall back to the raw directory `option.id` for the DROPDOWN option
+    // text whenever `option.name` was blank -- one DOM layer ABOVE the add-sign chip label the two
+    // tests above already cover (that fix only touched `onAddSignUserSelected`'s stored label, not
+    // the picker's own dropdown). `user_9` (blank name) sits in the SAME directory fixture every
+    // other test in this describe block already uses. Neither dialog's placeholder here advertises
+    // id-based search (加签: "搜索并添加加签人"; 转交: "搜索并选择转交对象" -- see ApprovalDetailView.vue),
+    // so a raw id rendered as option TEXT on these two flows was a plain leak, not a documented
+    // search affordance.
+    it('the add-sign picker DROPDOWN never renders a raw id as option text, and stays distinguishable (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const options = Array.from(select.querySelectorAll('option'))
+      const labels = options.map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+      // The option VALUE (the real submit payload) is unaffected by the label fallback -- only
+      // the visible TEXT changed.
+      expect(options.map((o) => o.value)).toEqual(['user_2', 'user_3', 'user_4', 'user_9'])
+    })
+
+    it('the transfer picker DROPDOWN never renders a raw id as option text (same directory fixture, discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const transferBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '转交')
+      transferBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="转交审批"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+    })
+
+    // member-display-identity (2026-08-19) — owner directive: 转交/加签 hand real approval
+    // authority to whoever is picked, so the blank-name `user_9` option (same fixture every other
+    // test in this block already uses) must be UNSELECTABLE, not just relabelled. The named options
+    // stay selectable (positive control folded in, same assertion block).
+    it('the 转交/加签 dropdowns disable the unresolvable option and keep named options selectable', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      for (const [label, dialogTitle] of [['转交', '转交审批'], ['加签', '加签']] as const) {
+        const btn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+          .find((b) => b.textContent?.trim() === label)
+        btn!.click()
+        await flushUi()
+
+        const dialog = container!.querySelector(`[data-dialog-visible="true"][data-el-dialog="${dialogTitle}"]`)!
+        const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+        const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+        const nameless = options.find((o) => o.value === 'user_9')!
+        expect(nameless.disabled, `${label}: the nameless option must be disabled`).toBe(true)
+        for (const named of options.filter((o) => o.value !== 'user_9')) {
+          expect(named.disabled, `${label}: option ${named.value} has a real name and must stay selectable`).toBe(false)
+        }
+      }
     })
   })
 
@@ -1526,7 +1695,7 @@ describe('Approval E2E Lifecycle', () => {
   // UX B2-08: current handler + upcoming nodes
   // =========================================================================
   describe('UX B2-08: current handler + upcoming nodes', () => {
-    it('a pending instance renders 当前处理人 with the active assignee + 已等待', async () => {
+    it('a pending instance renders 当前处理人 with a values-free label + 已等待', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1537,8 +1706,72 @@ describe('Approval E2E Lifecycle', () => {
       const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
       expect(item).toBeTruthy()
       expect(item!.textContent).toContain('当前处理人')
-      expect(item!.textContent).toContain('user_current') // the fixture's active assigneeId
+      // P7-R2 gate hardening (P2-2): this used to pin the raw `assigneeId` leak — the fixture's
+      // assignment carries no `metadata.assigneeName` (matches production: that field has zero
+      // producers repo-wide), so `assignmentDisplayLabel` now renders the values-free "审批人"
+      // placeholder instead of ever falling back to the raw id.
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_current') // the fixture's raw assigneeId
       expect(item!.textContent).toContain('已等待')
+    })
+
+    // P7-R2 gate hardening (P2-2) — the gate's own probe named this the most reachable
+    // member-facing raw-id leak in ApprovalDetailView.vue: not a drift/exotic shape, the ORDINARY
+    // pending-instance case. Constructs the exact leak shape and confirms both branches.
+    it('P2-2: never renders the raw assigneeId, even with a distinctive id shape', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item).toBeTruthy()
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_secret_777')
+      expect(container!.innerHTML).not.toContain('user_secret_777')
+    })
+
+    it('P2-2: resolves to a real display name when the assignment already carries one', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: { assigneeName: '王五' },
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item!.textContent).toContain('王五')
+      expect(item!.textContent).not.toContain('user_secret_777')
+    })
+
+    // POSITIVE CONTROL, resolver path (member-display-identity, 2026-08-19): proves the NEW
+    // `getResolvedUserName` path (not just the pre-existing `metadata.assigneeName` path the test
+    // above already covers) turns the values-free "审批人" placeholder into the real name.
+    it('member-display-identity: resolves to a real name via the directory resolver when metadata.assigneeName is absent', async () => {
+      resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_secret_777', name: '钱八' }])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
+      await mountDetailView()
+      await flushUi(12)
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item!.textContent).toContain('钱八')
+      expect(item!.textContent).not.toContain('user_secret_777')
+      expect(item!.textContent).not.toContain('审批人')
     })
 
     it('a non-pending instance renders NO current/upcoming section', async () => {
@@ -1565,8 +1798,10 @@ describe('Approval E2E Lifecycle', () => {
         expect.stringContaining('结束'),
       ])
       // legacy assigneeType/assigneeIds shape (the fixture graph predates assigneeSources) still
-      // resolves to a real summary, not "unconfigured".
-      expect(items[0].textContent).toContain('指定成员：user_finance')
+      // resolves to a real summary, not "unconfigured" — count-only, never the raw configured id
+      // (this is a requester-facing "what's next" surface, not an authoring tool; P3).
+      expect(items[0].textContent).toContain('指定成员（1 人）')
+      expect(items[0].textContent).not.toContain('user_finance')
       expect(items[1].textContent).toContain('流程结束')
       // Greyed via the dedicated CSS class (--future), not the current/highlighted one.
       expect(items[0].classList.contains('approval-detail__timeline-upcoming-item--future')).toBe(true)

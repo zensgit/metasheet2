@@ -13,6 +13,13 @@
  * gated, provider-bound row's assembled prompt to `runShortcutCore`. The
  * per-charge invariants (charge-on-generation, never-release, reserve-then-
  * settle, the unsafe-input scan) live here unchanged.
+ *
+ * GOVERNED-AI WIRING: `runShortcutCore` is the SINGLE provider-call choke for the
+ * shipped multitable-AI features (single-record shortcut, inline bulk-fill, and
+ * the async bulk job worker all funnel through it). It therefore carries the
+ * data-class routing gate — `authorizeAiRoute(provider, 'business')` — so the
+ * deploy-configured routing policy actually governs the live path that handles
+ * customer record data. See the gate-order note on `runShortcutCore`.
  */
 
 import { redactString } from '../multitable/automation-log-redact'
@@ -22,6 +29,7 @@ import {
   type AiCompletionResult,
   type AiUsage,
 } from './ai-provider-client'
+import { authorizeAiRoute, type AiDataClass } from './ai-routing-policy'
 import {
   AI_USAGE_RESERVATION_GRACE_MS,
   conservativePromptTokenEstimate,
@@ -37,6 +45,15 @@ import {
 import type { ConnectionPool, QueryFn } from '../multitable/record-write-service'
 
 export type PoolLike = ConnectionPool & { query: QueryFn }
+
+/**
+ * The data-sensitivity class of EVERY prompt on this path. Fixed, not a
+ * parameter: these prompts are assembled from customer record content, so the
+ * class is a property of the feature, not of the caller. Making it an argument
+ * would let a caller declare its way around the routing policy — the exact
+ * "an argument is an unlock surface" failure the outbound-write gate calls out.
+ */
+export const AI_SHORTCUT_DATA_CLASS: AiDataClass = 'business'
 
 export interface ShortcutRequestContext {
   pool: PoolLike
@@ -86,10 +103,11 @@ async function insertLedgerBestEffort(query: AiUsageQueryFn, entry: AiUsageLedge
  * one built with the SAME injected fetchFn — both keep CI zero-real-call).
  *
  * Gate order from "prompt assembled" onward: unsafe scan → double-confirm/
- * readiness preflight (blocked: zero-token row, NO lock) → quota RESERVE (one
- * SHORT advisory-locked tx) → provider call (NO lock held) → SETTLE the
- * reservation to actual usage. Settles are best-effort (§2.5); a failing reserve
- * fails closed.
+ * readiness preflight (blocked: zero-token row, NO lock) → DATA-CLASS ROUTING
+ * GATE (blocked: zero-token row, NO lock, zero outbound — business data never
+ * reaches a cloud provider) → quota RESERVE (one SHORT advisory-locked tx) →
+ * provider call (NO lock held) → SETTLE the reservation to actual usage. Settles
+ * are best-effort (§2.5); a failing reserve fails closed.
  *
  * Returns a discriminated per-row outcome (see {@link ShortcutCoreOutcome}).
  */
@@ -141,6 +159,38 @@ export async function runShortcutCore(
       error: pre.message,
     })
     return { kind: 'blocked', message: pre.message }
+  }
+
+  // ── DATA-CLASS ROUTING GATE (governed AI boundary) ────────────────────────
+  // Every prompt on this path is assembled from CUSTOMER RECORD CONTENT
+  // (assembleMaskedPrompt in routes/multitable-ai.ts folds the record's captured
+  // field data into the prompt), so this path is unconditionally `business`
+  // class. Before this gate existed, `complete()` below sent that content to
+  // whatever MULTITABLE_AI_BASE_URL pointed at — defaulting to api.anthropic.com
+  // / api.openai.com, i.e. the public cloud — with NO routing policy consulted.
+  // A deployment could have a perfectly-configured policy and still leak BOM /
+  // record data through bulk-fill.
+  //
+  // Placed AFTER preflight (so provider identity is known) and BEFORE the quota
+  // reserve, so a refusal costs no reservation and is UNCHARGED with zero
+  // outbound. It resolves to the EXISTING `blocked` outcome — the vocabulary all
+  // three callers (single-record route, inline bulk-fill, async worker) already
+  // handle — so the response shape, the zero-token ledger row, redaction, the
+  // double-confirm gate and the quota discipline are all unchanged. This inserts
+  // the routing gate; it does not rewrite the feature.
+  const routing = authorizeAiRoute(pre.provider, AI_SHORTCUT_DATA_CLASS)
+  // `in`-guard (not `!routing.allowed`): non-strict tsconfig, no boolean-discriminant narrowing.
+  if ('reason' in routing) {
+    await insertLedgerBestEffort(query, {
+      ...baseEntry,
+      ...zeroUsage,
+      estimatedCostUsd: 0,
+      provider: pre.provider,
+      model: pre.model,
+      status: 'blocked',
+      error: routing.message,
+    })
+    return { kind: 'blocked', message: routing.message }
   }
 
   // Quota RESERVE — the advisory locks wrap ONLY this short check+insert

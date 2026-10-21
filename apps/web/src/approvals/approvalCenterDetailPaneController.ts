@@ -31,9 +31,12 @@ export interface DetailPaneController {
   clear(): void
 }
 
+// O-8 / F8-1: `isZh` is a getter (this module stays Vue-free) read when the fallback error copy is
+// built; ApprovalCenterView passes `() => isZh.value`. The default keeps the shipped zh-CN copy.
 export function createDetailPaneController(
   fetcher: (id: string) => Promise<UnifiedApprovalDTO>,
   onState: (patch: Partial<DetailPaneState>) => void,
+  isZh: () => boolean = () => true,
 ): DetailPaneController {
   let gen = 0
   return {
@@ -50,7 +53,7 @@ export function createDetailPaneController(
         onState({ approval: result, loading: false })
       } catch (error) {
         if (g !== gen) return
-        onState({ approval: null, error: error instanceof Error ? error.message : '加载详情失败', loading: false })
+        onState({ approval: null, error: error instanceof Error ? error.message : (isZh() ? '加载详情失败' : 'Failed to load details'), loading: false })
       }
     },
   }

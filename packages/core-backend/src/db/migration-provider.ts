@@ -87,10 +87,10 @@ const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
   // 041: script_sandbox (8-table package) — zombie.
   '041_script_sandbox',
   // 042/042a-042d, 043-047: core-model/views/external-data/audit/plugin/cache duplicates and
-  // predecessors of the modern equivalents. Two of these back genuinely dead application code,
+  // predecessors of the modern equivalents. Two of these backed genuinely dead application code,
   // not just unused tables — WorkflowRepository.ts (042 workflow_tokens/workflow_incidents) and
-  // DataMaterializationService.ts (042b/044 external_tables) have zero importers repo-wide, so
-  // reviving the migration alone would not make the feature live.
+  // DataMaterializationService.ts (042b/044 external_tables) had zero importers repo-wide; both
+  // source files have been deleted (GOV-02 source cleanup PR), migrations/tables kept as-is.
   '042_core_model_completion',
   '042a_core_model_views',
   '042b_external_data_model',

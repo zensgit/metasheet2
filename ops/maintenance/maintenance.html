@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>系统维护中</title>
+<!--
+  升级窗口维护页。nginx 在 <RootDir>/output/maintenance.flag 存在时把 / 的 503
+  指到这里（见 ops/nginx/multitable-onprem.conf.example 的「维护门」段）。
+
+  两条硬要求，改动时请保持：
+  1. 零外链 —— 不引用任何 CSS/JS/字体/图片。维护期间后端是停的，任何外部请求
+     都会挂起或再抛一个错误，正好毁掉这个页面存在的意义。
+  2. 放在升级**不会替换**的目录（<RootDir>/ops/maintenance/）。放进
+     apps/web/dist 的话，它会在升级删除重建那个目录的几十秒里正好消失。
+
+  部署：把本文件复制到 <RootDir>/ops/maintenance/maintenance.html（例如
+  C:\metasheet\ops\maintenance\maintenance.html），它不随升级包自动更新。
+-->
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f5f6f8;
+    color: #24292f;
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  }
+  .card {
+    max-width: 32rem;
+    padding: 2.5rem 2.75rem;
+    border: 1px solid #e3e5e8;
+    border-radius: 10px;
+    background: #fff;
+    text-align: center;
+  }
+  h1 { margin: 0 0 1rem; font-size: 1.5rem; font-weight: 600; }
+  p { margin: 0.5rem 0; line-height: 1.7; font-size: 0.95rem; }
+  .muted { color: #6b7280; font-size: 0.85rem; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>系统升级维护中</h1>
+    <p>正在进行版本升级，通常需要 1-2 分钟。</p>
+    <p>请稍后刷新本页面重试；此期间提交的操作不会被保存，请升级完成后重做。</p>
+    <p class="muted">如果超过 10 分钟仍看到本页面，请联系现场运维人员。</p>
+  </div>
+</body>
+</html>

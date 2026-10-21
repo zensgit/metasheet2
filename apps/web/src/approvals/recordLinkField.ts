@@ -22,6 +22,14 @@ export const RECORD_LINK_TARGET_UNAVAILABLE = '目标不可用'
 /** Display when a record is selected but no human summary is available (never raw recordId). */
 export const RECORD_LINK_SELECTED_GENERIC = '已选择记录'
 
+/** O-8 / F8-1: English counterpart of `RECORD_LINK_SELECTED_GENERIC` (same values-free rule). */
+export const RECORD_LINK_SELECTED_GENERIC_EN = 'Record selected'
+
+/** The generic selected-record label for the current shell locale. */
+export function recordLinkSelectedGeneric(isZh: boolean): string {
+  return isZh ? RECORD_LINK_SELECTED_GENERIC : RECORD_LINK_SELECTED_GENERIC_EN
+}
+
 /** Values-free client hint (server re-validates with the same no-oracle shape). */
 export const RECORD_LINK_VALUE_HINT =
   '请选择一条关联记录（仅支持单条；提交时服务端按读权限校验）'
@@ -85,9 +93,17 @@ export function isRecordLinkType(type: FormFieldType): boolean {
  * non-scalar and "never as one comparable value"; its two endpoints are separately selectable via
  * `dateRangeVisibilityEndpointOptions` below, a per-type ADDITIVE affordance, not a widening of
  * this boolean.
+ *
+ * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, MS-9) extends the SAME exclusion
+ * to `explanation` — it carries no value at all (a stricter case than "non-scalar": there is
+ * nothing to compare, ever), and unlike date_range it gets no endpoint fallback (it has none).
  */
 export function isSelectableConditionOrVisibilityDependencyType(type: FormFieldType | string): boolean {
-  return type !== 'record-link' && type !== 'detail' && type !== 'date_range'
+  return type !== 'record-link'
+    && type !== 'detail'
+    && type !== 'date_range'
+    && type !== 'explanation'
+    && type !== 'department'
 }
 
 /**
@@ -130,7 +146,10 @@ export function visibilityReferenceBaseFieldId(rawFieldId: string): string {
  * Pure helper for authoring + unit tests. Lock-8 L8-B: `date_range` joins record-link/detail as a
  * type whose retype-away must clear stale dependents — including a dotted endpoint address
  * (`${id}.start`/`${id}.end`), which `visibilityReferenceBaseFieldId` resolves to the same base id
- * a bare reference would use, so neither form survives orphaned.
+ * a bare reference would use, so neither form survives orphaned. Lock-8 L8-A: `explanation` joins
+ * too, matching record-link/detail's ONE-direction shape (nothing could ever validly have
+ * depended on it, so only "became explanation" needs clearing — there is no endpoint fallback to
+ * distinguish, unlike date_range).
  */
 export function clearStaleRecordLinkDependencies<T extends {
   id: string
@@ -142,7 +161,12 @@ export function clearStaleRecordLinkDependencies<T extends {
   changedFieldId: string,
   changedType: string,
 ): { fields: T[]; conditionRules: Array<{ fieldId: string }> } {
-  if (changedType !== 'record-link' && changedType !== 'detail' && changedType !== 'date_range') {
+  if (
+    changedType !== 'record-link' &&
+    changedType !== 'detail' &&
+    changedType !== 'date_range' &&
+    changedType !== 'explanation'
+  ) {
     return { fields, conditionRules }
   }
   const id = changedFieldId.trim()
@@ -169,9 +193,9 @@ export function clearStaleRecordLinkDependencies<T extends {
  * Fill / detail display: human label when available; otherwise a generic selected-record
  * label. NEVER falls back to the raw recordId (existence / id oracle surface).
  */
-export function formatRecordLinkDisplay(humanLabel: string | null | undefined): string {
+export function formatRecordLinkDisplay(humanLabel: string | null | undefined, isZh = true): string {
   const label = typeof humanLabel === 'string' ? humanLabel.trim() : ''
-  return label || RECORD_LINK_SELECTED_GENERIC
+  return label || recordLinkSelectedGeneric(isZh)
 }
 
 /**
@@ -245,6 +269,44 @@ export function buildRecordLinkSheetSelectOptions(
     options.unshift({ value: current, label: RECORD_LINK_TARGET_UNAVAILABLE })
   }
   return options
+}
+
+/**
+ * Parent-owned record-link authoring catalog snapshot (FWB-0 Layer 2; delta §3.4 typed pickers).
+ * The authoring VIEW is the only fetch/state owner (F0 gate #2); form-builder children render this
+ * snapshot read-only and ask the owner to (re)load it by emitting an intent — they never fetch.
+ */
+export interface RecordLinkAuthoringCatalog {
+  readonly bases: readonly RecordLinkNamedOption[]
+  readonly sheets: readonly (RecordLinkNamedOption & { baseId?: string | null })[]
+  readonly loading: boolean
+  /** True only after a successful fetch — a failure must stay retriable. */
+  readonly loaded: boolean
+  /** Values-free failure copy; '' when ok / idle. */
+  readonly error: string
+}
+
+/**
+ * Sheet pin to keep when an author changes a record-link field's target BASE: the current sheet
+ * survives only when a loaded catalog row proves it belongs to the new base (same membership rule
+ * as the flag-OFF inline editor's base-change handler); otherwise it is cleared. Clearing the base
+ * always clears the sheet — a sheet pin without a base is never a valid target. Pure, so the
+ * caller can submit `{ baseId, sheetId }` as ONE committed edit (one history entry).
+ */
+export function recordLinkSheetAfterBaseChange(
+  sheets: readonly (RecordLinkNamedOption & { baseId?: string | null })[],
+  nextBaseId: string | null | undefined,
+  currentSheetId: string | null | undefined,
+): string {
+  const base = typeof nextBaseId === 'string' ? nextBaseId.trim() : ''
+  const sheet = typeof currentSheetId === 'string' ? currentSheetId.trim() : ''
+  if (!base || !sheet) return ''
+  const belongs = sheets.some(
+    (s) => typeof s.id === 'string'
+      && s.id.trim() === sheet
+      && (typeof s.baseId === 'string' ? s.baseId.trim() : '') === base,
+  )
+  return belongs ? sheet : ''
 }
 
 /**

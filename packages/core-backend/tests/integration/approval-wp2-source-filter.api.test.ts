@@ -45,6 +45,17 @@ async function getJson<T>(baseUrl: string, path: string, token: string): Promise
   return (await response.json()) as T
 }
 
+// P7-R1 gate P2-1 closure — Anti-skip-green sentinel (mirrors approval-realdb-handler /
+// approval-field-edit-enforcement.db.test.ts): the approval-realdb-p7r1-sweep job (in
+// .github/workflows/approval-realdb-p7r1-coverage-repair.yml) sets
+// EXPECT_DB=1, so a broken/missing DATABASE_URL there REDS the run instead of the whole file
+// silently reporting skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test
+// cleanly — it never runs in the required no-DB `test (20.x)` job.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
@@ -183,8 +194,14 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
     }
   })
 
+  // RE-PINNED (P0-A). This test used to run as `wp2-actor-*`, an identity with no relationship to
+  // the seeded platform row — which pinned exactly the behaviour being removed: the list feed now
+  // decides its scope server-side, so a platform row reaches a caller only through that caller's own
+  // participation (or the DB-backed admin arm). The test's SUBJECT — the `sourceSystem` filter's
+  // three modes — is unchanged; it simply runs as `tabActorId`, who holds the seeded row's active
+  // seat, so the source filter is what discriminates rather than the absence of any scope.
   it('returns a unified feed when sourceSystem=all', async () => {
-    const token = await authToken(baseUrl, `wp2-actor-${suiteSuffix}`)
+    const token = await authToken(baseUrl, tabActorId)
     const payload = await getJson<ListResponse>(
       baseUrl,
       `/api/approvals?sourceSystem=all&workflowKey=${encodeURIComponent(platformWorkflowKey)}`,
@@ -256,8 +273,10 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
     expect(new Set(unifiedRows.map((row) => row.sourceSystem))).toEqual(new Set(['platform', 'plm']))
   })
 
+  // RE-PINNED (P0-A), same reason as the unified-feed test above: run as the seat-holder so the
+  // `sourceSystem=platform` filter is what this assertion measures.
   it('scopes the feed to platform rows when sourceSystem=platform', async () => {
-    const token = await authToken(baseUrl, `wp2-actor-${suiteSuffix}`)
+    const token = await authToken(baseUrl, tabActorId)
     const payload = await getJson<ListResponse>(
       baseUrl,
       `/api/approvals?sourceSystem=platform&workflowKey=${encodeURIComponent(platformWorkflowKey)}`,

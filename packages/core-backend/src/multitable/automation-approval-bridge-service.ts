@@ -20,6 +20,7 @@ import { isAdmin } from '../rbac/service'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
+import type { ExecutionLedgerKind } from './automation-execution-ledger'
 import { computeActionFingerprint, type ActionFingerprint } from './automation-suspension-service'
 import {
   lookupTemplateValue,
@@ -43,6 +44,7 @@ export interface AutomationApprovalBridgeRow {
   id: string
   executionId: string
   rootExecutionId: string
+  ledgerKind: ExecutionLedgerKind
   ruleId: string
   sheetId: string | null
   recordId: string | null
@@ -144,6 +146,11 @@ function rootIdFor(execution: Pick<AutomationExecution, 'id' | 'rerunOfExecution
   return execution.rootExecutionId || execution.rerunOfExecutionId || execution.id
 }
 
+function readLedgerKind(value: unknown): ExecutionLedgerKind {
+  if (value === 'execution' || value === 'test_run') return value
+  throw new Error('automation approval bridge has an invalid ledger_kind')
+}
+
 function buildTemplateData(context: ExecutionContext): Record<string, unknown> {
   return {
     ...context.recordData,
@@ -194,6 +201,90 @@ function stepResultForApproval(approval: Pick<UnifiedApprovalDTO, 'id' | 'reques
   }
 }
 
+/** The requester identity `createApproval` is called with (structurally `CreateApprovalActor`). */
+export interface AuthorizedApprovalActor {
+  userId: string
+  userName?: string
+  email?: string
+  department?: string
+  departmentIds?: string[]
+  roles?: string[]
+  permissions?: string[]
+}
+
+async function loadApprovalActorRoles(userId: string, legacyRole: string | null): Promise<string[]> {
+  const roles = new Set<string>()
+  if (legacyRole && legacyRole.trim()) roles.add(legacyRole.trim())
+  try {
+    const result = await query<{ role_id: string }>(
+      `SELECT role_id FROM user_roles WHERE user_id = $1`,
+      [userId],
+    )
+    for (const row of result.rows) {
+      if (row.role_id && row.role_id.trim()) roles.add(row.role_id.trim())
+    }
+  } catch {
+    // Older/degraded deployments may not have user_roles; legacy users.role still applies.
+  }
+  return Array.from(roles)
+}
+
+/**
+ * Load + AUTHORIZE the approval requester from the DATABASE (never from the JWT): the users row must
+ * exist and be active, and the identity must hold `approvals:write` (or be a DB admin).
+ *
+ * Extracted verbatim from `AutomationApprovalBridgeService.loadAuthorizedActor` (which now delegates
+ * here) so the record-level submit route reuses the SAME loader instead of minting a second one. The
+ * `START_APPROVAL_*` error codes are preserved byte-for-byte for the automation path; the record route
+ * maps them onto its own values-free vocabulary.
+ *
+ * This is a PRECHECK, not the authority: `ApprovalProductService.createApproval` re-checks
+ * `approvals:write` on its own transaction client before it writes.
+ */
+export async function loadAuthorizedApprovalActor(
+  requesterId: string | null | undefined,
+): Promise<AuthorizedApprovalActor> {
+  const userId = normalizeString(requesterId)
+  if (!userId) {
+    throw new ServiceError('start_approval requester could not be resolved', 400, 'START_APPROVAL_REQUESTER_REQUIRED')
+  }
+
+  const userResult = await query<{
+    id: string
+    email: string | null
+    username: string | null
+    name: string | null
+    role: string | null
+    is_active: boolean | null
+  }>(
+    `SELECT id, email, username, name, role, is_active
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [userId],
+  )
+  const user = userResult.rows[0]
+  if (!user || user.is_active === false) {
+    throw new ServiceError('start_approval requester user not found or inactive', 404, 'START_APPROVAL_REQUESTER_NOT_FOUND')
+  }
+
+  const permissions = await listRbacPermissionCodes(userId)
+  const roles = await loadApprovalActorRoles(userId, user.role)
+  const allowed = await isAdmin(userId)
+    || hasPermissionCode(permissions, 'approvals:write')
+  if (!allowed) {
+    throw new ServiceError('start_approval requester lacks approvals:write', 403, 'START_APPROVAL_PERMISSION_DENIED')
+  }
+
+  return {
+    userId,
+    userName: user.name ?? user.username ?? user.email ?? userId,
+    email: user.email ?? undefined,
+    roles,
+    permissions,
+  }
+}
+
 export class AutomationApprovalBridgeService {
   constructor(
     private readonly jobService: AutomationJobService,
@@ -216,7 +307,10 @@ export class AutomationApprovalBridgeService {
   }
 
   async startApproval(input: {
-    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & { rootExecutionId?: string }
+    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & {
+      rootExecutionId?: string
+      ledgerKind?: ExecutionLedgerKind
+    }
     rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction>; createdBy?: string }
     context: ExecutionContext
     stepIndex: number
@@ -250,6 +344,7 @@ export class AutomationApprovalBridgeService {
         id: bridgeId,
         execution_id: input.execution.id,
         root_execution_id: rootExecutionId,
+        ledger_kind: input.execution.ledgerKind ?? 'execution',
         rule_id: input.rule.id,
         sheet_id: input.rule.sheetId ?? null,
         record_id: input.context.recordId || null,
@@ -448,74 +543,11 @@ export class AutomationApprovalBridgeService {
     config: StartApprovalConfig,
     context: ExecutionContext,
     ruleCreatedBy: string,
-  ): Promise<{
-    userId: string
-    userName?: string
-    email?: string
-    department?: string
-    departmentIds?: string[]
-    roles?: string[]
-    permissions?: string[]
-  }> {
+  ): Promise<AuthorizedApprovalActor> {
     const preferred = config.requester?.mode === 'rule_creator'
       ? ruleCreatedBy
       : (context.actorId || ruleCreatedBy)
-    const userId = normalizeString(preferred)
-    if (!userId) {
-      throw new ServiceError('start_approval requester could not be resolved', 400, 'START_APPROVAL_REQUESTER_REQUIRED')
-    }
-
-    const userResult = await query<{
-      id: string
-      email: string | null
-      username: string | null
-      name: string | null
-      role: string | null
-      is_active: boolean | null
-    }>(
-      `SELECT id, email, username, name, role, is_active
-         FROM users
-        WHERE id = $1
-        LIMIT 1`,
-      [userId],
-    )
-    const user = userResult.rows[0]
-    if (!user || user.is_active === false) {
-      throw new ServiceError('start_approval requester user not found or inactive', 404, 'START_APPROVAL_REQUESTER_NOT_FOUND')
-    }
-
-    const permissions = await listRbacPermissionCodes(userId)
-    const roles = await this.loadUserRoles(userId, user.role)
-    const allowed = await isAdmin(userId)
-      || hasPermissionCode(permissions, 'approvals:write')
-    if (!allowed) {
-      throw new ServiceError('start_approval requester lacks approvals:write', 403, 'START_APPROVAL_PERMISSION_DENIED')
-    }
-
-    return {
-      userId,
-      userName: user.name ?? user.username ?? user.email ?? userId,
-      email: user.email ?? undefined,
-      roles,
-      permissions,
-    }
-  }
-
-  private async loadUserRoles(userId: string, legacyRole: string | null): Promise<string[]> {
-    const roles = new Set<string>()
-    if (legacyRole && legacyRole.trim()) roles.add(legacyRole.trim())
-    try {
-      const result = await query<{ role_id: string }>(
-        `SELECT role_id FROM user_roles WHERE user_id = $1`,
-        [userId],
-      )
-      for (const row of result.rows) {
-        if (row.role_id && row.role_id.trim()) roles.add(row.role_id.trim())
-      }
-    } catch {
-      // Older/degraded deployments may not have user_roles; legacy users.role still applies.
-    }
-    return Array.from(roles)
+    return loadAuthorizedApprovalActor(preferred)
   }
 
   private mapRow(row: Record<string, unknown>): AutomationApprovalBridgeRow {
@@ -527,6 +559,7 @@ export class AutomationApprovalBridgeService {
       id: row.id as string,
       executionId: row.execution_id as string,
       rootExecutionId: row.root_execution_id as string,
+      ledgerKind: readLedgerKind(row.ledger_kind),
       ruleId: row.rule_id as string,
       sheetId: (row.sheet_id as string) ?? null,
       recordId: (row.record_id as string) ?? null,

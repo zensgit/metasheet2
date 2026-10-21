@@ -14,6 +14,7 @@
  * table/column, validation state, or ON DELETE action.
  */
 
+import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
@@ -34,6 +35,8 @@ const AUTHORITY_FUNCTION_NAMES = [
   ...AUTHORITY_TRIGGER_FUNCTIONS,
 ]
 
+const EXPECTED_TRIGGER_STATES = new Set(['disabled', 'armed'])
+
 function triggerArgsHex(...args) {
   return Buffer.from(args.map((arg) => `${arg}\0`).join('')).toString('hex')
 }
@@ -48,6 +51,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
     argumentHex: triggerArgsHex('subject_type', 'subject_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -59,6 +63,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
     argumentHex: triggerArgsHex('user_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -70,6 +75,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
     argumentHex: triggerArgsHex('subject_type', 'subject_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -81,6 +87,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_role_permission_trigger',
     argumentHex: '',
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -92,6 +99,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_subject_trigger',
     argumentHex: triggerArgsHex('subject_type', 'subject_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -103,6 +111,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
     argumentHex: triggerArgsHex('user_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -114,6 +123,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
     argumentHex: triggerArgsHex('user_id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -125,6 +135,7 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
     argumentHex: triggerArgsHex('id'),
+    whenClause: '',
     updateColumns: [],
   },
   {
@@ -136,9 +147,58 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
     functionSchema: 'public',
     functionName: 'metasheet_recovery_authority_user_trigger',
     argumentHex: triggerArgsHex('id'),
+    whenClause: '',
     updateColumns: ['role', 'permissions', 'is_active'],
   },
 ]
+
+/**
+ * The ONE schema the canonical recovery-authority surface lives in — DERIVED from
+ * `EXPECTED_AUTHORITY_TRIGGERS`, never retyped.
+ *
+ * WHY THIS EXISTS. `to_regclass('roles')` resolves through the SESSION's `search_path`, so any
+ * consumer that binds to `roles` by bare name is bound to whatever the session happens to see. A
+ * decoy `roles` reached first — a `"$user"` schema the connecting role owns, a `SET search_path`, a
+ * DSN `options=`, an `ALTER ROLE … SET`, or a `CREATE TEMP TABLE roles` — silently retargets the
+ * query, and a query that finds nothing there reads as "nothing is there" rather than "we looked
+ * somewhere else". Consumers therefore bind to `<EXPECTED_AUTHORITY_SCHEMA>.roles` and treat any
+ * disagreement between that and the session's own resolution as UNOBSERVABLE, never as absence.
+ *
+ * DERIVED, NOT RETYPED, and it REFUSES rather than picks: if the canonical trigger set ever spans
+ * more than one schema there is no longer a single canonical schema to bind to, and every consumer
+ * must be re-designed rather than silently bound to whichever schema happened to sort first.
+ */
+const EXPECTED_AUTHORITY_SCHEMA = (() => {
+  const schemas = [...new Set(EXPECTED_AUTHORITY_TRIGGERS.map((trigger) => trigger.schemaName))]
+  if (schemas.length !== 1) {
+    throw new Error(
+      `EXPECTED_AUTHORITY_TRIGGERS spans ${schemas.length} schemas (${schemas.join(', ')}); there is no single`
+      + ' canonical schema for consumers to bind `roles` to. Re-design the binding rather than picking one.',
+    )
+  }
+  return schemas[0]
+})()
+
+/**
+ * A schema name safe to embed in the SQL these consumers build.
+ *
+ * Values-free by construction: the only schema names this repo ever binds are the canonical one and
+ * the per-run random schemas its real-DB goldens create, all plain lowercase identifiers. Anything
+ * else is refused at build time rather than escaped and passed through.
+ *
+ * DEFENCE IN DEPTH, NOT LOAD-BEARING TODAY — stated so a reader does not have to guess. No OBSERVED
+ * schema name ever reaches a builder: every call site passes either `EXPECTED_AUTHORITY_SCHEMA` or a
+ * literal schema the caller just created. In particular the witness's `session_roles_schema` is a
+ * catalog string that is REPORTED and never fed back in. This guard exists so that stays true by
+ * construction if a future caller is tempted to bind something it read from a database.
+ */
+function assertBindableSchemaName(schema) {
+  const name = String(schema ?? '')
+  if (!/^[a-z_][a-z0-9_$]*$/.test(name)) {
+    throw new Error(`refusing to bind a non-identifier schema name: ${JSON.stringify(schema)}`)
+  }
+  return name
+}
 
 const TRY_LOCK_USER_BODY = `
 DECLARE
@@ -207,7 +267,7 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    IF NOT metasheet_try_recovery_authority_user(authority_user_id, FALSE) THEN
+    IF NOT public.metasheet_try_recovery_authority_user(authority_user_id, FALSE) THEN
       RAISE EXCEPTION USING
         ERRCODE = '40001',
         MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
@@ -231,7 +291,7 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    IF NOT metasheet_try_recovery_authority_role(affected_role_id, FALSE) THEN
+    IF NOT public.metasheet_try_recovery_authority_role(affected_role_id, FALSE) THEN
       RAISE EXCEPTION USING
         ERRCODE = '40001',
         MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
@@ -268,11 +328,11 @@ BEGIN
        btrim(subject_id)
   LOOP
     IF affected_subject_type = 'user' THEN
-      acquired := metasheet_try_recovery_authority_user(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_user(affected_subject_id, FALSE);
     ELSIF affected_subject_type = 'role' THEN
-      acquired := metasheet_try_recovery_authority_role(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_role(affected_subject_id, FALSE);
     ELSE
-      acquired := metasheet_try_recovery_authority_group(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_group(affected_subject_id, FALSE);
     END IF;
     IF NOT acquired THEN
       RAISE EXCEPTION USING
@@ -294,6 +354,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_GROUP_BODY,
   },
   {
@@ -304,6 +368,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_ROLE_BODY,
   },
   {
@@ -314,6 +382,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_USER_BODY,
   },
   {
@@ -324,6 +396,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: SUBJECT_TRIGGER_BODY,
   },
   {
@@ -334,6 +410,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: USER_TRIGGER_BODY,
   },
   {
@@ -344,6 +424,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: ROLE_PERMISSION_TRIGGER_BODY,
   },
 ]
@@ -364,6 +448,7 @@ function canonicalTrigger(row) {
     functionSchema: String(row.functionSchema ?? row.function_schema ?? ''),
     functionName: String(row.functionName ?? row.function_name ?? ''),
     argumentHex: String(row.argumentHex ?? row.argument_hex ?? ''),
+    whenClause: String(row.whenClause ?? row.when_clause ?? ''),
     updateColumns: [...(row.updateColumns ?? row.update_columns ?? [])].map(
       String,
     ),
@@ -381,6 +466,10 @@ function canonicalFunction(row) {
     language: String(row.language ?? ''),
     securityDefiner: Boolean(row.securityDefiner ?? row.security_definer),
     volatility: String(row.volatility ?? ''),
+    // The per-function SET list (pg_proc.proconfig). node-postgres parses the text[] into a JS
+    // array of `name=value` strings, e.g. ['search_path=pg_catalog, public']; NULL (no SET) becomes
+    // []. Part of the fingerprint so the fixed search_path hardening cannot silently drift out.
+    config: [...(row.config ?? row.proconfig ?? [])].map(String),
     body: normalizeWhitespace(row.body),
   }
 }
@@ -391,6 +480,119 @@ function canonicalMetaLinksForeignRecordFk(row) {
     onDeleteAction: String(row.onDeleteAction ?? row.on_delete_action ?? ''),
   }
 }
+
+/**
+ * The authority-trigger catalogue SELECT — the SINGLE query of record for the canonical trigger
+ * identity (`$1` = expected trigger names, `$2` = authority trigger function names). Exported so
+ * the L1 battery's posture preflight observes the SAME columns this module canonicalizes rather
+ * than re-hardcoding a narrower field list of its own; a column added here reaches both readers.
+ * Deliberately NOT schema-filtered: an authority-named trigger parked in another schema must show
+ * up as an observation, not vanish from the snapshot.
+ *
+ * `when_clause` (pg_trigger.tgqual) is part of the identity for the same reason table_name is: a
+ * trigger can match the census in every OTHER field — right table, function, events, args, update
+ * columns, tgenabled — and still never fire, because a WHEN predicate that is never true gates it.
+ * Verified behaviourally on a real database: with such a predicate an EXCLUSIVE
+ * recovery-authority lease no longer refuses the platform write at all. Every authority trigger is
+ * declared without a WHEN clause, so the expected value is the empty string.
+ */
+const AUTHORITY_TRIGGER_SNAPSHOT_QUERY = `SELECT
+         ns.nspname AS schema_name,
+         cls.relname AS table_name,
+         trg.tgname AS trigger_name,
+         trg.tgenabled AS enabled,
+         trg.tgtype::int AS trigger_type,
+         pns.nspname AS function_schema,
+         proc.proname AS function_name,
+         encode(trg.tgargs, 'hex') AS argument_hex,
+         -- The WHEN clause (see the note above the export for why it is part of the identity).
+         COALESCE(pg_catalog.pg_get_expr(trg.tgqual, trg.tgrelid), '') AS when_clause,
+         COALESCE(
+           ARRAY(
+             SELECT attr.attname::text
+               FROM unnest(trg.tgattr::smallint[]) WITH ORDINALITY AS selected(attnum, position)
+               JOIN pg_catalog.pg_attribute attr
+                 ON attr.attrelid = trg.tgrelid
+                AND attr.attnum = selected.attnum
+              ORDER BY selected.position
+           ),
+           ARRAY[]::text[]
+         ) AS update_columns
+       FROM pg_catalog.pg_trigger trg
+       JOIN pg_catalog.pg_class cls ON cls.oid = trg.tgrelid
+       JOIN pg_catalog.pg_namespace ns ON ns.oid = cls.relnamespace
+       JOIN pg_catalog.pg_proc proc ON proc.oid = trg.tgfoid
+       JOIN pg_catalog.pg_namespace pns ON pns.oid = proc.pronamespace
+      WHERE NOT trg.tgisinternal
+        AND (
+          trg.tgname = ANY($1::text[])
+          OR proc.proname = ANY($2::text[])
+        )
+      ORDER BY ns.nspname, cls.relname, trg.tgname`
+
+/**
+ * The authority-function catalogue SELECT — the SINGLE query of record for the function body
+ * fingerprint (`$1` = authority function names). Shared with the L1 battery for the same reason
+ * as the trigger query above.
+ *
+ * `proconfig` (the per-function `SET` list, e.g. `{"search_path=pg_catalog, public"}`) is part of
+ * the identity for the same reason `body` is. The CVE-2018-1058-shaped shadowing hole is defeated by
+ * TWO independently-sufficient hardenings landed in
+ * `zzzz20260821120000_recovery_authority_functions_fix_search_path.ts`: (a) schema-qualified helper
+ * calls — visible in `prosrc`/`body` above — and (b) a fixed `SET search_path = pg_catalog, public`,
+ * which lives in `proconfig`, NOT in `prosrc`. Without this column the search_path half of the fix
+ * would ship UNVERIFIED — a drift no gate could observe, the very shape of the finding being fixed.
+ * Fingerprinting `proconfig` makes a silent removal of the fixed search_path fail this check.
+ */
+const AUTHORITY_FUNCTION_SNAPSHOT_QUERY = `SELECT
+         ns.nspname AS schema_name,
+         proc.proname AS function_name,
+         pg_catalog.pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
+         pg_catalog.pg_get_function_result(proc.oid) AS result_type,
+         lang.lanname AS language,
+         proc.prosecdef AS security_definer,
+         proc.provolatile AS volatility,
+         proc.proconfig AS config,
+         proc.prosrc AS body
+       FROM pg_catalog.pg_proc proc
+       JOIN pg_catalog.pg_namespace ns ON ns.oid = proc.pronamespace
+       JOIN pg_catalog.pg_language lang ON lang.oid = proc.prolang
+      WHERE ns.nspname = 'public'
+        AND proc.proname = ANY($1::text[])
+      ORDER BY ns.nspname, proc.proname, pg_catalog.pg_get_function_identity_arguments(proc.oid)`
+
+/**
+ * SHADOW-FUNCTION census (`$1` = authority function names). Returns every authority-named function
+ * that lives OUTSIDE `public`, in any other schema.
+ *
+ * HISTORY / current status: this census was originally the ONLY defense against a
+ * CVE-2018-1058-shaped shadow — before `zzzz20260821120000_recovery_authority_functions_fix_search_path`,
+ * the trigger functions called the lease helpers by BARE NAME with no `SET search_path`, so a
+ * same-signature helper in a schema earlier on the caller's search_path (`"$user", public` by
+ * default) could win over the real one in `public` and make an EXCLUSIVE lease stop refusing the
+ * write. That root cause is now FIXED at the source: the trigger functions call
+ * `public.metasheet_try_recovery_authority_*` (schema-qualified) AND every authority function carries
+ * a fixed `SET search_path = pg_catalog, public` (both independently sufficient; proven behaviourally
+ * in `recovery-authority-search-path.db.test.ts`). A shadow planted in another schema therefore can
+ * no longer win the resolution.
+ *
+ * This census is retained as DEFENSE-IN-DEPTH: an authority-named function outside `public` is still
+ * anomalous and worth surfacing (it should not exist, and its presence signals tampering), so the
+ * reader may still REFUSE such a database — but it is no longer load-bearing for the shadow defeat,
+ * which the migration owns. `AUTHORITY_FUNCTION_SNAPSHOT_QUERY` is schema-filtered to `public` and so
+ * cannot see this; that filter is deliberate (its rows are compared field-by-field against the
+ * `public` census). This is the complementary observation, kept separate so the containment module's
+ * own verdict shape is unchanged.
+ */
+const AUTHORITY_FUNCTION_SHADOW_QUERY = `SELECT
+         ns.nspname AS schema_name,
+         proc.proname AS function_name,
+         pg_catalog.pg_get_function_identity_arguments(proc.oid) AS identity_arguments
+       FROM pg_catalog.pg_proc proc
+       JOIN pg_catalog.pg_namespace ns ON ns.oid = proc.pronamespace
+      WHERE ns.nspname <> 'public'
+        AND proc.proname = ANY($1::text[])
+      ORDER BY ns.nspname, proc.proname, pg_catalog.pg_get_function_identity_arguments(proc.oid)`
 
 function sortByJson(rows) {
   return [...rows].sort((left, right) =>
@@ -414,9 +616,22 @@ function canonicalSnapshot(snapshot) {
   }
 }
 
-function expectedSchemaSnapshot() {
+function normalizeExpectedTriggerState(value = 'disabled') {
+  const normalized = String(value).trim().toLowerCase()
+  if (!EXPECTED_TRIGGER_STATES.has(normalized)) {
+    throw new TypeError('expected trigger state must be disabled or armed')
+  }
+  return normalized
+}
+
+function expectedSchemaSnapshot(expectedTriggerState = 'disabled') {
+  const triggerState = normalizeExpectedTriggerState(expectedTriggerState)
+  const enabled = triggerState === 'armed' ? 'O' : 'D'
   return canonicalSnapshot({
-    authorityTriggers: EXPECTED_AUTHORITY_TRIGGERS,
+    authorityTriggers: EXPECTED_AUTHORITY_TRIGGERS.map((trigger) => ({
+      ...trigger,
+      enabled,
+    })),
     authorityFunctions: EXPECTED_AUTHORITY_FUNCTIONS,
   })
 }
@@ -425,9 +640,10 @@ function fingerprint(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
-function assessSchemaSnapshot(snapshot) {
+function assessSchemaSnapshot(snapshot, { expectedTriggerState = 'disabled' } = {}) {
+  const triggerState = normalizeExpectedTriggerState(expectedTriggerState)
   const actual = canonicalSnapshot(snapshot)
-  const expected = expectedSchemaSnapshot()
+  const expected = expectedSchemaSnapshot(triggerState)
   const checks = [
     {
       id: 'recovery-authority-triggers',
@@ -464,6 +680,7 @@ function assessSchemaSnapshot(snapshot) {
   return {
     ok: checks.every((check) => check.ok),
     checks,
+    expectedTriggerState: triggerState,
   }
 }
 
@@ -482,8 +699,10 @@ function renderAssessment(assessment) {
   }
   lines.push(
     assessment.ok
-      ? 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links'
-      : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, fingerprint-drifted, or meta_links.foreign_record_id carries a foreign key',
+      ? assessment.expectedTriggerState === 'armed'
+        ? 'VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links'
+        : 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links'
+      : 'VERDICT: FAIL - recovery schema posture is missing, trigger-state-mismatched, fingerprint-drifted, or meta_links.foreign_record_id carries a foreign key',
   )
   return lines.join('\n')
 }
@@ -505,59 +724,14 @@ async function queryRecoverySchemaSnapshot(databaseUrl) {
     const triggerNames = EXPECTED_AUTHORITY_TRIGGERS.map(
       (trigger) => trigger.triggerName,
     )
-    const triggers = await client.query(
-      `SELECT
-         ns.nspname AS schema_name,
-         cls.relname AS table_name,
-         trg.tgname AS trigger_name,
-         trg.tgenabled AS enabled,
-         trg.tgtype::int AS trigger_type,
-         pns.nspname AS function_schema,
-         proc.proname AS function_name,
-         encode(trg.tgargs, 'hex') AS argument_hex,
-         COALESCE(
-           ARRAY(
-             SELECT attr.attname::text
-               FROM unnest(trg.tgattr::smallint[]) WITH ORDINALITY AS selected(attnum, position)
-               JOIN pg_catalog.pg_attribute attr
-                 ON attr.attrelid = trg.tgrelid
-                AND attr.attnum = selected.attnum
-              ORDER BY selected.position
-           ),
-           ARRAY[]::text[]
-         ) AS update_columns
-       FROM pg_catalog.pg_trigger trg
-       JOIN pg_catalog.pg_class cls ON cls.oid = trg.tgrelid
-       JOIN pg_catalog.pg_namespace ns ON ns.oid = cls.relnamespace
-       JOIN pg_catalog.pg_proc proc ON proc.oid = trg.tgfoid
-       JOIN pg_catalog.pg_namespace pns ON pns.oid = proc.pronamespace
-      WHERE NOT trg.tgisinternal
-        AND (
-          trg.tgname = ANY($1::text[])
-          OR proc.proname = ANY($2::text[])
-        )
-      ORDER BY ns.nspname, cls.relname, trg.tgname`,
-      [triggerNames, AUTHORITY_TRIGGER_FUNCTIONS],
-    )
+    const triggers = await client.query(AUTHORITY_TRIGGER_SNAPSHOT_QUERY, [
+      triggerNames,
+      AUTHORITY_TRIGGER_FUNCTIONS,
+    ])
 
-    const functions = await client.query(
-      `SELECT
-         ns.nspname AS schema_name,
-         proc.proname AS function_name,
-         pg_catalog.pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
-         pg_catalog.pg_get_function_result(proc.oid) AS result_type,
-         lang.lanname AS language,
-         proc.prosecdef AS security_definer,
-         proc.provolatile AS volatility,
-         proc.prosrc AS body
-       FROM pg_catalog.pg_proc proc
-       JOIN pg_catalog.pg_namespace ns ON ns.oid = proc.pronamespace
-       JOIN pg_catalog.pg_language lang ON lang.oid = proc.prolang
-      WHERE ns.nspname = 'public'
-        AND proc.proname = ANY($1::text[])
-      ORDER BY ns.nspname, proc.proname, pg_catalog.pg_get_function_identity_arguments(proc.oid)`,
-      [AUTHORITY_FUNCTION_NAMES],
-    )
+    const functions = await client.query(AUTHORITY_FUNCTION_SNAPSHOT_QUERY, [
+      AUTHORITY_FUNCTION_NAMES,
+    ])
 
     // Column-scoped FK absence: every pg_constraint FK on meta_links whose conkey (constrained
     // column attnum array) covers the attnum of meta_links.foreign_record_id. Constraint name,
@@ -596,7 +770,19 @@ async function queryRecoverySchemaSnapshot(databaseUrl) {
 async function runSchemaContainment({
   env = process.env,
   querySnapshot = queryRecoverySchemaSnapshot,
+  expectedTriggerState = 'disabled',
 } = {}) {
+  let triggerState
+  try {
+    triggerState = normalizeExpectedTriggerState(expectedTriggerState)
+  } catch {
+    return {
+      exitCode: 2,
+      output:
+        'VERDICT: FAIL - expected-trigger-state must be exactly disabled or armed',
+    }
+  }
+
   const databaseUrl = String(env.DATABASE_URL ?? '').trim()
   if (!databaseUrl) {
     return {
@@ -608,7 +794,9 @@ async function runSchemaContainment({
 
   try {
     const snapshot = await querySnapshot(databaseUrl)
-    const assessment = assessSchemaSnapshot(snapshot)
+    const assessment = assessSchemaSnapshot(snapshot, {
+      expectedTriggerState: triggerState,
+    })
     return {
       exitCode: assessment.ok ? 0 : 1,
       output: renderAssessment(assessment),
@@ -622,26 +810,51 @@ async function runSchemaContainment({
   }
 }
 
+function parseExpectedTriggerStateArg(argv = process.argv.slice(2)) {
+  if (argv.length === 0) return 'disabled'
+  if (argv.length !== 1) return null
+  const match = argv[0].match(/^--expected-trigger-state=(disabled|armed)$/)
+  return match?.[1] ?? null
+}
+
 async function main() {
-  const result = await runSchemaContainment()
+  const expectedTriggerState = parseExpectedTriggerStateArg()
+  if (!expectedTriggerState) {
+    process.stderr.write(
+      'VERDICT: FAIL - expected-trigger-state must be exactly disabled or armed\n',
+    )
+    process.exitCode = 2
+    return
+  }
+  const result = await runSchemaContainment({ expectedTriggerState })
   const stream = result.exitCode === 0 ? process.stdout : process.stderr
   stream.write(`${result.output}\n`)
   process.exitCode = result.exitCode
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main()
 }
 
 export {
   AUTHORITY_FUNCTION_NAMES,
+  AUTHORITY_FUNCTION_SHADOW_QUERY,
+  AUTHORITY_FUNCTION_SNAPSHOT_QUERY,
   AUTHORITY_TRIGGER_FUNCTIONS,
+  AUTHORITY_TRIGGER_SNAPSHOT_QUERY,
   EXPECTED_AUTHORITY_FUNCTIONS,
+  EXPECTED_AUTHORITY_SCHEMA,
   EXPECTED_AUTHORITY_TRIGGERS,
+  EXPECTED_TRIGGER_STATES,
+  assertBindableSchemaName,
   assessSchemaSnapshot,
+  canonicalFunction,
   canonicalSnapshot,
+  canonicalTrigger,
   expectedSchemaSnapshot,
   fingerprint,
+  normalizeExpectedTriggerState,
+  parseExpectedTriggerStateArg,
   queryRecoverySchemaSnapshot,
   renderAssessment,
   runSchemaContainment,

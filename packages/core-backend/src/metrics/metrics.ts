@@ -6,6 +6,12 @@ import client, {
   type SummaryConfiguration,
 } from 'prom-client'
 
+import {
+  createRecoveryArchiveObservability,
+  RECOVERY_ARCHIVE_WORKER_RUN_KINDS,
+} from '../multitable/recovery-archive-observability'
+import { TASK_DELIVERY_OUTCOMES } from '../tasks/task-delivery-protocol'
+
 export const registry = new client.Registry()
 client.collectDefaultMetrics({ register: registry })
 
@@ -483,6 +489,36 @@ const approvalSlaSchedulerLeaderGauge = gauge({
   labelNames: ['state'] as const
 })
 
+const recoveryArchiveWorkerRunsTotal = counter({
+  name: 'metasheet_recovery_archive_worker_runs_total',
+  help: 'Recovery archive restore worker runs by closed outcome',
+  labelNames: ['outcome'] as const
+})
+
+const recoveryArchiveWorkerSweptTotal = counter({
+  name: 'metasheet_recovery_archive_worker_swept_total',
+  help: 'Recovery archive restore jobs swept by the worker',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerChunksTotal = counter({
+  name: 'metasheet_recovery_archive_worker_chunks_total',
+  help: 'Recovery archive restore chunks applied by the worker',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerRunning = gauge({
+  name: 'metasheet_recovery_archive_worker_running',
+  help: 'Recovery archive restore worker lifecycle state',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerDrainTotal = counter({
+  name: 'metasheet_recovery_archive_worker_drain_total',
+  help: 'Recovery archive restore worker drain attempts by closed outcome',
+  labelNames: ['outcome'] as const
+})
+
 // DingTalk OAuth state-store operations (packages/core-backend/src/auth/dingtalk-oauth.ts).
 // `operation` is the state-store action ('write' from generateState, 'validate' from
 // validateState); `result` is the outcome ('ok' | 'error'). Cardinality is fixed at 2x2 —
@@ -500,6 +536,32 @@ const dingtalkOAuthStateFallbackTotal = counter({
   name: 'metasheet_dingtalk_oauth_state_fallback_total',
   help: 'DingTalk OAuth state operations that used the in-process memory fallback because the shared (Redis) state store was unavailable',
   labelNames: ['operation'] as const
+})
+
+// Task notification delivery worker (M4 PR-3b design §4.1, §7; ASSUMPTION(task-m4): [own-3b-11]).
+// One increment per outbox row the worker writes to a terminal state, labelled by that state (the
+// five-value closed set of src/tasks/task-delivery-protocol.ts); rows the two sweeps finalise count
+// too. Ids and user data never appear in labels.
+const tasksNotificationDeliveriesTotal = counter({
+  name: 'tasks_notification_deliveries_total',
+  help: 'Task notification outbox rows written to a terminal state by the delivery worker, by outcome',
+  labelNames: ['outcome'] as const
+})
+
+// Task scheduler (M4 PR-3b design §4.1, §6.6). The leader gauge holds the result of the last tick
+// (1 = that state, 0 = the others). The backlog gauge is refreshed by the leader once per tick,
+// across orgs (ASSUMPTION(task-m4): [own-3b-31]); the kinds are the closed set of
+// src/services/task-scheduler.ts. Ids and user data never appear in labels.
+const tasksSchedulerLeaderGauge = gauge({
+  name: 'tasks_scheduler_leader',
+  help: 'Task scheduler leader-lock state of the last tick (1=current state, 0=other)',
+  labelNames: ['state'] as const
+})
+
+const tasksNotificationBacklogGauge = gauge({
+  name: 'tasks_notification_backlog',
+  help: 'Task notification outbox backlog: rows waiting for a send, seconds the earliest due one has waited, outcome_unknown rows',
+  labelNames: ['kind'] as const
 })
 
 registry.registerMetric(httpHistogram)
@@ -573,8 +635,16 @@ registry.registerMetric(apigwCbStoreUsedTotal)
 registry.registerMetric(apigwCbInitTotal)
 registry.registerMetric(automationSchedulerLeaderGauge)
 registry.registerMetric(approvalSlaSchedulerLeaderGauge)
+registry.registerMetric(recoveryArchiveWorkerRunsTotal)
+registry.registerMetric(recoveryArchiveWorkerSweptTotal)
+registry.registerMetric(recoveryArchiveWorkerChunksTotal)
+registry.registerMetric(recoveryArchiveWorkerRunning)
+registry.registerMetric(recoveryArchiveWorkerDrainTotal)
 registry.registerMetric(dingtalkOAuthStateOperationsTotal)
 registry.registerMetric(dingtalkOAuthStateFallbackTotal)
+registry.registerMetric(tasksNotificationDeliveriesTotal)
+registry.registerMetric(tasksSchedulerLeaderGauge)
+registry.registerMetric(tasksNotificationBacklogGauge)
 
 // Zero-initialize every DingTalk OAuth state label combination at module registration.
 // prom-client emits NO sample line for a labeled counter until its first .inc() call —
@@ -590,6 +660,35 @@ for (const dingtalkOAuthStateOperation of ['write', 'validate'] as const) {
   }
   dingtalkOAuthStateFallbackTotal.inc({ operation: dingtalkOAuthStateOperation }, 0)
 }
+
+for (const outcome of RECOVERY_ARCHIVE_WORKER_RUN_KINDS) {
+  recoveryArchiveWorkerRunsTotal.inc({ outcome }, 0)
+}
+for (const outcome of ['success', 'failure'] as const) {
+  recoveryArchiveWorkerDrainTotal.inc({ outcome }, 0)
+}
+recoveryArchiveWorkerRunning.set(0)
+
+// Every delivery outcome has a sample line from start-up, so a scrape tells zero rows from no wiring.
+for (const outcome of TASK_DELIVERY_OUTCOMES) {
+  tasksNotificationDeliveriesTotal.inc({ outcome }, 0)
+}
+// The scheduler's gauges have a sample line for every label from start-up too: all zero until the
+// first tick (no state yet, no backlog read yet).
+for (const state of ['leader', 'follower', 'relinquished'] as const) {
+  tasksSchedulerLeaderGauge.set({ state }, 0)
+}
+for (const kind of ['pending', 'oldest_due_wait_seconds', 'outcome_unknown'] as const) {
+  tasksNotificationBacklogGauge.set({ kind }, 0)
+}
+
+export const recoveryArchiveObservability = createRecoveryArchiveObservability({
+  incrementRun: (outcome) => recoveryArchiveWorkerRunsTotal.inc({ outcome }),
+  incrementSwept: (count) => recoveryArchiveWorkerSweptTotal.inc(count),
+  incrementChunks: (count) => recoveryArchiveWorkerChunksTotal.inc(count),
+  setRunning: (value) => recoveryArchiveWorkerRunning.set(value),
+  incrementDrain: (outcome) => recoveryArchiveWorkerDrainTotal.inc({ outcome }),
+})
 
 function trimConfiguredMetricsToken(raw: string | undefined): string | null {
   const token = typeof raw === 'string' ? raw.trim() : ''
@@ -739,9 +838,18 @@ export const metrics = {
   apigwCbInitTotal,
   automationSchedulerLeaderGauge,
   approvalSlaSchedulerLeaderGauge,
+  recoveryArchiveWorkerRunsTotal,
+  recoveryArchiveWorkerSweptTotal,
+  recoveryArchiveWorkerChunksTotal,
+  recoveryArchiveWorkerRunning,
+  recoveryArchiveWorkerDrainTotal,
   // DingTalk OAuth state-store operations
   dingtalkOAuthStateOperationsTotal,
-  dingtalkOAuthStateFallbackTotal
+  dingtalkOAuthStateFallbackTotal,
+  // Task notification delivery worker and task scheduler (M4 PR-3b)
+  tasksNotificationDeliveriesTotal,
+  tasksSchedulerLeaderGauge,
+  tasksNotificationBacklogGauge
 }
 
 /**

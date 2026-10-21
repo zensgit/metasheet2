@@ -5,6 +5,8 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -26,11 +28,12 @@ function makeViewRow(
   expiresAt?: number,
   accessMode: 'public' | 'dingtalk' | 'dingtalk_granted' = 'public',
   allowlists: { allowedUserIds?: string[]; allowedMemberGroupIds?: string[] } = {},
+  sheetId = TEST_SHEET_ID,
 ) {
   return {
     id: TEST_VIEW_ID,
-    sheetId: TEST_SHEET_ID,
-    sheet_id: TEST_SHEET_ID,
+    sheetId,
+    sheet_id: sheetId,
     name: 'Public Form View',
     type: 'form',
     config: JSON.stringify({
@@ -48,9 +51,9 @@ function makeViewRow(
   }
 }
 
-function makeSheetRow() {
+function makeSheetRow(sheetId = TEST_SHEET_ID) {
   return {
-    id: TEST_SHEET_ID,
+    id: sheetId,
     name: 'Test Sheet',
     baseId: 'base_1',
     base_id: 'base_1',
@@ -75,13 +78,16 @@ function buildQueryHandler(
     allowedUserIds?: string[]
     allowedMemberGroupIds?: string[]
     hasAllowedMemberGroup?: boolean
+    projectionOrgId?: string
+    sheetId?: string
   } = {},
 ): QueryHandler {
+  const sheetId = opts.sheetId ?? TEST_SHEET_ID
   const view = makeViewRow(viewToken, opts.enabled ?? true, opts.expiresAt, opts.accessMode ?? 'public', {
     allowedUserIds: opts.allowedUserIds,
     allowedMemberGroupIds: opts.allowedMemberGroupIds,
-  })
-  const sheet = makeSheetRow()
+  }, sheetId)
+  const sheet = makeSheetRow(sheetId)
   const fields = makeFieldRows()
   return (sql: string, params?: unknown[]) => {
     if (sql.includes('FROM meta_views') || sql.includes('from meta_views')) {
@@ -89,6 +95,16 @@ function buildQueryHandler(
     }
     // A: approval-projection read-guard lookup — no projection sheet in this test
     if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+    if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+      return opts.projectionOrgId
+        ? { rows: [{ org_id: opts.projectionOrgId, sheet_id: sheetId }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+      return opts.projectionOrgId
+        ? { rows: [{ id: sheetId }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
     if (sql.includes('FROM meta_sheets') || sql.includes('from meta_sheets') || sql.includes('FROM spreadsheets')) {
       return { rows: [sheet], rowCount: 1 }
     }
@@ -136,6 +152,9 @@ function buildQueryHandler(
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
+    // this fixture keeps its own notion of which sheets exist.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
     if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
     if (sql.includes('FROM spreadsheet_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM field_permissions')) return { rows: [], rowCount: 0 }
@@ -152,10 +171,11 @@ function createMockPool(queryHandler: QueryHandler) {
 async function createApp(opts: {
   queryHandler?: QueryHandler
   user?: { id?: string; roles?: string[]; perms?: string[] } | null
+  isAdmin?: boolean
 }) {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
-    isAdmin: vi.fn().mockResolvedValue(false),
+    isAdmin: vi.fn().mockResolvedValue(opts.isAdmin === true),
     userHasPermission: vi.fn().mockResolvedValue(false),
     listUserPermissions: vi.fn().mockResolvedValue([]),
     invalidateUserPerms: vi.fn(),
@@ -249,6 +269,45 @@ describe('Public form flow', () => {
     // The important thing is it's not 401/403.
     expect(res.status).not.toBe(401)
     expect(res.status).not.toBe(403)
+  })
+
+  test('e-learning aggregate projection cannot be exposed or submitted through a public form token', async () => {
+    const orgId = 'org-elearning-form-guard'
+    const sheetId = deriveElearningProjectionSheetId(orgId)
+    const { app, mockPool } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { projectionOrgId: orgId, sheetId }),
+      user: null,
+    })
+
+    const context = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+    expect(context.status).toBe(401)
+
+    const submit = await request(app)
+      .post(`/api/multitable/views/${TEST_VIEW_ID}/submit?publicToken=${VALID_TOKEN}`)
+      .send({ publicToken: VALID_TOKEN, data: { fld_1: 'should-not-write' } })
+    expect(submit.status).toBe(401)
+    expect(mockPool.query.mock.calls.some(([sql]) => (
+      String(sql).includes('INSERT INTO meta_records')
+    ))).toBe(false)
+  })
+
+  test('e-learning aggregate projection cannot enable form sharing even for a platform admin', async () => {
+    const orgId = 'org-elearning-form-admin-guard'
+    const sheetId = deriveElearningProjectionSheetId(orgId)
+    const { app, mockPool } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { projectionOrgId: orgId, sheetId }),
+      user: { id: 'platform-admin', roles: ['admin'] },
+      isAdmin: true,
+    })
+
+    const response = await request(app)
+      .patch(`/api/multitable/sheets/${sheetId}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ enabled: true })
+    expect(response.status).toBe(403)
+    expect(mockPool.query.mock.calls.some(([sql]) => (
+      String(sql).includes('UPDATE meta_views')
+    ))).toBe(false)
   })
 
   test('dingtalk-protected form redirects anonymous access to sign-in', async () => {

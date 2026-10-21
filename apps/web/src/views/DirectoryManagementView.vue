@@ -231,6 +231,10 @@
           <div>
             <h2>{{ selectedIntegration ? '编辑集成' : '创建集成' }}</h2>
             <p class="directory-admin__hint">`appSecret` 在更新时可留空，系统会继续使用已保存的值。</p>
+            <p class="directory-admin__hint" data-testid="dingtalk-login-config-hint">
+              此处的 App Key / App Secret 用于目录集成，不会配置钉钉登录。钉钉登录使用服务端环境变量。
+              <router-link class="directory-admin__link-button" to="/help/attendance/dingtalk-microapp#server-login">查看钉钉登录配置</router-link>
+            </p>
           </div>
           <div class="directory-admin__summary" v-if="selectedIntegration">
             <span class="directory-admin__badge">{{ selectedIntegration.status }}</span>
@@ -272,10 +276,60 @@
               <input v-model.trim="draft.approvalCardPublicAppUrl" class="directory-admin__input" type="text" placeholder="一键卡片深链的对外可达地址；留空则使用部署环境配置" />
             </label>
           </template>
-          <label class="directory-admin__field">
-            <span>根部门 ID</span>
-            <input v-model.trim="draft.rootDepartmentId" class="directory-admin__input" type="text" placeholder="默认 1" />
-          </label>
+          <div class="directory-admin__field" data-testid="directory-root-department-field">
+            <span>{{ rootDepartmentPickerAvailable ? '根部门' : '根部门 ID' }}</span>
+            <select
+              v-if="rootDepartmentPickerAvailable"
+              v-model="draft.rootDepartmentId"
+              class="directory-admin__input"
+              aria-label="根部门"
+              data-testid="directory-root-department-select"
+            >
+              <option v-if="!rootDepartmentTreeIds.has('1')" value="1">全公司（ID 1）</option>
+              <option v-if="rootDepartmentNeedsFallbackOption" :value="draft.rootDepartmentId">
+                {{ readRootDepartmentFallbackLabel(draft.rootDepartmentId) }}
+              </option>
+              <option
+                v-for="department in departmentRows"
+                :key="department.externalDepartmentId"
+                :value="department.externalDepartmentId"
+              >
+                {{ readDepartmentPickerPath(department) }}{{ department.isActive ? '' : '（已停用）' }}
+              </option>
+            </select>
+            <details
+              v-if="rootDepartmentPickerAvailable"
+              class="directory-admin__manual-ids"
+              data-testid="directory-root-department-manual"
+            >
+              <summary>高级：手动填写 ID</summary>
+              <p class="directory-admin__hint">
+                下拉只列出当前根部门下已同步的部门；要扩大同步范围（例如改回全公司），可在这里直接填写部门 ID。
+              </p>
+              <input
+                v-model.trim="draft.rootDepartmentId"
+                class="directory-admin__input"
+                type="text"
+                placeholder="默认 1"
+                aria-label="手动填写根部门 ID"
+              />
+            </details>
+            <template v-else>
+              <input v-model.trim="draft.rootDepartmentId" class="directory-admin__input" type="text" placeholder="默认 1" />
+              <p class="directory-admin__hint" data-testid="directory-root-department-hint">
+                首次同步前请保持默认 1（全公司）或填写已知部门 ID
+              </p>
+              <button
+                v-if="selectedIntegration && !departmentsLoaded"
+                class="directory-admin__link-button"
+                type="button"
+                :disabled="loadingDepartments"
+                @click="void loadDepartmentsForPicker()"
+              >
+                {{ loadingDepartments ? '加载中...' : '从已同步部门中选择' }}
+              </button>
+            </template>
+          </div>
           <label class="directory-admin__field">
             <span>Base URL</span>
             <input v-model.trim="draft.baseUrl" class="directory-admin__input" type="text" placeholder="默认 https://oapi.dingtalk.com" />
@@ -291,24 +345,62 @@
               <option value="auto_for_scoped_departments">auto_for_scoped_departments</option>
             </select>
           </label>
-          <label class="directory-admin__field directory-admin__field--wide">
+          <div class="directory-admin__field directory-admin__field--wide">
             <span>自动准入部门白名单</span>
-            <textarea
-              v-model.trim="draft.admissionDepartmentIdsText"
-              class="directory-admin__input directory-admin__textarea"
-              rows="3"
-              placeholder="填写部门 ID，支持逗号或换行分隔；将覆盖所选部门及其子部门"
+            <DirectoryOptionPicker
+              test-id="directory-admission-department-picker"
+              :selected="readDepartmentTargetIds('admission')"
+              :options="departmentPickerOptions"
+              :unknown-label="readUnknownDepartmentLabel"
+              :loaded="departmentPickerLoaded"
+              :loading="loadingDepartments"
+              :error="departmentPickerError"
+              :empty-text="departmentPickerEmptyText"
+              not-loaded-text="正在加载已同步的部门..."
+              open-label="选择部门"
+              search-placeholder="搜索名称或完整路径"
+              empty-selection-text="未选择部门；将覆盖所选部门及其子部门"
+              @open="void loadDepartmentsForPicker()"
+              @update:selected="(ids) => writeDepartmentTargetText('admission', ids)"
             />
-          </label>
-          <label class="directory-admin__field directory-admin__field--wide">
+            <details class="directory-admin__manual-ids">
+              <summary>高级：手动填写 ID</summary>
+              <textarea
+                v-model.trim="draft.admissionDepartmentIdsText"
+                class="directory-admin__input directory-admin__textarea"
+                rows="3"
+                placeholder="填写部门 ID，支持逗号或换行分隔；将覆盖所选部门及其子部门"
+              />
+            </details>
+          </div>
+          <div class="directory-admin__field directory-admin__field--wide">
             <span>自动准入排除部门</span>
-            <textarea
-              v-model.trim="draft.excludeDepartmentIdsText"
-              class="directory-admin__input directory-admin__textarea"
-              rows="2"
-              placeholder="填写需要排除的部门 ID，支持逗号或换行分隔；会覆盖白名单父部门"
+            <DirectoryOptionPicker
+              test-id="directory-exclude-department-picker"
+              :selected="readDepartmentTargetIds('exclude')"
+              :options="departmentPickerOptions"
+              :unknown-label="readUnknownDepartmentLabel"
+              :loaded="departmentPickerLoaded"
+              :loading="loadingDepartments"
+              :error="departmentPickerError"
+              :empty-text="departmentPickerEmptyText"
+              not-loaded-text="正在加载已同步的部门..."
+              open-label="选择部门"
+              search-placeholder="搜索名称或完整路径"
+              empty-selection-text="未选择部门；排除会覆盖白名单父部门"
+              @open="void loadDepartmentsForPicker()"
+              @update:selected="(ids) => writeDepartmentTargetText('exclude', ids)"
             />
-          </label>
+            <details class="directory-admin__manual-ids">
+              <summary>高级：手动填写 ID</summary>
+              <textarea
+                v-model.trim="draft.excludeDepartmentIdsText"
+                class="directory-admin__input directory-admin__textarea"
+                rows="2"
+                placeholder="填写需要排除的部门 ID，支持逗号或换行分隔；会覆盖白名单父部门"
+              />
+            </details>
+          </div>
           <label class="directory-admin__field">
             <span>成员组同步模式</span>
             <select v-model="draft.memberGroupSyncMode" class="directory-admin__input">
@@ -316,33 +408,90 @@
               <option value="sync_scoped_departments">sync_scoped_departments</option>
             </select>
           </label>
-          <label class="directory-admin__field directory-admin__field--wide">
+          <div class="directory-admin__field directory-admin__field--wide">
             <span>成员组同步部门</span>
-            <textarea
-              v-model.trim="draft.memberGroupDepartmentIdsText"
-              class="directory-admin__input directory-admin__textarea"
-              rows="2"
-              placeholder="填写需要投影为平台用户组的部门 ID，支持逗号或换行分隔"
+            <DirectoryOptionPicker
+              test-id="directory-member-group-department-picker"
+              :selected="readDepartmentTargetIds('memberGroup')"
+              :options="departmentPickerOptions"
+              :unknown-label="readUnknownDepartmentLabel"
+              :loaded="departmentPickerLoaded"
+              :loading="loadingDepartments"
+              :error="departmentPickerError"
+              :empty-text="departmentPickerEmptyText"
+              not-loaded-text="正在加载已同步的部门..."
+              open-label="选择部门"
+              search-placeholder="搜索名称或完整路径"
+              empty-selection-text="未选择部门；所选部门会投影为平台用户组"
+              @open="void loadDepartmentsForPicker()"
+              @update:selected="(ids) => writeDepartmentTargetText('memberGroup', ids)"
             />
-          </label>
-          <label class="directory-admin__field directory-admin__field--wide">
+            <details class="directory-admin__manual-ids">
+              <summary>高级：手动填写 ID</summary>
+              <textarea
+                v-model.trim="draft.memberGroupDepartmentIdsText"
+                class="directory-admin__input directory-admin__textarea"
+                rows="2"
+                placeholder="填写需要投影为平台用户组的部门 ID，支持逗号或换行分隔"
+              />
+            </details>
+          </div>
+          <div class="directory-admin__field directory-admin__field--wide">
             <span>成员组默认业务角色</span>
-            <textarea
-              v-model.trim="draft.memberGroupDefaultRoleIdsText"
-              class="directory-admin__input directory-admin__textarea"
-              rows="2"
-              placeholder="填写 role ID，支持逗号或换行分隔；仅对投影成员组里的已链接用户做单向补齐"
+            <DirectoryOptionPicker
+              test-id="directory-member-group-role-picker"
+              :selected="parseAdmissionDepartmentIdsText(draft.memberGroupDefaultRoleIdsText)"
+              :options="memberGroupRoleOptions"
+              :unknown-label="readUnknownRoleLabel"
+              :loaded="roleCatalogLoaded"
+              :loading="roleCatalogLoading"
+              :error="roleCatalogError"
+              empty-text="没有可选的业务角色（平台管理员与委派管理员角色不可作为默认角色）"
+              not-loaded-text="正在加载角色列表..."
+              open-label="选择角色"
+              search-placeholder="搜索角色名称或 ID"
+              empty-selection-text="未选择角色；仅对投影成员组里的已链接用户做单向补齐"
+              @open="void ensureRoleCatalogLoaded()"
+              @update:selected="writeMemberGroupDefaultRoleIds"
             />
-          </label>
-          <label class="directory-admin__field directory-admin__field--wide">
+            <details class="directory-admin__manual-ids">
+              <summary>高级：手动填写 ID</summary>
+              <textarea
+                v-model.trim="draft.memberGroupDefaultRoleIdsText"
+                class="directory-admin__input directory-admin__textarea"
+                rows="2"
+                placeholder="填写 role ID，支持逗号或换行分隔；仅对投影成员组里的已链接用户做单向补齐"
+              />
+            </details>
+          </div>
+          <div class="directory-admin__field directory-admin__field--wide">
             <span>成员组默认插件开通</span>
-            <textarea
-              v-model.trim="draft.memberGroupDefaultNamespacesText"
-              class="directory-admin__input directory-admin__textarea"
-              rows="2"
-              placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
+            <DirectoryOptionPicker
+              test-id="directory-member-group-namespace-picker"
+              :selected="parseAdmissionDepartmentIdsText(draft.memberGroupDefaultNamespacesText)"
+              :options="memberGroupNamespaceOptions"
+              :unknown-label="readUnknownNamespaceLabel"
+              :loaded="roleCatalogLoaded"
+              :loading="roleCatalogLoading"
+              :error="roleCatalogError"
+              empty-text="角色目录里没有可开通的插件命名空间"
+              not-loaded-text="正在加载可开通的插件..."
+              open-label="选择插件"
+              search-placeholder="搜索插件名称或命名空间"
+              empty-selection-text="未选择插件"
+              @open="void ensureRoleCatalogLoaded()"
+              @update:selected="writeMemberGroupDefaultNamespaces"
             />
-          </label>
+            <details class="directory-admin__manual-ids">
+              <summary>高级：手动填写命名空间</summary>
+              <textarea
+                v-model.trim="draft.memberGroupDefaultNamespacesText"
+                class="directory-admin__input directory-admin__textarea"
+                rows="2"
+                placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
+              />
+            </details>
+          </div>
           <div class="directory-admin__field directory-admin__field--wide">
             <span>组织架构同步说明</span>
             <p class="directory-admin__hint">
@@ -669,11 +818,11 @@
               当前可见 {{ visibleDepartmentRows.length }} 个部门；批量增删仅更新当前草稿，保存前仍可继续检查和清理。
             </p>
             <label class="directory-admin__field directory-admin__field--wide">
-              <span>当前可见部门 ID 预览</span>
+              <span>当前可见部门预览</span>
               <textarea
                 class="directory-admin__input directory-admin__textarea directory-admin__visible-department-preview"
                 :rows="Math.min(visibleDepartmentRows.length, 6)"
-                :value="visibleDepartmentIdPreview"
+                :value="visibleDepartmentNamePreview"
                 readonly
               />
             </label>
@@ -738,57 +887,106 @@
           </div>
           <div class="directory-admin__manual-department">
             <div>
-              <strong>手动部门 ID</strong>
+              <strong>选择部门加入配置</strong>
               <p class="directory-admin__hint">
-                适用于钉钉部门暂未同步到本地镜像、但管理员已确认部门 ID 的场景；这里仍只写入当前配置草稿。
+                从已同步的部门中按名称或完整路径搜索并选择一个部门，再加入对应范围；这里仍只写入当前配置草稿。
               </p>
             </div>
-            <div class="directory-admin__manual-department-fields">
-              <label class="directory-admin__field">
-                <span>部门 ID</span>
-                <input
-                  v-model.trim="manualDepartmentId"
-                  class="directory-admin__input"
-                  type="text"
-                  placeholder="例如 123456"
-                />
-              </label>
-              <label class="directory-admin__field">
-                <span>备注名称（可选）</span>
-                <input
-                  v-model.trim="manualDepartmentName"
-                  class="directory-admin__input"
-                  type="text"
-                  placeholder="例如 财务共享中心"
-                />
-              </label>
-            </div>
+            <DirectoryOptionPicker
+              test-id="directory-manual-department-picker"
+              :selected="pickedDepartmentId ? [pickedDepartmentId] : []"
+              :options="departmentPickerOptions"
+              :unknown-label="readUnknownDepartmentLabel"
+              :multiple="false"
+              :loaded="departmentPickerLoaded"
+              :loading="loadingDepartments"
+              :error="departmentPickerError"
+              :empty-text="departmentPickerEmptyText"
+              not-loaded-text="正在加载已同步的部门..."
+              open-label="选择部门"
+              search-placeholder="搜索名称或完整路径"
+              empty-selection-text="未选择部门"
+              @open="void loadDepartmentsForPicker()"
+              @update:selected="writePickedDepartment"
+            />
             <div class="directory-admin__department-actions">
               <button
                 class="directory-admin__link-button"
                 type="button"
-                :disabled="manualDepartmentId.trim().length === 0"
-                @click="addManualDepartmentToTarget('admission')"
+                :disabled="pickedDepartmentId.length === 0"
+                @click="addPickedDepartmentToTarget('admission')"
               >
-                手动加入准入白名单
+                将所选部门加入准入白名单
               </button>
               <button
                 class="directory-admin__link-button"
                 type="button"
-                :disabled="manualDepartmentId.trim().length === 0"
-                @click="addManualDepartmentToTarget('exclude')"
+                :disabled="pickedDepartmentId.length === 0"
+                @click="addPickedDepartmentToTarget('exclude')"
               >
-                手动加入排除部门
+                将所选部门加入排除部门
               </button>
               <button
                 class="directory-admin__link-button"
                 type="button"
-                :disabled="manualDepartmentId.trim().length === 0"
-                @click="addManualDepartmentToTarget('memberGroup')"
+                :disabled="pickedDepartmentId.length === 0"
+                @click="addPickedDepartmentToTarget('memberGroup')"
               >
-                手动加入成员组同步
+                将所选部门加入成员组同步
               </button>
             </div>
+            <details class="directory-admin__manual-ids" data-testid="directory-manual-department-fallback">
+              <summary>高级：部门尚未同步时手动填写 ID</summary>
+              <p class="directory-admin__hint">
+                适用于钉钉部门暂未同步到本地镜像、但管理员已确认部门 ID 的场景；这里仍只写入当前配置草稿。
+              </p>
+              <div class="directory-admin__manual-department-fields">
+                <label class="directory-admin__field">
+                  <span>部门 ID</span>
+                  <input
+                    v-model.trim="manualDepartmentId"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 123456"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>备注名称（可选）</span>
+                  <input
+                    v-model.trim="manualDepartmentName"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 财务共享中心"
+                  />
+                </label>
+              </div>
+              <div class="directory-admin__department-actions">
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  :disabled="manualDepartmentId.trim().length === 0"
+                  @click="addManualDepartmentToTarget('admission')"
+                >
+                  手动加入准入白名单
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  :disabled="manualDepartmentId.trim().length === 0"
+                  @click="addManualDepartmentToTarget('exclude')"
+                >
+                  手动加入排除部门
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  :disabled="manualDepartmentId.trim().length === 0"
+                  @click="addManualDepartmentToTarget('memberGroup')"
+                >
+                  手动加入成员组同步
+                </button>
+              </div>
+            </details>
           </div>
           <div
             v-if="hasDepartmentDraftScopeChanges"
@@ -1207,10 +1405,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__status directory-admin__status--error">
-                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+                暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐），当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__hint">
-                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+                修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="reviewProcessingAccountId === item.account.id" @click="void refreshSingleReviewItem(item.account.id)">
@@ -1296,7 +1494,7 @@
                   />
                 </label>
                 <label class="directory-admin__field">
-                  <span>用户名（可选）</span>
+                  <span>登录名（可选）</span>
                   <input
                     :value="readManualAdmissionDraft(item.account).username"
                     class="directory-admin__input"
@@ -1316,7 +1514,8 @@
                   />
                 </label>
               </div>
-              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
+              <p class="directory-admin__hint" data-directory-admission-rule="login-name">{{ DIRECTORY_ADMISSION_LOGIN_NAME_HINT }}</p>
+              <p class="directory-admin__hint">姓名必填；邮箱、登录名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
             </div>
             <div class="directory-admin__actions">
               <button
@@ -1720,10 +1919,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__status directory-admin__status--error">
-                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+                暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐），当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__hint">
-                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+                修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="bindingAccountId === account.id" @click="void refreshSingleAccount(account.id)">
@@ -1780,7 +1979,7 @@
               v-if="!account.localUser && isManualAdmissionExpanded(account.id)"
               class="directory-admin__review-admission"
             >
-              <p class="directory-admin__hint">从当前钉钉同步成员创建本地用户并立即绑定。邮箱可为空，用户名或手机号可作为登录账号。</p>
+              <p class="directory-admin__hint">从当前钉钉同步成员创建本地用户并立即绑定。邮箱可为空，登录名或手机号可作为登录账号。</p>
               <div class="directory-admin__form-grid">
                 <label class="directory-admin__field">
                   <span>姓名</span>
@@ -1803,7 +2002,7 @@
                   />
                 </label>
                 <label class="directory-admin__field">
-                  <span>用户名（可选）</span>
+                  <span>登录名（可选）</span>
                   <input
                     :value="readManualAdmissionDraft(account).username"
                     class="directory-admin__input"
@@ -1823,7 +2022,8 @@
                   />
                 </label>
               </div>
-              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
+              <p class="directory-admin__hint" data-directory-admission-rule="login-name">{{ DIRECTORY_ADMISSION_LOGIN_NAME_HINT }}</p>
+              <p class="directory-admin__hint">姓名必填；邮箱、登录名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
               <div class="directory-admin__actions">
                 <button
                   class="directory-admin__button"
@@ -1981,9 +2181,20 @@
 </template>
 
 <script setup lang="ts">
+import { canCopyText, copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
+import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
+import { presentRoleTitle } from './builtinCatalogPresentation'
+import {
+  buildMemberGroupNamespaceOptions,
+  buildMemberGroupRoleOptions,
+  isRoleRejectedAsMemberGroupDefault,
+  normalizeDirectoryRoleCatalog,
+  type DirectoryPickerOption,
+  type DirectoryRoleCatalogItem,
+} from './directoryConfigPickerOptions'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -2161,6 +2372,11 @@ type DirectoryAccount = {
   externalUserId: string
   unionId: string | null
   openId: string | null
+  /**
+   * Server-computed with the SAME predicate the bind/admit grant check runs (own openId, else the
+   * openId a DingTalk login recorded for the same corp+unionId). Missing ⇒ treated as not grantable.
+   */
+  grantOpenIdAvailable?: boolean
   externalKey: string
   name: string
   email: string | null
@@ -2390,6 +2606,13 @@ const departmentQuery = ref('')
 const departmentScopeFilter = ref<DirectoryDepartmentScopeFilter>('all')
 const manualDepartmentId = ref('')
 const manualDepartmentName = ref('')
+const pickedDepartmentId = ref('')
+// Platform role catalog (GET /api/admin/roles), loaded lazily the first time a role or
+// plugin picker opens; it is platform-level, so it survives integration switches.
+const roleCatalog = ref<DirectoryRoleCatalogItem[]>([])
+const roleCatalogLoaded = ref(false)
+const roleCatalogLoading = ref(false)
+const roleCatalogError = ref('')
 const accountQuery = ref('')
 const alertFilter = ref<DirectoryAlertFilter>('all')
 const reviewFilter = ref<DirectoryReviewItemFilter>('all')
@@ -2635,6 +2858,38 @@ const visibleDepartmentRows = computed(() =>
 const visibleDepartmentIdPreview = computed(() =>
   visibleDepartmentRows.value.map((department) => department.externalDepartmentId).join('\n'),
 )
+const visibleDepartmentNamePreview = computed(() =>
+  visibleDepartmentRows.value.map((department) => readDepartmentPreviewLine(department)).join('\n'),
+)
+const departmentPickerOptions = computed<DirectoryPickerOption[]>(() =>
+  departmentRows.value.map((department) => {
+    const path = readDepartmentPickerPath(department)
+    const detail = department.isActive ? path : `${path}（已停用）`
+    return {
+      value: department.externalDepartmentId,
+      label: department.name || department.externalDepartmentId,
+      detail,
+      keywords: `${department.name} ${path}`,
+    }
+  }),
+)
+// With no integration selected there is nothing to load, so the picker shows its empty hint.
+const departmentPickerLoaded = computed(() => departmentsLoaded.value || !selectedIntegration.value)
+const departmentPickerError = computed(() => (
+  departmentLoadError.value ? `加载部门失败：${departmentLoadError.value}` : ''
+))
+const departmentPickerEmptyText = '请先同步一次目录以加载部门'
+const memberGroupRoleOptions = computed(() => buildMemberGroupRoleOptions(roleCatalog.value))
+const memberGroupNamespaceOptions = computed(() => buildMemberGroupNamespaceOptions(roleCatalog.value))
+const rootDepartmentPickerAvailable = computed(() => departmentsLoaded.value && departmentRows.value.length > 0)
+const rootDepartmentTreeIds = computed(() => new Set(departmentRows.value.map((department) => department.externalDepartmentId)))
+// The mirror only holds departments under the CURRENT root (the sync walks down from it), so
+// 全公司 (ID 1) is always offered as its own option, and any other id outside the tree keeps an
+// option of its own instead of being silently replaced by the first row.
+const rootDepartmentNeedsFallbackOption = computed(() => {
+  const rootDepartmentId = draft.rootDepartmentId.trim()
+  return rootDepartmentId !== '1' && !rootDepartmentTreeIds.value.has(rootDepartmentId)
+})
 const departmentViewFilterActive = computed(() =>
   departmentFilterActive.value || departmentScopeFilter.value !== 'all',
 )
@@ -2827,6 +3082,7 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  cancelPendingDepartmentLoad()
   departments.value = []
   departmentsLoaded.value = false
   departmentLoadError.value = ''
@@ -2834,6 +3090,7 @@ function resetDraft() {
   departmentScopeFilter.value = 'all'
   manualDepartmentId.value = ''
   manualDepartmentName.value = ''
+  pickedDepartmentId.value = ''
   reviewBatchProgress.value = null
   scheduleSnapshot.value = null
   alerts.value = []
@@ -3097,14 +3354,15 @@ async function writeClipboardText(
     setStatus(options.emptyMessage ?? '没有可复制的部门 ID', 'error')
     return
   }
-  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+  // "Unsupported" now means NO copy mechanism at all — plain-HTTP intranet deployments (no Clipboard
+  // API) still copy through copyText's execCommand fallback.
+  if (!canCopyText()) {
     setStatus(options.unsupportedMessage ?? '当前浏览器不支持自动复制，请从预览框手动复制部门 ID', 'error')
     return
   }
-  try {
-    await navigator.clipboard.writeText(text)
+  if (await copyText(text)) {
     setStatus(successMessage)
-  } catch {
+  } else {
     setStatus(options.failureMessage ?? '复制部门 ID 失败，请从预览框手动复制', 'error')
   }
 }
@@ -3499,6 +3757,89 @@ function addManualDepartmentToTarget(field: DirectoryDepartmentTargetField): voi
   addDepartmentIdToTarget(manualDepartmentId.value, manualDepartmentName.value, field, { manual: true })
 }
 
+function writePickedDepartment(ids: string[]): void {
+  pickedDepartmentId.value = ids[0] ?? ''
+}
+
+function addPickedDepartmentToTarget(field: DirectoryDepartmentTargetField): void {
+  const departmentId = pickedDepartmentId.value
+  const department = departments.value.find((item) => item.externalDepartmentId === departmentId)
+  addDepartmentIdToTarget(departmentId, department?.name ?? '', field)
+}
+
+function readDepartmentTargetIds(field: DirectoryDepartmentTargetField): string[] {
+  return parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+}
+
+function writeMemberGroupDefaultRoleIds(roleIds: string[]): void {
+  draft.memberGroupDefaultRoleIdsText = roleIds.join('\n')
+}
+
+function writeMemberGroupDefaultNamespaces(namespaces: string[]): void {
+  draft.memberGroupDefaultNamespacesText = namespaces.join('\n')
+}
+
+function readDepartmentPickerPath(department: DirectoryDepartment): string {
+  return department.fullPath?.trim() || department.name || department.externalDepartmentId
+}
+
+function readDepartmentPreviewLine(department: DirectoryDepartment): string {
+  const name = department.name || department.externalDepartmentId
+  const path = readDepartmentPickerPath(department)
+  return path === name ? name : `${name} · ${path}`
+}
+
+function readUnknownDepartmentLabel(departmentId: string): string {
+  return `未知部门（ID ${departmentId}）`
+}
+
+function readUnknownRoleLabel(roleId: string): string {
+  const role = roleCatalog.value.find((item) => item.id === roleId)
+  if (role && isRoleRejectedAsMemberGroupDefault(roleId)) {
+    return `${presentRoleTitle(role) || roleId}（${roleId}，不可作为默认角色，保存会被拒绝）`
+  }
+  return `已删除的角色（${roleId}）`
+}
+
+function readUnknownNamespaceLabel(namespace: string): string {
+  return `未知插件（${namespace}）`
+}
+
+function readRootDepartmentFallbackLabel(rootDepartmentId: string): string {
+  const normalized = rootDepartmentId.trim()
+  if (!normalized) return '未填写（保存时按 ID 1）'
+  if (normalized === '1') return '全公司（ID 1）'
+  return readUnknownDepartmentLabel(normalized)
+}
+
+async function loadDepartmentsForPicker(): Promise<void> {
+  const integration = selectedIntegration.value
+  if (!integration || loadingDepartments.value) return
+  // A failed load leaves departmentsLoaded=true (the mirror section shows the error); reopening a
+  // picker retries it, the same way the role catalog does.
+  if (departmentsLoaded.value && !departmentLoadError.value) return
+  await loadDepartments(integration.id, { force: true })
+}
+
+async function ensureRoleCatalogLoaded(): Promise<void> {
+  if (roleCatalogLoaded.value || roleCatalogLoading.value) return
+  roleCatalogLoading.value = true
+  roleCatalogError.value = ''
+  try {
+    const response = await apiFetch('/api/admin/roles')
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载角色列表失败'))
+    roleCatalog.value = normalizeDirectoryRoleCatalog(body?.data?.items)
+    roleCatalogLoaded.value = true
+  } catch (error) {
+    // Left unloaded so reopening a picker retries; chips keep showing the raw saved values.
+    roleCatalog.value = []
+    roleCatalogError.value = `加载角色列表失败：${error instanceof Error ? error.message : '未知错误'}`
+  } finally {
+    roleCatalogLoading.value = false
+  }
+}
+
 function removeDepartmentFromTarget(departmentId: string, field: DirectoryDepartmentTargetField): void {
   const normalizedDepartmentId = departmentId.trim()
   const targetLabel = readDepartmentTargetLabel(field)
@@ -3644,7 +3985,16 @@ function describeDepartmentParent(department: DirectoryDepartment): string {
   return parent ? `${parent.name} (${parent.externalDepartmentId})` : parentId
 }
 
-async function selectIntegration(integrationId: string): Promise<void> {
+async function selectIntegration(
+  integrationId: string,
+  options: { keepDepartments?: boolean } = {},
+): Promise<void> {
+  // A same-integration refresh after a save keeps the loaded tree on screen (pickers stay open,
+  // the root-department select does not flip back to a text box) and reloads it in place.
+  const keepDepartments = options.keepDepartments === true
+    && selectedIntegrationId.value === integrationId
+    && departmentsLoaded.value
+    && !departmentLoadError.value
   // Poll + preview are integration-scoped: kill them only when actually SWITCHING integration
   // (selectIntegration also runs as a same-integration refresh after saves — an active
   // background-sync poll must survive those).
@@ -3653,11 +4003,15 @@ async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
-  departments.value = []
-  departmentsLoaded.value = false
-  departmentLoadError.value = ''
-  departmentQuery.value = ''
-  departmentScopeFilter.value = 'all'
+  if (!keepDepartments) {
+    cancelPendingDepartmentLoad()
+    departments.value = []
+    departmentsLoaded.value = false
+    departmentLoadError.value = ''
+    departmentQuery.value = ''
+    departmentScopeFilter.value = 'all'
+    pickedDepartmentId.value = ''
+  }
   manualDepartmentId.value = ''
   manualDepartmentName.value = ''
   clearAutoAdmissionOnboardingPackets()
@@ -3684,6 +4038,7 @@ async function selectIntegration(integrationId: string): Promise<void> {
     loadAlerts(integrationId),
     loadReviewItems(integrationId),
     loadAccounts(integrationId),
+    keepDepartments ? loadDepartments(integrationId, { force: true }) : Promise.resolve(),
   ])
 }
 
@@ -3695,6 +4050,26 @@ function readApiError(payload: unknown, fallback: string): string {
 function readApiErrorCode(payload: unknown): string {
   const error = payload && typeof payload === 'object' ? (payload as { error?: { code?: unknown } }).error : undefined
   return typeof error?.code === 'string' ? error.code : ''
+}
+
+// #6259: the admit-user route answers a login-name rule failure with 400 INVALID_USERNAME and
+// `details.rule === 'login_name_ascii'` (English message unchanged). Localise by that code, never by
+// the English prose. Copy matches the create-user form (UserManagementView, #6257); when #6257's
+// shared copy module lands this can call it instead. Unknown codes return null (server message kept).
+const DIRECTORY_ADMISSION_LOGIN_NAME_RULE_COPY = '登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏'
+const DIRECTORY_ADMISSION_LOGIN_NAME_HINT = '登录名：只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏。'
+
+function describeDirectoryAdmissionError(payload: unknown): string | null {
+  const error = payload && typeof payload === 'object'
+    ? (payload as { error?: { code?: unknown; details?: unknown } }).error
+    : undefined
+  const details = error?.details && typeof error.details === 'object' && !Array.isArray(error.details)
+    ? error.details as Record<string, unknown>
+    : null
+  if (error?.code === 'INVALID_USERNAME' && details?.rule === 'login_name_ascii') {
+    return DIRECTORY_ADMISSION_LOGIN_NAME_RULE_COPY
+  }
+  return null
 }
 
 async function readJson(response: Response): Promise<any> {
@@ -4008,15 +4383,18 @@ function readGrantToggle(accountId: string): boolean {
   return grantToggles[accountId] ?? true
 }
 
-function canEnableDingTalkGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
-  return !((account.corpId?.trim() ?? '').length > 0 && (account.openId?.trim() ?? '').length === 0)
+// The page does NOT re-derive the DT-HARDEN-02 rule from corpId/openId: the server computes
+// grantOpenIdAvailable with the same predicate its grant check runs (which also accepts the openId
+// a DingTalk login recorded for this person), so the checkbox can never disagree with the server.
+function canEnableDingTalkGrant(account: Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): boolean {
+  return account.grantOpenIdAvailable === true
 }
 
 function readAccountGrantToggle(account: DirectoryAccount): boolean {
   return canEnableDingTalkGrant(account) && readGrantToggle(account.id)
 }
 
-function shouldWarnMissingOpenIdForGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
+function shouldWarnMissingOpenIdForGrant(account: Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): boolean {
   return !canEnableDingTalkGrant(account)
 }
 
@@ -4028,7 +4406,7 @@ function onGrantToggleChange(account: DirectoryAccount, event: Event) {
   const target = event.target
   if (!canEnableDingTalkGrant(account)) {
     updateGrantToggle(account.id, false)
-    setStatus(`目录成员 ${account.name} 缺少 openId，暂不能开通钉钉登录；请重新同步目录或完成钉钉 OAuth 绑定`, 'error')
+    setStatus(`目录成员 ${account.name} 暂时拿不到 openId，暂不能开通钉钉登录；请先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）`, 'error')
     return
   }
   updateGrantToggle(account.id, target instanceof HTMLInputElement ? target.checked : true)
@@ -4196,7 +4574,7 @@ async function saveIntegration() {
     setStatus(selectedIntegration.value ? '目录集成已更新' : '目录集成已创建')
     testResult.value = null
     await loadIntegrations()
-    if (integration?.id) await selectIntegration(integration.id)
+    if (integration?.id) await selectIntegration(integration.id, { keepDepartments: true })
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存目录集成失败', 'error')
   } finally {
@@ -4740,23 +5118,37 @@ async function loadAccounts(integrationId: string) {
   }
 }
 
+// Bumped whenever an in-flight department load must be ignored (integration switch, draft reset,
+// or a newer load). DingTalk department ids repeat across corps, so a late response for
+// integration A must never land in integration B's tree / pickers.
+let departmentLoadToken = 0
+
+function cancelPendingDepartmentLoad(): void {
+  departmentLoadToken += 1
+  loadingDepartments.value = false
+}
+
 async function loadDepartments(integrationId: string, options: { force?: boolean } = {}) {
   if (departmentsLoaded.value && options.force !== true) return
+  const token = ++departmentLoadToken
+  const isStale = () => token !== departmentLoadToken || selectedIntegrationId.value !== integrationId
   loadingDepartments.value = true
   departmentLoadError.value = ''
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/departments`)
     const body = await readJson(response)
+    if (isStale()) return
     if (!response.ok) throw new Error(readApiError(body, '加载组织架构失败'))
     departments.value = Array.isArray(body?.data?.items) ? body.data.items : []
     departmentsLoaded.value = true
   } catch (error) {
+    if (isStale()) return
     departments.value = []
     departmentsLoaded.value = true
     departmentLoadError.value = error instanceof Error ? error.message : '加载组织架构失败'
     setStatus(departmentLoadError.value, 'error')
   } finally {
-    loadingDepartments.value = false
+    if (token === departmentLoadToken) loadingDepartments.value = false
   }
 }
 
@@ -5200,13 +5592,14 @@ async function handleDirectoryNavigationChange(): Promise<void> {
   ])
 }
 
-function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'> & Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): string {
+function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'> & Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): string {
   const params = new URLSearchParams()
   params.set('userId', userId)
   params.set('source', 'directory-sync')
   params.set('integrationId', account.integrationId)
   params.set('accountId', account.id)
-  if (shouldWarnMissingOpenIdForGrant(account)) {
+  // only when the server said so: a bare {id, integrationId} (manual admission result) carries no verdict
+  if (account.grantOpenIdAvailable === false) {
     params.set('filter', 'dingtalk-openid-missing')
   }
   return `/admin/users?${params.toString()}`
@@ -5424,7 +5817,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
   }
   manualAdmissionDrafts[account.id] = nextDraft
   if (!nextDraft.name || (!nextDraft.email && !nextDraft.username && !nextDraft.mobile)) {
-    setStatus(`${memberLabel} ${account.name} 的姓名必填，且邮箱、用户名、手机号至少填写一项`, 'error')
+    setStatus(`${memberLabel} ${account.name} 的姓名必填，且邮箱、登录名、手机号至少填写一项`, 'error')
     return
   }
 
@@ -5443,7 +5836,8 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     })
     const body = await readJson(response)
     if (!response.ok || body?.ok !== true) {
-      throw new Error(readApiError(body, '创建本地用户并绑定失败'))
+      // #6259: known input-rule codes render Chinese copy; anything else keeps the server message.
+      throw new Error(describeDirectoryAdmissionError(body) ?? readApiError(body, '创建本地用户并绑定失败'))
     }
     const data = body?.data as Record<string, unknown> | undefined
     const createdUser = readCreatedLocalUserOption(data ?? {}, nextDraft)
@@ -6190,6 +6584,22 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.directory-admin__manual-ids {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.directory-admin__manual-ids > summary {
+  cursor: pointer;
+  color: #64748b;
+}
+
+.directory-admin__manual-ids[open] > summary {
+  margin-bottom: 8px;
 }
 
 .directory-admin__department-actions {

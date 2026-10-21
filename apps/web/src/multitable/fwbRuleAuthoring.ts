@@ -238,11 +238,17 @@ export function sheetFieldsToFwbTargets(
 }
 
 export function templateSchemaToFwbFields(
-  formSchema: { fields?: ReadonlyArray<{ id?: unknown; label?: unknown }> } | null | undefined,
+  formSchema: { fields?: ReadonlyArray<{ id?: unknown; label?: unknown; type?: unknown }> } | null | undefined,
 ): TemplateFieldInfo[] {
   const fields = Array.isArray(formSchema?.fields) ? formSchema!.fields! : []
   return fields
     .map((field) => {
+      // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1): explanation carries no
+      // submitted value (A-1) — it can never be a legitimate FWB mapping source. This is the ONE
+      // FE site that lists candidate source fields for the mapping picker (fwbMappingConfig.ts's
+      // `validateFwbMappingConfig` only checks source-id EXISTENCE, not type — see Lock-8 §0's
+      // "Unverified at this baseline" note), so the exclusion belongs here.
+      if (field?.type === 'explanation') return null
       const id = typeof field?.id === 'string' ? field.id : ''
       const label = typeof field?.label === 'string' && field.label.trim() ? field.label : id
       return id ? { id, label } : null

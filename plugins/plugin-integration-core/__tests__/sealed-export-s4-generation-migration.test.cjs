@@ -261,7 +261,19 @@ async function assertRealDbProofWiring() {
     'node __tests__/sealed-export-s6a-runtime-core.test.cjs',
     'node __tests__/sealed-export-s6a-product-runtime.test.cjs',
   ]
-  const chain = packageJson.scripts.test.split(' && ')
+  // The chain list lives in `test-chain.txt` (moved out of the digest-pinned package.json so that
+  // adding a suite stops re-pinning `runtimeFiles.pluginPackageJson`). Commands and order are
+  // unchanged, and the stage tail is still the tail — that is what this block pins. `scripts.test`
+  // must still invoke the runner, or this list would not be what executes; assert that too, since
+  // it is the one chain-related line that remains inside the pinned file.
+  assert.equal(
+    packageJson.scripts.test,
+    'node scripts/test-chain.cjs',
+    'scripts.test must invoke the chain runner, otherwise test-chain.txt is not what runs',
+  )
+  const chain = require(
+    path.join(__dirname, '..', 'scripts', 'test-chain.cjs'),
+  ).loadChain(path.join(__dirname, '..'))
   // S4 remains contiguous; the S5 and S6-A suites follow it exactly once.
   assert.deepEqual(
     chain.slice(-(s4Commands.length + s5Commands.length + s6Commands.length)),

@@ -85,8 +85,10 @@
       class="meta-toolbar__filter-value"
       :type="getInputType(rule.fieldId)"
       :placeholder="getValuePlaceholder(rule.fieldId)"
-      :value="rule.value ?? ''"
+      :value="displayFilterValue(rule.fieldId, rule.value)"
       :aria-label="l('toolbar.filterValue')"
+      :aria-invalid="isUnparseableDateTimeValue(rule.fieldId, rule.value) ? 'true' : undefined"
+      :data-filter-datetime="getFieldType(rule.fieldId) === 'dateTime' ? 'true' : undefined"
       @change="onValueChange(($event.target as HTMLInputElement).value)"
     />
     <button class="meta-toolbar__remove" @click="emit('remove')">&times;</button>
@@ -99,6 +101,7 @@ import type { FilterRule } from '../composables/useMultitableGrid'
 import { FILTER_OPERATORS_BY_TYPE, effectiveFilterTypeKey } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, fieldTypeLabel, filterValuePlaceholder, type MetaCoreLabelKey } from '../utils/meta-core-labels'
+import { formatDateTimeInZone, parseDateTimeInput, resolveDateTimeTimezone } from '../utils/business-timezone'
 
 const props = defineProps<{ rule: FilterRule; fields: MetaField[] }>()
 const emit = defineEmits<{ (e: 'update', rule: FilterRule): void; (e: 'remove'): void }>()
@@ -185,11 +188,33 @@ function onBetweenChange(slot: 0 | 1, value: string) {
 function onNDaysChange(value: string) {
   emit('update', { ...props.rule, value: value === '' ? '' : Number(value) })
 }
+// 客户反馈 2026-09-24 #4c (S2): a dateTime filter value is typed and shown as the SAME business wall clock
+// the grid shows (`2026-09-24 09:00`, zone rule: explicit non-UTC field zone, else the business zone) and
+// STORED as the absolute UTC instant it denotes, so the backend compares instants with no zone guesswork
+// (and a field with its own zone is honoured here, where the field is known). Text the parser rejects is
+// kept verbatim (aria-invalid) rather than dropped; the backend treats it as matching nothing.
+const dateTimeZoneFor = (id: string) => resolveDateTimeTimezone(getField(id)?.property)
+function displayFilterValue(fieldId: string, value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (getFieldType(fieldId) === 'dateTime') return formatDateTimeInZone(value, dateTimeZoneFor(fieldId)) ?? String(value)
+  return String(value)
+}
+function isUnparseableDateTimeValue(fieldId: string, value: unknown): boolean {
+  if (getFieldType(fieldId) !== 'dateTime') return false
+  if (value === null || value === undefined || value === '') return false
+  return formatDateTimeInZone(value, dateTimeZoneFor(fieldId)) === null
+}
+function dateTimeFilterValue(fieldId: string, text: string): unknown {
+  const parsed = parseDateTimeInput(text, dateTimeZoneFor(fieldId))
+  if (!parsed.ok) return text
+  return parsed.value ?? ''
+}
 function onValueChange(value: string) {
   const ft = getFieldType(props.rule.fieldId)
   let nextValue: unknown = value
   if (ft === 'number' && value !== '') nextValue = Number(value)
   if (ft === 'boolean') nextValue = value === 'true'
+  if (ft === 'dateTime') nextValue = dateTimeFilterValue(props.rule.fieldId, value)
   emit('update', { ...props.rule, value: nextValue })
 }
 </script>

@@ -2,16 +2,17 @@
   <PageShell width="wide">
     <PageHeader
       class="template-authoring__header"
-      :title="isEditMode ? '编辑审批模板' : '新建审批模板'"
+      :title="isEditMode ? '编辑审批表单' : '新建审批表单'"
       subtitle="分步完成基础信息、表单、流程与发布校验"
       back
-      back-label="返回模板列表"
+      back-label="返回表单列表"
       @back="goBack"
     >
       <template #meta>
         <span
           class="template-authoring__save-state"
           :class="{ 'template-authoring__save-state--dirty': isDraftDirty }"
+          data-testid="approval-template-save-state"
         >
           {{ draftStateLabel }}
         </span>
@@ -34,6 +35,19 @@
       </template>
       <template #actions>
         <div class="template-authoring__actions">
+          <!-- B0: 飞书-style "N项不完善" affordance — save stays unblocked by these; publish
+               still requires them all resolved (canConfirmPublish, unchanged). -->
+          <el-button
+            v-if="incompleteAuthoringIssueCount > 0"
+            text
+            size="small"
+            class="template-authoring__incomplete-count"
+            data-testid="approval-template-incomplete-count"
+            :aria-label="`${incompleteAuthoringIssueCount} 项不完善，点击查看详情`"
+            @click="revealIncompleteAuthoringIssues"
+          >
+            {{ incompleteAuthoringIssueCount }} 项不完善
+          </el-button>
           <el-button
             :loading="saving"
             :disabled="!canSave"
@@ -57,7 +71,7 @@
 
     <el-alert
       v-if="!canManageTemplates"
-      title="你没有模板管理权限"
+      title="你没有表单管理权限"
       type="warning"
       show-icon
       :closable="false"
@@ -67,7 +81,7 @@
     <el-alert
       v-if="unsupportedReason"
       :title="unsupportedReason"
-      description="该模板包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
+      description="该表单包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
       type="warning"
       show-icon
       :closable="false"
@@ -111,7 +125,7 @@
 
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
-        <nav class="template-authoring__steps" aria-label="模板配置步骤">
+        <nav class="template-authoring__steps" aria-label="表单配置步骤">
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -155,7 +169,7 @@
       >
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>常用审批模板</strong>
+            <strong>常用审批表单</strong>
             <span class="template-authoring__hint">创建为草稿，发布前可继续调整字段和审批人。</span>
           </div>
         </template>
@@ -168,6 +182,13 @@
             <div>
               <strong>{{ preset.title }}</strong>
               <p>{{ preset.description }}</p>
+              <p
+                v-if="presetBoundaryNote(preset.id)"
+                class="template-authoring__preset-note"
+                :data-testid="`approval-template-preset-${preset.id}-boundary-note`"
+              >
+                {{ presetBoundaryNote(preset.id) }}
+              </p>
             </div>
             <el-button
               type="primary"
@@ -177,7 +198,7 @@
               :data-testid="`approval-template-preset-${preset.id}`"
               @click="createFromPreset(preset.id)"
             >
-              使用模板
+              使用表单
             </el-button>
           </div>
         </div>
@@ -189,13 +210,20 @@
         </template>
         <el-form label-position="top" class="template-authoring__grid">
           <el-form-item label="模板 Key">
-            <el-input v-model="draft.key" :disabled="readOnly" data-testid="approval-template-key" />
+            <!-- approval-form-ux-slice1 (20260916 design §1.2): read-only display, not editable by
+                 anyone (`readonly`, not `:disabled`, so the value stays selectable/copyable — see
+                 design §1.2 point 1). Value is seeded at draft-creation time (createSeededTemplateDraft),
+                 never blank. PATCH never sends this field (buildUpdateTemplatePayload). -->
+            <el-input v-model="draft.key" readonly data-testid="approval-template-key" />
           </el-form-item>
           <el-form-item label="模板名称">
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
           </el-form-item>
           <el-form-item label="分类">
-            <el-input
+            <!-- approval-form-ux-slice1 (20260916 design §3): candidate dropdown backed by
+                 GET /api/approval-templates/categories, still a plain free-text field
+                 (allow-create — see CategoryCandidateInput.vue's own doc comment). -->
+            <CategoryCandidateInput
               v-model="draft.category"
               :disabled="readOnly"
               placeholder="如 请假 / 采购 / 报销"
@@ -255,25 +283,28 @@
       <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>表单设计</strong>
+            <strong>字段设计</strong>
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
-                :disabled="readOnly || !canUndoFormFieldHistory"
+                :disabled="readOnly || !(showFormBuilderV2 ? builderCanUndo : canUndoFormFieldHistory)"
                 data-testid="approval-form-undo"
-                @click="onFormFieldUndo"
+                @click="onFormUndoRedoClick('undo')"
               >
                 撤销
               </el-button>
               <el-button
                 size="small"
-                :disabled="readOnly || !canRedoFormFieldHistory"
+                :disabled="readOnly || !(showFormBuilderV2 ? builderCanRedo : canRedoFormFieldHistory)"
                 data-testid="approval-form-redo"
-                @click="onFormFieldRedo"
+                @click="onFormUndoRedoClick('redo')"
               >
                 重做
               </el-button>
+              <!-- Designer 2.0's palette (click/keyboard slot insertion) supersedes this button —
+                   hiding it under the flag avoids a second, divergent add-field path (M7). -->
               <el-button
+                v-if="!showFormBuilderV2"
                 size="small"
                 :disabled="readOnly"
                 data-testid="approval-template-add-field"
@@ -287,6 +318,7 @@
         </template>
 
         <ApprovalFormInlineEditor
+          v-if="!showFormBuilderV2"
           data-testid="approval-form-designer"
           :fields="draft.fields"
           :read-only="readOnly"
@@ -316,9 +348,39 @@
           @add-detail-column="addDetailColumn"
           @remove-detail-column="removeDetailColumn"
         />
+        <!-- F4 production mount (delta §5 F4, FB-D8): Designer 2.0 — the SAME composition shape
+             as the owned browser harness (`verification/approval-form-builder-harness.ts`): one
+             shared `dragSession`, palette + builder as siblings. `formBuilderSessionEpoch` is the
+             ONLY thing that remounts this (see `reseedFormBuilderSessionIfActive`); no `:key` is
+             derived from `draft` itself, so routine edits/tab-switches never reseed the session. -->
+        <div
+          v-else
+          class="template-authoring__form-designer-v2"
+          data-testid="approval-form-designer-v2"
+        >
+          <ApprovalFormPalette
+            :read-only="readOnly"
+            :drag-session="approvalFormDragSession"
+            @append-field="onFormBuilderPaletteAppend"
+          />
+          <ApprovalFormBuilder
+            :key="formBuilderSessionEpoch"
+            ref="formBuilderRef"
+            :draft="draft"
+            :read-only="readOnly"
+            :drag-session="approvalFormDragSession"
+            :record-link-catalog="recordLinkAuthoringCatalog"
+            @draft-change="onFormBuilderDraftChange"
+            @retry-record-link-catalog="retryRecordLinkCatalog"
+          />
+        </div>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
+      <el-card
+        v-show="activeAuthoringSection === 'flow'"
+        class="template-authoring__panel template-authoring__panel--flow"
+        shadow="never"
+      >
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>审批流程</strong>
@@ -335,16 +397,10 @@
           </div>
         </template>
 
-        <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
-        <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
-        <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
-          <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
-          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">辅助编辑模式</el-button>
-        </div>
-
-        <!-- D-1/D-5 visual canvas + inspector (PR4: extracted shell components; draft/history stay here). -->
+        <!-- Canvas is the ordinary authoring surface; the structured renderer remains only as the
+             explicit flag-off operational rollback for this release. -->
         <div
-          v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'"
+          v-if="graphReadOnly && canvasV2Enabled"
           class="template-authoring__canvas-workspace"
           data-testid="approval-canvas-workspace"
         >
@@ -373,6 +429,7 @@
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
+            :can-insert-on-edge="canInsertOnCanvasEdge"
             :can-insert-parallel-on-edge="canInsertParallelOnEdge"
             :can-insert-handler-on-edge="canInsertHandlerOnEdge"
             :canvas-move-target-label="canvasMoveTargetLabel"
@@ -409,7 +466,7 @@
             :can-insert-after="canInsertAfter"
             :can-insert-parallel-after="canInsertParallelAfter"
             :can-remove-node="canRemoveNode"
-            @close="clearCanvasSelection"
+            @close="closeCanvasInspector"
             @move-up="(key) => moveCanvasNodeStep(key, 'up')"
             @move-down="(key) => moveCanvasNodeStep(key, 'down')"
             @begin-move="beginCanvasNodeMove"
@@ -419,12 +476,13 @@
             @insert-condition="onInsertConditionAfter"
             @insert-parallel="onInsertParallelAfter"
             @remove="onRemoveNode"
+            @rename="onRenameCanvasNode"
           >
             <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
           </ApprovalCanvasNodeInspector>
         </div>
 
-        <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
+        <div v-if="graphReadOnly && !canvasV2Enabled" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -558,6 +616,96 @@
             <el-form-item label="步骤名称">
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
+            <!-- Lock-4 §1 F4-A — 审批类型 on each linear step. OD-L4-2(a): exactly TWO options (人工审批 /
+                 自动通过), no inert 自动拒绝. A linear graph is never inside a parallel region, so 自动通过 is
+                 always offered here (contrast the canvas inspector, which disables it per node). The
+                 radio `name` carries the step's localId because several step cards render at once. -->
+            <el-form-item label="审批类型">
+              <div
+                class="approval-node-source-roster"
+                role="radiogroup"
+                aria-label="审批类型"
+                data-testid="approval-step-approval-type"
+              >
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="manual"
+                    :checked="step.approvalType !== 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-manual"
+                    @change="() => onStepApprovalTypeChange(step, 'manual')"
+                  />
+                  <span>人工审批</span>
+                </label>
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="auto_approve"
+                    :checked="step.approvalType === 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-auto-approve"
+                    @change="() => onStepApprovalTypeChange(step, 'auto_approve')"
+                  />
+                  <span>自动通过</span>
+                </label>
+              </div>
+              <p
+                v-if="step.approvalType === 'auto_approve'"
+                class="template-authoring__hint"
+                data-testid="approval-step-approval-type-auto-hint"
+              >流程到达此步骤时由系统自动通过，不分配审批人</p>
+              <!-- Only reachable for a template saved through the API: the step still CARRIES a source,
+                   which is saved and validated, so it stays visible; the action drops it. -->
+              <p
+                v-if="step.approvalType === 'auto_approve' && !stepOmitsAssigneeSources(step)"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-live-sources-hint"
+              >
+                该步骤仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+                <el-button
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-drop-sources"
+                  @click="onStepApprovalTypeChange(step, 'auto_approve')"
+                >移除审批人来源</el-button>
+              </p>
+              <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (same mechanism as the canvas inspector): a hidden
+                   block (policy rows / timeout section below) is still saved and validated, so while its
+                   own values fail validation it is rendered again and this notice names the failure.
+                   关闭超时 is an explicit author action; nothing is rewritten at save time. -->
+              <div
+                v-if="stepOmitsAssigneeSources(step) && stepHiddenBlockErrors(step).length > 0"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-hidden-errors-hint"
+              >
+                <p>该步骤有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+                <ul>
+                  <li
+                    v-for="(message, messageIndex) in stepHiddenBlockErrors(step)"
+                    :key="messageIndex"
+                    data-testid="approval-step-approval-type-hidden-error"
+                  >{{ message }}</li>
+                </ul>
+                <el-button
+                  v-if="stepHiddenBlockErrors(step, 'timeout').length > 0"
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-clear-timeout"
+                  @click="clearStepTimeout(step)"
+                >关闭超时</el-button>
+              </div>
+            </el-form-item>
+            <!-- Lock-4 §1 F4-A: a step whose sources are omitted saves NONE, so the source controls
+                 (hidden scratch, restored on 人工审批) are not rendered. Same predicate as
+                 `buildStepConfig` and `validateTemplateApprovalFlow` (`stepOmitsAssigneeSources`). The
+                 person-only policy rows below are a SEPARATE block: hidden too, values preserved
+                 verbatim, but rendered again while they carry a live error (HIDDEN-BLOCK GUARD). -->
+            <template v-if="!stepOmitsAssigneeSources(step)">
             <el-form-item label="审批人来源">
               <el-select v-model="step.sourceKind" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
                 <el-option label="指定用户" value="static_user" />
@@ -571,6 +719,23 @@
                 <el-option label="提交人自选" value="requester_choice" />
                 <el-option label="连续多级部门负责人" value="continuous_dept_heads" />
                 <el-option label="指定层级部门负责人" value="dept_head_at_level" />
+                <el-option label="节点审批人" value="prior_node_approver" />
+                <el-option label="用户组" value="user_group" />
+                <!-- Lock-2 §2.4 C-7 form-schema precondition (D-6): the contact-extension kinds
+                     are OFFERED only when the form declares a user field — the affordance is
+                     schema-selected; a persisted selection stays rendered via the v-if's
+                     already-selected escape so a stored value is never orphaned. The backend
+                     publish validator remains the enforcement. -->
+                <el-option
+                  v-if="userFields.length > 0 || step.sourceKind === 'form_field_user_manager'"
+                  label="表单内联系人上级"
+                  value="form_field_user_manager"
+                />
+                <el-option
+                  v-if="userFields.length > 0 || step.sourceKind === 'form_field_user_dept_head'"
+                  label="表单内联系人部门负责人"
+                  value="form_field_user_dept_head"
+                />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -619,6 +784,53 @@
                 :disabled="readOnly"
                 data-testid="approval-step-dept-head-level"
               />
+            </el-form-item>
+            <!-- Lock-1 §K3 (节点审批人) linear authoring: a TYPED picker over the STRICTLY-EARLIER
+                 steps only (never a free-text node key). The reference is stored as the earlier
+                 step's stable localId, so insert/reorder can never silently retarget it; the
+                 builder emits that step's current positional key at save. -->
+            <el-form-item v-if="step.sourceKind === 'prior_node_approver'" label="引用审批步骤">
+              <el-select
+                v-model="step.priorStepLocalId"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="选择之前的审批步骤"
+                data-testid="approval-step-prior-node"
+              >
+                <el-option
+                  v-for="option in priorStepOptions(index)"
+                  :key="option.localId"
+                  :label="option.label"
+                  :value="option.localId"
+                />
+              </el-select>
+            </el-form-item>
+            <!-- Lock-1 §K1 (用户组) linear authoring: a TYPED multi-select restricted to groups
+                 BOUND to the template's org (never a free-text/raw-id input). Same picker source
+                 as the canvas sub-form (directory.memberGroups). -->
+            <el-form-item v-if="step.sourceKind === 'user_group'" label="选择用户组">
+              <el-select
+                v-model="step.groupIds"
+                multiple
+                filterable
+                :disabled="readOnly"
+                :loading="directory.memberGroupsLoading.value"
+                class="ms-w-100pct"
+                placeholder="选择已绑定的用户组"
+                data-testid="approval-step-group-picker"
+              >
+                <el-option
+                  v-for="group in directory.memberGroups.value"
+                  :key="group.id"
+                  :label="directory.formatMemberGroupLabel(group)"
+                  :value="group.id"
+                />
+              </el-select>
+              <p
+                v-if="!readOnly && directory.memberGroups.value.length === 0 && !directory.memberGroupsLoading.value"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-group-empty"
+              >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
               <el-select
@@ -672,6 +884,33 @@
                 />
               </el-select>
             </el-form-item>
+            <!-- Lock-2 §L2-C (表单内联系人上级/部门负责人) linear authoring: typed field picker
+                 over the form's user fields (never a raw field-id input) + a single level input,
+                 reusing the shared `fieldId` and `level` draft fields. The hint discloses the
+                 publish pins (required + no visibility rule) at authoring time. -->
+            <template v-if="step.sourceKind === 'form_field_user_manager' || step.sourceKind === 'form_field_user_dept_head'">
+              <el-form-item label="表单内联系人字段">
+                <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-contact-field">
+                  <el-option
+                    v-for="field in userFields"
+                    :key="field.id"
+                    :label="fieldDisplayLabel(field)"
+                    :value="field.id"
+                  />
+                </el-select>
+                <p class="template-authoring__hint" data-testid="approval-step-contact-field-hint">所选联系人字段须为必填且不带显示条件，发布时校验</p>
+              </el-form-item>
+              <el-form-item :label="step.sourceKind === 'form_field_user_manager' ? '指定联系人上级层级' : '指定联系人部门负责人层级'">
+                <el-input-number
+                  v-model="step.level"
+                  :min="1"
+                  :max="10"
+                  :step="1"
+                  :disabled="readOnly"
+                  data-testid="approval-step-contact-level"
+                />
+              </el-form-item>
+            </template>
             <!-- Lock-1 §K2 (提交人自选) linear authoring: mode + scope with typed pickers only
                  (the scope id list rides the shared idsText chip carrier via stepIds/setStepIds). -->
             <el-form-item v-if="step.sourceKind === 'requester_choice'" label="选择方式">
@@ -741,28 +980,232 @@
                 />
               </el-select>
             </el-form-item>
+            </template>
+            <template v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'policy')">
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
                 <el-option label="全部通过" value="all" />
                 <el-option label="任一通过" value="any" />
+                <el-option label="依次审批" value="sequential" data-testid="approval-step-mode-sequential-option" />
+                <!-- P1-C (T2-4 N-of-M / 门槛会签). Linear graphs are BY CONSTRUCTION never inside a
+                     parallel region (the linear editor admits no `parallel` node), so this option is
+                     always offered here — the backend's linear-only constraint is satisfied by
+                     construction, not by a runtime gate (contrast the complex-graph editor, which
+                     disables this option per-node). -->
+                <el-option label="门槛会签（N 人同意）" value="threshold" data-testid="approval-step-mode-threshold-option" />
               </el-select>
             </el-form-item>
+            <!-- P1-C: typed N-of-M control. M is resolved from this step's approver source at
+                 runtime — this editor always emits `assigneeSources` (never the legacy shape the
+                 backend's static publish bound is scoped to), so an unreachable N fails closed at
+                 dispatch (APPROVAL_THRESHOLD_UNREACHABLE), never at save/publish; the hint says so
+                 honestly rather than pretending to validate M here (M8). -->
+            <el-form-item v-if="step.approvalMode === 'threshold'" label="通过所需人数（N）">
+              <el-input-number
+                :model-value="step.approvalThreshold"
+                @update:model-value="(value: number | null) => { step.approvalThreshold = value ?? 1 }"
+                :min="1"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-threshold"
+              />
+              <p class="template-authoring__hint">
+                需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
+              </p>
+            </el-form-item>
+            <!-- W1-1a (Lock-4 §3 F4-B, OD-L4-3(a)): 'designated' joins 报错/自动通过; its targets ride the
+                 ONE key `emptyAssigneeFallback`, filled through the SAME typed directory pickers the
+                 static_user/static_role sources use (D0 §10.2 — never a raw-id input). 转审批管理员 is
+                 expressed by designating the approval-admin ROLE (OD-L4-3(a)), not a separate option. -->
+            <!-- Gate r2 P2-1 (C7): re-sync on EVERY policy change, mirroring the source-kind select's
+                 @change above. The fallback targets stay on the draft while the policy is switched away
+                 (default (g)) but are re-ensured into the shared directory options only while it is
+                 'designated'; a user search made in between replaces that list, so without this the
+                 re-mounted picker would have no option for a retained target and Element Plus would
+                 label its chip with the raw id. -->
             <el-form-item label="空审批人策略">
-              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct">
+              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-empty-policy" @change="syncStepOptions(step)">
                 <el-option label="报错" value="error" />
                 <el-option label="自动通过" value="auto-approve" />
+                <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
               </el-select>
             </el-form-item>
-            <el-form-item label="自审策略">
-              <el-checkbox
-                v-model="step.mergeWithRequester"
-                :disabled="readOnly"
-                data-testid="approval-step-merge-with-requester"
+            <!-- Full-width, label-on-top rows (same layout fix as the canvas editor): the labels and
+                 honesty hints are long, so a half-width grid column would squeeze the control. -->
+            <template v-if="step.emptyAssigneePolicy === 'designated'">
+              <el-form-item label="转交给（用户）" label-position="top" class="template-authoring__wide">
+                <el-select
+                  :model-value="step.emptyAssigneeFallback?.userIds ?? []"
+                  multiple
+                  filterable
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  placeholder="搜索用户名 / 邮箱"
+                  data-testid="approval-step-empty-fallback-user-picker"
+                  @update:model-value="(ids: string[]) => onStepEmptyFallbackIds(step, 'user', ids)"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="转交给（角色）" label-position="top" class="template-authoring__wide">
+                <el-select
+                  :model-value="step.emptyAssigneeFallback?.roleIds ?? []"
+                  multiple
+                  filterable
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  placeholder="选择角色"
+                  data-testid="approval-step-empty-fallback-role-picker"
+                  @update:model-value="(ids: string[]) => onStepEmptyFallbackIds(step, 'role', ids)"
+                >
+                  <el-option
+                    v-for="role in directory.roles.value"
+                    :key="role.id"
+                    :label="directoryRoleDisplayLabel(role)"
+                    :value="role.id"
+                  />
+                </el-select>
+                <p class="template-authoring__hint" data-testid="approval-step-empty-fallback-hint">{{ EMPTY_ASSIGNEE_DESIGNATED_HINT }}</p>
+              </el-form-item>
+            </template>
+            <!-- W1-1a (Lock-4 §2 F4-C): the four-value same-person control REPLACES the shipped 自审合并
+                 checkbox and owns `mergeWithRequester` + `samePersonPolicy` together (implementer
+                 default (a)); 默认 omits both keys (default (b)). The displayed value is DERIVED from the
+                 step's two raw carriers, so an untouched legacy node re-saves byte-identical. -->
+            <el-form-item label="审批人与发起人为同一人时" label-position="top" class="template-authoring__wide">
+              <el-select
+                :model-value="stepSamePersonSelectValue(step)"
+                :disabled="readOnly || stepSamePersonControlState(step).kind !== 'editable'"
+                class="ms-w-100pct"
+                data-testid="approval-step-same-person-policy"
+                @update:model-value="(value: string) => onStepSamePersonSelect(step, value)"
               >
-                发起人自动通过（自审合并）
-              </el-checkbox>
+                <el-option
+                  v-for="option in stepSamePersonOptions(step)"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+              <p class="template-authoring__hint" data-testid="approval-step-same-person-hint">{{ stepSamePersonOverrideHint(step) }}</p>
+              <p
+                v-if="isSamePersonTransferValue(stepSamePersonSelectValue(step))"
+                class="template-authoring__hint"
+                data-testid="approval-step-same-person-transfer-hint"
+              >{{ SAME_PERSON_TRANSFER_HINT }}</p>
             </el-form-item>
+            </template>
+          </div>
+          <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
+               (see the mode-picker comment above), so this section needs no parallel gating. Lock-4
+               §1 F4-A: not rendered for a step whose sources are omitted (an auto_approve step never
+               waits, so a timeout there is inert); the persisted value is preserved verbatim — and
+               rendered again while it carries a live error (HIDDEN-BLOCK GUARD), and then kept rendered
+               until 审批类型 changes, 关闭超时, reload or save (STICKY REVEAL, `stepHiddenBlockRevealed`). -->
+          <div v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'timeout')" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+            <el-form-item label="节点超时">
+              <el-checkbox
+                v-model="step.timeoutEnabled"
+                :disabled="readOnly"
+                data-testid="approval-step-timeout-enabled"
+              >启用超时处理</el-checkbox>
+            </el-form-item>
+            <template v-if="step.timeoutEnabled">
+              <el-form-item label="超时时长（分钟）">
+                <el-input
+                  v-model="step.timeoutAfterMinutesText"
+                  :disabled="readOnly"
+                  placeholder="例如 60"
+                  data-testid="approval-step-timeout-after-minutes"
+                />
+              </el-form-item>
+              <el-form-item label="超时后动作">
+                <el-select v-model="step.timeoutEffect" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-timeout-effect">
+                  <!-- P1-C: ONLY the effects the scheduler actually acts on / publish accepts — never
+                       'auto_approve'/'auto_reject' (reserved, M6/M8). -->
+                  <el-option
+                    v-for="effect in NODE_TIMEOUT_SUPPORTED_EFFECTS"
+                    :key="effect"
+                    :label="stepTimeoutEffectOptionLabel(effect)"
+                    :value="effect"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="step.timeoutEffect === 'transfer'" label="转交给">
+                <el-select
+                  v-model="step.timeoutTransferToUserId"
+                  filterable
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
+                  :disabled="readOnly"
+                  class="ms-w-360"
+                  placeholder="搜索用户名 / 邮箱"
+                  data-testid="approval-step-timeout-transfer-target"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-else-if="step.timeoutEffect === 'jump'" label="跳转到节点">
+                <!-- Business labels only — never a raw step key/id in the option text (M8). -->
+                <el-select
+                  v-model="step.timeoutJumpToStepLocalId"
+                  :disabled="readOnly"
+                  class="ms-w-240"
+                  placeholder="选择目标审批节点"
+                  data-testid="approval-step-timeout-jump-target"
+                >
+                  <el-option
+                    v-for="option in timeoutJumpStepOptions(step.localId)"
+                    :key="option.localId"
+                    :label="option.label"
+                    :value="option.localId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="计时方式">
+                <div class="approval-node-source-roster" role="radiogroup" aria-label="计时方式" data-testid="approval-step-timeout-unit">
+                  <label class="approval-node-source-roster-option">
+                    <input
+                      type="radio"
+                      :name="`approval-step-timeout-unit-${step.localId}`"
+                      :checked="step.timeoutUnit !== 'business'"
+                      :disabled="readOnly"
+                      data-testid="approval-step-timeout-unit-wall-clock"
+                      @change="() => { step.timeoutUnit = '' }"
+                    />
+                    <span>自然时间</span>
+                  </label>
+                  <label class="approval-node-source-roster-option">
+                    <input
+                      type="radio"
+                      :name="`approval-step-timeout-unit-${step.localId}`"
+                      :checked="step.timeoutUnit === 'business'"
+                      :disabled="readOnly"
+                      data-testid="approval-step-timeout-unit-business"
+                      @change="() => { step.timeoutUnit = 'business' }"
+                    />
+                    <span>工作时间</span>
+                  </label>
+                </div>
+              </el-form-item>
+            </template>
           </div>
           <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` and
                `只读` are BOTH enforced server-side (Lock-7 P4-B: 隐藏 redacts the read echo + blocks a
@@ -839,8 +1282,8 @@
                 仅连续节点自动同意
               </el-radio>
             </el-radio-group>
-            <p class="template-authoring__hint">
-              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；仅对未单独设置去重规则的审批节点生效，返回上一节点后该节点重新计入本轮去重历史。
+            <p class="template-authoring__hint" data-testid="approval-template-dedup-tier-hint">
+              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；审批节点单独设置了自动审批规则（例如「审批人与发起人为同一人时」选择了默认以外的选项）时，该节点不再沿用本设置；返回上一节点后该节点重新计入本轮去重历史。
             </p>
             <!-- M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover has a second,
                  real server effect beyond the dedup cascade — it also exempts the graph from two
@@ -936,20 +1379,23 @@
                 v-model="sampleFormData[field.id]"
                 class="ms-w-100pct"
               />
-              <!-- date -->
+              <!-- date: the same strict YYYY-MM-DD binding as the fill form (T4a-E1) -->
               <el-date-picker
                 v-else-if="field.type === 'date'"
                 v-model="sampleFormData[field.id]"
                 type="date"
+                :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
                 :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
-              <!-- datetime -->
+              <!-- datetime: the same entry settings as the fill form (T4a) -->
               <el-date-picker
                 v-else-if="field.type === 'datetime'"
                 v-model="sampleFormData[field.id]"
                 type="datetime"
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
+                :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+                :default-time="tryRunDatetimeDefaultTime"
+                :placeholder="field.placeholder || '请选择日期和时间'"
                 class="ms-w-100pct"
               />
               <!-- select -->
@@ -1180,10 +1626,20 @@ import { describeTemplateAuthoringError } from '../../approvals/templateAuthorin
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
+import { useLocale } from '../../composables/useLocale'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
+import {
+  APPROVAL_CIVIL_DATE_VALUE_FORMAT,
+  APPROVAL_DATETIME_DISPLAY_FORMAT,
+  approvalDatetimeDefaultTime,
+} from '../../approvals/datePickerFormat'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import CategoryCandidateInput from '../../approvals/components/CategoryCandidateInput.vue'
 import ApprovalFormInlineEditor from '../../approvals/components/ApprovalFormInlineEditor.vue'
+import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
+import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
+import { createApprovalFormDragSession } from '../../approvals/approvalFormDragPayload'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalCanvasNodeInspector from '../../approvals/components/ApprovalCanvasNodeInspector.vue'
@@ -1205,6 +1661,7 @@ import {
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
+  generateTemplateKey,
   graphReadOnlyReason,
   insertStepAt,
   parseIdsText,
@@ -1214,11 +1671,21 @@ import {
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
   validateTemplateBasicInfo,
+  collectTemplateSaveMinimum,
+  seedDraftIdentityForSave,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
   isPlaceholderRoleSource,
   addAssigneeSourceCard,
   removeAssigneeSourceCard,
+  legalPriorApproverNodeKeys,
+  approvalNodeEditOmitsAssigneeSources,
+  applyApprovalTypeChoice,
+  setStepApprovalType,
+  stepOmitsAssigneeSources,
+  stepHiddenBlockLiveErrors,
+  approvalNodeEditHiddenBlockLiveErrors,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1234,8 +1701,25 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
   moveItemToIndex,
   isTemplateDedupTierLocked,
+  // W1-1a (Lock-4 F4-B / F4-C) — shared same-person / designated-fallback helpers + copy.
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_TRANSFER_HINT,
+  applySamePersonChoice,
+  samePersonChoiceFromSelectValue,
+  samePersonChoiceOptions,
+  samePersonOverrideHint,
+  samePersonSelectValue,
+  setStepEmptyAssigneeFallbackIds,
+  setStepSamePersonChoice,
+  stepAutoApprovalPolicy,
+  stepSamePersonControlState,
+  withEmptyAssigneeFallbackIds,
+  conditionValueFieldFromDraft,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
@@ -1245,9 +1729,12 @@ import {
   appendCcNode,
   appendHandlerNode,
   collectParallelRegionNodeKeys,
+  conditionBranchRemovalBlocker,
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
+  planConditionBranchRemoval,
+  removeConditionBranch,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
 import {
@@ -1288,24 +1775,30 @@ import {
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
+  presetBoundaryNote,
+  presetCreatedMessage,
   type CommonApprovalTemplatePresetId,
 } from '../../approvals/commonTemplatePresets'
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
-  ApprovalAssigneeType,
+  ApprovalCcTargetType,
   ApprovalGraph,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   CcNodeConfig,
   ConditionNodeConfig,
   EmptyAssigneePolicy,
   HandlerMode,
   FormField,
   NodeFieldAccess,
+  NodeTimeoutConfig,
   ParallelJoinMode,
   ParallelNodeConfig,
+  SupportedNodeTimeoutEffect,
 } from '../../types/approval'
+import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
@@ -1314,6 +1807,7 @@ import {
   dateRangeVisibilityEndpointOptions,
   dateRangeVisibilityFieldId,
   visibilityReferenceBaseFieldId,
+  type RecordLinkAuthoringCatalog,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1334,7 +1828,96 @@ const unsupportedReason = ref<string | null>(null)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
-const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+
+// approval-form-ux-slice1 (20260916 design §1.2 point 3): the key input is now read-only (below),
+// so a brand-new draft must never render with a blank, permanently-uneditable key — seed it at
+// DRAFT-CREATION time, not at save time. `name` is deliberately left blank here (unlike
+// `seedDraftIdentityForSave`, which seeds both): the name input stays a normal editable field the
+// author fills in, and `basicInfoIssues`'s `模板名称必填` badge is UNCHANGED for a new draft.
+function createSeededTemplateDraft(): TemplateAuthoringDraft {
+  return { ...createEmptyTemplateDraft(), key: generateTemplateKey() }
+}
+const draft = ref<TemplateAuthoringDraft>(createSeededTemplateDraft())
+
+// ── F4 production mount (delta §5 F4, FB-D8) ──
+// The hardened Designer 2.0 builder mounts behind the EXISTING `approvalCanvasV2` flag — no new
+// flag (FB-D8). `formSessionHydrated` gates the mount on top of the flag: `ApprovalFormBuilder`
+// seeds its session ONCE, synchronously, from `props.draft` at component creation (F1/F2 — the
+// component never re-seeds from a later prop change), so mounting it before `loadTemplateForEdit`
+// resolves the real draft would permanently strand the session on the empty placeholder. Both
+// `showFormBuilderV2` inputs only ever transition false→true for the life of one view instance:
+// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once
+// per view instance by whichever `loadTemplateForEdit` ticket completes first (a route reload
+// re-runs the loader, but the flag only ever transitions false→true) — so `showFormBuilderV2`
+// cannot flip back to false, and the `v-if` mount is NOT re-evaluated by ordinary
+// editing/tab-switching (the outer step chrome uses v-show, not v-if — see
+// `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY thing that remounts
+// (reseeds) the builder, and it is bumped ONLY at DRAFT-REPLACEMENT points (invariant updated
+// with round 5 — the original text said "the three server-round-trip points", falsified twice
+// over by that round): `persistDraft` update/create, `createFromPreset`, a successful
+// route-reload apply, and the edit->new synchronous reset — never on routine field edits.
+const formSessionHydrated = ref(false)
+const formBuilderSessionEpoch = ref(0)
+const showFormBuilderV2 = computed(() => canvasV2Enabled.value && formSessionHydrated.value)
+/** Shared transient drag session (palette <-> builder), created once per view instance. */
+const approvalFormDragSession = createApprovalFormDragSession()
+interface ApprovalFormBuilderExposed {
+  getDragSession(): ReturnType<typeof createApprovalFormDragSession>
+  appendField(type: AuthorableFieldType): boolean
+  undo(): boolean
+  redo(): boolean
+  canUndo(): boolean
+  canRedo(): boolean
+}
+const formBuilderRef = ref<ApprovalFormBuilderExposed | null>(null)
+const builderCanUndo = ref(false)
+const builderCanRedo = ref(false)
+
+/** Refresh the toolbar's undo/redo enabled state after a builder-originated commit. */
+function refreshFormBuilderHistoryFlags(): void {
+  builderCanUndo.value = formBuilderRef.value?.canUndo() ?? false
+  builderCanRedo.value = formBuilderRef.value?.canRedo() ?? false
+}
+
+/**
+ * The v2 builder is the SINGLE writer of `draft.value` while mounted (FB-D4): every add / move /
+ * remove / retype / property-update / undo / redo commit re-emits the CURRENT draft here so the
+ * rest of the view (save/publish payload, header field count, dirty-check) stays in sync — a
+ * commit that never reached `draft.value` would be silently unsaved (M8).
+ */
+function onFormBuilderDraftChange(nextDraft: TemplateAuthoringDraft, focusLocalId: string | null): void {
+  draft.value = nextDraft
+  formFieldFocusLocalId.value = focusLocalId
+  refreshFormBuilderHistoryFlags()
+}
+
+/** Deliberate resync after a genuine draft REPLACEMENT — server round-trips (save/create/preset)
+ *  and route transitions on a reused instance (round-5 P2: A->B switch left the builder showing
+ *  A's fields — ApprovalFormBuilder reads the draft ONCE per epoch by design, and only this epoch
+ *  bump remounts it). First mount is untouched: showFormBuilderV2 is still false there (the
+ *  hydration gate runs after this would-be call), so the guard makes it a natural no-op. */
+function reseedFormBuilderSessionIfActive(): void {
+  if (!showFormBuilderV2.value) return
+  formBuilderSessionEpoch.value += 1
+  builderCanUndo.value = false
+  builderCanRedo.value = false
+}
+
+/** Palette click path (§3.1): append via the SAME ONE adapter the builder's own drag/slot paths use. */
+function onFormBuilderPaletteAppend(type: AuthorableFieldType): void {
+  formBuilderRef.value?.appendField(type)
+}
+
+function onFormUndoRedoClick(direction: 'undo' | 'redo'): void {
+  if (readOnly.value) return
+  if (showFormBuilderV2.value) {
+    if (direction === 'undo') formBuilderRef.value?.undo()
+    else formBuilderRef.value?.redo()
+    return
+  }
+  if (direction === 'undo') onFormFieldUndo()
+  else onFormFieldRedo()
+}
 
 // FWB-0 Layer 2: typed base/sheet catalog for record-link authoring (IDs persist on the draft,
 // never shown as ordinary free-text labels). Loaded via MultitableApiClient listBases/listSheets.
@@ -1387,6 +1970,20 @@ const recordLinkCatalogValidation = computed(() => ({
   sheets: recordLinkSheets.value,
 }))
 
+/**
+ * Delta §3.4 / parity ledger deferral (3): the Designer 2.0 inspector's typed base/sheet pickers
+ * render THIS view's catalog read-only (F0 gate #2 — this view stays the only fetch/state owner)
+ * and send a retry intent back to `retryRecordLinkCatalog`. Pin edits go through the builder's
+ * typed command path, never through the flag-OFF editor's direct field mutation below.
+ */
+const recordLinkAuthoringCatalog = computed<RecordLinkAuthoringCatalog>(() => ({
+  bases: recordLinkBases.value,
+  sheets: recordLinkSheets.value,
+  loading: recordLinkCatalogLoading.value,
+  loaded: recordLinkCatalogLoaded.value,
+  error: recordLinkCatalogError.value,
+}))
+
 function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
   return buildRecordLinkBaseSelectOptions(recordLinkBases.value, field.recordLinkBaseId)
 }
@@ -1437,10 +2034,10 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
-  { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
+  { id: 'basic', label: '基础信息', description: '名称、可见范围与创建起点' },
+  { id: 'fields', label: '字段设计', description: '字段、校验与显隐规则' },
   { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
-  { id: 'more-settings', label: '更多设置', description: '审批人去重等模板级策略' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等流程策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1451,8 +2048,23 @@ const validationSummaryRef = ref<HTMLElement | null>(null)
 // same builders on load/save, so key order is deterministic.
 const draftBaseline = ref(JSON.stringify(draft.value))
 const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaseline.value)
+// Linear STICKY REVEAL state (see `stepHiddenBlockRevealed`): `${step.localId}:${blockId}` keys.
+// Declared here, before `snapshotDraft`, which resets it.
+const stickyStepHiddenBlockReveals = ref(new Set<string>())
+// Canvas STICKY REVEAL state (see `approvalNodeHiddenBlockRevealed`): `${nodeKey}:${blockId}` keys.
+// Declared here for the same reason.
+const stickyApprovalNodeHiddenBlockReveals = ref(new Set<string>())
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
+  // A re-baselined draft (load / reload / save completed) starts with no sticky hidden-block reveal.
+  stickyStepHiddenBlockReveals.value = new Set()
+  stickyApprovalNodeHiddenBlockReveals.value = new Set()
+}
+
+function promoteLinearDraftAndBaselineToGraphAuthoring(): void {
+  const baseline = JSON.parse(draftBaseline.value) as TemplateAuthoringDraft
+  draftBaseline.value = JSON.stringify(promoteLinearDraftToGraphAuthoring(baseline))
+  draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
 }
 const conditionFormulaDryRunResults = ref<Record<string, string>>({})
 const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
@@ -1478,9 +2090,19 @@ const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupported
 // A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
 // the author inserts their first condition or parallel gateway.
 const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
-const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+// EDIT ROUTE REQUIRES THE LOADED TEMPLATE TO BE **THIS ROUTE'S** TEMPLATE (external review
+// rounds 3+4, both reproduced on the real mounted path). Round 3: getTemplate rejects, draft
+// stays the empty no-templateId fallback, and save fell through persistDraft's create branch —
+// minting a fresh 未命名审批 template from an EDIT url. Round 4: the route param SWITCHES
+// (/tpl_a/edit -> /tpl_b/edit) on a reused component instance — the load ran only in onMounted,
+// so draft still held tpl_a and 保存 called updateTemplate('tpl_a', …) from tpl_b's URL. The
+// predicate is therefore EQUALITY with the current route id, not mere presence — presence is the
+// round-3 subset (`'' !== 'tpl_b'`). Anchored on draft.templateId (set only by
+// draftFromTemplate after a successful fetch), not on loadError, which topology ops reuse.
+const editRouteLoaded = computed(() => !isEditMode.value || draft.value.templateId === templateId.value)
+const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
-  if (!isEditMode.value && !isDraftDirty.value) return '新模板'
+  if (!isEditMode.value && !isDraftDirty.value) return '新表单'
   return isDraftDirty.value ? '有未保存更改' : '已保存'
 })
 const authoringFlowNodeCount = computed(() => (
@@ -1519,12 +2141,12 @@ function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
 async function selectAuthoringSection(section: AuthoringSectionId) {
   activeAuthoringSection.value = section
   // Canvas V2: ordinary-user flow authoring uses one preservedGraph rail. Promote linear steps
-  // when entering the flow step so linear + branch share the canvas surface; list remains the
-  // retained accessible alternative (辅助编辑模式).
+  // when entering the flow step so linear + branch share the canvas surface. Apply the same
+  // representation-only promotion to the last-saved baseline; snapshotting the current draft here
+  // would erase genuine edits made before entering flow authoring.
   if (section === 'flow' && canvasV2Enabled.value && !readOnly.value && !draft.value.preservedGraph) {
-    draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
+    promoteLinearDraftAndBaselineToGraphAuthoring()
     reseedCanvasHistoryFromDraft()
-    canvasViewMode.value = 'canvas'
   }
   await nextTick()
   scrollAuthoringTarget(authoringContentRef.value)
@@ -1659,7 +2281,12 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
+    // T5b (test report 2026-10-08) — D0 §3.2: the card's (first) summary line states the lane COUNT
+    // and the join consequence ("3 个并行分支 · 全部完成后合并"), so an author can see that the lane
+    // count grows and is not fixed at two. The lane names stay on the next line.
+    const laneCount = Array.isArray(cfg.branches) ? cfg.branches.length : 0
     return [
+      `${laneCount} 个并行分支 · ${cfg.joinMode === 'any' ? '任一完成后继续' : '全部完成后合并'}`,
       `并行分支：${parallelBranchLabels(node)}`,
       `汇聚节点：${graphNodeDisplayName(cfg.joinNodeKey)}`,
       `汇聚模式：${cfg.joinMode ?? '（无）'}`,
@@ -1670,7 +2297,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     // H2: CC still has no directory picker — targetIds remain the only carrier. Show type only
     // so ordinary DOM does not dump raw assignee IDs; the editable picker still holds the values.
     return [
-      `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
+      `抄送类型：${ccTargetTypeLabel(cfg.targetType)}`,
       `抄送对象：${(cfg.targetIds ?? []).length ? `已选 ${(cfg.targetIds ?? []).length} 个` : '（无）'}`,
     ]
   }
@@ -1678,7 +2305,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
     // Prefer human labels; for static_user/static_role avoid dumping raw id lists in read-only rows
     // (typed pickers own those values when the node is editable).
-    return sources.map((source) => {
+    const lines = sources.map((source) => {
       if (source.kind === 'static_user') {
         const count = source.userIds?.length ?? 0
         return `审批人：指定用户${count ? `（${count} 人）` : '（无）'}`
@@ -1693,6 +2320,26 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
       }
       return `审批人：${assigneeSourceSummary(source)}`
     })
+    // P1-C: business labels only — never a raw effect enum, user id, or node key (master §P1-C
+    // G1-p exit bullet 4).
+    const approvalConfig = config as { approvalMode?: ApprovalMode; approvalThreshold?: number; timeout?: NodeTimeoutConfig }
+    if (approvalConfig.approvalMode === 'threshold' && Number.isInteger(approvalConfig.approvalThreshold)) {
+      lines.push(`审批模式：门槛会签（需 ${approvalConfig.approvalThreshold} 人同意）`)
+    } else if (approvalConfig.approvalMode === 'sequential') {
+      lines.push('审批模式：依次审批')
+    }
+    if (approvalConfig.timeout) {
+      const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
+      if (effectLabel) lines.push(`节点超时：${approvalConfig.timeout.afterMinutes} 分钟后${effectLabel}`)
+    }
+    // Lock-4 §1 F4-A: an auto_approve node decides without a person. With no source saved, the
+    // person-only lines (mode / timeout) are inert and hidden in the editor, so the summary says
+    // only that — and the card no longer falls back to 「点击配置」 for a node that needs nothing.
+    // A node that still carries sources (API-saved) keeps its lines after the type line.
+    if ((config as { approvalType?: unknown }).approvalType === 'auto_approve') {
+      return sources.length > 0 ? ['审批类型：自动通过', ...lines] : ['审批类型：自动通过（不分配审批人）']
+    }
+    return lines
   }
   return []
 }
@@ -1725,6 +2372,9 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 // visibilityFieldOptions below) — its `{start,end}` value has no per-type predicate for MS-9 in
 // this slice, and `validateConditionEdits` (conditionEdit.ts) rejects any rule that references one.
 // Offering it here would be an M7 inert control: always selectable, never publishable.
+// Lock-8 L8-A (§1.1): explanation carries no value at all — excluded the same way, an M7 inert
+// control would otherwise always fail publish (`validateConditionEdits` rejects any rule
+// referencing one).
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => (
@@ -1732,8 +2382,11 @@ const conditionFieldOptions = computed(() =>
       && field.type !== 'record-link'
       && field.type !== 'detail'
       && field.type !== 'date_range'
+      && field.type !== 'explanation'
+      && field.type !== 'department'
     ))
-    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
+    // R-43 (B): type + options let the branch editor pick values by field type.
+    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field), ...conditionValueFieldFromDraft(field) })),
 )
 const conditionFormulaInsertOptions = computed(() =>
   approvalFormulaInsertOptions(buildFormSchema(draft.value)),
@@ -1860,6 +2513,25 @@ function graphNodeLabel(nodeKey: string): string {
   return node.name?.trim() || nodeTypeLabel(node.type)
 }
 
+// Lock-1 §K3 — the LEGAL candidates for a prior_node_approver picker on `nodeKey`'s card:
+// approval nodes strictly upstream on every runtime-reachable path of the LIVE effective graph
+// (`legalPriorApproverNodeKeys`, the FE mirror of the backend publish dominance gate — which
+// stays the sole arbiter). Labels reuse `graphNodeLabel` (template-authored names, never ids).
+function priorApproverNodeOptions(nodeKey: string): Array<{ key: string; label: string }> {
+  return legalPriorApproverNodeKeys(canvasEffectiveGraph.value, nodeKey)
+    .map((key) => ({ key, label: graphNodeLabel(key) }))
+}
+
+// Lock-1 §K3 — the linear editor's picker candidates for step `index`: the STRICTLY-EARLIER
+// steps only (referenced by stable localId; the builder emits the referenced step's current
+// positional key at save — see ApprovalStepDraft.priorStepLocalId).
+function priorStepOptions(index: number): Array<{ localId: string; label: string }> {
+  return draft.value.steps.slice(0, index).map((candidate, candidateIndex) => ({
+    localId: candidate.localId,
+    label: candidate.name.trim() || `审批人 ${candidateIndex + 1}`,
+  }))
+}
+
 function graphEdgeTargetLabel(nodeKey: string, edgeKey: string): string {
   const edge = canvasEffectiveGraph.value.edges.find(
     (candidate) => candidate.source === nodeKey && candidate.key === edgeKey,
@@ -1893,12 +2565,20 @@ function parallelJoinModeLabel(mode: ParallelJoinMode): string {
 // ── G-4 cc editor (targetType + targetIds; the cc node's edges/position are preserved topology) ──
 // Editable model on `draft.ccEdits[nodeKey]`, seeded 1:1 from the preserved cc nodes. The controls
 // mutate ONLY targetType/targetIds; `buildApprovalGraph` re-applies onto a COPY (every non-cc node +
-// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role}, non-empty targetIds).
+// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role,group}, non-empty
+// targetIds — Lock-1 OD-L1-7(a) added 'group', the "`user_group` (cc) | 用户组" registry row).
 function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
   return draft.value.ccEdits?.[nodeKey]
 }
-function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
-  return targetType === 'role' ? '角色' : '用户'
+function ccTargetTypeLabel(targetType: ApprovalCcTargetType): string {
+  switch (targetType) {
+    case 'role': return '角色'
+    case 'group': return '用户组'
+    case 'user': return '用户'
+    default:
+      // G-16: an off-enum persisted value is shown as-is (never relabelled as a known kind).
+      return String(targetType)
+  }
 }
 
 // ── G-5 approval-node editor (approver SOURCE only; the node's mode/policy + edges are preserved) ──
@@ -1919,27 +2599,204 @@ function approvalNodeMode(nodeKey: string): ApprovalMode {
 }
 function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
   const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.approvalMode = mode
+  if (!edit) return
+  // P1-C linear-only fail-closed floor, defense-in-depth: the mode picker must not OFFER 'threshold'
+  // inside a parallel region (see the `:disabled` option below); this guard covers a caller that
+  // bypasses that render-layer gate (e.g. a forced DOM event past the disabled option, or a future
+  // non-select entry point). CORRECTION (fix-round gate P2-2): this is NOT the invariant's actual
+  // enforcement point for SAVE — that is `validateApprovalNodeEdits`'s `inParallelRegion` check
+  // (approvalNodeEdit.ts), wired end-to-end from `draft.preservedGraph` in
+  // `validateTemplateApprovalFlow`, which blocks `validate()`/`persistDraft` regardless of whether
+  // this setter ever ran (mutation-proven: neutering ONLY this line does not turn the save path
+  // green for a threshold edit inside a parallel region). Mutation-proven for what it DOES guard:
+  // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeMode refuses threshold…"
+  // test reds if this line is removed.
+  if ((mode === 'threshold' || mode === 'sequential') && approvalNodeInParallelRegion(nodeKey)) return
+  edit.approvalMode = mode
+}
+// P1-C (T2-4 N-of-M / 门槛会签). Meaningful only when `approvalNodeMode(nodeKey) === 'threshold'`.
+function approvalNodeThreshold(nodeKey: string): number {
+  const value = approvalNodeEditFor(nodeKey)?.approvalThreshold
+  return Number.isInteger(value) && (value as number) >= 1 ? (value as number) : 1
+}
+function setApprovalNodeThreshold(nodeKey: string, value: number): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.approvalThreshold = Number.isInteger(value) && value >= 1 ? value : 1
+}
+// P1-C: FE mirror of the backend's parallel-region definition (reused from the canvas's own
+// nested-parallel authoring guard, `graphTopologyEdit.ts`), read over the CURRENT effective graph —
+// a config edit never moves topology, but this stays consistent with the file's existing convention
+// of reading topology through `canvasEffectiveGraph` rather than the (load-time) `preservedGraph`.
+const parallelRegionNodeKeysInDraft = computed(() => collectParallelRegionNodeKeys(canvasEffectiveGraph.value))
+function approvalNodeInParallelRegion(nodeKey: string): boolean {
+  return parallelRegionNodeKeysInDraft.value.has(nodeKey)
+}
+// ── Lock-4 §1 F4-A — node-level 审批类型 (人工审批 / 自动通过) on the canvas edit model ──────────────
+// The whole mutation (and its owner-visible implementer defaults) lives in the pure
+// `applyApprovalTypeChoice` (approvalNodeEdit.ts); this setter only resolves the edit and the
+// parallel-region flag. Refusing 自动通过 inside a parallel region here is the defense-in-depth floor
+// mirroring `setApprovalNodeMode`; the SAVE-blocking floor is `validateApprovalNodeEdits` (backend
+// `APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED`).
+function setApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  releaseApprovalNodeHiddenBlockReveals(nodeKey)
+  applyApprovalTypeChoice(edit, type, approvalNodeInParallelRegion(nodeKey))
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (canvas) — per sourceless auto_approve node, the live errors of
+// its hidden blocks, judged against the whole draft by the save validator
+// (`approvalNodeEditHiddenBlockLiveErrors`). Computed once per draft change: the editors read it and
+// the sticky watcher below reads the same map, so the validator runs once per node, not per reader.
+const approvalNodeHiddenBlockErrorsByKey = computed(() => {
+  const byKey = new Map<string, HiddenBlockLiveErrors>()
+  for (const [nodeKey, edit] of Object.entries(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalNodeEditOmitsAssigneeSources(edit)) byKey.set(nodeKey, approvalNodeEditHiddenBlockLiveErrors(draft.value, nodeKey))
+  }
+  return byKey
+})
+function approvalNodeHiddenBlockErrors(nodeKey: string): HiddenBlockLiveErrors {
+  return approvalNodeHiddenBlockErrorsByKey.value.get(nodeKey) ?? {}
+}
+// Canvas STICKY REVEAL (W1-1a; merge-train r3 F9) — the canvas twin of the linear sticky reveal
+// (`stepHiddenBlockRevealed`), for the POLICY grid. Keyed on "failing now" alone, the grid revealed by
+// a 转交指定人员-without-target error unmounted on the first pick in its multi-select fallback picker,
+// so an author adding a second target lost the control mid-edit. Once a node's policy grid has been
+// revealed by a live error it STAYS rendered until (a) that node's 审批类型 changes
+// (`setApprovalNodeApprovalType`), or (b) the draft is re-baselined — template (re)load, or save
+// completes (`snapshotDraft`). Keyed by node key, never kept in the editor: the Canvas-first inspector
+// reuses ONE editor instance across node selections. The notice stays keyed on live errors only.
+// Display state only: never saved, never read by a validator. The timeout section stays live-keyed
+// (#6304 gate r3): every canvas timeout control is single-valued (a clamped number input, single
+// selects), so none goes valid mid-edit. Extending this to the timeout block means adding 'timeout'
+// below plus a release on 关闭超时, as the linear editor does.
+const CANVAS_STICKY_HIDDEN_BLOCK_IDS: readonly AutoApproveHiddenBlockId[] = ['policy']
+const stickyApprovalNodeHiddenBlockKey = (nodeKey: string, blockId: AutoApproveHiddenBlockId) => `${nodeKey}:${blockId}`
+watch(
+  approvalNodeHiddenBlockErrorsByKey,
+  (byKey) => {
+    for (const [nodeKey, errors] of byKey) {
+      for (const blockId of CANVAS_STICKY_HIDDEN_BLOCK_IDS) {
+        const key = stickyApprovalNodeHiddenBlockKey(nodeKey, blockId)
+        if ((errors[blockId]?.length ?? 0) > 0 && !stickyApprovalNodeHiddenBlockReveals.value.has(key)) {
+          stickyApprovalNodeHiddenBlockReveals.value = new Set(stickyApprovalNodeHiddenBlockReveals.value).add(key)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+function approvalNodeHiddenBlockRevealed(nodeKey: string, blockId: AutoApproveHiddenBlockId): boolean {
+  return (approvalNodeHiddenBlockErrors(nodeKey)[blockId]?.length ?? 0) > 0
+    || stickyApprovalNodeHiddenBlockReveals.value.has(stickyApprovalNodeHiddenBlockKey(nodeKey, blockId))
+}
+function releaseApprovalNodeHiddenBlockReveals(nodeKey: string): void {
+  const next = new Set(stickyApprovalNodeHiddenBlockReveals.value)
+  for (const id of AUTO_APPROVE_HIDDEN_BLOCK_IDS) next.delete(stickyApprovalNodeHiddenBlockKey(nodeKey, id))
+  if (next.size !== stickyApprovalNodeHiddenBlockReveals.value.size) stickyApprovalNodeHiddenBlockReveals.value = next
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
 }
+// Gate r2 P2-1 (C7): every policy change re-syncs the node's chips — the canvas twin of the linear
+// select's @change. A retained 'designated' target (kept while the policy is switched away) is
+// re-ensured only while the policy is 'designated', so a user search made in between would otherwise
+// leave the re-mounted fallback picker without an option for it.
 function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy): void {
   const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.emptyAssigneePolicy = policy
+  if (!edit) return
+  edit.emptyAssigneePolicy = policy
+  syncApprovalNodeOptions(nodeKey)
 }
-function approvalNodeMergeWithRequester(nodeKey: string): boolean {
-  return Boolean(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy?.mergeWithRequester)
-}
-function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): void {
+// W1-1a (Lock-4 §2 F4-C) — the canvas half of the four-value 审批人与发起人为同一人时 control. It
+// REPLACES the shipped 自审合并 checkbox setter (`setApprovalNodeMergeWithRequester`) and goes through
+// the SAME `applySamePersonChoice` the linear editor's `setStepSamePersonChoice` mirrors: both owned
+// keys are deleted first and every sibling (`mergeAdjacentApprover` / `dedupeHistoricalApprover` /
+// `actorMode`) is kept — the delete-key-keep-siblings pattern (Lock-4 OD-L4-6). A no-op for an
+// unknown persisted value (X-3) or a pick equal to the current projection, so an untouched node's
+// `autoApprovalPolicy` is never rewritten. `null` removes the key (the canvas grammar).
+function setApprovalNodeSamePersonPolicy(nodeKey: string, value: string): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
-  const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
-    ? { ...edit.autoApprovalPolicy }
-    : {}
-  if (enabled) policy.mergeWithRequester = true
-  else delete policy.mergeWithRequester
-  edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+  const choice = samePersonChoiceFromSelectValue(value)
+  if (!choice) return
+  const next = applySamePersonChoice(edit.autoApprovalPolicy, choice)
+  if (next === edit.autoApprovalPolicy) return
+  edit.autoApprovalPolicy = next ?? null
+}
+// W1-1a (Lock-4 §3 F4-B) — the canvas 'designated' target pickers. Same pruning as the linear
+// `setStepEmptyAssigneeFallbackIds`; clearing every target sets `null` (key removed), which
+// `validateApprovalNodeEdits` then reports as designated-without-target before save.
+function setApprovalNodeEmptyAssigneeFallbackIds(nodeKey: string, side: 'user' | 'role', ids: string[]): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.emptyAssigneeFallback = withEmptyAssigneeFallbackIds(edit.emptyAssigneeFallback, side, ids) ?? null
+  syncApprovalNodeOptions(nodeKey)
+}
+// ── P1-C (T1-1) node-level timeout — approval-node-only; `null` explicitly clears (mirrors the
+// `autoApprovalPolicy` null-clears-it convention above). `undefined` fields are ONLY ever produced
+// by these setters together, never a half-filled shape — `buildStepTimeoutConfig`'s linear-path
+// counterpart applies the SAME per-effect target discipline. ──────────────────────────────────────
+function approvalNodeTimeout(nodeKey: string): NodeTimeoutConfig | undefined {
+  return approvalNodeEditFor(nodeKey)?.timeout ?? undefined
+}
+function setApprovalNodeTimeoutEnabled(nodeKey: string, enabled: boolean): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (!enabled) {
+    edit.timeout = null
+    return
+  }
+  // Fail-closed floor, defense-in-depth, mirroring `setApprovalNodeMode`'s threshold guard above —
+  // see that guard's comment (CORRECTION, fix-round gate P2-2): the invariant's actual enforcement
+  // point for SAVE is `validateApprovalNodeEdits`'s `inParallelRegion` timeout branch
+  // (approvalNodeEdit.ts), not this setter. Mutation-proven for what it DOES guard:
+  // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeTimeoutEnabled refuses…"
+  // test reds if this line is removed.
+  if (approvalNodeInParallelRegion(nodeKey)) return
+  if (edit.timeout) return // already enabled — do not clobber an in-progress configuration
+  edit.timeout = { afterMinutes: 60, effect: 'remind' }
+}
+function setApprovalNodeTimeoutAfterMinutes(nodeKey: string, minutes: number): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  if (!Number.isInteger(minutes) || minutes < 1) return
+  edit.timeout = { ...edit.timeout, afterMinutes: minutes }
+}
+function setApprovalNodeTimeoutEffect(nodeKey: string, effect: SupportedNodeTimeoutEffect): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  const { afterMinutes, unit } = edit.timeout
+  // Switching effect drops the PREVIOUS effect's target field — transfer/jump are mutually
+  // exclusive and 'remind' carries neither (mirrors `validateNodeTimeoutConfigs`'s strict
+  // per-effect target rule: a stray target on the wrong effect is rejected, never ignored).
+  edit.timeout = { afterMinutes, effect, ...(unit ? { unit } : {}) }
+}
+function setApprovalNodeTimeoutTransferToUserId(nodeKey: string, userId: string): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout || edit.timeout.effect !== 'transfer') return
+  edit.timeout = { ...edit.timeout, transferToUserId: userId }
+}
+function setApprovalNodeTimeoutJumpToNodeKey(nodeKey: string, targetNodeKey: string): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout || edit.timeout.effect !== 'jump') return
+  edit.timeout = { ...edit.timeout, jumpToNodeKey: targetNodeKey }
+}
+function setApprovalNodeTimeoutUnit(nodeKey: string, unit: 'wall_clock' | 'business'): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  const next = { ...edit.timeout }
+  if (unit === 'business') next.unit = 'business'
+  else delete next.unit
+  edit.timeout = next
+}
+/** Candidate jump targets: every OTHER `approval` node not inside a parallel region, business-labeled
+ *  via the SAME `graphNodeLabel` the condition/cc editors already use — never a raw node key in the
+ *  rendered option text (M8). */
+function timeoutJumpTargetOptions(nodeKey: string): Array<{ key: string; label: string }> {
+  return canvasEffectiveGraph.value.nodes
+    .filter((node) => node.type === 'approval' && node.key !== nodeKey && !approvalNodeInParallelRegion(node.key))
+    .map((node) => ({ key: node.key, label: graphNodeLabel(node.key) }))
 }
 // Lock-3 §1.1 — handler-only mode + opinion accessors (same edit model, keyed by nodeKey).
 function handlerNodeMode(nodeKey: string): HandlerMode {
@@ -2023,9 +2880,19 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
             : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
               // Lock-1 §K4: same default shape as continuous_managers.
               : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                // Lock-2 §L2-C: field picker + single level — fieldId starts unchosen ('' is
+                // invalid to save; the picker must be used) and level defaults to 1 (直属).
+                : kind === 'form_field_user_manager' ? { kind, fieldId: '', level: 1 }
+                  : kind === 'form_field_user_dept_head' ? { kind, fieldId: '', level: 1 }
                 // Lock-1 §K5-b: same default shape as manager_at_level.
                 : kind === 'dept_head_at_level' ? { kind, level: 1 }
-                  : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+                  // Lock-1 §K3: '' = not yet chosen — invalid to save until the typed picker
+                  // selects a legal upstream node (never silently defaulted to one).
+                  : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
+                    // Lock-1 §K1: '' = no group selected yet — invalid to save until the typed
+                    // bound-group picker selects ≥1 (never silently defaulted to one).
+                    : kind === 'user_group' ? { kind, groupIds: [] }
+                      : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 function setApprovalSourceKind(nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind): void {
   const cacheKey = approvalSourceKindCacheKey(nodeKey, sourceIndex)
@@ -2045,6 +2912,17 @@ function approvalSourceIds(nodeKey: string, sourceIndex: number): string[] {
   if (source?.kind === 'static_role') return source.roleIds
   return []
 }
+// Lock-1 §K1 — the user_group source's DEDICATED id carrier (separate from approvalSourceIds
+// above, which is hardcoded to static_user/static_role's userIds/roleIds shape).
+function approvalSourceGroupIds(nodeKey: string, sourceIndex: number): string[] {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  return source?.kind === 'user_group' ? source.groupIds : []
+}
+function setApprovalSourceGroupIds(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  if (source?.kind !== 'user_group') return
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'user_group', groupIds: [...ids] })
+}
 // G-5 sentinel hint: true when THIS card is a static_role still carrying the starter-preset
 // placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
 // in the editor so the admin replaces it first. Non-blocking — the draft still saves. Computed
@@ -2062,7 +2940,7 @@ function approvalSourceCount(nodeKey: string): number {
 }
 // P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
 // editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
-// button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
+// button never seeds a kind outside its handler roster). Delegates to the pure, independently
 // unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
 // kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
 // the end), so a card the author already configured-then-switched-away-from keeps its cached
@@ -2217,7 +3095,7 @@ function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
 function runTopologyOp(
   op: (graph: ApprovalGraph) => ApprovalGraph,
   selectionAfter?: ApprovalCanvasSelection,
-): void {
+): boolean {
   const result = applyTopologyOpToSession(
     canvasAuthoringHistory.value,
     draft.value,
@@ -2226,13 +3104,14 @@ function runTopologyOp(
   )
   if (!result.ok) {
     loadError.value = result.errorMessage ?? '该拓扑操作不适用于当前流程结构'
-    return
+    return false
   }
   draft.value = result.draft
   canvasAuthoringHistory.value = result.history
   if (result.history.selection.kind === 'node') {
     selectedCanvasNode.value = result.history.selection.nodeKey
   }
+  return true
 }
 
 function onCanvasUndo(): void {
@@ -2259,6 +3138,38 @@ function onCanvasRedo(): void {
 function onAddConditionBranch(nodeKey: string): void {
   runTopologyOp((graph) => addConditionBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
+// T5a (test report 2026-10-08): delete a NON-default condition branch through the SAME typed
+// topology-op path every structural edit uses, so it is one entry in the unified undo history
+// (D0 §7.1). Refusals are decided BEFORE mutation by a dry run of the same command and surfaced as a
+// business-language reason (D0 §4.2); the default branch is never offered (D0 §4.1). Deleting the
+// last non-default branch removes the gateway and keeps the default path in its place.
+const canvasAuthoringActive = computed(() => canvasV2Enabled.value)
+function conditionBranchRemovalReason(nodeKey: string, edgeKey: string): string | null {
+  return conditionBranchRemovalBlocker(canvasEffectiveGraph.value, nodeKey, edgeKey)
+}
+function onRemoveConditionBranch(nodeKey: string, edgeKey: string): void {
+  if (readOnly.value || !canvasAuthoringActive.value) return
+  const blocker = conditionBranchRemovalReason(nodeKey, edgeKey)
+  if (blocker) {
+    ElMessage.warning(blocker)
+    return
+  }
+  const plan = planConditionBranchRemoval(canvasEffectiveGraph.value, nodeKey, edgeKey)
+  const applied = runTopologyOp(
+    (graph) => removeConditionBranch(graph, nodeKey, edgeKey),
+    plan.removedGateway ? { kind: 'none' } : { kind: 'node', nodeKey },
+  )
+  if (!applied) return
+  if (plan.removedGateway) {
+    // The gateway is gone: close its inspector and hand focus to the node now in its slot
+    // (D0 §5 "returns focus ... to the nearest surviving neighbor").
+    clearCanvasSelection()
+    if (plan.replacementNodeKey) focusCanvasNodeSelector(plan.replacementNodeKey)
+  }
+  ElMessage.success(plan.removedGateway
+    ? '已删除分支并移除条件节点（保留默认分支流程），可点击「撤销」恢复'
+    : '已删除分支，可点击「撤销」恢复')
+}
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
@@ -2281,18 +3192,68 @@ function onInsertHandlerAfter(nodeKey: string): void {
   runTopologyOp((graph) => appendHandlerNode(graph, nodeKey), { kind: 'none' })
   selectInsertedNode(beforeKeys)
 }
+// T5b (test report 2026-10-08) — D0 §3.4: an insertion "selects/focuses the new node with the
+// inspector open". Gateway inserts used to leave the SOURCE node selected, so the gateway's own
+// 「+添加分支」 never appeared and a second +并行 built a second two-lane gateway in series. The
+// gateway key is resolved by a dry run of the SAME deterministic op on the SAME effective graph
+// the session applies it to, and passed as `selectionAfter` so undo/redo history stays coherent.
+function insertedNodeKeyOfType(
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  type: ApprovalNode['type'],
+): string | undefined {
+  try {
+    const before = canvasEffectiveGraph.value
+    const beforeKeys = new Set(before.nodes.map((node) => node.key))
+    return op(before).nodes.find((node) => node.type === type && !beforeKeys.has(node.key))?.key
+  } catch {
+    return undefined // the real run reports the refusal; selection simply stays put
+  }
+}
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
-  canvasViewMode.value = 'canvas'
+  const op = (graph: ApprovalGraph) => insertConditionGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'condition')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
-  canvasViewMode.value = 'canvas'
+  const op = (graph: ApprovalGraph) => insertParallelGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'parallel')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
+}
+// B2 — parent owns the mutation (component doc comment "parent owns selection and all
+// mutations"). HOW it applies (rewritten 2026-08-25, twice flagged stale — the text below this
+// line previously described a direct write to `draft.preservedGraph` with the live-name overlay
+// keeping renames alive across topology undo; BOTH halves of that design are gone, E-P2-4):
+// rename runs a topology op through the UNIFIED authoring history, so it is undo/redo-able like
+// every structural edit — and `mergeLiveNodeConfigsOntoTopology` deliberately no longer overlays
+// live names, because with rename in history, stack ordering provides what the overlay faked and
+// the overlay's only remaining effect was making rename itself un-undoable. A blank/whitespace
+// name clears the override (`graphNodeLabel` falls back to the node-type label), equally undoable.
+function onRenameCanvasNode(nodeKey: string, name: string): void {
+  // THROUGH THE UNIFIED HISTORY, not a direct draft mutation (E-P2-4, external review
+  // 2026-08-25): the first shape wrote draft.preservedGraph in place, so rename produced no
+  // history entry — undo stayed disabled after a rename, and a later topology undo resurrected
+  // stale names. A topology op records a snapshot pair with inverse in the SAME undo stack every
+  // other structural edit uses; renaming to the current name is an identity op and records
+  // nothing. (mergeLiveNodeConfigsOntoTopology no longer overlays live names for the same
+  // reason — see its comment.)
+  const trimmed = name.trim()
+  runTopologyOp(
+    (graph) => ({
+      nodes: graph.nodes.map((node) => {
+        if (node.key !== nodeKey) return node
+        if (trimmed) return { ...node, name: trimmed }
+        const { name: _dropped, ...rest } = node
+        return rest
+      }),
+      edges: graph.edges,
+    }),
+    { kind: 'node', nodeKey },
+  )
 }
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
   return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
@@ -2324,9 +3285,7 @@ function canRemoveNode(node: ApprovalNode): boolean {
 
 // ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
 // Alt+Arrow both invoke the same typed canvas command, so visual position never diverges from the
-// saved graph. Canvas is the ordinary-user default when Canvas V2 is on; list is the retained
-// accessible alternative until S12 equivalence is proven. ──
-const canvasViewMode = ref<'list' | 'canvas'>('canvas')
+// saved graph. Canvas is the ordinary-user surface when Canvas V2 is on. ──
 const selectedCanvasNode = ref<string | null>(null)
 const approvalFlowCanvasRef = ref<{ getViewportEl: () => HTMLElement | null } | null>(null)
 const approvalCanvasInspectorRef = ref<{ scrollIntoView: (opts?: ScrollIntoViewOptions) => void } | null>(null)
@@ -2348,12 +3307,16 @@ const canvasStageStyle = computed<CSSProperties>(() => {
   const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
   const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
   const vpW = canvasViewportState.value.width
-  const vpH = canvasViewportState.value.height
+  // T5c (test report 2026-10-08) — stage min-height ratchet: the viewport's height is content-driven
+  // (no cap since #4917), so feeding its own `clientHeight` back in as the stage's pixel
+  // min-height/height made every enlargement permanent — a zoom-in, a tall inspector stretching
+  // the row, any sync — and the page only ever grew until reload. The stage now sizes from the
+  // canvas content alone; the viewport keeps its own CSS min-height, so short flows look the same.
   return {
     minWidth: '100%',
-    minHeight: vpH ? `${vpH}px` : '100%',
+    minHeight: '100%',
     width: `${Math.max(vpW, scaledW)}px`,
-    height: `${Math.max(vpH, scaledH + 56)}px`,
+    height: `${scaledH + 56}px`,
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'flex-start',
@@ -2418,6 +3381,24 @@ async function selectCanvasNode(nodeKey: string): Promise<void> {
 function clearCanvasSelection(): void {
   selectedCanvasNode.value = null
 }
+/** D0 §5: "closing ... returns focus to the canvas node" — the inspector unmounts on close, which
+ *  would otherwise drop focus to <body>. */
+function closeCanvasInspector(): void {
+  const nodeKey = selectedCanvasNode.value
+  clearCanvasSelection()
+  if (nodeKey) focusCanvasNodeSelector(nodeKey)
+}
+/** Move keyboard focus to a canvas node's selector without scrolling the page (D0 §5 focus
+ *  return). No-op when the node is not rendered (e.g. the flag-off rollback list). */
+function focusCanvasNodeSelector(nodeKey: string): void {
+  void nextTick(() => {
+    if (typeof document === 'undefined') return
+    // Match by attribute VALUE (no selector interpolation — node keys are data, never CSS).
+    const card = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="approval-canvas-node"]'))
+      .find((candidate) => candidate.getAttribute('data-canvas-node') === nodeKey)
+    card?.querySelector<HTMLElement>('[data-testid="approval-canvas-node-select"]')?.focus({ preventScroll: true })
+  })
+}
 // Inspector node for the right-side panel. Selection is preserved across list/canvas toggles while
 // the key still exists; once the graph no longer carries that key, selection clears.
 const selectedCanvasInspectorNode = computed<ApprovalNode | null>(() => {
@@ -2431,8 +3412,8 @@ watch(canvasEffectiveGraph, (graph) => {
   const movingKey = movingCanvasNode.value
   if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
 })
-watch([canvasViewMode, canvasLayout], async ([mode]) => {
-  if (mode !== 'canvas') return
+watch(canvasLayout, async () => {
+  if (!canvasV2Enabled.value || !graphReadOnly.value) return
   await nextTick()
   syncCanvasViewportState()
 })
@@ -2476,6 +3457,29 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
   { key: 'placeholder', label: '审批人占位', ok: publishPlaceholderRoleIssues.value.length === 0, detail: publishPlaceholderRoleIssues.value[0] },
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
+
+// B0 (header "N项不完善" affordance) — the SAME three issue lists the publish checklist already
+// derives, flattened. Zero new validation logic: this is a live view onto what `canConfirmPublish`
+// already gates on, so "0 项不完善" and "ready to publish" can never disagree. Deliberately NOT
+// `validationErrors.value` (that ref only updates on an explicit `validate()` call, i.e. after a
+// save attempt) — this counter is live from the moment the draft has anything incomplete, matching
+// the reference product's counter instead of only appearing after a blocked save.
+const incompleteAuthoringIssues = computed<string[]>(() => [
+  ...publishFormFieldIssues.value,
+  ...publishApprovalFlowIssues.value,
+  ...publishPlaceholderRoleIssues.value,
+])
+const incompleteAuthoringIssueCount = computed<number>(() => incompleteAuthoringIssues.value.length)
+
+/** Clicking the header "N项不完善" affordance reuses the EXACT same reveal machinery a blocked
+ *  save already uses (`validationErrors` + `firstInvalidAuthoringSection` + `scrollAuthoringTarget`)
+ *  — it never renders a second, parallel issue list. */
+async function revealIncompleteAuthoringIssues(): Promise<void> {
+  validationErrors.value = incompleteAuthoringIssues.value
+  activeAuthoringSection.value = firstInvalidAuthoringSection(publishFormFieldIssues.value)
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
+}
 const publishChecklistVisible = ref(false)
 // B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
 const publishNote = ref('')
@@ -2663,9 +3667,18 @@ function setApprovalSourceIdsFromPicker(nodeKey: string, sourceIndex: number, id
 }
 function approvalSourceFieldId(nodeKey: string, sourceIndex: number): string {
   const source = approvalNodeSourceAt(nodeKey, sourceIndex)
-  return source?.kind === 'form_field_user' ? source.fieldId : ''
+  if (source?.kind === 'form_field_user') return source.fieldId
+  // Lock-2 §L2-C: the contact-extension kinds carry a fieldId too (field picker + level).
+  if (source?.kind === 'form_field_user_manager' || source?.kind === 'form_field_user_dept_head') return source.fieldId
+  return ''
 }
 function setApprovalSourceFieldId(nodeKey: string, sourceIndex: number, fieldId: string): void {
+  const current = approvalNodeSourceAt(nodeKey, sourceIndex)
+  // Lock-2 §L2-C: preserve the kind + configured level — only the referenced field changes.
+  if (current?.kind === 'form_field_user_manager' || current?.kind === 'form_field_user_dept_head') {
+    setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: current.kind, fieldId, level: current.level })
+    return
+  }
   setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'form_field_user', fieldId })
 }
 function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
@@ -2676,6 +3689,8 @@ function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
   if (source?.kind === 'continuous_dept_heads') return source.levels
   // Lock-1 §K5-b: same shared-field shape as manager_at_level.
   if (source?.kind === 'dept_head_at_level') return source.level
+  // Lock-2 §L2-C: the contact-extension kinds carry a single level beside their fieldId.
+  if (source?.kind === 'form_field_user_manager' || source?.kind === 'form_field_user_dept_head') return source.level
   return 1
 }
 function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: number): void {
@@ -2684,6 +3699,12 @@ function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: num
   else if (kind === 'continuous_managers') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
   else if (kind === 'continuous_dept_heads') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
   else if (kind === 'dept_head_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
+  else if (kind === 'form_field_user_manager' || kind === 'form_field_user_dept_head') {
+    // Lock-2 §L2-C: preserve the configured fieldId — only the level changes.
+    const current = approvalNodeSourceAt(nodeKey, sourceIndex)
+    const fieldId = current?.kind === kind ? current.fieldId : ''
+    setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, fieldId, level: value })
+  }
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
@@ -2705,18 +3726,83 @@ const fieldPermissionFields = computed(() => draft.value.fields.filter((field) =
 // condition because they read the identical Set, not two independently-derived ones.
 const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
+  const driverKinds = new Set(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'])
   for (const step of draft.value.steps) {
-    if (step.sourceKind === 'form_field_user' && step.fieldId.trim()) ids.add(step.fieldId.trim())
+    // Lock-4 §1 F4-A: a sourceless auto_approve step's hidden source scratch routes nobody.
+    if (stepOmitsAssigneeSources(step)) continue
+    if (driverKinds.has(step.sourceKind) && step.fieldId.trim()) ids.add(step.fieldId.trim())
   }
   for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalNodeEditOmitsAssigneeSources(edit)) continue
     for (const source of edit.assigneeSources) {
-      if (source.kind === 'form_field_user' && source.fieldId.trim()) ids.add(source.fieldId.trim())
+      // Lock-2 §L2-C: the contact-extension kinds reference a driver field too — same hint.
+      if ((source.kind === 'form_field_user' || source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') && source.fieldId.trim()) ids.add(source.fieldId.trim())
     }
   }
   return ids
 })
 function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, access: NodeFieldAccess): void {
   step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
+}
+// Lock-4 §1 F4-A — the linear 审批类型 radio. The mutation and its owner-visible defaults live in the
+// pure `setStepApprovalType` (templateAuthoring.ts).
+function onStepApprovalTypeChange(step: ApprovalStepDraft, type: ApprovalType): void {
+  if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId)
+  setStepApprovalType(step, type)
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (linear) — per sourceless auto_approve step, the live errors of
+// its hidden blocks, judged by the save validator itself (`stepHiddenBlockLiveErrors`). Computed once
+// per draft change and read many times by the template.
+const stepHiddenBlockErrorsByLocalId = computed(() => {
+  const byLocalId = new Map<string, HiddenBlockLiveErrors>()
+  for (const step of draft.value.steps) {
+    if (stepOmitsAssigneeSources(step)) byLocalId.set(step.localId, stepHiddenBlockLiveErrors(draft.value, step))
+  }
+  return byLocalId
+})
+function stepHiddenBlockErrors(step: ApprovalStepDraft, blockId?: AutoApproveHiddenBlockId): string[] {
+  const errors = stepHiddenBlockErrorsByLocalId.value.get(step.localId)
+  if (!errors) return []
+  if (blockId) return errors[blockId] ?? []
+  return AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((id) => errors[id] ?? [])
+}
+function clearStepTimeout(step: ApprovalStepDraft): void {
+  if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId, 'timeout')
+  step.timeoutEnabled = false
+}
+// STICKY REVEAL (linear; gate r2 P3-1). Keyed on "failing now" alone, a revealed block unmounted on
+// the keystroke that made it valid (提醒 first, then typing 60: the section vanished after the 6 and
+// the save carried 6). So once a step's hidden block has been revealed by a live error it STAYS
+// rendered until (a) the step's 审批类型 changes, (b) 关闭超时 (timeout block only), or (c) the draft
+// is re-baselined — template (re)load, or save completes (`snapshotDraft`). The notice above stays
+// keyed on live errors only. Display state only: never saved, never read by a validator. Canvas: the
+// policy grid has its own sticky reveal (`approvalNodeHiddenBlockRevealed`); its timeout section needs
+// none, since its timeout controls are discrete selects / a clamped number input (no keystroke unmount).
+const stickyStepHiddenBlockKey = (localId: string, blockId: AutoApproveHiddenBlockId) => `${localId}:${blockId}`
+watch(
+  stepHiddenBlockErrorsByLocalId,
+  (byLocalId) => {
+    for (const [localId, errors] of byLocalId) {
+      for (const blockId of AUTO_APPROVE_HIDDEN_BLOCK_IDS) {
+        const key = stickyStepHiddenBlockKey(localId, blockId)
+        if ((errors[blockId]?.length ?? 0) > 0 && !stickyStepHiddenBlockReveals.value.has(key)) {
+          stickyStepHiddenBlockReveals.value = new Set(stickyStepHiddenBlockReveals.value).add(key)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+function stepHiddenBlockRevealed(step: ApprovalStepDraft, blockId: AutoApproveHiddenBlockId): boolean {
+  return stepHiddenBlockErrors(step, blockId).length > 0
+    || stickyStepHiddenBlockReveals.value.has(stickyStepHiddenBlockKey(step.localId, blockId))
+}
+function releaseStepHiddenBlockReveals(localId: string, blockId?: AutoApproveHiddenBlockId): void {
+  const next = new Set(stickyStepHiddenBlockReveals.value)
+  for (const id of blockId ? [blockId] : AUTO_APPROVE_HIDDEN_BLOCK_IDS) next.delete(stickyStepHiddenBlockKey(localId, id))
+  if (next.size !== stickyStepHiddenBlockReveals.value.size) stickyStepHiddenBlockReveals.value = next
 }
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
@@ -2732,6 +3818,58 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+// W1-1a (Lock-4 §2 F4-C) — linear four-value control adapters. The displayed value / options are
+// DERIVED from the same `stepAutoApprovalPolicy` object `buildStepConfig` emits, so what the author
+// sees and what is saved cannot diverge.
+function stepSamePersonSelectValue(step: ApprovalStepDraft): string {
+  return samePersonSelectValue(stepAutoApprovalPolicy(step))
+}
+function stepSamePersonOptions(step: ApprovalStepDraft): Array<{ value: string; label: string }> {
+  return samePersonChoiceOptions(stepAutoApprovalPolicy(step))
+}
+function stepSamePersonOverrideHint(step: ApprovalStepDraft): string {
+  return samePersonOverrideHint(stepAutoApprovalPolicy(step))
+}
+function onStepSamePersonSelect(step: ApprovalStepDraft, value: string): void {
+  if (readOnly.value) return
+  const choice = samePersonChoiceFromSelectValue(value)
+  if (!choice) return
+  setStepSamePersonChoice(step, choice)
+}
+function isSamePersonTransferValue(value: string): boolean {
+  return value === 'transfer_direct_manager' || value === 'transfer_dept_head'
+}
+// W1-1a (Lock-4 §3 F4-B) — linear 'designated' target pickers; re-sync so chips keep their labels.
+function onStepEmptyFallbackIds(step: ApprovalStepDraft, side: 'user' | 'role', ids: string[]): void {
+  setStepEmptyAssigneeFallbackIds(step, side, ids)
+  syncStepOptions(step)
+}
+
+// P1-C (T1-1): business labels for the timeout effect picker — never the raw enum string.
+const STEP_TIMEOUT_EFFECT_OPTION_LABELS: Record<SupportedNodeTimeoutEffect, string> = {
+  remind: '催办提醒',
+  transfer: '转交他人',
+  jump: '跳转节点',
+}
+function stepTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): string {
+  return STEP_TIMEOUT_EFFECT_OPTION_LABELS[effect]
+}
+/** Read-only-summary counterpart of `stepTimeoutEffectOptionLabel` — tolerates an effect outside the
+ *  wired set (returns '', never the raw enum string) since a SUMMARY echoes persisted data rather
+ *  than authoring it. */
+function nodeTimeoutEffectLabel(effect: string | undefined): string {
+  return (effect && (STEP_TIMEOUT_EFFECT_OPTION_LABELS as Partial<Record<string, string>>)[effect]) || ''
+}
+
+/** Candidate jump targets for the linear editor's timeout: every OTHER step, keyed + business-labeled
+ *  by its stable draft `localId` (never the position-based node key, which is unstable across a
+ *  reorder — see `buildStepTimeoutConfig`'s resolution comment). */
+function timeoutJumpStepOptions(currentStepLocalId: string): Array<{ localId: string; label: string }> {
+  return draft.value.steps
+    .filter((candidate) => candidate.localId !== currentStepLocalId)
+    .map((candidate, index) => ({ localId: candidate.localId, label: candidate.name.trim() || `审批人 ${index + 1}` }))
+}
+
 // Lock-1 §K2: a scope-type switch clears the shared idsText carrier deliberately — userIds and
 // roleIds are different id domains, so carrying one list into the other would author wrong config.
 function setStepRequesterChoiceScopeType(step: ApprovalStepDraft, type: 'company' | 'members' | 'role'): void {
@@ -2745,6 +3883,10 @@ async function onUserSearch(query: string): Promise<void> {
   // Keep already-selected ids visible as chips even if the new search page omits them —
   // across linear steps, complex approval nodes, and CC user targets.
   for (const step of draft.value.steps) {
+    // W1-1a: a 'designated' step's fallback users are chips in their own picker (C7: never a raw id).
+    if (step.emptyAssigneePolicy === 'designated') {
+      for (const id of step.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    }
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   }
@@ -2771,6 +3913,14 @@ function syncStepOptions(step: ApprovalStepDraft): void {
     } else if (step.requesterChoiceScopeType === 'role') {
       for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
     }
+  } else if (step.sourceKind === 'user_group') {
+    // Lock-1 §K1: keep an authored group id visible even if it fell off the CURRENT bound page.
+    for (const id of step.groupIds) directory.ensureMemberGroupOptionVisible(id)
+  }
+  // W1-1a (Lock-4 F4-B): the 'designated' fallback pickers are independent of the source kind.
+  if (step.emptyAssigneePolicy === 'designated') {
+    for (const id of step.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    for (const id of step.emptyAssigneeFallback?.roleIds ?? []) directory.ensureRoleOptionVisible(id)
   }
 }
 
@@ -2797,8 +3947,17 @@ function syncApprovalNodeOptions(nodeKey: string): void {
       } else if (source.scope.type === 'role') {
         for (const id of source.scope.roleIds) directory.ensureRoleOptionVisible(id)
       }
+    } else if (kind === 'user_group') {
+      // Lock-1 §K1: keep an authored group id visible even if it fell off the CURRENT bound
+      // page (e.g. a stale unbind mid-edit) — same placeholder-synthesis posture as above.
+      for (const id of approvalSourceGroupIds(nodeKey, sourceIndex)) directory.ensureMemberGroupOptionVisible(id)
     }
   })
+  // W1-1a (Lock-4 F4-B): keep the 'designated' fallback chips visible too (C7: never a raw id).
+  if (edit.emptyAssigneePolicy === 'designated') {
+    for (const id of edit.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    for (const id of edit.emptyAssigneeFallback?.roleIds ?? []) directory.ensureRoleOptionVisible(id)
+  }
 }
 
 function syncAllApprovalNodeOptions(): void {
@@ -2817,6 +3976,10 @@ function syncCcOptions(nodeKey: string): void {
   if (!edit) return
   if (edit.targetType === 'user') {
     for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
+  } else if (edit.targetType === 'group') {
+    // Lock-1 OD-L1-7(a): a persisted bound-group id stays visible as a chip even when the bound
+    // list no longer carries it (unbound after save) — no silent drop; publish is the arbiter.
+    for (const id of edit.targetIds) directory.ensureMemberGroupOptionVisible(id)
   } else {
     for (const id of edit.targetIds) directory.ensureRoleOptionVisible(id)
   }
@@ -2851,9 +4014,15 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionFormulaDryRunLoading,
   dryRunConditionFormula,
   conditionOutgoingEdgeKeys,
+  // T5a/T5b: Canvas-hosted editor (branch delete + add-lane hint) — see canvasAuthoringActive.
+  canvasAuthoringActive,
+  conditionBranchRemovalBlocker: conditionBranchRemovalReason,
+  removeConditionBranch: onRemoveConditionBranch,
   conditionEdgeLabel,
   graphEdgeTargetLabel,
   graphNodeLabel,
+  // Lock-1 §K3: legal upstream candidates for the prior_node_approver typed node picker.
+  priorApproverNodeOptions,
   parallelJoinModeLabel,
   ccTargetTypeLabel,
   approvalSourceKind,
@@ -2861,6 +4030,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   syncApprovalNodeOptions,
   approvalSourceIds,
   setApprovalSourceIdsFromPicker,
+  // Lock-1 §K1: the user_group source's dedicated id carrier.
+  approvalSourceGroupIds,
+  setApprovalSourceGroupIds,
   setCcTargetIds,
   syncCcOptions,
   approvalSourceFieldId,
@@ -2873,10 +4045,27 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   removeApprovalSourceCard,
   approvalNodeMode,
   setApprovalNodeMode,
+  approvalNodeThreshold,
+  setApprovalNodeThreshold,
+  approvalNodeInParallelRegion,
+  // Lock-4 §1 F4-A — 审批类型 (OPTIONAL on the api; always present on the shipped app's object).
+  setApprovalNodeApprovalType,
+  approvalNodeHiddenBlockErrors,
+  approvalNodeHiddenBlockRevealed,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
-  approvalNodeMergeWithRequester,
-  setApprovalNodeMergeWithRequester,
+  // W1-1a: the four-value same-person control + the 'designated' fallback pickers (they replace the
+  // shipped approvalNodeMergeWithRequester / setApprovalNodeMergeWithRequester checkbox pair).
+  setApprovalNodeSamePersonPolicy,
+  setApprovalNodeEmptyAssigneeFallbackIds,
+  approvalNodeTimeout,
+  setApprovalNodeTimeoutEnabled,
+  setApprovalNodeTimeoutAfterMinutes,
+  setApprovalNodeTimeoutEffect,
+  setApprovalNodeTimeoutTransferToUserId,
+  setApprovalNodeTimeoutJumpToNodeKey,
+  setApprovalNodeTimeoutUnit,
+  timeoutJumpTargetOptions,
   handlerNodeMode,
   setHandlerNodeMode,
   handlerNodeOpinionRequired,
@@ -2893,6 +4082,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   directoryUsersLoading: directory.usersLoading,
   directoryRoles: directory.roles,
   formulaRoles: directory.formulaRoles,
+  // Lock-1 §K1: org-scoped bound-group picker options + loading flag + label formatter.
+  memberGroupOptions: directory.memberGroups,
+  memberGroupOptionsLoading: directory.memberGroupsLoading,
+  formatMemberGroupLabel: directory.formatMemberGroupLabel,
   formatUserLabel: directoryUserDisplayLabel,
   formatRoleLabel: directoryRoleDisplayLabel,
 }
@@ -2924,8 +4117,13 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
 // source-scans every file under src/views for that literal component name and fails the build if
 // it appears, even as an import of its exported constants. This stays a SECOND, non-derived
 // registration site the F2 forcing-function test (approval-form-palette-chips.spec.ts:107) does
-// not cover; approval-date-range-field.test.ts census-checks this file's set is consistent with
-// AUTHORABLE_FIELD_TYPES instead.
+// NOT cover — and neither did approval-date-range-field.test.ts's own "census" (correction, gate
+// P2-1: an earlier version of this comment claimed that file checked THIS array; it only ever
+// re-read the F2 component's own APPROVAL_FORM_PALETTE_GROUPS, never `fieldPaletteGroups` below —
+// deleting `explanation` from this array alone left every then-reachable spec green). This array's
+// completeness against AUTHORABLE_FIELD_TYPES is covered by a REAL mount of this view (not a
+// duplicated literal): apps/web/tests/approval-form-inline-editor-extract.spec.ts's "(o) MS-13
+// completeness" test queries the rendered `approval-field-palette-*` chip DOM directly.
 const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   text: '文本',
   textarea: '多行文本',
@@ -2935,9 +4133,11 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
+  explanation: '说明',
 }
 const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   text: 'A',
@@ -2948,16 +4148,23 @@ const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   select: '○',
   'multi-select': '☑',
   user: '人',
+  department: '部',
   detail: '表',
   'record-link': '链',
   date_range: '区',
+  explanation: '明',
 }
+// Lock-8 L8-A (§2.6): the group needs an owner decision — placed in 其他 as a REVERSIBLE
+// presentation choice (goal-set provenance; see this repo's execution ledger §3), not a ratified
+// OD-L8-3 group. Same choice as the F2 Designer 2.0 palette component's independent copy
+// (apps/web/src/approvals/components/ApprovalForm + Palette.vue, split across this comment on
+// purpose — see that file's own doc comment for why the literal name can't appear here whole).
 const fieldPaletteGroups = [
   { id: 'text', label: '文本', types: ['text', 'textarea'] },
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
+  { id: 'other', label: '其他', types: ['user', 'department', 'detail', 'record-link', 'explanation'] },
 ].map((group) => ({
   ...group,
   entries: group.types.map((type) => ({
@@ -3067,7 +4274,27 @@ const detailLeafTypeOptions = computed(() =>
 )
 
 function addDetailColumn(field: FieldAuthoringDraft) {
-  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
+  const created = createEmptyDetailColumnDraft(field.detailColumns.length + 1)
+  // Collision guard (owner-reported bug, 2026-08-24): `length + 1` assumes ids stay densely
+  // packed 1..N, but a delete-then-add sequence breaks that invariant — e.g.
+  // [col_1, col_2, col_3] -> delete col_2 (index 1) -> [col_1, col_3] (length 2) -> `length + 1`
+  // recomputes "col_3", which the SURVIVING third column already holds -> save-blocking
+  // "子字段 id 不能重复", plus a confusing "子字段 N" auto-label once N drifts arbitrarily far
+  // ahead of the visible row count over repeated add/delete cycles. `createEmptyDetailColumnDraft`
+  // itself stays frozen — its single-argument output is a pinned baseline
+  // (approval-form-builder-parity-delta-design-20260811.md §F1 "Protected baseline", pinned
+  // byte-for-byte by approval-form-authoring-adapter.test.ts) that the Designer 2.0 opaque
+  // allocator depends on staying untouched. Only the CONSTRUCTED draft returned from this call is
+  // patched here, scanning forward past any id this field's OWN detailColumns already uses before
+  // it is pushed — the call above, and its frozen output, are unchanged.
+  const existingIds = new Set(field.detailColumns.map((column) => column.id))
+  let candidateIndex = field.detailColumns.length + 1
+  while (existingIds.has(`col_${candidateIndex}`)) {
+    candidateIndex += 1
+  }
+  created.id = `col_${candidateIndex}`
+  created.label = `子字段 ${candidateIndex}`
+  field.detailColumns = [...field.detailColumns, created]
 }
 
 function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
@@ -3089,7 +4316,10 @@ function visibilityFieldOptions(current: FieldAuthoringDraft) {
   for (const field of draft.value.fields) {
     if (field.localId === current.localId) continue
     if (!field.id.trim()) continue
-    if (field.type === 'record-link' || field.type === 'detail') continue
+    if (field.type === 'record-link' || field.type === 'detail' || field.type === 'department') continue
+    // Lock-8 L8-A (§1.1): explanation carries no value at all — never offered, bare or dotted (it
+    // has no endpoints, unlike date_range).
+    if (field.type === 'explanation') continue
     if (field.type === 'date_range') {
       const fieldId = field.id.trim()
       const label = fieldDisplayLabel(field)
@@ -3124,7 +4354,13 @@ function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft
   const changedId = changedField.id.trim()
   if (!changedId) return
   const bareBanned =
-    changedField.type === 'record-link' || changedField.type === 'detail' || changedField.type === 'date_range'
+    changedField.type === 'record-link'
+    || changedField.type === 'detail'
+    || changedField.type === 'date_range'
+    // Lock-8 L8-A (§1.1): explanation matches record-link/detail's ONE-direction shape — nothing
+    // could ever validly have depended on it, so only "became explanation" needs clearing.
+    || changedField.type === 'explanation'
+    || changedField.type === 'department'
   const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
     const dependsOn = field.visibility.dependsOnFieldId.trim()
@@ -3178,12 +4414,26 @@ function moveStep(index: number, delta: -1 | 1) {
   draft.value.steps = swap(draft.value.steps, index, delta) ?? draft.value.steps
 }
 
+// Round-4 stale-response guard: navigations can overlap (slow tpl_a fetch, user switches to
+// tpl_b, tpl_b resolves first, tpl_a resolves LAST) — without a sequence check the older
+// response would overwrite the newer route's draft. Each load takes a ticket; only the holder
+// of the CURRENT ticket may apply its result or touch shared loading state.
+let templateLoadSeq = 0
+
 async function loadTemplateForEdit() {
+  const seq = ++templateLoadSeq
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
   canvasZoom.value = 1
   if (!isEditMode.value) {
-    draft.value = createEmptyTemplateDraft()
+    // P3-4 (gate on 6d6c6013cd, reproduced): this branch returns before the try/finally, so an
+    // id->'' transition arriving while an edit-route load was in flight left `loading` stuck true
+    // forever — the superseded load's finally correctly defers to the newer ticket, and the newer
+    // ticket (this branch) never touched loading. Unreachable today (/new always remounts via
+    // TemplateCenterView), but one router.push('/approval-templates/new') from this view would
+    // have made it live: a permanently unsaveable new-template page with no error.
+    loading.value = false
+    draft.value = createSeededTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     formFieldFocusLocalId.value = null
@@ -3191,12 +4441,20 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2: an edit->new transition on a reused instance replaced the draft above — the
+    // builder must re-read it (no-ops on first mount via the showFormBuilderV2 guard).
+    reseedFormBuilderSessionIfActive()
+    // F4 hydration gate: a NEW template's starter draft is available synchronously (no fetch) —
+    // seed the v2 session in the SAME tick, before first paint, so there is no builder-mounts-empty
+    // flash even for a brand-new template.
+    formSessionHydrated.value = true
     return
   }
   loading.value = true
   loadError.value = null
   try {
     const template = await getTemplate(templateId.value)
+    if (seq !== templateLoadSeq) return // superseded by a newer navigation — drop this response
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
@@ -3208,10 +4466,27 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2 (external review, reproduced mounted with Canvas V2 ON): a route reload on a
+    // reused instance replaced the draft above, but ApprovalFormBuilder reads the draft ONCE per
+    // epoch — basic info showed B while the form designer still showed A's fields. Reseed here;
+    // the showFormBuilderV2 guard makes this a no-op on the first (mount-time) load, where the
+    // hydration gate below does the seeding.
+    reseedFormBuilderSessionIfActive()
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
+    if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
+    loadError.value = describeTemplateAuthoringError(error, '加载审批表单失败')
   } finally {
+    if (seq !== templateLoadSeq) {
+      // the newer navigation owns loading/hydration state now
+    } else {
     loading.value = false
+    // F4 hydration gate: set exactly ONCE per view instance, success or failure — `draft.value`
+    // holds whatever the load produced (the real template, or the pre-existing empty fallback on
+    // failure) and `ApprovalFormBuilder` seeds from it here for the first and only time. A later
+    // `draft.value` reassignment (e.g. after save) never re-triggers this — see
+    // `reseedFormBuilderSessionIfActive` for the ONE deliberate, explicit resync path.
+    formSessionHydrated.value = true
+    }
   }
 }
 
@@ -3226,21 +4501,31 @@ function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId 
   return 'flow'
 }
 
+// B0 (owner-approved draft-save UX slice, 20260824): 保存草稿 no longer runs PUBLISH-grade
+// validation — it runs only the SAVE-BLOCKING minimum, i.e. what the backend actually 400s on
+// `createTemplate`/`updateTemplate` (see `validateTemplateFormFields`/`validateTemplateApprovalFlow`'s
+// `{ minimal: true }` doc comments in templateAuthoring.ts for the exact, evidence-cited server
+// reject-set). No record-link catalog fetch is needed here at all — the catalog/pin-mismatch check
+// is a publish-time-only concern server-side, so a plain draft save never awaits that network call.
+// `key`/`name` are auto-seeded (never blocked) since both are `NOT NULL` server-side but the
+// reference product never makes an author type them before saving (see
+// `seedDraftIdentityForSave`'s doc comment for the collision-safety reasoning).
+//
+// `openPublishChecklist`/`confirmPublish` are UNTOUCHED — they keep gating on the full
+// `publishChecklist` (`publishFormFieldIssues`/`publishApprovalFlowIssues`/`publishPlaceholderRoleIssues`,
+// still `validateTemplateFormFields`/`validateTemplateApprovalFlow` with NO `minimal` flag) before
+// ever reaching `persistDraft`, so relaxing what `validate()` itself checks never weakens publish.
 async function validate(): Promise<boolean> {
-  // Ensure catalog is attempted before pin-membership checks when the draft uses record-link.
-  if (draft.value.fields.some((f) => f.type === 'record-link') && !recordLinkCatalogLoaded.value) {
-    await ensureRecordLinkCatalog(true)
-  }
-  const formErrors = validateTemplateFormFields(
-    draft.value,
-    unsupportedReason.value,
-    recordLinkCatalogValidation.value,
-  )
-  const flowErrors = validateTemplateApprovalFlow(draft.value)
-  validationErrors.value = [...formErrors, ...flowErrors]
+  // Seeding is a NO-OP for existing templates (see seedDraftIdentityForSave — gate P2-1); their
+  // blank identity blocks below instead. The save-blocking set has ONE definition —
+  // collectTemplateSaveMinimum — and this is its production call site (E-P3).
+  draft.value = seedDraftIdentityForSave(draft.value)
+  const minimum = collectTemplateSaveMinimum(draft.value, unsupportedReason.value)
+  const formErrors = minimum.formErrors
+  validationErrors.value = minimum.all
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
-    ElMessage.warning('请先修正模板配置')
+    ElMessage.warning('请先修正表单配置')
     await nextTick()
     scrollAuthoringTarget(validationSummaryRef.value, true)
     return false
@@ -3249,6 +4534,14 @@ async function validate(): Promise<boolean> {
 }
 
 async function persistDraft() {
+  // WRITE-PATH DEFENCE, independent of the canSave UI gate (external review rounds 3+4): the
+  // draft must be THIS route's template. `!==` covers both poisoned states — never-loaded
+  // (`'' !== 'tpl_b'`, would fall through to CREATE and mint a duplicate) and stale-after-
+  // route-switch (`'tpl_a' !== 'tpl_b'`, would UPDATE the wrong template from tpl_b's URL).
+  if (isEditMode.value && draft.value.templateId !== templateId.value) {
+    loadError.value = '表单尚未加载成功，无法保存 — 请刷新重试'
+    return null
+  }
   if (!(await validate())) return null
   saving.value = true
   try {
@@ -3261,6 +4554,7 @@ async function persistDraft() {
       templateLatestVersionId.value = updated.latestVersionId
       reseedCanvasHistoryFromDraft()
       reseedFormHistoryFromDraft()
+      reseedFormBuilderSessionIfActive()
       snapshotDraft()
       return updated
     }
@@ -3272,15 +4566,34 @@ async function persistDraft() {
     templateLatestVersionId.value = created.latestVersionId
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
+    reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '保存模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '保存表单失败', authoringErrorContext)
+    // T5b: the failure banner sits at the top of the page — bring it into view (a long flow leaves
+    // the author scrolled far below it, so the save looked like it silently did nothing).
+    void revealAuthoringFailure()
     return null
   } finally {
     saving.value = false
   }
+}
+
+// T5b (test report 2026-10-08): business labels for the nodes a failed write's values-free
+// `details` names. Resolved against the graph the failed request carried (a failed save leaves the
+// draft untouched; a failed publish runs right after a successful save of the same keys). Never
+// returns a key — an unknown key yields `undefined`, i.e. the unattributed copy.
+function authoringErrorNodeLabel(nodeKey: string): string | undefined {
+  const node = canvasEffectiveGraph.value.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return undefined
+  return node.name?.trim() || nodeTypeLabel(node.type)
+}
+const authoringErrorContext = { nodeLabel: authoringErrorNodeLabel }
+async function revealAuthoringFailure(): Promise<void> {
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
 }
 
 async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
@@ -3299,11 +4612,17 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     syncAllCcOptions()
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
+    reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
-    ElMessage.success('模板草稿已创建')
+    if (presetBoundaryNote(presetId)) {
+      // A1: a preset with a boundary note (请假审批) says so at creation, and stays up long enough to be read.
+      ElMessage.success({ message: presetCreatedMessage(presetId), duration: 8000, showClose: true })
+    } else {
+      ElMessage.success(presetCreatedMessage(presetId))
+    }
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '创建常用模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '创建常用表单失败')
   } finally {
     creatingPresetId.value = null
   }
@@ -3358,10 +4677,11 @@ async function confirmPublish() {
       policy: policyToPublish,
       ...(note ? { note } : {}),
     })
-    ElMessage.success('模板已发布')
+    ElMessage.success('表单已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '发布模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '发布表单失败', authoringErrorContext)
+    void revealAuthoringFailure()
   } finally {
     publishing.value = false
   }
@@ -3376,6 +4696,9 @@ async function confirmPublish() {
 // of a second hand-rolled loading/race implementation.
 const sampleRequesterId = ref<string | null>(null)
 const sampleFormData = ref<Record<string, unknown>>({})
+// T4a: the try-run datetime pickers take the fill form's settings (approvals/datePickerFormat.ts);
+// Element Plus reads `default-time` once, when each picker mounts.
+const tryRunDatetimeDefaultTime = approvalDatetimeDefaultTime()
 const routePreview = ref<ApprovalRoutePreview | null>(null)
 const routePreviewLoading = ref(false)
 const routePreviewError = ref('')
@@ -3392,6 +4715,10 @@ const tryRunDisabledReason = computed<string>(() => {
   return ''
 })
 
+// The view itself is not locale-switched yet (its other copy is Chinese only); the try-run hint
+// below follows the app locale like the R-43 (B) condition copy does.
+const { isZh: tryRunIsZh } = useLocale()
+
 const routePreviewController = createRoutePreviewController(
   async (req: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string }) => {
     try {
@@ -3401,7 +4728,16 @@ const routePreviewController = createRoutePreviewController(
       // message here instead of surfacing as a generic failure flash — the controller only ever
       // reads `.message` off a caught error, so the code → message translation must happen
       // before it does (describeRoutePreviewError is unit-tested independently).
-      throw new Error(describeRoutePreviewError(error))
+      // R-43 follow-up (a): a whole-form validation failure on an empty required sample field gets
+      // a localized hint naming the fields (display names only, looked up in the FULL field list —
+      // the server only reports visible ones, so every id resolves here).
+      throw new Error(describeRoutePreviewError(error, undefined, {
+        isZh: tryRunIsZh.value,
+        fieldLabel: (id) => {
+          const field = templateFormFields.value.find((candidate) => candidate.id === id)
+          return field ? fieldDisplayLabel(field) : null
+        },
+      }))
     }
   },
   (patch) => {
@@ -3463,10 +4799,21 @@ const conditionNodeSummaries = computed(() =>
     })),
 )
 
+// Round-4: Vue Router REUSES this component across /:id/edit param changes — onMounted alone
+// leaves the previous template's draft live under the new URL. Reload on every id change (and on
+// edit->new transitions, where loadTemplateForEdit resets to the empty starter synchronously).
+watch(templateId, (next, prev) => {
+  if (next === prev) return
+  if (!canManageTemplates.value) return
+  void loadTemplateForEdit()
+})
+
 onMounted(() => {
   if (!canManageTemplates.value) return
   void directory.loadRoles()
   void directory.loadFormulaRoles()
+  // Lock-1 §K1: org-scoped bound-group picker options.
+  void directory.loadMemberGroups()
   void loadTemplateForEdit()
   window.addEventListener('resize', syncCanvasViewportState)
 })
@@ -3475,6 +4822,14 @@ onMounted(() => {
 // surface and previously lost all edits on a stray back-click. Route leaves confirm when
 // dirty; hard reloads/closures get the browser-native prompt (same pattern as WorkflowDesigner).
 onBeforeRouteLeave(async () => {
+  // F4 route-level drag-state clearing (delta §5 F4 handoff condition 3): `v-show` keeps the
+  // step chrome — and therefore the mounted `ApprovalFormBuilder` — mounted across
+  // `activeAuthoringSection` switches, so `onUnmounted`'s existing drag-session clear (F2) only
+  // fires on a GENUINE unmount. The dirty-draft confirm below can be CANCELLED (user picks 留下),
+  // in which case no unmount ever happens even though a navigation attempt began and any in-flight
+  // drag was already visually interrupted. Clearing here — unconditionally, before the dirty
+  // check/confirm — covers exactly that gap regardless of whether the navigation proceeds.
+  formBuilderRef.value?.getDragSession().clear()
   if (!isDraftDirty.value) return true
   try {
     await ElMessageBox.confirm('有未保存的更改，离开将丢失编辑内容。确定离开吗？', '未保存的更改', {
@@ -3512,6 +4867,11 @@ onUnmounted(() => {
 
 .template-authoring__actions {
   justify-content: flex-end;
+}
+
+/* B0 — header "N项不完善" affordance, next to 保存草稿/发布. */
+.template-authoring__incomplete-count {
+  color: var(--ms-color-warning);
 }
 
 .template-authoring__header {
@@ -3671,6 +5031,15 @@ onUnmounted(() => {
   box-shadow: var(--ms-shadow-card);
 }
 
+/* T5c (test report 2026-10-08): Element Plus ships `.el-card { overflow: hidden }`. An
+   overflow:hidden ancestor becomes the sticky containing scroller (the card never scrolls, so the
+   canvas inspector's `position: sticky` never engaged) and also clips descendants' scroll-margin.
+   `clip` keeps the rounded-corner clipping without creating a scroll container. Scoped to the flow
+   card only. */
+.template-authoring__panel--flow {
+  overflow: clip;
+}
+
 .template-authoring__section-actions {
   position: sticky;
   bottom: 0;
@@ -3722,6 +5091,12 @@ onUnmounted(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+/* A1: the boundary note must read as a caveat, not as one more description line. */
+.template-authoring__preset p.template-authoring__preset-note {
+  color: var(--el-color-warning-dark-2);
+  font-weight: 600;
 }
 
 .template-authoring__visibility {
@@ -3954,8 +5329,12 @@ pre {
   }
 
   .template-authoring__steps {
-    top: 0;
+    position: static;
     justify-content: flex-start;
+  }
+
+  .template-authoring__section-actions {
+    position: static;
   }
 
   .template-authoring__grid {
@@ -3992,6 +5371,53 @@ pre {
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {
     flex-direction: column;
+  }
+}
+
+/* F4 production mount (delta §5 F4, FB-D1/FB-D2): the Designer 2.0 three-region wrapper. The
+   palette and `ApprovalFormBuilder` (canvas + inspector) are separate components (§5 F2/F3), so the
+   fixed-width palette column and the >=1100px three-region contract are assembled HERE, matching
+   the SAME >=1100px / <1100px two-tier breakpoint the extracted legacy shell above already ships
+   (there is no shipped third tier at 768px on this baseline to diverge from). `:deep()` reaches
+   into the child components' own scoped roots — neither owns a fixed width itself. */
+.template-authoring__form-designer-v2 {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  min-height: min(68vh, 720px);
+  margin: -8px -12px -16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  max-width: 100%;
+}
+.template-authoring__form-designer-v2 :deep(.approval-form-palette) {
+  flex: 0 0 228px;
+  min-width: 0;
+  border-right: 1px solid var(--el-border-color-lighter);
+}
+.template-authoring__form-designer-v2 :deep(.approval-form-builder) {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 0;
+  background: transparent;
+}
+@media (max-width: 1100px) {
+  .template-authoring__form-designer-v2 {
+    flex-direction: column;
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-palette) {
+    flex: 0 0 auto;
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-builder) {
+    flex-direction: column;
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-builder__inspector) {
+    flex: 1 1 auto;
+    min-width: 0;
+    border-left: 0;
+    border-top: 1px solid var(--el-border-color-lighter);
   }
 }
 

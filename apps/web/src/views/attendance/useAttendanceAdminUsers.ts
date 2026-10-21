@@ -18,6 +18,7 @@ export interface AttendanceAdminUserSearchItem {
 }
 
 interface UseAttendanceAdminUsersOptions {
+  isSessionCurrent?: () => boolean
   adminForbidden?: Ref<boolean>
   apiFetch?: ApiFetchFn
   tr?: Translate
@@ -28,6 +29,10 @@ interface UseAttendanceAdminUsersOptions {
    * delegated attendance admin who is not a platform admin can still search.
    */
   endpoint?: string
+  /** Required by the delegated attendance-admin directory; kept reactive as org selection changes. */
+  orgId?: Readonly<Ref<string | undefined>>
+  /** Platform administrators must opt into the wider directory explicitly. */
+  globalScope?: Readonly<Ref<boolean>>
 }
 
 function defaultTranslate(en: string): string {
@@ -51,17 +56,22 @@ function formatUserLabel(user: AttendanceAdminUserSearchItem, tr: Translate): st
   ) {
     return `${tr('Current value', '当前值')}: ${user.id}`
   }
-  const primary = user.name?.trim() || user.email.trim() || user.id
-  const secondary = user.email.trim() && user.email.trim() !== primary ? user.email.trim() : user.id
+  // Email is optional when a user is created, and the server answers null for it (#6344); never trim it raw.
+  const email = typeof user.email === 'string' ? user.email.trim() : ''
+  const primary = user.name?.trim() || email || user.id
+  const secondary = email && email !== primary ? email : (user.id !== primary ? user.id : '')
   const profileParts = [user.employeeNo?.trim(), user.department?.trim()].filter(Boolean)
-  return user.id ? [primary, ...profileParts, secondary].join(' · ') : tr('Unknown user', '未知用户')
+  return user.id ? [primary, ...profileParts, secondary].filter(Boolean).join(' · ') : tr('Unknown user', '未知用户')
 }
 
 export function useAttendanceAdminUsers({
+  isSessionCurrent = () => true,
   adminForbidden,
   apiFetch = defaultApiFetch,
   tr = defaultTranslate,
   endpoint = '/api/admin/users',
+  orgId,
+  globalScope,
 }: UseAttendanceAdminUsersOptions = {}) {
   const users = ref<AttendanceAdminUserSearchItem[]>([])
   const searchQuery = ref('')
@@ -69,6 +79,7 @@ export function useAttendanceAdminUsers({
   const statusMessage = ref('')
 
   async function loadUsers(query = searchQuery.value) {
+    if (!isSessionCurrent()) return
     loading.value = true
     statusMessage.value = ''
     try {
@@ -77,7 +88,21 @@ export function useAttendanceAdminUsers({
       if (normalizedQuery) {
         params.set('q', normalizedQuery)
       }
+      if (endpoint === '/api/attendance-admin/users/search') {
+        if (globalScope?.value === true) {
+          params.set('scope', 'global')
+        } else {
+          const scopedOrgId = orgId?.value?.trim() || ''
+          if (!scopedOrgId) {
+            users.value = []
+            statusMessage.value = tr('Select an organization first', '请先选择组织')
+            return
+          }
+          params.set('orgId', scopedOrgId)
+        }
+      }
       const response = await apiFetch(`${endpoint}${params.size ? `?${params.toString()}` : ''}`)
+      if (!isSessionCurrent()) return
       if (response.status === 403) {
         adminForbidden && (adminForbidden.value = true)
         users.value = []
@@ -85,6 +110,7 @@ export function useAttendanceAdminUsers({
         return
       }
       const data = await readJson(response)
+      if (!isSessionCurrent()) return
       if (!response.ok || data?.ok !== true) {
         throw new Error(String((data?.error as Record<string, unknown> | undefined)?.message || tr('Failed to load users', '加载用户失败')))
       }
@@ -92,13 +118,19 @@ export function useAttendanceAdminUsers({
       const items = data?.data && typeof data.data === 'object'
         ? (data.data as Record<string, unknown>).items
         : []
-      users.value = Array.isArray(items) ? items as AttendanceAdminUserSearchItem[] : []
+      // Normalise the optional email at the boundary: users created without one come back with null (#6344).
+      users.value = Array.isArray(items)
+        ? (items as AttendanceAdminUserSearchItem[]).map((item) => (
+          typeof item?.email === 'string' ? item : { ...item, email: '' }
+        ))
+        : []
     } catch (error: unknown) {
+      if (!isSessionCurrent()) return
       statusMessage.value = error instanceof Error && error.message
         ? error.message
         : tr('Failed to load users', '加载用户失败')
     } finally {
-      loading.value = false
+      if (isSessionCurrent()) loading.value = false
     }
   }
 

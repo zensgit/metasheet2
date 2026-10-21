@@ -214,8 +214,12 @@ export interface AttachmentRowForAuth {
   status: 'unbound' | 'bound' | 'deleted'
   uploaderId: string
   instanceId: string | null
-  /** the attachment field's id in the template form schema — the key the hidden-redaction gate reads (G7). */
-  fieldId: string
+  /**
+   * The attachment field's id in the template form schema — the key the hidden-redaction gate
+   * reads (G7). NULL only for a Lock-9 process attachment (`bindKind === 'process'`) — a fieldless
+   * row has no hidden-field gate to evaluate (OD-L9-4).
+   */
+  fieldId: string | null
   /**
    * Org that owns the durable row (server-derived at upload). Bound list/download pin the viewer to
    * this org so a cross-org stale membership cannot read another tenant's bytes (no existence oracle).
@@ -223,14 +227,26 @@ export interface AttachmentRowForAuth {
   orgId: string
   /** §6 scan seam — only `infected` is refused; unscanned/clean pass (default-OFF pass-through). */
   scanState?: string | null
+  /**
+   * Lock-9 OD-L9-2 discriminator. OPTIONAL (not `'form_field' | 'process'`, not required) so every
+   * existing literal in approval-attachment-storage.test.ts / approval-attachment-routes.test.ts
+   * (which predate this field) keeps type-checking unchanged — absent is treated as `'form_field'`
+   * everywhere this is read (`bindKind !== 'process'` fails toward the EXISTING gate, never toward
+   * the skip; an un-widened caller cannot accidentally reach the process branch by omission).
+   */
+  bindKind?: string
 }
 
 export interface DownloadAuthChecks {
   /**
-   * Is the viewer a participant (initiator/approver/cc/admin) of the instance, PINNED to the
-   * attachment's org? Cross-org stale relations must fail closed as not_participant.
+   * Is the viewer a participant (requester/seat/past-actor/cc/admin) of the instance? Backed by
+   * the ONE Lock-10 (S1) predicate, `canReadApprovalInstance` (OD-S1-16 — `isInstanceParticipant`
+   * as a separate implementation no longer exists). No `orgId` parameter: the predicate derives
+   * org server-side and does not take a caller-supplied value (OD-S1-9(f)) — the ROW's org is
+   * still pinned, but by gate 0 above (`viewerOrgId !== row.orgId`), a mechanism this interface
+   * does not carry.
    */
-  isInstanceParticipant(viewerId: string, instanceId: string, orgId: string): Promise<boolean>
+  isInstanceParticipant(viewerId: string, instanceId: string): Promise<boolean>
   /**
    * Does the instance's ACTIVE node(s) mark `fieldId` as `access:'hidden'`? (§4.2 gate 2 / G7.)
    * The production wiring MUST back this with the SAME `collectHiddenFieldIds(...)` the snapshot
@@ -272,18 +288,26 @@ export async function authorizeAttachmentDownload(
   } else {
     denyCode = 'not_participant'
     try {
-      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId, row.orgId)
+      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId)
     } catch {
       authorized = false // fail-closed
     }
   }
   if (!authorized) return { ok: false, code: denyCode }
-  // Gate 2 (G7): even an authorized participant gets NO bytes for a field hidden at the active node —
-  // the byte path inherits the snapshot's redaction. Bound rows only (unbound has no active node).
-  // Fail-closed: if we cannot confirm not-hidden, refuse.
-  if (row.instanceId) {
+  // Gate 2 (G7 / Lock-9 OD-L9-4): even an authorized participant gets NO bytes for a field hidden
+  // at the active node — the byte path inherits the snapshot's redaction. Bound rows only (unbound
+  // has no active node). Fail-closed: if we cannot confirm not-hidden, refuse.
+  //
+  // `bindKind !== 'process'` is the EXPLICIT skip for a Lock-9 process attachment (OD-L9-4(a)): a
+  // process row has no `fieldId` at all, so there is no hidden-field decision to evaluate — it is
+  // NOT reached by the `hidden.has(null) === false` accidental pass a sentinel `fieldId` would leave
+  // (OD-L9-4's rejected arm (b), a VERIFIED LEAK per the lock). Written `!== 'process'` (not
+  // `=== 'form_field'`) so an un-widened row (bindKind absent) falls toward THIS existing branch,
+  // never toward the skip (G3).
+  if (row.instanceId && row.bindKind !== 'process') {
     let hidden = true
     try {
+      if (row.fieldId == null) throw new Error('form_field row missing fieldId')
       hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
     } catch {
       hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip

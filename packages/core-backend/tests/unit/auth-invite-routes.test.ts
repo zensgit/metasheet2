@@ -186,6 +186,13 @@ describe('auth invite routes', () => {
 
     expect(response.statusCode).toBe(400)
     expect((response.body as Record<string, any>).error).toBe('Password does not meet requirements')
+    // `details` (English strings) is unchanged; `reasons` is the additive machine-readable list.
+    expect((response.body as Record<string, any>).details).toEqual([
+      'Password must be at least 8 characters long',
+      'Password must contain at least one uppercase letter',
+      'Password must contain at least one number',
+    ])
+    expect((response.body as Record<string, any>).reasons).toEqual(['too_short', 'no_uppercase', 'no_digit'])
     expect(pgMocks.query).not.toHaveBeenCalled()
   })
 

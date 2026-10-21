@@ -162,6 +162,7 @@ printf 'header.payload.signature\\n'
       DEPLOY_HOST: 'deploy.example.test',
       DEPLOY_USER: 'deployer',
       DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: 'deploy.example.test ssh-ed25519 AAAAfakePinnedHostKey',
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -224,6 +225,7 @@ printf 'header.payload.signature\\n'
       DEPLOY_HOST: 'deploy.example.test',
       DEPLOY_USER: 'deployer',
       DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: 'deploy.example.test ssh-ed25519 AAAAfakePinnedHostKey',
     })
 
     assert.equal(result.status, 0, result.stderr)

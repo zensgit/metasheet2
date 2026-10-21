@@ -2,6 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import App from '../src/App.vue'
 import { setMultitableApiErrorLocaleResolver } from '../src/multitable/api/client'
+import { truncateAccountIdentity } from '../src/utils/accountIdentityDisplay'
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const base64url = (input: string): string =>
+    Buffer.from(input, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const header = base64url(JSON.stringify({ alg: 'none', typ: 'JWT' }))
+  const body = base64url(JSON.stringify(payload))
+  return `${header}.${body}.signature`
+}
 
 const mocks = vi.hoisted(() => ({
   route: {
@@ -16,6 +25,10 @@ const mocks = vi.hoisted(() => ({
   fetchPlugins: vi.fn().mockResolvedValue(undefined),
   getApiBase: vi.fn(() => 'https://api.example.com'),
   clearStoredAuthState: vi.fn(),
+  // Brand-link cases: the top-left brand must follow resolveHomePath(), so the mock exposes the
+  // focus flags and the resolver as configurable state instead of constants.
+  focus: { attendance: false, plm: false },
+  resolveHomePath: vi.fn(() => '/home'),
 }))
 
 vi.mock('vue-router', () => ({
@@ -32,9 +45,10 @@ vi.mock('../src/composables/usePlugins', () => ({
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     loadProductFeatures: mocks.loadProductFeatures,
-    isAttendanceFocused: () => false,
-    isPlmWorkbenchFocused: () => false,
+    isAttendanceFocused: () => mocks.focus.attendance,
+    isPlmWorkbenchFocused: () => mocks.focus.plm,
     hasFeature: () => false,
+    resolveHomePath: mocks.resolveHomePath,
   }),
 }))
 
@@ -164,9 +178,14 @@ describe('App guest bootstrap', () => {
     window.localStorage.setItem('metasheet_product_mode', 'attendance')
     window.localStorage.setItem('user_permissions', '["attendance:admin"]')
     window.localStorage.setItem('user_roles', '["admin"]')
-    const authTokensSeenByLogoutFetch: Array<string | null> = []
-    vi.mocked(globalThis.fetch).mockImplementation(async () => {
-      authTokensSeenByLogoutFetch.push(window.localStorage.getItem('auth_token'))
+    // Every request the shell makes, with the token visible AT THE MOMENT it was issued. The
+    // previous form recorded only the token, so it doubled as an incidental "exactly one request"
+    // guard; recording the URL keeps that guard (the enumeration below is exhaustive) while letting
+    // the assertion say what it is actually about — that the logout POST is issued AFTER local
+    // state is cleared.
+    const fetchLog: Array<{ url: string; authToken: string | null }> = []
+    vi.mocked(globalThis.fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      fetchLog.push({ url: String(input), authToken: window.localStorage.getItem('auth_token') })
       return new Response('{}', { status: 200 })
     })
 
@@ -200,7 +219,22 @@ describe('App guest bootstrap', () => {
       },
     })
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
-    expect(authTokensSeenByLogoutFetch).toEqual([null])
+    expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
+      .toEqual([null])
+    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added one — the
+    // DB-backed approval-administrator capability read, issued once per page load and only for
+    // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
+    // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
+    // B-2 (todo-center-design-lock v2.14 §4) added `GET /api/todo/count`: `ApprovalTodoBadge`
+    // reads the todo-center aggregate on mount (`todo/api.ts` has no dev/test mock, so it fires
+    // for real here). Task-feature M2's `GET /api/tasks/pending-count` (the tasks nav badge) is
+    // ABSENT here on purpose: this mock store reports every product feature off, and with the tasks
+    // feature off (TASKS_ENABLED not exactly 'true' on the server) the shell must not render the
+    // tasks entry or poll its badge — even for this administrator. Order follows App.vue's
+    // template: the approvals span, then the admin-only 批量转交 entry.
+    // A stray request added later still reddens this line.
+    expect(fetchLog.map((call) => new URL(call.url).pathname))
+      .toEqual(['/api/todo/count', '/api/approvals/admin/capability', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',
@@ -213,5 +247,275 @@ describe('App guest bootstrap', () => {
       expect(window.localStorage.getItem(key)).toBeNull()
     }
     expect(assign).toHaveBeenCalledWith('/login')
+  })
+})
+
+describe('App top-bar account identity display', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/attendance'
+    mocks.route.fullPath = '/attendance'
+    mocks.route.meta = {}
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+    return container
+  }
+
+  it('carries the FULL account name on title and keeps the distinguishing tail visible for the real staging-trial shape', async () => {
+    // The exact production shape (GATE-5047 P1) — 43 chars, 20-char shared domain — not a
+    // simplified stand-in. See accountIdentityDisplay.spec.ts for the full contract.
+    const longEmail = 'synth-w4w7-853b767f-u01@w4w7-soak.synthetic'
+    const token = fakeJwt({ email: longEmail })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    const navUser = el.querySelector('.nav-user') as HTMLElement | null
+    expect(navUser).toBeTruthy()
+
+    // Full value must be recoverable regardless of visible truncation.
+    expect(navUser?.getAttribute('title')).toBe(longEmail)
+
+    // The visible text must retain the distinguishing suffix. This is an exact literal
+    // (not just endsWith/derived-from-the-function) so the assertion still discriminates
+    // if the wiring stops calling truncateAccountIdentity at all; the truncation shape
+    // itself is that function's own contract, covered exhaustively in
+    // tests/accountIdentityDisplay.spec.ts.
+    expect(navUser?.textContent).toBe('…853b767f-u01')
+    expect(navUser?.textContent).toBe(truncateAccountIdentity(longEmail))
+    expect(navUser?.textContent).not.toBe(longEmail)
+    expect(navUser?.textContent?.endsWith('853b767f-u01')).toBe(true)
+  })
+
+  it('two real staging-trial accounts sharing the same org+domain render DISTINCT top-bar text', async () => {
+    const accountA = 'synth-w4w7-853b767f-u01@w4w7-soak.synthetic'
+    const accountB = 'synth-w4w7-853b767f-u02@w4w7-soak.synthetic'
+
+    window.localStorage.setItem('auth_token', fakeJwt({ email: accountA }))
+    window.localStorage.setItem('jwt', fakeJwt({ email: accountA }))
+    const elA = await mountApp()
+    const textA = (elA.querySelector('.nav-user') as HTMLElement | null)?.textContent
+    elA.remove()
+    if (app) app.unmount()
+    app = null
+
+    window.localStorage.setItem('auth_token', fakeJwt({ email: accountB }))
+    window.localStorage.setItem('jwt', fakeJwt({ email: accountB }))
+    const elB = await mountApp()
+    const textB = (elB.querySelector('.nav-user') as HTMLElement | null)?.textContent
+
+    expect(textA).toBe('…853b767f-u01')
+    expect(textB).toBe('…853b767f-u02')
+    expect(textA).not.toBe(textB)
+  })
+
+  it('renders a short account name unchanged, with title still present', async () => {
+    const shortEmail = 'a@b.io'
+    const token = fakeJwt({ email: shortEmail })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    const navUser = el.querySelector('.nav-user') as HTMLElement | null
+    expect(navUser?.getAttribute('title')).toBe(shortEmail)
+    expect(navUser?.textContent).toBe(shortEmail)
+  })
+
+  it('renders nothing when there is no account email (no title, no element)', async () => {
+    const token = fakeJwt({}) // no email claim
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    expect(el.querySelector('.nav-user')).toBeNull()
+  })
+})
+
+describe('App top-bar brand link (owner request 2026-09-14: brand goes back to the landing page)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/multitable'
+    mocks.route.fullPath = '/multitable'
+    mocks.route.meta = {}
+    mocks.focus.attendance = false
+    mocks.focus.plm = false
+    mocks.resolveHomePath.mockReturnValue('/home')
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    mocks.focus.attendance = false
+    mocks.focus.plm = false
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    await flushUi()
+    return container
+  }
+
+  function brandLink(root: HTMLDivElement): HTMLAnchorElement | null {
+    return root.querySelector('[data-testid="nav-brand-link"]') as HTMLAnchorElement | null
+  }
+
+  it('renders the brand as a router-link whose target is resolveHomePath() (platform mode: /home)', async () => {
+    const root = await mountApp()
+    const link = brandLink(root)
+    expect(link).not.toBeNull()
+    expect(link!.tagName).toBe('A')
+    expect(link!.getAttribute('href')).toBe('/home')
+    expect(link!.textContent?.trim()).toBe('MetaSheet')
+    expect(mocks.resolveHomePath).toHaveBeenCalled()
+  })
+
+  it('follows resolveHomePath() in a focused product mode instead of hard-coding /home', async () => {
+    mocks.focus.attendance = true
+    mocks.resolveHomePath.mockReturnValue('/attendance')
+    const root = await mountApp()
+    const link = brandLink(root)
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('href')).toBe('/attendance')
+    // brandText switches to the attendance label in focus mode — the link wraps whatever the brand says.
+    expect(link!.textContent?.trim()).not.toBe('')
+    expect(link!.textContent?.trim()).not.toBe('MetaSheet')
+  })
+
+  it('is absent when the navbar is hidden (guest routes keep no brand link)', async () => {
+    mocks.route.path = '/login'
+    mocks.route.fullPath = '/login'
+    mocks.route.meta = { hideNavbar: true, requiresGuest: true }
+    const root = await mountApp()
+    expect(brandLink(root)).toBeNull()
+  })
+})
+
+describe('App primary nav after the 外接数据源 fold (整合切片 2026-09-09)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/attendance'
+    mocks.route.fullPath = '/attendance'
+    mocks.route.meta = {}
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to, class: 'nav-link' }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+    return container
+  }
+
+  function navHrefs(el: HTMLElement): string[] {
+    return Array.from(el.querySelectorAll('.nav-links a')).map((anchor) => anchor.getAttribute('href') ?? '')
+  }
+
+  it('drops the /data-sources entry while keeping the 数据工厂 entry it folded into', async () => {
+    // Same principal the retired entry was gated on (integration:write) — so this is not "the
+    // link is missing because the gate is closed", it is "the link is gone for the very
+    // principal that used to see it, and its destination is still one click away".
+    const token = fakeJwt({ email: 'nav-probe@example.test' })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+    window.localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+
+    const el = await mountApp()
+    const hrefs = navHrefs(el)
+    expect(hrefs).toContain('/integrations/workbench')
+    expect(hrefs).not.toContain('/data-sources')
+    expect(el.querySelector('.nav-links a[href="/data-sources"]')).toBeNull()
+  })
+
+  it('renders no /data-sources entry for a principal without integration:write either', async () => {
+    const token = fakeJwt({ email: 'nav-probe@example.test' })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+    window.localStorage.setItem('user_permissions', JSON.stringify([]))
+
+    const el = await mountApp()
+    expect(navHrefs(el)).not.toContain('/data-sources')
   })
 })

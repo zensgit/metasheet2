@@ -1,15 +1,47 @@
 import { createRequire } from 'node:module'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Readable } from 'node:stream'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { validateAttendanceIanaTimezoneV1 } from '../../src/attendance/w4c1-strict-time'
+import { parseCanonicalAttendanceUserIdV1 } from '../../src/attendance/w4c0-identity'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
 } from '../../src/attendance/w4c3a-import-proof'
 
 const require = createRequire(import.meta.url)
+const fsp = require('node:fs/promises')
+const fs = require('node:fs')
+// These unit seams exercise scheduling/RBAC, not timezone source resolution.
+// Supply the trusted guard collaborator; native runtime tests prove its SQL/locks.
+const runtimeModule = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+const originalRuntimeFactory = runtimeModule.createAttendanceTimezoneRuntime
+const verifyTimezoneSource = vi.fn(async () => {})
+const prepareTimezoneSource = vi.fn(async (_trx: unknown, input: { orgId: string }) => {
+  expect(input.orgId).toBeTruthy()
+  return verifyTimezoneSource
+})
+runtimeModule.createAttendanceTimezoneRuntime = (deps: unknown) => ({
+  ...originalRuntimeFactory(deps),
+  prepareSourceChange: prepareTimezoneSource,
+})
+delete require.cache[require.resolve('../../../../plugins/plugin-attendance/index.cjs')]
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
+
+runtimeModule.createAttendanceTimezoneRuntime = originalRuntimeFactory
+afterAll(() => {
+  const key = require.resolve('../../../../plugins/plugin-attendance/index.cjs')
+  if (require.cache[key]?.exports === attendancePlugin) delete require.cache[key]
+})
 
 type RouteHandler = (req: any, res: any, next: any) => Promise<void>
 type CommitSyncImportPlan = (input: unknown) => Promise<unknown>
+
+const importEmployeeId = '00000000-0000-4000-8000-000000000421'
+const importEmployeeIdentifiers = [importEmployeeId, 'worker@example.test', 'worker-login', '+86 138-0000-0000']
 
 function syncImportResult(batchId: string, itemId: string) {
   return {
@@ -22,7 +54,7 @@ function syncImportResult(batchId: string, itemId: string) {
     recordUpsertStrategy: 'row',
     items: [{
       id: itemId,
-      userId: 'worker-1',
+      userId: importEmployeeId,
       workDate: '2026-06-10',
       engine: null,
     }],
@@ -77,6 +109,7 @@ async function createHarness(
   rbacBypass = 'true',
   commitSyncImportPlan?: CommitSyncImportPlan,
   attendanceW4SegmentCalculation?: Record<string, unknown>,
+  queue?: { add: ReturnType<typeof vi.fn> },
 ) {
   process.env.RBAC_BYPASS = rbacBypass
   process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED = 'false'
@@ -108,7 +141,41 @@ async function createHarness(
       },
     },
     services: {
+      queue,
+      // Product entry v2 phase A: plugin-attendance registers the two cancel-round routes only when
+      // core lends it this port. A stub that must never be reached — every case below is answered
+      // by the UUID guard before any lookup.
+      approvalCancelRoundEntry: {
+        canReadDocument: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        readRoundSummary: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        launch: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        // A2 / C2: the routes register only when all six methods are present.
+        decide: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        withdraw: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        // C2: all six methods, or none of the cancel-round routes registers.
+        listSeatedPendingRounds: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+      },
       attendanceW4SegmentCalculation: {
+        validateIanaTimezone: validateAttendanceIanaTimezoneV1,
+        // This UUID/RBAC harness represents the default organization only.
+        // Native approval-org tests exercise membership-based writer derivation.
+        deriveApprovalInstanceOrgIdForAttendanceSubjectV1: async ({ requestNamedOrgId }: { requestNamedOrgId: string | null }) =>
+          requestNamedOrgId === null || requestNamedOrgId === 'default'
+            ? { ok: true, orgId: 'default' }
+            : { ok: false, reason: 'selector_not_permitted' },
+
         resolveOrgSegmentCalculationPosture: async () => ({
           effectiveState: 'legacy',
           referenceSegments: false,
@@ -125,6 +192,7 @@ async function createHarness(
               routeVariant: input.routeVariant ?? null,
             }
             const adapter = adapters[input.kind]
+            await adapter.prepareIdentity(trx, input.routeInput, operation)
             const prepared = await adapter.prepare(trx, input.routeInput, operation)
             const result = await adapter.execute(trx, prepared, operation)
             return { kind: 'legacy', response: result.response }
@@ -574,6 +642,44 @@ function attendanceReadOnlyRbacQueryResult(sql: string, params: unknown[] = []) 
   return undefined
 }
 
+function expectActiveOrgMemberPredicate(sql: string) {
+  expect(sql).toContain('FROM user_orgs uo')
+  expect(sql).toContain('JOIN users u ON u.id = uo.user_id')
+  expect(sql).toContain('uo.org_id = $1')
+  expect(sql).toContain('uo.user_id = ANY($2::text[])')
+  expect(sql).toContain('uo.is_active = true')
+  expect(sql).toContain('u.is_active = true')
+  expect(sql).toContain('FOR SHARE OF uo, u')
+}
+
+function orgGateDetails(indexes: number[]) {
+  return [{
+    code: 'USER_NOT_IN_ORG',
+    rejectedCount: indexes.length,
+    indexes,
+  }]
+}
+
+function groupManagerProbeResult(
+  sql: string,
+  params: unknown[] = [],
+  options: { userId?: string; groupId?: string; managed?: boolean } = {},
+) {
+  if (!(sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1'))) return undefined
+  expect(params).toEqual(['default', options.groupId ?? attendanceGroupId, options.userId ?? 'owner-user-1'])
+  return options.managed === false ? [] : [{ ok: 1 }]
+}
+
+function importIdentifierQueryResult(sql: string, params: unknown[], identifier: string) {
+  if (!sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) return undefined
+  expect(sql).toContain('uo.org_id = $1')
+  expect(sql).toContain('uo.is_active = true')
+  expect(sql).toContain('u.is_active = true')
+  expect(params[0]).toBe('default')
+  expect(params[1]).toEqual([identifier])
+  return [{ id: importEmployeeId, email: 'worker@example.test', username: 'worker-login', mobile: '13800000000' }]
+}
+
 function actorContextQueryResult(sql: string) {
   if (sql.includes('SELECT name, role FROM users')) return [{ name: 'Scoped scheduler', role: null }]
   if (sql.includes('FROM attendance_group_members m')) return []
@@ -589,6 +695,7 @@ function requestDecisionIdentityQueryResult(
     permissions?: string[]
   } = {},
 ) {
+  if (sql === "SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'") return []
   if (sql.includes('SELECT id, org_id, user_id, approval_instance_id, request_type')) {
     return [attendanceRequestRow()]
   }
@@ -808,6 +915,7 @@ describe('attendance UUID route validation', () => {
     db.query.mockClear()
     db.query
       .mockResolvedValueOnce([{ id: groupId }])
+      .mockResolvedValueOnce([{ user_id: 'owner-user-1' }])
       .mockResolvedValueOnce([{ ...managerRow, role: 'sub_owner' }])
 
     const createRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
@@ -833,6 +941,7 @@ describe('attendance UUID route validation', () => {
       expect.stringContaining('attendance_group_managers'),
       ['default', groupId, 'owner-user-1', 'sub_owner', 'attendance-user-1'],
     )
+    expectActiveOrgMemberPredicate(db.query.mock.calls.map(call => String(call[0])).join('\n'))
 
     db.query.mockClear()
     db.query
@@ -879,17 +988,37 @@ describe('attendance UUID route validation', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
-  it('keeps attendance group member management admin-only in R0', async () => {
-    const { db, routes } = await createHarness('false')
-    const groupId = '00000000-0000-4000-8000-000000000101'
+  it('lets an owner add members of a managed group and emits a values-free change event', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    const groupId = attendanceGroupId
     const ownerUserId = 'owner-user-1'
+    const memberRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: groupId,
+      user_id: 'member-user-2',
+      created_at: '2026-05-30T10:00:00.000Z',
+      updated_at: '2026-05-30T10:00:00.000Z',
+    }
 
-    db.query.mockImplementation(async (sql: string) => {
-      const text = String(sql)
-      if (text.includes('FROM user_roles') && text.includes('role_id = $2')) return []
-      if (text.includes('FROM user_permissions')) return []
-      if (text.includes('JOIN role_permissions')) return []
-      throw new Error(`unexpected SQL: ${text}`)
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: ownerUserId, groupId, managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) {
+        expect(params).toEqual([groupId, 'default'])
+        return [{ id: groupId }]
+      }
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        expect(params).toEqual(['default', ['member-user-2']])
+        return [{ user_id: 'member-user-2' }]
+      }
+      if (sql.includes('INSERT INTO attendance_group_members')) {
+        expect(params).toEqual(['default', groupId, 'member-user-2'])
+        return [memberRow]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
     })
 
     const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
@@ -898,11 +1027,199 @@ describe('attendance UUID route validation', () => {
       user: { id: ownerUserId, orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
-    expect(db.transaction).not.toHaveBeenCalled()
-    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_managers')
-    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_members')
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'member-user-2' }] } })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).toContain("role IN ('owner', 'sub_owner')")
+    expectActiveOrgMemberPredicate(sql)
+    expect(eventEmit).toHaveBeenCalledWith('attendance.group.members.changed', {
+      orgId: 'default',
+      groupId,
+      actorId: ownerUserId,
+      action: 'add',
+      scope: 'managed',
+      count: 1,
+    })
+  })
+
+  // #6045 / #6047: inactive, other-org, and nonexistent ids are one predicate
+  // (no active user_orgs ∩ users row). The route must not distinguish them, and
+  // must not insert any roster row — including the valid ids in a mixed batch.
+  describe('attendance group roster active-org gate', () => {
+    const ownerUserId = 'owner-user-1'
+    const memberRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: attendanceGroupId,
+      user_id: 'member-user-2',
+      created_at: '2026-05-30T10:00:00.000Z',
+      updated_at: '2026-05-30T10:00:00.000Z',
+    }
+    const managerId = '00000000-0000-4000-8000-000000000201'
+    const createdAt = '2026-05-29T22:00:00.000Z'
+
+    function installOwnerMemberWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, false)
+        if (rbac !== undefined) return rbac
+        const probe = groupManagerProbeResult(sql, params, {
+          userId: ownerUserId,
+          groupId: attendanceGroupId,
+          managed: true,
+        })
+        if (probe !== undefined) return probe
+        if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          return requested
+            .filter((userId) => activeUserIds.includes(userId))
+            .map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('INSERT INTO attendance_group_members')) {
+          return [{ ...memberRow, user_id: params[2] }]
+        }
+        throw new Error(`unexpected SQL: ${sql}`)
+      })
+    }
+
+    function installAdminManagerWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          return requested
+            .filter((userId) => activeUserIds.includes(userId))
+            .map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('INSERT INTO attendance_group_managers')) {
+          return [{
+            id: managerId,
+            org_id: 'default',
+            group_id: attendanceGroupId,
+            user_id: params[2],
+            role: params[3],
+            created_by: params[4],
+            created_at: createdAt,
+            updated_at: createdAt,
+          }]
+        }
+        throw new Error(`unexpected SQL: ${sql}`)
+      })
+    }
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects an owner member add for %s without inserting', async (_label, userId) => {
+      const { db, eventEmit, routes } = await createHarness('false')
+      installOwnerMemberWriteMock(db, ['member-user-2'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+        params: { id: attendanceGroupId },
+        body: { userId },
+        user: { id: ownerUserId, orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: orgGateDetails([0]),
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(eventEmit).not.toHaveBeenCalled()
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects an admin manager add for %s without inserting', async (_label, userId) => {
+      const { db, routes } = await createHarness()
+      installAdminManagerWriteMock(db, ['owner-user-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+        params: { id: attendanceGroupId },
+        body: { userId, role: 'owner' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: orgGateDetails([0]),
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_managers')
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects a mixed member batch before inserting the valid id', async () => {
+      const { db, eventEmit, routes } = await createHarness('false')
+      installOwnerMemberWriteMock(db, ['member-user-2'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+        params: { id: attendanceGroupId },
+        body: { userIds: ['member-user-2', 'not-in-this-org'] },
+        user: { id: ownerUserId, orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: orgGateDetails([1]),
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      const membershipCall = db.query.mock.calls.find(([text]) => String(text).includes('FROM user_orgs uo'))
+      expect(membershipCall?.[1]).toEqual(['default', ['member-user-2', 'not-in-this-org']])
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(eventEmit).not.toHaveBeenCalled()
+    })
+
+    it('lets an admin add an active org member as a group manager', async () => {
+      const { db, routes } = await createHarness()
+      installAdminManagerWriteMock(db, ['owner-user-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+        params: { id: attendanceGroupId },
+        body: { userId: 'owner-user-1', role: 'owner' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: { userId: 'owner-user-1', role: 'owner', groupId: attendanceGroupId },
+      })
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO attendance_group_managers'),
+        ['default', attendanceGroupId, 'owner-user-1', 'owner', 'attendance-user-1'],
+      )
+      expectActiveOrgMemberPredicate(db.query.mock.calls.map(([text]) => String(text)).join('\n'))
+    })
   })
 
   it('preserves group-manager authorization for the independent team-availability read', async () => {
@@ -989,6 +1306,458 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('INSERT INTO attendance_group_managers')
   })
 
+  it('lists every attendance group for a full admin and stamps scope=org', async () => {
+    const { db, routes } = await createHarness('false')
+    const ownedGroupId = '00000000-0000-4000-8000-000000000101'
+    const otherGroupId = '00000000-0000-4000-8000-000000000102'
+    const groupRow = {
+      id: ownedGroupId,
+      org_id: 'default',
+      name: 'Ops Team',
+      code: 'ops-team',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      member_count: 2,
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_groups') && !sql.includes('attendance_group_managers')) {
+        return [{ total: 2 }]
+      }
+      if (sql.includes('FROM attendance_groups g') && !sql.includes('attendance_group_managers')) {
+        return [groupRow, { ...groupRow, id: otherGroupId, name: 'Other' }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: { total: 2, scope: 'org' },
+    })
+    expect((res.body as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual([ownedGroupId, otherGroupId])
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_group_managers')
+  })
+
+  it('scopes GET /api/attendance/groups to owner/sub_owner rows for a non-admin manager', async () => {
+    const { db, routes } = await createHarness('false')
+    const ownedGroupId = '00000000-0000-4000-8000-000000000101'
+    const groupRow = {
+      id: ownedGroupId,
+      org_id: 'default',
+      name: 'Owned Team',
+      code: 'owned',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      member_count: 1,
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (
+        sql.includes('SELECT group_id')
+        && sql.includes('FROM attendance_group_managers')
+        && !sql.includes('FROM attendance_groups')
+      ) {
+        expect(params).toEqual(['default', 'owner-user-1'])
+        return [{ group_id: ownedGroupId }]
+      }
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers')) {
+        expect(params).toEqual(['default', 'owner-user-1'])
+        return [{ total: 1 }]
+      }
+      if (sql.includes('FROM attendance_groups g') && sql.includes('attendance_group_managers') && sql.includes('LIMIT')) {
+        expect(params).toEqual(['default', 'owner-user-1', 50, 0])
+        return [groupRow]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: ownedGroupId }],
+        total: 1,
+        scope: 'managed',
+      },
+    })
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    // Mutation target: dropping the managers predicate makes this assertion fail.
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).toContain("m.role IN ('owner', 'sub_owner')")
+  })
+
+  it('returns 403 on GET /api/attendance/groups when the caller is neither admin nor a group manager', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT group_id') && sql.includes('FROM attendance_group_managers')) {
+        return []
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups', {
+      user: { id: 'bystander-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('returns 200 for GET /api/attendance/groups/:id when the caller manages that group', async () => {
+    const { db, routes } = await createHarness('false')
+    const groupRow = {
+      id: attendanceGroupId,
+      org_id: 'default',
+      name: 'Owned Team',
+      code: 'owned',
+      timezone: 'UTC',
+      rule_set_id: null,
+      description: 'unit-test',
+      attendance_type: 'fixed_shift',
+      created_at: '2026-05-29T20:00:00.000Z',
+      updated_at: '2026-05-29T20:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1')) {
+        expect(params).toEqual(['default', attendanceGroupId, 'owner-user-1'])
+        return [{ ok: 1 }]
+      }
+      if (sql.includes('FROM attendance_groups') && sql.includes('WHERE id = $1')) {
+        return [groupRow]
+      }
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) {
+        return [{ total: 3 }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: attendanceGroupId, memberCount: 3 } })
+  })
+
+  it('returns 403 before 404 on GET /api/attendance/groups/:id for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1')) {
+        return []
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('lists members for an owner of that group', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 1 }]
+      if (sql.includes('SELECT * FROM attendance_group_members')) {
+        return [{
+          id: scheduleGroupMemberId,
+          org_id: 'default',
+          group_id: attendanceGroupId,
+          user_id: 'worker-1',
+          created_at: '2026-05-30T10:00:00.000Z',
+          updated_at: '2026-05-30T10:00:00.000Z',
+        }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { total: 1, items: [{ userId: 'worker-1' }] } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).toContain('FROM attendance_group_managers')
+  })
+
+  it('returns 403 before 404 on GET members for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'not-a-manager', managed: false })
+      if (probe !== undefined) return probe
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('FROM attendance_groups')
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('attendance_group_members')
+  })
+
+  it('lets an owner remove a member of a managed group', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('DELETE FROM attendance_group_members')) {
+        expect(params).toEqual(['default', attendanceGroupId, 'worker-1'])
+        return [{ id: scheduleGroupMemberId }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/members/:userId', {
+      params: { id: attendanceGroupId, userId: 'worker-1' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: scheduleGroupMemberId } })
+    expect(eventEmit).toHaveBeenCalledWith('attendance.group.members.changed', {
+      orgId: 'default',
+      groupId: attendanceGroupId,
+      actorId: 'owner-user-1',
+      action: 'remove',
+      scope: 'managed',
+      count: 1,
+    })
+  })
+
+  it('lists the owner roster for a manager of that group without allowing roster writes', async () => {
+    const { db, routes } = await createHarness('false')
+    const managerRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: attendanceGroupId,
+      user_id: 'owner-user-1',
+      role: 'owner',
+      created_by: 'admin-1',
+      created_at: '2026-05-29T22:00:00.000Z',
+      updated_at: '2026-05-29T22:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) return [{ total: 1 }]
+      if (sql.includes('SELECT *') && sql.includes('FROM attendance_group_managers')) return [managerRow]
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const listRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(listRes.statusCode).toBe(200)
+    expect(listRes.body).toMatchObject({ ok: true, data: { total: 1, items: [{ userId: 'owner-user-1', role: 'owner' }] } })
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const writeRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      body: { userId: 'owner-user-2', role: 'sub_owner' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(writeRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('INSERT INTO attendance_group_managers')
+  })
+
+  it('returns 403 before 404 on GET managers for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'not-a-manager', managed: false })
+      if (probe !== undefined) return probe
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('lets an owner preview a fixed schedule for a managed group without applying it', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      const fixedSchedule = fixedScheduleQueryResult(sql)
+      if (fixedSchedule.handled) return fixedSchedule.rows
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/preview', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true })
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(eventEmit).not.toHaveBeenCalled()
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).not.toContain('INSERT INTO attendance_shift_assignments')
+  })
+
+  it('keeps group CRUD and fixed-schedule apply admin-or-scheduler-only for a group owner', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const putRes = await invokeRoute(routes, 'PUT /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      body: { name: 'Renamed' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(putRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('UPDATE attendance_groups')
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const deleteRes = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(deleteRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('DELETE FROM attendance_groups')
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return []
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const applyRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/apply', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(applyRes.statusCode).toBe(403)
+    expect(applyRes.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 when attendance_group_managers is missing on a scoped member write', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers')) {
+        const error = new Error('relation "attendance_group_managers" does not exist')
+        ;(error as { code?: string }).code = '42P01'
+        throw error
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      body: { userId: 'member-user-2' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'DB_NOT_READY' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 when attendance_group_managers is missing on scoped group get', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers')) {
+        const error = new Error('relation "attendance_group_managers" does not exist')
+        ;(error as { code?: string }).code = '42P01'
+        throw error
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'DB_NOT_READY' } })
+  })
+
   it('rejects malformed route UUID params before hitting the database', async () => {
     const { db, routes } = await createHarness()
     const cases = [
@@ -997,6 +1766,10 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/requests/:id/approve' },
       { key: 'POST /api/attendance/requests/:id/reject' },
       { key: 'POST /api/attendance/requests/:id/cancel' },
+      { key: 'GET /api/attendance/requests/:id/cancel-round' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round/actions' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round/withdraw' },
       { key: 'DELETE /api/attendance/requests/:id' },
       { key: 'PUT /api/attendance/integrations/:id' },
       { key: 'DELETE /api/attendance/integrations/:id' },
@@ -1203,6 +1976,7 @@ describe('attendance UUID route validation', () => {
     })
 
     db.query.mockImplementation(async (sql: string) => {
+      if (sql === "SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'") return []
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
@@ -1238,8 +2012,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'worker-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(409)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(409)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'W4C3B_REQUEST_SNAPSHOT_EXPECTED_VERSION_CONFLICT' },
     })
@@ -1291,8 +2065,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'approver-1', orgId: 'default', roles: ['admin'] },
     })
 
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(500)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'APPROVAL_RECORD_ID_MISSING' },
     })
@@ -1338,8 +2112,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'approver-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'FORBIDDEN' },
     })
@@ -1389,8 +2163,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: true,
       data: {
         requestId: attendanceRequestId,
@@ -1446,8 +2220,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     const statements = db.query.mock.calls.map(([sql]) => String(sql))
     expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(true)
     expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances') && sql.includes('FOR UPDATE'))).toBe(false)
@@ -1460,6 +2234,12 @@ describe('attendance UUID route validation', () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('SELECT u.id FROM users u JOIN user_orgs') && sql.includes('ANY($2::text[])')) {
+        expect(params).toEqual(['default',['scheduler-1','worker-1']])
+        return [{id:'scheduler-1'},{id:'worker-1'}]
+      }
+      if (sql.includes('FROM attendance_timezone_context_companions')) return []
+
       const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
       const actor = actorContextQueryResult(sql)
@@ -1485,10 +2265,11 @@ describe('attendance UUID route validation', () => {
         format: 'json',
       },
       user: { id: 'scheduler-1', orgId: 'default' },
+      authenticatedTenantId: 'default',
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: true,
       data: {
         total: 1,
@@ -1551,10 +2332,11 @@ describe('attendance UUID route validation', () => {
         format: 'json',
       },
       user: { id: 'scheduler-1', orgId: 'default' },
+      authenticatedTenantId: 'default',
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records ar'))).toBe(false)
   })
 
@@ -1590,12 +2372,14 @@ describe('attendance UUID route validation', () => {
     )
   })
 
-  it('lets scoped non-admin schedulers preview import rows inside their import scope', async () => {
+  it.each(importEmployeeIdentifiers)('lets scoped non-admin schedulers preview import rows inside their import scope (%s)', async (identifier) => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      const identity = importIdentifierQueryResult(sql, params, identifier)
+      if (identity !== undefined) return identity
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
@@ -1616,7 +2400,7 @@ describe('attendance UUID route validation', () => {
       body: {
         rows: [
           {
-            userId: 'worker-1',
+            userId: identifier,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -1628,6 +2412,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -1636,7 +2421,7 @@ describe('attendance UUID route validation', () => {
         rowCount: 1,
         items: [
           {
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
           },
         ],
@@ -1644,7 +2429,7 @@ describe('attendance UUID route validation', () => {
     })
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+      ['default', importEmployeeId, '2026-06-10', '2026-06-10'],
     )
   })
 
@@ -1679,7 +2464,7 @@ describe('attendance UUID route validation', () => {
       body: {
         rows: [
           {
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -1695,16 +2480,20 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+      ['default', importEmployeeId, '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_rules'))).toBe(false)
   })
 
-  it('lets scoped non-admin schedulers commit import rows inside their import scope', async () => {
-    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
-      '00000000-0000-4000-8000-000000000411',
-      '00000000-0000-4000-8000-000000000401',
-    ))
+  it.each(importEmployeeIdentifiers)('lets scoped non-admin schedulers commit import rows inside their import scope (%s)', async (identifier) => {
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      )
+    })
     const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
@@ -1714,6 +2503,8 @@ describe('attendance UUID route validation', () => {
         : ((query as { values?: unknown[] })?.values ?? paramsArg)
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      const identity = importIdentifierQueryResult(sql, params, identifier)
+      if (identity !== undefined) return identity
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
@@ -1736,7 +2527,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('INSERT INTO attendance_records')) {
         return [{
           id: '00000000-0000-4000-8000-000000000401',
-          user_id: 'worker-1',
+          user_id: importEmployeeId,
           work_date: '2026-06-10',
         }]
       }
@@ -1748,7 +2539,7 @@ describe('attendance UUID route validation', () => {
       body: {
         rows: [
           {
-            userId: 'worker-1',
+            userId: identifier,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -1760,6 +2551,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -1771,12 +2563,15 @@ describe('attendance UUID route validation', () => {
         items: [
           {
             id: '00000000-0000-4000-8000-000000000401',
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
           },
         ],
       },
     })
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      recordWrites: [expect.objectContaining({ userId: importEmployeeId })],
+    }))
     expect(db.transaction).toHaveBeenCalledTimes(1)
     expect(db.query).not.toHaveBeenCalledWith(
       'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
@@ -1829,7 +2624,7 @@ describe('attendance UUID route validation', () => {
         commitToken: 'commit-token-1',
         rows: [
           {
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -1845,7 +2640,7 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+      ['default', importEmployeeId, '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_import_tokens'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_import_batches'))).toBe(false)
@@ -1891,7 +2686,7 @@ describe('attendance UUID route validation', () => {
         idempotencyKey: 'repeat-scope',
         rows: [
           {
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -1917,7 +2712,7 @@ describe('attendance UUID route validation', () => {
     expect(batchLookups).toBe(1)
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+      ['default', importEmployeeId, '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('DELETE FROM attendance_import_tokens'))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
@@ -1967,11 +2762,15 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
-  it('lets scoped non-admin schedulers run legacy import rows inside their import scope', async () => {
-    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
-      '00000000-0000-4000-8000-000000000412',
-      '00000000-0000-4000-8000-000000000402',
-    ))
+  it.each(importEmployeeIdentifiers)('lets scoped non-admin schedulers run legacy import rows inside their import scope (%s)', async (identifier) => {
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult(
+        '00000000-0000-4000-8000-000000000412',
+        '00000000-0000-4000-8000-000000000402',
+      )
+    })
     const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
@@ -1981,6 +2780,8 @@ describe('attendance UUID route validation', () => {
         : ((query as { values?: unknown[] })?.values ?? paramsArg)
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      const identity = importIdentifierQueryResult(sql, params, identifier)
+      if (identity !== undefined) return identity
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
@@ -2002,7 +2803,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('INSERT INTO attendance_records')) {
         return [{
           id: '00000000-0000-4000-8000-000000000402',
-          user_id: 'worker-1',
+          user_id: importEmployeeId,
           work_date: '2026-06-10',
         }]
       }
@@ -2013,7 +2814,7 @@ describe('attendance UUID route validation', () => {
       body: {
         rows: [
           {
-            userId: 'worker-1',
+            userId: identifier,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -2025,6 +2826,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -2036,12 +2838,15 @@ describe('attendance UUID route validation', () => {
         items: [
           {
             id: '00000000-0000-4000-8000-000000000402',
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
           },
         ],
       },
     })
+    expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+      recordWrites: [expect.objectContaining({ userId: importEmployeeId })],
+    }))
     expect(db.transaction).toHaveBeenCalledTimes(1)
     expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
       orgId: 'default',
@@ -2084,7 +2889,7 @@ describe('attendance UUID route validation', () => {
       body: {
         rows: [
           {
-            userId: 'worker-1',
+            userId: importEmployeeId,
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -2100,11 +2905,747 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT DISTINCT m.schedule_group_id'),
-      ['default', 'worker-1', '2026-06-10', '2026-06-10'],
+      ['default', importEmployeeId, '2026-06-10', '2026-06-10'],
     )
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_rules'))).toBe(false)
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO attendance_records'))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  describe('csv import group-member active-org gate', () => {
+    const memberWarning = 'Target user is not an active member of this org'
+
+    function importAssignRow(userId: string, workDate = '2026-06-10', extras: Record<string, unknown> = {}) {
+      return {
+        userId,
+        workDate,
+        fields: {
+          attendanceGroup: 'Day Shift',
+          firstInAt: `${workDate}T09:00:00.000Z`,
+          lastOutAt: `${workDate}T18:00:00.000Z`,
+        },
+        ...extras,
+      }
+    }
+
+    function sqlText(query: unknown) {
+      return typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+    }
+
+    function queryParams(query: unknown, paramsArg: unknown[]) {
+      return typeof query === 'string'
+        ? paramsArg
+        : ((query as { values?: unknown[] })?.values ?? paramsArg)
+    }
+
+    function installImportPipelineMock(
+      db: { query: { mockImplementation: (impl: (query: unknown, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[] | null,
+      options: { groups?: Array<{ id: string; name: string }>; aliases?: Array<{ id: string; email?: string; username?: string; mobile?: string }> } = {},
+    ) {
+      db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+        const sql = sqlText(query)
+        const params = queryParams(query, paramsArg)
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        const actor = actorContextQueryResult(sql)
+        if (actor !== undefined) return actor
+        if (sql.includes('FROM users u') && sql.includes('JOIN user_orgs uo')) return options.aliases ?? []
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          if (activeUserIds === null) throw new Error(`unexpected membership query: ${sql}`)
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          const active = new Set(activeUserIds)
+          return requested.filter((userId) => active.has(userId)).map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('SELECT id, name, code, rule_set_id FROM attendance_groups')) {
+          return (options.groups ?? []).map((group) => ({
+            id: group.id,
+            name: group.name,
+            code: null,
+            rule_set_id: null,
+          }))
+        }
+        if (sql.includes('FROM attendance_scheduler_scopes')) return []
+        if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+        if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return []
+        if (sql.includes('FROM attendance_rules')) return []
+        if (sql.includes('SELECT value FROM system_configs')) return []
+        if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+        if (sql.includes('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')) return []
+        if (sql.includes('SET LOCAL statement_timeout')) return []
+        if (sql.includes('INSERT INTO attendance_import_batches')) return []
+        if (sql.includes('FROM attendance_holidays')) return []
+        if (sql.includes('FROM attendance_shift_assignments')) return []
+        if (sql.includes('FROM attendance_rotation_assignments')) return []
+        if (sql.includes('FROM attendance_records') && sql.includes('last_out_at IS NULL')) return []
+        if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return []
+        if (sql.includes('FROM attendance_records ar')) return []
+        if (sql.includes('INSERT INTO attendance_records')) {
+          return [{
+            id: '00000000-0000-4000-8000-000000000401',
+            user_id: '00000000-0000-4000-8000-000000000421',
+            work_date: '2026-06-10',
+          }]
+        }
+        if (sql.includes('INSERT INTO attendance_import_items')) return []
+        if (sql.includes('INSERT INTO attendance_group_members')) {
+          throw new Error('attendance_group_members insert must not run before the org gate')
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      })
+    }
+
+    function expectMemberNotInOrg(res: { statusCode: number; body: unknown }, indexes: number[]) {
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: memberWarning,
+          details: orgGateDetails(indexes),
+        },
+      })
+      expect(JSON.stringify(res.body)).not.toContain('userId')
+    }
+
+    it.each([
+      ['inactive user', '00000000-0000-4000-8000-000000000423'],
+      ['user from another org', '00000000-0000-4000-8000-000000000424'],
+      ['nonexistent user', '00000000-0000-4000-8000-000000000422'],
+    ])('preview rejects auto-assign for %s with a per-row warning and does not succeed', async (_label, userId) => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow(userId)],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('FROM attendance_holidays')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+
+    it('preview rejects a mixed auto-assign batch and reports only the rejected rows', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-10'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-11'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-12'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [1, 2])
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('uo.user_id = ANY($2::text[])'),
+        ['default', ['00000000-0000-4000-8000-000000000421', '00000000-0000-4000-8000-000000000425']],
+      )
+    })
+
+    it('preview reports one skipped-row detail when the same inactive user is duplicated', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [
+            importAssignRow('00000000-0000-4000-8000-000000000422'),
+            importAssignRow('00000000-0000-4000-8000-000000000422'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+    })
+
+    it('preview does not gate a row that would not be assigned', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, null)
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [{
+            userId: '00000000-0000-4000-8000-000000000422',
+            workDate: '2026-06-10',
+            fields: {
+              firstInAt: '2026-06-10T09:00:00.000Z',
+              lastOutAt: '2026-06-10T18:00:00.000Z',
+            },
+          }],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          items: [{ userId: '00000000-0000-4000-8000-000000000422', workDate: '2026-06-10' }],
+        },
+      })
+    })
+
+    it('preview leaves unknown groups ungated when auto-create is off', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, null)
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
+          groupSync: { autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          groupWarnings: ['Attendance group not found: Day Shift'],
+        },
+      })
+    })
+
+    it('preview still gates an existing group when auto-create is off', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [], { groups: [{ id: attendanceGroupId, name: 'Day Shift' }] })
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
+          groupSync: { autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+    })
+
+    it('rejects preview when the org selector is not the authenticated org', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          orgId: 'org-b',
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Organization not found' },
+      })
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expect(sql).not.toContain('FROM user_orgs uo')
+
+      const queryRes = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        query: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(queryRes.statusCode).toBe(404)
+      expect(queryRes.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND' },
+      })
+    })
+
+    it('preview accepts an active org member for auto-assign', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          items: [{ userId: '00000000-0000-4000-8000-000000000421', workDate: '2026-06-10' }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+    })
+
+    it.each([
+      ['inactive user', '00000000-0000-4000-8000-000000000423'],
+      ['user from another org', '00000000-0000-4000-8000-000000000424'],
+      ['nonexistent user', '00000000-0000-4000-8000-000000000422'],
+    ])('commit rejects auto-assign for %s before the sync plan and inserts no members', async (_label, userId) => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [importAssignRow(userId)],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+      expect(commitSyncImportPlan).not.toHaveBeenCalled()
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(sql).not.toContain('INSERT INTO attendance_records')
+    })
+
+    it('commit rejects a mixed auto-assign batch with no partial member plan', async () => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-10'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-11'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [1])
+      expect(commitSyncImportPlan).not.toHaveBeenCalled()
+      expect(db.query.mock.calls.map(([query]) => sqlText(query)).some((sql) => sql.includes('INSERT INTO attendance_group_members'))).toBe(false)
+    })
+
+    it('commit still plans ensure_member for an active org member', async () => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [
+            importAssignRow('00000000-0000-4000-8000-000000000421'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-11', { fields: { firstInAt: '2026-06-11T09:00:00.000Z', lastOutAt: '2026-06-11T18:00:00.000Z' } }),
+            importAssignRow('00000000-0000-4000-8000-000000000421'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-12'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+        groupEffects: expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'ensure_member',
+            userId: '00000000-0000-4000-8000-000000000421',
+            groupRef: 'day shift',
+            sourceOrdinals: [0, 3],
+          }),
+        ]),
+      }))
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+
+    it.each([
+      [false, false, true],
+      [true, true, true],
+      [true, false, false],
+    ])('uploaded async preview streams only when autoAssign=%s (active=%s)', async (autoAssignMembers, active, enqueued) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const { db, routes } = await createHarness('true', undefined, undefined, queue)
+      installImportPipelineMock(db, active ? ['00000000-0000-4000-8000-000000000421'] : [])
+      const pipelineQuery = db.query.getMockImplementation()!
+      db.query.mockImplementation(async (query: unknown, params: unknown[] = []) => {
+        const sql = sqlText(query)
+        if (sql.includes('INSERT INTO attendance_import_jobs')) return []
+        if (sql.includes('FROM attendance_import_jobs AS job')) {
+          return [{ id: params[0], org_id: 'default', status: 'queued', total: 4, payload: {} }]
+        }
+        return pipelineQuery(query, params)
+      })
+      const csv = [
+        'userId,workDate,attendanceGroup,firstInAt,lastOutAt',
+        '00000000-0000-4000-8000-000000000421,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-11,,2026-06-11T09:00:00.000Z,2026-06-11T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-12,Day Shift,2026-06-12T09:00:00.000Z,2026-06-12T18:00:00.000Z',
+      ].join('\n')
+      const readFile = vi.spyOn(fsp, 'readFile').mockImplementation(async (file: unknown) => {
+        if (String(file).endsWith('.json')) return JSON.stringify({ rowCount: 4, kind: 'csv' })
+        return csv
+      })
+      const stream = vi.spyOn(fs, 'createReadStream').mockImplementation(() => Readable.from([csv]))
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview-async', {
+        body: {
+          csvFileId: '00000000-0000-4000-8000-000000000499',
+          csvOptions: { headerRowIndex: 0 },
+          groupSync: { autoCreate: true, autoAssignMembers },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      if (enqueued) {
+        expect(res.statusCode).toBe(200)
+        expect(res.body).toMatchObject({ ok: true, data: { job: { status: 'queued', total: 4 } } })
+        expect(queue.add).toHaveBeenCalledTimes(1)
+      } else {
+        expectMemberNotInOrg(res, [0, 3])
+        expect(queue.add).not.toHaveBeenCalled()
+      }
+      expect(readFile.mock.calls.filter(([file]) => String(file).endsWith('.csv'))).toEqual([])
+      expect(stream).toHaveBeenCalledTimes(autoAssignMembers ? 2 : 0)
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      if (autoAssignMembers) expectActiveOrgMemberPredicate(sql)
+      else expect(sql).not.toContain('FROM user_orgs uo')
+      expect(sql.includes('INSERT INTO attendance_import_jobs')).toBe(enqueued)
+    })
+
+    it.each([
+      ['POST /api/attendance/import/preview', 'worker@example.test'],
+      ['POST /api/attendance/import/preview', 'worker-login'],
+      ['POST /api/attendance/import/preview', '+86 138-0000-0000'],
+      ['POST /api/attendance/import/commit', 'worker@example.test'],
+      ['POST /api/attendance/import/commit', 'worker-login'],
+      ['POST /api/attendance/import/commit', '+86 138-0000-0000'],
+      ['POST /api/attendance/import/preview-async', 'worker@example.test'],
+      ['POST /api/attendance/import/preview-async', 'worker-login'],
+      ['POST /api/attendance/import/preview-async', '+86 138-0000-0000'],
+    ])('uses the canonical member id for auto-assignment (%s, %s)', async (route, identifier) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const commit = vi.fn(async () => syncImportResult(attendanceGroupId, importEmployeeId))
+      const { db, routes } = await createHarness('true', commit, undefined, queue)
+      installImportPipelineMock(db, [importEmployeeId], {
+        aliases: [{ id: importEmployeeId, email: 'worker@example.test', username: 'worker-login', mobile: '+86 13800000000' }],
+      })
+      const pipelineQuery = db.query.getMockImplementation()!
+      db.query.mockImplementation(async (query: unknown, params: unknown[] = []) => {
+        const sql = sqlText(query)
+        if (sql.includes('INSERT INTO attendance_import_jobs')) return []
+        if (sql.includes('FROM attendance_import_jobs AS job')) return [{ id: params[0], org_id: 'default', status: 'queued', total: 1, payload: {} }]
+        return pipelineQuery(query, params)
+      })
+      const res = await invokeRoute(routes, route, {
+        body: { rows: [importAssignRow(identifier)], groupSync: { autoCreate: true, autoAssignMembers: true } },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expect(res.statusCode).toBe(200)
+      const membershipCalls = db.query.mock.calls.filter(([query]) => sqlText(query).includes('FROM user_orgs uo'))
+      expect(membershipCalls.length).toBeGreaterThan(0)
+      for (const [query, params] of membershipCalls) expect(queryParams(query, params)).toEqual(['default', [importEmployeeId]])
+      if (route.endsWith('preview-async')) expect(queue.add).toHaveBeenCalledTimes(1)
+      else if (route.endsWith('commit')) expect(commit).toHaveBeenCalledWith(expect.objectContaining({
+        groupEffects: expect.arrayContaining([expect.objectContaining({ kind: 'ensure_member', userId: importEmployeeId, sourceOrdinals: [0] })]),
+      }))
+      else expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: importEmployeeId }] } })
+    })
+
+    it.each([
+      'POST /api/attendance/import/preview',
+      'POST /api/attendance/import/commit',
+      'POST /api/attendance/import/preview-async',
+    ])('rechecks membership after alias lookup before auto-assignment (%s)', async (route) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const commit = vi.fn()
+      const { db, routes } = await createHarness('true', commit, undefined, queue)
+      installImportPipelineMock(db, [], { aliases: [{ id: importEmployeeId, email: 'worker@example.test' }] })
+      const res = await invokeRoute(routes, route, {
+        body: { rows: [importAssignRow('worker@example.test')], groupSync: { autoCreate: true, autoAssignMembers: true } },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expectMemberNotInOrg(res, [0])
+      expect(commit).not.toHaveBeenCalled()
+      expect(queue.add).not.toHaveBeenCalled()
+      expect(db.query.mock.calls.some(([query]) => sqlText(query).includes('INSERT INTO attendance_group_members'))).toBe(false)
+    })
+
+    it('async preview rejects an inactive auto-assign user before inserting a job', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview-async', {
+        body: {
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_import_jobs')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('rejects unresolved, inactive, foreign, or ambiguous aliases before import work (%s)', async (route) => {
+    for (const reason of ['missing', 'inactive-user', 'inactive-membership', 'foreign-org', 'ambiguous']) {
+      const commitSyncImportPlan = vi.fn()
+      const { db, routes } = await createHarness('false', commitSyncImportPlan)
+      const identifier = 'blocked@example.test'
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params)
+        if (rbac !== undefined) return rbac
+        const actor = actorContextQueryResult(sql)
+        if (actor !== undefined) return actor
+        if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+        if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
+          expect(sql).toContain('uo.org_id = $1')
+          expect(sql).toContain('uo.is_active = true')
+          expect(sql).toContain('u.is_active = true')
+          expect(params[0]).toBe('default')
+          const candidates = reason === 'missing' ? [] : [
+            { id: importEmployeeId, email: identifier, username: null, mobile: null, orgId: reason === 'foreign-org' ? 'another-org' : 'default', userActive: reason !== 'inactive-user', membershipActive: reason !== 'inactive-membership' },
+            ...(reason === 'ambiguous' ? [{ id: '00000000-0000-4000-8000-000000000422', email: null, username: identifier, mobile: null, orgId: 'default', userActive: true, membershipActive: true }] : []),
+          ]
+          return candidates.filter(user => user.orgId === params[0] && user.userActive && user.membershipActive)
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      })
+      const res = await invokeRoute(routes, route, {
+        body: { commitToken: 'must-not-consume', rows: [
+          { userId: importEmployeeId, workDate: '2026-06-10', fields: {} },
+          { userId: identifier, workDate: '2026-06-10', fields: {} },
+        ] },
+        user: { id: 'scheduler-1', orgId: 'default' },
+      })
+      expect(res.statusCode, `${route}: ${reason}`).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' } })
+      expect(db.query.mock.calls.some(([sql]) => String(sql).includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
+      expect(db.query.mock.calls.some(([sql]) => String(sql).includes('FROM attendance_rules'))).toBe(false)
+      expect(db.query.mock.calls.some(([sql]) => String(sql).includes('DELETE FROM attendance_import_tokens'))).toBe(false)
+      expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+      expect(db.transaction).not.toHaveBeenCalled()
+      expect(commitSyncImportPlan).not.toHaveBeenCalled()
+      await attendancePlugin.deactivate()
+    }
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('rejects missing identity authorization schema with a fixed response (%s)', async (route) => {
+    const commitSyncImportPlan = vi.fn()
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
+        throw Object.assign(new Error('private database error'), { code: '42703' })
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+    const res = await invokeRoute(routes, route, {
+      body: { rows: [{ userId: 'worker@example.test', workDate: '2026-06-10', fields: {} }] },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toEqual({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(1)
+    expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(commitSyncImportPlan).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('rejects unknown opaque targets before scope or W4 writes (%s)', async (route) => {
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult('00000000-0000-4000-8000-000000000441', '00000000-0000-4000-8000-000000000442')
+    })
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
+        expect(params[0]).toBe('default')
+        expect(params[1]).toEqual(['worker-1'])
+        return []
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+    const res = await invokeRoute(routes, route, {
+      body: { commitToken: 'must-not-consume', rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }] },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' },
+    })
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(1)
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
+    expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(commitSyncImportPlan).not.toHaveBeenCalled()
+    // The current W4 host contract is the counter-control for the remote passthrough rationale.
+    expect(() => parseCanonicalAttendanceUserIdV1('worker-1')).toThrowError('W4C0_USER_ID_INVALID')
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('checks actor import capability before querying aliases (%s)', async (route) => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+    const res = await invokeRoute(routes, route, {
+      body: { rows: [{ userId: 'worker@example.test', workDate: '2026-06-10', fields: {} }] },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('uses the uploaded CSV for scope and execution when rows are also supplied (%s)', async (route) => {
+    const uploadDir = await mkdtemp(join(tmpdir(), 'attendance-import-source-'))
+    const originalUploadDir = process.env.ATTENDANCE_IMPORT_UPLOAD_DIR
+    process.env.ATTENDANCE_IMPORT_UPLOAD_DIR = uploadDir
+    const fileId = '00000000-0000-4000-8000-000000000431'
+    const outsideUserId = '00000000-0000-4000-8000-000000000432'
+    await mkdir(join(uploadDir, 'default'))
+    try {
+      for (const { csvAllowed, rowCount } of [{ csvAllowed: false, rowCount: 1 }, { csvAllowed: true, rowCount: 1 }, { csvAllowed: true, rowCount: 500001 }]) {
+        const csvUserId = csvAllowed ? importEmployeeId : outsideUserId
+        const rowUserId = csvAllowed ? outsideUserId : importEmployeeId
+        const csvText = `UserId,Date,ClockIn,ClockOut\n${csvUserId},2026-06-10,2026-06-10 09:00,2026-06-10 18:00\n`
+        await writeFile(join(uploadDir, 'default', `${fileId}.csv`), csvText)
+        await writeFile(join(uploadDir, 'default', `${fileId}.json`), JSON.stringify({ createdAt: new Date().toISOString(), rowCount, bytes: Buffer.byteLength(csvText) }))
+        const commitSyncImportPlan = vi.fn(async () => syncImportResult('00000000-0000-4000-8000-000000000433', '00000000-0000-4000-8000-000000000434'))
+        const { db, routes } = await createHarness('false', commitSyncImportPlan)
+        db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+          const sql = typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+          const params = typeof query === 'string' ? paramsArg : ((query as { values?: unknown[] })?.values ?? paramsArg)
+          const rbac = rbacQueryResult(sql, params)
+          if (rbac !== undefined) return rbac
+          const actor = actorContextQueryResult(sql)
+          if (actor !== undefined) return actor
+          if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+          if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+          if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
+            expect(params[1]).toBe(csvUserId)
+            return csvAllowed ? [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }] : []
+          }
+          if (/^SET LOCAL statement_timeout = [0-9]+$/.test(sql)) return []
+          if (sql.includes('FROM attendance_rules')) return []
+          if (sql.includes('SELECT value FROM system_configs')) return []
+          if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+          if (sql.includes('FROM attendance_holidays')) return []
+          if (sql.includes('FROM attendance_shift_assignments')) return []
+          if (sql.includes('FROM attendance_rotation_assignments')) return []
+          if (sql.includes('FROM attendance_records') && sql.includes('last_out_at IS NULL')) return []
+          if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return []
+          if (sql.includes('FROM attendance_records ar')) return []
+          throw new Error(`unexpected query: ${sql}`)
+        })
+        const res = await invokeRoute(routes, route, {
+          body: { csvFileId: fileId, rows: [{ userId: rowUserId, workDate: '2026-06-10', fields: {} }] },
+          user: { id: 'scheduler-1', orgId: 'default' },
+        })
+        expect(res.statusCode, `${route}: CSV allowed ${csvAllowed}, rows ${rowCount}`).toBe(rowCount > 1 ? 400 : (csvAllowed ? 200 : 403))
+        if (!csvAllowed || rowCount > 1) {
+          expect(res.body).toMatchObject({ ok: false, error: { code: rowCount > 1 ? 'CSV_TOO_LARGE' : 'SCHEDULER_SCOPE_FORBIDDEN' } })
+          expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+          expect(db.transaction).not.toHaveBeenCalled()
+          expect(commitSyncImportPlan).not.toHaveBeenCalled()
+        } else if (route.endsWith('/preview')) {
+          expect(res.body).toMatchObject({ ok: true, data: { items: [expect.objectContaining({ userId: importEmployeeId })] } })
+        } else {
+          expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({ recordWrites: [expect.objectContaining({ userId: importEmployeeId })] }))
+        }
+        await attendancePlugin.deactivate()
+      }
+    } finally {
+      await attendancePlugin.deactivate()
+      restoreEnv('ATTENDANCE_IMPORT_UPLOAD_DIR', originalUploadDir)
+      await rm(uploadDir, { recursive: true, force: true })
+    }
+  })
+
+  it('counts entries when an empty CSV string is also supplied', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      throw new Error(`unexpected query: ${sql}`)
+    })
+    const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+      body: { csvText: '', entries: Array.from({ length: 50001 }, () => ({})) },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'IMPORT_TOO_LARGE_FOR_SYNC' } })
+    expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+
   })
 
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
@@ -2114,6 +3655,9 @@ describe('attendance UUID route validation', () => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
       if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        return [{ user_id: 'worker-1' }]
+      }
       if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
       if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
       throw new Error(`unexpected query: ${sql}`)
@@ -2129,6 +3673,9 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'worker-1' }] } })
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    const membershipSql = db.query.mock.calls.map(([text]) => String(text)).find((text) => text.includes('FROM user_orgs uo'))
+    expect(membershipSql).toEqual(expect.any(String))
+    expectActiveOrgMemberPredicate(String(membershipSql))
   })
 
   it('lets scoped non-admin schedulers add members inside their scheduler scope', async () => {
@@ -2141,6 +3688,9 @@ describe('attendance UUID route validation', () => {
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
       if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        return [{ user_id: 'worker-1' }]
+      }
       if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
       if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
       throw new Error(`unexpected query: ${sql}`)
@@ -2159,6 +3709,86 @@ describe('attendance UUID route validation', () => {
       ['default', 'scheduler-1', [], []],
     )
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    const membershipSql = db.query.mock.calls.map(([text]) => String(text)).find((text) => text.includes('FROM user_orgs uo'))
+    expect(membershipSql).toEqual(expect.any(String))
+    expectActiveOrgMemberPredicate(String(membershipSql))
+  })
+
+  describe('schedule group member active-org gate', () => {
+    function installScheduleMemberWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          const active = new Set(activeUserIds)
+          return requested.filter((userId) => active.has(userId)).map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('pg_advisory_xact_lock')) return []
+        if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
+        if (sql.includes('INSERT INTO attendance_schedule_group_members')) {
+          return [scheduleGroupMemberRow({ user_id: params[2] })]
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      })
+    }
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects a schedule-group member add for %s without inserting', async (_label, userId) => {
+      const { db, routes } = await createHarness('false')
+      installScheduleMemberWriteMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+        params: { id: scheduleGroupId },
+        body: { userIds: [userId], effectiveFrom: '2026-06-01' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: orgGateDetails([0]),
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_schedule_group_members')
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects a mixed schedule-group member batch before inserting the valid id', async () => {
+      const { db, routes } = await createHarness('false')
+      installScheduleMemberWriteMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+        params: { id: scheduleGroupId },
+        body: { userIds: ['worker-1', 'not-in-this-org'], effectiveFrom: '2026-06-01' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          details: orgGateDetails([1]),
+        },
+      })
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('uo.user_id = ANY($2::text[])'),
+        ['default', ['worker-1', 'not-in-this-org']],
+      )
+      expect(db.query.mock.calls.map(([text]) => String(text)).some((text) => text.includes('INSERT INTO attendance_schedule_group_members'))).toBe(false)
+    })
   })
 
   it('rejects member dispatch outside scheduler scope and does not write', async () => {
@@ -2895,8 +4525,14 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_shift_assignments a') && sql.includes('JOIN attendance_shifts')) {
         expect(sql).toContain('EXISTS')
         expect(sql).toContain('m.schedule_group_id = ANY')
+        expect(sql).toContain('a.producer_type')
+        expect(sql).not.toContain('a.producer_ref_id')
+        expect(sql).not.toContain('a.producer_key')
+        expect(sql).not.toContain('a.producer_run_id')
         expect(params).toEqual(['default', [scheduleGroupId], 50, 0])
-        return [shiftAssignmentListRow()]
+        return [shiftAssignmentListRow({
+          producer_type: 'attendance_group_fixed_schedule',
+        })]
       }
       throw new Error(`unexpected query: ${sql}`)
     })
@@ -2908,7 +4544,19 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
-      data: { total: 1, items: [{ assignment: { userId: 'worker-1', shiftId } }] },
+      data: {
+        total: 1,
+        items: [{
+          assignment: {
+            userId: 'worker-1',
+            shiftId,
+            producerType: 'attendance_group_fixed_schedule',
+            producerRefId: null,
+            producerKey: null,
+            producerRunId: null,
+          },
+        }],
+      },
     })
   })
 
@@ -3933,11 +5581,13 @@ describe('attendance UUID route validation', () => {
     }
   })
 
-  it('keeps fixed-schedule preview admin-only at runtime before group SQL', async () => {
+  it('keeps fixed-schedule preview closed for a non-manager before group SQL', async () => {
     const { db, eventEmit, routes } = await createHarness('false')
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'scheduler-1', managed: false })
+      if (probe !== undefined) return probe
       throw new Error(`unexpected scoped SQL: ${sql}`)
     })
 
@@ -3950,9 +5600,11 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(403)
     expect(res.body).toEqual({
       ok: false,
-      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
     })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_'))).toBe(false)
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).not.toContain('FROM attendance_groups')
     expect(db.transaction).not.toHaveBeenCalled()
     expect(eventEmit).not.toHaveBeenCalled()
   })
@@ -3998,6 +5650,10 @@ describe('attendance UUID route validation', () => {
         if (sql.includes('SELECT *') && sql.includes('FROM attendance_groups')) return [attendanceGroupRow()]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 0 }]
         if (sql.includes('SELECT * FROM attendance_group_members')) return []
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1] : []
+          return requested.map((userId) => ({ user_id: userId }))
+        }
         if (sql.includes('INSERT INTO attendance_group_members')) return [memberRow]
         if (sql.includes('DELETE FROM attendance_group_members')) return [{ id: scheduleGroupMemberId }]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) return [{ total: 0 }]
@@ -4319,5 +5975,322 @@ describe('attendance UUID route validation', () => {
     expect(allowed.res.statusCode).toBe(200)
     expect(allowed.res.body).toMatchObject({ ok: true, data: { state: 'not_configured' } })
     expect(allowed.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(true)
+  })
+
+  describe('import-chain authenticated org', () => {
+    const batchId = '00000000-0000-4000-8000-000000000901'
+    const integrationId = '00000000-0000-4000-8000-000000000902'
+    const reads: Array<{ key: string; params?: Record<string, string>; body?: unknown }> = [
+      { key: 'GET /api/attendance/import/jobs/:id', params: { id: 'job-1' } },
+      { key: 'GET /api/attendance/import/batches' },
+      { key: 'GET /api/attendance/import/batches/:id', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/batches/:id/items', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/batches/:id/export.csv', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/template-prefs' },
+      { key: 'GET /api/attendance/integrations' },
+      { key: 'GET /api/attendance/integrations/:id/runs', params: { id: integrationId } },
+    ]
+
+    async function invokeImport(
+      key: string,
+      extra: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown>; user?: Record<string, unknown> },
+    ) {
+      const { db, routes } = await createHarness('true')
+      const res = await invokeRoute(routes, key, extra)
+      return { db, res }
+    }
+
+    it.each(reads)('$key rejects a query org override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        query: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Organization not found' },
+      })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects a body org override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        body: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects an x-org-id override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        headers: { 'x-org-id': 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects a caller with import permission and no authenticated org', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        user: { id: 'admin-1' },
+      })
+      expect(res.statusCode).toBe(403)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
+      })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it('prepare, legacy import, upload, and rollback use the same selector contract', async () => {
+      const { db, routes } = await createHarness('true')
+      const user = { id: 'admin-1', orgId: 'org-a' }
+      const cases: Array<{ key: string; params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown> }> = [
+        { key: 'POST /api/attendance/import/prepare', query: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/prepare', body: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/prepare', headers: { 'x-org-id': 'org-b' } },
+        { key: 'POST /api/attendance/import/upload', query: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/upload-artifact', headers: { 'x-org-id': 'org-b' } },
+        {
+          key: 'POST /api/attendance/import',
+          body: {
+            orgId: 'org-b',
+            rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }],
+          },
+        },
+        {
+          key: 'POST /api/attendance/import/rollback/:id',
+          params: { id: batchId },
+          query: { orgId: 'org-b' },
+        },
+      ]
+      for (const entry of cases) {
+        db.query.mockClear()
+        const res = await invokeRoute(routes, entry.key, { ...entry, user })
+        expect(res.statusCode, entry.key).toBe(404)
+        expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+        const sql = db.query.mock.calls.map(([query]) => String(query)).join('\n')
+        expect(sql, entry.key).not.toContain('org-b')
+        expect(sql, entry.key).not.toContain('attendance_import_jobs')
+        expect(sql, entry.key).not.toContain('attendance_import_batches')
+      }
+    })
+
+    function captureImportQueries(db: { query: { mockImplementation: (fn: (sql: string, params?: unknown[]) => Promise<unknown[]>) => void } }) {
+      const calls: Array<{ sql: string; params: unknown[] }> = []
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql: String(sql), params: Array.isArray(params) ? [...params] : [] })
+        return []
+      })
+      return calls
+    }
+
+    function expectTokenTenant(calls: Array<{ params: unknown[] }>, label: string) {
+      const params = calls.flatMap((call) => call.params)
+      expect(params, label).toContain('org-tenant')
+      expect(params, label).not.toContain('default')
+    }
+
+    const legacyRows = {
+      ruleSetId: '00000000-0000-4000-8000-0000000009aa',
+      rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }],
+    }
+
+    it('prepare, legacy import, and integration sync use the token tenant when no org selector is sent', async () => {
+      const { db, routes } = await createHarness('true')
+      const calls = captureImportQueries(db)
+      const tokenOnly = { id: 'admin-1' }
+      const blankOrgClaim = { id: 'admin-1', orgId: '' }
+      const cases: Array<{ label: string; key: string; params?: Record<string, string>; body?: unknown; user: Record<string, unknown> }> = [
+        { label: 'prepare absent org claim', key: 'POST /api/attendance/import/prepare', user: tokenOnly },
+        { label: 'prepare blank org claim', key: 'POST /api/attendance/import/prepare', user: blankOrgClaim },
+        { label: 'legacy import absent org claim', key: 'POST /api/attendance/import', body: legacyRows, user: tokenOnly },
+        { label: 'legacy import blank org claim', key: 'POST /api/attendance/import', body: legacyRows, user: blankOrgClaim },
+        {
+          label: 'integration sync absent org claim',
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+          user: tokenOnly,
+        },
+        {
+          label: 'integration sync blank org claim',
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+          user: blankOrgClaim,
+        },
+      ]
+      for (const entry of cases) {
+        calls.length = 0
+        const res = await invokeRoute(routes, entry.key, {
+          params: entry.params,
+          body: entry.body,
+          user: entry.user,
+          authenticatedTenantId: 'org-tenant',
+        })
+        expect(res.body, entry.label).not.toMatchObject({
+          error: { message: 'Authenticated organization not found' },
+        })
+        expect(res.body, entry.label).not.toMatchObject({
+          error: { message: 'Organization not found' },
+        })
+        expectTokenTenant(calls, entry.label)
+        if (entry.key.endsWith('/prepare')) expect(res.statusCode, entry.label).toBe(200)
+      }
+    })
+
+    it('an empty-string org selector stays on the token tenant', async () => {
+      const { db, routes } = await createHarness('true')
+      const calls = captureImportQueries(db)
+      const user = { id: 'admin-1' }
+      const selectors: Array<{ label: string; query?: Record<string, unknown>; body?: Record<string, unknown>; headers?: Record<string, unknown> }> = [
+        { label: 'query', query: { orgId: '' } },
+        { label: 'body', body: { orgId: '' } },
+        { label: 'header', headers: { 'x-org-id': '' } },
+      ]
+      const routesUnderTest: Array<{ key: string; params?: Record<string, string>; body?: Record<string, unknown> }> = [
+        { key: 'POST /api/attendance/import/prepare' },
+        { key: 'POST /api/attendance/import', body: legacyRows },
+        {
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+        },
+      ]
+      for (const route of routesUnderTest) {
+        for (const selector of selectors) {
+          calls.length = 0
+          const label = `${route.key} ${selector.label}`
+          const res = await invokeRoute(routes, route.key, {
+            params: route.params,
+            query: selector.query,
+            body: { ...(route.body ?? {}), ...(selector.body ?? {}) },
+            headers: selector.headers,
+            user,
+            authenticatedTenantId: 'org-tenant',
+          })
+          expect(res.body, label).not.toMatchObject({
+            error: { message: 'Organization not found' },
+          })
+          expect(res.body, label).not.toMatchObject({
+            error: { message: 'Authenticated organization not found' },
+          })
+          expectTokenTenant(calls, label)
+          if (route.key.endsWith('/prepare')) expect(res.statusCode, label).toBe(200)
+        }
+      }
+
+      calls.length = 0
+      const unbound = await invokeRoute(routes, 'POST /api/attendance/import/prepare', {
+        query: { orgId: '' },
+        user,
+      })
+      expect(unbound.statusCode).toBe(403)
+      expect(unbound.body).toMatchObject({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
+      })
+      expect(calls).toEqual([])
+    })
+  })
+})
+
+// Reviewer finding F3 (2026-10-08): the leave cancel-round launch flag follows the AGENTS.md red line —
+// default OFF, ON only for the exact literal 'true' (no trim, no case folding, no '1' / 'yes'). The launch
+// route is the flag's gate; the summary read and the 201 body report the same function's value, so this
+// matrix pins the one reader every call site shares. Each spelling is its own case, so a lenient reader
+// shows WHICH spellings it lets through.
+describe('cancel-round launch flag ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED: exact literal true only', () => {
+  const FLAG = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const LAUNCH = 'POST /api/attendance/requests/:id/cancel-round'
+  const leaveRequestId = '00000000-0000-4000-8000-00000000c401'
+  const NOT_FOUND = { ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } }
+  const originalFlag = process.env[FLAG]
+
+  afterEach(() => {
+    restoreEnv(FLAG, originalFlag)
+  })
+
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['false', 'false'],
+    ['upper case TRUE', 'TRUE'],
+    ['title case True', 'True'],
+    ['leading space', ' true'],
+    ['trailing space', 'true '],
+    ['trailing newline', 'true\n'],
+    ['1', '1'],
+    ['yes', 'yes'],
+    ['YES', 'YES'],
+    ['on', 'on'],
+  ] as Array<[string, string | undefined]>)('%s keeps the launch OFF: the not-found body, before any read', async (_label, value) => {
+    const { db, routes } = await createHarness()
+    if (value === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = value
+    const res = await invokeRoute(routes, LAUNCH, { params: { id: leaveRequestId }, body: { reason: 'plans changed' } })
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toEqual(NOT_FOUND)
+    expect(db.query).not.toHaveBeenCalled()
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('the exact literal true is the positive control: the gate is passed and the leave row is read', async () => {
+    const { db, routes } = await createHarness()
+    process.env[FLAG] = 'true'
+    const res = await invokeRoute(routes, LAUNCH, { params: { id: leaveRequestId }, body: { reason: 'plans changed' } })
+    // the first thing after the gate is the org-scoped read of the leave row
+    expect(db.query).toHaveBeenCalledTimes(1)
+    const [sql, params] = db.query.mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('FROM attendance_requests')
+    expect(params[0]).toBe(leaveRequestId)
+    // the unit harness's database refuses every query, so the route answers its own 500 — not the gate's 404
+    expect(res.statusCode).toBe(500)
+    expect(res.body).not.toEqual(NOT_FOUND)
+  })
+})
+
+
+// This is the fresh-hook defense after boundary preflight, not a claim that
+// a real caller can bypass preflight's original organization authorization.
+describe('generic request fresh authority congruence', () => {
+  it('refuses a derived organization outside the already claimed identity before target reads or DML', async () => {
+    type CreateAdapter = {
+      prepareIdentity: (trx: unknown, input: unknown, operation: unknown) => Promise<{orgId:string}>
+      prepareFreshTimezoneContext: (trx: unknown, identity: unknown, input: unknown, operation: unknown) => Promise<void>
+    }
+    let capturedAdapters: {request_create:CreateAdapter} | undefined
+    const derivedOrg = '22222222-2222-4222-8222-222222222222'
+    const derive = vi.fn(async () => ({ ok: true, orgId: derivedOrg }))
+    const { db } = await createHarness('true', undefined, {
+      deriveApprovalInstanceOrgIdForAttendanceSubjectV1: derive,
+      createRequestOperationBoundary: ({ adapters }: { adapters: {request_create:CreateAdapter} }) => {
+        capturedAdapters = adapters
+        return { execute: vi.fn() }
+      },
+    })
+    const rawInput = {
+      orgId: '11111111-1111-4111-8111-111111111111', actorId: 'unit-applicant',
+      tokenSubjectUserId: 'unit-applicant', requesterName: 'Unit applicant',
+      requestId: null, requestNamedOrgId: null,
+      requestBody: { requestType: 'leave', workDate: '2026-10-12' },
+    }
+    const operation = { operationId: '33333333-3333-4333-8333-333333333333', routeVariant: 'generic' }
+    const adapter = capturedAdapters!.request_create
+    const identity = await adapter.prepareIdentity(db, rawInput, operation)
+    expect(identity.orgId).toBe(rawInput.orgId)
+    expect(derive).not.toHaveBeenCalled()
+    await expect(adapter.prepareFreshTimezoneContext(db, identity, rawInput, operation))
+      .rejects.toMatchObject({ status: 409, code: 'W4C3B_REQUEST_IDENTITY_CHANGED' })
+    expect(derive).toHaveBeenCalledTimes(1)
+    expect(db.query).not.toHaveBeenCalled()
   })
 })

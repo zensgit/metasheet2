@@ -1,8 +1,8 @@
 /**
  * P2 durable-delivery — slice S5: the REAL consumer handlers (production wiring).
  *
- * `automation-durable-activation.ts` defines the six-key `DurableConsumerHandlers` shape and the adapter
- * outcome mapping; this module builds the CONCRETE handlers that delegate to the exact same production
+ * `automation-durable-activation.ts` defines the `DurableConsumerHandlers` shape (manifest v3 universe)
+ * and the adapter outcome mapping; this module builds the CONCRETE handlers that delegate to the exact same production
  * methods the legacy `eventBus.subscribe(...)` closures call. It is the structural close of the manifest's
  * un-enumerable direction (#4203 §293-300): every anonymous bus closure gets a named consumer_key adapter
  * whose body IS the closure's body.
@@ -14,6 +14,10 @@
  *   - approval-task-trigger    → AutomationService.handleApprovalTaskCreatedTrigger (automation-service.ts:954)
  *   - automation-record-trigger→ AutomationService.handleEvent                     (automation-service.ts:923)
  *   - webhook-event-bridge     → WebhookService.deliverEvent (via WEBHOOK_BRIDGE_EVENT_MAP) (webhook-event-bridge.ts:78)
+ *   - multitable-record-approval → record-approval-submission-service applyRecordApprovalCompletion
+ *                                (manifest v2; same sink the eventBus leg subscribes)
+ *   - dingtalk-todo-mirror     → dingtalk-todo-mirror-service applyTodoMirrorTaskCreated / ...Completion
+ *                                (manifest v3; same sink the eventBus leg subscribes, flag-gated inside)
  *
  * A handler throwing is mapped by the activation registry to a retryable `adapter_error` (the dispatcher
  * reschedules with backoff, bounded → dead_letter) — EXCEPT a `PermanentDeliveryFailure`, which dead-letters.
@@ -58,6 +62,23 @@ export interface DurableDeliveryServices {
     // the legacy bus bridge omits it. Optional so a spy/legacy caller need not supply it.
     deliverEvent(event: WebhookEventType, payload: unknown, eventId?: string): Promise<unknown>
   }
+  /**
+   * Manifest v2 addition. The SAME sink object the eventBus leg calls
+   * (`subscribeRecordApprovalCompletionBus`) — one idempotent handler, two legs, exactly as
+   * approval-bridge/-projection are wired.
+   */
+  recordApprovalService: {
+    handleApprovalCompletion(event: ApprovalCompletionEventV1): Promise<void>
+  }
+  /**
+   * Manifest v3 addition — the DingTalk approval-todo ONE-WAY mirror. The SAME sink object the eventBus
+   * leg calls (`subscribeDingTalkTodoMirrorBus`); it owns its own DINGTALK_TODO_MIRROR_ENABLED gate, so
+   * with the flag OFF both legs are no-ops that touch no table.
+   */
+  todoMirrorService: {
+    handleApprovalTaskCreated(event: ApprovalTaskCreatedEventV1): Promise<void>
+    handleApprovalCompletion(event: ApprovalCompletionEventV1): Promise<void>
+  }
 }
 
 /** Reconstruct the record-trigger payload, overlaying the durable row's authoritative identity + depth. */
@@ -67,11 +88,11 @@ function recordTriggerPayload(event: ClaimedConsumer): AutomationEventPayload {
 }
 
 /**
- * Build the six concrete durable consumer handlers over the live services. The result is handed to
+ * Build the concrete durable consumer handlers over the live services. The result is handed to
  * `buildConsumerAdapterRegistry` / `bootDurableDelivery`, which wrap each in the ratified outcome mapping.
  */
 export function buildDurableConsumerHandlers(services: DurableDeliveryServices): DurableConsumerHandlers {
-  const { automationService, projectionService, webhookService } = services
+  const { automationService, projectionService, webhookService, recordApprovalService, todoMirrorService } = services
   return {
     'approval-bridge': async (event: ClaimedConsumer) => {
       await automationService.handleApprovalCompletionEvent(event.payload as ApprovalCompletionEventV1)
@@ -106,6 +127,46 @@ export function buildDurableConsumerHandlers(services: DurableDeliveryServices):
       // Thread the outbox row's authoritative `eventId` so a redelivery of THIS durable row is idempotent per
       // (webhook, event) — no duplicate delivery row, no duplicate send. (The legacy bus bridge omits it.)
       await webhookService.deliverEvent(webhookEvent, event.payload, event.eventId)
+    },
+    'multitable-record-approval': async (event: ClaimedConsumer) => {
+      // Record-level submit-for-approval completion (manifest v2). The sink's UPDATE is guarded on
+      // `status = 'pending'` AND keyed by approval_instance_id, so:
+      //   - an approval that did NOT come from a record matches no submission row → ZERO rows updated →
+      //     resolve (ACK). Retrying would never find one, and a throw would dead-letter every ordinary
+      //     approval completion in the system.
+      //   - a redelivery of a completion we already applied also updates zero rows → same ACK, no second
+      //     notification.
+      // Both are "no work to do", which is a SUCCESS for this adapter — the same posture the
+      // approval-projection adapter takes on a payload with no instanceId.
+      await recordApprovalService.handleApprovalCompletion(event.payload as ApprovalCompletionEventV1)
+    },
+    'dingtalk-todo-mirror': async (event: ClaimedConsumer) => {
+      // ONE consumer_key, TWO event shapes (manifest v3 routes it on task_created AND the four
+      // completion families), so the adapter dispatches on the row's event type. An unrecognized type
+      // can only mean a producer enqueued a row the manifest does not route to this key: THROW, so it
+      // surfaces through the retry/dead-letter ceiling instead of being silently dropped.
+      //
+      // Both sinks are idempotent and both return early when DINGTALK_TODO_MIRROR_ENABLED is not
+      // exactly 'true', so a double delivery through both legs, or a durable redelivery, can neither
+      // duplicate a todo nor write a row for a disabled feature. BOTH halves earn that, separately:
+      // the create half on UNIQUE (org_id, source_key) + ON CONFLICT DO NOTHING (plus a seat-liveness
+      // gate, so a replay cannot mint a todo for an approval that is already over), and the retire half
+      // on seat LIVENESS rather than on "who announced last" — a replayed OLD task_created retires the
+      // dead rows it always would have and leaves the current seat alone.
+      if (event.eventType === 'approval.task_created') {
+        await todoMirrorService.handleApprovalTaskCreated(event.payload as ApprovalTaskCreatedEventV1)
+        return
+      }
+      if (
+        event.eventType === 'approval.approved'
+        || event.eventType === 'approval.rejected'
+        || event.eventType === 'approval.revoked'
+        || event.eventType === 'approval.cancelled'
+      ) {
+        await todoMirrorService.handleApprovalCompletion(event.payload as ApprovalCompletionEventV1)
+        return
+      }
+      throw new Error(`dingtalk-todo-mirror: unroutable event type "${event.eventType}"`)
     },
   }
 }

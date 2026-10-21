@@ -9,10 +9,9 @@ import type { ComputedRef, InjectionKey, Ref } from 'vue'
  * selected node's type) so a single persisting inspector instance stays correct as selection moves
  * between node types; `active` is what actually gates tabbed vs. flat rendering for the currently
  * selected node. `inject()`ed with a `undefined` default by the config editor, so the SAME editor
- * component, when rendered outside the canvas inspector (the retained "辅助编辑模式" structured
- * list — TemplateAuthoringView.vue's list-mode row, which never wraps it in the shell), falls back
- * to its original flat, un-tabbed rendering — unchanged for that surface (Lock-0 delta §2 explicit
- * non-delta: "Accessible structured fallback retention unchanged").
+ * component, when rendered outside the canvas inspector (the operator-only flag-off structured
+ * renderer, which never wraps it in the shell), falls back to its original flat, un-tabbed
+ * rendering.
  */
 export type ApprovalCanvasInspectorTabId = 'assignee' | 'fieldPermissions' | 'operations'
 

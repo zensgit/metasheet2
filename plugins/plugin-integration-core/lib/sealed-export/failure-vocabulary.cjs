@@ -255,6 +255,13 @@ const SEALED_EXPORT_SAFE_DETAIL_TOKENS = Object.freeze([
   'totalBytes',
   'totalRows',
   'wholeArtifactByteDigest',
+  // S6-A Windows runtime parity: stock-preparation-runtime-config.cjs refuses a
+  // win32 boot with `{ field: 'win32ArtifactAclAttested' }` when the operator has
+  // not attested that the artifact root carries an NTFS ACL equivalent to the
+  // POSIX 0o700/0o600 modes chmod() silently no-ops there. The REASON stays
+  // SEALED_EXPORT_PROFILE_UNCERTIFIED — the §10 set is ratified and frozen at 30
+  // tokens — so this detail value is the only thing that names the unmet control.
+  'win32ArtifactAclAttested',
 ])
 const SAFE_DETAIL_TOKEN_SET = new Set(SEALED_EXPORT_SAFE_DETAIL_TOKENS)
 

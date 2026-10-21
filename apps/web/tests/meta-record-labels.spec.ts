@@ -5,6 +5,9 @@ import {
   historyActor,
   requiredField,
   restoredFromVersionBadge,
+  recordPosition,
+  recordHiddenFieldsHeading,
+  recordApprovalErrorLabel,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -79,6 +82,25 @@ describe('meta-record-labels static keys', () => {
     expect(recordLabel('record.errorWatchUpdate', false)).toBe('Failed to update watch status')
   })
 
+  // Record inspector v3 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §1.3 body, PR-B1): the details-tab hide-empty toggle's CONSTANT label (APG toggle button —
+  // `aria-pressed` carries the state, so there is no separate pressed copy; round 2 removed the
+  // round-1 `record.showEmpty` pin along with the key), the link-field "edit links" button beside the
+  // chips, and the copy-link status pair PR-A reserved for this slice — every key in BOTH locales.
+  // The "hidden in this view" heading is `recordHiddenFieldsHeading` (pinned separately); §1 has no
+  // heading at all (round 2 removed the round-1 `record.fieldsInView` pin along with the key).
+  // Additive pins only; no pre-existing pin above changes.
+  it('PR-B1: hide-empty toggle, edit-links and copy-link status keys exist in both locales', () => {
+    expect(recordLabel('record.hideEmpty', false)).toBe('Hide empty fields')
+    expect(recordLabel('record.hideEmpty', true)).toBe('隐藏空字段')
+    expect(recordLabel('record.editLinks', false)).toBe('Edit links')
+    expect(recordLabel('record.editLinks', true)).toBe('编辑关联')
+    expect(recordLabel('record.copyLinkDone', false)).toBe('Link copied')
+    expect(recordLabel('record.copyLinkDone', true)).toBe('链接已复制')
+    expect(recordLabel('record.copyLinkFailed', false)).toBe('Could not copy link')
+    expect(recordLabel('record.copyLinkFailed', true)).toBe('链接复制失败')
+  })
+
   it('M1: form submit/reset chain is fully covered (Saving/Save/Create/Reset)', () => {
     expect(recordLabel('form.loading', true)).toBe('正在加载...')
     expect(recordLabel('form.readOnly', true)).toBe('此表单为只读')
@@ -126,5 +148,99 @@ describe('meta-record-labels helpers', () => {
     // the version is interpolated raw (data), not a fixed literal
     expect(restoredFromVersionBadge(17, false)).toBe('Restored from v17')
     expect(restoredFromVersionBadge(17, true)).toBe('从版本 17 恢复')
+  })
+
+  // P3-1 (2026-09-05, record inspector v3 header-overflow-bound follow-up):
+  // docs/development/multitable-record-inspector-v3-design-20260905.md — "position text... a compact
+  // form for large totals". Every ordinary record-list size (well under 1000) must render byte-
+  // identical to before this fix; only past that does the compaction change the string at all.
+  it('recordPosition renders the ordinary "n/N" (zh) / "n / N" (en) form unchanged for any total under 1000', () => {
+    expect(recordPosition(3, 12, true)).toBe('3/12')
+    expect(recordPosition(3, 12, false)).toBe('3 / 12')
+    expect(recordPosition(1, 999, false)).toBe('1 / 999')
+    expect(recordPosition(1, 999, true)).toBe('1/999')
+  })
+
+  // Record inspector v3 (PR-B1 §1.3 sections): the "hidden in this view" section heading interpolates
+  // the count raw (data), both locales; zero is a legal argument (the caller simply does not render the
+  // section then, but the helper must not special-case it into a different sentence).
+  it('recordHiddenFieldsHeading interpolates the hidden-field count raw in both locales', () => {
+    expect(recordHiddenFieldsHeading(2, false)).toBe('Hidden in this view (2)')
+    expect(recordHiddenFieldsHeading(2, true)).toBe('本视图中隐藏的字段 (2)')
+    expect(recordHiddenFieldsHeading(17, false)).toBe('Hidden in this view (17)')
+    expect(recordHiddenFieldsHeading(0, false)).toBe('Hidden in this view (0)')
+  })
+
+  it('recordPosition compacts a total of 1000 or more (a huge record list must not force the header wider)', () => {
+    expect(recordPosition(1, 12345, false)).toBe('1 / 12.3K')
+    expect(recordPosition(1, 12345, true)).toBe('1/1.2万')
+    // both the current index AND the total compact independently, past the SAME 1000 threshold
+    expect(recordPosition(12345, 20000, false)).toBe('12.3K / 20K')
+  })
+
+  // 记录级送审拒绝文案 — three real-world misleads this pins against regressing:
+  //  B1) APPROVAL_ORG_UNRESOLVED had NO copy entry at all (the dialog fell back to the route's fixed
+  //      English sentence). The fix must be actionable ("an administrator must fix it") and values-free
+  //      (no membership count, no org id/name, no user id — those never reach the client at all, but the
+  //      copy itself must not invent any either).
+  //  B2) RECORD_APPROVAL_PERMISSION_DENIED is shared by THREE gates (record read / multitable
+  //      submit-approval / approval approvals:write) — naming only two, as the old copy did, misdirects a
+  //      caller refused at the read gate. The copy must name all three causes and imply none.
+  it('APPROVAL_ORG_UNRESOLVED gets its own actionable, values-free copy (B1)', () => {
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', true))
+      .toBe('你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。')
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', false))
+      .toBe("Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.")
+    // values-free: no digits (a membership count) anywhere in either locale's copy
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', true)).not.toMatch(/[0-9]/)
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', false)).not.toMatch(/[0-9]/)
+  })
+
+  it('RECORD_APPROVAL_PERMISSION_DENIED names all three refusal gates without implying which fired (B2)', () => {
+    const zh = recordApprovalErrorLabel('RECORD_APPROVAL_PERMISSION_DENIED', true)!
+    const en = recordApprovalErrorLabel('RECORD_APPROVAL_PERMISSION_DENIED', false)!
+    expect(zh).toBe('没有送审权限（可能是记录读取权限、多维表送审权限或审批发起权限之一缺失），请联系管理员核实相关权限。')
+    expect(en).toBe('You do not have permission to submit this record for approval — this can be missing record read access, missing multitable submit-approval permission, or missing approval-write permission. Ask an administrator to check your access.')
+    // all THREE causes named — a reader told this refusal came from the read gate must not be sent to
+    // ask for only the other two permissions (the pre-fix bug)
+    expect(zh).toContain('记录读取权限')
+    expect(zh).toContain('多维表送审权限')
+    expect(zh).toContain('审批发起权限')
+    expect(en).toContain('record read access')
+    expect(en).toContain('multitable submit-approval permission')
+    expect(en).toContain('approval-write permission')
+  })
+
+  // B3) An empty published-template roster and a 403 on the roster read are the SAME dialog state BY
+  // DESIGN (MetaRecordApprovalSubmitDialog.vue loadTemplates has no free-text template-id fallback for
+  // either), and multitable-record-approval-submit.spec.ts pins that collapse directly ("shows the same
+  // notice when the roster read is refused (403)") — so this only pins that the ONE sentence stays
+  // actionable (tells the operator to ask an administrator to check both possible causes) rather than
+  // asserting which one applies.
+  it('the no-template/no-permission notice stays one sentence but names an actionable next step (B3)', () => {
+    expect(recordLabel('approval.templatesUnavailable', true))
+      .toBe('无可用模板或无审批读取权限，请联系管理员确认已发布审批模板，并核实你是否有审批读取权限。')
+    expect(recordLabel('approval.templatesUnavailable', false))
+      .toBe('No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.')
+  })
+
+  // R-43 A: APPROVAL_REQUESTER_CHOICE_REQUIRED (the template's route has a 发起人自选 approver/handler,
+  // which record submission cannot carry) had NO entry, so the dialog showed only the route's English
+  // sentence. The copy must name the cause, send the actor to the approval centre, and NOT imply that a
+  // request started there stays linked to the record (it does not).
+  it('APPROVAL_REQUESTER_CHOICE_REQUIRED explains 发起人自选 and points at the approval centre (R-43 A)', () => {
+    const zh = recordApprovalErrorLabel('APPROVAL_REQUESTER_CHOICE_REQUIRED', true)!
+    const en = recordApprovalErrorLabel('APPROVAL_REQUESTER_CHOICE_REQUIRED', false)!
+    expect(zh).toBe('该模板需要发起人自选审批人或办理人，记录送审暂不支持。请到审批中心发起；在审批中心发起的申请不会关联到本记录。')
+    expect(en).toBe('This template requires the requester to choose an approver or handler, which record submission does not support yet. Start it from the approval centre instead — a request started there is not linked to this record.')
+    expect(zh).toContain('审批人或办理人')
+    expect(zh).toContain('不会关联到本记录')
+    expect(en).toContain('approver or handler')
+    expect(en).toContain('not linked to this record')
+  })
+
+  it('the approval-centre link label exists in both locales (R-43 A)', () => {
+    expect(recordLabel('approval.openApprovalCenter', true)).toBe('去审批中心发起')
+    expect(recordLabel('approval.openApprovalCenter', false)).toBe('Start in the approval centre')
   })
 })

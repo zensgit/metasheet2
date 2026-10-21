@@ -627,7 +627,9 @@ function constantsAndTestChainArePinned() {
     command,
   )
   assert.equal(
-    packageJson.scripts.test.split(' && ').filter((entry) => entry === command).length,
+    require(path.join(__dirname, '..', 'scripts', 'test-chain.cjs'))
+      .loadChain(path.join(__dirname, '..'))
+      .filter((entry) => entry === command).length,
     1,
     'the executor suite must occur exactly once in the explicit test chain',
   )

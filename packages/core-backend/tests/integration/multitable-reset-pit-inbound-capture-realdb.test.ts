@@ -57,6 +57,11 @@ const CAP_ROWS_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS'
 const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+const purgeTokenBurns = (sheetId: string) =>
+  poolManager.get().transaction(async ({ query }) => {
+    await query('SET LOCAL session_replication_role = replica')
+    await query('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheetId])
+  })
 let app: Express
 let fixture: ExactAnchorHistoryFixture
 let seq = 0
@@ -156,7 +161,7 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
       await pruneSealedHistoryOperations(sheet).catch(() => {})
       await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [sheet]).catch(() => {})
-      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await purgeTokenBurns(sheet)
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
@@ -177,7 +182,7 @@ describeIfDatabase('4c-3 §7 (D-3) — PIT-reset inline delete inbound-link capt
     await pruneSealedHistoryOperations(SHEET_A).catch(() => {})
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
     await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
-    await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
+    await purgeTokenBurns(SHEET_A)
     await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_A]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_A]).catch(() => {})

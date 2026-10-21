@@ -9,6 +9,7 @@ import { WorkflowDesigner, type WorkflowDefinition } from '../workflow/WorkflowD
 import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine'
 import { compileBpmnPreview } from '../workflow/bpmnCompilePreview'
 import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
+import { requireBpmnRuntimeEnabled } from '../workflow/bpmnRuntimeConfig'
 import {
   appendWorkflowDraftExecution,
   canDeployWorkflowDraft,
@@ -505,6 +506,14 @@ router.get(
 router.post(
   '/templates/:id/instantiate',
   authenticate,
+  // P0-S S1 (Codex round 2): NO runtime gate here. Instantiate is DRAFT-ONLY authoring —
+  // it reads the template catalog and calls `designer.saveWorkflow`, which is a pure
+  // `workflow_definitions` upsert with `status: 'draft'` (WorkflowDesigner.ts:433-470).
+  // WorkflowDesigner never imports BPMNWorkflowEngine, so no deployProcess / startProcess /
+  // timer is reachable from this handler. The ratified S1 spec keeps draft/modeling/
+  // compile-preview OPEN while the runtime flag is off and closes only deploy/start/timer;
+  // gating this route broke authoring with no security benefit. The engine-reaching
+  // sibling `/workflows/:id/deploy` KEEPS the gate.
   param('id').isString(),
   body('name').optional().isString(),
   body('description').optional().isString(),
@@ -1226,6 +1235,7 @@ router.post(
 router.post(
   '/workflows/:id/deploy',
   authenticate,
+  requireBpmnRuntimeEnabled, // P0-S S1: deploy reaches the BPMN engine
   param('id').isString(),
   validate,
   async (req: Request, res: Response) => {

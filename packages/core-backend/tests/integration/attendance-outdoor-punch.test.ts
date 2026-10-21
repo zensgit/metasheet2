@@ -1,3 +1,5 @@
+import { captureAttendanceRecordTimezoneFixture } from '../utils/attendance-record-timezone-fixture'
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
 import { createRequire } from 'module'
 import {
@@ -36,7 +38,10 @@ import { Pool } from 'pg'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -72,21 +77,47 @@ const INSIDE = { lat: 31.2304, lng: 121.4737 }
 const OUTSIDE = { lat: 0, lng: 0 }
 
 describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
+  const recordTimezoneFixture = captureAttendanceRecordTimezoneFixture()
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
   let adminToken = ''
   let originalPunchPolicy: unknown
   let originalGeoFence: unknown
+  const mintedUserIds: string[] = []
+  let ownedDefaultRuleId: string | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Manage requires this users row, same-org membership, and the DB grant. Token roles do not.
+    const codes = perms.split(',').map((code) => code.trim()).filter(Boolean)
+    mintedUserIds.push(userId)
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'outdoor fixture', 'disabled', 'user', '[]'::jsonb, true, false)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [userId, `${userId}@outdoor-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [userId, codes],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId],
+    )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
-  const putSettings = (body: Record<string, unknown>) =>
-    requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+  const putSettings = async (body: Record<string, unknown>, requireSuccess = true) => {
+    const response = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+    if (requireSuccess) expect(response.status).toBe(200)
+    return response
+  }
   const getSettings = () => requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
   const punch = (token: string, body: Record<string, unknown>) =>
     requestJson(`${baseUrl}/api/attendance/punch`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
@@ -143,7 +174,7 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   }
   const iso = (value: unknown) => new Date(value as string | number | Date).toISOString()
   async function seedRecordOnlyFirstIn(userId: string, workDate: string, firstInAt: string, options: { status?: string; source?: string } = {}) {
-    await pool.query(
+    await recordTimezoneFixture.seed(pool, { orgId: ORG, userId, workDate, timezone: 'UTC' }, client => client.query(
       `INSERT INTO attendance_records
        (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, 'UTC', $5, NULL, 0, 0, 0, $6, true, $7::jsonb, NULL, now(), now())`,
@@ -156,10 +187,10 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
         options.status ?? 'adjusted',
         JSON.stringify({ source: options.source ?? 'record-only' }),
       ],
-    )
+    ))
   }
   async function seedRecordOnlyLastOut(userId: string, workDate: string, lastOutAt: string, options: { status?: string; source?: string } = {}) {
-    await pool.query(
+    await recordTimezoneFixture.seed(pool, { orgId: ORG, userId, workDate, timezone: 'UTC' }, client => client.query(
       `INSERT INTO attendance_records
        (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, 'UTC', NULL, $5, 0, 0, 0, $6, true, $7::jsonb, NULL, now(), now())`,
@@ -172,7 +203,7 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
         options.status ?? 'adjusted',
         JSON.stringify({ source: options.source ?? 'record-only' }),
       ],
-    )
+    ))
   }
   async function cleanupUser(userId: string) {
     await pool.query(`DELETE FROM approval_instances WHERE business_key IN (SELECT 'attendance-request:' || id FROM attendance_requests WHERE user_id = $1)`, [userId]).catch(() => undefined)
@@ -201,7 +232,18 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
-    adminToken = await mintToken('outdoor-admin', 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const outdoorAdminId = `outdoor-admin-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+    adminToken = await mintToken(outdoorAdminId, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const ruleId = randomUUID()
+    const insertedDefault = await pool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, $3, 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [ruleId, ORG, `outdoor-fixture-default-${ruleId}`],
+    )
+    ownedDefaultRuleId = insertedDefault.rows[0]?.id as string | undefined
     const before = await getSettings()
     const data = (before.body as { data?: { punchPolicy?: unknown; geoFence?: unknown } } | undefined)?.data
     originalPunchPolicy = data?.punchPolicy
@@ -219,8 +261,24 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   })
 
   afterAll(async () => {
-    if (adminToken) await putSettings({ geoFence: originalGeoFence ?? null, punchPolicy: originalPunchPolicy ?? {} }).catch(() => undefined)
+    recordTimezoneFixture.restore()
+    if (adminToken) await putSettings({ geoFence: originalGeoFence ?? null, punchPolicy: originalPunchPolicy ?? {} }, false).catch(() => undefined)
     await deleteOutdoorFlows().catch(() => undefined)
+    if (ownedDefaultRuleId && pool) {
+      await pool.query(
+        `DELETE FROM attendance_rules r WHERE r.id = ANY($1::uuid[])
+          AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id = r.org_id AND a.is_active = true)
+          AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id = r.org_id AND a.is_active = true)
+          AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id = r.org_id)
+          AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id = r.org_id)`,
+        [[ownedDefaultRuleId]],
+      ).catch(() => undefined)
+    }
+    if (pool && mintedUserIds.length > 0) {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [mintedUserIds]).catch(() => undefined)
+      await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2', [mintedUserIds, ORG]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [mintedUserIds]).catch(() => undefined)
+    }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
   })
@@ -507,12 +565,7 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     const internalInAt = `${workDate}T09:05:00.000Z`
     const t = await mintToken(u, 'attendance:read,attendance:write')
     try {
-      await pool.query(
-        `INSERT INTO attendance_records
-         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'UTC', $5, NULL, 0, 0, 0, 'adjusted', true, $6::jsonb, NULL, now(), now())`,
-        [randomUUID(), u, ORG, workDate, protectedFirst, JSON.stringify({ source: 'override-protected' })]
-      )
+      await seedRecordOnlyFirstIn(u, workDate, protectedFirst, { source: 'override-protected' })
       await pool.query(
         `INSERT INTO attendance_events
          (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
@@ -737,7 +790,7 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   })
 
   it('S2-photo: a non-boolean requirePhoto is rejected at the settings gate (400 VALIDATION_ERROR, no silent coerce)', async () => {
-    const res = await putSettings({ punchPolicy: { outdoor: { requirePhoto: 'yes' } } })
+    const res = await putSettings({ punchPolicy: { outdoor: { requirePhoto: 'yes' } } }, false)
     expect(res.status).toBe(400)
     expect((res.body as { error?: { code?: string } })?.error?.code).toBe('VALIDATION_ERROR')
   })

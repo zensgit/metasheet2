@@ -235,3 +235,71 @@ export async function uploadApprovalAttachmentsAtomic(
     throw error
   }
 }
+
+/**
+ * Lock-9 OD-L9-10(a) — upload ONE process (approver) attachment. Body is `file` + `stagedInstanceId`
+ * ONLY — **never** `templateId`/`fieldId`: the server route (`POST /api/approval/attachments/process`)
+ * explicitly 400s a supplied `fieldId`/`templateId` with `process_attachment_has_no_field` (a process
+ * attachment has no field to bind against). `stagedInstanceId` is the approval instance id the caller
+ * is acting on — the row commits to that instance only at bind time (the `comment` action's
+ * `attachmentIds` rider), and stays uploader-only-readable until then; sending it here is only the
+ * server's fail-fast `actorHasActiveSeat` pre-check, never an authority grant.
+ *
+ * Validation: `preValidateAttachments` is called with a SINGLE-file array — deliberately, not the
+ * full picked selection. That is what keeps this call scoped to the RATIFIED OD-L9-9 per-file rules
+ * (MIME allowlist, extension⇄MIME cross-check, the 20MB/file cap) and structurally excludes the
+ * FORM-field-shaped `too_many_files`/`submission_too_large` checks: a 1-element array can never trip
+ * a >10-file count cap, and a single file can never trip the 50MB submission cap without already
+ * failing its own 20MB per-file cap first (`maxFileBytes < maxSubmissionBytes`). The process budget
+ * itself (`maxFilesPerAction`/`maxBytesPerAction`, `approval-process-attachment-bind.ts:18-21`) is
+ * explicitly UNRATIFIED (OD-L9-8) — this client deliberately pins NOTHING for it; the server's
+ * upload-time pre-check and bind-time authoritative check are the only enforcement.
+ */
+export async function uploadApprovalProcessAttachment(
+  file: File,
+  stagedInstanceId: string,
+  fetcher: AttachmentFetcher = apiFetch,
+): Promise<UploadedAttachment> {
+  const pre = preValidateAttachments([{ name: file.name, type: file.type, size: file.size }])
+  if (pre.length > 0) throw new Error(`attachment rejected: ${pre[0].code}`)
+  const form = new FormData()
+  form.append('stagedInstanceId', stagedInstanceId)
+  form.append('file', file)
+  const res = await fetcher('/api/approval/attachments/process', { method: 'POST', body: form })
+  if (res.status === 201) return (await res.json()) as UploadedAttachment
+  // Same reject-status mapping as the form-upload route (§5/G3): 415/413 for type/cap rejects,
+  // 422 for infected/other, plus the process-specific 400s (`file_required`,
+  // `process_attachment_has_no_field`, `staged_instance_id_required`) surfaced generically below.
+  if (res.status === 415 || res.status === 413 || res.status === 422) {
+    const body = (await res.json().catch(() => ({}))) as { rejected?: Array<{ code: string }> }
+    throw new Error(`attachment rejected: ${body.rejected?.[0]?.code ?? 'rejected'}`)
+  }
+  throw new Error(`attachment upload failed: ${res.status}`)
+}
+
+/**
+ * Atomic multi-file selection for the process-attachment path — same reverse-order DELETE
+ * compensation contract as `uploadApprovalAttachmentsAtomic` above, with no field to key on and
+ * deliberately NO client-side file-count cap (see `uploadApprovalProcessAttachment`'s docblock:
+ * the process budget is server-authoritative and unratified).
+ */
+export async function uploadApprovalProcessAttachmentsAtomic(
+  files: readonly File[],
+  stagedInstanceId: string,
+  fetcher: AttachmentFetcher = apiFetch,
+): Promise<UploadedAttachment[]> {
+  const uploaded: UploadedAttachment[] = []
+  try {
+    for (const file of files) {
+      uploaded.push(await uploadApprovalProcessAttachment(file, stagedInstanceId, fetcher))
+    }
+    return uploaded
+  } catch (error) {
+    for (const item of [...uploaded].reverse()) {
+      await deleteApprovalAttachment(item.id, fetcher).catch(() => {
+        // Best-effort: see the form-path atomic wrapper's identical comment above.
+      })
+    }
+    throw error
+  }
+}

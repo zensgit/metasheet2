@@ -85,6 +85,52 @@ describe('multitable loaders helper', () => {
     })
   })
 
+  // W8-4 (L1): `loadSheetRow` gained the same optional memo `loadFieldsForSheet` always had, so
+  // one request can stop re-reading a constant sheet row per written record.
+  it('caches a FOUND sheet row when a cache is supplied', async () => {
+    let calls = 0
+    const cache = new Map<string, any>()
+    const pool = createPool((_sql, params) => {
+      calls += 1
+      expect(params).toEqual(['sheet_ops'])
+      return [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }]
+    })
+
+    const first = await loadSheetRow(pool, 'sheet_ops', cache)
+    const second = await loadSheetRow(pool, 'sheet_ops', cache)
+
+    expect(calls).toBe(1)
+    expect(first).toEqual(second)
+    expect(first).toEqual({ id: 'sheet_ops', baseId: 'base_ops', name: 'Orders', description: null })
+  })
+
+  it('never caches a MISS, so a sheet that appears later is not masked by a remembered null', async () => {
+    let calls = 0
+    const cache = new Map<string, any>()
+    const pool = createPool(() => {
+      calls += 1
+      return calls === 1
+        ? []
+        : [{ id: 'sheet_late', base_id: null, name: 'Late', description: null }]
+    })
+
+    await expect(loadSheetRow(pool, 'sheet_late', cache)).resolves.toBeNull()
+    await expect(loadSheetRow(pool, 'sheet_late', cache)).resolves.toMatchObject({ id: 'sheet_late' })
+    expect(calls).toBe(2)
+  })
+
+  it('queries every time when no cache is supplied', async () => {
+    let calls = 0
+    const pool = createPool(() => {
+      calls += 1
+      return [{ id: 'sheet_ops', base_id: null, name: 'Orders', description: null }]
+    })
+
+    await loadSheetRow(pool, 'sheet_ops')
+    await loadSheetRow(pool, 'sheet_ops')
+    expect(calls).toBe(2)
+  })
+
   it('accepts a raw query for loadFieldsForSheet', async () => {
     let calls = 0
     const pool = createPool((_sql, params) => {

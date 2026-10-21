@@ -9,6 +9,7 @@ const authServiceMocks = vi.hoisted(() => ({
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
   resolveSessionTenantId: vi.fn(),
+  listActiveMembershipOrgIds: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -64,28 +65,6 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
       this.name = 'DingTalkLoginPolicyError'
       this.statusCode = options.statusCode ?? 403
       this.code = options.code ?? 'policy_denied'
-    }
-  },
-}))
-
-const dingtalkClientMocks = vi.hoisted(() => ({
-  DingTalkBusinessError: class DingTalkBusinessError extends Error {
-    errcode: number
-    constructor(message: string, errcode = 40078) {
-      super(message)
-      this.name = 'DingTalkBusinessError'
-      this.errcode = errcode
-    }
-  },
-  DingTalkRequestError: class DingTalkRequestError extends Error {
-    statusCode: number
-    responseBody: Record<string, unknown> | null
-
-    constructor(message: string, statusCode = 502, responseBody: Record<string, unknown> | null = null) {
-      super(message)
-      this.name = 'DingTalkRequestError'
-      this.statusCode = statusCode
-      this.responseBody = responseBody
     }
   },
 }))
@@ -148,11 +127,19 @@ vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
 }))
 
-vi.mock('../../src/integrations/dingtalk/client', () => ({
-  DingTalkBusinessError: dingtalkClientMocks.DingTalkBusinessError,
-  DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
-}))
+// The REAL transport error classes: auth.ts classifies them with instanceof (R-41), so a hand-rolled
+// look-alike class would silently take the fallback arm and prove nothing.
+vi.mock('../../src/integrations/dingtalk/client', async () => {
+  const transport = await vi.importActual<typeof import('../../src/integrations/dingtalk/transport')>(
+    '../../src/integrations/dingtalk/transport',
+  )
+  return {
+    DingTalkBusinessError: transport.DingTalkBusinessError,
+    DingTalkRequestError: transport.DingTalkRequestError,
+  }
+})
 
+import { DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/transport'
 import { authRouter } from '../../src/routes/auth'
 import express from 'express'
 import request from 'supertest'
@@ -229,6 +216,61 @@ async function invokeRoute(
   return res
 }
 
+describe('explicit session organization routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a' })
+    authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['org-a', 'org-b'])
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
+    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
+    authServiceMocks.createToken.mockReturnValue('signed-new-token')
+    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+  })
+
+  it('lists only the authenticated actor memberships, ignoring submitted actor selectors', async () => {
+    const res = await invokeRoute('get', '/session-orgs', {
+      headers: { authorization: 'Bearer current', 'x-user-id': 'other' }, query: { userId: 'other' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.listActiveMembershipOrgIds).toHaveBeenCalledWith('actor')
+    expect(res.body).toEqual({ success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+  })
+
+  it('remints only after checking active membership for the authenticated actor', async () => {
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each([{}, { orgId: '' }, { orgId: 'org-b', userId: 'other' }])('rejects a missing or expanded selector %j', async body => {
+    const res = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body })
+    expect(res.statusCode).toBe(400)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+  })
+
+  it('requires a real bearer authentication result, not an actor header', async () => {
+    const res = await invokeRoute('post', '/session-org', { headers: { 'x-user-id': 'actor' }, body: { orgId: 'org-b' } })
+    expect(res.statusCode).toBe(401)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+  })
+})
+
 describe('auth login routes', () => {
   beforeEach(() => {
     vi.unstubAllEnvs()
@@ -304,6 +346,119 @@ describe('auth login routes', () => {
       workflow: expect.any(Boolean),
       attendanceAdmin: true,
     })
+  })
+
+  function stubAllElearningCapabilitiesOn() {
+    vi.stubEnv('ELEARNING_CONTENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSIGNMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSESSMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_INCENTIVE_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ANALYTICS_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_MEDIA_ENABLED', 'true')
+  }
+
+  async function loginAdminForElearningPayload() {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin', 'elearning:admin'],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+    return invokeRoute('post', '/login', {
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+      },
+    })
+  }
+
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+    ['TRUE', 'TRUE'],
+    ['1', '1'],
+    ['yes', 'yes'],
+    ['true-with-trailing-space', 'true '],
+    ['true-with-leading-space', ' true'],
+  ] as const)(
+    'admin + all capability flags on + master %s keeps elearning false',
+    async (_label, master) => {
+      stubAllElearningCapabilitiesOn()
+      if (master !== undefined) vi.stubEnv('ELEARNING_ENABLED', master)
+      else delete process.env.ELEARNING_ENABLED
+      const response = await loginAdminForElearningPayload()
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.features.elearning).toBe(false)
+      expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
+    },
+  )
+
+  it('admin + all capability flags on + exact master true yields elearning true', async () => {
+    stubAllElearningCapabilitiesOn()
+    vi.stubEnv('ELEARNING_ENABLED', 'true')
+    const response = await loginAdminForElearningPayload()
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.elearning).toBe(true)
+    expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
+  })
+
+  // Tasks: the web shows 任务, its badge and /tasks only when the session says tasks=true, which
+  // must be exactly when TASKS_ENABLED is the literal 'true' (the same predicate that mounts
+  // /api/tasks). Checked on both session payload producers the web reads: login and /me.
+  const TASKS_FLAG_CASES = [
+    ['unset', undefined, false],
+    ['empty', '', false],
+    ['TRUE', 'TRUE', false],
+    ['1', '1', false],
+    ['leading space', ' true', false],
+    ['trailing space', 'true ', false],
+    ['false', 'false', false],
+    ['exact true', 'true', true],
+  ] as const
+
+  async function withTasksEnabledEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, 'TASKS_ENABLED')
+    const previous = process.env.TASKS_ENABLED
+    if (value === undefined) delete process.env.TASKS_ENABLED
+    else process.env.TASKS_ENABLED = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env.TASKS_ENABLED = previous
+      else delete process.env.TASKS_ENABLED
+    }
+  }
+
+  it.each(TASKS_FLAG_CASES)('login as an administrator with TASKS_ENABLED %s (%j): features.tasks is %s', async (_label, value, expected) => {
+    const response = await withTasksEnabledEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.tasks).toBe(expected)
+    // The administrator's other role-derived features are unaffected: tasks is not inferred from role.
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(TASKS_FLAG_CASES)('/me for an administrator with TASKS_ENABLED %s (%j): features.tasks is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withTasksEnabledEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.tasks).toBe(expected)
   })
 
   it('accepts a generic identifier payload for login', async () => {
@@ -564,6 +719,37 @@ describe('auth login routes', () => {
     )
     expect((response.body as Record<string, any>).data.passwordChangeRequired).toBe(false)
     expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
+  })
+
+  it('rejects a forced password change that hits the weak-pattern rule with the weak_pattern reason code', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        password: '123456Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Password does not meet requirements',
+      details: ['Password contains a common weak pattern'],
+      reasons: ['weak_pattern'],
+    })
+    expect(bcryptMocks.hash).not.toHaveBeenCalled()
   })
 
   it('rejects password-change calls when the session is not marked for forced rotation', async () => {
@@ -1737,7 +1923,7 @@ describe('auth login routes', () => {
     })
     dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
     dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
-      new dingtalkClientMocks.DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
+      new DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
         error: 'invalid_client',
       }),
     )
@@ -1750,7 +1936,33 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(502)
-    expect((response.body as Record<string, any>).error).toBe('Failed to obtain access token from DingTalk')
+    expect((response.body as Record<string, any>).error).toBe(
+      'DingTalk authentication failed: DingTalk answered with an error status (HTTP 401)',
+    )
+  })
+
+  it('R-41: the callback 502 body never carries provider text (message or response body), only the HTTP status', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new DingTalkRequestError('MARKER_MSG connect ETIMEDOUT 203.0.113.9:443', 503, {
+        errmsg: 'MARKER_BODY from 192.0.2.7',
+      }),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-1' },
+    })
+
+    expect(response.statusCode).toBe(502)
+    const serialized = JSON.stringify(response.body)
+    expect(serialized).not.toContain('MARKER_')
+    expect(serialized).not.toContain('203.0.113.9')
+    expect(serialized).not.toContain('192.0.2.7')
+    expect(serialized).not.toContain('ETIMEDOUT')
+    expect((response.body as Record<string, any>).error).toBe(
+      'DingTalk authentication failed: DingTalk answered with an error status (HTTP 503)',
+    )
   })
 
   it('maps unexpected local callback failures to 500', async () => {
@@ -1848,6 +2060,28 @@ describe('auth login routes', () => {
       })
     })
 
+    it('R-41: a DingTalkRequestError maps to 502 with a fixed sentence and the HTTP status, never provider text', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new DingTalkRequestError('MARKER_MSG getaddrinfo 203.0.113.9', 502, {
+          errmsg: 'MARKER_BODY 192.0.2.7',
+        }),
+      )
+
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
+        body: { authCode: 'auth-code-11' },
+      })
+
+      expect(response.statusCode).toBe(502)
+      const serialized = JSON.stringify(response.body)
+      expect(serialized).not.toContain('MARKER_')
+      expect(serialized).not.toContain('203.0.113.9')
+      expect(serialized).not.toContain('192.0.2.7')
+      expect((response.body as Record<string, any>).error).toBe(
+        'DingTalk authentication failed: DingTalk answered with an error status (HTTP 502)',
+      )
+    })
+
     it('passes policy errors through with status + code', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
@@ -1900,7 +2134,7 @@ describe('auth login routes', () => {
     it('maps a DingTalk business rejection (invalid authCode) to 401 invalid_auth_code', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
-        new dingtalkClientMocks.DingTalkBusinessError('invalid code', 40078),
+        new DingTalkBusinessError('invalid code', { errcode: 40078 }),
       )
       const response = await invokeRoute('post', '/login/dingtalk/container', {
         headers: { 'x-forwarded-for': '10.9.9.10' },

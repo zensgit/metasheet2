@@ -34,11 +34,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { reconstructRecordsAtSeq, reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
-import { resolveExactAnchor, executeExactAnchorRecovery } from '../../src/multitable/exact-anchor-recovery'
+import { composeBaselineOverlay, resolveExactAnchor, executeExactAnchorRecovery } from '../../src/multitable/exact-anchor-recovery'
 import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 import {
+  hashAnchorRecoveryScope,
   hashRecoveryAuthorizationScope,
   mintExactAnchorRecoveryIdentity,
+  verifyExactAnchorRecoveryIdentity,
 } from '../../src/multitable/restore-preview-identity'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -83,6 +85,12 @@ const revSeqOp = (run: Run, recordId: string, version: number, seq: string, opId
     `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq, operation_id, batch_id)
      VALUES (gen_random_uuid(),$1,$2,$3,'create','rest',ARRAY[]::text[],'{}'::jsonb,$4::jsonb,$5::bigint,$6::uuid,$7)`,
     [SHEET, recordId, version, JSON.stringify(snap), seq, opId, batchId],
+  )
+const markerSeq = (recordId: string, version: number, seq: string) =>
+  q(
+    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, seq)
+     VALUES (gen_random_uuid(),$1,$2,$3,'unlock',$4::bigint)`,
+    [SHEET, recordId, version, seq],
   )
 const insertEndpoint = (run: Run, opId: string, endpointSeq: string, eventCount: number) =>
   run(
@@ -220,6 +228,114 @@ describeIfDatabase('W0-1 v3.7 L6-b — exact-anchor recovery + causal reconstruc
     // would see Number(HI) <= Number(anchor) as true and wrongly include HI (then seq DESC would pick it) — so
     // the exact ::bigint path is what keeps the as-of-anchor state at LO.
     expect((await reconstructRecordsAtSeq(q, SHEET, LO)).get(R)).toMatchObject({ exists: true, data: { [F_STR]: 'lo' }, version: 1 })
+  })
+
+  test('TRUST-FLOOR: a pre-checkpoint revision cannot override the checkpoint baseline', async () => {
+    const R = `rec_floor_${TS}`
+    const preFloorSeq = (await nextSeqs(1))[0]
+    await revSeq(R, 1, 'create', { [F_STR]: 'untrusted-pre-floor' }, preFloorSeq)
+    await q(
+      'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)',
+      [R, SHEET, JSON.stringify({ [F_STR]: 'trusted-baseline' }), 7],
+    )
+    const checkpoint = await activate()
+
+    const replay = await reconstructRecordsAtSeq(
+      q,
+      SHEET,
+      checkpoint.trustedSinceSeq,
+      undefined,
+      checkpoint.trustedSinceSeq,
+    )
+    const composed = await composeBaselineOverlay(q, {
+      sheetId: SHEET,
+      checkpointId: checkpoint.checkpointId,
+      stateMap: replay,
+    })
+
+    expect(composed.get(R)).toEqual({
+      recordId: R,
+      exists: true,
+      data: { [F_STR]: 'trusted-baseline' },
+      version: 7,
+    })
+
+    // Production preview resolution must pass the same floor into reconstruction; otherwise the stale
+    // pre-floor row wins before composeBaselineOverlay can supply the baseline.
+    const anchorRecord = `rec_floor_anchor_${TS}`
+    const opId = await sealOp(anchorRecord, await nextSeqs(1))
+    const resolved = await resolveExactAnchor(q, {
+      sheetId: SHEET,
+      request: { kind: 'exact-anchor', anchorOperationId: opId },
+      actorId: ACTOR,
+      mode: 'revert',
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    })
+    expect(resolved.ok).toBe(true)
+    if (resolved.ok) expect(resolved.stateMap.get(R)).toEqual(composed.get(R))
+  })
+
+  test('MARKER-ONLY TARGET: baseline v1 + post-floor marker v2 reconstructs, signs, and read-executes as v2', async () => {
+    const R = `rec_marker_target_${TS}`
+    const ANCHOR_RECORD = `rec_marker_anchor_${TS}`
+    const baselineData = { [F_STR]: 'baseline-v1' }
+    await q(
+      'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [R, SHEET, JSON.stringify(baselineData)],
+    )
+    const checkpoint = await activate()
+    const [markerOnlySeq, anchorSeq] = await nextSeqs(2)
+    await markerSeq(R, 2, markerOnlySeq)
+    await q('UPDATE meta_records SET version = 2 WHERE id = $1 AND sheet_id = $2', [R, SHEET])
+    const opId = await sealOp(ANCHOR_RECORD, [anchorSeq])
+    await q(
+      'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [ANCHOR_RECORD, SHEET, JSON.stringify({ [F_STR]: 'v1' })],
+    )
+
+    const replay = await reconstructRecordsAtSeq(
+      q,
+      SHEET,
+      anchorSeq,
+      undefined,
+      checkpoint.trustedSinceSeq,
+      checkpoint.checkpointId,
+    )
+    expect(replay.get(R)).toMatchObject({ exists: true, version: 2 })
+    const composed = await composeBaselineOverlay(q, {
+      sheetId: SHEET,
+      checkpointId: checkpoint.checkpointId,
+      stateMap: replay,
+    })
+    expect(composed.get(R)).toEqual({ recordId: R, exists: true, data: baselineData, version: 2 })
+
+    const resolved = await resolveExactAnchor(q, {
+      sheetId: SHEET,
+      request: { kind: 'exact-anchor', anchorOperationId: opId },
+      actorId: ACTOR,
+      mode: 'revert',
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    expect(resolved.stateMap.get(R)).toEqual(composed.get(R))
+    const expectedScopeHash = hashAnchorRecoveryScope([
+      { recordId: R, exists: true, version: 2 },
+      { recordId: ANCHOR_RECORD, exists: true, version: 1 },
+    ])
+    expect(resolved.scopeHash).toBe(expectedScopeHash)
+    const verified = verifyExactAnchorRecoveryIdentity(resolved.token, { sheetId: SHEET, actorId: ACTOR })
+    expect(verified.valid).toBe(true)
+    expect(verified.claims?.scopeHash).toBe(expectedScopeHash)
+
+    const executed = await executeExactAnchorRecovery(q, {
+      token: resolved.token,
+      sheetId: SHEET,
+      actorId: ACTOR,
+      evaluateFullReadAccess: ALLOW_FULL_READ,
+    })
+    expect(executed.ok).toBe(true)
+    if (executed.ok) expect(executed.stateMap.get(R)).toEqual(composed.get(R))
   })
 
   // ── ANCHOR RESOLUTION ────────────────────────────────────────────────────────────────────────────────────

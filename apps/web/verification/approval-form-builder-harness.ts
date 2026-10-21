@@ -4,6 +4,16 @@
 // composition shape) and publishes bounded, VALUES-FREE metrics for Playwright:
 // field types in order, slot/history counts, drag-state, and the status copy.
 // No persistent ids, labels, or draft values are exported.
+// FAIL-5 fix (P7-R2, 20260818): production theme + design tokens, exactly as
+// apps/web/src/main.ts loads them. Without these every `var(--el-*)`/`var(--ms-*)` reference in
+// the mounted components' scoped CSS is undefined, so Chromium drops the whole declaration and
+// any focus-ring / paint measurement over this harness is vacuously empty (measured: 27/28
+// controls falsely reported "no focus ring" before this import; 28/28 after). CSS-only — no
+// `element-plus` plugin registration: neither ApprovalFormPalette nor ApprovalFormBuilder render
+// any `<el-*>` component, so `.use(ElementPlus)` would add a runtime dependency with no
+// contrast benefit.
+import 'element-plus/dist/index.css'
+import '../src/styles/tokens.css'
 import { createApp, h, ref } from 'vue'
 import ApprovalFormBuilder, {
   STALE_SLOT_RETRY_MESSAGE,

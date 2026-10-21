@@ -76,6 +76,7 @@ describe('WebhookService.createWebhook persists retry policy', () => {
 
   test('stores maxRetries + backoff columns when provided', async () => {
     await svc.createWebhook('u1', {
+      sheetId: 'sheet1',
       name: 'Policy',
       url: 'https://example.com/hook',
       events: ['record.created'],
@@ -90,6 +91,7 @@ describe('WebhookService.createWebhook persists retry policy', () => {
 
   test('defaults max_retries to 3 and leaves backoff NULL when omitted', async () => {
     await svc.createWebhook('u1', {
+      sheetId: 'sheet1',
       name: 'No policy',
       url: 'https://example.com/hook',
       events: ['record.created'],

@@ -6,8 +6,15 @@ import {
   PLM_WORKBENCH_ALLOWED_PREFIXES,
   buildRouteGuardContext,
   buildRouteGuardInput,
+  buildStockPrepAwarePermissionProbe,
   resolveRouteGuardDecision,
 } from '../src/router/guardPolicy'
+import {
+  STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_ROUTE_PERMISSION,
+  canReachStockPrepWorkbench,
+  satisfiesStockPrepAccess,
+} from '../src/services/integration/stockPreparation/workbenchAccess'
 import { join } from 'node:path'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
@@ -23,7 +30,13 @@ import { join } from 'node:path'
 // flip locale / permission BEFORE each mount (useLocale/useAuth are invoked fresh per mount).
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
-  hasPerm: true,
+  /**
+   * O2 / R-11. Codes the acting principal holds. The default is the PLATFORM-ADMIN pair, because
+   * every shell assertion below is about the legacy MVP tab strip, which is platform-admin-only
+   * after this change — an operator-tier default would have quietly turned those tests into
+   * assertions about an empty page. Tests that care about the operator tier set it explicitly.
+   */
+  permissions: ['integration:admin', 'stock-prep:read'] as string[],
   route: {
     path: '/multitable',
     fullPath: '/multitable',
@@ -60,6 +73,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
+    resolveHomePath: () => '/home', // App.vue brand link (#5700) reads it; the brand target itself is pinned in App.spec.ts
     loadProductFeatures: h.loadProductFeatures,
     isAttendanceFocused: () => false,
     isPlmWorkbenchFocused: () => false,
@@ -67,12 +81,20 @@ vi.mock('../src/stores/featureFlags', () => ({
   }),
 }))
 
+// O2 / R-11: the auth double became a permission SET rather than one boolean. The shell now renders
+// a different tab strip per tier (the six legacy MVP tabs are platform-admin only, the confirmation
+// queue is the operator's), so a single `hasPerm` flag can no longer express the actors this spec
+// needs. Exact-code matching only — the ladder lives in workbenchAccess.ts and is exercised by
+// stockPrepPermissionMatrix.spec.ts, so reproducing it here would only let the two drift.
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
-    hasPermission: (permission: string) => permission === 'integration:write' && h.hasPerm,
+    // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
+    // never the expanding probe), so this double has to carry them or every stock-prep predicate
+    // reads an empty principal.
+    getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: h.permissions }),
+    hasPermission: (permission: string) => h.permissions.includes(permission),
   }),
 }))
 
@@ -95,6 +117,7 @@ import {
 } from '../src/services/integration/stockPreparation/bomSnapshotDiff'
 import { getStockPreparationMaterialMappingSummary } from '../src/services/integration/stockPreparation/materialMapping'
 import { getStockPreparationUnitConversionSummary } from '../src/services/integration/stockPreparation/unitConversion'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 // Values-free forbidden-substring guard: rendered shell copy must never surface any of these.
 const FORBIDDEN_SUBSTRINGS = [
@@ -127,7 +150,11 @@ async function waitForSelector(container: HTMLElement, selector: string, cycles 
   throw new Error(`Timed out waiting for selector: ${selector}`)
 }
 
-const VIEW_KEYS = [
+// O1' §附 narrowed this page to the CONFIRMATION-QUEUE workbench, so 'confirmation-queue' leads the
+// strip and is the landing tab. The seven below it are the legacy MVP tabs, which the same ruling
+// did not revive and which stay PLATFORM-ADMIN gated end to end — they render only for this spec's
+// default (admin) actor, never for a stock-prep operator.
+const LEGACY_MVP_VIEW_KEYS = [
   'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
@@ -136,6 +163,7 @@ const VIEW_KEYS = [
   'prep-line',
   'exception-queue',
 ] as const
+const VIEW_KEYS = ['confirmation-queue', ...LEGACY_MVP_VIEW_KEYS] as const
 
 // Source-level drift pin (matching the repo idiom in approvalTemplateRouteGuard.spec.ts): importing
 // appRoutes eagerly pulls every view + element-plus CSS into jsdom, so assert on the source text.
@@ -149,13 +177,18 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     return end === -1 ? SRC.slice(i) : SRC.slice(i, end)
   }
 
-  it('registers /stock-prep bound to a lazy shell component and the integration:write gate', () => {
+  it('registers /stock-prep bound to a lazy shell component and the stock-prep:read gate (O2/R-11)', () => {
     const block = routeBlockByPath('/stock-prep')
     expect(block, 'route /stock-prep must exist in appRoutes.ts').toBeTruthy()
     expect(block).toContain('AppRouteNames.INTEGRATION_STOCK_PREPARATION')
     expect(block).toContain("import('../components/integration/stockPreparation/StockPreparationWorkspace.vue')")
     expect(block).toMatch(/requiresAuth:\s*true/)
-    expect(block).toMatch(/permissions:\s*\[\s*'integration:write'\s*\]/)
+    // O2 / R-11: the gate moved off the Data Factory's integration:write onto the workbench's own
+    // code. BOTH halves are pinned — the new code present AND the old one gone — because a route
+    // that kept both would still admit an integration:write holder the server refuses everywhere,
+    // which is the misalignment this change exists to close.
+    expect(block).toMatch(/permissions:\s*\[\s*'stock-prep:read'\s*\]/)
+    expect(block).not.toMatch(/permissions:\s*\[[^\]]*'integration:write'/)
     expect(block).toContain("titleZh: '备料工作台'")
   })
 
@@ -214,6 +247,13 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(decide('/plm', { requiredFeature: 'nonsense' }, { hasFeature: () => false })).toEqual({ action: 'allow' })
     })
 
+    it('required-feature gate denies and allows elearning', () => {
+      expect(decide('/learn', { requiredFeature: 'elearning' }, { hasFeature: () => false }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/learn', { requiredFeature: 'elearning' }, { hasFeature: (feature) => feature === 'elearning' }))
+        .toEqual({ action: 'allow' })
+    })
+
     it('the plm allowlist is exactly the five workbench prefixes — all non-empty absolute strings', () => {
       expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
       expect(PLM_WORKBENCH_ALLOWED_PREFIXES.every((p) => typeof p === 'string' && p.startsWith('/') && p.length > 1)).toBe(true)
@@ -247,7 +287,10 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     it('buildRouteGuardContext delegates hasPermission to auth.hasPermission and keeps the typeof tolerance', () => {
       const seen: string[] = []
       const deps = {
-        auth: { hasPermission: (p: string) => { seen.push(p); return p === 'integration:write' } },
+        auth: {
+          hasPermission: (p: string) => { seen.push(p); return p === 'integration:write' },
+          getAccessSnapshot: () => ({ roles: [], permissions: [] }),
+        },
         flags: {
           hasFeature: () => true,
           isAttendanceFocused: () => false,
@@ -264,7 +307,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: undefined } }).plmWorkbenchFocused).toBe(false)
       expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: 42 } }).plmWorkbenchFocused).toBe(false)
       // end-to-end: adapter-built context + real policy = real deny behavior.
-      const denyDeps = { ...deps, auth: { hasPermission: () => false } }
+      const denyDeps = { ...deps, auth: { ...deps.auth, hasPermission: () => false } }
       expect(resolveRouteGuardDecision({ path: '/stock-prep', meta: { permissions: ['integration:write'] } }, buildRouteGuardContext(denyDeps)))
         .toEqual({ action: 'redirect', target: '/HOME' })
     })
@@ -280,7 +323,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(buildRouteGuardInput({ path: 123 as unknown as string, meta }).path).toBe('123')
       // end-to-end: real route meta flows through input adapter + ctx adapter into the policy.
       const deps = {
-        auth: { hasPermission: () => false },
+        auth: { hasPermission: () => false, getAccessSnapshot: () => ({ roles: [], permissions: [] }) },
         flags: {
           hasFeature: () => true,
           isAttendanceFocused: () => false,
@@ -297,7 +340,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     it('buildRouteGuardContext delegates hasFeature / attendanceFocused / resolveHomePath faithfully', () => {
       const featureSeen: string[] = []
       const deps = {
-        auth: { hasPermission: () => true },
+        auth: { hasPermission: () => true, getAccessSnapshot: () => ({ roles: [], permissions: [] }) },
         flags: {
           hasFeature: (f: string) => { featureSeen.push(f); return f === 'plm' },
           isAttendanceFocused: () => true,
@@ -316,6 +359,158 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       const denyFeature = { ...deps, flags: { ...deps.flags, hasFeature: () => false, isAttendanceFocused: () => false } }
       expect(resolveRouteGuardDecision({ path: '/plm', meta: { requiredFeature: 'plm' } }, buildRouteGuardContext(denyFeature)))
         .toEqual({ action: 'redirect', target: '/HOME-LAZY' })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // GATE ALIGNMENT PIN (2026-09-10) — nav predicate == route gate == workbench predicate.
+  //
+  // WHAT WENT WRONG BEFORE. Three surfaces answered the same question and only two of them agreed.
+  // The nav link (`App.vue`) and the route guard both ran `useAuth().hasPermission`, which EXPANDS
+  // (`stock-prep:*` and `*:*` satisfy `stock-prep:read`, `:write` implies `:read`, `users:write`
+  // counts as admin); everything INSIDE the page ran `satisfiesStockPrepAccess`, which matches
+  // LITERALLY, exactly as the server does. The gap was documented rather than closed
+  // (`stockPrepPermissionMatrix.spec.ts` F-03 carried four annotated rows for it) and it failed both
+  // ways at once: three principals reached a page whose every panel refused them, and a bare
+  // `integration:admin` — a platform admin to the server AND to every predicate in
+  // `workbenchAccess.ts` — was redirected away from a page it may use in full.
+  //
+  // WHAT THIS PINS. ONE verdict per principal, read three different ways: the nav predicate, the
+  // REAL `/stock-prep` route meta driven through the REAL guard adapter, and the workbench-internal
+  // predicate. They must be EQUAL, not merely each individually plausible. Reverting
+  // `buildRouteGuardContext` to `deps.auth.hasPermission` reddens this.
+  //
+  // WHAT IT DOES *NOT* PIN, said plainly because an earlier draft of this comment claimed it did:
+  // reverting `App.vue` to the expanding probe does NOT redden this block. Nothing here mounts the
+  // shell — `canReachStockPrepWorkbench` is called directly — so a nav link wired to a different
+  // predicate would still leave every assertion below green. The pin for THAT is F-07 in
+  // `stockPrepPermissionMatrix.spec.ts`, which reads `App.vue`'s source, and it is where a mutation
+  // probe of that revert actually lands.
+  //
+  // The app-wide probe handed to the adapter below is deliberately EXTREME — `() => true` in one
+  // half, `() => false` in the other — because that is what makes the assertion mean anything: the
+  // verdict has to come from the PRINCIPAL, not from the probe. A wrapper that quietly delegated
+  // would answer 'allow' for everyone in the first half and 'redirect' for everyone in the second.
+  // ---------------------------------------------------------------------------
+  describe('gate alignment: nav, route and workbench answer with ONE predicate', () => {
+    interface Subject {
+      name: string
+      roles: string[]
+      permissions: string[]
+      /** The single verdict all three surfaces must reach. */
+      reachable: boolean
+    }
+
+    const SUBJECTS: Subject[] = [
+      { name: 'plain read holder', roles: [], permissions: ['stock-prep:read'], reachable: true },
+      { name: 'operator (read + operate)', roles: [], permissions: ['stock-prep:read', 'stock-prep:operate'], reachable: true },
+      // `stock-prep:admin` WITHOUT an explicit `:read`. The server's ladder answers read from it, so
+      // all three surfaces must — this row is why the nav gate cannot be a literal `includes`.
+      { name: 'workbench admin only (stock-prep:admin, no explicit read)', roles: [], permissions: ['stock-prep:admin'], reachable: true },
+      { name: 'platform admin (admin role + integration:admin)', roles: ['admin'], permissions: ['integration:admin'], reachable: true },
+      // THE ROW THAT WAS BROKEN IN THE DANGEROUS DIRECTION: permitted everywhere inside, hidden by
+      // the shell. `integration:admin` is half of PLATFORM_ADMIN_PERMISSIONS, and `hasPermission`
+      // derives nothing at all from it.
+      { name: 'bare integration:admin (no admin role)', roles: [], permissions: ['integration:admin'], reachable: true },
+      { name: 'no codes at all', roles: [], permissions: [], reachable: false },
+      // THE THREE EXPANSION ROWS, now strictly narrower. Each was admitted by the shell and refused
+      // by the server, so each used to land on a page with nothing on it.
+      { name: 'stock-prep:* wildcard', roles: [], permissions: ['stock-prep:*'], reachable: false },
+      { name: '*:* without the admin role', roles: [], permissions: ['*:*'], reachable: false },
+      { name: 'stock-prep:write holder', roles: [], permissions: ['stock-prep:write'], reachable: false },
+      // `users:write` is what makes `useAuth().getAccessSnapshot().isAdmin` true, and isAdmin
+      // short-circuits `hasPermission` to true for EVERY code. The server has no such rule.
+      { name: 'users:write (isAdmin to the shell, nobody to the server)', roles: [], permissions: ['users:write'], reachable: false },
+      { name: 'integration:write holder (the pre-O2 gate)', roles: [], permissions: ['integration:write'], reachable: false },
+    ]
+
+    /** The permission list the REAL route declares, read out of appRoutes.ts source (see above). */
+    function declaredRoutePermissions(): string[] {
+      const block = routeBlockByPath('/stock-prep')
+      expect(block, '/stock-prep must be registered').toBeTruthy()
+      const match = /permissions:\s*\[([^\]]*)\]/.exec(block as string)
+      expect(match, '/stock-prep must declare meta.permissions').toBeTruthy()
+      return Array.from((match as RegExpExecArray)[1].matchAll(/'([^']+)'/g)).map((m) => m[1])
+    }
+
+    function guardAllows(subject: Subject, appWideProbe: (permission: string) => boolean): boolean {
+      const decision = resolveRouteGuardDecision(
+        buildRouteGuardInput({ path: '/stock-prep', meta: { requiresAuth: true, permissions: declaredRoutePermissions() } }),
+        buildRouteGuardContext({
+          auth: {
+            hasPermission: appWideProbe,
+            getAccessSnapshot: () => ({ roles: subject.roles, permissions: subject.permissions }),
+          },
+          flags: {
+            hasFeature: () => true,
+            isAttendanceFocused: () => false,
+            isPlmWorkbenchFocused: () => false,
+            resolveHomePath: () => '/HOME',
+          },
+        }),
+      )
+      return decision.action === 'allow'
+    }
+
+    it('the route meta still declares exactly the workbench read code', () => {
+      expect(declaredRoutePermissions()).toEqual([STOCK_PREP_ROUTE_PERMISSION])
+      expect(STOCK_PREP_ROUTE_PERMISSION).toBe('stock-prep:read')
+    })
+
+    it('nav predicate, route gate and workbench predicate give ONE answer per principal', () => {
+      for (const subject of SUBJECTS) {
+        const snapshot = { roles: subject.roles, permissions: subject.permissions }
+
+        const nav = canReachStockPrepWorkbench(snapshot)
+        const workbench = satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
+        const routeUnderPermissiveProbe = guardAllows(subject, () => true)
+        const routeUnderDenyingProbe = guardAllows(subject, () => false)
+
+        expect(nav, `${subject.name}: nav predicate`).toBe(subject.reachable)
+        expect(workbench, `${subject.name}: workbench predicate`).toBe(subject.reachable)
+        expect(routeUnderPermissiveProbe, `${subject.name}: route gate (permissive app-wide probe)`).toBe(subject.reachable)
+        expect(routeUnderDenyingProbe, `${subject.name}: route gate (denying app-wide probe)`).toBe(subject.reachable)
+        // Stated as an equality as well: "all three happen to be right" and "all three are the same
+        // predicate" are different properties, and only the second one cannot drift.
+        expect(
+          [nav, workbench, routeUnderPermissiveProbe, routeUnderDenyingProbe],
+          `${subject.name}: one verdict, three surfaces`,
+        ).toEqual([subject.reachable, subject.reachable, subject.reachable, subject.reachable])
+      }
+    })
+
+    it('the probe answers the three stock-prep codes from the principal and delegates everything else', () => {
+      const held = { roles: [] as string[], permissions: ['stock-prep:read'] }
+      const empty = { roles: [] as string[], permissions: [] as string[] }
+
+      // A probe that says yes to everything cannot grant a stock-prep code...
+      const yesProbe = buildStockPrepAwarePermissionProbe(() => true, () => empty)
+      for (const code of STOCK_PREP_PERMISSION_CODES) {
+        expect(yesProbe(code), `${code} must not come from the app-wide probe`).toBe(false)
+      }
+      // ...and a probe that says no to everything cannot withhold one.
+      const noProbe = buildStockPrepAwarePermissionProbe(() => false, () => held)
+      expect(noProbe(STOCK_PREP_ROUTE_PERMISSION)).toBe(true)
+
+      // Everything that is NOT a stock-prep code still goes to the app-wide probe, unchanged.
+      const seen: string[] = []
+      const delegating = buildStockPrepAwarePermissionProbe(
+        (permission) => { seen.push(permission); return permission === 'integration:write' },
+        () => empty,
+      )
+      expect(delegating('integration:write')).toBe(true)
+      expect(delegating('approvals:read')).toBe(false)
+      expect(seen).toEqual(['integration:write', 'approvals:read'])
+      expect(seen.some((permission) => STOCK_PREP_PERMISSION_CODES.includes(permission))).toBe(false)
+    })
+
+    it('a snapshot that cannot be read fails CLOSED — it never falls back to the wider probe', () => {
+      const probe = buildStockPrepAwarePermissionProbe(() => true, () => { throw new Error('no principal') })
+      for (const code of STOCK_PREP_PERMISSION_CODES) {
+        expect(probe(code)).toBe(false)
+      }
+      // The non-stock-prep half is untouched by the throwing snapshot getter.
+      expect(probe('integration:write')).toBe(true)
     })
   })
 
@@ -451,6 +646,9 @@ describe('StockPreparationWorkspace shell', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
+    // Restored per test: the operator-tier case below narrows it, and a leaked narrow actor would
+    // silently turn every later legacy-tab assertion into an assertion about an empty page.
+    h.permissions = ['integration:admin', 'stock-prep:read']
     h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
     localStorage.removeItem('tenantId')
     localStorage.removeItem('workspaceId')
@@ -477,7 +675,27 @@ describe('StockPreparationWorkspace shell', () => {
     return container!
   }
 
-  it('renders the tablist with the dashboard tab (H1/H2) plus all six MVP view tabs', async () => {
+  /**
+   * Mount the shell and put 确认队列 on screen.
+   *
+   * THE CLICK IS NOT DECORATION. Since PR #5555 this file's default actor (`integration:admin` +
+   * `stock-prep:read`) is a PLATFORM ADMIN on the workbench, exactly as it always was on the server:
+   * `workbenchAccess.ts` now decides on a `{ roles, permissions }` snapshot with the server's own
+   * literal ladder instead of on this file's exact-code `hasPermission` double. D2 therefore lands
+   * them on 开始使用 (nothing here answers the preflight, and 「读不到」 lands on the wizard). The
+   * queue is one click away and still theirs; the cases below are about what 建立确认账本 / 对账 do
+   * once it is open, and the landing itself is asserted in its own case above.
+   */
+  async function mountShellOnTheQueue(): Promise<HTMLDivElement> {
+    const root = await mountShell()
+    const tab = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement | null
+    expect(tab, '确认队列 must still be a tab this actor can open').not.toBeNull()
+    tab!.click()
+    await flushUi()
+    return root
+  }
+
+  it('renders the tablist with the confirmation queue plus every legacy MVP tab (platform admin)', async () => {
     const root = await mountShell()
     const tablist = root.querySelector('[data-testid="stock-prep-tabs"]')
     expect(tablist).not.toBeNull()
@@ -485,17 +703,131 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
+    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14 -> 15. 14 was PR #5555's alignment, not a new tab:
+    // this actor holds a bare `integration:admin`, which the SERVER has always counted as a platform
+    // admin (`PLATFORM_ADMIN_PERMISSIONS`) while the browser's `hasPermission` did not.
+    // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
+    // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
+    // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
+    // rendered) + 1 【帮助】.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+  })
+
+  // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
+  // would 403 on every action must not be there — otherwise the page hands a customer operator seven
+  // tabs of dead controls, which is the "visible but not actionable" failure in its purest form.
+  it('shows a stock-prep operator ONLY the confirmation queue — every legacy MVP tab is hidden', async () => {
+    h.permissions = ['stock-prep:read']
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]')).not.toBeNull()
+    for (const key of LEGACY_MVP_VIEW_KEYS) {
+      expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
+    }
+    // P1-1: 1 -> 2, and P2-1 leaves it at 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read`
+    // holder is still refused 今天要处理 / 项目备料 / 项目查询 (all value-bearing, operate tier) and
+    // the whole 【部署与接入】 group.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]'), '项目查询 is operate-tier').toBeNull()
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    expect(root.querySelector('[data-testid="stock-prep-tab-help"]')).not.toBeNull()
+    // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
+    //
+    // D2=A LEAVES THIS ONE ALONE, and that is the ruling working rather than an omission: this actor
+    // is below the workbench-admin ceiling (so no 开始使用 / 记录与排查 landing) and below the
+    // operator tier (so no 今天要处理). 确认队列 is what is left, which is where they landed before.
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
+  })
+
+  // §14 (multitable-application-model-20260830.md) — the INSTALL tab. Gated on `stock-prep:admin`,
+  // the workbench-scoped ceiling, because everything the PANEL reads (the app-catalog manifest and
+  // the read-tier preflight) is answerable to that holder. The run control INSIDE it is
+  // platform-admin and does its own gating (StockPreparationInstallView.spec.ts V-05).
+  it('hides the install tab from an operator and shows it to a workbench admin', async () => {
+    h.permissions = ['stock-prep:read']
+    const operatorRoot = await mountShell()
+    expect(operatorRoot.querySelector('[data-testid="stock-prep-tab-install"]')).toBeNull()
+
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    const adminRoot = await mountShell()
+    expect(adminRoot.querySelector('[data-testid="stock-prep-tab-install"]')).not.toBeNull()
+    // P1-1: 2 -> 5 -> 7. The workbench-admin code opens the WHOLE 【部署与接入】 group, not just the
+    // install page: 开始使用 (the wizard, promoted off the install page's first screen) and
+    // 记录与排查 (the ops panel, which shipped mounted-but-unreachable) ride exactly the same
+    // `canOpenStockPrepInstallView` gate the install tab always did. Plus 确认队列 and 【帮助】.
+    // 5 -> 7 is PR #5555: `stock-prep:admin` satisfies read AND operate on the server's ladder, and
+    // the workbench now uses that ladder rather than this file's exact-code double — so 今天要处理
+    // and 项目备料 come with the code, which is what StockPreparationRail.spec.ts's own
+    // `stock-prep:admin` actor (already on the real ladder) always expected.
+    // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
+    // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+      expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
+    }
+    for (const key of LEGACY_MVP_VIEW_KEYS) {
+      expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must stay hidden`).toBeNull()
+    }
+    // D2=A: 'confirmation-queue' -> 'getting-started'. THIS IS THE RULING, and this is the actor it
+    // is about — a workbench admin. Landing them on an empty confirmation queue was the dead end the
+    // whole redesign opened with (设计稿 §2.3 A1): the page never said "you have to install this
+    // first". They now land on 开始使用 because the preflight could not be read here (this test's
+    // apiFetch is reset, so the read rejects) — and 「读不到」 lands on the wizard, never on the health
+    // page, since 「看不到」 is not 「装完了」. The installed case lands on 记录与排查; both are
+    // asserted directly against the predicate in the D2 block further down this file.
+    const panel = adminRoot.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('getting-started')
+  })
+
+  it('opens the install tab and badges it as a manifest read plus an idempotent ensure', async () => {
+    h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
+      id: 'stock-preparation',
+      displayName: 'BOM备料',
+      permissions: [],
+      objects: [],
+    }), { status: 200 }))
+
+    const root = await mountShell()
+    // P1-1: 9 -> 12. The queue, the whole 【部署与接入】 group (开始使用 / 安装 · 体检 / 记录与排查),
+    // 【帮助】, and the seven legacy MVP tabs — now folded into 深度工具 ▾ but still rendered, so
+    // still counted. This actor holds no `stock-prep:operate`, so 今天要处理 and 项目备料 stay hidden.
+    // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
+    // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
+    // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('install')
+    expect(root.querySelector('[data-testid="stock-prep-install"]')).not.toBeNull()
+
+    // The badge must not claim "readonly · GET": the panel's admin-only run calls the existing
+    // idempotent ensure / customer-pack routes.
+    const endpoint = root.querySelector('[data-testid="stock-prep-panel-endpoint"]') as HTMLElement
+    expect(endpoint.textContent).toContain('/api/platform/apps/stock-preparation')
+    expect(endpoint.textContent).toContain('幂等建表')
+    expect(endpoint.textContent).not.toMatch(/· GET/)
   })
 
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
     h.locale = 'zh-CN'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('项目工作台')
+    // THE WHOLE RAIL, not just `[data-testid="stock-prep-tabs"]` (hardening wave, 2026-09-08): 深度工具
+    // moved outside the tablist witness element (R-05 in StockPreparationRail.spec.ts has the full
+    // reasoning), so the seven legacy labels these three lines check now live in a NAV-level sibling of
+    // it, `.sp-rail__advanced`. `.sp-rail` is the outer container both live inside, unaffected by that
+    // internal move.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('项目工作台')
     // NAMING: snapshot uses 快照批次 / batch vocabulary (collision-avoidance requirement).
-    expect(tabs.textContent).toContain('BOM 快照批次与差异')
-    expect(tabs.textContent).toContain('异常队列')
+    expect(rail.textContent).toContain('BOM 快照批次与差异')
+    expect(rail.textContent).toContain('异常队列')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toContain('只读')
     expect(boundary.textContent).toMatch(/K3 Save/)
@@ -504,16 +836,51 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders English labels when locale is not zh-CN', async () => {
     h.locale = 'en'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('Project Workspace')
-    expect(tabs.textContent).toContain('BOM Snapshot Batch & Diff')
-    expect(tabs.textContent).toContain('Exception Queue')
+    // See the zh-CN case above for why `.sp-rail` rather than the tablist testid.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('Project Workspace')
+    expect(rail.textContent).toContain('BOM Snapshot Batch & Diff')
+    expect(rail.textContent).toContain('Exception Queue')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toMatch(/readonly/i)
   })
 
-  it('defaults to the dashboard tab (H1: "operator enters the system and sees this first"), with no single-endpoint badge', async () => {
+  // O1' §附 moved the landing tab: this page is now the confirmation-queue workbench, so the queue —
+  // not the MVP dashboard — is what an operator sees on arrival. The dashboard remains reachable for
+  // a platform admin via its tab, asserted immediately below.
+  //
+  // D2=A DOES MOVE THIS ONE, as of PR #5555. The actor holds a bare `integration:admin`, which the
+  // SERVER has always counted as a platform admin; the workbench now counts it the same way instead
+  // of through this file's exact-code `hasPermission` double, so D2's posture rule applies to them.
+  // Nothing here answers the preflight, and 「读不到」 lands on 开始使用, never on 记录与排查.
+  // THE QUEUE IS STILL THEIRS — one click away — which is the second half of this case rather than
+  // an assertion dropped.
+  it('lands where D2 sends a platform admin (开始使用), with the queue one click away', async () => {
     const root = await mountShell()
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('getting-started')
+    const queueTab = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement
+    expect(queueTab).not.toBeNull()
+    queueTab.click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
+  })
+
+  // O1' §附's claim itself, kept and pointed at the tier it is actually about: the values-free
+  // `stock-prep:read` queue watcher, whose landing neither D2 nor this PR touched.
+  it('lands on the confirmation queue for the read-only tier (O1\': the page this workbench was adopted to be)', async () => {
+    h.permissions = ['stock-prep:read']
+    const root = await mountShell()
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
+  })
+
+  it('still opens the dashboard tab for a platform admin, with no single-endpoint badge', async () => {
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    await flushUi()
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('dashboard')
     // The dashboard aggregates MULTIPLE existing endpoints client-side — it has no single endpoint
@@ -530,7 +897,8 @@ describe('StockPreparationWorkspace shell', () => {
       data: { projectCount: 0, statusCounts: {}, projects: [] },
     }), { status: 200 }))
 
-    await mountShell()
+    const shell = await mountShell()
+    ;(shell.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
     await waitForSelector(container!, '[data-testid="stock-prep-dashboard-empty"]')
 
     const call = h.apiFetch.mock.calls.find(([value]) => String(value).includes('/stock-preparation/projects'))
@@ -753,6 +1121,174 @@ describe('StockPreparationWorkspace shell', () => {
     })
   }
 
+  // ---- 打开备料多维表 on 项目工作台 (this PR) ---------------------------------------------------
+  //
+  // The legacy tab's 到多维表 buttons had no sheet to name, so the shell could only ever open the
+  // multitable chooser. The operator directory now returns the tenant-gated handle, and the SHELL
+  // fetches it — lazily, once, and only for the tab that has a button for it, because the read it
+  // rides (`?includePullTargets=1`) is the scan the owner ruled may not be charged on every open.
+  it('打开备料多维表: the shell asks for the handle ONLY once 项目工作台 is on screen', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/operator/projects')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            tenantId: 'tenant-a',
+            directoryReady: true,
+            ledgerReady: true,
+            projectCount: 0,
+            pendingProjectCount: 0,
+            projects: [],
+            fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' },
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+    const directoryCalls = (): string[] => h.apiFetch.mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((url: string) => url.includes('/operator/projects'))
+
+    const root = await mountShell()
+    // THE COST ASSERTION: the tab this actor lands on pays nothing for a handle it has no button for.
+    expect(directoryCalls()).toHaveLength(0)
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    const asked = directoryCalls()
+    expect(asked.length).toBe(1)
+    expect(asked[0]).toContain('includePullTargets=1')
+
+    // ONCE PER MOUNT: leaving the tab and coming back must not re-run the scan.
+    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(directoryCalls().length).toBe(1)
+  })
+
+  // ---- 打开备料多维表 on 项目工作台: THE DEEP LINK, END TO END -----------------------------------
+  //
+  // WHY THE COST ASSERTION ABOVE IS NOT ENOUGH. The button is three hops away from a route: the SHELL
+  // fetches the handle, `StockPreparationProjectWorkspaceView` hands it back UP on the emit, and the
+  // shell composes the path. Drop the emit's payload (`emit('open-multitable', props.fillTarget ?? null)`
+  // -> `emit('open-multitable')`) or stop passing `:fill-target` down, and the button still renders
+  // and still says 「打开备料多维表」 — it just lands on the table chooser again, which is the exact
+  // bug this PR exists to remove. Only a click that ends in a ROUTE can catch that, so these two
+  // drive a real run and assert on `router.push`, the same shape 项目备料页's own spec asserts.
+  const SYNC_ACTION_BASE = '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1'
+
+  /** Directory (the handle) + the two sync calls a PLAN_READY -> IMPORTED run makes. Values-free. */
+  function mockWorkspaceSyncReads(fillTarget: { sheetId: string; viewId: string } | null): void {
+    h.apiFetch.mockImplementation(async (url: string) => {
+      const target = String(url)
+      if (target.includes('/operator/projects')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            tenantId: 'tenant-a',
+            directoryReady: true,
+            ledgerReady: true,
+            projectCount: 0,
+            pendingProjectCount: 0,
+            projects: [],
+            fillTarget,
+          },
+        }), { status: 200 })
+      }
+      // R67 ④: the dry run is enqueued (POST, no projectNo in the query) and polled (GET …?projectNo=).
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`) && !target.includes('projectNo=')) {
+        return new Response(JSON.stringify({ ok: true, data: { jobId: 'job_ws', status: 'running', elapsedMs: 0 } }), { status: 202 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run-jobs`)) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            jobId: 'job_ws',
+            status: 'succeeded',
+            elapsedMs: 0,
+            result: {
+              status: 'ready',
+              canApply: true,
+              dryRunToken: 'tok_ws',
+              counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+            },
+          },
+        }), { status: 200 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/apply`)) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { status: 'succeeded', apply: { counts: { created: 1 } } },
+        }), { status: 200 })
+      }
+      // 一个项目一张备料表 (S2): this fixture is a deployment with the project-sheets switch OFF, and
+      // that is what the real server answers on the project-target route. Since S2 fix round 1 the
+      // pull panel STOPS on any other answer to it (an unreadable sheet state is never guessed past),
+      // so the catch-all below must not stand in for it.
+      if (target.includes('/stock-preparation/projects/') && target.includes('/target')) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', message: 'disabled' },
+        }), { status: 404 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+  }
+
+  /** 项目工作台 -> type a number -> 同步 -> the link the run puts on screen. */
+  async function openMultitableLinkOnProjectWorkspace(root: HTMLDivElement): Promise<HTMLButtonElement> {
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = (await waitForSelector(root, '[data-testid="stock-prep-project-sync-project-no"]')) as HTMLInputElement
+    input.value = 'PRJ-WS-1'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
+    return (await waitForSelector(root, '[data-testid="stock-prep-project-sync-open-multitable"]')) as HTMLButtonElement
+  }
+
+  it('打开备料多维表: 项目工作台 routes the click to the BOUND 备料主表, not the chooser', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    mockWorkspaceSyncReads({ sheetId: 'sheet_x', viewId: 'view_x' })
+    const root = await mountShell()
+
+    const link = await openMultitableLinkOnProjectWorkspace(root)
+    expect(link.getAttribute('data-fill-target')).toBe('bound')
+    expect(link.textContent).toContain('打开备料多维表')
+
+    link.click()
+    await flushUi()
+    // THE ASSERTION THIS PR IS ABOUT: the same route shape 项目备料页's board button produces.
+    expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable/sheet_x/view_x' })
+    expect(h.router.push).not.toHaveBeenCalledWith({ path: '/multitable' })
+    // R67 ④: 项目工作台's 试算 went through the background job lane — enqueued once, polled — and
+    // never through the synchronous route a 60 s gateway timeout cuts off.
+    const dryRunCalls = h.apiFetch.mock.calls
+      .map((call: unknown[]) => ({ url: String(call[0]), method: (call[1] as RequestInit | undefined)?.method ?? 'GET' }))
+      .filter((call: { url: string }) => call.url.includes(`${SYNC_ACTION_BASE}/dry-run`))
+    expect(dryRunCalls.filter((call: { url: string; method: string }) => call.method === 'POST' && call.url.includes('/dry-run-jobs'))).toHaveLength(1)
+    expect(dryRunCalls.some((call: { url: string; method: string }) => call.method === 'GET' && call.url.includes('/dry-run-jobs?') && call.url.includes('projectNo=PRJ-WS-1'))).toBe(true)
+    expect(dryRunCalls.some((call: { url: string }) => /\/dry-run(\?|$)/.test(call.url))).toBe(false)
+  })
+
+  it('打开备料多维表: with NO handle 项目工作台 keeps the old destination, and the label says so', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    mockWorkspaceSyncReads(null)
+    const root = await mountShell()
+
+    const link = await openMultitableLinkOnProjectWorkspace(root)
+    expect(link.getAttribute('data-fill-target')).toBe('none')
+    expect(link.textContent).toContain('打开多维表工作台')
+
+    link.click()
+    await flushUi()
+    expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable' })
+    // No handle must never be turned into a fabricated deep link.
+    const pushed = h.router.push.mock.calls.map((call: unknown[]) => String((call[0] as { path?: string })?.path ?? ''))
+    expect(pushed.some((path: string) => path.startsWith('/multitable/'))).toBe(false)
+  })
   it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
     mockStockPrepReads()
     const root = await mountShell()
@@ -899,14 +1435,265 @@ describe('StockPreparationWorkspace shell', () => {
     const batchListCalls = h.apiFetch.mock.calls
       .map((call) => String(call[0]))
       .filter((url) => url.includes('/snapshot-batches'))
-    // TWO calls, not one: the dashboard (H1/H2, now the default landing tab) ALSO eagerly aggregates
-    // the sync stage for an already-seeded projectId on its own mount (before the test ever switches
-    // to view 2) — this is the dashboard's own reused GET, not a duplicate/bug. Both carry the SAME
-    // deep-linked handle either way.
-    expect(batchListCalls.length).toBe(2)
+    // ONE call now, where it used to be two. The second was the dashboard's own eager stage
+    // aggregation on mount, back when the dashboard was the landing tab; O1' §附 made the
+    // confirmation queue the landing tab, and that tab reads nothing until the operator asks. So
+    // arriving on a deep link no longer fires an admin-tier MVP read the arriving principal may not
+    // even be permitted to make — the count dropping is the point, not an omission.
+    expect(batchListCalls.length).toBe(1)
     for (const call of batchListCalls) {
       expect(call).toContain('projectId=proj-alpha')
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // 确认队列's two PLATFORM-ADMIN buttons — the wiring, and what it may say
+  // -------------------------------------------------------------------------
+  //
+  // THE BUG THESE PIN. `StockPreparationConfirmationQueueView` rendered 建立确认账本 and
+  // 重新扫描待确认的事 and emitted `admin-action` for both. This shell is the component's ONLY mount
+  // point and declared no listener, so both clicks were swallowed entirely: no request left the
+  // browser, no error appeared, and the admin who pressed 建账本 had every reason to believe the
+  // ensure had run. Every assertion below is about a request that must now be made and a sentence
+  // that must now appear.
+
+  /** The queue tab's own on-mount reads answered with empty, valid envelopes. */
+  function answerQueueReads(): void {
+    h.apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify({
+      ok: true,
+      data: String(url).includes('/operator/projects')
+        ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+        : {},
+    }), { status: 200 }))
+  }
+
+  function postCalls(pathFragment: string): string[] {
+    return h.apiFetch.mock.calls
+      .filter((call) => String((call[1] as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'POST')
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes(pathFragment))
+  }
+
+  it('the ensure button really calls the confirmation-ledger ensure route and says what happened', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    const ensure = root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement
+    expect(ensure).not.toBeNull()
+    ensure.click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/stock-preparation/confirmation-decisions/ensure').length).toBe(1)
+    expect(notice.textContent).toContain('确认账本已经就位')
+    // A SUCCESS carries no error token — the code element renders only on a failure.
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
+  it('the reconcile button calls the table-action reconcile route for the number on screen', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '200000006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    const calls = postCalls('/confirmation-decisions/reconcile')
+    expect(calls.length).toBe(1)
+    expect(calls[0]).toContain('/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/')
+    expect(notice.textContent).toContain('已经重新扫描过一遍')
+  })
+
+  it('reconcile with no project number asks for one instead of firing a request that cannot succeed', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/confirmation-decisions/reconcile').length).toBe(0)
+    expect(notice.textContent).toContain('请先填一个项目号')
+  })
+
+  // A REFUSED RECONCILE. It reaches the shell as an ordinary clamped code, so the notice must be the
+  // code's OWN sentence — not the generic "did not save" — and must carry no project number of its
+  // own.
+  //
+  // THE CODE HERE USED TO BE `STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE`, the project gate
+  // #5516 put on the server. The owner ruled on 2026-09-06 that stock-prep will not do project
+  // ownership; the gate and its copy were deleted, so no server path can produce that code any more
+  // and a test that kept asserting its sentence would have been witnessing dead copy. This case is
+  // what it was always really about — the notice renders the refusal's own words plus the code —
+  // repointed at a refusal this button can genuinely receive: the 403 `FORBIDDEN` that
+  // `requireTableActionAccess` raises.
+  it('a refused reconcile shows the plain-language refusal plus its code, values-free', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'FORBIDDEN', message: 'nope' },
+        }), { status: 403 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShellOnTheQueue()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '200000006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('当前账号没有做这件事的权限')
+    expect(notice.querySelector('code')?.textContent).toBe('FORBIDDEN')
+    // The wording is the CODE's own, not the write-generic every unknown code falls back to.
+    expect(notice.textContent).not.toContain('这一步没有保存成功')
+    // ...and the number the admin typed is not echoed back into the notice.
+    expect(notice.textContent).not.toContain('200000006')
+  })
+
+  // -------------------------------------------------------------------------
+  // THE NOTICE IS A NOTICE, NOT A BRANCH — the v-else-if chain must stay whole
+  // -------------------------------------------------------------------------
+  //
+  // Vue attaches `v-else-if` to its immediately preceding sibling branch. An element carrying its own
+  // `v-if`, dropped BETWEEN two branches of the panel's chain, therefore splits that chain in two —
+  // silently, with no compiler warning. The first cut of the admin notice sat between the queue and
+  // the install branch, and the two observable consequences are exactly what these cases pin:
+  //   * chain 1 (project-board, confirmation-queue) lost its `v-else`, so the "container placeholder"
+  //     paragraph — the fallback for a tab with no view — rendered UNDER both of the only two tabs an
+  //     operator ever sees, with no admin action involved at all;
+  //   * chain 2 began at the notice, so the moment one appeared, install / dashboard / every legacy
+  //     panel stopped rendering.
+  // Neither shows up in an assertion about the notice text or the request, which is why the five
+  // cases above all passed while this was broken.
+
+  // D2 lands this actor on 开始使用 (see the landing case above), so the queue is opened explicitly —
+  // the claim is about the CHAIN under a real tab, and 确认队列 is the tab whose branch lost its
+  // `v-else` when this broke.
+  it('the container placeholder never renders under a real tab (the notice must not split the chain)', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  it('...including the operator landing tab, which is the other half of the split chain', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    // P1-1 / D2=A: 'project-board' -> 'home'. WHAT THE OPERATOR SEES IS THE SAME PIXELS. P0 shipped
+    // the task home INSIDE the board view, keyed on 「?projectNo= 无值即首页」, so a bare landing on
+    // 项目备料 already painted 今天要处理. P1-1 gives that page its own rail item and lands on it by
+    // name; the branch is literally the same component with the number withheld, which is why this
+    // is a key rename in the assertion rather than a behaviour change under it.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  // P2-1's URL contract, the half the SHELL owns. 项目查询 is the one panel that mirrors `?tab=`
+  // itself, so the shell is the only thing that can clean the bit up when the reader leaves — and a
+  // staleness test that looked only at `q`/`status`/`source`/`sel` called a bare `?tab=project-query`
+  // clean. Two clicks reach that state (filter once, press the same chip again: every filter key
+  // deletes itself at its default and `tab` is what is left), and the next reload then threw the
+  // reader back into a panel they had already walked away from.
+  it('leaving 项目查询 clears a bare `?tab=project-query` — the four filter keys being absent is not "clean"', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.route.query = { tab: 'project-query' }
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    expect(h.router.replace, '深链进来本身不发 replace').not.toHaveBeenCalled()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  // The same guard, keyed off `effectiveKey` rather than the raw `activeKey`: `tabFromQuery()`
+  // accepts a key by NAME without asking whether this principal may see it, so a 纯 read 主体 can
+  // arrive with `activeKey === 'project-query'` while `activeView` folds them back to their landing.
+  // Reading `activeKey` would call that reader's panel "active" and keep five keys belonging to a
+  // screen they never saw — forever, and carried forward by every later replace.
+  it('a principal who cannot open 项目查询 does not carry its five keys around after a deep link', async () => {
+    h.permissions = ['stock-prep:read']
+    h.route.query = { tab: 'project-query', status: 'ready', source: 'mvp', q: 'x', sel: 'PRJ-1' }
+    answerQueueReads()
+    const root = await mountShell()
+    // Folded back to their landing, and the panel they cannot see never mounted.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-project-query"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  it('a notice never replaces the panel, and does not follow the admin onto the next tab', async () => {
+    // The install tab is the nearest branch BELOW the notice in the panel's chain, so it is the one
+    // that disappeared; it needs the workbench-admin code to be on screen at all.
+    h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
+    answerQueueReads()
+    const root = await mountShell()
+    // NOT one of the nine: a NAVIGATION step, added because D2 moved this actor's landing off the
+    // queue and onto 开始使用. The claim under test (a notice sits beside its panel and dies with the
+    // tab) is about the queue's two admin buttons, so the test has to be ON the queue to press one.
+    // Nothing was weakened — every assertion below is the one that was there.
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+    // The panel it was pressed on is still the panel — the notice sits beside the view, not instead
+    // of it, and the placeholder is still absent.
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+    // The install view really renders (it was swallowed whole while a notice was showing) ...
+    expect(root.querySelector('[data-testid="stock-prep-install"]')).not.toBeNull()
+    // ... and the sentence about the OTHER tab is gone rather than stale-hanging over this one.
+    expect(root.querySelector('[data-testid="stock-prep-admin-action-notice"]')).toBeNull()
+  })
+
+  // The install client's error type carries a status and no `code` (by design — it never surfaces a
+  // server message), so an ensure failure has no token to quote. It must still say something, and it
+  // must not invent a code.
+  it('a failed ensure says so with the generic sentence and no invented error code', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'SOMETHING', message: 'nope' } }), { status: 500 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShellOnTheQueue()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('这一步没有保存成功')
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
+  // R-11's other half, restated for the newly-live buttons: wiring them must not have made them
+  // reachable by anyone who could not see them before.
+  it('a stock-prep operator sees neither admin button, so neither can be pressed', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).toBeNull()
+    expect(postCalls('/confirmation-decisions/').length).toBe(0)
   })
 
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {
@@ -946,7 +1733,9 @@ describe('App nav entry for Stock Preparation', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.hasPerm = true
+    // O2 / R-11: the nav link follows the ROUTE's gate. A stock-prep:read holder is the minimal
+    // principal the link must appear for; integration:write (the old gate) is deliberately absent.
+    h.permissions = ['stock-prep:read']
     h.route = { path: '/multitable', fullPath: '/multitable', meta: {}, query: {} }
     window.localStorage.clear()
     window.localStorage.setItem('auth_token', 'session-token')
@@ -964,7 +1753,7 @@ describe('App nav entry for Stock Preparation', () => {
     return Array.from(root.querySelectorAll('a')).find((a) => a.getAttribute('href') === '/stock-prep')
   }
 
-  it('renders a /stock-prep nav link with the zh label when the user has integration:write', async () => {
+  it('renders a /stock-prep nav link with the zh label when the user has stock-prep:read', async () => {
     mountApp()
     await flushUi()
     const link = findStockPrepLink(container as HTMLElement)
@@ -981,8 +1770,41 @@ describe('App nav entry for Stock Preparation', () => {
     expect(link!.textContent).toContain('Stock Preparation')
   })
 
-  it('hides the /stock-prep nav link when the user lacks integration:write', async () => {
-    h.hasPerm = false
+  // Review item 7 — THE ROW THE GATE-ALIGNMENT CHANGE EXISTS FOR, asserted on the real shell.
+  //
+  // The `describe` above this one pins the three predicates as pure functions. This pins the
+  // rendered LINK, which is the only thing a user can actually see, for the principal the old gate
+  // got wrong in the dangerous direction: a bare `integration:admin` is a platform admin to the
+  // server and to every predicate in `workbenchAccess.ts`, yet `useAuth().hasPermission` derives no
+  // `stock-prep:read` from it, so the link used to be absent and the guard used to redirect. Mount
+  // the shell, hold only that code, and the link has to be there.
+  it('renders the /stock-prep nav link for a bare integration:admin — the principal the old gate hid', async () => {
+    h.permissions = ['integration:admin']
+    mountApp()
+    await flushUi()
+    const link = findStockPrepLink(container as HTMLElement)
+    expect(link, 'a platform admin on this surface must not be hidden from the page it may fully use').toBeTruthy()
+    expect(link!.textContent).toContain('备料工作台')
+  })
+
+  // ...and the other direction, on the same surface: a code the SERVER refuses must not render a
+  // link, however the app-wide probe would expand it. Without this row, widening the nav predicate
+  // back to something permissive would still pass the row above.
+  it('hides the /stock-prep nav link for stock-prep:* and *:* — codes the server refuses literally', async () => {
+    for (const held of [['stock-prep:*'], ['*:*'], ['stock-prep:write'], ['users:write']]) {
+      h.permissions = [...held]
+      mountApp()
+      await flushUi()
+      expect(findStockPrepLink(container as HTMLElement), `${held[0]} must not render the link`).toBeFalsy()
+      if (app) app.unmount()
+      if (container) container.remove()
+      app = null
+      container = null
+    }
+  })
+
+  it('hides the /stock-prep nav link when the user lacks stock-prep:read', async () => {
+    h.permissions = []
     mountApp()
     await flushUi()
     expect(findStockPrepLink(container as HTMLElement)).toBeUndefined()

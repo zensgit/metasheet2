@@ -80,6 +80,8 @@ function gridClient(personalConfig: unknown) {
   vi.spyOn(client, 'getPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: personalConfig as never, updatedAt: null })
   vi.spyOn(client, 'putPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: personalConfig as never, updatedAt: null })
   vi.spyOn(client, 'updateView').mockResolvedValue({} as never)
+  // #6075 round 2: hidden/group state is written only into the view it was LOADED from, so the load returns v1.
+  vi.spyOn(client, 'loadView').mockResolvedValue({ fields: [], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } } as never)
   return client
 }
 
@@ -87,6 +89,7 @@ describe('useMultitableGrid — personal in-place edit is additive (Slice 3d wir
   it('personal ON: toggling a hidden field merges over the existing personal config (sort preserved), not updateView', async () => {
     const client = gridClient({ sortInfo: { fieldId: 'b', direction: 'desc' } })
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client, isPersonalMode: () => true })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     grid.toggleFieldVisibility('f1')
     await vi.waitFor(() => expect(client.putPersonalViewConfig).toHaveBeenCalled())
     expect(client.putPersonalViewConfig).toHaveBeenCalledWith('v1', { sortInfo: { fieldId: 'b', direction: 'desc' }, hiddenFieldIds: ['f1'] })
@@ -96,10 +99,42 @@ describe('useMultitableGrid — personal in-place edit is additive (Slice 3d wir
   it('personal OFF: toggling a hidden field uses the shared updateView path, no personal-config calls', async () => {
     const client = gridClient(null)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client, isPersonalMode: () => false })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     grid.toggleFieldVisibility('f1')
     await vi.waitFor(() => expect(client.updateView).toHaveBeenCalled())
     expect(client.updateView).toHaveBeenCalledWith('v1', { hiddenFieldIds: ['f1'] })
     expect(client.putPersonalViewConfig).not.toHaveBeenCalled()
     expect(client.getPersonalViewConfig).not.toHaveBeenCalled()
+  })
+
+  // #6075/#6110: clearing a facet through the toolbar sends an explicit empty value (never `undefined`),
+  // so it PUTs as an explicit personal override — the same "explicit empty, not a fallback to shared"
+  // semantics #6075 already established for sortInfo/filterInfo. Without this, clearing grouping in
+  // personal mode would instead REMOVE the personal override (falling back to whatever the shared view
+  // has), which is a different, unintended behaviour — not the "no grouping" the toolbar shows.
+  it('personal ON: clearing grouping sends an explicit empty groupInfo ({}) in the personal-config PUT, not an absent key (#6075/#6110)', async () => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn(async () => new Response('{}', { status: 200 })) })
+    const personalConfig = { groupInfo: { fieldIds: ['f1'], fieldId: 'f1' } }
+    vi.spyOn(client, 'getPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: personalConfig as never, updatedAt: null })
+    vi.spyOn(client, 'putPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: {} as never, updatedAt: null })
+    vi.spyOn(client, 'updateView').mockResolvedValue({} as never)
+    // The loaded (shared) view carries the SAME grouping as the personal overlay here — clearing the
+    // personal override is what setGroupField(null) drives, independent of what the shared view has.
+    vi.spyOn(client, 'loadView').mockResolvedValue({
+      fields: [{ id: 'f1', name: 'Status', type: 'select' }],
+      rows: [],
+      view: { id: 'v1', groupInfo: { fieldIds: ['f1'], fieldId: 'f1' } },
+      page: { offset: 0, limit: 50, total: 0, hasMore: false },
+    } as never)
+
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client, isPersonalMode: () => true })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    expect(grid.groupFieldId.value).toBe('f1')
+
+    await grid.setGroupField(null)
+    expect(grid.groupFieldId.value).toBeNull()
+    await vi.waitFor(() => expect(client.putPersonalViewConfig).toHaveBeenCalled())
+    expect(client.putPersonalViewConfig).toHaveBeenCalledWith('v1', { groupInfo: {} })
+    expect(client.updateView).not.toHaveBeenCalled()
   })
 })

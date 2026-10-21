@@ -18,6 +18,7 @@ import type {
   CreateDataSourcePayload,
   DataSourceDetail,
   DataSourceListItem,
+  DataSourceLoadFailedItem,
   DataSourceSchemaInfo,
   DataSourceSelectPayload,
   DataSourceSelectResult,
@@ -27,6 +28,8 @@ import type {
   RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
 } from '../data-sources/types'
+import { describeDeleteFailure } from '../data-sources/deleteRefusalCopy'
+import { RESEAL_RESTART_REQUIRED_NOTICE } from '../data-sources/loadFailedCopy'
 
 function tableDetailKey(id: string, table: string, schema?: string): string {
   return `${id}:${schema ? `${schema}.` : ''}${table}`
@@ -34,8 +37,13 @@ function tableDetailKey(id: string, table: string, schema?: string): string {
 
 export const useDataSourcesStore = defineStore('dataSources', () => {
   const items = ref<DataSourceListItem[]>([])
+  // Sources that exist but the server could not load. Kept APART from `items` on purpose: every
+  // consumer of `items` may treat an entry as a usable source; these are not.
+  const loadFailed = ref<DataSourceLoadFailedItem[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
+  // A non-error status line (e.g. credentials saved but a restart is needed to take effect).
+  const notice = ref<string | null>(null)
   const testing = ref<Record<string, boolean>>({})
   const testResults = ref<Record<string, DataSourceTestResult>>({})
   const schemaLoading = ref<Record<string, boolean>>({})
@@ -51,7 +59,9 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     loading.value = true
     error.value = null
     try {
-      items.value = await listDataSources()
+      let nextLoadFailed: DataSourceLoadFailedItem[] = []
+      items.value = await listDataSources({ onLoadFailed: (entries) => { nextLoadFailed = entries } })
+      loadFailed.value = nextLoadFailed
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load data sources'
     } finally {
@@ -98,11 +108,17 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
     }
   }
 
-  /** Rotate write-only credentials then refresh. Blank fields are omitted by the payload builder. */
+  /**
+   * Rotate write-only credentials then refresh. Blank fields are omitted by the payload builder.
+   * The same call re-seals a source the server could not load; when the server saved the
+   * credentials but needs a restart to bring the source live, `notice` says so.
+   */
   async function rotateCredentials(id: string, payload: RotateDataSourceCredentialsPayload): Promise<boolean> {
     error.value = null
+    notice.value = null
     try {
-      await rotateDataSourceCredentials(id, payload)
+      const result = await rotateDataSourceCredentials(id, payload)
+      if (result?.restartRequired === true) notice.value = RESEAL_RESTART_REQUIRED_NOTICE
       const remainingResults = { ...testResults.value }
       delete remainingResults[id]
       testResults.value = remainingResults
@@ -125,7 +141,9 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
       await fetchAll()
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to delete data source'
+      // The referential 409 is rewritten into the count + where to go clear it; every other
+      // failure keeps the server's own message, exactly as before.
+      error.value = describeDeleteFailure(e)
       return false
     }
   }
@@ -233,8 +251,10 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
 
   return {
     items,
+    loadFailed,
     loading,
     error,
+    notice,
     testing,
     testResults,
     schemaLoading,

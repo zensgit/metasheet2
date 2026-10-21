@@ -4,10 +4,30 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 
 # One dispatch = ONE action of the attendance five-window staging acceptance
 # (docs/development/attendance-staging-window-bundle-20260702.md):
-#   deploy         — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
-#   smoke          — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
+#   deploy         — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth.
+#                    Owner-authorized 2026-09-28: `tasks_enabled` (default false) additionally
+#                    sets TASKS_ENABLED=true on the staging backend via the same persistent
+#                    runner override set_window_env uses; redeploying with tasks_enabled=false
+#                    removes it. Deploy-only — see the input description below.
+#   smoke          — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5 / tasks)
+#                    in-container. Rule: ae4, mp6 and otbank-v18 stay packaged in the bundle
+#                    but are not enabled in this runner until their cleanup and fixtures match
+#                    the current code; the remote script refuses them first, before any
+#                    container access, token mint or staging write, so only rd45, hmr5 and
+#                    tasks run. `tasks` (owner-authorized 2026-09-28) is a non-admin
+#                    tasks-route smoke covering the P0-A and M3 routes: requires
+#                    TASKS_ENABLED=true on the running backend (fails closed otherwise), runs
+#                    against org `default` (the same deterministic default every other window
+#                    smoke already uses), and always tears down its stamp-derived throwaway
+#                    users/roles/admissions and every task row it wrote (guaranteed cleanup via
+#                    the smoke script's own try/catch/finally — same discipline as ae4/rd45/
+#                    mp6/hmr5). It is NOT part of the bundle §7 fixed-format `stamps` residue-
+#                    sweep (that input is a closed 5-field ae4/rd45/otbank/mp6/hmr5 contract) —
+#                    the tasks smoke proves and reports its own zero-residue instead.
 #   status         — read-only staging snapshot
-#   migrate        — backup + clone-rehearsal + apply, per docs/operations/staging-migration-
+#   migrate        — pull the exact deploy_sha backend image WITHOUT switching the running app,
+#                    then backup + clone-rehearsal + apply its migration universe, per
+#                    docs/operations/staging-migration-
 #                    alignment-runbook.md. The only path forward from action=deploy's migration-
 #                    alignment gate reporting `do_not_run_full_migrate`: pg_dump the real staging
 #                    DB to a host file (metadata-only in the artifact — never the dump itself),
@@ -44,8 +64,18 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
-# committed scripts/ops/attendance-staging-window-runner-remote.sh, synced per-run;
-# every remote command is wrapped in an explicit `bash -o pipefail -c '<script>'`
+# committed scripts/ops/attendance-staging-window-runner-remote.sh. Each run ships ONE
+# bundle from this checkout to a per-run directory on the deploy host (the "Sync runner
+# scripts" tar list): the remote script, its pipeline lib, the in-container helpers, and
+# every window smoke script together with its relative-import closure. action=smoke
+# docker-cp's the smoke from that bundle and never reads, fetches or checks out a
+# repository on the deploy host. scripts/ops/attendance-window-runner-pipeline.test.mjs
+# derives each smoke's bundle from the remote script's smoke cases and the module sources (the
+# smoke plus every sibling file it names with a literal relative specifier), refuses a load it
+# cannot resolve unless that use is allowlisted with a reason, and fails when the tar list, the
+# node --check list or the container copy misses a file, or when a smoke started alone from a
+# flat copy of its bundle files cannot load.
+# Every remote command is wrapped in an explicit `bash -o pipefail -c '<script>'`
 # (login-shell defaults are never relied on). Pipeline semantics are proven by
 # scripts/ops/attendance-window-runner-pipeline.test.mjs (gate-contract strict case).
 #
@@ -63,7 +93,7 @@ on:
         options: [deploy, smoke, status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
         default: status
       deploy_sha:
-        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, smoke, and soak-flags (there it must equal the RUNNING image tags — soak-flags flips env only, never images).'
+        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, migrate, smoke, and soak-flags. Migrate runs that exact image migration universe without switching the app; soak-flags must equal the RUNNING image tags.'
         required: false
         default: ''
       soak_orgs:
@@ -71,15 +101,15 @@ on:
         required: false
         default: ''
       soak_opts:
-        description: 'soak actions: ";"-separated key=value pairs. Keys: users_per_org (soak-seed, default 10), tz (soak-seed, IANA name or three "|"-separated, default Asia/Shanghai), w7_target (soak-seed, only group_shadow is runnable at kickoff), owner_ref (soak-seed REQUIRED — names the owner-authored authorization artifact for the transition manifests), entrypoint_inventory_ref (soak-seed REQUIRED — operator attestation for the W4 manifest entrypointInventoryRef; never fabricated), punch_target (soak-run, default 200), config (soak-run host config path), window_start (soak-status override, ISO8601 UTC).'
+        description: 'soak actions: ";"-separated key=value pairs. Keys: users_per_org (soak-seed, default 10), tz (soak-seed, IANA name or three "|"-separated, default Asia/Shanghai), w7_target (soak-seed, only group_shadow is runnable at kickoff), owner_ref (soak-seed REQUIRED — names the owner-authored authorization artifact for the transition manifests), entrypoint_inventory_ref (soak-seed REQUIRED — operator attestation for the W4 manifest entrypointInventoryRef; never fabricated), rotate_password (soak-seed, only "true" accepted — a standalone act that rotates ONLY the host-only synthetic-user password + its DB hash for the EXISTING synthetic family, never seeds/inserts/walks posture; refuses users_per_org/tz/w7_target in the same dispatch; owner_ref/entrypoint_inventory_ref/soak_orgs may still be supplied but are unused), punch_target (soak-run, default 200), config (soak-run host config path), window_start (soak-status override, ISO8601 UTC).'
         required: false
         default: ''
       smoke:
-        description: 'Which window smoke to run (action=smoke only)'
+        description: 'Which window smoke to run (action=smoke only). ae4, mp6 and otbank-v18 are packaged but refused by the runner until their cleanup and fixtures match the current code; rd45, hmr5 and tasks run.'
         required: false
         type: choice
-        options: [ae4, rd45, otbank-v18, mp6, hmr5]
-        default: ae4
+        options: [ae4, rd45, otbank-v18, mp6, hmr5, tasks]
+        default: tasks
       stamps:
         description: 'action=residue-sweep only: comma-separated ae4,rd45,otbank,mp6,hmr5 STAMP values in that order (bundle §7). ae4/rd45/otbank are required; leave mp6/hmr5 blank if that optional smoke did not run this window, e.g. "ae4-smoke-x,rd45-smoke-x,otbank-v18-smoke-x,,".'
         required: false
@@ -95,9 +125,11 @@ on:
         required: false
         type: boolean
         default: false
-      skip_host_sync:
-        description: 'skip the deploy-host repo git sync before smoke (true/false)'
+      tasks_enabled:
+        description: 'deploy only: sets TASKS_ENABLED=true on the staging backend via the runner override (mounts the P0-A /api/tasks routes). Default false; redeploying with false removes it. Rollback: redeploy the SAME deploy_sha with false (+force_recreate); an older image fails deploy migrate once newer migrations are applied.'
         required: false
+        type: choice
+        options: ['false', 'true']
         default: 'false'
 
 concurrency:
@@ -128,13 +160,14 @@ jobs:
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
+          TASKS_ENABLED_INPUT: ${{ inputs.tasks_enabled }}
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
         run: |
           set -euo pipefail
           case "$ACTION" in deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
-          if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
+          if [[ "$ACTION" == "deploy" || "$ACTION" == "migrate" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
               exit 2
@@ -197,15 +230,16 @@ jobs:
               [[ "$pair" == *"="* && -n "$value" ]] || { echo "soak_opts pair must be key=value, got: '$pair'" >&2; exit 2; }
               [[ "$value" =~ $opt_value_re ]] || { echo "soak_opts $key value has unsafe characters: '$value'" >&2; exit 2; }
               case "$key" in
-                users_per_org) [[ "$value" =~ ^[1-9][0-9]?$ ]] || { echo "users_per_org must be 1..99, got '$value'" >&2; exit 2; } ;;
+                users_per_org) [[ "$value" =~ ^[2-9]$|^[1-9][0-9]$ ]] || { echo "users_per_org must be 2..99, got '$value'" >&2; exit 2; } ;;
                 tz) ;;
                 w7_target) [[ "$value" == "group_shadow" ]] || { echo "w7_target only supports group_shadow at kickoff (deeper rungs carry compare-window exit predicates and are separate owner-run CLI acts), got '$value'" >&2; exit 2; } ;;
                 owner_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "owner_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
                 entrypoint_inventory_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "entrypoint_inventory_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
+                rotate_password) [[ "$value" == "true" ]] || { echo "rotate_password only accepts 'true' (a standalone password-only rotation), got '$value'" >&2; exit 2; } ;;
                 punch_target) [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "punch_target must be 1..9999 (remote further caps it at the config's one-day capacity), got '$value'" >&2; exit 2; } ;;
                 config) [[ "$value" =~ ^[A-Za-z0-9._/~-]+$ ]] || { echo "config must be a plain path, got '$value'" >&2; exit 2; } ;;
                 window_start) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$ ]] || { echo "window_start must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, got '$value'" >&2; exit 2; } ;;
-                *) echo "unknown soak_opts key: '$key' (known: users_per_org, tz, w7_target, owner_ref, entrypoint_inventory_ref, punch_target, config, window_start)" >&2; exit 2 ;;
+                *) echo "unknown soak_opts key: '$key' (known: users_per_org, tz, w7_target, owner_ref, entrypoint_inventory_ref, rotate_password, punch_target, config, window_start)" >&2; exit 2 ;;
               esac
             done
           fi
@@ -216,6 +250,11 @@ jobs:
           case "$FORCE_RECREATE" in true|false) ;; *) echo "force_recreate must be true or false, got: '$FORCE_RECREATE'" >&2; exit 2 ;; esac
           if [[ "$ACTION" != "deploy" && "$FORCE_RECREATE" == "true" ]]; then
             echo "force_recreate=true is only allowed for action=deploy" >&2
+            exit 2
+          fi
+          case "$TASKS_ENABLED_INPUT" in true|false) ;; *) echo "tasks_enabled must be true or false, got: '$TASKS_ENABLED_INPUT'" >&2; exit 2 ;; esac
+          if [[ "$ACTION" != "deploy" && "$TASKS_ENABLED_INPUT" == "true" ]]; then
+            echo "tasks_enabled=true is only allowed for action=deploy (env flips happen together with the deploy, never mid-smoke — same rule as set_window_env)" >&2
             exit 2
           fi
           if [[ "$ACTION" == "residue-sweep" ]]; then
@@ -237,11 +276,18 @@ jobs:
           bash -n scripts/ops/attendance-window-runner-pipeline.lib.sh
           node --check scripts/ops/attendance-window-runner-mint-token.mjs
           node --check scripts/ops/attendance-w4w7-soak-load-generator.mjs
+          node --check scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs
+          node --check scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs
+          node --check scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs
+          node --check scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs
+          node --check scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs
+          node --check scripts/ops/staging-attendance-tooling-teardown.mjs
+          node --check scripts/ops/staging-tasks-smoke.mjs
           node -e "JSON.parse(require('fs').readFileSync('scripts/ops/attendance-w4w7-soak-config.template.json','utf8'))"
           echo "inputs and embedded scripts OK"
 
       - name: Run pipeline self-test (same shape as the remote invocation)
-        run: node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+        run: node --test scripts/ops/attendance-window-runner-pipeline.test.mjs scripts/ops/staging-tasks-smoke.test.mjs
 
       - name: Sync runner scripts to deploy host
         id: sync
@@ -266,11 +312,20 @@ jobs:
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
           runner_dir="/tmp/attendance-window-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          # The runner bundle. Every smoke_script and smoke_deps entry of action_smoke in the
+          # remote script must be listed here (enforced by the pipeline contract test).
           tar -czf - \
             scripts/ops/attendance-staging-window-runner-remote.sh \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
             scripts/ops/attendance-window-runner-mint-token.mjs \
             scripts/ops/attendance-w4w7-soak-load-generator.mjs \
+            scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs \
+            scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs \
+            scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs \
+            scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs \
+            scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs \
+            scripts/ops/staging-attendance-tooling-teardown.mjs \
+            scripts/ops/staging-tasks-smoke.mjs \
           | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
@@ -291,7 +346,7 @@ jobs:
           SMOKE_ID: ${{ inputs.smoke }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
-          SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
+          TASKS_ENABLED_INPUT: ${{ inputs.tasks_enabled }}
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
@@ -300,7 +355,7 @@ jobs:
           set -euo pipefail
           ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH" "SKIP_HOST_SYNC=$SKIP_HOST_SYNC"; do
+          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
             value="${pair#*=}"
             if [[ ! "$value" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
               echo "refusing unsafe characters in ${pair%%=*}: '$value'" >&2
@@ -320,9 +375,9 @@ jobs:
           export SMOKE_ID='${SMOKE_ID}'
           export SET_WINDOW_ENV='${SET_WINDOW_ENV}'
           export FORCE_RECREATE='${FORCE_RECREATE}'
+          export TASKS_WINDOW_ENABLED='${TASKS_ENABLED_INPUT}'
           export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
           export DEPLOY_PATH='${DEPLOY_PATH}'
-          export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
           export STAMPS='${STAMPS}'
           export SOAK_ORGS='${SOAK_ORGS}'
           export SOAK_OPTS='${SOAK_OPTS}'
@@ -367,6 +422,7 @@ jobs:
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
+          TASKS_ENABLED_INPUT: ${{ inputs.tasks_enabled }}
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
@@ -385,6 +441,7 @@ jobs:
             echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
             echo "- Window env: \`${SET_WINDOW_ENV}\`"
             echo "- Force recreate: \`${FORCE_RECREATE}\`"
+            if [[ "$ACTION" == "deploy" ]]; then echo "- Tasks enabled: \`${TASKS_ENABLED_INPUT}\`"; fi
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             if [[ -f output/window-runner/summary.txt ]]; then

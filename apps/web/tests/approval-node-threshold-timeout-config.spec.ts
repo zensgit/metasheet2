@@ -1,0 +1,439 @@
+/* eslint-disable vue/one-component-per-file, vue/require-default-prop */
+/**
+ * P1-C (approval-parity-master-design-lock-20260817.md §P1-C, master M7): direct-mount proof that
+ * the complex-graph node editor's NEW threshold (T2-4 N-of-M) + timeout (T1-1) controls are actually
+ * WIRED — every rendered control changes real edit state through the typed setter, not inert theater
+ * (M7). Also the behavioral positive control for "never offer a capability the engine doesn't
+ * implement" (M6/M8): the timeout-effect picker's option set is asserted against the DOM, not a
+ * hand-copied literal, so a mutation widening it to `auto_approve`/`auto_reject` is caught. Mirrors
+ * the mount harness in approval-handler-node-config.spec.ts (element-plus stubs + provide/inject).
+ */
+import { afterEach, describe, expect, it } from 'vitest'
+import { createApp, defineComponent, h, nextTick, provide, reactive, type App as VueApp } from 'vue'
+import ApprovalGraphNodeConfigEditor from '../src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
+import { APPROVAL_NODE_CONFIG_EDITOR_KEY, type ApprovalNodeConfigEditorApi } from '../src/approvals/nodeConfigEditorContext'
+import { DEFAULT_APPROVAL_CAPABILITY_REGISTRY } from '../src/approvals/approvalCapabilityRegistry'
+import { NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../src/approvals/templateAuthoring'
+import type { ApprovalMode, ApprovalNode, NodeTimeoutConfig, SupportedNodeTimeoutEffect } from '../src/types/approval'
+
+// ── element-plus stubs (same shapes as approval-handler-node-config.spec.ts) ─────────────────────
+const ElSelect = defineComponent({
+  name: 'ElSelect', props: { modelValue: [String, Array], disabled: Boolean }, emits: ['update:modelValue', 'change'],
+  render() {
+    return h('select', {
+      value: this.modelValue ?? '', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'],
+      onChange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; this.$emit('update:modelValue', v); this.$emit('change', v) },
+    }, this.$slots.default?.())
+  },
+})
+const ElOption = defineComponent({ name: 'ElOption', props: { label: String, value: String, disabled: Boolean }, render() { return h('option', { value: this.value, disabled: this.disabled }, this.label) } })
+const ElCheckbox = defineComponent({
+  name: 'ElCheckbox', inheritAttrs: false, props: { modelValue: Boolean, disabled: Boolean }, emits: ['update:modelValue'],
+  render() { return h('label', [h('input', { type: 'checkbox', checked: this.modelValue, disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onChange: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).checked) }), this.$slots.default?.()]) },
+})
+const ElInput = defineComponent({
+  name: 'ElInput', props: { modelValue: [String, Number], disabled: Boolean }, emits: ['update:modelValue'],
+  render() { return h('input', { value: this.modelValue ?? '', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onInput: (e: Event) => { const text = (e.target as HTMLInputElement).value; if (text !== String(this.modelValue ?? '')) this.$emit('update:modelValue', text) } /* EP 2.11.8 fidelity: no update when unchanged */ }) },
+})
+const ElInputNumber = defineComponent({
+  name: 'ElInputNumber', props: { modelValue: Number, disabled: Boolean, min: Number, max: Number, step: Number }, emits: ['update:modelValue'],
+  render() { return h('input', { type: 'number', value: this.modelValue ?? '', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onInput: (e: Event) => this.$emit('update:modelValue', Number((e.target as HTMLInputElement).value)) }) },
+})
+const passthrough = (name: string, tag = 'div') => defineComponent({ name, render() { return h(tag, { 'data-testid': (this.$attrs as any)?.['data-testid'] }, this.$slots.default?.()) } })
+const ElButton = defineComponent({ name: 'ElButton', props: { disabled: Boolean, type: String, size: String }, emits: ['click'], render() { return h('button', { type: 'button', disabled: this.disabled, 'data-testid': (this.$attrs as any)?.['data-testid'], onClick: (e: Event) => this.$emit('click', e) }, this.$slots.default?.()) } })
+
+function installStubs(app: VueApp<Element>) {
+  app.component('ElSelect', ElSelect)
+  app.component('ElOption', ElOption)
+  app.component('ElCheckbox', ElCheckbox)
+  app.component('ElInput', ElInput)
+  app.component('ElInputNumber', ElInputNumber)
+  app.component('ElButton', ElButton)
+  app.component('ElButtonGroup', passthrough('ElButtonGroup'))
+  app.component('ElAlert', passthrough('ElAlert'))
+  app.component('ElForm', passthrough('ElForm', 'form'))
+  app.component('ElFormItem', passthrough('ElFormItem', 'label'))
+  app.component('ElIcon', passthrough('ElIcon', 'span'))
+}
+
+type Edit = {
+  nodeKey: string
+  assigneeSources: Array<Record<string, unknown>>
+  approvalMode: ApprovalMode
+  approvalThreshold: number
+  fieldPermissions: Array<{ fieldId: string; access: string }>
+  timeout: NodeTimeoutConfig | null | undefined
+}
+
+function createStubConfigApi(
+  seed: Record<string, Partial<Edit>>,
+  opts: { inParallelRegion?: boolean } = {},
+): ApprovalNodeConfigEditorApi {
+  const edits: Record<string, Edit> = reactive({})
+  for (const [key, v] of Object.entries(seed)) {
+    edits[key] = {
+      nodeKey: key,
+      assigneeSources: (v.assigneeSources ?? [{ kind: 'requester' }]).map((s) => ({ ...s })),
+      approvalMode: v.approvalMode ?? 'single',
+      approvalThreshold: v.approvalThreshold ?? 1,
+      fieldPermissions: (v.fieldPermissions ?? []).map((p) => ({ ...p })),
+      timeout: v.timeout,
+    }
+  }
+  return {
+    readOnly: false,
+    conditionEditFor: () => undefined,
+    parallelEditFor: () => undefined,
+    ccEditFor: () => undefined,
+    approvalNodeEditFor: (k: string) => edits[k] as any,
+    conditionFieldOptions: [],
+    userFields: [],
+    conditionFormulaInsertOptions: [],
+    fieldPermissionFields: [],
+    conditionOperatorLabel: () => '',
+    liveBranchSummary: () => '',
+    conditionRuleValueText: () => '',
+    setConditionRuleValue: () => {},
+    addConditionRule: () => {},
+    removeConditionRule: () => {},
+    setConditionBranchPredicateMode: () => {},
+    insertConditionFormulaToken: () => {},
+    insertConditionFormulaFunction: () => {},
+    insertConditionFormulaRoleMembership: () => {},
+    conditionFormulaDryRunResult: () => '',
+    conditionFormulaDryRunLoading: () => false,
+    dryRunConditionFormula: () => {},
+    conditionOutgoingEdgeKeys: () => [],
+    conditionEdgeLabel: () => '',
+    graphEdgeTargetLabel: () => '',
+    graphNodeLabel: (k: string) => k,
+    parallelJoinModeLabel: () => '',
+    ccTargetTypeLabel: () => '用户',
+    setCcTargetIds: () => {},
+    syncCcOptions: () => {},
+    approvalSourceKind: (k: string, i: number) => (edits[k]?.assigneeSources[i]?.kind as any) ?? 'requester',
+    setApprovalSourceKind: () => {},
+    syncApprovalNodeOptions: () => {},
+    approvalSourceIds: () => [],
+    setApprovalSourceIdsFromPicker: () => {},
+    approvalSourceFieldId: () => '',
+    setApprovalSourceFieldId: () => {},
+    approvalSourceLevel: () => 1,
+    setApprovalSourceLevel: () => {},
+    approvalSourceIsPlaceholder: () => false,
+    approvalSourceCount: (k: string) => edits[k]?.assigneeSources.length ?? 0,
+    addApprovalSourceCard: () => {},
+    removeApprovalSourceCard: () => {},
+    approvalNodeMode: (k: string) => edits[k]?.approvalMode ?? 'single',
+    setApprovalNodeMode: (k: string, mode: ApprovalMode) => { const e = edits[k]; if (e) e.approvalMode = mode },
+    // P1-C — the controls this spec exists to prove are wired.
+    approvalNodeThreshold: (k: string) => edits[k]?.approvalThreshold ?? 1,
+    setApprovalNodeThreshold: (k: string, value: number) => { const e = edits[k]; if (e) e.approvalThreshold = value },
+    approvalNodeInParallelRegion: () => opts.inParallelRegion ?? false,
+    approvalNodeTimeout: (k: string) => edits[k]?.timeout ?? undefined,
+    setApprovalNodeTimeoutEnabled: (k: string, enabled: boolean) => {
+      const e = edits[k]; if (!e) return
+      if (!enabled) { e.timeout = null; return }
+      if (e.timeout) return
+      e.timeout = { afterMinutes: 60, effect: 'remind' }
+    },
+    setApprovalNodeTimeoutAfterMinutes: (k: string, minutes: number) => { const e = edits[k]; if (e?.timeout) e.timeout = { ...e.timeout, afterMinutes: minutes } },
+    setApprovalNodeTimeoutEffect: (k: string, effect: SupportedNodeTimeoutEffect) => { const e = edits[k]; if (e?.timeout) e.timeout = { afterMinutes: e.timeout.afterMinutes, effect } },
+    setApprovalNodeTimeoutTransferToUserId: (k: string, userId: string) => { const e = edits[k]; if (e?.timeout) e.timeout = { ...e.timeout, transferToUserId: userId } },
+    setApprovalNodeTimeoutJumpToNodeKey: (k: string, targetNodeKey: string) => { const e = edits[k]; if (e?.timeout) e.timeout = { ...e.timeout, jumpToNodeKey: targetNodeKey } },
+    setApprovalNodeTimeoutUnit: (k: string, unit: 'wall_clock' | 'business') => {
+      const e = edits[k]; if (!e?.timeout) return
+      const next = { ...e.timeout }
+      if (unit === 'business') next.unit = 'business'
+      else delete next.unit
+      e.timeout = next
+    },
+    timeoutJumpTargetOptions: () => [{ key: 'approval_2', label: '二审' }],
+    approvalNodeEmptyPolicy: () => 'error',
+    setApprovalNodeEmptyPolicy: () => {},
+    // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+    // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+    // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+    // full TemplateAuthoringView mounts.
+    setApprovalNodeSamePersonPolicy: () => {},
+    setApprovalNodeEmptyAssigneeFallbackIds: () => {},
+    handlerNodeMode: () => 'all',
+    setHandlerNodeMode: () => {},
+    handlerNodeOpinionRequired: () => false,
+    setHandlerNodeOpinionRequired: () => {},
+    approvalNodeFieldAccess: () => 'editable',
+    setApprovalNodeFieldAccess: () => {},
+    nodeConfigSummary: () => [],
+    onUserSearch: () => {},
+    directoryUsers: [{ id: 'backup_u1', name: '备份审批人' }],
+    directoryUsersLoading: false,
+    directoryRoles: [],
+    formulaRoles: [],
+    formatUserLabel: (u: { id: string; name?: string }) => u.name ?? u.id,
+    formatRoleLabel: (r: { id: string }) => r.id,
+  } as unknown as ApprovalNodeConfigEditorApi
+}
+
+const mounted: Array<() => void> = []
+afterEach(() => { while (mounted.length) mounted.pop()!() })
+
+function mountEditorFlat(node: ApprovalNode, api: ApprovalNodeConfigEditorApi) {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const Harness = defineComponent({ name: 'HF', setup() { provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, api); return () => h(ApprovalGraphNodeConfigEditor as any, { node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY }) } })
+  const app = createApp(Harness)
+  installStubs(app)
+  app.mount(container)
+  mounted.push(() => { app.unmount(); container.remove() })
+  return container
+}
+
+function approvalNode(key = 'approval_1'): ApprovalNode {
+  return { key, type: 'approval', name: '主管', config: {} as any }
+}
+
+describe('P1-C threshold control (M7 wired, not inert)', () => {
+  it('the mode picker offers a threshold option; selecting it calls setApprovalNodeMode', () => {
+    const api = createStubConfigApi({ approval_1: {} })
+    const c = mountEditorFlat(approvalNode(), api)
+    const select = c.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    const thresholdOption = c.querySelector('[data-testid="approval-node-mode-threshold-option"]') as HTMLOptionElement
+    expect(thresholdOption).toBeTruthy()
+    expect(thresholdOption.disabled).toBe(false)
+    select.value = 'threshold'
+    select.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeMode('approval_1')).toBe('threshold')
+  })
+
+  it('the mode picker offers sequential and disables it inside a parallel region', () => {
+    const api = createStubConfigApi({ approval_1: {} })
+    const c = mountEditorFlat(approvalNode(), api)
+    const select = c.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    const option = c.querySelector('[data-testid="approval-node-mode-sequential-option"]') as HTMLOptionElement
+    expect(option.disabled).toBe(false)
+    select.value = 'sequential'
+    select.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeMode('approval_1')).toBe('sequential')
+
+    const parallelApi = createStubConfigApi({ approval_1: {} }, { inParallelRegion: true })
+    const parallel = mountEditorFlat(approvalNode(), parallelApi)
+    expect((parallel.querySelector('[data-testid="approval-node-mode-sequential-option"]') as HTMLOptionElement).disabled).toBe(true)
+  })
+
+  it('the N input renders once mode is threshold and setApprovalNodeThreshold fires on change', async () => {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1 } })
+    const c = mountEditorFlat(approvalNode(), api)
+    const input = c.querySelector('[data-testid="approval-node-threshold"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    input.value = '3'
+    input.dispatchEvent(new Event('input'))
+    expect(api.approvalNodeThreshold('approval_1')).toBe(3)
+  })
+
+  it('the N input is ABSENT for a non-threshold mode (no inert control)', () => {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'single' } })
+    const c = mountEditorFlat(approvalNode(), api)
+    expect(c.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+  })
+
+  it('linear-only fail-closed: the threshold option is DISABLED for a node inside a parallel region', () => {
+    const api = createStubConfigApi({ approval_1: {} }, { inParallelRegion: true })
+    const c = mountEditorFlat(approvalNode(), api)
+    const thresholdOption = c.querySelector('[data-testid="approval-node-mode-threshold-option"]') as HTMLOptionElement
+    expect(thresholdOption.disabled).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-threshold-parallel-hint"]')).toBeTruthy()
+  })
+})
+
+describe('P1-C timeout controls (M7 wired, not inert)', () => {
+  it('the enable checkbox calls setApprovalNodeTimeoutEnabled and the detail fields then appear', () => {
+    const api = createStubConfigApi({ approval_1: {} })
+    const c = mountEditorFlat(approvalNode(), api)
+    expect(c.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+    const checkbox = c.querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')).toBeTruthy()
+  })
+
+  it('linear-only fail-closed: the enable checkbox is DISABLED for a node inside a parallel region', () => {
+    const api = createStubConfigApi({ approval_1: {} }, { inParallelRegion: true })
+    const c = mountEditorFlat(approvalNode(), api)
+    const checkbox = c.querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    expect(checkbox.disabled).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-timeout-parallel-hint"]')).toBeTruthy()
+  })
+
+  it('afterMinutes / effect fields are wired; effect option set is EXACTLY the supported three (M6/M8 — never invents auto_approve/auto_reject)', () => {
+    const api = createStubConfigApi({ approval_1: { timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const c = mountEditorFlat(approvalNode(), api)
+    const minutesInput = c.querySelector('[data-testid="approval-node-timeout-after-minutes"]') as HTMLInputElement
+    minutesInput.value = '90'
+    minutesInput.dispatchEvent(new Event('input'))
+    expect(api.approvalNodeTimeout('approval_1')?.afterMinutes).toBe(90)
+
+    const effectSelect = c.querySelector('[data-testid="approval-node-timeout-effect"]') as HTMLSelectElement
+    const optionValues = Array.from(effectSelect.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value)
+    expect(optionValues.sort()).toEqual([...NODE_TIMEOUT_SUPPORTED_EFFECTS].sort())
+    expect(optionValues).not.toContain('auto_approve')
+    expect(optionValues).not.toContain('auto_reject')
+  })
+
+  it('transfer effect reveals the target picker, wired to setApprovalNodeTimeoutTransferToUserId', async () => {
+    const api = createStubConfigApi({ approval_1: { timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const c = mountEditorFlat(approvalNode(), api)
+    const effectSelect = c.querySelector('[data-testid="approval-node-timeout-effect"]') as HTMLSelectElement
+    effectSelect.value = 'transfer'
+    effectSelect.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')?.effect).toBe('transfer')
+    await nextTick()
+
+    const target = c.querySelector('[data-testid="approval-node-timeout-transfer-target"]') as HTMLSelectElement
+    expect(target).toBeTruthy()
+    expect(c.querySelector('[data-testid="approval-node-timeout-jump-target"]')).toBeNull()
+    target.value = 'backup_u1'
+    target.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')?.transferToUserId).toBe('backup_u1')
+  })
+
+  it('jump effect reveals the target node picker (business labels), wired to setApprovalNodeTimeoutJumpToNodeKey', async () => {
+    const api = createStubConfigApi({ approval_1: { timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const c = mountEditorFlat(approvalNode(), api)
+    const effectSelect = c.querySelector('[data-testid="approval-node-timeout-effect"]') as HTMLSelectElement
+    effectSelect.value = 'jump'
+    effectSelect.dispatchEvent(new Event('change'))
+    await nextTick()
+
+    const target = c.querySelector('[data-testid="approval-node-timeout-jump-target"]') as HTMLSelectElement
+    expect(target).toBeTruthy()
+    expect(c.querySelector('[data-testid="approval-node-timeout-transfer-target"]')).toBeNull()
+    // Business label, never a raw node key, in the rendered option text (M8).
+    expect(target.querySelector('option')?.textContent).toBe('二审')
+    target.value = 'approval_2'
+    target.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')?.jumpToNodeKey).toBe('approval_2')
+  })
+
+  it('the unit radios are wired to setApprovalNodeTimeoutUnit', () => {
+    const api = createStubConfigApi({ approval_1: { timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const c = mountEditorFlat(approvalNode(), api)
+    const businessRadio = c.querySelector('[data-testid="approval-node-timeout-unit-business"]') as HTMLInputElement
+    businessRadio.checked = true
+    businessRadio.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')?.unit).toBe('business')
+    const wallClockRadio = c.querySelector('[data-testid="approval-node-timeout-unit-wall-clock"]') as HTMLInputElement
+    wallClockRadio.checked = true
+    wallClockRadio.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeTimeout('approval_1')?.unit).toBeUndefined()
+  })
+})
+
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — direct-mount wiring of the component's reveal for BOTH hidden
+// blocks, keyed only by the api's `approvalNodeHiddenBlockErrors` (the stub api below does not wire
+// the optional sticky `approvalNodeHiddenBlockRevealed`; the next describe does). Before W1-1a the
+// policy block had no mounted path in the full view (the threshold setter clamps and an invalid
+// persisted threshold opens read-only); W1-1a's 转交指定人员 without a target is one, pinned mounted in
+// approvalTemplateAuthoring.spec.ts ("W1-1a F1(b)").
+describe('F4-A hidden-block guard: a hidden block is revealed exactly while it has a live error', () => {
+  function autoApproveApi(liveErrors: Record<string, string[]>) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    ;(api as { approvalNodeHiddenBlockErrors?: unknown }).approvalNodeHiddenBlockErrors = () => liveErrors
+    return api
+  }
+
+  it('no live error ⇒ the policy grid and the timeout section stay hidden (values preserved, not rendered)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({}))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+  })
+
+  it('a live POLICY error reveals the policy grid only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ policy: ['审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'] }))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-threshold"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('a live TIMEOUT error reveals the timeout section only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ timeout: ['审批节点 approval_1 的超时转交需要选择接收人'] }))
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+  })
+
+  // The notice lives in the 审批类型 item, which renders only when the api can set the type — the
+  // stub above has no `setApprovalNodeApprovalType`, so these provide one (a no-op: never clicked).
+  function autoApproveApiWithTypeControl(liveErrors: Record<string, string[]>, opts: { readOnly?: boolean } = {}) {
+    const api = autoApproveApi(liveErrors) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    api.setApprovalNodeApprovalType = () => {}
+    if (opts.readOnly) api.readOnly = true
+    return api
+  }
+  const noticeItems = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll('[data-testid="approval-node-approval-type-hidden-error"]')).map((item) => item.textContent?.trim())
+  const POLICY_ERROR = '审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'
+  const TIMEOUT_ERROR = '审批节点 approval_1 的超时转交需要选择接收人'
+
+  it('the notice LISTS the policy-block messages, not only the timeout ones (gate r2 P3-3) — policy first, in block order', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR], timeout: [TIMEOUT_ERROR] }))
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).not.toBeNull()
+    expect(noticeItems(c)).toEqual([POLICY_ERROR, TIMEOUT_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+  })
+
+  it('a policy-only live error: the notice lists it and offers NO 关闭超时 (the timeout block is not failing)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR] }))
+    expect(noticeItems(c)).toEqual([POLICY_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).toBeNull()
+  })
+
+  it('关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the timeout untouched', async () => {
+    const api = autoApproveApiWithTypeControl({ timeout: [TIMEOUT_ERROR] }, { readOnly: true })
+    const before = api.approvalNodeTimeout('approval_1')
+    expect(before).toEqual({ afterMinutes: 60, effect: 'remind' })
+    const c = mountEditorFlat(approvalNode(), api)
+    const clear = c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]') as HTMLButtonElement
+    expect(clear).not.toBeNull()
+    expect(clear.disabled).toBe(true)
+    // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+    clear.removeAttribute('disabled')
+    clear.click()
+    await nextTick()
+    expect(api.approvalNodeTimeout('approval_1')).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+})
+
+// W1-1a (merge-train r3 F9) — the canvas STICKY REVEAL contract on the component side: the view owns
+// the sticky state (per node key) and reports it through the OPTIONAL `approvalNodeHiddenBlockRevealed`;
+// the component renders a hidden block when that says so, per block, while the notice stays keyed on
+// live errors only. Absent method ⇒ live errors only (the describe above).
+describe('W1-1a canvas sticky reveal: the component renders what the api reports as revealed', () => {
+  function stickyApi(revealed: (nodeKey: string, blockId: string) => boolean) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } }) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    api.approvalNodeHiddenBlockErrors = () => ({})
+    api.setApprovalNodeApprovalType = () => {}
+    api.approvalNodeHiddenBlockRevealed = revealed
+    return api
+  }
+
+  it('a sticky POLICY reveal with no live error keeps the policy grid rendered (timeout stays hidden) and shows no notice', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi((nodeKey, blockId) => nodeKey === 'approval_1' && blockId === 'policy'))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-empty-policy"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('POSITIVE CONTROL: the same api reporting nothing revealed keeps both blocks hidden', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi(() => false))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+  })
+})

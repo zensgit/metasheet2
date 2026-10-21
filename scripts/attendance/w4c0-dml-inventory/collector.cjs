@@ -22,6 +22,7 @@ const {
   P25_OPERATIONAL_TABLE_SPECS,
   TRACKED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
+  W4_EXACT_CANONICAL_SITES,
 } = require('./table-classification.cjs')
 
 const SCANNABLE_EXTENSIONS = new Set(['.ts', '.js', '.cjs', '.mjs', '.sql', '.sh'])
@@ -925,6 +926,16 @@ function classifyCensus(rawSites) {
   const canonicalSites = []
   const outsideBoundarySites = []
   const unclassifiedTableSites = []
+  const exactKey = (site) => JSON.stringify([site.relPath, site.enclosingSymbol, site.table, site.verb])
+  const exactCanonicalCountDrift = []
+  const exactAllowed = new Set()
+  const exactTables = new Set(W4_EXACT_CANONICAL_SITES.map(site => site.table))
+  for (const descriptor of W4_EXACT_CANONICAL_SITES) {
+    const key = exactKey(descriptor)
+    const actual = rawSites.filter(site => exactKey(site) === key).length
+    if (actual === descriptor.count) exactAllowed.add(key)
+    else exactCanonicalCountDrift.push({ ...descriptor, actual })
+  }
 
   for (const site of rawSites) {
     if (!isAttendanceOwnedCandidate(site.table)) continue
@@ -936,7 +947,7 @@ function classifyCensus(rawSites) {
     const p25 = P25_OPERATIONAL_TABLE_SPECS[site.table]
     const classified = p25 ? { ...site, bucket, p25 } : { ...site, bucket }
     if (bucket === 'w4_canonical') {
-      if (isCanonicalBoundaryPath(site.relPath)) {
+      if (exactAllowed.has(exactKey(site)) || (!exactTables.has(site.table) && isCanonicalBoundaryPath(site.relPath))) {
         canonicalSites.push(classified)
       } else {
         outsideBoundarySites.push(classified)
@@ -950,7 +961,7 @@ function classifyCensus(rawSites) {
     bucketAllowlistedSites.push(classified)
   }
 
-  return { trackedSites, bucketAllowlistedSites, canonicalSites, outsideBoundarySites, unclassifiedTableSites }
+  return { trackedSites, bucketAllowlistedSites, canonicalSites, outsideBoundarySites, unclassifiedTableSites, exactCanonicalCountDrift }
 }
 
 function sha256Hex(text) {

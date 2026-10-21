@@ -2,9 +2,9 @@
   <PageShell width="narrow">
     <PageHeader
       class="approval-new__header"
-      title="发起审批"
+      :title="t.pageTitle"
       back
-      back-label="返回"
+      :back-label="t.back"
       @back="goBack"
     />
 
@@ -18,7 +18,7 @@
       @close="templateStore.error = null; approvalStore.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link @click="retryLoad">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -29,11 +29,11 @@
           <template #header>
             <div class="approval-new__info-header">
               <h2>{{ template.name }}</h2>
-              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" force-locale="zh" />
+              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" />
             </div>
           </template>
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
-          <p v-else class="approval-new__info-desc approval-new__info-desc--empty">暂无描述</p>
+          <p v-else class="approval-new__info-desc approval-new__info-desc--empty">{{ t.noDescription }}</p>
         </el-card>
 
         <!-- UX B2-13 (再次提交): shown only once a `?fromInstance=` prefill actually applied at
@@ -47,14 +47,14 @@
           data-testid="approval-draft-restore"
         >
           <template #title>
-            检测到上次未提交的草稿，是否恢复？
-            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">恢复草稿</el-button>
-            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">丢弃</el-button>
+            {{ t.draftRestorePrompt }}
+            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">{{ t.draftRestoreApply }}</el-button>
+            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">{{ t.draftRestoreDiscard }}</el-button>
           </template>
         </el-alert>
         <el-alert
           v-if="prefillNoticeVisible"
-          title="已从上一次申请预填，请检查后提交"
+          :title="t.prefillNotice"
           type="info"
           show-icon
           :closable="true"
@@ -76,11 +76,11 @@
           data-testid="approval-flow-preview"
         >
           <template #header>
-            <span class="approval-new__flow-preview-header">审批流程</span>
+            <span class="approval-new__flow-preview-header">{{ t.flow }}</span>
           </template>
           <div class="approval-new__flow-preview-row">
             <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
-              发起人
+              {{ t.requester }}
             </span>
             <template v-for="step in flowPreviewSteps" :key="step.key">
               <span class="approval-new__flow-preview-arrow">→</span>
@@ -105,14 +105,14 @@
               data-testid="approval-route-preview-btn"
               @click="loadRoutePreview"
             >
-              按当前表单预览路径
+              {{ t.routePreview }}
             </el-button>
             <div v-if="routePreviewError" class="approval-new__route-preview-error" data-testid="approval-route-preview-error">
               {{ routePreviewError }}
             </div>
             <div v-else-if="routePreview" class="approval-new__flow-preview-row" data-testid="approval-route-preview-row">
               <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
-                发起人
+                {{ t.requester }}
               </span>
               <template v-for="node in routePreview.route" :key="node.nodeKey">
                 <span class="approval-new__flow-preview-arrow">→</span>
@@ -122,7 +122,7 @@
                   data-testid="approval-route-preview-node"
                 >
                   {{ node.nodeLabel }}
-                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node, isZh) }}</span>
                 </span>
               </template>
               <span
@@ -130,21 +130,22 @@
                 class="approval-new__route-preview-truncated"
                 data-testid="approval-route-preview-truncated"
               >
-                （路径未能完整解析，以实际流转为准）
+                {{ t.routeTruncated }}
               </span>
               <span v-else-if="routePreview.route.length === 0" class="approval-new__route-preview-truncated">
-                （按当前表单将直接通过，无审批节点）
+                {{ t.routeDirectPass }}
               </span>
             </div>
           </div>
         </el-card>
 
-        <!-- Lock-1 §K2 (提交人自选): submit-time approver chooser. Rendered only when the
-             loaded template's graph carries a requester_choice node; REQUIRED — handleSubmit
-             blocks until every such node has a mode-satisfying choice. The picker is
-             scope-filtered server-side (members/role scope → userIds/roleIds params on the
-             participant directory search); createApproval re-validates the submitted choice
-             fail-closed either way. -->
+        <!-- Lock-1 §K2 (提交人自选): submit-time chooser. Rendered only when the loaded
+             template's graph carries a requester_choice node — an APPROVAL node (K2) or, since
+             W1-1d (Lock-3 §1.5 forward row "`requester_choice` (K2) … ADMIT"), a HANDLER node;
+             REQUIRED — handleSubmit blocks until every such node has a mode-satisfying choice.
+             The picker is scope-filtered server-side (members/role scope → userIds/roleIds params
+             on the participant directory search); createApproval re-validates the submitted
+             choice fail-closed either way. -->
         <el-card
           v-if="requesterChoiceNodes.length > 0"
           class="approval-new__requester-choice"
@@ -152,13 +153,13 @@
           data-testid="approval-requester-choice"
         >
           <template #header>
-            <span class="approval-new__flow-preview-header">选择审批人</span>
+            <span class="approval-new__flow-preview-header">{{ requesterChoiceHeader }}</span>
           </template>
           <el-form label-position="top">
             <el-form-item
               v-for="chooser in requesterChoiceNodes"
               :key="chooser.nodeKey"
-              :label="`${chooser.nodeName}（${chooser.mode === 'multi' ? '可选多人' : '选一人'} · ${chooserScopeLabel(chooser)}）`"
+              :label="chooserItemLabel(chooser)"
               required
               data-testid="approval-requester-choice-item"
             >
@@ -171,23 +172,24 @@
                 :remote-method="(q: string) => searchChoiceCandidates(chooser, q)"
                 :loading="choiceSearchLoading[chooser.nodeKey] === true"
                 class="ms-w-100pct"
-                placeholder="搜索并选择审批人"
+                :placeholder="chooser.nodeType === 'handler' ? t.chooserHandlerPlaceholder : t.chooserPlaceholder"
                 :data-testid="`approval-requester-choice-picker-${chooser.nodeKey}`"
                 @update:model-value="(value: string[] | string | null) => setRequesterChoice(chooser, value)"
                 @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
               >
                 <el-option
-                  v-for="option in choiceOptions[chooser.nodeKey] ?? []"
+                  v-for="(option, optionIndex) in choiceOptions[chooser.nodeKey] ?? []"
                   :key="option.id"
-                  :label="choiceOptionLabel(option)"
+                  :label="choiceOptionLabel(option, optionIndex)"
                   :value="option.id"
+                  :disabled="isChoiceOptionUnidentifiable(chooser, option)"
                 />
               </el-select>
             </el-form-item>
           </el-form>
         </el-card>
 
-        <el-divider content-position="left">填写表单</el-divider>
+        <el-divider content-position="left">{{ t.fillForm }}</el-divider>
 
         <el-form
           ref="formRef"
@@ -219,7 +221,7 @@
                 <el-input
                   :model-value="recordLinkDisplay(field.id)"
                   readonly
-                  placeholder="请选择一条关联记录"
+                  :placeholder="t.recordLinkPlaceholder"
                   data-testid="approval-record-link-display"
                 />
                 <el-button
@@ -228,7 +230,7 @@
                   data-testid="approval-record-link-pick"
                   @click="openRecordLinkPicker(field)"
                 >
-                  选择记录
+                  {{ t.pickRecord }}
                 </el-button>
                 <el-button
                   v-if="formData[field.id]"
@@ -236,7 +238,7 @@
                   data-testid="approval-record-link-clear"
                   @click="clearRecordLink(field.id)"
                 >
-                  清除
+                  {{ t.clear }}
                 </el-button>
               </div>
             </div>
@@ -245,7 +247,7 @@
             <el-input
               v-else-if="field.type === 'text'"
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- textarea -->
@@ -254,7 +256,7 @@
               v-model="formData[field.id]"
               type="textarea"
               :rows="3"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- number -->
@@ -267,21 +269,26 @@
               v-bind="numberFieldProps(field)"
               class="ms-w-100pct"
             />
-            <!-- date -->
+            <!-- date: bound as the strict YYYY-MM-DD civil string the server validates (T4a-E1;
+                 see approvals/datePickerFormat.ts) -->
             <el-date-picker
               v-else-if="field.type === 'date'"
               v-model="formData[field.id]"
               type="date"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             />
 
-            <!-- datetime -->
+            <!-- datetime: minute-granular entry with a real default time of day (T4a); the stored
+                 value is unchanged (a Date, i.e. an ISO instant on the wire) -->
             <el-date-picker
               v-else-if="field.type === 'datetime'"
               v-model="formData[field.id]"
               type="datetime"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+              :default-time="datetimeDefaultTime"
+              :placeholder="field.placeholder || t.datetimePlaceholder"
               class="ms-w-100pct"
             />
 
@@ -302,16 +309,16 @@
                   :model-value="dateRangeStart(field.id)"
                   :type="dateRangePickerElementType(field.props?.dateType)"
                   :value-format="dateRangePickerValueFormat(field.props?.dateType)"
-                  :placeholder="(field.props?.startLabel as string) || '起始'"
+                  :placeholder="(field.props?.startLabel as string) || t.rangeStart"
                   data-testid="approval-date-range-start"
                   @update:model-value="(value: string | null) => setDateRangeStart(field.id, value)"
                 />
-                <span class="approval-new__date-range-sep">至</span>
+                <span class="approval-new__date-range-sep">{{ t.rangeTo }}</span>
                 <el-date-picker
                   :model-value="dateRangeEnd(field.id)"
                   :type="dateRangePickerElementType(field.props?.dateType)"
                   :value-format="dateRangePickerValueFormat(field.props?.dateType)"
-                  :placeholder="(field.props?.endLabel as string) || '结束'"
+                  :placeholder="(field.props?.endLabel as string) || t.rangeEnd"
                   data-testid="approval-date-range-end"
                   @update:model-value="(value: string | null) => setDateRangeEnd(field.id, value)"
                 />
@@ -326,7 +333,7 @@
             <el-select
               v-else-if="field.type === 'select'"
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             >
               <el-option
@@ -342,7 +349,7 @@
               v-else-if="field.type === 'multi-select'"
               v-model="formData[field.id]"
               multiple
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             >
               <el-option
@@ -356,7 +363,27 @@
             <!-- user (B3-04 D-2: real participant directory picker) -->
             <ApprovalUserPicker
               v-else-if="field.type === 'user'"
-              :model-value="(formData[field.id] as string | null | undefined) ?? null"
+              :model-value="userFieldValue(field)"
+              :multiple="userSelection(field) === 'multi'"
+              :max-selections="userMaxSelections(field)"
+              :excluded-user-ids="userExcludedIds(field)"
+              :initial-options="userInitialOptions(field)"
+              :aria-label="chooseAriaLabel(field.label)"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
+              @update:model-value="formData[field.id] = $event"
+              @update:multiple-model-value="formData[field.id] = $event"
+            />
+
+            <ApprovalDepartmentPicker
+              v-else-if="field.type === 'department'"
+              :model-value="departmentFieldValue(field.id)"
+              :selection="departmentSelection(field)"
+              :display="departmentDisplay(field)"
+              :max-selections="departmentMaxSelections(field)"
+              :default-mode="departmentDefaultMode(field)"
+              :default-department-ids="departmentDefaultIds(field)"
+              :aria-label="chooseAriaLabel(field.label)"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               @update:model-value="formData[field.id] = $event"
             />
 
@@ -409,6 +436,7 @@
                       v-else-if="column.type === 'date'"
                       v-model="row[column.id]"
                       type="date"
+                      :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
                       :placeholder="column.label"
                       class="ms-w-100pct"
                     />
@@ -416,6 +444,8 @@
                       v-else-if="column.type === 'datetime'"
                       v-model="row[column.id]"
                       type="datetime"
+                      :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+                      :default-time="datetimeDefaultTime"
                       :placeholder="column.label"
                       class="ms-w-100pct"
                     />
@@ -448,14 +478,20 @@
                     </el-select>
                     <ApprovalUserPicker
                       v-else-if="column.type === 'user'"
-                      :model-value="(row[column.id] as string | null | undefined) ?? null"
+                      :model-value="(row[column.id] as string | string[] | null | undefined) ?? null"
+                      :multiple="userSelection(column) === 'multi'"
+                      :max-selections="userMaxSelections(column)"
+                      :excluded-user-ids="userExcludedIds(column)"
+                      :initial-options="userInitialOptions(column, row[column.id])"
+                      :aria-label="chooseAriaLabel(column.label)"
                       @update:model-value="row[column.id] = $event"
+                      @update:multiple-model-value="row[column.id] = $event"
                     />
                     <el-input v-else v-model="row[column.id]" :placeholder="column.label" />
                     </template>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="80" align="center">
+                <el-table-column :label="t.colActions" width="80" align="center">
                   <template #default="{ $index }">
                     <el-button
                       type="danger"
@@ -463,12 +499,12 @@
                       :disabled="!canRemoveDetailRow(field)"
                       @click="removeDetailRow(field.id, $index)"
                     >
-                      删除
+                      {{ t.deleteRow }}
                     </el-button>
                   </template>
                 </el-table-column>
                 <template #empty>
-                  <span class="approval-new__detail-empty">暂无明细行，请点击下方“添加一行”</span>
+                  <span class="approval-new__detail-empty">{{ t.detailEmpty }}</span>
                 </template>
               </el-table>
               <div class="approval-new__detail-actions">
@@ -479,7 +515,7 @@
                   :disabled="!canAddDetailRow(field)"
                   @click="addDetailRow(field)"
                 >
-                  添加一行
+                  {{ t.addRow }}
                 </el-button>
                 <span v-if="detailRowsHint(field)" class="approval-new__detail-hint">
                   {{ detailRowsHint(field) }}
@@ -507,14 +543,16 @@
               <ul v-if="attachmentList(field.id).length > 0" class="approval-new__attachment-list">
                 <li v-for="item in attachmentList(field.id)" :key="item.id">
                   <span>{{ item.name }}</span>
-                  <el-button link type="danger" @click="removeAttachment(field.id, item.id)">移除</el-button>
+                  <el-button link type="danger" @click="removeAttachment(field.id, item.id)">{{ t.removeAttachment }}</el-button>
                 </li>
               </ul>
-              <span class="approval-new__field-hint">支持 PDF / JPG / PNG / TXT / CSV，单文件 ≤ 20MB，每字段 ≤ 10 个</span>
+              <span class="approval-new__field-hint">{{ t.attachmentHint }}</span>
             </div>
 
             <!-- attachment, flag OFF: B2-28 honest-disable STOPGAP (byte-identical while
-                 APPROVAL_ATTACHMENTS_ENABLED stays OFF — D5/G1). The previous el-upload
+                 APPROVAL_ATTACHMENTS_ENABLED stays OFF — D5/G1; O-8 / F8-1 therefore leaves
+                 its text untouched as a named exception of the F8-1 locale guards — the copy is
+                 retired with the stopgap itself at rung 4). The previous el-upload
                  (action="#" + auto-upload=false) was fully interactive but never actually uploaded
                  anything: the raw File a user dropped landed in formData, and JSON.stringify-ing that
                  for the request body silently turned it into `{}` — a success toast over
@@ -531,11 +569,26 @@
               附件上传功能即将支持，请先在其他字段中注明附件信息。
             </div>
 
+            <!-- Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3)
+                 explanation: display-only. Renders the authored `props.text` body to the
+                 requester. No v-model: an explanation collects nothing (A-1), so there is no
+                 formData key to bind — WITHOUT this arm, an explanation field would fall through
+                 to the plain-text-input fallback below and silently collect a value it must never
+                 carry. white-space:pre-wrap preserves authored line breaks without interpreting
+                 markup (plain text, never raw HTML). -->
+            <div
+              v-else-if="field.type === 'explanation'"
+              class="approval-new__explanation"
+              data-testid="approval-explanation-field"
+            >
+              {{ (field.props?.text as string) || '' }}
+            </div>
+
             <!-- fallback -->
             <el-input
               v-else
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- G-B2-16: 大写回显 — under the template-declared amount total (no label guessing),
@@ -549,7 +602,7 @@
               class="approval-new__amount-words"
               data-testid="approval-amount-words"
             >
-              大写：{{ amountWordsFor(field) }}
+              {{ t.amountInWords }}{{ amountWordsFor(field) }}
             </div>
 
             <!-- L8-C: formatted-number display caption (currency prefix / thousands grouping) —
@@ -563,7 +616,7 @@
             </div>
 
             <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
-              由明细自动汇总，无需手填
+              {{ t.autoSummed }}
             </span>
           </el-form-item>
 
@@ -576,14 +629,14 @@
               :disabled="!canWrite"
               @click="handleSubmit"
             >
-              提交审批
+              {{ t.submit }}
             </el-button>
-            <el-button @click="goBack">取消</el-button>
+            <el-button @click="goBack">{{ t.cancel }}</el-button>
           </el-form-item>
         </el-form>
       </div>
 
-      <el-empty v-else-if="!templateStore.loading" description="未找到审批模板" />
+      <el-empty v-else-if="!templateStore.loading" :description="t.notFound" />
     </div>
 
     <!-- FWB-0 Layer 2: dedicated record-link picker (pinned baseId+sheetId; no MetaField fabric). -->
@@ -602,6 +655,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useLocale } from '../../composables/useLocale'
+import { NEW_EN, NEW_ZH } from './approvalNewLabels'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -630,8 +685,14 @@ import {
 } from '../../approvals/numberFieldProps'
 import { amountToChineseWords } from '../../approvals/amountInWords'
 import { numberFieldScale } from '../../approvals/amountAutoSum'
-import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
+import { formSchemaSignature } from '../../approvals/formDraft'
+// P3-3: draft STORAGE moved server-side (cross-device + drafts inbox); the signature function
+// above (schema-drift guard) is unchanged and still computed client-side by the caller.
+import { clearFormDraftServer, loadFormDraftServer, saveFormDraftServer } from '../../approvals/serverFormDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import ApprovalDepartmentPicker, {
+  type ApprovalDepartmentValue,
+} from '../../approvals/components/ApprovalDepartmentPicker.vue'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,
@@ -662,6 +723,11 @@ import {
   dateRangePickerValueFormat,
 } from '../../approvals/dateRangeField'
 import {
+  APPROVAL_CIVIL_DATE_VALUE_FORMAT,
+  APPROVAL_DATETIME_DISPLAY_FORMAT,
+  approvalDatetimeDefaultTime,
+} from '../../approvals/datePickerFormat'
+import {
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
   preValidateAttachments,
@@ -669,9 +735,34 @@ import {
 } from '../../approvals/attachmentUpload'
 import { collectAttachmentRefIds, dropStaleAttachmentRefs } from '../../approvals/attachmentRefs'
 import { useFeatureFlags } from '../../stores/featureFlags'
+import { ensureUserNamesResolved, resolvedUserNames } from '../../approvals/directoryResolve'
 
 const route = useRoute()
 const router = useRouter()
+// O-8 / F8-1: this view follows the shell locale (module-scope `useLocale()` singleton); its own
+// copy lives in approvalNewLabels.ts, interpolated copy is an `isZh.value ? … : …` pair below.
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? NEW_ZH : NEW_EN))
+// T4a: the datetime pickers' `default-time` — the time this form was opened, to the minute. Element
+// Plus reads `default-time` once, when each picker mounts, so a single value read at setup is what
+// every picker on the page (top-level and 明细 cells) would see anyway.
+const datetimeDefaultTime = approvalDatetimeDefaultTime()
+
+function inputPlaceholder(label: string): string {
+  return isZh.value ? `请输入${label}` : `Enter ${label}`
+}
+
+function selectPlaceholder(label: string): string {
+  return isZh.value ? `请选择${label}` : `Select ${label}`
+}
+
+function chooseAriaLabel(label: string): string {
+  return isZh.value ? `选择${label}` : `Choose ${label}`
+}
+
+function requiredMessage(label: string): string {
+  return isZh.value ? `请填写${label}` : `${label} is required`
+}
 const approvalStore = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canWrite } = useApprovalPermissions()
@@ -693,6 +784,119 @@ const attachmentUploadEnabled = computed(() => productFeatures.value.approvalAtt
 const uploadedAttachments = reactive<Record<string, Array<{ id: string; name: string }>>>({})
 const attachmentUploading = ref(false)
 
+function departmentFieldValue(fieldId: string): ApprovalDepartmentValue[] {
+  const value = formData[fieldId]
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const record = entry as Record<string, unknown>
+    if (typeof record.id !== 'string' || !record.id) return []
+    return [{
+      id: record.id,
+      ...(typeof record.name === 'string' ? { name: record.name } : {}),
+      ...(typeof record.fullPath === 'string' ? { fullPath: record.fullPath } : {}),
+    }]
+  })
+}
+
+function departmentSelection(field: FormField): 'single' | 'multi' {
+  return field.props?.selection === 'multi' ? 'multi' : 'single'
+}
+
+function departmentDisplay(field: FormField): 'leaf_only' | 'full_path' {
+  return field.props?.display === 'full_path' ? 'full_path' : 'leaf_only'
+}
+
+function departmentMaxSelections(field: FormField): number | undefined {
+  return typeof field.props?.maxSelections === 'number' ? field.props.maxSelections : undefined
+}
+
+function departmentDefaultMode(field: FormField): 'requester_department' | 'designated' | undefined {
+  return field.props?.defaultMode === 'requester_department' || field.props?.defaultMode === 'designated'
+    ? field.props.defaultMode
+    : undefined
+}
+
+function departmentDefaultIds(field: FormField): string[] {
+  return Array.isArray(field.props?.defaultDepartmentIds)
+    ? field.props.defaultDepartmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+}
+
+function userSelection(field: FormField): 'single' | 'multi' {
+  return field.props?.selection === 'multi' ? 'multi' : 'single'
+}
+
+function userMaxSelections(field: FormField): number | undefined {
+  return typeof field.props?.maxSelections === 'number' ? field.props.maxSelections : undefined
+}
+
+function userAllowSelf(field: FormField): boolean {
+  return field.props?.allowSelf === true
+}
+
+function userDefaultIds(field: FormField): string[] {
+  return Array.isArray(field.props?.defaultUserIds)
+    ? field.props.defaultUserIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+}
+
+function userExcludedIds(field: FormField): string[] {
+  return !userAllowSelf(field) && draftUserId.value ? [draftUserId.value] : []
+}
+
+function userFieldValue(field: FormField): string | string[] | null {
+  const value = formData[field.id]
+  if (userSelection(field) === 'multi') {
+    return Array.isArray(value)
+      ? value.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : []
+  }
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function userInitialOptions(
+  field: FormField,
+  sourceValue: unknown = formData[field.id],
+): ApprovalDirectoryUser[] {
+  const ids = Array.isArray(sourceValue)
+    ? sourceValue.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : typeof sourceValue === 'string' && sourceValue.length > 0 ? [sourceValue] : []
+  return ids.map((id) => ({ id, name: resolvedUserNames[id] ?? '', email: '' }))
+}
+
+function collectSelectedUserIds(): string[] {
+  if (!template.value) return []
+  const ids: string[] = []
+  for (const field of template.value.formSchema.fields) {
+    if (field.type === 'user') {
+      ids.push(...userInitialOptions(field).map((option) => option.id))
+      continue
+    }
+    if (field.type !== 'detail' || !Array.isArray(formData[field.id])) continue
+    for (const row of formData[field.id] as Array<Record<string, unknown>>) {
+      for (const column of field.columns ?? []) {
+        if (column.type === 'user') {
+          ids.push(...userInitialOptions(column, row[column.id]).map((option) => option.id))
+        }
+      }
+    }
+  }
+  return [...new Set(ids)]
+}
+
+function initialUserFieldValue(field: FormField, requesterId: string | null): string | string[] | undefined {
+  const multi = userSelection(field) === 'multi'
+  if (field.props?.defaultMode === 'requester' && requesterId) {
+    return multi ? [requesterId] : requesterId
+  }
+  if (field.props?.defaultMode === 'designated') {
+    const defaults = userDefaultIds(field)
+    return multi ? defaults : defaults[0]
+  }
+  return multi ? [] : undefined
+}
+
 function attachmentList(fieldId: string): Array<{ id: string; name: string }> {
   return uploadedAttachments[fieldId] ?? []
 }
@@ -709,13 +913,13 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
   const templateId = route.params.templateId as string
   const current = attachmentList(field.id)
   if (current.length + picked.length > 10) {
-    ElMessage.error('附件数量超出上限（每字段最多 10 个）')
+    ElMessage.error(t.value.attachmentTooMany)
     return
   }
   // client mirror of the ratified caps/allowlist — the server re-validates authoritatively (422).
   const rejects = preValidateAttachments(picked.map((f) => ({ name: f.name, type: f.type, size: f.size })))
   if (rejects.length > 0) {
-    ElMessage.error(`附件被拒绝（${rejects[0].code}）`)
+    ElMessage.error(isZh.value ? `附件被拒绝（${rejects[0].code}）` : `Attachment rejected (${rejects[0].code})`)
     return
   }
   attachmentUploading.value = true
@@ -732,7 +936,7 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
     syncAttachmentFormValue(field.id)
   } catch (error) {
     // values-free code from the client mirror / server reject — never file contents or paths.
-    ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
+    ElMessage.error(error instanceof Error ? error.message : t.value.attachmentUploadFailed)
   } finally {
     attachmentUploading.value = false
   }
@@ -755,7 +959,7 @@ async function removeAttachment(fieldId: string, attachmentId: string): Promise<
   try {
     await deleteApprovalAttachment(attachmentId)
   } catch {
-    ElMessage.error('附件移除失败，请重试')
+    ElMessage.error(t.value.attachmentRemoveFailed)
     return
   }
   const index = list.findIndex((item) => item.id === attachmentId)
@@ -766,25 +970,76 @@ async function removeAttachment(fieldId: string, attachmentId: string): Promise<
 // see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
 const prefillNoticeVisible = ref(false)
 
-// G-B2-14: localStorage draft autosave/restore (per user+template; pure helpers in
-// approvals/formDraft.ts). The machinery arms only once BOTH the template and the user id are
-// known; a resubmit-prefill (B2-13) takes precedence — the restore offer is skipped entirely.
+// G-B2-14 / P3-3: server-backed draft autosave/restore (per user+template; storage lives in
+// `approval_form_drafts`, one row per (user, template) — the FE-visible shape is identical to the
+// former localStorage era, only the medium moved). The machinery arms only once the template, the
+// user id, AND (P3-3) the initial restore fetch have all settled — a resubmit-prefill (B2-13)
+// takes precedence and skips the restore offer entirely. `draftUserId` is also used elsewhere in
+// this file (selected-user defaults, :800/:1706) — kept as-is; the draft calls below no longer
+// need it themselves (the server derives the acting user from the auth token), only `templateId`.
 const draftUserId = ref<string | null>(null)
 const draftRestoreVisible = ref(false)
 const pendingDraft = ref<Record<string, unknown> | null>(null)
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
 let draftArmed = false
+// P3-3 FIX C (gate2 P3-D): the debounced SAVE this timer schedules is fire-and-forget
+// (`void saveFormDraftServer(...)`) — cancelling the TIMER (FIX 8, below) only stops a save that
+// has not been ISSUED yet. Once the timer fires, the HTTP request is in flight and clearing the
+// timer does nothing for it. `draftSaveInFlight` tracks that in-flight request's promise so a
+// later CLEAR (submit/discard) can wait for it to settle FIRST — see the submit handler below for
+// why this, and not a `res.ok`/abort-based approach, is what actually closes the race.
+//
+// FIX (this round, reviewer-found): the FIRST version of this fix let `scheduleDraftSave` simply
+// OVERWRITE this slot with each new save's own promise — a single slot, not a queue. That is only
+// correct while at most one save is ever outstanding, but two CAN be outstanding at once (the user
+// types again 800ms later while the first save's HTTP request is still on the wire). If the LATER
+// save's promise settles BEFORE the earlier one, the old `.finally` (keyed on
+// `draftSaveInFlight === <this call's own promise>`) nulled the slot while the earlier save was
+// still unsettled — a quiescing caller reading the slot at that instant saw "nothing in flight"
+// and issued its CLEAR immediately, and if the earlier save's transaction then committed AFTER
+// that CLEAR's DELETE had already committed, its INSERT resurrected the draft. Same resurrection
+// shape FIX C below closes for "one save in flight"; this is that same window reached through a
+// SECOND, later-issued save completing first, not through a rejected/late network response —
+// reproduced with an in-memory probe of the extracted save/clear helpers.
+//
+// This slot is now the TAIL of a promise CHAIN scoped to THIS COMPONENT INSTANCE, not a single
+// overwritten promise — see `scheduleDraftSave` below: each new save is chained onto whatever this
+// slot currently holds, so (a) saves issued from this instance run in the order they were
+// scheduled (a later save's fetch is not even issued until the earlier one has settled) and (b)
+// this slot always names the chain's current tail, so any quiescing caller reading it is always
+// waiting on the true tail, never a promise a later save has already superseded and nulled out
+// from under it. `cancelPendingDraftSaveThenClear` needed NO change for this — it already just
+// reads whatever is in this slot, and this slot is now always correct.
+//
+// Scope, precisely: NOT per-(user,template) — `currentDraftTemplateId()` is re-read independently
+// at each call site (this timer's own callback, and `cancelPendingDraftSaveThenClear`), so if this
+// instance were ever reused across a templateId change (Vue Router's default same-record-reuse
+// behavior — this route has no `:key` and no `beforeRouteUpdate` guard to force a remount, though
+// nothing here relies on one existing), a save queued for the OLD template would chain ahead of
+// one for the NEW template. That is a latency artifact, not a resurrection risk: every save/clear
+// still carries its OWN correct templateId captured at ITS OWN call time, so the wrong-order
+// effect is "the newer template's autosave is delayed," never "data lands under the wrong row."
+//
+// Chaining relies on `saveFormDraftServer` never rejecting (its own `try { … } catch {}` body in
+// serverFormDraft.ts) — a link that rejected would skip every save queued behind it. One accepted,
+// deliberate consequence: a slow save now makes later debounced saves QUEUE behind it in order
+// rather than fire independently of it — the most recently typed content still wins once the
+// chain drains, just later than before.
+let draftSaveInFlight: Promise<void> | null = null
 
-function draftStorageKey(): string | null {
+function currentDraftTemplateId(): string | null {
   const templateId = route.params.templateId as string
-  if (!draftUserId.value || !templateId || !template.value) return null
-  return formDraftKey(draftUserId.value, templateId)
+  if (!templateId || !template.value) return null
+  return templateId
 }
 
-function offerDraftRestore(): void {
-  const key = draftStorageKey()
-  if (!key || !template.value) return
-  const draft = loadFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema))
+/** P3-3: now async (a network round-trip, not a synchronous storage.getItem). Callers MUST await
+ *  this before arming `draftArmed` — see onMounted below — otherwise the 800ms autosave watcher
+ *  could fire (and clobber this restore, or be clobbered by it) while the GET is still in flight. */
+async function offerDraftRestore(): Promise<void> {
+  const templateId = currentDraftTemplateId()
+  if (!templateId || !template.value) return
+  const draft = await loadFormDraftServer(templateId, formSchemaSignature(template.value.formSchema))
   if (!draft) return
   pendingDraft.value = draft
   draftRestoreVisible.value = true
@@ -842,13 +1097,51 @@ async function applyDraftRestore(): Promise<void> {
     uploadedAttachments[field.id] = kept.map((id) => ({ id, name: liveByIdName.get(id) ?? id }))
   }
   if (scan.staleIds.length > 0) {
-    ElMessage.warning(`${scan.staleIds.length} 个暂存附件已过期，已从草稿中移除，请重新上传`)
+    ElMessage.warning(isZh.value
+      ? `${scan.staleIds.length} 个暂存附件已过期，已从草稿中移除，请重新上传`
+      : `${scan.staleIds.length} staged attachment(s) expired and were removed from the draft. Upload them again.`)
+  }
+}
+
+/** P3-3 FIX C (gate2 P3-D) — the "quiesce then clear" sequence, factored out so the submit path and
+ *  the discard-restore path cannot drift onto different behavior again (which is exactly how
+ *  `discardDraftRestore` missed this fix the first time — gate2 P3-D residual #1). See the submit
+ *  call site's own comment (below) for the full race/residual/rejected-alternatives writeup this
+ *  sequence closes; this function IS that sequence: cancel the pending debounce timer (a save that
+ *  has not been ISSUED yet must never fire after the clear) and defer the CLEAR itself until any
+ *  already-IN-FLIGHT save (issued, HTTP request already sent) settles — because a save whose fetch
+ *  RESOLVES via a real response can only do so after its own server-side transaction has already
+ *  committed or rolled back, so once that promise settles there is no window left for this CLEAR to
+ *  land first.
+ *
+ *  Deliberately does NOT touch `draftArmed` — that is each CALL SITE's own decision, not shared.
+ *  `handleSubmit` sets `draftArmed = false` at its own call site because the component is about to
+ *  navigate away and never needs to autosave again; `discardDraftRestore` must NOT do that — it
+ *  runs early in this component's lifecycle (right after mount, before the user has necessarily
+ *  typed anything), and the user is expected to keep filling out THIS SAME form afterward. Sharing
+ *  a permanent disarm here would silently kill autosave for the rest of the session on every
+ *  discard — a session-wide, common-path regression, not a narrow one (unlike the submit call
+ *  site's own version of this hazard — see that site's comment).
+ *
+ *  Fire-and-forget from the CALLER's point of view — neither `saveFormDraftServer` nor
+ *  `clearFormDraftServer` ever throws, and nothing here needs to block the caller on a network
+ *  round-trip. */
+function cancelPendingDraftSaveThenClear(templateId: string | null): void {
+  if (draftSaveTimer) {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+  const pendingSave = draftSaveInFlight
+  if (templateId) {
+    void (pendingSave ?? Promise.resolve()).finally(() => {
+      void clearFormDraftServer(templateId)
+    })
   }
 }
 
 function discardDraftRestore(): void {
-  const key = draftStorageKey()
-  if (key) clearFormDraft(window.localStorage, key)
+  const templateId = currentDraftTemplateId()
+  cancelPendingDraftSaveThenClear(templateId)
   pendingDraft.value = null
   draftRestoreVisible.value = false
 }
@@ -857,8 +1150,8 @@ function scheduleDraftSave(): void {
   if (!draftArmed) return
   if (draftSaveTimer) clearTimeout(draftSaveTimer)
   draftSaveTimer = setTimeout(() => {
-    const key = draftStorageKey()
-    if (!key || !template.value) return
+    const templateId = currentDraftTemplateId()
+    if (!templateId || !template.value) return
     // Flag ON (#4195 G13): attachment ids ARE persisted in the draft, because the restore path now
     // detects stale refs (`applyDraftRestore` above) — a draft that outlives the 7-day unbound GC has
     // its swept ids dropped and surfaced at restore instead of being carried into a submission. Flag
@@ -867,11 +1160,37 @@ function scheduleDraftSave(): void {
     const data = attachmentUploadEnabled.value
       ? { ...formData }
       : stripAttachmentFields(template.value.formSchema, { ...formData })
-    saveFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema), data)
+    // Snapshotted NOW, at debounce-fire time — same timing as `data` above, and as the whole
+    // pre-fix synchronous call — even though the actual network call below may not run until
+    // later (chained behind an earlier unsettled save). Reading `template.value` again from
+    // inside the (possibly much later) `.then()` callback instead would let a template swap that
+    // happens while this save is queued silently change what gets persisted.
+    const schemaSignature = formSchemaSignature(template.value.formSchema)
+    // Fire-and-forget from THIS call site's point of view — saveFormDraftServer never throws, and
+    // the 800ms debounce already keeps this off the hot path, so nothing here needs to await the
+    // network round-trip. The promise itself IS retained (`draftSaveInFlight`), though: it is the
+    // only way a later submit/discard-triggered CLEAR can tell "a save I already issued has not
+    // settled yet" and wait for it — see FIX C above and the submit handler below.
+    //
+    // Chained onto the EXISTING slot, not assigned over it (this round's fix — see the slot's own
+    // declaration comment above for the reverse-completion-order window this closes, and for this
+    // slot's exact scope): the actual `saveFormDraftServer` call is deferred inside the `.then()`,
+    // so if an earlier save from this instance is still unsettled, this one is not even ISSUED
+    // until that earlier one settles — saves from this instance always run in issue order, and
+    // this slot always names the chain's current TAIL, never a stale link a later save has already
+    // superseded.
+    const tail: Promise<void> = (draftSaveInFlight ?? Promise.resolve()).then(() =>
+      saveFormDraftServer(templateId, schemaSignature, data),
+    )
+    draftSaveInFlight = tail
+    void tail.finally(() => {
+      if (draftSaveInFlight === tail) draftSaveInFlight = null
+    })
   }, 800)
 }
 
 watch(formData, scheduleDraftSave, { deep: true })
+watch(formData, () => ensureUserNamesResolved(collectSelectedUserIds()), { deep: true })
 // UX B2-13: folded into the SAME `v-loading` overlay as the template/submit loads (below) so the
 // form can't be interacted with — and submitted un-prefilled — during the brief window between
 // the template finishing its own load and the source-instance prefill fetch resolving.
@@ -888,7 +1207,7 @@ const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.
 const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
-  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
+  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null, isZh.value)
 })
 
 // ---------------------------------------------------------------------------
@@ -897,19 +1216,26 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
 interface RequesterChoiceChooser {
   nodeKey: string
   nodeName: string
+  // W1-1d: the carrying node's type drives the 审批人 / 办理人 wording only — the payload shape,
+  // the per-node key and the server-side validation are identical for both node types.
+  nodeType: 'approval' | 'handler'
   mode: 'single' | 'multi'
   scope: RequesterChoiceAssigneeSource['scope']
 }
 
-// One chooser row per approval node whose sources include a requester_choice entry (the FIRST
-// such source drives the UI; the server validates the submitted choice against EVERY
-// requester_choice source on the node, so the UI can never under-constrain the create).
+// One chooser row per approval OR handler node whose sources include a requester_choice entry
+// (the FIRST such source drives the UI; the server validates the submitted choice against EVERY
+// requester_choice source on the node, so the UI can never under-constrain the create). Handler
+// nodes since W1-1d — Lock-3 §1.5's forward row ("`requester_choice` (K2) … ADMIT" on a handler):
+// the backend collector keys a handler's choice under its node key and REQUIRES it at create
+// (422 APPROVAL_REQUESTER_CHOICE_REQUIRED), so a submit page that skipped handler nodes would
+// leave the requester unable to satisfy the node at all.
 const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
   const choosers: RequesterChoiceChooser[] = []
   for (const node of graph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources
     if (!Array.isArray(sources)) continue
     const source = sources.find(
@@ -919,6 +1245,7 @@ const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
       choosers.push({
         nodeKey: node.key,
         nodeName: (node.name && node.name.trim()) || node.key,
+        nodeType: node.type,
         mode: source.mode,
         scope: source.scope,
       })
@@ -927,23 +1254,98 @@ const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
   return choosers
 })
 
+// W1-1d: the chooser card's header names the role(s) the requester is choosing — 审批人 for
+// approval nodes, 办理人 for handler nodes, both when the route carries both kinds of chooser.
+const requesterChoiceHeader = computed<string>(() => {
+  const hasApproval = requesterChoiceNodes.value.some((chooser) => chooser.nodeType === 'approval')
+  const hasHandler = requesterChoiceNodes.value.some((chooser) => chooser.nodeType === 'handler')
+  if (hasApproval && hasHandler) return t.value.chooseApproverAndHandler
+  if (hasHandler) return t.value.chooseHandler
+  return t.value.chooseApprover
+})
+
 const requesterChoices = reactive<Record<string, string[]>>({})
 const choiceOptions = reactive<Record<string, ApprovalDirectoryUser[]>>({})
 const choiceSearchLoading = reactive<Record<string, boolean>>({})
+// member-display-identity (2026-08-19; requester-choice raw-id-render fix; stale-cache fix
+// 2026-08-21): nodeKey -> id -> real name, kept in sync with the FRESHEST search response for
+// that id (`searchChoiceCandidates` below) — a name is written when the latest page confirms one,
+// and DELETED the moment the latest page for that id comes back blank/absent (a directory record
+// can be renamed to blank, anonymized, or deactivated between two searches; the freshest answer
+// must win, never an earlier append). Accumulating confirmed names ACROSS pages (rather than
+// replacing the whole map per page) is what lets a candidate picked from an EARLIER search page
+// stay identifiable at submit time even after a LATER search's result page doesn't happen to
+// re-include that id at all — the deletion above only fires when that id IS present in a later
+// page with a blank name, never merely because a later page omits it. This is the single source of
+// truth `isChoiceOptionUnidentifiable` and the submit-time gate below both read.
+const choiceConfirmedNames = reactive<Record<string, Record<string, string>>>({})
+// Per-node request epoch (2026-08-21, mirrors routePreviewController.ts's race-guard): a search
+// fired by an EARLIER focus/keystroke can resolve AFTER a LATER one if the network reorders
+// responses. Only the response whose captured generation still matches the node's CURRENT
+// generation may write `choiceOptions`/`choiceConfirmedNames` — an out-of-order resolution is
+// discarded outright rather than silently clobbering a newer, already-rendered result page. Not
+// `reactive`: purely an internal ordering token, never read by a template or computed.
+const choiceSearchGeneration: Record<string, number> = {}
 
 function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
-  if (chooser.scope.type === 'members') return '限指定成员'
-  if (chooser.scope.type === 'role') return '限指定角色的成员'
-  return '全公司可选'
+  if (chooser.scope.type === 'members') return t.value.scopeMembers
+  if (chooser.scope.type === 'role') return t.value.scopeRole
+  return t.value.scopeCompany
 }
 
-function choiceOptionLabel(option: ApprovalDirectoryUser): string {
-  const primary = option.name?.trim() || option.id
+function chooserItemLabel(chooser: RequesterChoiceChooser): string {
+  const mode = chooser.mode === 'multi' ? t.value.chooserMulti : t.value.chooserSingle
+  // W1-1d: a handler row is tagged 办理人 so a requester can tell it from an approver row when a
+  // route carries both (the header alone cannot say which row is which).
+  const roleTag = chooser.nodeType === 'handler' ? `${t.value.chooserHandlerTag} · ` : ''
+  return isZh.value
+    ? `${chooser.nodeName}（${roleTag}${mode} · ${chooserScopeLabel(chooser)}）`
+    : `${chooser.nodeName} (${roleTag}${mode} · ${chooserScopeLabel(chooser)})`
+}
+
+// raw-id-render fix (2026-08-19): SAME contract as ApprovalUserPicker.vue's `optionLabel` — a
+// blank/unresolved directory name falls back to a values-free, per-list ordinal ("成员 N"), NEVER
+// the raw directory id. Previously this fell back to `option.id`, which a requester (not just an
+// admin) would see whenever a scope-matched candidate's directory record has no name — the
+// primary site this fix closes (census class: requester-facing SELECT leak).
+function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string {
+  const primary = option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
 }
 
+// Same GOAL as ApprovalUserPicker.vue's `isUnidentifiable` (a candidate with no resolvable name
+// must be UNSELECTABLE, never merely relabelled, so a requester can never hand approval authority
+// to an account they cannot identify by name) but NO LONGER the same shape as of the 2026-08-21
+// stale-cache fix -- this now reads `choiceConfirmedNames` (the freshest-wins record) rather than
+// the CURRENT render page's `option.name` directly, and there is deliberately NO "currently-
+// selected ids are exempt" special case any more. That exemption (which ApprovalUserPicker.vue
+// still has, unchanged by this PR: `if (option.id === props.modelValue) return false`) was
+// checking `option.name` against the page the option happens to be rendered from, which is
+// exactly the site a stale/renamed-to-blank directory record slipped through here: the id was
+// selected while an EARLIER page still confirmed a real name, a LATER page then re-confirmed it
+// blank (deleting the entry above), and the exemption kept the now-unconfirmed option enabled
+// anyway. Reading `choiceConfirmedNames` alone already preserves the one property the exemption
+// existed for -- a selection confirmed on an earlier page stays selectable even when a later
+// page's results don't happen to re-include that id at all -- without ever re-enabling an id the
+// freshest page has actively retracted.
+//
+// SIBLING NOT FIXED HERE (2026-08-21 audit, out of this PR's scope): ApprovalUserPicker.vue keeps
+// its `modelValue`-exemption AND has no `choiceConfirmedNames`-style freshest-wins record --
+// `fetchedOptions` is replaced wholesale per search rather than accumulated, so a re-search that
+// returns the CURRENTLY-selected id with a newly-blank name would hit the same exemption shape
+// this fix removed. Whether that is exploitable end-to-end depends on whether its 4 consuming
+// flows (transfer / add-sign / fill-form user field / delegation delegatee) each enforce
+// identifiability independently server-side -- NOT verified by this PR, which only touches the
+// requester_choice path (this file only, frontend-side; the backend identifiability arm was
+// withdrawn -- it contradicted the RATIFIED Lock-1 §K2 create-time contract, see PR #5043 body).
+// Flagged as a candidate follow-up, deliberately not expanded into this diff.
+function isChoiceOptionUnidentifiable(chooser: RequesterChoiceChooser, option: ApprovalDirectoryUser): boolean {
+  return !choiceConfirmedNames[chooser.nodeKey]?.[option.id]?.trim()
+}
+
 async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string): Promise<void> {
+  const generation = (choiceSearchGeneration[chooser.nodeKey] = (choiceSearchGeneration[chooser.nodeKey] ?? 0) + 1)
   choiceSearchLoading[chooser.nodeKey] = true
   try {
     // Scope-filtered SERVER-SIDE so a members/role-scoped candidate outside the current search
@@ -953,9 +1355,30 @@ async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string
       : chooser.scope.type === 'role'
         ? { roleIds: chooser.scope.roleIds }
         : {}
-    choiceOptions[chooser.nodeKey] = await searchApprovalDirectoryUsers(q, 20, scope)
+    const results = await searchApprovalDirectoryUsers(q, 20, scope)
+    // Epoch guard: a later focus/keystroke on this SAME node already started a newer search
+    // while this one was in flight -- discard this response entirely (never partially apply it).
+    if (choiceSearchGeneration[chooser.nodeKey] !== generation) return
+    choiceOptions[chooser.nodeKey] = results
+    // Freshest-wins identifiability record for the submit-time gate (see choiceConfirmedNames'
+    // own doc above): write a real name when confirmed, DELETE any earlier confirmation the
+    // moment this same id comes back blank on the freshest page for this node.
+    const confirmed = choiceConfirmedNames[chooser.nodeKey] ?? (choiceConfirmedNames[chooser.nodeKey] = {})
+    for (const candidate of results) {
+      const name = candidate.name?.trim()
+      if (name) confirmed[candidate.id] = name
+      else delete confirmed[candidate.id]
+    }
+    // Also prime the shared authorized-scope resolver cache (directoryResolve.ts) with these
+    // candidate ids — harmless if this component never reads it back, but keeps this picker
+    // consistent with every other viewer-facing member-identity site's contract of feeding the one
+    // shared cache, and means a LATER unrelated resolve() elsewhere on this session for the same
+    // id does not need its own network round trip.
+    ensureUserNamesResolved(results.map((candidate) => candidate.id))
   } finally {
-    choiceSearchLoading[chooser.nodeKey] = false
+    // Only the still-current generation may clear the loading flag -- an out-of-order response's
+    // `finally` must not mask a still-in-flight newer request as "done".
+    if (choiceSearchGeneration[chooser.nodeKey] === generation) choiceSearchLoading[chooser.nodeKey] = false
   }
 }
 
@@ -980,6 +1403,23 @@ function missingRequesterChoiceNode(): RequesterChoiceChooser | null {
   return null
 }
 
+/**
+ * raw-id-render fix (2026-08-19), defense in depth: `isChoiceOptionUnidentifiable` already
+ * disables an unidentifiable option so it cannot be SELECTED in the first place, but this gate
+ * closes the same case `reducibleAssignees`' submit-guard closes for 减签 — a chosen id that is no
+ * longer identifiable (e.g. the disabled-option check has any gap this fix did not foresee) must
+ * still never reach `createApproval`. First chooser carrying a selected id with no confirmed name;
+ * null when every selection across every chooser is identifiable.
+ */
+function firstUnidentifiableChoiceNode(): RequesterChoiceChooser | null {
+  for (const chooser of requesterChoiceNodes.value) {
+    const confirmed = choiceConfirmedNames[chooser.nodeKey] ?? {}
+    const ids = requesterChoices[chooser.nodeKey] ?? []
+    if (ids.some((id) => !confirmed[id]?.trim())) return chooser
+  }
+  return null
+}
+
 function buildRequesterChoicesPayload(): Record<string, string[]> {
   const payload: Record<string, string[]> = {}
   for (const chooser of requesterChoiceNodes.value) {
@@ -1000,7 +1440,7 @@ const routePreviewController = createRoutePreviewController(previewApprovalRoute
   if ('preview' in patch) routePreview.value = patch.preview ?? null
   if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
   if (patch.error !== undefined) routePreviewError.value = patch.error
-})
+}, () => isZh.value)
 
 async function loadRoutePreview() {
   if (!template.value) return
@@ -1067,7 +1507,7 @@ const formRules = computed<FormRules>(() => {
             trigger: ['blur', 'change'],
             validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
               if (!dateRangeStart(field.id) || !dateRangeEnd(field.id)) {
-                callback(new Error(`请填写${field.label}`))
+                callback(new Error(requiredMessage(field.label)))
                 return
               }
               callback()
@@ -1080,7 +1520,7 @@ const formRules = computed<FormRules>(() => {
         // unset could silently pass validation until submit-time. `change` catches those; `blur`
         // stays too so leaving a text/textarea/number field empty validates without a submit click.
         rules[field.id] = [
-          { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
+          { required: true, message: requiredMessage(field.label), trigger: ['blur', 'change'] },
         ]
       }
     }
@@ -1121,7 +1561,7 @@ function recordLinkDisplay(fieldId: string): string {
   if (!parsed.ok) return ''
   // Human label for THIS field when the picker supplied one; otherwise a generic selected-record
   // label. NEVER fall back to the raw recordId (review: id oracle surface).
-  return formatRecordLinkDisplay(recordLinkLabels[fieldId])
+  return formatRecordLinkDisplay(recordLinkLabels[fieldId], isZh.value)
 }
 
 function clearRecordLink(fieldId: string): void {
@@ -1206,13 +1646,13 @@ function setDateRangeEnd(fieldId: string, value: string | null): void {
 
 function dateRangeDurationDisplay(field: FormField): string {
   const dateType = field.props?.dateType
-  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id))
+  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id), isZh.value)
   return text ?? '-'
 }
 
 function dateRangeDurationLabel(field: FormField): string {
   const label = field.props?.durationLabel
-  return typeof label === 'string' && label.trim() ? label.trim() : '时长'
+  return typeof label === 'string' && label.trim() ? label.trim() : t.value.duration
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,8 +1686,8 @@ function canRemoveDetailRow(field: FormField): boolean {
 
 function detailRowsHint(field: FormField): string {
   const parts: string[] = []
-  if (typeof field.minRows === 'number') parts.push(`至少 ${field.minRows} 行`)
-  if (typeof field.maxRows === 'number') parts.push(`最多 ${field.maxRows} 行`)
+  if (typeof field.minRows === 'number') parts.push(isZh.value ? `至少 ${field.minRows} 行` : `at least ${field.minRows} row(s)`)
+  if (typeof field.maxRows === 'number') parts.push(isZh.value ? `最多 ${field.maxRows} 行` : `at most ${field.maxRows} row(s)`)
   return parts.join(' · ')
 }
 
@@ -1308,7 +1748,7 @@ async function handleSubmit() {
     try {
       await formRef.value.validate()
     } catch {
-      ElMessage.warning('请检查表单中的必填项')
+      ElMessage.warning(t.value.checkRequired)
       scrollFirstErrorIntoView()
       return
     }
@@ -1319,7 +1759,7 @@ async function handleSubmit() {
   // otherwise only surface as an unreadable backend 400. Checked AFTER the top-level validate()
   // above succeeds, so both validation layers must pass before anything is submitted.
   if (template.value) {
-    const detailViolations = validateDetailRows(template.value.formSchema, formData)
+    const detailViolations = validateDetailRows(template.value.formSchema, formData, isZh.value)
     if (detailViolations.length > 0) {
       ElMessage.warning(detailViolations[0])
       return
@@ -1330,7 +1770,21 @@ async function handleSubmit() {
   // choice — the server would 422 values-free anyway; this surfaces the actionable message.
   const missingChoice = missingRequesterChoiceNode()
   if (missingChoice) {
-    ElMessage.warning(`请为「${missingChoice.nodeName}」选择审批人`)
+    const isHandlerChoice = missingChoice.nodeType === 'handler'
+    ElMessage.warning(isZh.value
+      ? `请为「${missingChoice.nodeName}」选择${isHandlerChoice ? '办理人' : '审批人'}`
+      : `Choose ${isHandlerChoice ? 'a handler' : 'an approver'} for "${missingChoice.nodeName}"`)
+    return
+  }
+
+  // raw-id-render fix (2026-08-19): mirrors the 减签 disable+submit-guard posture — a selection
+  // that cannot be shown by name must never be submittable, defense in depth alongside the
+  // disabled-option UI gate above.
+  const unidentifiableChoice = firstUnidentifiableChoiceNode()
+  if (unidentifiableChoice) {
+    ElMessage.warning(isZh.value
+      ? `「${unidentifiableChoice.nodeName}」选择的审批人暂无法确认身份，请重新选择`
+      : `The approver chosen for "${unidentifiableChoice.nodeName}" cannot be identified right now. Choose again.`)
     return
   }
 
@@ -1341,11 +1795,81 @@ async function handleSubmit() {
       formData: buildSubmitFormData(),
       ...(requesterChoiceNodes.value.length > 0 ? { requesterChoices: buildRequesterChoicesPayload() } : {}),
     })
-    ElMessage.success('审批已提交')
+    ElMessage.success(t.value.submitted)
     // G-B2-14: a successful submit consumes the draft.
+    // P3-3 FIX 8 (gate P3-3): the 800ms debounced autosave (`scheduleDraftSave`) can already have a
+    // SAVE timer PENDING at this exact moment (the user's last keystroke was < 800ms ago). Clearing
+    // the draft here without cancelling that timer lets it fire AFTER this clear — confirmed
+    // sequence `["CLEAR","SAVE"]` — resurrecting the draft the user just submitted. Pre-existing
+    // shape (the same race existed against the old localStorage clear), but P3-3 gives it a new
+    // blast radius: the resurrection is now server-side, so it reappears cross-device and in the
+    // drafts inbox, and CLEAR/SAVE are now two independently-ordered HTTP requests rather than two
+    // synchronous calls in one JS tick. Cancel the pending timer AND disarm further scheduling
+    // (`draftArmed = false`) — the deep `watch(formData, scheduleDraftSave)` below stays live until
+    // this component unmounts, so merely clearing the timer once would not stop a LATER edit (e.g.
+    // from a lingering render tick during navigation) from arming a fresh one.
+    //
+    // P3-3 FIX C (gate2 P3-D): cancelling the TIMER only closes the PENDING-debounce half of this
+    // race. The debounce can ALSO already have fired — the SAVE's HTTP request already issued,
+    // its promise sitting in `draftSaveInFlight`, unsettled — at the exact moment submit runs. If
+    // CLEAR is fired right away regardless, its DELETE can commit on the server BEFORE that
+    // in-flight SAVE's own transaction opens; the save then finds no existing row (`existingId`
+    // undefined, approval-form-draft-service.ts's upsert `else` branch) and INSERTs, resurrecting
+    // the draft the user just submitted — the exact "silently resurrect the row" outcome
+    // `clearApprovalFormDraft`'s own comment (approval-form-draft-service.ts) rejects for the
+    // narrower SELECT-vs-UPDATE window; this is that same rejection, widened to cover the
+    // already-in-flight-request window too.
+    //   - Chosen: AWAIT the in-flight save (if any) before issuing CLEAR. This closes the window
+    //     for the DOMINANT case: `saveFormDraftServer` never throws, but for a save whose fetch
+    //     RESOLVES (a real HTTP response — 2xx or otherwise — actually came back), that response can
+    //     only be sent after that save's own transaction has committed or rolled back. So once the
+    //     awaited promise settles via a genuine response, the save it was racing has unconditionally
+    //     finished on the server, and there is no window left for CLEAR to land first.
+    //     RESIDUAL (NOT closed by this fix, and shared with the rejected "abort" alternative below):
+    //     if the save's fetch instead REJECTS — network error, client-side timeout, dropped
+    //     connection — `saveFormDraftServer`'s own `catch {}` swallows that too, and its promise
+    //     still settles. But a rejection observed on the CLIENT does not mean the request never
+    //     reached the server: an abandoned-by-the-client request can still be sitting in flight (or
+    //     already committing) at the server when CLEAR is issued right after. Awaiting does not
+    //     close this narrower window — only a server-side guard (below) can, since it does not
+    //     depend on what the client believes happened.
+    //   - Rejected: aborting the in-flight fetch client-side. Same fundamental limit as the residual
+    //     above, not a different one: an `AbortController` only stops the CLIENT from waiting on the
+    //     response — over a real network the request may already have reached the server and
+    //     started its transaction by the time abort() runs, so it does not guarantee the server
+    //     won't still complete (and commit) the save. The chosen AWAIT approach is strictly no worse
+    //     — it gets the dominant (settles-via-response) case exactly right with a real
+    //     happens-before, which abort cannot offer either — so abort would add a mechanism without
+    //     closing anything AWAIT leaves open.
+    //   - Rejected: a server-side monotonic/epoch guard (compare each save's "captured at" against a
+    //     persisted "cleared at" high-water-mark). This is the more general fix — the ONLY one of the
+    //     three that would ALSO close the rejection-path residual above, since it never depends on
+    //     what the client observed. It would also close multi-tab / multi-device interleavings this
+    //     client-side await cannot (it can only order requests THIS tab issues). It requires a new
+    //     persisted marker that survives the row's own deletion — schema growth this final fix round
+    //     does not take on; left as a follow-up (see the PR body's disclosure list).
+    // The await is NOT on the outer `handleSubmit` (navigation/other post-submit work below must
+    // not block on a network round-trip that may already be seconds old) — only the CLEAR itself
+    // is deferred until the in-flight save (if any) settles, via `.finally()`.
+    //
+    // FIX (gate2 P3-D, this same fix round): the cancel-timer / await-in-flight-save / defer-clear
+    // sequence itself now lives in the shared `cancelPendingDraftSaveThenClear` helper (used by
+    // `discardDraftRestore` too — see its own comment for why `draftArmed = false` stays HERE,
+    // submit-only, rather than moving into the shared helper). Separately, `saveApprovalFormDraft`
+    // / `clearApprovalFormDraft` (server) now serialize against each other via a shared advisory
+    // lock, closing this same race INSIDE an overlapping transaction even without this client-side
+    // await — but that does not make this await redundant: it is what stops CLEAR from even being
+    // SENT until the dominant-case save is known-settled, and it is still the only thing that helps
+    // at all for the "save's fetch rejects but the request already reached the server" residual
+    // described two paragraphs up, which the server lock cannot see (the two requests never overlap
+    // as far as the lock is concerned once the earlier one has already fully committed).
     {
-      const key = draftStorageKey()
-      if (key) clearFormDraft(window.localStorage, key)
+      const submittedTemplateId = currentDraftTemplateId()
+      // Submit-only: the component is about to navigate away (see below) and will not autosave
+      // again, so a PERMANENT disarm here is safe. `discardDraftRestore` must NOT do this — see
+      // `cancelPendingDraftSaveThenClear`'s own comment for why.
+      draftArmed = false
+      cancelPendingDraftSaveThenClear(submittedTemplateId)
     }
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
     const submittedTemplate = template.value
@@ -1363,7 +1887,7 @@ async function handleSubmit() {
     }
     router.push({ name: 'approval-detail', params: { id: result.id } })
   } catch {
-    ElMessage.error('提交审批失败，请重试')
+    ElMessage.error(t.value.submitFailed)
   }
 }
 
@@ -1396,12 +1920,16 @@ async function applyResubmitPrefill(): Promise<void> {
 
 onMounted(async () => {
   const templateId = route.params.templateId as string
+  const currentUserPromise = useAuth().getCurrentUserId().catch(() => null)
   await templateStore.loadTemplate(templateId)
+  const currentUserId = await currentUserPromise
   // Initialize form with default values
   if (template.value) {
     for (const field of template.value.formSchema.fields) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
+      } else if (field.type === 'user') {
+        formData[field.id] = initialUserFieldValue(field, currentUserId)
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         // detail value is an array of row objects; seed empty so the fill table binds an array.
         formData[field.id] = []
@@ -1416,14 +1944,18 @@ onMounted(async () => {
     }
   }
   await applyResubmitPrefill()
-  // G-B2-14: arm the draft machinery once user id resolves; the restore offer only appears when
-  // NO resubmit prefill claimed the form (prefill wins — it is an explicit user intent).
-  try {
-    draftUserId.value = await useAuth().getCurrentUserId()
-  } catch {
-    draftUserId.value = null // drafting silently unavailable without an identity
+  ensureUserNamesResolved(collectSelectedUserIds())
+  // G-B2-14 / P3-3: arm the draft machinery once user id resolves AND (P3-3) the restore fetch
+  // itself has settled — the restore offer only appears when NO resubmit prefill claimed the form
+  // (prefill wins — it is an explicit user intent, contract §4 G). `draftArmed` is deliberately set
+  // AFTER `await`ing the restore GET: arming it earlier would let the 800ms autosave watcher fire
+  // (on any formData mutation, including the restore's own upcoming `Object.assign` once the user
+  // accepts it) while the initial GET is still in flight, racing an in-progress restore against an
+  // autosave of a still-empty/partial form.
+  draftUserId.value = currentUserId
+  if (!prefillNoticeVisible.value) {
+    await offerDraftRestore()
   }
-  if (!prefillNoticeVisible.value) offerDraftRestore()
   draftArmed = true
 })
 
@@ -1439,6 +1971,8 @@ function syncVisibleFormState() {
     if (formData[field.id] === undefined) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
+      } else if (field.type === 'user') {
+        formData[field.id] = initialUserFieldValue(field, draftUserId.value)
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         formData[field.id] = []
       } else if (field.type === 'date_range') {
@@ -1620,6 +2154,19 @@ watch([visibleFieldIds, template], () => {
 
 .approval-new__date-range-duration-label::after {
   content: '：';
+}
+
+.approval-new__explanation {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--ms-bg-subtle, var(--el-fill-color-light));
+  color: var(--ms-text-2, var(--el-text-color-regular));
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .approval-new__form {

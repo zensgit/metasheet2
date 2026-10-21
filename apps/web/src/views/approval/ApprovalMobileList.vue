@@ -26,7 +26,7 @@
     >
       <div class="approval-mobile-list__card-top">
         <span class="approval-mobile-list__title">{{ row.title ?? t.titleFallback }}</span>
-        <StatusTag domain="approvalInstance" :status="row.status" size="sm" />
+        <StatusTag v-bind="closeReasons.tagProps(row)" size="sm" />
       </div>
       <div class="approval-mobile-list__meta">
         <span class="approval-mobile-list__request-no">{{ row.requestNo ?? '-' }}</span>
@@ -48,18 +48,19 @@
         :class="`approval-mobile-list__date--${waitSeverity(row.createdAt)}`"
         :title="formatDate(row.createdAt)"
       >
-        已等待 {{ formatRelativeWait(row.createdAt) }}
+        {{ waitingPhrase(formatRelativeWait(row.createdAt, isZh), isZh) }}
       </div>
     </button>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import type { FormSchema, UnifiedApprovalDTO } from '../../types/approval'
 import { useLocale } from '../../composables/useLocale'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { resolveRowSummaryLine } from '../../approvals/useApprovalListFieldSummary'
+import { useCancelRoundCloseReasons } from '../../approvals/useCancelRoundCloseReasons'
 import StatusTag from '../../components/status/StatusTag.vue'
 
 // T3-1 v0 — dedicated touch-first list card (ballot Q10). Replaces the desktop
@@ -96,6 +97,12 @@ defineEmits<{
 
 const { isZh } = useLocale()
 
+// 撤销锁 P-2: same domain selector as the desktop table. The one read this card list can trigger is
+// the close-reason detail read for a REJECTED cancel-round row (useCancelRoundCloseReasons.ts) —
+// without it an approver's rejection and a system closure would render identically.
+const closeReasons = useCancelRoundCloseReasons()
+watch(() => props.approvals, (rows) => closeReasons.ensure(rows), { immediate: true })
+
 const t = computed(() => (isZh.value
   ? {
       loading: '加载中…',
@@ -128,7 +135,7 @@ function formatDate(dateStr: string): string {
 // B2-01: same row-summary glue the desktop table uses, resolved against the `templateSchemas`
 // cache the parent owns and passes down as a prop.
 function rowSummaryLine(row: UnifiedApprovalDTO): string {
-  return resolveRowSummaryLine(props.templateSchemas, row)
+  return resolveRowSummaryLine(props.templateSchemas, row, isZh.value)
 }
 </script>
 

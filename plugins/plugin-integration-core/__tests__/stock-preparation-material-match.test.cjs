@@ -14,6 +14,10 @@ const {
   generateMaterialMappingCandidates,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-material-match.cjs'))
 
+const {
+  mapExpansionRowsToSnapshotLines,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-expansion-snapshot-mapper.cjs'))
+
 function line(overrides = {}) {
   return {
     snapshotLineId: 'line_alpha',
@@ -45,7 +49,83 @@ function result(overrides = {}) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// THE OPERATOR STOPS HAND-TYPING THE PLM SIDE.
+//
+// `plmNameOf` / `plmSpecOf` have ALWAYS read `childName` / `spec` off a snapshot line — the
+// matcher was wired for name+spec matching from the start. What it never had was DATA: the mapper
+// dropped the component name and never read 规格 at all, so every persisted line reached this
+// module as a bare drawing number, NAME_SPEC could not fire, and the operator hand-typed
+// plmMaterialName / plmSpec into the mapping form.
+//
+// So the fix for the mapping form is not new wiring — it is the seven-field pull. This builds the
+// line through the SHIPPED mapper rather than hand-writing one, which is what makes it a witness:
+// on the pre-change mapper the line has no childName and no spec and both assertions fail.
+// ---------------------------------------------------------------------------
+function mappingFormPrefillsFromThePulledLine() {
+  const expansionRow = {
+    projectNo: 'PRJ-1',
+    componentSourceId: 'obj-child',
+    parentSourceId: null,
+    path: '["obj-child"]',
+    depth: 0,
+    componentCode: 'NO-ERP-CODE', // deliberately NOT an ERP material code: only name+spec can match
+    componentName: '标准封头D',
+    material: 'S30408',
+    spec: 'EHA-DN1200x12',
+    sourceVersion: 'A',
+    rawQuantity: 1,
+    totalQuantity: 1,
+    active: true,
+  }
+  const pulledLine = mapExpansionRowsToSnapshotLines([expansionRow], { snapshotBatchId: 'batch_prefill' }).lines[0]
+  assert.equal(pulledLine.childName, '标准封头D', 'control: the pulled line carries 当前组件名称')
+  assert.equal(pulledLine.spec, 'EHA-DN1200x12', 'control: the pulled line carries 规格')
+  assert.equal(pulledLine.plmMaterialName, undefined, 'control: nobody hand-typed the PLM side')
+  assert.equal(pulledLine.plmSpec, undefined)
+
+  const erp = material({
+    erpMaterialCode: 'ERP-9001',
+    erpMaterialInternalId: 'ERP-INTERNAL-PREFILL',
+    erpMaterialName: '标准封头D',
+    erpSpec: 'EHA-DN1200x12',
+  })
+  const matched = generateMaterialMappingCandidates({
+    plmBomLines: [pulledLine],
+    erpMaterials: [erp],
+    confirmedMappings: [],
+  })
+  const row = matched.mappingRows[0]
+  // (1) auto-matching FIRES on a line the operator did not have to touch.
+  assert.equal(row.matchMethod, MATCH_METHODS.NAME_SPEC, 'name+spec auto-match fires on a pulled line')
+  assert.equal(row.erpMaterialInternalId, 'ERP-INTERNAL-PREFILL')
+  // (2) the mapping row's PLM side is PRE-FILLED from the line — this is the mapping form's
+  //     plmMaterialName / plmSpec, which is exactly what the operator used to type by hand.
+  assert.equal(row.plmMaterialName, '标准封头D', 'the mapping form\'s PLM name is pre-filled from the pull')
+  assert.equal(row.plmSpec, 'EHA-DN1200x12', 'the mapping form\'s PLM spec is pre-filled from the pull')
+
+  // Negative control: the SAME component pulled by a deployment whose read plan declares no spec
+  // column and whose source has no name is still a bare drawing number — no auto-match, and the
+  // form has nothing to pre-fill. Absence degrades to today's behaviour instead of guessing.
+  const bareLine = mapExpansionRowsToSnapshotLines(
+    [{ ...expansionRow, componentName: null, spec: undefined }],
+    { snapshotBatchId: 'batch_bare' },
+  ).lines[0]
+  const unmatched = generateMaterialMappingCandidates({
+    plmBomLines: [bareLine],
+    erpMaterials: [erp],
+    confirmedMappings: [],
+  })
+  assert.equal(unmatched.mappingRows[0].matchMethod, MATCH_METHODS.NONE, 'a bare drawing number still cannot auto-match')
+  assert.ok(!unmatched.mappingRows[0].plmMaterialName, 'and the form is left for the operator, not filled with a guess')
+  assert.ok(!unmatched.mappingRows[0].plmSpec)
+
+  console.log('  ✓ a pulled line auto-matches by name+spec and pre-fills the mapping form\'s PLM side')
+}
+
 function main() {
+  mappingFormPrefillsFromThePulledLine()
+
   const exact = result()
   assert.equal(exact.status, 'pending_confirmation')
   assert.equal(exact.mappingRows.length, 1)

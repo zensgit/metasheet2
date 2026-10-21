@@ -30,6 +30,7 @@ import {
   type IdentityRandomSource,
 } from '../src/approvals/approvalFormIdentity'
 import {
+  buildFormSchema,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
@@ -180,6 +181,161 @@ describe('retypeFormField - identity preservation (FB-D5)', () => {
     expect(
       retypeFormField(draftWith([field(1)]), 'local_1', 'no_such_type' as never),
     ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+  })
+})
+
+describe('buildFormSchema - cross-type props ownership', () => {
+  it('emits no props for an untouched user field and round-trips every Lock-2 user prop when configured', () => {
+    const untouched = draftWith([field(1, { type: 'user' })])
+    expect(buildFormSchema(untouched).fields[0]).not.toHaveProperty('props')
+
+    const configured = draftWith([
+      field(1, {
+        type: 'user',
+        userAllowSelf: true,
+        userSelection: 'multi',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['u1', 'u2'],
+        userMaxSelectionsText: '3',
+      }),
+    ])
+    expect(buildFormSchema(configured).fields[0].props).toEqual({
+      allowSelf: true,
+      selection: 'multi',
+      defaultMode: 'designated',
+      defaultUserIds: ['u1', 'u2'],
+      maxSelections: 3,
+    })
+  })
+
+  it('drops persisted date_range props when retyped to number', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'date_range',
+      label: '日期区间',
+      props: {
+        dateType: 'date_minute',
+        startLabel: '开始',
+        endLabel: '结束',
+        durationLabel: '时长',
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'date_range',
+        original,
+        dateRangeDateType: 'date_minute',
+        dateRangeStartLabel: '开始',
+        dateRangeEndLabel: '结束',
+        dateRangeDurationLabel: '时长',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'number')
+    assertOk(retyped)
+    const configured = updateFormFieldProperties(retyped.draft, 'local_1', {
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+    })
+    assertOk(configured)
+
+    expect(buildFormSchema(configured.draft).fields[0].props).toEqual({
+      currencySymbol: '¥',
+      thousandsSeparator: true,
+    })
+  })
+
+  it('drops persisted explanation props when retyped to number', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'explanation',
+      label: '说明',
+      props: { text: '仅供参考' },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'explanation',
+        original,
+        explanationText: '仅供参考',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'number')
+    assertOk(retyped)
+    const configured = updateFormFieldProperties(retyped.draft, 'local_1', {
+      numberUppercaseCny: true,
+    })
+    assertOk(configured)
+
+    expect(buildFormSchema(configured.draft).fields[0].props).toEqual({
+      uppercaseCny: true,
+    })
+  })
+
+  it('preserves persisted number props after retyping away and back', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'number',
+      label: '金额',
+      props: {
+        min: 0,
+        precision: 2,
+        derivedFrom: {
+          operandColumnIds: ['quantity', 'price'],
+          operation: 'product',
+        },
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'number',
+        original,
+        numberCurrencySymbol: '¥',
+        numberThousandsSeparator: true,
+      }),
+    ])
+    const away = retypeFormField(source, 'local_1', 'text')
+    assertOk(away)
+    const back = retypeFormField(away.draft, 'local_1', 'number')
+    assertOk(back)
+
+    expect(buildFormSchema(back.draft).fields[0].props).toEqual({
+      min: 0,
+      precision: 2,
+      derivedFrom: {
+        operandColumnIds: ['quantity', 'price'],
+        operation: 'product',
+      },
+      currencySymbol: '¥',
+      thousandsSeparator: true,
+    })
+  })
+
+  it('drops persisted user props after retyping to a non-user field', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'user',
+      label: '联系人',
+      props: {
+        allowSelf: true,
+        selection: 'multi',
+        defaultMode: 'designated',
+        defaultUserIds: ['u1', 'u2'],
+        maxSelections: 3,
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'user',
+        original,
+        userAllowSelf: true,
+        userSelection: 'multi',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['u1', 'u2'],
+        userMaxSelectionsText: '3',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'text')
+    assertOk(retyped)
+    expect(buildFormSchema(retyped.draft).fields[0]).not.toHaveProperty('props')
   })
 })
 
@@ -736,6 +892,159 @@ describe('updateFormFieldProperties - committed inspector edits (FB-D7)', () => 
     ).toMatchObject({ ok: false, reason: 'field_not_found' })
     expect(source.fields[0].label).toBe('字段 1')
   })
+
+  it('writes Lock-8 properties only to their matching field types and preserves field identity', () => {
+    const source = draftWith([
+      field(1, { type: 'number' }),
+      field(2, { type: 'date_range' }),
+      field(3, { type: 'explanation' }),
+    ])
+    const before = JSON.stringify(source)
+
+    const numberResult = updateFormFieldProperties(source, 'local_1', {
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    assertOk(numberResult)
+    const dateResult = updateFormFieldProperties(
+      numberResult.draft,
+      'local_2',
+      {
+        dateRangeDateType: 'date_minute',
+        dateRangeStartLabel: '开始时间',
+        dateRangeEndLabel: '结束时间',
+        dateRangeDurationLabel: '共计',
+      },
+    )
+    assertOk(dateResult)
+    const explanationResult = updateFormFieldProperties(
+      dateResult.draft,
+      'local_3',
+      { explanationText: '第一行\n第二行' },
+    )
+    assertOk(explanationResult)
+
+    expect(explanationResult.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'number',
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    expect(explanationResult.draft.fields[1]).toMatchObject({
+      id: 'field_2',
+      localId: 'local_2',
+      type: 'date_range',
+      dateRangeDateType: 'date_minute',
+      dateRangeStartLabel: '开始时间',
+      dateRangeEndLabel: '结束时间',
+      dateRangeDurationLabel: '共计',
+    })
+    expect(explanationResult.draft.fields[2]).toMatchObject({
+      id: 'field_3',
+      localId: 'local_3',
+      type: 'explanation',
+      explanationText: '第一行\n第二行',
+    })
+    expect(JSON.stringify(source)).toBe(before)
+  })
+
+  it('writes Lock-2 user properties only to user fields and rejects mixed cross-type patches atomically', () => {
+    const source = draftWith([
+      field(1, { type: 'user' }),
+      field(2, { type: 'text' }),
+    ])
+    const before = JSON.stringify(source)
+    const updated = updateFormFieldProperties(source, 'local_1', {
+      userAllowSelf: true,
+      userSelection: 'multi',
+      userDefaultMode: 'designated',
+      userDefaultIds: ['u1', 'u2'],
+      userMaxSelectionsText: '3',
+    })
+    assertOk(updated)
+    expect(updated.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'user',
+      userAllowSelf: true,
+      userSelection: 'multi',
+      userDefaultMode: 'designated',
+      userDefaultIds: ['u1', 'u2'],
+      userMaxSelectionsText: '3',
+    })
+    expect(JSON.stringify(source)).toBe(before)
+
+    expect(
+      updateFormFieldProperties(source, 'local_2', {
+        userSelection: 'multi',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(
+      updateFormFieldProperties(source, 'local_1', {
+        userSelection: 'multi',
+        departmentSelection: 'multi',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(source)).toBe(before)
+  })
+
+  it('rejects every type-specific property on the wrong current type, including mixed patches, with zero mutation', () => {
+    const source = draftWith([field(1)])
+    const before = JSON.stringify(source)
+    const patches: Array<
+      Parameters<typeof updateFormFieldProperties>[2]
+    > = [
+      { numberCurrencySymbol: '¥' },
+      { numberThousandsSeparator: true },
+      { numberUppercaseCny: true },
+      { dateRangeDateType: 'date' },
+      { dateRangeStartLabel: '开始' },
+      { dateRangeEndLabel: '结束' },
+      { dateRangeDurationLabel: '时长' },
+      { explanationText: '说明' },
+      { userAllowSelf: true },
+      { userSelection: 'multi' },
+      { userDefaultMode: 'requester' },
+      { userDefaultIds: ['u1'] },
+      { userMaxSelectionsText: '2' },
+    ]
+    for (const patch of patches) {
+      expect(
+        updateFormFieldProperties(source, 'local_1', patch),
+      ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+      expect(JSON.stringify(source)).toBe(before)
+    }
+
+    const numberSource = draftWith([field(1, { type: 'number' })])
+    const numberBefore = JSON.stringify(numberSource)
+    expect(
+      updateFormFieldProperties(numberSource, 'local_1', {
+        numberCurrencySymbol: '¥',
+        explanationText: '不得部分写入',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(numberSource)).toBe(numberBefore)
+  })
+
+  it('rejects an invalid date-range granularity while preserving the explicit empty draft state', () => {
+    const source = draftWith([field(1, { type: 'date_range' })])
+    const before = JSON.stringify(source)
+    expect(
+      updateFormFieldProperties(source, 'local_1', {
+        dateRangeDateType: 'week' as never,
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(source)).toBe(before)
+
+    const unset = updateFormFieldProperties(source, 'local_1', {
+      dateRangeDateType: '',
+    })
+    assertOk(unset)
+    expect(unset.draft.fields[0].dateRangeDateType).toBe('')
+  })
 })
 
 // --- detail column commands --------------------------------------------------
@@ -1039,5 +1348,180 @@ describe('approvalFormAuthoringAdapter - F3 one-entry-per-logical-edit history (
       required: true,
     })
     expect(redone.focusLocalId).toBe('local_1')
+  })
+})
+
+// --- record-link target pins (delta §3.4 typed pickers; parity ledger deferral (3)) ----------
+
+/**
+ * Delta §3.4 lists "record-link base/sheet typed pickers" among the inspector's type-specific
+ * controls, and the parity ledger's deferral (3) required the F4 mount to wire them so a field
+ * retyped into (or added as) record-link never reaches a configuration dead-end. The pins ride the
+ * SAME typed property patch as every other type-specific property: gated to `record-link`, one
+ * committed edit = one history entry, value-identical = zero entries, rejection = zero mutation.
+ * The catalog-dependent "keep the sheet only if it belongs to the new base" decision is the
+ * CALLER's (the command layer has no catalog); the caller submits both pins as ONE patch.
+ */
+describe('updateFormFieldProperties - record-link target pins (delta §3.4 typed pickers)', () => {
+  it('writes base + sheet pins on a record-link field, preserving identity/type; the serializer emits exactly { baseId, sheetId }', () => {
+    const source = draftWith([field(1, { type: 'record-link' }), field(2)])
+    const before = JSON.stringify(source)
+    const result = updateFormFieldProperties(source, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertOk(result)
+    expect(result.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'record-link',
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    expect(result.focusLocalId).toBe('local_1')
+    expect(JSON.stringify(source)).toBe(before)
+    expect(buildFormSchema(result.draft).fields[0].props).toEqual({
+      baseId: 'base_alpha',
+      sheetId: 'sheet_alpha_1',
+    })
+  })
+
+  it('a single-pin patch touches only that pin, and clearing both pins (the clearable picker) un-configures the field', () => {
+    const source = draftWith([
+      field(1, {
+        type: 'record-link',
+        recordLinkBaseId: 'base_alpha',
+        recordLinkSheetId: 'sheet_alpha_1',
+      }),
+    ])
+    const sheetOnly = updateFormFieldProperties(source, 'local_1', {
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    assertOk(sheetOnly)
+    expect(sheetOnly.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    const cleared = updateFormFieldProperties(sheetOnly.draft, 'local_1', {
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    assertOk(cleared)
+    expect(cleared.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    // A fresh (never-saved) field with both pins cleared is no longer "configured": the
+    // record_link_config retype refusal (FB-D6) lifts, so the author is never stuck.
+    expect(
+      collectFormFieldRetypeDependencies(cleared.draft, 'local_1', 'text'),
+    ).toEqual([])
+  })
+
+  it('rejects either pin on EVERY non-record-link type, and a mixed patch atomically, with zero mutation', () => {
+    const otherTypes = [
+      'text',
+      'textarea',
+      'number',
+      'date',
+      'datetime',
+      'select',
+      'multi-select',
+      'user',
+      'department',
+      'detail',
+      'date_range',
+      'explanation',
+    ] as const
+    for (const type of otherTypes) {
+      const source = draftWith([
+        field(1, {
+          type,
+          ...(type === 'detail' ? { detailColumns: [column(1)] } : {}),
+        }),
+      ])
+      const before = JSON.stringify(source)
+      for (const patch of [
+        { recordLinkBaseId: 'base_alpha' },
+        { recordLinkSheetId: 'sheet_alpha_1' },
+        { recordLinkBaseId: 'base_alpha', recordLinkSheetId: 'sheet_alpha_1' },
+      ]) {
+        expect(
+          updateFormFieldProperties(source, 'local_1', patch),
+        ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+        expect(JSON.stringify(source)).toBe(before)
+      }
+    }
+
+    // Mixed patch on a record-link field: a foreign type-specific key fails the WHOLE patch.
+    const link = draftWith([field(1, { type: 'record-link' })])
+    const linkBefore = JSON.stringify(link)
+    expect(
+      updateFormFieldProperties(link, 'local_1', {
+        recordLinkBaseId: 'base_alpha',
+        numberCurrencySymbol: '¥',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(link)).toBe(linkBefore)
+  })
+
+  it('adapter: a base change carrying BOTH pins is exactly ONE history entry; value-identical is ZERO; one undo restores base and sheet together', () => {
+    const adapter = createFormAuthoringAdapter()
+    const session = adapter.startSession(
+      draftWith([field(1, { type: 'record-link' }), field(2)]),
+    )
+    const pinned = adapter.updateFieldProperties(session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertAdapterOk(pinned)
+    expect(pinned.changed).toBe(true)
+    expect(pinned.session.history.undoStack).toHaveLength(1)
+
+    const identical = adapter.updateFieldProperties(pinned.session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertAdapterOk(identical)
+    expect(identical.changed).toBe(false)
+    expect(identical.session.history.undoStack).toHaveLength(1)
+
+    // Switching base: the caller cleared the sheet that does not belong to the new base, in the
+    // SAME patch — one logical edit, one entry.
+    const rebased = adapter.updateFieldProperties(identical.session, 'local_1', {
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    assertAdapterOk(rebased)
+    expect(rebased.changed).toBe(true)
+    expect(rebased.session.history.undoStack).toHaveLength(2)
+    expect(rebased.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+
+    const undone = adapter.undo(rebased.session)
+    assertAdapterOk(undone)
+    expect(undone.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    const redone = adapter.redo(undone.session)
+    assertAdapterOk(redone)
+    expect(redone.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    expect(redone.focusLocalId).toBe('local_1')
+  })
+
+  it('adapter: a rejected pin patch on a non-record-link field leaves the session UNCHANGED', () => {
+    const adapter = createFormAuthoringAdapter()
+    const session = adapter.startSession(draftWith([field(1), field(2)]))
+    const refused = adapter.updateFieldProperties(session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+    })
+    expect(refused).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    if (!refused.ok) expect(refused.session).toBe(session)
   })
 })

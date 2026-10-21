@@ -9,16 +9,26 @@ const { isPlainObject, optionalString } = require('./stock-preparation-common.cj
 const ACCEPTED_LINE_STATUSES = Object.freeze(['imported', 'active', 'inactive', 'incomplete'])
 const CANONICAL_LINE_STATUSES = Object.freeze(['active', 'inactive', 'incomplete'])
 const ACCEPTED_LINE_STATUS_SET = new Set(ACCEPTED_LINE_STATUSES)
+// This projection is a HARD WALL, not a hint: cleanProjection() drops every key not named here, so a
+// snapshot-line field missing from this list is silently lost on the T3b auto-persist path even
+// though the template has a column for it. The five business fields below are the seven-field 备料
+// pull (owner spec) — `material` landed on the template with the fingerprint decomposition and was
+// never added here; `parentName` / `childName` / `spec` / `totalQuantity` land with it now.
 const EXPANSION_ROW_KEYS = Object.freeze([
   'snapshotLineId',
   'parentDrawingNo',
   'parentVersion',
+  'parentName',
   'childDrawingNo',
   'childVersion',
+  'childName',
+  'material',
+  'spec',
   'bomLevel',
   'pathKey',
   'designQty',
   'designUnit',
+  'totalQuantity',
   'lineStatus',
   'sourceFingerprint',
 ])

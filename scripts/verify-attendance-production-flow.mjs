@@ -2,7 +2,11 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { pathToFileURL } from 'node:url'
+import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
+import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 import { randomUUID } from 'node:crypto'
+import { scopeAttendanceImportUrl } from './ops/attendance-import-scope.mjs'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
@@ -130,6 +134,7 @@ async function fetchWithRetry(url, init = {}, options = {}) {
       }
       return res
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       if (attempt >= apiRetryAttempts) throw error
       const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
       logWarn(`${label} network error: ${(error && error.message) || String(error)}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
@@ -161,12 +166,14 @@ async function refreshAuthToken(apiBase) {
     }
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
+      await verifyAcceptanceTokenTenant(apiBase, nextToken)
       token = nextToken
       return true
     }
     logWarn('token refresh response missing token')
     return false
   } catch (error) {
+    if (error instanceof AcceptanceTenantError) throw error
     logWarn(`token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
@@ -228,6 +235,19 @@ async function ensureAttendanceLoaded(page) {
   }
 }
 
+export async function ensureAttendanceHistoryFiltersOpen(page) {
+  const details = page.locator('details[data-attendance-history-filters]')
+  await details.waitFor({ state: 'visible', timeout: timeoutMs })
+  if (await details.evaluate((element) => element.open)) return
+
+  const summary = details.locator('summary')
+  await summary.waitFor({ state: 'visible', timeout: timeoutMs })
+  await summary.click()
+  if (!await details.evaluate((element) => element.open)) {
+    throw new Error('ATTENDANCE_HISTORY_FILTERS_NOT_OPEN')
+  }
+}
+
 function getRecordsCard(page) {
   return page.locator('section.attendance__card').filter({
     has: headingByNames(page, uiText.records),
@@ -264,10 +284,7 @@ async function switchToOverview(page) {
 }
 
 async function selectAdminSection(page, sectionId, headingName, waitMs = timeoutMs) {
-  const quickJump = page.locator('[data-admin-quick-jump="true"]').first()
-  if (await quickJump.count()) {
-    await quickJump.selectOption(sectionId)
-  }
+  await selectAttendanceAdminWorkspaceSection(page, sectionId, waitMs)
 
   const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
   await section.waitFor({ state: 'visible', timeout: waitMs })
@@ -424,6 +441,7 @@ async function run() {
   logInfo(`API_BASE=${apiBase}`)
 
   await refreshAuthToken(apiBase)
+  await verifyAcceptanceTokenTenant(apiBase, token)
 
   const me = await apiGetJson(`${apiBase}/auth/me`, token)
   if (!me.ok) {
@@ -489,20 +507,19 @@ async function run() {
   const workDate = formatDateOnly(today)
   const start = new Date(today)
   start.setHours(9, 0, 0, 0)
-  const end = new Date(today)
-  end.setHours(18, 0, 0, 0)
   await clickAndMaybeContinue(
     (async () => {
-      await page.locator('#attendance-request-work-date').fill(workDate)
-      await page.locator('#attendance-request-type').selectOption('missed_check_in')
-      await page.locator('#attendance-request-in').fill(formatDatetimeLocal(start))
-      await page.locator('#attendance-request-out').fill(formatDatetimeLocal(end))
+      await page.locator('[data-selfservice-action="missing-punch"]').click()
+      const makeupCard = page.locator('[data-attendance-makeup-request-card]')
+      await makeupCard.waitFor({ state: 'visible', timeout: timeoutMs })
+      await makeupCard.locator('[data-makeup-card-time]').fill(formatDatetimeLocal(start))
+      await makeupCard.locator('[data-makeup-card-reason]').fill('Synthetic acceptance')
       const reqResp = waitForJsonResponse(
         page,
         (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/requests'),
         { label: 'Submit request' }
       )
-      await buttonByNames(page, uiText.submitRequest).click()
+      await makeupCard.locator('[data-makeup-card-submit]').click()
       const { body } = await reqResp
       logInfo(`Request API ok: ${Boolean(body?.ok)} id=${body?.data?.request?.id || ''}`)
     })(),
@@ -683,7 +700,10 @@ async function run() {
   }
   await page.screenshot({ path: path.join(outputDir, '05-import-batches.png'), fullPage: true })
 
-  const batchItems = await apiGetJson(`${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`, token)
+  const batchItems = await apiGetJson(scopeAttendanceImportUrl(
+    `${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`,
+    process.env.ORG_ID || 'default',
+  ), token)
   if (!batchItems.ok) {
     throw new Error(`GET /attendance/import/batches/:id/items failed: ${batchItems.status}`)
   }
@@ -716,6 +736,7 @@ async function run() {
   logInfo('Returning to Overview')
   await buttonByNames(page, uiText.overview).click()
   await ensureAttendanceLoaded(page)
+  await ensureAttendanceHistoryFiltersOpen(page)
   await page.locator('#attendance-from-date').fill(workDate)
   await page.locator('#attendance-to-date').fill(workDate)
   if (userId) {
@@ -731,7 +752,9 @@ async function run() {
   logInfo('Production flow verification complete')
 }
 
-run().catch((error) => {
-  console.error('[attendance-production-flow] Failed:', error)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((error) => {
+    console.error('[attendance-production-flow] Failed:', error)
+    process.exit(1)
+  })
+}

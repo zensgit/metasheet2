@@ -274,6 +274,69 @@ async function main() {
     'S6 initialization refusal emits a values-free warning',
   )
   await entry.deactivate()
+
+  // --- 8. The connection resolver is handed the plugin logger ----------
+  // WHY a connection was refused is written by the connection resolver, through the logger that
+  // index.cjs passes to it. A resolver built without a logger refuses exactly the same way and
+  // writes nothing, so no other suite notices when that wiring is dropped. This section does: it
+  // activates the real entry module, refuses one canonical binding through the comm API, and
+  // requires the refusal line — once, with its three closed words and no value.
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+  {
+    const REFUSAL_REASON_KEY = Symbol.for('metasheet.dataSource.refusalReason')
+    const REFUSAL_LINE = '[plugin-integration-core] connection refused'
+    const marker = 'zq9mark'
+    const { context: wiredContext, inspect: wiredInspect } = createMockContext()
+    const lines = []
+    wiredContext.logger = {
+      info: (...args) => lines.push(['info', args]),
+      warn: (...args) => lines.push(['warn', args]),
+      error: (...args) => lines.push(['error', args]),
+    }
+    let facadeCalls = 0
+    wiredContext.api.dataSources = {
+      async resolveConnectionRegistration(id) {
+        facadeCalls += 1
+        const refusal = new Error(`Data source with id '${id}' not found`)
+        refusal.name = 'DataSourceUnavailableError'
+        refusal.code = 'DATA_SOURCE_NOT_FOUND'
+        Object.defineProperty(refusal, REFUSAL_REASON_KEY, { value: 'not_loaded_credentials_unreadable' })
+        throw refusal
+      },
+      async assertReferenceable() {},
+    }
+    await entry.activate(wiredContext)
+    const wiredApi = wiredInspect.namespaces.get('integration-core')
+    await assert.rejects(
+      () => wiredApi.upsertExternalSystem({
+        tenantId: 'tenant_1',
+        workspaceId: null,
+        name: `smoke ${marker}`,
+        kind: 'data-source:sql-readonly',
+        role: 'source',
+        connectionId: `ds_${marker}`,
+      }),
+      (error) => {
+        assert.equal(error.name, 'ExternalSystemValidationError', 'the refusal is the one the registry always raised')
+        assert.equal(error.message, 'canonical connection is unavailable')
+        assert.deepEqual(error.details, { field: 'connectionId', code: 'CONNECTION_CANONICAL_UNAVAILABLE' })
+        return true
+      },
+    )
+    assert.equal(facadeCalls, 1, 'the host facade was asked once')
+    const refusalLines = lines.filter(([, args]) => args[0] === REFUSAL_LINE)
+    assert.deepEqual(refusalLines, [[
+      'warn',
+      [REFUSAL_LINE, {
+        phase: 'canonical',
+        code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+        reason: 'not_loaded_credentials_unreadable',
+      }],
+    ]], 'index.cjs hands its logger to the connection resolver: one refusal, one line')
+    assert.ok(!JSON.stringify(refusalLines).includes(marker), 'the refusal line carries no id')
+    await entry.deactivate()
+  }
+
   if (previousFeatureFlag === undefined) {
     delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
   } else {

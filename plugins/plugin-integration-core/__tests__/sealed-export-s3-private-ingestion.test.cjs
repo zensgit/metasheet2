@@ -6,6 +6,13 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
+// POSIX modes are a POSIX-only control: chmod()/mkdir({ mode }) SUCCEED and then
+// no-op on win32 (the mode reads back 0o666). Asserting them there would assert a
+// guarantee the platform does not give. The win32 substitute is the operator NTFS
+// ACL attestation gated in lib/sealed-export/stock-preparation-runtime-config.cjs;
+// see docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md.
+const POSIX_MODES_ENFORCED = process.platform !== 'win32'
+
 const SEALED_DIR = path.join(__dirname, '..', 'lib', 'sealed-export')
 const codec = require(path.join(SEALED_DIR, 'canonical-json.cjs'))
 const contracts = require(path.join(SEALED_DIR, 'contracts.cjs'))
@@ -442,12 +449,15 @@ async function main() {
       (await blobOnly.writeChunk(blobOnlySession, 0, blobFirst)).outcome,
       'CREATED',
     )
-    assert.equal((await fs.stat(blobOnlyRoot)).mode & 0o777, 0o700)
-    assert.equal((await fs.stat(blobOnlyDirectory)).mode & 0o777, 0o700)
-    assert.equal(
-      (await fs.stat(path.join(blobOnlyDirectory, 'chunk-0.bin'))).mode & 0o777,
-      0o600,
-    )
+    if (POSIX_MODES_ENFORCED) {
+      assert.equal((await fs.stat(blobOnlyRoot)).mode & 0o777, 0o700)
+      assert.equal((await fs.stat(blobOnlyDirectory)).mode & 0o777, 0o700)
+      assert.equal(
+        (await fs.stat(path.join(blobOnlyDirectory, 'chunk-0.bin'))).mode
+          & 0o777,
+        0o600,
+      )
+    }
     assert.equal(
       (await blobOnly.writeChunk(blobOnlySession, 0, blobFirst)).outcome,
       'EXISTING_IDENTICAL',
@@ -593,12 +603,14 @@ async function main() {
       bytes: data.chunks[1],
     })
 
-    const rootMode = (await fs.stat(rootDir)).mode & 0o777
-    const sessionMode = (await fs.stat(path.join(rootDir, sessionId))).mode & 0o777
-    const chunkMode = (await fs.stat(path.join(rootDir, sessionId, 'chunk-0.bin'))).mode & 0o777
-    assert.equal(rootMode, 0o700)
-    assert.equal(sessionMode, 0o700)
-    assert.equal(chunkMode, 0o600)
+    if (POSIX_MODES_ENFORCED) {
+      const rootMode = (await fs.stat(rootDir)).mode & 0o777
+      const sessionMode = (await fs.stat(path.join(rootDir, sessionId))).mode & 0o777
+      const chunkMode = (await fs.stat(path.join(rootDir, sessionId, 'chunk-0.bin'))).mode & 0o777
+      assert.equal(rootMode, 0o700)
+      assert.equal(sessionMode, 0o700)
+      assert.equal(chunkMode, 0o600)
+    }
 
     const resumedHarness = buildHarness(rootDir, memory, clock)
     const resumed = await resumedHarness.service.resumeSession({ sessionId })

@@ -72,6 +72,7 @@ import { useMultitableCommentInbox } from '../multitable/composables/useMultitab
 import { useMultitableCommentInboxRealtime } from '../multitable/composables/useMultitableCommentInboxRealtime'
 import { multitableClient } from '../multitable/api/client'
 import type { MultitableCommentInboxItem } from '../multitable/types'
+import { formatBusinessTimestamp } from '../multitable/utils/business-timezone'
 import { AppRouteNames } from '../router/types'
 import { MtButton } from '../multitable/ui'
 
@@ -175,12 +176,9 @@ function resolveItemFieldId(item: MultitableCommentInboxItem): string | null {
   return item.targetFieldId ?? item.fieldId ?? null
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(value: string): string {
-  try {
-    return new Date(value).toLocaleString()
-  } catch {
-    return value
-  }
+  return formatBusinessTimestamp(value) ?? value
 }
 
 onMounted(() => {

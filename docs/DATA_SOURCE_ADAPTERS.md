@@ -4,7 +4,7 @@
 
 The Data Source Adapter system provides a unified interface for connecting to and querying external data sources.
 
-> **Currently supported public types** (what `POST /api/data-sources` accepts, driven by `SUPPORTED_DATA_SOURCE_TYPES`): `postgresql` / `postgres`, `http`, and **`sqlserver`** (modern SQL Server, direct Node path). MySQL/MongoDB adapter classes still exist in the codebase but are **not** registered as public data-source types (they are used internally by `DataMaterializationService` only). Some sections below describe aspirational/partial capabilities — treat the supported-types list above as the source of truth.
+> **Currently supported public types** (what `POST /api/data-sources` accepts, driven by `SUPPORTED_DATA_SOURCE_TYPES`): `postgresql` / `postgres`, `http`, and **`sqlserver`** (modern SQL Server, direct Node path). MySQL/MongoDB adapter classes still exist in the codebase but are **not** registered as public data-source types (`DataMaterializationService`, their only internal caller, has been removed — GOV-02 source cleanup; the adapter classes themselves are kept). Some sections below describe aspirational/partial capabilities — treat the supported-types list above as the source of truth.
 
 ## Architecture
 
@@ -86,7 +86,7 @@ Central management system for all data source adapters:
 - **Scope**: modern SQL Server (2017+) over a direct Node path. **Legacy SQL Server (2014 RTM / 2012 / 2008 / 2005) is out of scope here** — pre-login/TLS-negotiation failures continue to be handled by the Bridge Agent / Lane C design line; this adapter does not add legacy protocol hacks.
 
 #### MySQL / MongoDB adapters (internal only — not a public data-source type)
-- The `MySQLAdapter` / `MongoDBAdapter` classes exist but are **not** registered as public `data-sources` types (A4 narrowed the public matrix). They are used only by `DataMaterializationService`. Do not assume `type: 'mysql'` / `'mongodb'` is accepted by `POST /api/data-sources` — it returns `400 VALIDATION_ERROR`.
+- The `MySQLAdapter` / `MongoDBAdapter` classes exist but are **not** registered as public `data-sources` types (A4 narrowed the public matrix). They were used only by `DataMaterializationService`, which has since been removed (GOV-02 source cleanup); the adapter classes remain in the codebase. Do not assume `type: 'mysql'` / `'mongodb'` is accepted by `POST /api/data-sources` — it returns `400 VALIDATION_ERROR`.
 
 #### HTTP Adapter
 - RESTful API integration

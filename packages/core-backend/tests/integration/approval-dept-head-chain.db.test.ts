@@ -350,12 +350,13 @@ describeIfDatabase('Lock-1 §K4 continuous_dept_heads — real-DB create/freeze/
   // NOTE: `dept_head_at_level` (K5-b) is no longer this test's "unimplemented" example — Lock-1
   // §K5-b landed in a LATER slice (docs/development/approval-lock1-enterprise-assignees-20260817.md
   // §K5-b; real-DB acceptance for it lives in its own approval-dept-head-at-level.db.test.ts,
-  // sibling job approval-realdb-k5b). `user_group` (Lock-1 §K1) is still genuinely unimplemented at
-  // this baseline — it is not even a member of ApprovalAssigneeSourceKind yet — so it is the
-  // fixture now.
-  it('G-2: a contract-unimplemented kind (user_group / K1, not landed at this baseline) is rejected at authoring, never persisted', async () => {
+  // sibling job approval-realdb-k5b). `user_group` (Lock-1 §K1) ALSO landed since (its own
+  // approval-realdb-k1 job) — swapped to a kind genuinely undeclared anywhere in the union so
+  // this arm keeps exercising the SAME default-arm rejection mechanism
+  // (`normalizeApprovalAssigneeSources`'s `default:` choke) rather than the K1 create path.
+  it('G-2: a contract-unimplemented kind is rejected at authoring, never persisted', async () => {
     const graph = headsGraph(3) as { nodes: Array<{ config: { assigneeSources?: unknown[] } }> }
-    graph.nodes[2].config.assigneeSources = [{ kind: 'user_group', groupIds: ['g1'] }]
+    graph.nodes[2].config.assigneeSources = [{ kind: 'not_a_real_kind', groupIds: ['g1'] }]
     const key = `dh-${TS}-g2-unimplemented`
     const res = await req(base, '/api/approval-templates', reqTok, {
       method: 'POST',

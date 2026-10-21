@@ -15,7 +15,7 @@ This is backend/API-first. The rule-editor selector can be exposed in a later UI
 - Signature: `X-MS-Webhook-Signature: sha256=<hex>` over `"${unixSeconds}.${rawBody}"`, with `X-MS-Webhook-Timestamp`.
 - Replay window: timestamp must be within +/-300 seconds.
 - Secret policy: `webhook.received` rules require a non-empty `trigger_config.secret` at create/update; legacy/direct-DB secret-less rules are blocked on any edit and rejected at ingest.
-- Reject posture: unknown rule, wrong trigger type, disabled rule, missing secret, stale timestamp, bad signature, missing body, and invalid top-level JSON all return `401 { ok:false }`.
+- Reject posture: unknown rule (`unknown_rule`), wrong trigger type (`wrong_trigger`), disabled rule (`disabled`), missing secret (`missing_secret`), missing or stale timestamp (`missing_timestamp`, `stale_timestamp`), missing or bad signature (`missing_signature`, `bad_signature`), missing body (`missing_body`), and invalid top-level JSON (`invalid_body`) all return `401 { ok:false }`. So does a rule whose sheet is soft-deleted (`sheet_deleted`, added by #5803). That reason is decided only after the signature verifies, so a request whose signature does not verify never triggers the sheet lookup and is never given this reason. The reason label appears only in the metric and the security log, never in the response.
 - Observability: rejected attempts increment `automation_webhook_rejected_total{reason}` and write structured security logs; accepted attempts use the existing redacted automation execution log.
 - Dispatch: synchronous inline execution; successful verification returns `202` after execution completes.
 - Limits: 1 MB JSON body parser on the inbound path; per-rule rate limit 60/minute using the existing rate-limiter store.
@@ -23,7 +23,7 @@ This is backend/API-first. The rule-editor selector can be exposed in a later UI
 
 ## Trust Boundary
 
-The webhook caller is anonymous. Possession of the per-rule secret authorizes delivery, but the caller does not become a platform actor.
+The webhook route requires a valid session, but the handler ignores that session. The path is not an exception to the global session gate in `index.ts` (`GLOBAL_GATE_EXCEPTIONS` in `auth/api-path-policy.ts`), and it matches neither of the gate's request-based exceptions (the public-form token and the OAPI `mst_` allowlist). A request without a valid session JWT is therefore refused before it reaches the handler. Once it does reach the handler, the session plays no part. There is no table-permission check, only the per-rule secret (a verified signature) authorizes delivery, and the caller does not become a platform actor. (Correction, #5803: an earlier version of this section said the caller is anonymous.)
 
 The request body is exposed as `recordData` for conditions/templates, but the actual executor context is synthetic:
 

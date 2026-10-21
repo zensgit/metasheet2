@@ -104,35 +104,75 @@ export function getZonedParts(utcMs: number, timeZone: string): ZonedParts {
   return { year, month, day, hour, minute, second }
 }
 
+/**
+ * `Date.UTC` that keeps years 0000–0099 as themselves. `Date.UTC(99, …)` means 1999 (a legacy two-digit
+ * rule), which would silently move a stored `0099-…` instant by 1900 years through any wall-clock round
+ * trip. `setUTCFullYear` has no such rule.
+ */
+export function utcMsFromParts(
+  year: number,
+  month: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+): number {
+  const d = new Date(0)
+  d.setUTCFullYear(year, month - 1, day)
+  d.setUTCHours(hour, minute, second, 0)
+  return d.getTime()
+}
+
 /** Offset (minutes) of `timeZone` at the given UTC instant: (localWallClock-as-UTC) − utc. */
 function timeZoneOffsetMinutes(utcMs: number, timeZone: string): number {
   const p = getZonedParts(utcMs, timeZone)
-  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second)
+  const asUtc = utcMsFromParts(p.year, p.month, p.day, p.hour, p.minute, p.second)
   return (asUtc - utcMs) / 60000
 }
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000
+
 /**
  * Convert a LOCAL wall-clock (civil Y-M-D h:m in `timeZone`) to a UTC epoch-ms — the hard local→UTC direction.
- * Single-pass guess+correct, matching the plugin-attendance precedent. Exact for times away from DST edges
- * (the date-reminder default 09:00 is far from typical 02:00–03:00 transitions). At an exact spring-forward
- * gap the result lands on the post-transition instant; at a fall-back overlap it resolves to one offset —
- * both acceptable bounded edges (Q5 documents the bounded one-time re-bucket tolerance). Throws only on an
- * invalid tz (callers guard).
+ *
+ * EXACT (客户反馈 2026-09-24 #4c, PR #6083 review S1/N1): the previous single-pass guess+correct read the
+ * zone's offset at the wall clock TAKEN AS UTC, which is 4–14 hours away from the real instant. For up to
+ * that many hours after every DST transition it therefore applied the WRONG offset (e.g. America/New_York
+ * 2026-03-08 06:00 → 11:00Z instead of 10:00Z). This version tries every offset the zone has within a day
+ * of the guess and keeps the candidate whose instant really maps back to that offset.
+ *
+ * DST rule (documented + tested, shared by the web `wallClockToUtcMs`):
+ *   - a wall clock that does not exist (spring-forward GAP, e.g. NY 2026-03-08 02:30) → the POST-transition
+ *     instant: the later candidate, i.e. the clock read with the pre-transition offset (02:30 EST = 07:30Z,
+ *     which displays as 03:30 EDT);
+ *   - a wall clock that exists twice (fall-back OVERLAP, e.g. NY 2026-11-01 01:30) → the EARLIER instant
+ *     (01:30 EDT = 05:30Z).
+ * Zones without DST (Asia/Shanghai) have exactly one candidate and are exact everywhere.
+ *
+ * Throws only on an invalid tz (callers guard).
  */
 export function zonedWallClockToUtcMs(
   parts: { year: number; month: number; day: number; hour: number; minute: number; second?: number },
   timeZone: string,
 ): number {
-  const utcGuess = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second ?? 0,
-  )
-  const offset = timeZoneOffsetMinutes(utcGuess, timeZone)
-  return utcGuess - offset * 60000
+  const utcGuess = utcMsFromParts(parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second ?? 0)
+  // Every offset the zone uses within ±1 day of the guess: 1 value normally, 2 around a transition.
+  const offsets = new Set<number>([
+    timeZoneOffsetMinutes(utcGuess - ONE_DAY_MS, timeZone),
+    timeZoneOffsetMinutes(utcGuess, timeZone),
+    timeZoneOffsetMinutes(utcGuess + ONE_DAY_MS, timeZone),
+  ])
+  const candidates: number[] = []
+  const consistent: number[] = []
+  for (const offset of offsets) {
+    const utcMs = utcGuess - offset * 60000
+    candidates.push(utcMs)
+    // Self-consistent: the zone really is at `offset` at that instant, so it displays as `parts`.
+    if (timeZoneOffsetMinutes(utcMs, timeZone) === offset) consistent.push(utcMs)
+  }
+  if (consistent.length === 1) return consistent[0]
+  if (consistent.length > 1) return Math.min(...consistent) // overlap → earlier instant
+  return Math.max(...candidates) // gap → post-transition instant
 }
 
 /**

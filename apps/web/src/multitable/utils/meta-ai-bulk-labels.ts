@@ -54,11 +54,19 @@ export type MetaAiBulkLabelKey =
   | 'aibulk.reasonBlocked'
   | 'aibulk.reasonGenFailed'
   | 'aibulk.reasonUnsafe'
+  | 'aibulk.reasonSheetNotLive'
   // Distinct failure reasons (CHARGED, non-confirmable)
   | 'aibulk.reasonProviderError'
   | 'aibulk.reasonCacheFailed'
-  // Partial-preview (capped:true) notice
+  // Charged while AT the provider, then the row left `pending` before the output could be
+  // offered (#5842). Two distinct causes, so two distinct labels — the reason is user-visible
+  // provenance for real money, and telling someone they cancelled a row they did not is a lie.
+  | 'aibulk.reasonCancelledAfterCharge'
+  | 'aibulk.reasonInterruptedAfterCharge'
+  // Partial-preview (capped:true) notice — and its #5838 variant, for the one cause whose next step
+  // is NOT "write these, then re-run" (both refuse on a table that is gone).
   | 'aibulk.partialNotice'
+  | 'aibulk.partialNoticeSheetNotLive'
   // Empty preview
   | 'aibulk.emptyConfirmable'
   // Confirm step
@@ -91,6 +99,8 @@ export type MetaAiBulkLabelKey =
   | 'aibulk.jobCancelledNotice'
   | 'aibulk.jobErroredNotice'
   | 'aibulk.jobResolvedNotice'
+  // The commit phase holds the job (#5842) — review is truthful, but the write is not on offer
+  | 'aibulk.jobCommitInFlightNotice'
   // Job action buttons
   | 'aibulk.jobCancel'
   | 'aibulk.jobConfirm'
@@ -157,12 +167,33 @@ const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
   'aibulk.reasonBlocked': { en: 'AI unavailable — re-run later', zh: 'AI 暂不可用——稍后重试' },
   'aibulk.reasonGenFailed': { en: 'Generation failed (not charged)', zh: '生成失败（未扣费）' },
   'aibulk.reasonUnsafe': { en: 'Content blocked (secret-shaped) — not sent', zh: '内容被拦截（疑似密钥）——未发送' },
+  // #5838: the table could not be CONFIRMED available while the batch was running — the rest was never
+  // sent. The server fails closed on three different verdicts (deleted / row gone / the liveness lookup
+  // itself failed) and reports one reason, so this copy must not ASSERT a deletion: a DB blip on a live
+  // table would otherwise tell the user their table was deleted and talk them out of the one action
+  // that works (re-run). "Could not be confirmed" is true of all three.
+  'aibulk.reasonSheetNotLive': { en: 'Table could not be confirmed available — the rest was not sent', zh: '无法确认数据表可用——其余行未发送' },
   'aibulk.reasonProviderError': { en: 'Provider error after charge', zh: '扣费后模型出错' },
   'aibulk.reasonCacheFailed': { en: 'Result lost after charge', zh: '扣费后结果丢失' },
+  'aibulk.reasonCancelledAfterCharge': {
+    en: 'Cancelled while generating — already charged',
+    zh: '生成中被取消——已扣费',
+  },
+  'aibulk.reasonInterruptedAfterCharge': {
+    en: 'Interrupted while generating — already charged',
+    zh: '生成中被中断——已扣费',
+  },
   // capped:true — partial preview; NO count (hidden-row oracle guard).
   'aibulk.partialNotice': {
     en: 'Preview stopped early — some in-scope rows were not previewed yet. Write these results, then run AI fill again to continue with the rest.',
     zh: '预览提前结束——范围内仍有部分行未预览。可先写入这些结果，再次运行 AI 填充以继续处理其余行。',
+  },
+  // #5838: capped:true because the TABLE stopped being confirmable, not because a quota ran out. The
+  // generic notice above sends the user to do two things that both refuse on a table that is gone
+  // (write → 404 SHEET_DELETED, re-run → refused at the entry gate), so this replaces it.
+  'aibulk.partialNoticeSheetNotLive': {
+    en: 'Preview stopped early — the table could not be confirmed available while this batch was running, so the remaining rows were never sent. These results are already charged, but they can only be written while the table is available: if it was deleted, restore it first; otherwise run AI fill again.',
+    zh: '预览提前结束——本次批量运行期间无法确认数据表可用，其余行未发送。下方结果已扣费，但只有在数据表可用时才能写入：如果它已被删除，请先恢复；否则请再次运行 AI 填充。',
   },
   'aibulk.emptyConfirmable': {
     en: 'No rows are ready to write. See skipped/failed rows below for why.',
@@ -211,6 +242,10 @@ const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
     zh: '生成因出错而中止。下方已生成的行仍可写入；请再次运行 AI 填充以继续处理其余行。',
   },
   'aibulk.jobResolvedNotice': { en: 'This job is complete. See the write results below.', zh: '此任务已完成。写入结果见下方。' },
+  'aibulk.jobCommitInFlightNotice': {
+    en: 'A write for this job is already in progress, so it cannot be written again from here. The rows below are shown for reference; reopen this dialog shortly to see the result.',
+    zh: '此任务的写入正在进行中，因此无法在此再次写入。下方行仅供查看；请稍后重新打开此对话框查看结果。',
+  },
   'aibulk.jobCancel': { en: 'Cancel generation', zh: '取消生成' },
   'aibulk.jobConfirm': { en: 'Write selected rows', zh: '写入所选行' },
   'aibulk.jobCommitting': { en: 'Writing…', zh: '写入中…' },
@@ -249,6 +284,8 @@ export function aiBulkSkippedReason(reason: string, isZh: boolean): string {
       return aiBulkLabel('aibulk.reasonGenFailed', isZh)
     case 'unsafe_input':
       return aiBulkLabel('aibulk.reasonUnsafe', isZh)
+    case 'sheet_not_live':
+      return aiBulkLabel('aibulk.reasonSheetNotLive', isZh)
     default:
       return reason
   }
@@ -261,6 +298,14 @@ export function aiBulkFailureReason(reason: string, isZh: boolean): string {
       return aiBulkLabel('aibulk.reasonProviderError', isZh)
     case 'cache_failed_after_generation':
       return aiBulkLabel('aibulk.reasonCacheFailed', isZh)
+    // #5842 — the row was AT the provider when it left `pending`: the charge is real, the output
+    // is not offered. Which transition took it decides which of the two the backend writes
+    // (a user cancel vs an orphan/reconcile interrupt), so each gets its own copy; falling back
+    // to `default` would print the raw English token next to the one row the user paid for.
+    case 'cancelled_after_charge':
+      return aiBulkLabel('aibulk.reasonCancelledAfterCharge', isZh)
+    case 'interrupted_after_charge':
+      return aiBulkLabel('aibulk.reasonInterruptedAfterCharge', isZh)
     default:
       return reason
   }

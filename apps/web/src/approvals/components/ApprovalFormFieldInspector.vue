@@ -53,7 +53,10 @@
         />
       </label>
 
-      <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row approval-form-field-inspector__row--inline"
+      >
         <input
           type="checkbox"
           data-testid="approval-form-field-inspector-required"
@@ -63,7 +66,10 @@
         <span class="approval-form-field-inspector__label">必填</span>
       </label>
 
-      <label class="approval-form-field-inspector__row">
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row"
+      >
         <span class="approval-form-field-inspector__label">提示文字</span>
         <input
           class="approval-form-field-inspector__control"
@@ -116,6 +122,288 @@
         >
           添加选项
         </button>
+      </section>
+
+      <section
+        v-if="field.type === 'department'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-department"
+      >
+        <p class="approval-form-field-inspector__label">部门设置</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-selection"
+            :value="field.departmentSelection"
+            @change="onDepartmentSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">展示格式</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-display"
+            :value="field.departmentDisplay"
+            @change="onDepartmentDisplayChange($event)"
+          >
+            <option value="leaf_only">仅末级名称</option>
+            <option value="full_path">完整部门路径</option>
+          </select>
+        </label>
+        <label v-if="field.departmentSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-max"
+            inputmode="numeric"
+            :value="textValue('departmentMaxSelectionsText')"
+            @input="onTextInput('departmentMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('departmentMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('departmentMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-default-mode"
+            :value="field.departmentDefaultMode"
+            @change="onDepartmentDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester_department">申请人所在部门</option>
+            <option value="designated">指定部门</option>
+          </select>
+        </label>
+        <ApprovalDepartmentPicker
+          v-if="field.departmentDefaultMode === 'designated'"
+          :model-value="departmentDefaultValue"
+          :selection="field.departmentSelection"
+          :display="field.departmentDisplay"
+          :max-selections="departmentMaxSelections"
+          aria-label="选择默认部门"
+          @update:model-value="onDepartmentDefaultIdsChange"
+        />
+      </section>
+
+      <section
+        v-if="field.type === 'user'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-user"
+      >
+        <p class="approval-form-field-inspector__label">联系人设置</p>
+        <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-user-allow-self"
+            :checked="field.userAllowSelf"
+            @change="onUserAllowSelfChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">允许选择申请人本人</span>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-selection"
+            :value="field.userSelection"
+            @change="onUserSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label v-if="field.userSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-max"
+            inputmode="numeric"
+            :value="textValue('userMaxSelectionsText')"
+            @input="onTextInput('userMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('userMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('userMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-default-mode"
+            :value="field.userDefaultMode"
+            @change="onUserDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester">申请人</option>
+            <option value="designated">指定人员</option>
+          </select>
+        </label>
+        <template v-if="field.userDefaultMode === 'designated'">
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">搜索人员</span>
+            <input
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-search"
+              type="search"
+              autocomplete="off"
+              @input="onUserDirectorySearch($event)"
+            />
+          </label>
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">默认人员</span>
+            <select
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-default-ids"
+              :multiple="field.userSelection === 'multi'"
+              :value="field.userSelection === 'multi' ? field.userDefaultIds : field.userDefaultIds[0] ?? ''"
+              :aria-busy="userDirectory.usersLoading.value"
+              @focus="onUserDefaultPickerFocus"
+              @change="onUserDefaultIdsChange($event)"
+            >
+              <option value="">不设置</option>
+              <option
+                v-for="(user, index) in authorUserOptions"
+                :key="user.id"
+                :value="user.id"
+                :disabled="!user.name.trim() && !field.userDefaultIds.includes(user.id)"
+              >
+                {{ authorUserLabel(user, index) }}
+              </option>
+            </select>
+          </label>
+          <p v-if="userDirectory.statusMessage.value" class="approval-form-field-inspector__hint" role="status">
+            {{ userDirectory.statusMessage.value }}
+          </p>
+        </template>
+      </section>
+
+      <section
+        v-if="field.type === 'number'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-number-format"
+      >
+        <p class="approval-form-field-inspector__label">格式化数字</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">货币符号</span>
+          <select
+            class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+            data-testid="approval-form-field-inspector-number-currency"
+            :value="field.numberCurrencySymbol"
+            @change="onNumberCurrencyChange($event)"
+          >
+            <option value="">不显示</option>
+            <option value="¥">¥ 人民币</option>
+            <option value="$">$ 美元</option>
+            <option value="€">€ 欧元</option>
+            <option value="£">£ 英镑</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-thousands"
+            :checked="field.numberThousandsSeparator"
+            @change="onNumberThousandsChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示千位分隔符</span>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-uppercase"
+            :checked="field.numberUppercaseCny"
+            @change="onNumberUppercaseChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示中文大写</span>
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          格式化数字仅用于展示（货币符号、千位分隔符、中文大写回显），不改变提交的数值。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'date_range'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-date-range"
+      >
+        <p class="approval-form-field-inspector__label">日期区间</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">日期类型（必选）</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-type"
+            :value="field.dateRangeDateType"
+            @change="onDateRangeDateTypeChange($event)"
+          >
+            <option value="" disabled>请选择日期类型</option>
+            <option value="date">年-月-日</option>
+            <option value="date_half_day">年-月-日 上午/下午</option>
+            <option value="date_minute">年-月-日 时:分</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">起始控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-start-label"
+            type="text"
+            :value="textValue('dateRangeStartLabel')"
+            @input="onTextInput('dateRangeStartLabel', $event)"
+            @blur="commitTextBuffer('dateRangeStartLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeStartLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">结束控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-end-label"
+            type="text"
+            :value="textValue('dateRangeEndLabel')"
+            @input="onTextInput('dateRangeEndLabel', $event)"
+            @blur="commitTextBuffer('dateRangeEndLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeEndLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">时长控件名称（可选）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-duration-label"
+            type="text"
+            :value="textValue('dateRangeDurationLabel')"
+            @input="onTextInput('dateRangeDurationLabel', $event)"
+            @blur="commitTextBuffer('dateRangeDurationLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeDurationLabel')"
+          />
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          时长由起始、结束自动计算并展示，不可编辑；提交时以系统计算结果为准。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'explanation'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-explanation"
+      >
+        <p class="approval-form-field-inspector__label">说明内容</p>
+        <textarea
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-explanation-text"
+          aria-label="说明内容"
+          rows="3"
+          :value="textValue('explanationText')"
+          @input="onTextInput('explanationText', $event)"
+          @blur="commitTextBuffer('explanationText')"
+        ></textarea>
+        <p class="approval-form-field-inspector__hint">
+          说明为纯展示控件，不收集任何提交值，不可设置必填、占位文本或选项。
+        </p>
       </section>
 
       <!-- detail columns -->
@@ -214,15 +502,93 @@
         </div>
       </section>
 
-      <!-- record-link: values-free summary only; the typed base/sheet pickers
-           stay with the parent-owned catalog and arrive at the F4 mount. -->
+      <!-- record-link (delta §3.4 typed pickers; parity ledger deferral (3)): the target base and
+           sheet are chosen from the PARENT-OWNED catalog (F0 gate #2) — this pane never fetches; it
+           renders the snapshot and emits a load/retry intent. Option text is a business name or the
+           values-free 目标不可用 placeholder for a stale pin, never a raw id, and there is no
+           free-text id entry. A base change commits ONE patch carrying both pins (a sheet outside
+           the new base is cleared); the empty option clears, like the legacy clearable picker. -->
       <section
         v-if="field.type === 'record-link'"
         class="approval-form-field-inspector__section"
         data-testid="approval-form-field-inspector-record-link"
       >
+        <p class="approval-form-field-inspector__label">关联目标</p>
+        <div
+          v-if="recordLinkCatalogError"
+          class="approval-form-field-inspector__option-row"
+          role="alert"
+          data-testid="approval-form-field-inspector-record-link-catalog-error"
+        >
+          <span class="approval-form-field-inspector__error">{{ recordLinkCatalogError }}</span>
+          <button
+            type="button"
+            class="approval-form-field-inspector__minor-action"
+            data-testid="approval-form-field-inspector-record-link-catalog-retry"
+            :disabled="recordLinkCatalogLoading"
+            @click="requestRecordLinkCatalog"
+          >
+            重试
+          </button>
+        </div>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">目标空间</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-record-link-base"
+            :value="field.recordLinkBaseId.trim()"
+            :disabled="recordLinkCatalogLoading"
+            :aria-busy="recordLinkCatalogLoading"
+            @focus="onRecordLinkPickerFocus"
+            @change="onRecordLinkBaseChange($event)"
+          >
+            <option value="">请选择目标空间</option>
+            <option
+              v-for="option in recordLinkBaseOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">目标表</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-record-link-sheet"
+            :value="field.recordLinkSheetId.trim()"
+            :disabled="recordLinkCatalogLoading || !field.recordLinkBaseId.trim()"
+            :aria-busy="recordLinkCatalogLoading"
+            @focus="onRecordLinkPickerFocus"
+            @change="onRecordLinkSheetChange($event)"
+          >
+            <option value="">请选择目标表</option>
+            <option
+              v-for="option in recordLinkSheetOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <p
+          v-if="recordLinkCatalogHint"
+          class="approval-form-field-inspector__hint"
+          role="status"
+          data-testid="approval-form-field-inspector-record-link-catalog-hint"
+        >
+          {{ recordLinkCatalogHint }}
+        </p>
+        <p
+          class="approval-form-field-inspector__hint"
+          data-testid="approval-form-field-inspector-record-link-summary"
+        >
+          {{ recordLinkSummary }}
+        </p>
         <p class="approval-form-field-inspector__hint">
-          {{ recordLinkConfigured ? '已选择目标空间与目标表。' : '尚未选择目标空间与目标表。' }}
+          仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
         </p>
       </section>
 
@@ -257,24 +623,129 @@
             @change="onVisibilityOperatorChange($event)"
           >
             <option
-              v-for="option in VISIBILITY_OPERATOR_OPTIONS"
+              v-for="option in visibilityOperatorChoices"
               :key="option.value"
               :value="option.value"
+              :disabled="option.disabled"
             >
               {{ option.label }}
             </option>
           </select>
-          <input
-            v-if="visibilityNeedsValue"
-            class="approval-form-field-inspector__control"
-            data-testid="approval-form-field-inspector-visibility-value"
-            type="text"
-            aria-label="条件值"
-            :value="textValue('valueText')"
-            @input="onTextInput('valueText', $event)"
-            @blur="commitTextBuffer('valueText')"
-            @keydown.enter.prevent="commitTextBuffer('valueText')"
-          />
+          <template v-if="visibilityNeedsValue">
+            <!-- R-43 (B): option fields pick from the options (name shown, option value saved). -->
+            <template v-if="visibilityIsOption">
+              <p
+                v-if="dependencyOptions.length === 0"
+                class="approval-form-field-inspector__hint"
+                data-testid="approval-form-field-inspector-visibility-no-options"
+              >
+                {{ conditionCopy.noOptions }}
+              </p>
+              <select
+                v-else-if="field.visibility.operator !== 'in'"
+                class="approval-form-field-inspector__control"
+                data-testid="approval-form-field-inspector-visibility-option-value"
+                aria-label="条件值"
+                :value="optionScalarValue"
+                @change="onVisibilityOptionValueChange($event)"
+              >
+                <option value="">{{ conditionCopy.chooseOption }}</option>
+                <option
+                  v-for="option in dependencyOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+                <option
+                  v-if="optionScalarStale"
+                  :value="optionScalarValue"
+                  disabled
+                >
+                  {{ conditionCopy.invalidValue }}
+                </option>
+              </select>
+              <fieldset
+                v-else
+                class="approval-form-field-inspector__option-choices"
+                data-testid="approval-form-field-inspector-visibility-option-values"
+                aria-label="条件值"
+              >
+                <label
+                  v-for="(option, optionIndex) in dependencyOptions"
+                  :key="option.value"
+                  class="approval-form-field-inspector__row--inline"
+                >
+                  <input
+                    type="checkbox"
+                    :data-testid="`approval-form-field-inspector-visibility-option-${optionIndex}`"
+                    :checked="optionListSelected.includes(option.value)"
+                    @change="onVisibilityOptionToggle(option.value, $event)"
+                  />
+                  {{ option.label }}
+                </label>
+                <p
+                  v-if="optionListStaleCount > 0"
+                  class="approval-form-field-inspector__hint"
+                  data-testid="approval-form-field-inspector-visibility-stale-count"
+                >
+                  {{ conditionCopy.staleListHint(optionListStaleCount) }}
+                </p>
+              </fieldset>
+            </template>
+            <!-- `in` over text / number: one value per line. A textarea keeps the newlines and has
+                 no Enter-to-commit (that collapsed multi-value rules into one value). -->
+            <textarea
+              v-else-if="field.visibility.operator === 'in'"
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-values"
+              rows="3"
+              aria-label="条件值"
+              :placeholder="visibilityKind === 'number' ? conditionCopy.oneNumberPerLine : conditionCopy.oneValuePerLine"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+            ></textarea>
+            <input
+              v-else-if="visibilityKind === 'number'"
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-number-value"
+              type="text"
+              inputmode="decimal"
+              aria-label="条件值"
+              :placeholder="conditionCopy.enterNumber"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+              @keydown.enter.prevent="commitTextBuffer('valueText')"
+            />
+            <input
+              v-else
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-visibility-value"
+              type="text"
+              aria-label="条件值"
+              :value="textValue('valueText')"
+              @input="onTextInput('valueText', $event)"
+              @blur="commitTextBuffer('valueText')"
+              @keydown.enter.prevent="commitTextBuffer('valueText')"
+            />
+          </template>
+          <p
+            v-if="visibilityIssueText"
+            class="approval-form-field-inspector__error"
+            role="note"
+            data-testid="approval-form-field-inspector-visibility-issue"
+          >
+            {{ visibilityIssueText }}
+          </p>
+          <!-- R-43 (B): a marked value its box shows EMPTY (re-entering it is a real edit) is shown
+               here read-only; plain-text interpolation, cut short. -->
+          <p
+            v-if="visibilityStoredValueNote !== null"
+            class="approval-form-field-inspector__hint approval-form-field-inspector__stored-value"
+            data-testid="approval-form-field-inspector-visibility-stored-value"
+          >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-form-field-inspector-visibility-stored-value-text">{{ visibilityStoredValueNote }}</span></p>
         </template>
       </section>
 
@@ -370,6 +841,17 @@ export const INSPECTOR_RETYPE_REFUSAL_PREFIX =
 export const INSPECTOR_DELETE_REFUSAL_PREFIX =
   '暂不能删除，以下配置正在使用此字段，请先调整后重试：'
 
+/**
+ * Record-link target picker copy (delta §3.4). The two summaries are the pre-existing F3 copy; a
+ * stale pin instead shows the SAME message the publish check reports
+ * (`validateRecordLinkPinAgainstLoadedCatalog`), so the pane and the checklist cannot disagree.
+ * The loading/empty-catalog lines are new UI copy (owner/design-confirmable).
+ */
+export const INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE = '尚未选择目标空间与目标表。'
+export const INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE = '已选择目标空间与目标表。'
+export const INSPECTOR_RECORD_LINK_LOADING_MESSAGE = '关联表目录加载中…'
+export const INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE = '暂无可选的目标空间。'
+
 /** Business labels for every dependency kind (never internal locations/IDs). */
 export const DEPENDENCY_KIND_BUSINESS_LABELS: Record<FormDependencyKind, string> = {
   visibility_rule: '字段显示条件',
@@ -430,23 +912,63 @@ export function describeDependencyRefusal(
  *   and never regenerated (§3.4).
  * - No persistent/local IDs in any rendered copy; `localId` appears only in
  *   non-visible data-* attributes/test ids (§8).
+ * - Record-link target base/sheet typed pickers (§3.4; parity ledger
+ *   deferral (3)) render the PARENT-OWNED catalog (`recordLinkCatalog`, F0
+ *   gate #2) and commit through the same typed `update-properties` command; a
+ *   load/retry is an emitted intent (`retry-record-link-catalog`), never a
+ *   fetch from this pane.
  */
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormAdapterResult } from '../approvalFormAuthoringAdapter'
 // NOTE: FormFieldPropertyPatch / FormDetailColumnPropertyPatch and the
 // dependency types are imported in the sibling <script> block above; the two
 // blocks share one module scope, so they must not be imported twice.
 import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from '../detailField'
-import type { FormFieldType } from '../../types/approval'
-import type {
-  AuthorableFieldType,
-  FieldAuthoringDraft,
-  FieldVisibilityDraft,
+import type { FormFieldType, FormOption } from '../../types/approval'
+import {
+  buildVisibilityRule,
+  visibilityStoredValuePreview,
+  visibilityDraftForDependencyChange,
+  visibilityDraftList,
+  visibilityDraftListText,
+  visibilityDraftScalar,
+  visibilityDraftScalarText,
+  visibilityDraftWithList,
+  visibilityDraftWithListText,
+  visibilityDraftWithOperator,
+  visibilityDraftWithScalar,
+  visibilityDraftWithScalarText,
+  type AuthorableFieldType,
+  type FieldAuthoringDraft,
+  type FieldVisibilityDraft,
 } from '../templateAuthoring'
+import {
+  conditionValueCopy,
+  conditionValueIssueText,
+  conditionValueKind,
+  isCurrentOptionValue,
+  isOptionKind,
+  STALE_OPTION_KEY,
+  parseConditionListText,
+  parseConditionNumber,
+  visibilityOperatorsForField,
+  visibilityRuleValueIssues,
+  type ConditionValueField,
+} from '../conditionValueTyping'
+import { useLocale } from '../../composables/useLocale'
 import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
 } from './ApprovalFormPalette.vue'
+import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
+import { useApprovalDirectory, type DirectoryUserOption } from '../useApprovalDirectory'
+import {
+  buildRecordLinkBaseSelectOptions,
+  buildRecordLinkSheetSelectOptions,
+  recordLinkSheetAfterBaseChange,
+  validateRecordLinkPinAgainstLoadedCatalog,
+  type RecordLinkAuthoringCatalog,
+} from '../recordLinkField'
 
 const props = withDefaults(
   defineProps<{
@@ -454,8 +976,18 @@ const props = withDefaults(
     field: FieldAuthoringDraft | null
     /** FB-D6 current-draft reference set for the selected field. */
     references?: readonly FormFieldDependency[]
-    /** Business options for the visibility depends-on picker (no self/record-link/detail). */
-    visibilityOptions?: readonly { id: string; label: string }[]
+    /**
+     * Business options for the visibility depends-on picker (no self/record-link/detail). R-43 (B):
+     * `type` + `options` (optional) let the value control follow the dependency's field type.
+     */
+    visibilityOptions?: readonly {
+      id: string
+      label: string
+      type?: FormFieldType
+      options?: readonly FormOption[]
+      /** A multi-person picker (its submitted value is a list); follow-up (b) narrows its operators. */
+      listValued?: boolean
+    }[]
     readOnly?: boolean
     /**
      * FB-D4 seam: run one typed command through the ONE adapter path. Returns
@@ -464,25 +996,129 @@ const props = withDefaults(
     execute: (command: FormFieldInspectorCommand) => FormAdapterResult | null
     /** Opaque value seam for NEW options (§3.4); injectable for determinism. */
     optionValueFactory?: () => string
+    /**
+     * Delta §3.4: the PARENT-OWNED record-link catalog snapshot (F0 gate #2) the typed base/sheet
+     * pickers render. Null when no owner supplies one (standalone harnesses): the pickers then
+     * offer only the current pins, shown as the values-free unavailable placeholder.
+     */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   }>(),
   {
     references: () => [],
     visibilityOptions: () => [],
     readOnly: false,
     optionValueFactory: undefined,
+    recordLinkCatalog: null,
   },
 )
 
-const VISIBILITY_OPERATOR_OPTIONS: readonly {
-  value: FieldVisibilityDraft['operator']
-  label: string
-}[] = [
-  { value: 'eq', label: '等于' },
-  { value: 'neq', label: '不等于' },
-  { value: 'in', label: '包含任一（每行一个值）' },
-  { value: 'isEmpty', label: '为空' },
-  { value: 'notEmpty', label: '不为空' },
-]
+const emit = defineEmits<{
+  /** Ask the catalog OWNER to (re)load the record-link catalog — never a fetch from here. */
+  (e: 'retry-record-link-catalog'): void
+}>()
+
+const VISIBILITY_OPERATOR_LABELS: Record<FieldVisibilityDraft['operator'], string> = {
+  eq: '等于',
+  neq: '不等于',
+  in: '包含任一（每行一个值）',
+  isEmpty: '为空',
+  notEmpty: '不为空',
+}
+
+// --- R-43 (B): typed visibility values ----------------------------------------
+const { isZh } = useLocale()
+const conditionCopy = computed(() => conditionValueCopy(isZh.value))
+
+function visibilityDependencyFor(dependsOnFieldId: string): ConditionValueField | null {
+  const id = dependsOnFieldId.trim()
+  if (!id) return null
+  const option = props.visibilityOptions.find((candidate) => candidate.id === id)
+  if (!option?.type) return null
+  // Keep `listValued` (a multi-person picker): its operators are narrowed and its stored eq/neq
+  // rules marked (follow-up (b)), exactly like the legacy editor and the branch editor.
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
+}
+
+const visibilityDependency = computed(() =>
+  props.field ? visibilityDependencyFor(props.field.visibility.dependsOnFieldId) : null,
+)
+const visibilityKind = computed(() => conditionValueKind(visibilityDependency.value))
+const visibilityIsOption = computed(() => isOptionKind(visibilityKind.value))
+const dependencyOptions = computed<FormOption[]>(() => [...(visibilityDependency.value?.options ?? [])])
+
+/** Effective operators for the dependency; a stored ineffective one stays visible but disabled. */
+const visibilityOperatorChoices = computed(() => {
+  const inLabel = visibilityIsOption.value
+    ? conditionCopy.value.visibilityInLabelOption
+    : conditionCopy.value.visibilityInLabelText
+  const label = (operator: FieldVisibilityDraft['operator']) =>
+    operator === 'in' ? inLabel : VISIBILITY_OPERATOR_LABELS[operator]
+  const choices: { value: FieldVisibilityDraft['operator']; label: string; disabled: boolean }[] =
+    visibilityOperatorsForField(visibilityDependency.value).map((operator) => ({
+      value: operator,
+      label: label(operator),
+      disabled: false,
+    }))
+  const current = props.field?.visibility.operator
+  if (current && !choices.some((choice) => choice.value === current)) {
+    choices.push({
+      value: current,
+      label: `${label(current)}${conditionCopy.value.notApplicableSuffix}`,
+      disabled: true,
+    })
+  }
+  return choices
+})
+
+const visibilityIssueText = computed(() => {
+  const current = props.field
+  if (!current || !current.visibility.dependsOnFieldId) return ''
+  return conditionValueIssueText(
+    visibilityRuleValueIssues(buildVisibilityRule(current.visibility), visibilityDependency.value),
+    isZh.value,
+  )
+})
+
+const visibilityStoredValueNote = computed(() => {
+  const current = props.field
+  if (!current || !current.visibility.dependsOnFieldId) return null
+  return visibilityStoredValuePreview(current.visibility, visibilityDependency.value)
+})
+
+// Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
+// option '1') never matches `===`, so it shows as the invalid placeholder — never as that option
+// selected — and re-picking the option is a real change that fixes it.
+const optionScalarRaw = computed(() => {
+  const current = props.field
+  return current ? visibilityDraftScalar(current.visibility) : undefined
+})
+const optionScalarStale = computed(() => {
+  const raw = optionScalarRaw.value
+  if (raw === undefined || raw === null || raw === '' || (Array.isArray(raw) && raw.length === 0)) return false
+  return !isCurrentOptionValue(visibilityDependency.value, raw)
+})
+const optionScalarValue = computed(() => {
+  const raw = optionScalarRaw.value
+  if (optionScalarStale.value) return typeof raw === 'string' ? raw : STALE_OPTION_KEY
+  return typeof raw === 'string' ? raw : ''
+})
+const optionListSelected = computed<string[]>(() => {
+  const current = props.field
+  if (!current) return []
+  const list = visibilityDraftList(current.visibility)
+  return dependencyOptions.value
+    .map((option) => option.value)
+    .filter((value) => list.includes(value))
+})
+const optionListStaleCount = computed(() => {
+  const current = props.field
+  if (!current) return 0
+  return visibilityDraftList(current.visibility).filter(
+    (value) => !isCurrentOptionValue(visibilityDependency.value, value),
+  ).length
+})
 
 const typeOptions = APPROVAL_FORM_PALETTE_GROUPS.flatMap(
   (group) => group.entries,
@@ -493,12 +1129,93 @@ const columnTypeOptions = DETAIL_LEAF_FIELD_TYPES.map((type) => ({
 }))
 
 const field = computed(() => props.field)
+const userDirectory = useApprovalDirectory()
+const authorUserOptions = computed<DirectoryUserOption[]>(() => {
+  const fetched = userDirectory.users.value
+  const seen = new Set(fetched.map((user) => user.id))
+  const missing = (field.value?.userDefaultIds ?? [])
+    .filter((id) => id.trim().length > 0 && !seen.has(id))
+    .map((id) => ({ id, name: '', email: '' }))
+  return missing.length > 0 ? [...missing, ...fetched] : fetched
+})
+const departmentDefaultValue = computed(() => (
+  field.value?.departmentDefaultIds.map((id) => ({ id })) ?? []
+))
+const departmentMaxSelections = computed<number | undefined>(() => {
+  const text = field.value?.departmentMaxSelectionsText.trim() ?? ''
+  const value = Number(text)
+  return text && Number.isInteger(value) && value > 0 ? value : undefined
+})
+
+onMounted(() => {
+  if (field.value?.type === 'user' && field.value.userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+})
+
 const recordLinkConfigured = computed(
   () =>
     Boolean(field.value) &&
     field.value!.recordLinkBaseId.trim() !== '' &&
     field.value!.recordLinkSheetId.trim() !== '',
 )
+
+// --- record-link target pickers (delta §3.4) ----------------------------------
+
+const recordLinkCatalogLoading = computed(
+  () => props.recordLinkCatalog?.loading === true,
+)
+const recordLinkCatalogError = computed(() => props.recordLinkCatalog?.error ?? '')
+
+/** Business-name options; a pin missing from the catalog becomes the 目标不可用 placeholder. */
+const recordLinkBaseOptions = computed(() => {
+  const current = field.value
+  if (!current || current.type !== 'record-link') return []
+  return buildRecordLinkBaseSelectOptions(
+    props.recordLinkCatalog?.bases ?? [],
+    current.recordLinkBaseId,
+  )
+})
+
+/** Sheets scoped to the CURRENT base pin (none until a base is chosen). */
+const recordLinkSheetOptions = computed(() => {
+  const current = field.value
+  if (!current || current.type !== 'record-link') return []
+  return buildRecordLinkSheetSelectOptions(
+    props.recordLinkCatalog?.sheets ?? [],
+    current.recordLinkBaseId,
+    current.recordLinkSheetId,
+  )
+})
+
+const recordLinkCatalogHint = computed(() => {
+  const catalog = props.recordLinkCatalog
+  if (!catalog) return ''
+  if (catalog.loading) return INSPECTOR_RECORD_LINK_LOADING_MESSAGE
+  if (catalog.loaded && !catalog.error && catalog.bases.length === 0) {
+    return INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE
+  }
+  return ''
+})
+
+/**
+ * Same predicate as the publish check: unconfigured → the F3 summary; a pin the LOADED catalog
+ * proves unusable → the publish-check message itself; otherwise configured.
+ */
+const recordLinkSummary = computed(() => {
+  const current = field.value
+  if (!current || !recordLinkConfigured.value) {
+    return INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE
+  }
+  const catalog = props.recordLinkCatalog
+  const issue = catalog
+    ? validateRecordLinkPinAgainstLoadedCatalog(current, {
+        loaded: catalog.loaded,
+        sheets: catalog.sheets,
+      })
+    : null
+  return issue ?? INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE
+})
 const visibilityNeedsValue = computed(() => {
   const operator = field.value?.visibility.operator
   return operator === 'eq' || operator === 'neq' || operator === 'in'
@@ -524,6 +1241,12 @@ type TextBufferKey =
   | 'valueText'
   | 'minRowsText'
   | 'maxRowsText'
+  | 'dateRangeStartLabel'
+  | 'dateRangeEndLabel'
+  | 'dateRangeDurationLabel'
+  | 'explanationText'
+  | 'departmentMaxSelectionsText'
+  | 'userMaxSelectionsText'
 
 interface EditBuffer {
   text: Partial<Record<TextBufferKey, string>>
@@ -561,7 +1284,17 @@ watch(
 function committedText(key: TextBufferKey): string {
   const current = field.value
   if (!current) return ''
-  if (key === 'valueText') return current.visibility.valueText
+  if (key === 'valueText') {
+    // R-43 (B): what the value box shows for the committed draft, by dependency type. A stored
+    // non-number on a number dependency shows '' so re-typing the same digits is a real edit.
+    if (current.visibility.operator === 'in') {
+      return visibilityDraftListText(current.visibility, visibilityKind.value)
+    }
+    return visibilityDraftScalarText(
+      current.visibility,
+      visibilityKind.value === 'number' ? 'number' : 'text',
+    )
+  }
   return current[key]
 }
 
@@ -702,8 +1435,44 @@ function bufferValidationError(): string | null {
   if (label !== undefined && label.trim() === '') {
     return INSPECTOR_INVALID_BUFFER_MESSAGE
   }
+  const dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  if (
+    dateRangeStartLabel !== undefined &&
+    dateRangeStartLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  if (
+    dateRangeEndLabel !== undefined &&
+    dateRangeEndLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const explanationText = buffer.text.explanationText
+  if (explanationText !== undefined && explanationText.trim() === '') {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
   const minRows = buffer.text.minRowsText ?? current.minRowsText
   const maxRows = buffer.text.maxRowsText ?? current.maxRowsText
+  const departmentMaxSelections =
+    buffer.text.departmentMaxSelectionsText ?? current.departmentMaxSelectionsText
+  const userMaxSelections =
+    buffer.text.userMaxSelectionsText ?? current.userMaxSelectionsText
+  if (
+    current.type === 'department' &&
+    departmentMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(departmentMaxSelections.trim()) || Number(departmentMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  if (
+    current.type === 'user' &&
+    userMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(userMaxSelections.trim()) || Number(userMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
   if (
     buffer.text.minRowsText !== undefined ||
     buffer.text.maxRowsText !== undefined
@@ -719,6 +1488,18 @@ function bufferValidationError(): string | null {
       return INSPECTOR_INVALID_BUFFER_MESSAGE
     }
   }
+  const valueText = buffer.text.valueText
+  // R-43 (B): a number dependency only accepts numbers (one per line for `in`). Only while the
+  // operator still takes a value: under isEmpty/notEmpty the value box is hidden, so its leftover
+  // text must not block (an error pointing at an invisible control).
+  if (valueText !== undefined && visibilityKind.value === 'number' && visibilityNeedsValue.value) {
+    const entries = current.visibility.operator === 'in'
+      ? parseConditionListText(valueText, 'number')
+      : valueText.trim() === '' ? [] : [parseConditionNumber(valueText) ?? valueText]
+    if (entries.some((entry) => typeof entry !== 'number')) {
+      return conditionCopy.value.invalidNumber
+    }
+  }
   for (const value of Object.values(buffer.optionLabels)) {
     if (value.trim() === '') return INSPECTOR_INVALID_BUFFER_MESSAGE
   }
@@ -732,8 +1513,26 @@ function onTextInput(key: TextBufferKey, event: Event): void {
   // Buffer only — NEVER a command per keystroke (FB-D7).
   buffer.text = {
     ...buffer.text,
-    [key]: (event.target as HTMLInputElement).value,
+    [key]: (event.target as HTMLInputElement | HTMLTextAreaElement).value,
   }
+}
+
+function visibilityPatchForText(
+  value: string,
+  current: FieldAuthoringDraft,
+): FieldVisibilityDraft {
+  // R-43 (B): `in` keeps the line text (numbers parsed for a number dependency); a number
+  // dependency's eq/neq saves a NUMBER; anything else stays text.
+  if (current.visibility.operator === 'in') {
+    return visibilityDraftWithListText(current.visibility, value, visibilityKind.value)
+  }
+  if (visibilityKind.value === 'number') {
+    const parsed = parseConditionNumber(value)
+    return parsed === null
+      ? visibilityDraftWithScalarText(current.visibility, '')
+      : visibilityDraftWithScalar(current.visibility, parsed)
+  }
+  return visibilityDraftWithScalarText(current.visibility, value)
 }
 
 function textPatchFor(
@@ -742,7 +1541,7 @@ function textPatchFor(
   current: FieldAuthoringDraft,
 ): FormFieldPropertyPatch {
   if (key === 'valueText') {
-    return { visibility: { ...current.visibility, valueText: value } }
+    return { visibility: visibilityPatchForText(value, current) }
   }
   return { [key]: value }
 }
@@ -770,7 +1569,17 @@ function commitTextBuffer(key: TextBufferKey): void {
 }
 
 function keyBlocksCommit(key: TextBufferKey): boolean {
-  return key === 'label' || key === 'minRowsText' || key === 'maxRowsText'
+  return (
+    (key === 'valueText' && visibilityKind.value === 'number') ||
+    key === 'label' ||
+    key === 'minRowsText' ||
+    key === 'maxRowsText' ||
+    key === 'dateRangeStartLabel' ||
+    key === 'dateRangeEndLabel' ||
+    key === 'explanationText' ||
+    key === 'departmentMaxSelectionsText' ||
+    key === 'userMaxSelectionsText'
+  )
 }
 
 // --- select/toggle commits (commit on change) -------------------------------
@@ -781,6 +1590,11 @@ function onTypeChange(event: Event): void {
   const select = event.target as HTMLSelectElement
   const nextType = select.value as FormFieldType
   if (nextType === current.type) return
+  if (!settlePendingEdits()) {
+    // A retype must not hide an invalid buffer from the previous field type.
+    select.value = current.type
+    return
+  }
   const committed = runCommand({
     kind: 'retype',
     localId: current.localId,
@@ -801,13 +1615,206 @@ function onRequiredChange(event: Event): void {
   }
 }
 
+function onNumberCurrencyChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  if (!commitPatch({ numberCurrencySymbol: select.value })) {
+    select.value = current.numberCurrencySymbol
+  }
+}
+
+function onDepartmentSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentSelection = select.value as FieldAuthoringDraft['departmentSelection']
+  const patch: FormFieldPropertyPatch = departmentSelection === 'single'
+    ? {
+        departmentSelection,
+        departmentMaxSelectionsText: '',
+        departmentDefaultIds: current.departmentDefaultIds.slice(0, 1),
+      }
+    : { departmentSelection }
+  if (!commitPatch(patch)) select.value = current.departmentSelection
+}
+
+function onDepartmentDisplayChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDisplay = select.value as FieldAuthoringDraft['departmentDisplay']
+  if (!commitPatch({ departmentDisplay })) select.value = current.departmentDisplay
+}
+
+function onDepartmentDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDefaultMode = select.value as FieldAuthoringDraft['departmentDefaultMode']
+  const patch: FormFieldPropertyPatch = departmentDefaultMode === 'designated'
+    ? { departmentDefaultMode }
+    : { departmentDefaultMode, departmentDefaultIds: [] }
+  if (!commitPatch(patch)) select.value = current.departmentDefaultMode
+}
+
+function onDepartmentDefaultIdsChange(value: Array<{ id: string }>): void {
+  commitPatch({ departmentDefaultIds: value.map((entry) => entry.id) })
+}
+
+function onUserAllowSelfChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  const patch: FormFieldPropertyPatch = input.checked
+    ? { userAllowSelf: true }
+    : {
+        userAllowSelf: false,
+        ...(current.userDefaultMode === 'requester'
+          ? { userDefaultMode: '', userDefaultIds: [] }
+          : {}),
+      }
+  if (!commitPatch(patch)) input.checked = current.userAllowSelf
+}
+
+function onUserSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userSelection = select.value as FieldAuthoringDraft['userSelection']
+  const patch: FormFieldPropertyPatch = userSelection === 'single'
+    ? {
+        userSelection,
+        userMaxSelectionsText: '',
+        userDefaultIds: current.userDefaultIds.slice(0, 1),
+      }
+    : { userSelection }
+  if (!commitPatch(patch)) select.value = current.userSelection
+}
+
+function onUserDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userDefaultMode = select.value as FieldAuthoringDraft['userDefaultMode']
+  const patch: FormFieldPropertyPatch = userDefaultMode === 'designated'
+    ? { userDefaultMode }
+    : {
+        userDefaultMode,
+        userDefaultIds: [],
+        ...(userDefaultMode === 'requester' ? { userAllowSelf: true } : {}),
+      }
+  if (!commitPatch(patch)) {
+    select.value = current.userDefaultMode
+  } else if (userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+}
+
+function onUserDefaultIdsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const ids = current.userSelection === 'multi'
+    ? Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean)
+    : select.value ? [select.value] : []
+  commitPatch({ userDefaultIds: ids })
+}
+
+function onUserDirectorySearch(event: Event): void {
+  void userDirectory.searchUsers((event.target as HTMLInputElement).value)
+}
+
+function onUserDefaultPickerFocus(): void {
+  void userDirectory.searchUsers('')
+}
+
+function authorUserLabel(user: DirectoryUserOption, index: number): string {
+  const primary = user.name.trim() || `成员 ${index + 1}`
+  const email = user.email.trim()
+  return email ? `${primary} · ${email}` : primary
+}
+
+function onNumberThousandsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberThousandsSeparator: input.checked })) {
+    input.checked = current.numberThousandsSeparator
+  }
+}
+
+function onNumberUppercaseChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberUppercaseCny: input.checked })) {
+    input.checked = current.numberUppercaseCny
+  }
+}
+
+function onDateRangeDateTypeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const dateRangeDateType =
+    select.value as FieldAuthoringDraft['dateRangeDateType']
+  if (!commitPatch({ dateRangeDateType })) {
+    select.value = current.dateRangeDateType
+  }
+}
+
+function requestRecordLinkCatalog(): void {
+  emit('retry-record-link-catalog')
+}
+
+/** Legacy parity (`visible-change` → retry): opening a picker of an unloaded catalog loads it. */
+function onRecordLinkPickerFocus(): void {
+  const catalog = props.recordLinkCatalog
+  if (catalog && (catalog.loaded || catalog.loading)) return
+  requestRecordLinkCatalog()
+}
+
+/**
+ * ONE committed edit carrying BOTH pins: the sheet survives only when the loaded catalog proves it
+ * belongs to the new base (`recordLinkSheetAfterBaseChange`); the empty option clears both.
+ */
+function onRecordLinkBaseChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const recordLinkBaseId = select.value.trim()
+  const recordLinkSheetId = recordLinkSheetAfterBaseChange(
+    props.recordLinkCatalog?.sheets ?? [],
+    recordLinkBaseId,
+    current.recordLinkSheetId,
+  )
+  if (!commitPatch({ recordLinkBaseId, recordLinkSheetId })) {
+    select.value = current.recordLinkBaseId.trim()
+  }
+}
+
+function onRecordLinkSheetChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  if (!commitPatch({ recordLinkSheetId: select.value.trim() })) {
+    select.value = current.recordLinkSheetId.trim()
+  }
+}
+
 function onVisibilityDependsChange(event: Event): void {
   const current = field.value
   if (!current) return
   const value = (event.target as HTMLSelectElement).value
-  const visibility: FieldVisibilityDraft = value
-    ? { ...current.visibility, dependsOnFieldId: value }
-    : { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+  // R-43 (B): a value only carries over text → text; a multi-select dependency switches the
+  // operator to one that can take effect.
+  const visibility = visibilityDraftForDependencyChange(
+    current.visibility,
+    value,
+    visibilityDependencyFor(current.visibility.dependsOnFieldId),
+    visibilityDependencyFor(value),
+  )
   if (!commitPatch({ visibility })) {
     ;(event.target as HTMLSelectElement).value =
       current.visibility.dependsOnFieldId
@@ -819,8 +1826,36 @@ function onVisibilityOperatorChange(event: Event): void {
   if (!current) return
   const value = (event.target as HTMLSelectElement)
     .value as FieldVisibilityDraft['operator']
-  if (!commitPatch({ visibility: { ...current.visibility, operator: value } })) {
+  if (!commitPatch({ visibility: visibilityDraftWithOperator(current.visibility, value) })) {
     ;(event.target as HTMLSelectElement).value = current.visibility.operator
+  }
+}
+
+function onVisibilityOptionValueChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const visibility = select.value
+    ? visibilityDraftWithScalar(current.visibility, select.value)
+    : visibilityDraftWithScalarText(current.visibility, '')
+  if (!commitPatch({ visibility })) {
+    select.value = optionScalarValue.value
+  }
+}
+
+/** Re-picking drops values no current option carries (the "choose again to fix" path). */
+function onVisibilityOptionToggle(optionValue: string, event: Event): void {
+  const current = field.value
+  if (!current) return
+  const checkbox = event.target as HTMLInputElement
+  const selected = new Set(optionListSelected.value)
+  if (checkbox.checked) selected.add(optionValue)
+  else selected.delete(optionValue)
+  const next = dependencyOptions.value
+    .map((option) => option.value)
+    .filter((value) => selected.has(value))
+  if (!commitPatch({ visibility: visibilityDraftWithList(current.visibility, next) })) {
+    checkbox.checked = !checkbox.checked
   }
 }
 
@@ -1003,6 +2038,11 @@ function settlePendingEdits(): boolean {
     optionsText?: string
     minRowsText?: string
     maxRowsText?: string
+    dateRangeStartLabel?: string
+    dateRangeEndLabel?: string
+    dateRangeDurationLabel?: string
+    explanationText?: string
+    departmentMaxSelectionsText?: string
     visibility?: FieldVisibilityDraft
   } = {}
   if (buffer.text.label !== undefined && buffer.text.label !== current.label) {
@@ -1027,13 +2067,43 @@ function settlePendingEdits(): boolean {
     patch.maxRowsText = buffer.text.maxRowsText
   }
   if (
-    buffer.text.valueText !== undefined &&
-    buffer.text.valueText !== current.visibility.valueText
+    buffer.text.dateRangeStartLabel !== undefined &&
+    buffer.text.dateRangeStartLabel !== current.dateRangeStartLabel
   ) {
-    patch.visibility = {
-      ...current.visibility,
-      valueText: buffer.text.valueText,
-    }
+    patch.dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  }
+  if (
+    buffer.text.dateRangeEndLabel !== undefined &&
+    buffer.text.dateRangeEndLabel !== current.dateRangeEndLabel
+  ) {
+    patch.dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  }
+  if (
+    buffer.text.dateRangeDurationLabel !== undefined &&
+    buffer.text.dateRangeDurationLabel !== current.dateRangeDurationLabel
+  ) {
+    patch.dateRangeDurationLabel = buffer.text.dateRangeDurationLabel
+  }
+  if (
+    buffer.text.explanationText !== undefined &&
+    buffer.text.explanationText !== current.explanationText
+  ) {
+    patch.explanationText = buffer.text.explanationText
+  }
+  if (
+    buffer.text.departmentMaxSelectionsText !== undefined &&
+    buffer.text.departmentMaxSelectionsText !== current.departmentMaxSelectionsText
+  ) {
+    patch.departmentMaxSelectionsText = buffer.text.departmentMaxSelectionsText
+  }
+  if (
+    buffer.text.valueText !== undefined &&
+    visibilityNeedsValue.value &&
+    buffer.text.valueText !== committedText('valueText')
+  ) {
+    // (A hidden value box's leftover text is dropped with the buffer, never folded in: it would
+    // overwrite the kept value as a side effect.)
+    patch.visibility = visibilityPatchForText(buffer.text.valueText, current)
   }
   if (Object.keys(buffer.optionLabels).length > 0) {
     // Same value-preserving rule as the blur/Enter path (P2-3): one shared
@@ -1122,6 +2192,26 @@ defineExpose({ settlePendingEdits, isDirty })
   margin: 0;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+.approval-form-field-inspector__error {
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.approval-form-field-inspector__stored-value {
+  overflow-wrap: anywhere;
+}
+
+.approval-form-field-inspector__option-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
 }
 
 .approval-form-field-inspector__control {

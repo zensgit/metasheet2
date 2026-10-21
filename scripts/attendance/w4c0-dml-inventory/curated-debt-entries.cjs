@@ -118,9 +118,6 @@ const P16_EXACT_ALLOWLIST = new Set([
   "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_requests::delete",
   "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_schedule_dispatch_requests::delete",
   "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs::cleanupStep::attendance_shift_assignments::delete",
-  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::approval_instances::delete",
-  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::attendance_events::delete",
-  "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs::cleanup::attendance_requests::delete",
   "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_assignments::delete",
   "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_instances::delete",
   "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs::cleanup::approval_records::delete",
@@ -670,6 +667,52 @@ const CURATED_DEBT_ENTRIES = [
       site.relPath === 'packages/core-backend/src/services/AttendanceExpiryService.ts' &&
       (site.table === 'attendance_leave_balances' || site.table === 'attendance_leave_balance_events'),
   },
+  {
+    id: 'X08',
+    title:
+      'Approval change-request design lock v5.9 §14.3 #10 (Q1c, WI-3): one-time migration ' +
+      'backfill UPDATE that pairs pre-existing attendance_requests.approval_instance_id rows ' +
+      'with the referenced approval_instances.workflow_key, BEFORE the composite FK ' +
+      '(approval_instance_id, approval_workflow_key) and the atr_instance_key_pair / ' +
+      'atr_not_cancel_round CHECKs are added in the same migration (lock:371 "回填先于约束").',
+    owningSlice: 'approval-cancel-round-wi3',
+    sharedHook: false,
+    canonicalizedBy: 'approval-cancel-round-wi3',
+    // Runs exactly once, inside this migration's own transaction, before the constraints it
+    // backfills for exist — not a runtime writer reachable from any request path (the five
+    // runtime writers that DO reach this table on every attendance submission are already
+    // claimed by P12's bySymbol match on their enclosing function names, unaffected by this
+    // migration adding a new column to their existing INSERT/UPDATE statements).
+    //
+    // Claimed by relPath ALONE, not by enclosingSymbol: every migration file's data-mutating
+    // function is named `up` (and `down`), so a bare bySymbol(/^up$/) match would silently
+    // swallow a future, unrelated migration's own attendance_requests DML under this same entry
+    // — the exact nearest-symbol collision trap
+    // (finding_p26_census_nearest_symbol_collision in project memory: "same-name local closure
+    // folds into an already-reviewed entry"). This migration's relPath is unique in the tree, so
+    // relPath alone is a precise, non-generalizing discriminator.
+    claims: (site) =>
+      site.relPath ===
+      'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts',
+  },
+
+  {
+    id: 'X09',
+    title: 'Multi-timezone D3 typed business-trip creation, final publication and canonical cancellation.',
+    owningSlice: 'attendance-multitimezone-D3',
+    sharedHook: false,
+    canonicalizedBy: 'attendance-multitimezone-D3',
+    // Exact authority sites only: request_create installs the immutable typed source;
+    // final request_decision publishes; the approved cancel-round adapter truncates.
+    // Table buckets and canonical multiplicity remain independently enforced.
+    claims: (site) => [
+      'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_requests::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_business_trip_requests::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip.cjs::publish::attendance_business_trip_arrangements::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip.cjs::cancel::attendance_business_trip_arrangements::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
+
 ]
 
 // Non-attendance generic-shared-function allowlist (§8.4: "Shared tables such as
@@ -685,6 +728,12 @@ const GENERIC_SHARED_ALLOWLIST = [
   { relPath: 'packages/core-backend/scripts/test-approvals-contract.mjs', reason: 'generic approval-product contract test tooling' },
   { relPath: 'packages/core-backend/src/seeds/seed-approvals.ts', reason: 'generic approval-product seed script' },
   { relPath: 'packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts', reason: 'generic approval-bridge schema/backfill migration, not attendance-specific' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts', reason: 'Lock-10 (S1) generic approval_instances.org_id schema/backfill migration (Phase 1 only), not attendance-specific — same shape as zzzz20260404100000 above' },
+  { relPath: 'packages/core-backend/src/services/approval-comment-service.ts', reason: 'Lock-10 (S2) approval-comments pointer-row audit writer — generic approval product, not attendance-specific; same shape as the approval bridge/migration entries above' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823040000_recovery09_prepare_legacy_default_org.ts', reason: 'Recovery09 generic approval/user-org migration pre-alignment — bounded legacy default anchor for multi-org staging, not attendance-specific' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts', reason: 'Lock-10 (S1) Migration B, revised at Lock-11 §10 D-8(β) — generic approval_instances.org_id residual backfill (classes 2/3, ordered, plus the (i)-guarded class-6 stamp), not attendance-specific — same shape as zzzz20260821100000 above' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823149900_recovery09_close_approval_org_gap.ts', reason: 'Recovery09 generic approval_instances.org_id source-first gap repair before the older single-org closer, not attendance-specific' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823150000_close_approval_instance_org_id_gap_window.ts', reason: 'Lock-11 §10.3 gap-closer (seventh by-reference ruling, item 1) — generic approval_instances.org_id backfill over the Migration-B->W1W2 creation window (created_at-scoped, (i)-guarded), not attendance-specific — same shape as zzzz20260823100000 above' },
 ]
 
 function isGenericSharedAllowlisted(site) {

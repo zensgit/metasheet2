@@ -1,5 +1,6 @@
 import type {
   ApprovalAssigneeResolutionMetadata,
+  ApprovalAssigneeSource,
   ApprovalAutoApprovalReason,
   ApprovalEdge,
   ApprovalMode,
@@ -15,7 +16,11 @@ import type {
   ParallelNodeConfig,
   RuntimeGraph,
 } from '../types/approval-product'
+import { isApprovalCcTargetType } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('ApprovalGraphExecutor')
 import {
   approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
@@ -23,6 +28,7 @@ import {
   type RequesterFormulaContext,
 } from './ApprovalConditionFormula'
 import { isValidIsoCalendarDate } from '../utils/calendar-date'
+import { applySequentialQueueMetadata } from './approval-sequential-mode'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -42,8 +48,13 @@ export type ApprovalGraphAssignmentResolver = (input: ApprovalGraphAssignmentRes
 
 export interface ApprovalCcEvent {
   nodeKey: string
+  /** The PERSISTED cc row shape — a `'group'` cc target (OD-L1-7(a)) never reaches here: the cc
+   *  arm expands it into one `'user'` event per frozen member. */
   targetType: 'user' | 'role'
   targetId: string
+  /** Lock-1 OD-L1-7(a): set on every per-member event expanded from a `'group'` target — the
+   *  expanding group id, for audit ("why was I cc'd"; the template-authored id is §2.6-permitted). */
+  groupId?: string
 }
 
 export interface ApprovalGraphAutoApprovalEvent {
@@ -111,7 +122,7 @@ export interface ApprovalGraphResolution {
    * Any-mode resolution carries `'any'`; all-mode carries `'all'` only when aggregation is complete
    * (the route short-circuits incomplete all-mode before calling `resolveAfterApprove`).
    */
-  aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null
+  aggregateMode: ApprovalMode | null
   /**
    * Indicates that the previous node's aggregation requirement is satisfied and resolution advanced.
    * Always `true` when `resolveAfterApprove` returns (incomplete aggregation never reaches here).
@@ -133,6 +144,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isApprovalNodeConfig(config: unknown): config is ApprovalNodeConfig {
   if (!isRecord(config)) return false
+  // Lock-4 F4-A (OD-L4-1(a)) gate A-2 — an `auto_approve` node's assignee resolution is SKIPPED
+  // entirely (the caller short-circuits BEFORE `resolveAssignmentsForApprovalNode`), so an
+  // absent/empty `assigneeSources` and no legacy `assigneeIds` pair is a structurally VALID approval
+  // config for this one `approvalType` value ONLY — never for 'manual'/absent, which still require
+  // one via the `hasLegacyAssignees || assigneeSources` check below. Without this arm this guard
+  // would reject a legitimately-published auto_approve node before the short-circuit is ever
+  // reached, throwing "has invalid config" instead of advancing.
+  if (config.approvalType === 'auto_approve') return true
   const hasLegacyAssignees = (config.assigneeType === 'user' || config.assigneeType === 'role')
     && Array.isArray(config.assigneeIds)
   return hasLegacyAssignees || Array.isArray(config.assigneeSources)
@@ -142,6 +161,27 @@ function isConditionBranch(value: unknown): value is ConditionBranch {
   return isRecord(value)
     && typeof value.edgeKey === 'string'
     && Array.isArray(value.rules)
+}
+
+/**
+ * Lock-1 OD-L1-7(a) — read the frozen `groupMemberIds` map out of a stored requester snapshot
+ * (`approval_instances.requester_snapshot`, untyped at the dispatch-side construction sites) into
+ * the shape the executor's cc arm consumes: ONLY string-keyed arrays of non-empty strings survive;
+ * an absent map, a legacy snapshot that never baked one, or a malformed entry reads as `{}` / `[]`
+ * — the same tolerance `ApprovalAssigneeResolver` case 'user_group' applies inline. Pure.
+ */
+export function readGroupMemberIdsSnapshot(requesterSnapshot: unknown): Record<string, string[]> {
+  if (!isRecord(requesterSnapshot)) return {}
+  const raw = requesterSnapshot.groupMemberIds
+  if (!isRecord(raw)) return {}
+  const out: Record<string, string[]> = {}
+  for (const [groupId, members] of Object.entries(raw)) {
+    if (!Array.isArray(members)) continue
+    out[groupId] = members
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+  }
+  return out
 }
 
 function isNonEmptyStringArray(value: unknown): value is string[] {
@@ -159,7 +199,8 @@ function isParallelNodeConfig(config: unknown): config is ParallelNodeConfig {
 
 // Lock-3 §1.1 — a normalized handler config always carries an `assigneeSources` array (empty arrays
 // are rejected at authoring, so a runtime handler node always has ≥1 source). Structural only: the
-// normalize choke (ApprovalProductService) owns the seven-member registry + prohibition gates.
+// normalize choke (ApprovalProductService) owns the handler registry (HANDLER_ASSIGNEE_SOURCE_KINDS)
+// + prohibition gates.
 function isHandlerNodeConfig(config: unknown): config is HandlerNodeConfig {
   return isRecord(config) && Array.isArray(config.assigneeSources)
 }
@@ -202,7 +243,11 @@ function normalizeComparableValue(value: unknown): number | string | null {
   return null
 }
 
-function isEmptyValue(value: unknown): boolean {
+// Lock-7B §0.2 — the ONE type-agnostic emptiness predicate, reused VERBATIM (holes and all: `0`,
+// `false`, a whitespace-only string, `{}` are all non-empty) by the required-at-node handler-submit
+// check (`ApprovalProductService.ts`) so create-time and node-time never disagree about the same
+// value. Exported so that reuse is an import, never a second definition.
+export function isEmptyValue(value: unknown): boolean {
   return value === null
     || value === undefined
     || value === ''
@@ -260,7 +305,11 @@ export function resolveVisibilityFieldReference(
   const fieldMap = new Map(fields.map((field) => [field.id, field]))
   const direct = fieldMap.get(rawFieldId)
   if (direct) {
-    return direct.type === 'date_range' ? null : { field: direct }
+    // Lock-8 L8-A (§1.1, MS-8): `explanation` carries no value at all — refused as a bare
+    // reference the same way date_range's WHOLE value is, and with no endpoint fallback (it has
+    // none). A saved graph can never legitimately reach this branch (publish already denies it,
+    // ApprovalProductService.ts), but this runtime resolver stays defensive independent of that.
+    return direct.type === 'date_range' || direct.type === 'explanation' ? null : { field: direct }
   }
   const dot = rawFieldId.lastIndexOf('.')
   if (dot <= 0 || dot === rawFieldId.length - 1) return null
@@ -393,8 +442,34 @@ export function pruneHiddenFormData(
   )
 }
 
-function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'all' || value === 'any' || value === 'single' || value === 'threshold' ? value : 'single'
+/**
+ * Lock-1 §K6 precondition (named by the K3 slice sequencing): the executor's approval-mode
+ * normalizer must fail CLOSED. The previous arm silently mapped ANY unrecognized mode to
+ * `'single'` — for contract-valid data the gap was unreachable (the authoring choke rejects
+ * unknown modes, and `asRuntimeGraph` re-normalizes every STORED graph through that same choke on
+ * each dispatch), but deploy skew around any future mode would degrade it silently to
+ * first-approver-wins with no error and no audit signal —
+ * the precise inverse of the S7 governing precedent.
+ *
+ * Enumerated legitimate inputs (widen-only: every value a re-normalized stored graph can carry):
+ *   - `undefined` — the absent default, ≡ `'single'` (the shipped contract; the service-side
+ *     normalizer emits the key only when set, and `single` is the documented absent default);
+ *   - the five shipped members `'single' | 'all' | 'any' | 'threshold' | 'sequential'` — pass
+ *     through unchanged.
+ * ANYTHING else (an unknown string, `null`, a non-string) throws a typed error instead of running
+ * as `'single'`. `null` is deliberately in the reject set: the authoring choke has always rejected
+ * it (`typeof null !== 'string'`), so no legitimately stored graph carries it. The raw value is
+ * deliberately NOT echoed into the message (values-free; the node key — template-authored — is).
+ */
+function normalizeApprovalMode(value: unknown, nodeKey: string): ApprovalMode {
+  if (value === undefined) return 'single'
+  if (value === 'all' || value === 'any' || value === 'single' || value === 'threshold' || value === 'sequential') return value
+  throw new ServiceError(
+    `Approval node ${nodeKey} has an unsupported approval mode`,
+    400,
+    'APPROVAL_MODE_UNSUPPORTED',
+    { nodeKey },
+  )
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -460,8 +535,38 @@ export function validateFieldType(
   switch (field.type) {
     case 'text':
     case 'textarea':
-    case 'user':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'user': {
+      const selection = field.props?.selection === 'multi' ? 'multi' : 'single'
+      if (selection === 'multi' && !Array.isArray(value)) {
+        return `${field.id} must be an array of users`
+      }
+      const values = Array.isArray(value) ? value : [value]
+      if (selection === 'single' && values.length !== 1) {
+        return `${field.id} must contain exactly one user`
+      }
+      // Preserve the field-derived routing door: a blank scalar is an empty anchor, not a
+      // malformed principal. The create-time routing guard returns the established values-free
+      // APPROVAL_FORM_ROUTING_FIELD_EMPTY response for that case.
+      if (values.length === 1 && typeof values[0] === 'string' && values[0].trim().length === 0) {
+        return null
+      }
+      const ids: string[] = []
+      for (const entry of values) {
+        const id = typeof entry === 'string'
+          ? entry.trim()
+          : isRecord(entry) && typeof entry.id === 'string'
+            ? entry.id.trim()
+            : ''
+        if (!id) return `${field.id} must contain only user ids or objects with an id`
+        ids.push(id)
+      }
+      if (new Set(ids).size !== ids.length) return `${field.id} must not contain duplicate users`
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured user selection limit`
+      }
+      return null
+    }
     case 'attachment':
       if (options.attachmentValueMode !== 'ids') {
         return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
@@ -509,6 +614,36 @@ export function validateFieldType(
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'department': {
+      if (!Array.isArray(value)) {
+        return `${field.id} must be an array of departments`
+      }
+      // Optional array-valued controls submit [] after the user clears them. Required fields are
+      // rejected by validateApprovalFormData's shared isEmptyValue gate before reaching this arm.
+      if (value.length === 0) return null
+      const ids: string[] = []
+      for (const entry of value) {
+        if (
+          !isRecord(entry)
+          || Object.keys(entry).length !== 1
+          || typeof entry.id !== 'string'
+          || !entry.id.trim()
+        ) {
+          return `${field.id} must contain only exact { id } department values`
+        }
+        ids.push(entry.id.trim())
+      }
+      if (new Set(ids).size !== ids.length) {
+        return `${field.id} must not contain duplicate departments`
+      }
+      if (field.props?.selection === 'single' && ids.length !== 1) {
+        return `${field.id} must contain exactly one department`
+      }
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured department selection limit`
+      }
+      return null
+    }
     case 'record-link': {
       // FWB-0 Layer 2 structural shape only (sync): exactly one `{ recordId: non-blank string }`.
       // No arrays, free-text ids, or extra keys (incl. target base/sheet overrides). Filler read
@@ -534,6 +669,13 @@ export function validateFieldType(
       }
       return null
     }
+    // Lock-8 L8-A (§1.1, MS-3): explanation accepts NO submitted value — an explicit arm, not the
+    // fall-through `default: return null` above (which would make the type fail-OPEN: any value
+    // silently accepted). This function only reaches here when `value !== undefined && value !==
+    // null` (the early return above already lets an absent/unset value through) — so this arm ONLY
+    // fires when a client actually submitted something for a field that must carry nothing.
+    case 'explanation':
+      return `${field.id} does not accept a submitted value`
     default:
       return null
   }
@@ -803,7 +945,23 @@ export class ApprovalGraphExecutor {
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
     private readonly formData: Record<string, unknown>,
-    private readonly options: { assignmentResolver?: ApprovalGraphAssignmentResolver; requesterContext?: RequesterFormulaContext | null } = {},
+    private readonly options: {
+      assignmentResolver?: ApprovalGraphAssignmentResolver
+      designatedFallbackResolver?: ApprovalGraphAssignmentResolver
+      requesterContext?: RequesterFormulaContext | null
+      /**
+       * Lock-1 OD-L1-7(a) — the FROZEN `requesterSnapshot.groupMemberIds` map (group id → ordered
+       * local user ids), read by the cc arms to expand a `'group'` cc target into one `'user'`
+       * event per member. It is the SAME create-time freeze the approver `user_group` source reads
+       * (`ApprovalAssigneeResolver` case 'user_group' / `fetchMemberGroupSnapshot`) — never a live
+       * read here, so a membership change after create does not reach an in-flight cc. A graph
+       * whose cc nodes are all user/role never touches it. Every construction site whose walk can
+       * reach a cc arm supplies it (as `{}` when the snapshot carries none): a `'group'` target
+       * with the option ABSENT throws (a wiring error, never a silent drop); a group id absent
+       * from a SUPPLIED map, or frozen as `[]`, yields zero events (cc is informational — debug log).
+       */
+      groupMemberIds?: Record<string, string[]>
+    } = {},
   ) {
     for (const node of runtimeGraph.nodes) {
       this.nodeMap.set(node.key, node)
@@ -991,7 +1149,7 @@ export class ApprovalGraphExecutor {
   }
 
   getApprovalMode(nodeKey: string): ApprovalMode {
-    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
+    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode, nodeKey)
   }
 
   // Lock-3 §2.2 — handler aggregation mode, fail-closed to `'all'` (see `normalizeHandlerMode`).
@@ -1148,7 +1306,7 @@ export class ApprovalGraphExecutor {
 
   private resolveFromNode(
     nodeKey: string,
-    context: { aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null; aggregateComplete: boolean },
+    context: { aggregateMode: ApprovalMode | null; aggregateComplete: boolean },
   ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
@@ -1185,19 +1343,7 @@ export class ApprovalGraphExecutor {
       }
 
       if (node.type === 'cc') {
-        const ccConfig = node.config as unknown as Record<string, unknown>
-        const targetIds = ccConfig.targetIds
-        const targetType = ccConfig.targetType
-        if (!isNonEmptyStringArray(targetIds) || (targetType !== 'user' && targetType !== 'role')) {
-          throw new Error(`CC node ${node.key} has invalid config`)
-        }
-        for (const targetId of targetIds) {
-          ccEvents.push({
-            nodeKey: node.key,
-            targetType,
-            targetId,
-          })
-        }
+        this.collectCcEvents(node, ccEvents)
         currentKey = this.firstTargetForNode(node.key)
         continue
       }
@@ -1208,10 +1354,58 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
+        // Lock-4 F4-A (OD-L4-1(a)) gate A-2 — an `auto_approve` node SKIPS assignee resolution
+        // entirely (RATIFIED verbatim: "Assignee resolution is SKIPPED, so an empty source list is
+        // legal here and only here") and advances immediately, mirroring the shipped
+        // `emptyAssigneePolicy:'auto-approve'` arm immediately below — same push shape, no
+        // `metadata`, so `actorIdForAutoApprovalEvent` (ApprovalProductService.ts) falls through to
+        // the shipped `system:auto-approval` sentinel and the event carries NO `originalApprover`
+        // (RATIFIED: "The event records NO originalApprover"). Placed BEFORE
+        // `resolveAssignmentsForApprovalNode` — resolving first would re-trigger the (unrelated)
+        // empty-assignee 400 this node is exempt from.
+        //
+        // ONLY site 1 (`resolveFromNode`, this walker — covers both initial resolution and the
+        // after-approve tail-call, see correction C-1 in the design brief) is edited. Site 2
+        // (`resolveBranchAdvance`, reached only from inside a `parallel` branch) is deliberately NOT
+        // touched: `validateApprovalTypePlacement` (ApprovalProductService.ts) publish-rejects any
+        // non-'manual' `approvalType` inside a parallel region (A-1), so that branch path can never
+        // carry one — the asymmetry against F4-B's "both sites" requirement is intentional, not an
+        // omission.
+        if (approvalConfig.approvalType === 'auto_approve') {
+          autoApprovalEvents.push({
+            nodeKey: node.key,
+            sourceStep,
+            approvalMode,
+            reason: 'auto-node-approve',
+          })
+          currentKey = this.firstTargetForNode(node.key)
+          continue
+        }
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
-          if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
+          // Lock-4 §3 F4-B, gate B-1 (EXECUTOR SITE 1 of 2 — inside `resolveFromNode`, which
+          // `resolveAfterApprove` tail-calls, so this arm covers BOTH initial resolution AND
+          // after-approve re-entry). See `resolveBranchAdvance` below for site 2 of 2, reachable only
+          // through a parallel branch's second node.
+          if (approvalConfig.emptyAssigneePolicy === 'designated') {
+            const fallbackAssignments = this.resolveDesignatedFallbackAssignments(node.key, approvalConfig, sourceStep)
+            if (fallbackAssignments.length > 0) {
+              return {
+                status: 'pending',
+                currentNodeKey: node.key,
+                currentStep: sourceStep,
+                totalSteps: this.totalSteps,
+                assignments: fallbackAssignments,
+                ccEvents,
+                autoApprovalEvents,
+                aggregateMode: context.aggregateMode,
+                aggregateComplete: context.aggregateComplete,
+              }
+            }
+            // Gate B-2 (locked): "never chaining to 'auto-approve', never falling back to a manager,
+            // never retrying" — an empty designated set falls straight through to the terminal throw.
+          } else if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
               sourceStep,
@@ -1404,6 +1598,55 @@ export class ApprovalGraphExecutor {
     }
   }
 
+  /**
+   * The ONE cc arm shared by `resolveFromNode` and `resolveBranchAdvance` (Lock-1 G-4: both
+   * executor cc branches accept exactly the ratified set, APPROVAL_CC_TARGET_TYPES, and still throw
+   * for anything else — the widening is enumerated, not permissive). `user` / `role` targets become
+   * one event each, byte-identical to the pre-OD-L1-7 behaviour. A `group` target (OD-L1-7(a))
+   * expands into one `targetType:'user'` event per FROZEN member read from
+   * `options.groupMemberIds`, each carrying `groupId` for audit; a member listed by two of the
+   * node's groups is cc'd ONCE (first group wins), mirroring the resolver's per-node `seen` dedup
+   * for approver seats. An empty / unknown group contributes nothing — cc is informational, so
+   * "nobody to cc" is a values-free debug log, never a dispatch failure (contrast the approver
+   * half, where an empty group falls to `emptyAssigneePolicy`).
+   */
+  private collectCcEvents(node: ApprovalNode, ccEvents: ApprovalCcEvent[]): void {
+    const ccConfig = node.config as unknown as Record<string, unknown>
+    const targetIds = ccConfig.targetIds
+    const targetType = ccConfig.targetType
+    if (!isNonEmptyStringArray(targetIds) || !isApprovalCcTargetType(targetType)) {
+      throw new Error(`CC node ${node.key} has invalid config`)
+    }
+    if (targetType !== 'group') {
+      for (const targetId of targetIds) {
+        ccEvents.push({ nodeKey: node.key, targetType, targetId })
+      }
+      return
+    }
+    const groupMemberIds = this.options.groupMemberIds
+    if (groupMemberIds === undefined) {
+      throw new Error(`CC node ${node.key} has a group target but no group member snapshot was supplied`)
+    }
+    const seen = new Set<string>()
+    for (const groupId of targetIds) {
+      const rawMembers = groupMemberIds[groupId]
+      const members = Array.isArray(rawMembers)
+        ? rawMembers
+            .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+            .filter((entry) => entry.length > 0)
+        : []
+      if (members.length === 0) {
+        logger.debug('cc group target resolved to no members', { nodeKey: node.key, groupId })
+        continue
+      }
+      for (const memberId of members) {
+        if (seen.has(memberId)) continue
+        seen.add(memberId)
+        ccEvents.push({ nodeKey: node.key, targetType: 'user', targetId: memberId, groupId })
+      }
+    }
+  }
+
   private resolveConditionTarget(node: ApprovalNode): string | null {
     const config = node.config as unknown as Record<string, unknown>
     const rawBranches = config.branches
@@ -1512,19 +1755,7 @@ export class ApprovalGraphExecutor {
       }
 
       if (node.type === 'cc') {
-        const ccConfig = node.config as unknown as Record<string, unknown>
-        const targetIds = ccConfig.targetIds
-        const targetType = ccConfig.targetType
-        if (!isNonEmptyStringArray(targetIds) || (targetType !== 'user' && targetType !== 'role')) {
-          throw new Error(`CC node ${node.key} has invalid config`)
-        }
-        for (const targetId of targetIds) {
-          ccEvents.push({
-            nodeKey: node.key,
-            targetType,
-            targetId,
-          })
-        }
+        this.collectCcEvents(node, ccEvents)
         currentKey = this.firstTargetForNode(node.key)
         continue
       }
@@ -1535,10 +1766,28 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
-          if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
+          // Lock-4 §3 F4-B, gate B-1 (EXECUTOR SITE 2 of 2 — inside `resolveBranchAdvance`, reachable
+          // ONLY through a parallel branch's second node via `resolveAfterApproveInParallel`; NOT
+          // reached by `resolveAfterApprove`, which tail-calls `resolveFromNode` = site 1 above). A
+          // one-sided edit here without site 1 (or vice versa) is the classic half-wired defect —
+          // gate B-3 pins both arms as independently mutation-discriminating.
+          if (approvalConfig.emptyAssigneePolicy === 'designated') {
+            const fallbackAssignments = this.resolveDesignatedFallbackAssignments(node.key, approvalConfig, sourceStep)
+            if (fallbackAssignments.length > 0) {
+              return {
+                kind: 'pending-approval',
+                approvalNodeKey: node.key,
+                assignments: fallbackAssignments,
+                ccEvents,
+                autoApprovalEvents,
+              }
+            }
+            // Gate B-2 (locked): never chains to 'auto-approve', never falls back further — falls
+            // straight through to the terminal APPROVAL_ASSIGNEE_EMPTY throw below.
+          } else if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
               sourceStep,
@@ -1695,7 +1944,86 @@ export class ApprovalGraphExecutor {
           sourceStep,
         }))
     this.assertThresholdReachable(nodeKey, approvalConfig, assignments)
-    return assignments
+    return applySequentialQueueMetadata(assignments, normalizeApprovalMode(approvalConfig.approvalMode, nodeKey))
+  }
+
+  /**
+   * Lock-4 §3 F4-B (docs/development/approval-lock4-flow-policies-20260817.md, OD-L4-3(a)) — resolves
+   * `emptyAssigneePolicy: 'designated'`'s target set. Quoting the lock: "Fallback is exactly ONE
+   * non-recursive step (locked)." This method is called ONLY from the two empty-assignee branches
+   * below (never recursively, never from itself) — the caller is solely responsible for terminating
+   * at `APPROVAL_ASSIGNEE_EMPTY` when this returns `[]`; it must NEVER be chained into another
+   * `emptyAssigneePolicy` arm, retried, or substituted with a manager lookup ("转审批管理员 is
+   * expressed by designating the admin ... there is NO reverse admin lookup").
+   *
+   * The designated set is routed through the SAME `assignmentResolver` (→ `resolveApprovalAssignees`)
+   * that `static_user`/`static_role` sources already use — built as a synthetic one-off
+   * `ApprovalNodeConfig` carrying only `assigneeSources`, never hand-built — so delegation
+   * substitution and the `seen` dedup collapse apply identically to a designated fallback as to any
+   * other static source.
+   *
+   * PROVENANCE DISCLOSURE: because of the above, a dispatched fallback assignment's
+   * `metadata.resolvedFrom.kind` reads `'static_user'`/`'static_role'` — describing HOW the fallback
+   * itself resolved, not that this seat exists because the node's real primary source (which may be
+   * an entirely different kind, e.g. `manager_at_level`) came back empty. Checked against both known
+   * `resolvedFrom` readers: `ApprovalProductService.isDynamicallyResolvedAssignment` only tests
+   * presence (any resolver-produced `resolvedFrom`, any kind, routes through the active-assignment
+   * conflict check — correct here too), and `AttendanceDecisionTrace.classifyApproverAssignmentMetadata`
+   * special-cases only `direct_manager`/`dept_head`/`manager_at_level`, so a fallback seat falls
+   * through to its generic 'static'/'unknown' bucket rather than being mislabeled as one of those
+   * three. Net effect: no consumer is misled into naming a mechanism that didn't fire, but the
+   * decision trace also cannot yet say "this seat exists because the designated fallback fired" —
+   * a real but narrow observability gap, not a correctness defect. Not fixed here (no new metadata
+   * shape is in the ratified Lock-4 §3 text); flag if a future consumer needs to distinguish it.
+   *
+   * GATE B-2: production callers inject a designated-only resolver whose eligibility input is
+   * frozen at instance creation and read from internal instance metadata on later activations. It
+   * removes user ids that were deactivated and roles that had no active members at that boundary,
+   * while the existing resolver still owns delegation, metadata, and deduplication. Ordinary static
+   * sources do not use that filter. A unit-level executor without the service injection retains the
+   * direct fallback below so this class stays independently testable.
+   */
+  private resolveDesignatedFallbackAssignments(
+    nodeKey: string,
+    approvalConfig: ApprovalNodeConfig,
+    sourceStep: number,
+  ): ApprovalGraphAssignment[] {
+    const fallback = approvalConfig.emptyAssigneeFallback
+    const userIds = fallback?.userIds ?? []
+    const roleIds = fallback?.roleIds ?? []
+    if (userIds.length === 0 && roleIds.length === 0) return []
+    const fallbackSources: ApprovalAssigneeSource[] = [
+      ...(userIds.length > 0 ? [{ kind: 'static_user' as const, userIds }] : []),
+      ...(roleIds.length > 0 ? [{ kind: 'static_role' as const, roleIds }] : []),
+    ]
+    const fallbackResolver = this.options.designatedFallbackResolver ?? this.options.assignmentResolver
+    const fallbackAssignments: ApprovalGraphAssignment[] = fallbackResolver
+      ? fallbackResolver({ nodeKey, sourceStep, config: { assigneeSources: fallbackSources } })
+      // No resolver injected (unit-level executor without the service resolver, mirroring
+      // `resolveAssignmentsForApprovalNode`'s own no-resolver branch immediately above): no
+      // delegation substitution is available at this layer either way, so build directly.
+      : fallbackSources.flatMap((source): ApprovalGraphAssignment[] => {
+          if (source.kind === 'static_user') {
+            return source.userIds.map((assigneeId) => ({ assignmentType: 'user' as const, assigneeId, nodeKey, sourceStep }))
+          }
+          if (source.kind === 'static_role') {
+            return source.roleIds.map((assigneeId) => ({ assignmentType: 'role' as const, assigneeId, nodeKey, sourceStep }))
+          }
+          return []
+        })
+    // T2-4 threshold reachability applies to the FALLBACK set too — `resolveAssignmentsForApprovalNode`
+    // (the primary-source path) already runs this check, but this method bypasses that caller
+    // entirely, so it must re-run it here on its OWN result. Without this, a threshold node whose
+    // DYNAMIC primary source (e.g. `manager_at_level`) resolves empty and falls to a 'designated'
+    // fallback smaller than the node's threshold would dispatch a permanently-unreachable node — the
+    // exact "3-of-2" failure mode `assertThresholdReachable`'s own doc comment describes. A no-op for
+    // site 2 (`resolveBranchAdvance`): threshold mode is publish-time rejected inside a parallel
+    // region, so `normalizeApprovalMode(...) !== 'threshold'` always holds there.
+    this.assertThresholdReachable(nodeKey, approvalConfig, fallbackAssignments)
+    return applySequentialQueueMetadata(
+      fallbackAssignments,
+      normalizeApprovalMode(approvalConfig.approvalMode, nodeKey),
+    )
   }
 
   /**
@@ -1718,7 +2046,7 @@ export class ApprovalGraphExecutor {
     approvalConfig: ApprovalNodeConfig,
     assignments: ApprovalGraphAssignment[],
   ): void {
-    if (normalizeApprovalMode(approvalConfig.approvalMode) !== 'threshold') return
+    if (normalizeApprovalMode(approvalConfig.approvalMode, nodeKey) !== 'threshold') return
     if (assignments.length === 0) return
     const threshold = this.getApprovalThreshold(nodeKey)
     const distinctSlots = new Set(

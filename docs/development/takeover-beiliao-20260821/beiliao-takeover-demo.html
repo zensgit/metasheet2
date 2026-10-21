@@ -1,0 +1,386 @@
+<title>备料接管 · MetaSheet 演示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root{
+    --bg:#eef1f4; --panel:#ffffff; --ink:#1c2430; --ink-soft:#556074; --line:#d3dae3;
+    --steel:#334155; --steel-soft:#5b6b82;
+    --sys:#eef1f5; --sys-ink:#6b7688; --sys-head:#64748b;
+    --prod:#b45309; --prod-band:#fdf3e3; --prod-head:#c2740f;
+    --purc:#15803d; --purc-band:#ecf7ee; --purc-head:#1a8f47;
+    --ware:#1d4ed8; --ware-band:#eaf0fe; --ware-head:#2258d6;
+    --keep:#16a34a; --keep-flash:#c9f2d4; --new:#fff7cd;
+    --danger:#b91c1c; --danger-band:#fbeaea;
+    --chip-45:#1d4ed8; --chip-304:#15803d; --chip-al:#b45309; --chip-ht:#64748b;
+    --shadow:0 1px 2px rgba(20,30,45,.06),0 8px 24px rgba(20,30,45,.06);
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Noto Sans SC',system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  :root:not([data-theme="light"]){}
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#10151c; --panel:#161d27; --ink:#e6ecf3; --ink-soft:#93a1b5; --line:#28323f;
+      --steel:#c3ceda; --steel-soft:#8b99ad;
+      --sys:#1a222d; --sys-ink:#7f8da0; --sys-head:#7f8da0;
+      --prod-band:#2a2113; --purc-band:#12241a; --ware-band:#131d33; --danger-band:#2a1414;
+      --keep-flash:#173a24; --new:#332c10;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#10151c; --panel:#161d27; --ink:#e6ecf3; --ink-soft:#93a1b5; --line:#28323f;
+    --steel:#c3ceda; --steel-soft:#8b99ad; --sys:#1a222d; --sys-ink:#7f8da0; --sys-head:#7f8da0;
+    --prod-band:#2a2113; --purc-band:#12241a; --ware-band:#131d33; --danger-band:#2a1414;
+    --keep-flash:#173a24; --new:#332c10; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5}
+  .wrap{max-width:1280px;margin:0 auto;padding:20px 18px 60px}
+  header.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:6px}
+  header.top h1{font-size:20px;font-weight:700;margin:0;letter-spacing:.5px}
+  .sub{color:var(--ink-soft);font-size:13px}
+  .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--steel-soft);background:var(--panel)}
+  .lead{color:var(--ink-soft);margin:8px 0 16px;max-width:78ch;font-size:13.5px}
+  .lead b{color:var(--ink)}
+
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow);margin-bottom:14px}
+  .btn{font-family:var(--sans);font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:8px 14px;border-radius:8px;cursor:pointer;transition:transform .05s,box-shadow .15s,background .15s}
+  .btn:hover{box-shadow:0 2px 8px rgba(20,30,45,.12)}
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{background:var(--steel);color:#fff;border-color:var(--steel)}
+  .btn.gold{background:var(--prod-head);color:#fff;border-color:var(--prod-head)}
+  .btn:focus-visible{outline:2px solid var(--ware);outline-offset:2px}
+  .spacer{flex:1}
+  .counter{font-size:12.5px;color:var(--ink-soft)}
+  .counter b{color:var(--keep);font-variant-numeric:tabular-nums;font-size:15px}
+  .roleseg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .roleseg button{border:0;background:var(--panel);color:var(--ink-soft);font-family:var(--sans);font-size:12.5px;font-weight:600;padding:7px 11px;cursor:pointer}
+  .roleseg button[aria-pressed="true"]{background:var(--steel);color:#fff}
+
+  .gridwrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:auto}
+  table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}
+  thead .band th{position:sticky;top:0;z-index:5;font-size:11px;font-weight:700;letter-spacing:.6px;text-align:center;padding:7px 6px;color:#fff;border-right:1px solid rgba(255,255,255,.25)}
+  .band .b-sys{background:var(--sys-head)} .band .b-prod{background:var(--prod-head)}
+  .band .b-purc{background:var(--purc-head)} .band .b-ware{background:var(--ware-head)}
+  thead .cols th{position:sticky;top:29px;z-index:5;background:var(--panel);font-size:11.5px;font-weight:600;color:var(--ink-soft);padding:6px 8px;text-align:left;white-space:nowrap;border-bottom:2px solid var(--line);border-right:1px solid var(--line)}
+  thead .cols th.sys{background:var(--sys)}
+  thead .cols th.prod{background:var(--prod-band)} thead .cols th.purc{background:var(--purc-band)} thead .cols th.ware{background:var(--ware-band)}
+  td{padding:0;border-bottom:1px solid var(--line);border-right:1px solid var(--line);white-space:nowrap;font-size:13px;vertical-align:middle}
+  td .cell{padding:6px 8px;min-height:32px;display:flex;align-items:center;gap:6px}
+  td.sys{background:var(--sys);color:var(--sys-ink)}
+  td.sys .cell{cursor:not-allowed}
+  td.editable{background:var(--panel)}
+  td.editable .cell[contenteditable]{cursor:text;outline:none}
+  td.editable .cell[contenteditable]:focus{box-shadow:inset 0 0 0 2px var(--ware);border-radius:4px}
+  td.prod-b{background:var(--prod-band)} td.purc-b{background:var(--purc-band)} td.ware-b{background:var(--ware-band)}
+  .mono{font-family:var(--mono);font-size:12.5px;letter-spacing:-.2px}
+  .num{font-variant-numeric:tabular-nums}
+  /* tree indent */
+  .lvl0 .name{font-weight:700} .lvl1 .name{padding-left:18px} .lvl2 .name{padding-left:36px}
+  .twig{color:var(--ink-soft);font-family:var(--mono);font-size:11px}
+  /* material dict chips */
+  .chip{font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;color:#fff}
+  .chip.c45{background:var(--chip-45)} .chip.c304{background:var(--chip-304)} .chip.cal{background:var(--chip-al)} .chip.cht{background:var(--chip-ht)}
+  select.dict{font-family:var(--sans);font-size:12.5px;border:1px solid var(--line);border-radius:6px;padding:3px 4px;background:var(--panel);color:var(--ink);max-width:120px}
+  .row-new{animation:newrow 2.2s ease}
+  @keyframes newrow{0%,60%{background:var(--new)}100%{background:transparent}}
+  tr.row-new td:not(.sys){background:var(--new)}
+  .keepflash{animation:keep 1.8s ease}
+  @keyframes keep{0%{background:var(--keep-flash);box-shadow:inset 0 0 0 2px var(--keep)}100%{background:inherit;box-shadow:none}}
+  .badge-hand{font-size:10px;font-weight:700;color:#fff;background:var(--steel-soft);border-radius:4px;padding:1px 5px;margin-left:6px}
+  .badge-borrow{font-size:10px;font-weight:700;color:var(--prod);background:var(--prod-band);border:1px solid var(--prod);border-radius:4px;padding:0 5px;margin-left:6px}
+
+  .split{display:grid;grid-template-columns:1fr;gap:14px;margin-top:16px}
+  @media(min-width:920px){.split{grid-template-columns:1.15fr .85fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:16px 18px}
+  .card h3{margin:0 0 10px;font-size:14.5px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .vs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .vs .col{border:1px solid var(--line);border-radius:9px;padding:11px 12px;font-size:12.5px}
+  .vs .old{background:var(--danger-band)} .vs .newc{background:var(--purc-band)}
+  .vs h4{margin:0 0 7px;font-size:12px;letter-spacing:.4px;text-transform:none}
+  .vs .old h4{color:var(--danger)} .vs .newc h4{color:var(--purc)}
+  .vs ul{margin:0;padding-left:16px} .vs li{margin:3px 0;color:var(--ink)}
+  .sec-list{list-style:none;margin:0;padding:0}
+  .sec-list li{display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-bottom:1px dashed var(--line);font-size:12.8px}
+  .sec-list li:last-child{border-bottom:0}
+  .x{color:var(--danger);font-weight:700;flex:0 0 auto} .ok{color:var(--keep);font-weight:700;flex:0 0 auto}
+  .sec-list code{font-family:var(--mono);font-size:11.5px;background:var(--danger-band);color:var(--danger);padding:0 4px;border-radius:4px}
+  .note{font-size:11.5px;color:var(--ink-soft);margin-top:10px;line-height:1.6}
+  .steps{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px;padding:0;list-style:none;counter-reset:s}
+  .steps li{counter-increment:s;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 12px 6px 30px;position:relative;font-size:12.5px;color:var(--ink-soft)}
+  .steps li::before{content:counter(s);position:absolute;left:6px;top:50%;transform:translateY(-50%);width:18px;height:18px;border-radius:50%;background:var(--steel);color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center}
+  .steps li.done{color:var(--keep)} .steps li.done::before{background:var(--keep)}
+  footer{margin-top:22px;color:var(--ink-soft);font-size:11.5px;text-align:center;line-height:1.7}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:10px 0 0;font-size:11.5px;color:var(--ink-soft)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>备料接管 · MetaSheet 演示</h1>
+    <span class="tag">合成数据 · 非真实客户数据</span>
+    <span class="tag">零外部写 · 只读演示</span>
+  </header>
+  <p class="lead">
+    这是把贵司现有<b>生产备料系统</b>迁入 MetaSheet 后的样子——<b>同样的字段、同样的字典、同样的生产/采购/仓库分工</b>。
+    下面用一个合成项目演示核心动作:拉取 BOM → 三方在同一张表里填列 → <b>再次拉取新批次时,所有人工填写的值原样保留</b>(贵司今天最依赖、也最怕出错的那一步)。
+  </p>
+
+  <ul class="steps" id="steps">
+    <li id="st1">拉取项目 BOM</li>
+    <li id="st2">三方填列(已预填)</li>
+    <li id="st3">拉取新批次 · 人工值保留</li>
+  </ul>
+
+  <div class="toolbar">
+    <button class="btn primary" id="pull1">① 拉取项目 BOM（PLM）</button>
+    <button class="btn gold" id="pull2" disabled>② 拉取新批次（保留人工值）</button>
+    <button class="btn" id="addhand" disabled>+ 手工新增一行</button>
+    <span class="spacer"></span>
+    <span class="counter">本次刷新保留人工填写 <b id="keptN">0</b> 个单元格</span>
+    <span class="roleseg" role="group" aria-label="高亮角色列">
+      <button data-role="all" aria-pressed="true">全部</button>
+      <button data-role="prod" aria-pressed="false">生产</button>
+      <button data-role="purc" aria-pressed="false">采购</button>
+      <button data-role="ware" aria-pressed="false">仓库</button>
+    </span>
+  </div>
+
+  <div class="gridwrap">
+    <table id="grid">
+      <thead>
+        <tr class="band">
+          <th class="b-sys" colspan="5">系统 / PLM（只读）</th>
+          <th class="b-prod" colspan="6">生产</th>
+          <th class="b-purc" colspan="3">采购</th>
+          <th class="b-ware" colspan="3">仓库</th>
+        </tr>
+        <tr class="cols">
+          <th class="sys">图号 / 层级</th>
+          <th class="sys">名称</th>
+          <th class="sys">规格</th>
+          <th class="sys">数量</th>
+          <th class="sys">pliObjId</th>
+          <th class="prod">材料</th>
+          <th class="prod">材料类型</th>
+          <th class="prod">毛胚类型</th>
+          <th class="prod">领料节点</th>
+          <th class="prod">需求日期</th>
+          <th class="prod">备注</th>
+          <th class="purc">回复日期</th>
+          <th class="purc">采购员</th>
+          <th class="purc">采购备注</th>
+          <th class="ware">报料情况</th>
+          <th class="ware">实际到料</th>
+          <th class="ware">发料确认</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td class="sys" colspan="17"><div class="cell" style="color:var(--ink-soft)">点击「① 拉取项目 BOM」加载合成项目 <b>2-2035001</b> 的备料明细…</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="legend">
+    <span><i class="sw" style="background:var(--sys-head)"></i>系统/PLM（不可编辑，刷新覆盖）</span>
+    <span><i class="sw" style="background:var(--prod-head)"></i>生产列</span>
+    <span><i class="sw" style="background:var(--purc-head)"></i>采购列</span>
+    <span><i class="sw" style="background:var(--ware-head)"></i>仓库列</span>
+    <span><i class="sw" style="background:var(--keep)"></i>刷新后保留的人工值</span>
+    <span><i class="sw" style="background:var(--new)"></i>本次新增行</span>
+  </div>
+
+  <div class="split">
+    <div class="card">
+      <h3>② 拉取新批次时,发生了什么</h3>
+      <div class="vs">
+        <div class="col old">
+          <h4>旧系统（今天）</h4>
+          <ul>
+            <li>先插新批、<b>后删旧批</b>,采购/仓库值靠 BeanUtils 拷贝到新行</li>
+            <li><b>无事务</b>:中途失败会留下半新半旧数据</li>
+            <li>借用件的历史填写靠 <span class="mono">reuseStockInfoExistsInDb</span> 取最近一次</li>
+          </ul>
+        </div>
+        <div class="col newc">
+          <h4>MetaSheet（接管后）</h4>
+          <ul>
+            <li>按 <span class="mono">pliObjId</span> 幂等重同步:同行原地保留,新键才插入</li>
+            <li><b>单事务</b>:要么全成、要么回滚,永不半批</li>
+            <li>采购/仓库是<b>同一行的列</b>,天然不会丢——拷贝逻辑消失</li>
+            <li>借用件沿用<b>同一条"取最近填写"</b>规则,行为一致</li>
+          </ul>
+        </div>
+      </div>
+      <p class="note">同一套业务规则,去掉旧代码里最大的正确性风险(无事务的插入-删除批次交换)。手工新增的行(无 pliObjId)也会被重新挂到父组件下保留。</p>
+    </div>
+
+    <div class="card">
+      <h3>接管第一天,顺手关闭的风险</h3>
+      <ul class="sec-list">
+        <li><span class="x">✕</span><div>现系统 <code>SecurityConfig /** permitAll</code> + TokenFilter 被注释 → <b>所有接口匿名可达</b></div></li>
+        <li><span class="x">✕</span><div><code>/erp/*</code> 的 K3 <b>写</b>端点(Material/Save、BOM/Save、PD/Save…)<b>全网匿名可写</b></div></li>
+        <li><span class="x">✕</span><div>登录<b>明文比对密码</b>;数据库 / K3 / 钉钉 / SMB 凭据<b>明文存配置</b></div></li>
+        <li><span class="ok">✓</span><div>接管后:统一鉴权 + 只读对接 + 加密凭据,以上入口<b>当天关闭</b></div></li>
+      </ul>
+      <p class="note">迁移不丢功能:BOM 拉取、共享网格、批次复用、需求日期、钉钉待办、Excel 导入导出全部保留;被迫停用的 Excel 导入(因缺 pliObjId)也可重新启用。</p>
+    </div>
+  </div>
+
+  <footer>
+    合成演示 · 字段与字典结构取自贵司现系统真实定义 · 不含任何真实生产数据或凭据<br>
+    接管路线:本演示 → 只读窗口授权 → 历史数据迁移与双轨对账 → 按项目号切换上线 → 后续 CRM / 派工 / 项目管理按需扩展
+  </footer>
+</div>
+
+<script>
+(function(){
+  var DICT_MAT=[["45#钢","c45"],["304不锈钢","c304"],["铝合金6061","cal"],["铸铁HT200","cht"]];
+  var DICT_RMT=["圆钢","板材","管材","型材"];
+  var DICT_EMB=["锻件","铸件","棒料","板料"];
+  var DICT_PICK=["粗加工前","精加工前","装配前"];
+  function matChip(v){var m={"45#钢":"c45","304不锈钢":"c304","铝合金6061":"cal","铸铁HT200":"cht"};return v?'<span class="chip '+(m[v]||"cht")+'">'+v+'</span>':'';}
+  // batch 1 rows: [lvl, code, name, spec, qty, pliObjId, prefill{}]
+  var BATCH1=[
+    [0,"J0225048-00","罐体总成","—","1","600087700",{}],
+    [1,"J0225048-14","罐底部分","组合件","1","600087725",{mat:"304不锈钢",rmt:"板材",emb:"板料",pick:"精加工前",need:"2026-09-05",rem:"",prep:""}],
+    [2,"J0225048-14-01","底板","δ12×Φ800","1","600087731",{mat:"304不锈钢",rmt:"板材",emb:"板料",pick:"精加工前",need:"2026-09-05"}],
+    [2,"J0225048-14-02","加强筋","δ8×60×740","6","600087732",{mat:"304不锈钢",rmt:"板材",emb:"板料",pick:"粗加工前",need:"2026-09-03"}],
+    [1,"J0225048-21","罐身","Φ800×1200","1","600087740",{mat:"304不锈钢",rmt:"管材",emb:"棒料",pick:"精加工前",need:"2026-09-08"}],
+    [1,"GB/T5782-M16","六角螺栓","M16×60",'24',"600011902",{borrow:true}]
+  ];
+  // batch 2 delta: one new row (封头) + qty change on 加强筋 (structure refresh) — human values must survive
+  var BATCH2_NEW=[1,"J0225048-32","封头","EHA Φ800","1","600087760",{mat:"304不锈钢",rmt:"板材",emb:"锻件",pick:"精加工前",need:"2026-09-10"}];
+  var BATCH2_QTY={"600087732":"8"}; // 加强筋 qty 6 -> 8 (PLM structure change), human fills preserved
+
+  var tbody=document.getElementById('tbody');
+  var pull1=document.getElementById('pull1'),pull2=document.getElementById('pull2'),addhand=document.getElementById('addhand');
+  var keptN=document.getElementById('keptN');
+  var handSeq=0;
+
+  function opt(list,cur){var s='<select class="dict"><option value=""></option>';list.forEach(function(o){var v=Array.isArray(o)?o[0]:o;s+='<option'+(v===cur?' selected':'')+'>'+v+'</option>';});return s+'</select>';}
+  function matSelect(cur){var s='<select class="dict"><option value=""></option>';DICT_MAT.forEach(function(o){s+='<option'+(o[0]===cur?' selected':'')+'>'+o[0]+'</option>';});return s+'</select>';}
+
+  function editCell(cls,html){return '<td class="editable '+cls+'"><div class="cell">'+html+'</div></td>';}
+  function editText(cls,val){return '<td class="editable '+cls+'"><div class="cell" contenteditable spellcheck="false">'+(val||'')+'</div></td>';}
+  function sysCell(html,extra){return '<td class="sys'+(extra?' '+extra:'')+'"><div class="cell">'+html+'</div></td>';}
+
+  function rowHtml(r,isNew,isHand){
+    var lvl=r[0],code=r[1],name=r[2],spec=r[3],qty=r[4],pli=r[5],pf=r[6]||{};
+    var nameCell='<span class="twig">'+(lvl===0?'▣':(lvl===1?'├':'└'))+'</span> <span class="name">'+name+'</span>'+(isHand?'<span class="badge-hand">手工</span>':'')+(pf.borrow?'<span class="badge-borrow">借用件</span>':'');
+    var tr='<tr class="lvl'+lvl+(isNew?' row-new':'')+'" data-pli="'+(pli||'')+'">';
+    tr+=sysCell('<span class="mono">'+code+'</span>');
+    tr+='<td class="sys"><div class="cell">'+nameCell+'</div></td>';
+    tr+=sysCell(spec);
+    tr+=sysCell('<span class="num">'+qty+'</span>');
+    tr+=sysCell('<span class="mono" style="opacity:.7">'+(pli||'—')+'</span>');
+    // production
+    tr+=editCell('prod-b',matSelect(pf.mat||''));
+    tr+=editCell('prod-b',opt(DICT_RMT,pf.rmt||''));
+    tr+=editCell('prod-b',opt(DICT_EMB,pf.emb||''));
+    tr+=editCell('prod-b',opt(DICT_PICK,pf.pick||''));
+    tr+=editText('prod-b',pf.need||'');
+    tr+=editText('prod-b',pf.rem||'');
+    // purchasing
+    tr+=editText('purc-b',pf.prd||'');
+    tr+=editText('purc-b',pf.pm||'');
+    tr+=editText('purc-b',pf.prem||'');
+    // warehouse
+    tr+=editText('ware-b',pf.wr||'');
+    tr+=editText('ware-b',pf.wd||'');
+    tr+=editText('ware-b',pf.wc||'');
+    return tr+'</tr>';
+  }
+
+  function render(rows){
+    tbody.innerHTML=rows.map(function(r){return rowHtml(r,false,r[7]);}).join('');
+  }
+
+  // capture current human values by pli (and by row index for hand rows)
+  function snapshot(){
+    var map={};
+    Array.prototype.forEach.call(tbody.querySelectorAll('tr'),function(tr){
+      var pli=tr.getAttribute('data-pli')||('hand-'+(tr.getAttribute('data-hand')||''));
+      var cells=tr.querySelectorAll('td.editable .cell');
+      var vals=[];
+      cells.forEach(function(c){vals.push(c.querySelector('select')?c.querySelector('select').value:c.textContent.trim());});
+      map[pli]=vals;
+    });
+    return map;
+  }
+  function applySnapshot(prev){
+    var kept=0;
+    Array.prototype.forEach.call(tbody.querySelectorAll('tr'),function(tr){
+      var pli=tr.getAttribute('data-pli')||('hand-'+(tr.getAttribute('data-hand')||''));
+      var saved=prev[pli];if(!saved)return;
+      var cells=tr.querySelectorAll('td.editable .cell');
+      cells.forEach(function(c,i){
+        var v=saved[i];if(v===undefined||v==='')return;
+        var sel=c.querySelector('select');
+        if(sel){if(sel.value!==v){sel.value=v;}}
+        else{c.textContent=v;}
+        if(v){c.parentElement.classList.add('keepflash');kept++;}
+      });
+    });
+    return kept;
+  }
+
+  pull1.addEventListener('click',function(){
+    render(BATCH1);
+    pull1.disabled=true;pull2.disabled=false;addhand.disabled=false;
+    document.getElementById('st1').classList.add('done');
+    document.getElementById('st2').classList.add('done');
+    keptN.textContent='0';
+  });
+
+  addhand.addEventListener('click',function(){
+    handSeq++;
+    var r=[2,"（手工）临时件-"+handSeq,"车间自加","1","",""," "];
+    var tmp=document.createElement('tbody');tmp.innerHTML=rowHtml(r,true,true);
+    var tr=tmp.firstChild;tr.setAttribute('data-hand',String(handSeq));tr.removeAttribute('data-pli');
+    tbody.appendChild(tr);
+  });
+
+  pull2.addEventListener('click',function(){
+    // 1) snapshot current human fills
+    var prev=snapshot();
+    // 2) rebuild structure from "new PLM batch": batch1 + qty change + new row, preserving hand rows
+    var handRows=Array.prototype.filter.call(tbody.querySelectorAll('tr[data-hand]'),function(t){return true;})
+      .map(function(t){return t;});
+    var next=BATCH1.map(function(r){
+      var c=r.slice();var pf=Object.assign({},r[6]);
+      if(BATCH2_QTY[r[5]]){c[4]=BATCH2_QTY[r[5]];} // structure/quantity refreshed from PLM
+      c[6]=pf;return c;
+    });
+    // insert new 封头 after 罐身 (index of 600087740)
+    var idx=next.findIndex(function(r){return r[5]==='600087740';});
+    next.splice(idx+1,0,BATCH2_NEW);
+    // render new structure
+    tbody.innerHTML=next.map(function(r){return rowHtml(r,r[5]==='600087760');}).join('');
+    // re-append hand rows (re-parented / survived)
+    handRows.forEach(function(t){t.classList.add('row-new');tbody.appendChild(t);});
+    // 3) restore human fills (existing pliObjId preserved; borrowed part follows the same "latest prior fill" rule)
+    var kept=applySnapshot(prev);
+    keptN.textContent=String(kept);
+    document.getElementById('st3').classList.add('done');
+    pull2.textContent='② 再拉一次（值仍保留）';
+    // scroll new row into view
+    var nr=tbody.querySelector('tr[data-pli="600087760"]');if(nr)nr.scrollIntoView({block:'center',behavior:'smooth'});
+  });
+
+  // role highlight
+  document.querySelectorAll('.roleseg button').forEach(function(b){
+    b.addEventListener('click',function(){
+      document.querySelectorAll('.roleseg button').forEach(function(x){x.setAttribute('aria-pressed','false');});
+      b.setAttribute('aria-pressed','true');
+      var role=b.getAttribute('data-role');
+      ['prod','purc','ware'].forEach(function(rl){
+        var on=(role==='all'||role===rl);
+        document.querySelectorAll('td.'+rl+'-b').forEach(function(td){td.style.opacity=on?'1':'.32';});
+        document.querySelectorAll('thead .cols th.'+rl).forEach(function(th){th.style.opacity=on?'1':'.4';});
+      });
+    });
+  });
+})();
+</script>

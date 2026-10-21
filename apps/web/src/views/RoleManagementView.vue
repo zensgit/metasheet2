@@ -30,7 +30,7 @@
           type="button"
           @click="selectRole(role)"
         >
-          <strong>{{ role.name }}</strong>
+          <strong>{{ presentRoleTitle(role) }}</strong>
           <span>{{ role.id }}</span>
           <small>成员数：{{ role.memberCount }}</small>
         </button>
@@ -44,7 +44,7 @@
           </label>
           <label class="admin-page__field">
             <span>角色名称</span>
-            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin">
+            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin" @input="markNameEdited()">
           </label>
         </div>
 
@@ -63,8 +63,8 @@
               >
               <div>
                 <strong>{{ permission.code }}</strong>
-                <p>{{ permission.name }}</p>
-                <small>{{ permission.description || '无描述' }}</small>
+                <p>{{ presentPermission(permission).name }}</p>
+                <small>{{ presentPermission(permission).description || '无描述' }}</small>
               </div>
             </label>
           </div>
@@ -82,6 +82,8 @@
             <span v-if="selectedPermissions.length === 0" class="admin-page__empty">尚未选择权限</span>
           </div>
         </section>
+
+        <RoleMembersPanel v-if="isEditing" :role-id="selectedRoleId" />
 
         <footer class="admin-page__footer">
           <button class="admin-page__button" type="button" :disabled="busy || !canSave" @click="void saveRole()">
@@ -108,12 +110,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { presentPermission, presentRoleTitle, roleNameForSave } from './builtinCatalogPresentation'
+import RoleMembersPanel from './RoleMembersPanel.vue'
 
 type RoleCatalogItem = {
   id: string
   name: string
   permissions: string[]
   memberCount: number
+  /**
+   * Optimistic-concurrency token from GET /api/admin/roles. Echoed back on save as
+   * `expectedUpdatedAt` so that saving a grid loaded before someone else's revoke is
+   * answered 409 instead of silently resurrecting the revoked codes.
+   */
+  updatedAt?: string | null
 }
 
 type PermissionCatalogItem = {
@@ -131,11 +141,30 @@ const permissions = ref<PermissionCatalogItem[]>([])
 const selectedRoleId = ref('')
 const draftRoleId = ref('')
 const draftRoleName = ref('')
+const nameEdited = ref(false)
 const selectedPermissions = ref<string[]>([])
 
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) || null)
 const isEditing = computed(() => selectedRoleId.value.length > 0)
 const canSave = computed(() => draftRoleName.value.trim().length > 0 && draftRoleId.value.trim().length > 0)
+
+/**
+ * Server refusal codes this page words itself (the server message is English). zh is shown; en is kept
+ * for a later locale switch. ROLE_NAME_RESERVED: POST / PUT /api/roles refuse `admin` and the built-in
+ * role names in any spelling (#6348 follow-up).
+ */
+const ROLE_WRITE_ERROR_COPY: Record<string, { zh: string; en: string }> = {
+  ROLE_NAME_RESERVED: {
+    zh: '该名称为系统保留名，不能用于自定义角色',
+    en: 'This name is reserved for a built-in role and cannot be used for a custom role.',
+  },
+}
+
+function roleWriteErrorMessage(error: unknown, fallback: string): string {
+  const record = (error ?? {}) as Record<string, unknown>
+  const copy = ROLE_WRITE_ERROR_COPY[String(record.code || '')]
+  return copy ? copy.zh : String(record.message || fallback)
+}
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
@@ -150,10 +179,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
   }
 }
 
+function markNameEdited(): void {
+  nameEdited.value = true
+}
+
 function applyRole(role: RoleCatalogItem | null): void {
   selectedRoleId.value = role?.id || ''
   draftRoleId.value = role?.id || ''
-  draftRoleName.value = role?.name || ''
+  draftRoleName.value = role ? presentRoleTitle(role) : ''
+  nameEdited.value = false
   selectedPermissions.value = [...(role?.permissions || [])]
 }
 
@@ -172,7 +206,14 @@ function togglePermission(code: string, checked: boolean): void {
   selectedPermissions.value = Array.from(current.values()).sort()
 }
 
-async function loadCatalog(): Promise<void> {
+/**
+ * Returns whether the reload actually SUCCEEDED. The caller needs that distinction: this
+ * function swallows its own error and leaves `roles.value` holding the pre-save array, so a
+ * post-save reconciliation that cannot tell "reload failed" from "reload disagrees" would
+ * report a data loss that never happened — and teach admins to ignore the one message this
+ * page added to make silent drops visible.
+ */
+async function loadCatalog(): Promise<boolean> {
   loading.value = true
   try {
     const [rolesResponse, permissionsResponse] = await Promise.all([
@@ -202,37 +243,96 @@ async function loadCatalog(): Promise<void> {
       const latest = roles.value.find((role) => role.id === selectedRoleId.value) || null
       applyRole(latest)
     }
+    return true
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载角色失败', 'error')
+    return false
   } finally {
     loading.value = false
   }
 }
 
+function sameCodeSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  const left = [...a].sort()
+  const right = [...b].sort()
+  return left.every((code, index) => code === right[index])
+}
+
 async function saveRole(): Promise<void> {
   if (!canSave.value) return
   busy.value = true
+  // `isEditing` is derived from selectedRoleId, which applyRole() rewrites below — read
+  // it here so the closing message still describes the action that was actually taken.
+  const wasEditing = isEditing.value
   try {
-    const payload = {
-      id: draftRoleId.value.trim(),
-      name: draftRoleName.value.trim(),
+    const payload: Record<string, unknown> = {
+      id: wasEditing ? selectedRoleId.value : draftRoleId.value.trim(),
+      // The name field may show a Chinese builtin title. Leaving it untouched keeps the
+      // loaded raw name; typing in the field is an explicit rename.
+      name: wasEditing
+        ? roleNameForSave(selectedRole.value ? selectedRole.value.name : null, draftRoleName.value, nameEdited.value)
+        : draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
+    // Mid-air-collision token: the grid being submitted is the one loaded with this
+    // timestamp, so a save that lands after someone else's change is refused (409) instead
+    // of replaying a stale set over it.
+    if (wasEditing && selectedRole.value?.updatedAt) {
+      payload.expectedUpdatedAt = selectedRole.value.updatedAt
+    }
+    if (wasEditing && selectedRole.value) {
+      // The permission set as LOADED. `updatedAt` alone would miss a writer that changes
+      // role_permissions without touching the roles row (the plugin provisioner does
+      // exactly that), and the DELETE this save implies would then revoke codes the admin
+      // never unchecked and never saw.
+      payload.expectedPermissions = [...(selectedRole.value.permissions || [])]
+    }
+    const submittedPermissions = [...selectedPermissions.value]
 
-    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
+    // An EXISTING role is addressed by the id it was LOADED with, never a trimmed copy: a
+    // stored id that differs only by invisible padding would otherwise address its
+    // look-alike — e.g. the real `<ns>_admin` instead of the padded duplicate.
+    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(selectedRoleId.value)}` : '/api/roles', {
       method: isEditing.value ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
     const body = await readJson(response)
+    const errorCode = String((body.error as Record<string, unknown> | undefined)?.code || '')
+    if (response.status === 409 && errorCode === 'ROLE_MODIFIED') {
+      // Someone else changed this role after this grid was loaded. Re-read it rather than
+      // offering 重试 on a stale draft — replaying it is exactly what the token prevents.
+      await loadCatalog()
+      setStatus('该角色已被其他人修改，已重新加载最新权限，请确认后再保存', 'error')
+      return
+    }
     if (!response.ok || body.ok !== true) {
-      throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
+      throw new Error(roleWriteErrorMessage(body.error, '保存角色失败'))
     }
 
     const currentId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)
-    await loadCatalog()
+    const reloaded = await loadCatalog()
     const latest = roles.value.find((role) => role.id === currentId) || null
     applyRole(latest)
-    setStatus(isEditing.value ? '角色已更新' : '角色已创建')
+
+    // Do not claim success on the strength of `ok: true` alone. This page used to report
+    // 角色已更新 while the reloaded role still showed the OLD checkboxes, because the
+    // backend silently dropped the permission set on edit; the reverted grid was the only
+    // signal, and it looked like a rendering quirk. Re-reading the persisted set and
+    // saying so when it disagrees with what was submitted makes that class of silent drop
+    // visible here — including against a server that has not been updated yet.
+    if (!reloaded) {
+      // The write itself answered ok:true; only the re-read failed. Saying「不一致」here
+      // would assert a data loss that did not happen (roles.value still holds the PRE-save
+      // array, so the comparison below would be old-vs-submitted and always disagree).
+      setStatus('已保存，但无法重新加载角色目录以核对，请刷新确认', 'error')
+    } else if (!latest) {
+      setStatus('已保存，但重新加载后未找到该角色，请刷新确认', 'error')
+    } else if (!sameCodeSet(latest.permissions || [], submittedPermissions)) {
+      setStatus(`已保存名称，但服务端记录的权限为 ${latest.permissions?.length ?? 0} 项，与提交的 ${submittedPermissions.length} 项不一致，请刷新确认`, 'error')
+    } else {
+      setStatus(wasEditing ? '角色已更新' : '角色已创建')
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
   } finally {
@@ -246,7 +346,10 @@ async function deleteRole(): Promise<void> {
 
   busy.value = true
   try {
-    const response = await apiFetch(`/api/roles/${encodeURIComponent(draftRoleId.value.trim())}`, {
+    // The id as LOADED (see saveRole): a trimmed id would delete the real `<ns>_admin` — and
+    // with it every membership and delegated audience — when the admin meant to remove a
+    // padded look-alike of it.
+    const response = await apiFetch(`/api/roles/${encodeURIComponent(selectedRoleId.value)}`, {
       method: 'DELETE',
     })
     const body = await readJson(response)

@@ -23,6 +23,76 @@ function stubComponent(name: string) {
   })
 }
 
+// Rename affordance (feat/multitable-rename): unlike the other mocked children above, these two
+// stubs need to actually EMIT (rename-sheet / rename) so the tests below can drive
+// MultitableWorkbench.vue's onRenameSheet/onRenameBase wiring — a bare stubComponent() has no way
+// to trigger an emit. They also surface the canManageFields prop they were passed via a data
+// attribute, as a cheap positive proof that the workbench threads caps.canManageFields.value down
+// (the negative case — the affordance actually disappearing when the capability is false — is
+// exhaustively covered at the component level in meta-sheet-view-rail.spec.ts / meta-base-picker.spec.ts).
+function stubMetaSheetViewRail() {
+  return defineComponent({
+    name: 'MetaSheetViewRail',
+    props: { canManageFields: { type: Boolean, default: false } },
+    emits: ['select-sheet', 'select-view', 'create-sheet', 'toggle-personal', 'rename-sheet'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaSheetViewRail': 'true',
+        'data-can-manage-fields': String(props.canManageFields === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-rename-sheet',
+          onClick: () => emit('rename-sheet', 'sheet_orders', 'Orders Renamed'),
+        }, 'rename-sheet'),
+      ])
+    },
+  })
+}
+
+// #5743's keep-alive test needs to CLOSE a manager dialog. MetaFieldManager is rendered
+// unconditionally with a :visible prop, so a bare stubComponent() gives the test no way to emit
+// 'close' back to the workbench; this stub surfaces both the visible prop and a close button.
+function stubMetaFieldManager() {
+  return defineComponent({
+    name: 'MetaFieldManager',
+    props: { visible: { type: Boolean, default: false } },
+    emits: ['close'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaFieldManager': 'true',
+        'data-visible': String(props.visible === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-close-field-manager',
+          onClick: () => emit('close'),
+        }, 'close'),
+      ])
+    },
+  })
+}
+
+function stubMetaBasePicker() {
+  return defineComponent({
+    name: 'MetaBasePicker',
+    props: { canManageFields: { type: Boolean, default: false } },
+    emits: ['select', 'create', 'toggle-favorite', 'rename'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaBasePicker': 'true',
+        'data-can-manage-fields': String(props.canManageFields === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-rename-base',
+          onClick: () => emit('rename', 'base_ops', 'Ops Base Renamed'),
+        }, 'rename-base'),
+      ])
+    },
+  })
+}
+
 let workbenchMock: any
 let gridMock: any
 
@@ -97,7 +167,7 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
   bulkImportRecords: vi.fn(),
 }))
 
-vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubMetaSheetViewRail() }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
@@ -106,13 +176,13 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubC
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
 vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
-vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubMetaFieldManager() }))
 vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
 vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
-vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
+vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubMetaBasePicker() }))
 
 vi.mock('../src/multitable/components/MetaToast.vue', () => ({
   default: defineComponent({
@@ -128,6 +198,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -162,6 +233,8 @@ function createWorkbenchMock() {
       deleteView: vi.fn(),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
+      renameSheet: vi.fn().mockResolvedValue({ sheet: { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders Renamed', description: null } }),
+      renameBase: vi.fn().mockResolvedValue({ base: { id: 'base_ops', name: 'Ops Base Renamed' } }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([
@@ -250,6 +323,10 @@ function createGridMock() {
     deleteRecord: vi.fn(),
     resolveRowActions: vi.fn(() => null),
     loadViewData: vi.fn().mockResolvedValue(true),
+    // #6075 round 2/3: a 视图管理 save of the current view's sort/filter discards the toolbar's unapplied sort/filter
+    // edits before its PATCH; the real method returns a `restore` for a failed save.
+    discardUnappliedSortFilterEdits: vi.fn(() => vi.fn()),
+    isViewStateLoadedFor: vi.fn(() => true),
     reloadCurrentPage: vi.fn(),
     dismissConflict: vi.fn(),
     retryConflict: vi.fn(),
@@ -326,6 +403,9 @@ describe('MultitableWorkbench manager-driven config flow', () => {
       },
     })
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    // #6075 round 3 (N4): a config-only save of a view that is not the current one (view_grid is) rewrites neither
+    // the current view's sort nor its filter, so the toolbar's staged edits are NOT discarded.
+    expect(gridMock.discardUnappliedSortFilterEdits).not.toHaveBeenCalled()
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
     // #3720 (W3-5b) added an optional `action?: ToastAction` 2nd param to the workbench's local
     // showSuccess(msg, action) wrapper (for History Center deep-link toast actions); it always
@@ -333,5 +413,390 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     // `msg` still records `action === undefined` explicitly as the 2nd arg.
     expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved', undefined)
     expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+})
+
+// Rename affordance (feat/multitable-rename). Both PATCH routes gate server-side on
+// canManageFields — these tests cover the workbench-level wiring: (a) the emit reaches
+// workbench.client.rename*, refreshes via the same paths onUpdateField/onCreateBase use, and (b) a
+// rejected client call (simulating the server's 403) surfaces through showError rather than a
+// silent success, with NO refresh performed on failure.
+describe('MultitableWorkbench rename affordance wiring', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    showErrorSpy.mockReset()
+    showSuccessSpy.mockReset()
+    vi.clearAllMocks()
+  })
+
+  function mountWorkbench(): HTMLDivElement {
+    const Host = defineComponent({
+      setup() {
+        return () => h(MultitableWorkbench as Component)
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    return container!
+  }
+
+  it('threads caps.canManageFields.value into both the sheet rail and the base picker', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    expect(root.querySelector('[data-stub-MetaSheetViewRail]')?.getAttribute('data-can-manage-fields')).toBe('true')
+    expect(root.querySelector('[data-stub-MetaBasePicker]')?.getAttribute('data-can-manage-fields')).toBe('true')
+  })
+
+  it('wires rename-sheet to client.renameSheet and refreshes sheet meta via loadSheetMeta', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-sheet"]')?.click()
+    await flushUi()
+
+    expect(workbenchMock.client.renameSheet).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.renameSheet).toHaveBeenCalledWith('sheet_orders', 'Orders Renamed')
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a rejected client.renameSheet (simulating the server 403) surfaces through showError, not a silent success, and skips the refresh', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    workbenchMock.client.renameSheet.mockRejectedValueOnce(new Error(message))
+    const root = mountWorkbench()
+    await flushUi()
+    workbenchMock.loadSheetMeta.mockClear() // drop the mount-time call so we assert only the post-click behavior
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-sheet"]')?.click()
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith(message)
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('wires rename to client.renameBase', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-base"]')?.click()
+    await flushUi()
+
+    expect(workbenchMock.client.renameBase).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.renameBase).toHaveBeenCalledWith('base_ops', 'Ops Base Renamed')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a rejected client.renameBase (simulating the server 403) surfaces through showError, not a silent success', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    workbenchMock.client.renameBase.mockRejectedValueOnce(new Error(message))
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-base"]')?.click()
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith(message)
+  })
+})
+
+// #5743: with a manager dialog open, the workbench used to re-arm a 1200 ms interval that called
+// workbench.loadSheetMeta() forever — GET /fields + GET /context roughly once a second, for as long
+// as the dialog stayed open, on a tab nobody was looking at. These tests pin the replacement
+// cadence: one refresh on open, then DIALOG_META_REFRESH_INTERVAL_MS, nothing at all while the tab
+// is hidden, one catch-up refresh when it comes back, and silence once the dialog closes.
+describe('MultitableWorkbench manager dialog meta keep-alive (#5743)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    delete (document as unknown as { visibilityState?: unknown }).visibilityState
+    showErrorSpy.mockReset()
+    showSuccessSpy.mockReset()
+    vi.clearAllMocks()
+  })
+
+  function setVisibility(state: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => state,
+    })
+  }
+
+  // Fake timers do not fake microtasks, so the component's own await chain still needs draining.
+  async function flushFake(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms)
+    await flushUi()
+  }
+
+  function openFieldManager(root: HTMLDivElement) {
+    const managerButtons = Array.from(root.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    const fieldsButton = managerButtons.find((button) => button.textContent?.includes('Fields'))
+    expect(fieldsButton).toBeTruthy()
+    fieldsButton!.click()
+  }
+
+  async function mountWithOpenDialog(): Promise<HTMLDivElement> {
+    const Host = defineComponent({
+      setup() {
+        return () => h(MultitableWorkbench as Component)
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    setVisibility('visible')
+    vi.useFakeTimers()
+    workbenchMock.loadSheetMeta.mockClear() // drop mount-time refreshes; count only the keep-alive
+    openFieldManager(container!)
+    await flushUi()
+    return container!
+  }
+
+  it('refreshes once on open and then only every DIALOG_META_REFRESH_INTERVAL_MS — not once a second', async () => {
+    await mountWithOpenDialog()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(10_000)
+    // The old cadence would have fired ~8 more times by here.
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS - 10_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
+  })
+
+  it('polls nothing while the tab is hidden and catches up once when it becomes visible again', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushFake(30_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // ...and the slow cadence resumes from there rather than replaying the hidden window.
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not refresh the old sheet while a base-context switch is loading', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    // switchBase selects the new base before its context and fields arrive.
+    workbenchMock.activeBaseId.value = 'base_finance'
+    workbenchMock.loading.value = true
+    await flushUi()
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    workbenchMock.activeSheetId.value = 'sheet_invoices'
+    workbenchMock.activeViewId.value = 'view_invoices'
+    workbenchMock.loading.value = false
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_invoices')
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+    expect(workbenchMock.activeBaseId.value).toBe('base_finance')
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_invoices')
+  })
+
+  // #5743 follow-up (merge judge): the catch-up must RESTART the cadence, not just add a refresh on
+  // top of an interval that kept its pre-hidden phase. With the old phase standing, "open, 5 s, tab
+  // hidden 20 s, tab back" refreshed at t=25 s (catch-up) and again at t=30 s (the tick that had
+  // been queued since t=15 s) — two round trips five seconds apart inside one nominal 15 s window.
+  it('restarts the interval phase from the visibility catch-up', async () => {
+    const root = await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    await flushFake(5_000)
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+
+    // t = 25 s: the t = 15 s tick landed on a hidden tab and was skipped.
+    await flushFake(20_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // t = 39 s. The pre-change build fired here (its old phase still had a tick due at t = 30 s).
+    await flushFake(14_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // t = 40 s: exactly one full interval after the catch-up.
+    await flushFake(1_000)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(3)
+
+    // The re-armed interval is still the one teardown knows about — closing the dialog silences it,
+    // which is also the proof that re-arming left no orphaned second interval behind.
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+    const callsAfterClose = workbenchMock.loadSheetMeta.mock.calls.length
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS * 3)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(callsAfterClose)
+  })
+
+  it('stops entirely once the dialog closes, including the visibility catch-up', async () => {
+    const root = await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+    workbenchMock.loadSheetMeta.mockClear()
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS * 4)
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  // The catch-up listener is document-scoped and outlives the dialog, so stopDialogMetaRefresh has
+  // to detach it (the interval alone is not the whole teardown). Behaviourally it is masked by the
+  // dialogMetaRefreshWanted() re-check, hence the listener-identity assertion.
+  it('detaches the visibilitychange listener when the dialog closes', async () => {
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+    const root = await mountWithOpenDialog()
+    const added = addSpy.mock.calls
+      .filter(([type]) => type === 'visibilitychange')
+      .map(([, handler]) => handler)
+    expect(added).toHaveLength(1)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-close-field-manager"]')?.click()
+    await flushUi()
+
+    const removed = removeSpy.mock.calls
+      .filter(([type]) => type === 'visibilitychange')
+      .map(([, handler]) => handler)
+    expect(removed).toContain(added[0])
+  })
+
+  // Teardown has to cancel the QUEUED re-run too, not just the interval and the listener: a refresh
+  // that is still awaiting when the workbench unmounts comes back into a finally whose re-run clause
+  // is armed (the sheet changed mid-flight) and whose dialog refs still read "open" — that used to
+  // put one more GET /fields + GET /context on the wire against a dead component.
+  it('fires nothing after unmount, even with a refresh in flight and a sheet switch queued', async () => {
+    await mountWithOpenDialog()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
+
+    // Hold the keep-alive tick's refresh open.
+    const pending: { settle: (value: boolean) => void } = { settle: () => {} }
+    workbenchMock.loadSheetMeta.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { pending.settle = resolve }),
+    )
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // Sheet switches while that refresh is in flight -> the finally's re-run clause arms.
+    workbenchMock.activeSheetId.value = 'sheet_invoices'
+    await flushUi()
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    app!.unmount()
+    app = null
+    pending.settle(true)
+    await flushUi()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+  })
+
+  // The keep-alive also reseated grid.fields with a brand-new array on every tick, which invalidates
+  // every grid computed (and re-renders the table) even when the refresh brought back the very same
+  // field objects — which, with the composable's fingerprint skip, is now the steady state.
+  it('leaves grid.fields identity alone when a refresh brings back the same field objects', async () => {
+    await mountWithOpenDialog()
+    const seeded = gridMock.fields.value
+    expect(seeded.length).toBeGreaterThan(0)
+
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+    expect(gridMock.fields.value).toBe(seeded)
+
+    // A real field change still reseats it.
+    workbenchMock.fields.value = [
+      ...workbenchMock.fields.value,
+      { id: 'fld_qty', name: 'Qty', type: 'number' },
+    ]
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(gridMock.fields.value).not.toBe(seeded)
+    expect(gridMock.fields.value.map((field: { id: string }) => field.id)).toContain('fld_qty')
+  })
+
+  // Same teardown hole on the other side of the await: the refresh's own grid.fields write lands
+  // after loadSheetMeta settles, so an unmount in between must cancel it too (here the answer
+  // genuinely changed, which is the only way the write is observable).
+  it('does not write grid.fields from a refresh that settles after unmount', async () => {
+    await mountWithOpenDialog()
+    const seeded = gridMock.fields.value
+    expect(seeded.length).toBeGreaterThan(0)
+
+    const pending: { settle: (value: boolean) => void } = { settle: () => {} }
+    workbenchMock.loadSheetMeta.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { pending.settle = resolve }),
+    )
+    await flushFake(DIALOG_META_REFRESH_INTERVAL_MS)
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
+
+    // What that in-flight refresh is about to apply.
+    workbenchMock.fields.value = [
+      ...workbenchMock.fields.value,
+      { id: 'fld_qty', name: 'Qty', type: 'number' },
+    ]
+    app!.unmount()
+    app = null
+    pending.settle(true)
+    await flushUi()
+
+    expect(gridMock.fields.value).toBe(seeded)
   })
 })

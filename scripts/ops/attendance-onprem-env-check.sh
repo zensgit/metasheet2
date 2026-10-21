@@ -38,6 +38,123 @@ function require_bcrypt_salt_rounds() {
   fi
 }
 
+# Encryption-at-rest master key/salt for packages/core-backend/src/security/encrypted-secrets.ts.
+# These must be present and must not equal the built-in insecure default sentinels, otherwise
+# any secret encrypted with the fallback key is trivially decryptable. We deliberately never
+# echo the configured value back to the operator (values-free diagnostics).
+#
+# THE NORMALIZATION BELOW IS A VALIDATION VIEW ONLY: it decides accept/reject. It never rewrites
+# the env file and never changes the bytes the runtime derives a key from (owner review F5,
+# 2026-09-16 -- preflight and runtime must not disagree about the SAME material, and the fix for
+# that disagreement must not touch key derivation).
+#
+# Two views exist because the callers hold two different things:
+#   env-file  RAW line text straight out of get_env_value, never re-parsed by a shell. Quotes, a
+#             trailing '#' comment, '$VAR' and blanks after '=' still mean whatever `source` /
+#             `docker compose --env-file` would make of them, so this view must REJECT any
+#             expression whose runtime value it cannot know. It deliberately does not eval or
+#             source the (untrusted) env file to resolve them -- rejecting is the safe answer.
+#   sourced   the value AFTER `source`, i.e. already the runtime effective value. Expressions are
+#             gone and '$' / '#' are ordinary characters of a real operator secret here, so this
+#             view only normalizes whitespace and a surrounding quote pair before the empty and
+#             sentinel compares. Rejecting expressions here would fail-closed on a legitimate key.
+#
+# This function is byte-identical in attendance-onprem-env-check.sh, attendance-preflight.sh and
+# attendance-onprem-bootstrap-admin.sh; the three copies are pinned against drift by
+# scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs.
+function get_env_material_value() {
+  # Material-only reader (owner re-review 2026-09-16, F5 residual). `source` honours the LAST
+  # assignment and accepts `export KEY=` plus indented declarations -- package-verify already
+  # treats those as valid declarations. Reading only line-start `KEY=` therefore judged a value
+  # the runtime would never load (a good first line followed by `export KEY=<sentinel>` passed).
+  # Deliberately scoped to the encryption material: every other env field keeps its old reader,
+  # so this cannot change how JWT/DB/etc. are interpreted. No eval, no source, bytes untouched.
+  local key="$1"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo ""
+    return 0
+  fi
+  local line
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    echo ""
+    return 0
+  fi
+  line="${line#"${line%%[![:space:]]*}"}"
+  if [[ "$line" == export[[:space:]]* ]]; then
+    line="${line#export}"
+    line="${line#"${line%%[![:space:]]*}"}"
+  fi
+  echo "${line#${key}=}"
+}
+
+function require_encryption_material() {
+  local var_name="$1"
+  local raw="$2"
+  local default_sentinel="$3"
+  local view="${4:-}"
+  local hint="Generate one with: openssl rand -hex 32"
+
+  case "$view" in
+    env-file|sourced) ;;
+    *)
+      die "internal error: require_encryption_material needs an explicit view (env-file|sourced) for ${var_name}"
+      ;;
+  esac
+
+  # A CRLF-saved env file leaves a trailing \r on every value and `source` keeps it, so strip it
+  # in both views before anything else.
+  raw="${raw%$'\r'}"
+  local value="$raw"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. ${hint}"
+
+  local mark="${value:0:1}"
+  if [[ "$view" == "env-file" ]]; then
+    # 'KEY=   value' assigns an EMPTY value -- the blanks terminate the assignment word -- so the
+    # text visible here is not what the runtime gets.
+    if [[ "$raw" == [[:space:]]* ]]; then
+      die "${var_name} in ${ENV_FILE} has blanks between '=' and the value, which assigns an empty value at runtime. Put the value directly after '='. ${hint}"
+    fi
+
+    if [[ "$mark" == '"' || "$mark" == "'" ]]; then
+      if (( ${#value} < 2 )) || [[ "${value: -1}" != "$mark" ]] || [[ "${value:1:-1}" == *"$mark"* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (unbalanced or embedded quote). Write a plain unquoted literal value. ${hint}"
+      fi
+      value="${value:1:-1}"
+    else
+      if [[ "$value" == *'"'* || "$value" == *"'"* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (a quote inside an unquoted value). Write a plain unquoted literal value. ${hint}"
+      fi
+      if [[ "$value" == *[[:space:]]#* ]]; then
+        die "${var_name} in ${ENV_FILE} uses an unsupported env expression (trailing '#' comment); source keeps only the text before it, so the preflight would be judging a different value than the runtime. Write a plain unquoted literal value. ${hint}"
+      fi
+    fi
+
+    # Single quotes are literal under both `source` and compose; everything else expands at load
+    # time, and resolving that here would mean executing an untrusted file.
+    if [[ "$mark" != "'" ]] && { [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]]; }; then
+      die "${var_name} in ${ENV_FILE} uses an unsupported env expression (variable expansion, command substitution or a backslash escape). Write a plain unquoted literal value. ${hint}"
+    fi
+  else
+    if (( ${#value} >= 2 )) && [[ "$mark" == '"' || "$mark" == "'" ]] && [[ "${value: -1}" == "$mark" ]]; then
+      value="${value:1:-1}"
+    fi
+  fi
+
+  # Re-trim AFTER de-quoting. Without this, '"   "' reads as non-empty and a sentinel padded
+  # inside its quotes reads as "not the default", while the runtime value is empty/default.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. ${hint}"
+  if [[ "$value" == "$default_sentinel" ]]; then
+    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. ${hint}"
+  fi
+}
+
 function get_env_value() {
   local key="$1"
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -63,9 +180,13 @@ UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
 DEPLOYMENT_MODEL="$(get_env_value DEPLOYMENT_MODEL)"
 BCRYPT_SALT_ROUNDS="$(get_env_value BCRYPT_SALT_ROUNDS)"
+ENCRYPTION_KEY="$(get_env_material_value ENCRYPTION_KEY)"
+ENCRYPTION_SALT="$(get_env_material_value ENCRYPTION_SALT)"
 
 require_strong_jwt_secret "$JWT_SECRET"
 require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
+require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production" "env-file"
+require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production" "env-file"
 
 [[ -n "$POSTGRES_PASSWORD" ]] || die "POSTGRES_PASSWORD is missing in ${ENV_FILE}"
 [[ "$POSTGRES_PASSWORD" != "change-me" ]] || die "POSTGRES_PASSWORD is still 'change-me' in ${ENV_FILE}"

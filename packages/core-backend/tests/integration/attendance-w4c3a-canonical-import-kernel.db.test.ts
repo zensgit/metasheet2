@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
-import { Pool, type PoolClient } from 'pg'
+import { Client, Pool, type PoolClient } from 'pg'
 
 import {
   claimAttendanceCanonicalImportRegistryV1,
@@ -15,7 +15,14 @@ import {
   type AttendanceW4TransactionClientV1,
 } from '../../src/attendance/w4c0-identity'
 import type { AttendanceLegacyPlanWorkerJobV1, VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
-import { LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1 } from '../../src/attendance/w4c3a-legacy-execution-plan'
+import {
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
+  type LegacyImportAsyncJobSummaryV1,
+} from '../../src/attendance/w4c3a-legacy-execution-plan'
+import { createAttendanceLegacyPlanWorkerRepositoryV1 } from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from '../../src/attendance/w4c3a-legacy-plan-commit-connection'
+import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -525,6 +532,160 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     if (closeError) throw closeError
     if (dropError) throw dropError
   }, 60000)
+
+  it.each([false, true])('V1 terminal timing includes transaction work and preserves an existing start (%s)', async (existingStart) => {
+    const client = await pool.connect()
+    const input = fixture('shadow')
+    const response: LegacyImportAsyncJobSummaryV1 = {
+      __jobType: 'commit',
+      idempotencyKey: null,
+      __importEngine: 'standard',
+      recordUpsertStrategy: 'unnest',
+      itemsInsertStrategy: 'unnest',
+      summary: {
+        processedRows: 1,
+        failedRows: 0,
+        elapsedMs: 0,
+        chunkConfig: { size: 100 },
+      },
+    }
+    try {
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      // Isolate the repository's real SQL time semantics from plan-admission
+      // constraints. These transaction-local tables never replace public data.
+      await client.query(`CREATE TEMP TABLE attendance_import_jobs
+        (LIKE public.attendance_import_jobs INCLUDING DEFAULTS) ON COMMIT DROP`)
+      await client.query(`CREATE TEMP TABLE attendance_import_legacy_terminal_responses (
+        job_id uuid PRIMARY KEY, org_id text NOT NULL, response_variant text NOT NULL,
+        response_digest text NOT NULL, response jsonb NOT NULL
+      ) ON COMMIT DROP`)
+      await client.query(
+        `INSERT INTO attendance_import_jobs
+          (id, org_id, batch_id, created_by, status, w4_contract_version, w4_accepted_write_posture, started_at)
+         VALUES ($1::uuid, $2, $3::uuid, $4, 'queued', 1, 'legacy_projection_only',
+           CASE WHEN $5::boolean THEN now() - interval '5 seconds' ELSE NULL END)`,
+        [input.job.jobId, input.orgId, input.batchId, input.job.createdBy, existingStart],
+      )
+      await client.query('SELECT pg_sleep(0.1)')
+      await createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+        .storeCompletedResponseAndTerminalize(
+          {
+            ...input.job,
+            status: 'queued',
+            acceptedWritePosture: 'legacy_projection_only',
+            entrypoint: 'import_batch',
+            batchCommandId: input.batchId,
+            executionReasonCode: null,
+          },
+          {
+            ...input.plan,
+            manifest: {
+              ...input.plan.manifest,
+              artifactCleanup: { kind: 'none' },
+            },
+          },
+          response,
+          computeLegacyImportAsyncJobSummaryDigestV1(response),
+        )
+      const result = await client.query(
+        `SELECT status, started_at IS NOT NULL AS has_start, finished_at IS NOT NULL AS has_finish,
+                started_at = CASE WHEN $2::boolean THEN now() - interval '5 seconds' ELSE now() END AS start_preserved,
+                updated_at = now() AS update_preserved,
+                EXTRACT(EPOCH FROM (finished_at - started_at))::double precision * 1000 AS elapsed_ms,
+                EXTRACT(EPOCH FROM (finished_at - now()))::double precision * 1000 AS transaction_work_ms
+           FROM attendance_import_jobs WHERE id = $1::uuid`,
+        [input.job.jobId, existingStart],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0]).toMatchObject({
+        status: 'completed', has_start: true, has_finish: true,
+        start_preserved: true, update_preserved: true,
+      })
+      // Reverting only the production finish expression to now() makes this
+      // zero despite pg_sleep; a fake summary elapsedMs cannot satisfy it.
+      expect(result.rows[0].transaction_work_ms).toBeGreaterThanOrEqual(100)
+      expect(result.rows[0].elapsed_ms).toBeGreaterThanOrEqual(existingStart ? 5100 : 100)
+      const stored = await client.query(
+        'SELECT response FROM attendance_import_legacy_terminal_responses WHERE job_id = $1::uuid',
+        [input.job.jobId],
+      )
+      expect(stored.rows).toEqual([{ response }])
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  })
+
+  it('legacy plan COMMIT waits within the existing bound for real deferred validation', async () => {
+    const url = new URL(dbUrl as string)
+    url.pathname = `/${scratchName}`
+    for (const adapted of [false, true]) {
+      const options = { connectionString: url.toString(), query_timeout: 40 }
+      const client = new Client(options)
+      await client.connect()
+      try {
+        const setup = (text: string) => {
+          const config = { text, query_timeout: 1000 }
+          return client.query<Record<string, unknown>>(config)
+        }
+        await setup('BEGIN')
+        await setup('CREATE TEMP TABLE delayed_plan_commit (n integer)')
+        await setup(`CREATE FUNCTION pg_temp.delay_plan_commit()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN PERFORM pg_sleep(0.1); RETURN NEW; END $$`)
+        await setup(`CREATE CONSTRAINT TRIGGER delayed_plan_validation
+          AFTER INSERT ON delayed_plan_commit DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION pg_temp.delay_plan_commit()`)
+        await setup('INSERT INTO delayed_plan_commit VALUES (1)')
+        if (adapted) {
+          await createAttendanceLegacyPlanCommitConnectionV1(client).query('COMMIT')
+          expect((await client.query('SELECT n FROM delayed_plan_commit')).rows).toEqual([{ n: 1 }])
+        } else {
+          await expect(client.query('COMMIT')).rejects.toThrow('Query read timeout')
+        }
+      } finally {
+        // A read timeout has an ambiguous commit outcome: never reuse that
+        // connection in this control. All objects belong to its temp schema.
+        await client.end()
+      }
+    }
+  })
+
+  it('preserves the transaction bound through deferred COMMIT with pool-shaped startup timers', async () => {
+    const url = new URL(dbUrl as string)
+    url.pathname = `/${scratchName}`
+    const client = new Client({
+      connectionString: url.toString(), query_timeout: 40, statement_timeout: 40,
+    })
+    await client.connect()
+    try {
+      const setup = (text: string) => client.query({ text, query_timeout: 1000 })
+      // Fixture DDL is outside the measured transaction and its short timers.
+      await setup("SET statement_timeout = '1s'")
+      await setup('CREATE TEMP TABLE pool_delayed_commit (n integer)')
+      await setup(`CREATE FUNCTION pg_temp.pool_delay_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(0.1); RETURN NEW; END $$`)
+      await setup(`CREATE CONSTRAINT TRIGGER pool_delayed_validation
+        AFTER INSERT ON pool_delayed_commit DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION pg_temp.pool_delay_commit()`)
+      await setup("SET statement_timeout = '40ms'")
+      const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
+      await runAttendanceResultOperationTransactionV1(connection, async (transaction) => {
+        expect(transaction).toBe(connection)
+        expect((await transaction.query(
+          "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+        )).rows).toEqual([{ setting: '180000' }])
+        await transaction.query('INSERT INTO pool_delayed_commit VALUES (1)')
+      })
+      expect((await client.query('SELECT n FROM pool_delayed_commit')).rows).toEqual([{ n: 1 }])
+      expect((await client.query(
+        "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+      )).rows).toEqual([{ setting: '40' }])
+    } finally {
+      await client.end()
+    }
+  })
 
   async function execute(input: ReturnType<typeof fixture>): Promise<void> {
     const client = await pool.connect()

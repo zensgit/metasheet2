@@ -24,6 +24,7 @@ import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { XlsxModule } from '../../src/multitable/xlsx-service'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 type QueryResult = { rows: any[]; rowCount?: number }
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
@@ -76,7 +77,12 @@ function createMockPool(opts: {
     }
     return { rows: [], rowCount: 0 }
   }
-  const query = vi.fn(async (sql: string, params?: unknown[]) => handler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. This fixture already declares the
+    // sheet through both existence forms above, so the translation resolves it as live.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(handler, params)
+    return handler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (c: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }

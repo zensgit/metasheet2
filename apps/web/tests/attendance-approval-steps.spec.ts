@@ -6,6 +6,7 @@ import {
 } from '../src/views/attendance/useAttendanceApprovalDirectoryReadiness'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ref } from 'vue'
 import {
   ATTENDANCE_APPROVAL_REQUEST_TYPES,
   ATTENDANCE_DEFAULT_ORG_ID,
@@ -34,9 +35,9 @@ import {
 } from '../src/views/attendance/attendanceApprovalSteps'
 
 describe('ATTENDANCE_APPROVAL_REQUEST_TYPES', () => {
-  it('exposes all eight backend request types, including outdoor_punch and schedule_dispatch', () => {
+  it('exposes all nine backend request types, including outdoor_punch and schedule_dispatch', () => {
     expect(ATTENDANCE_APPROVAL_REQUEST_TYPES).toEqual([
-      'missed_check_in', 'missed_check_out', 'time_correction', 'leave',
+      'missed_check_in', 'missed_check_out', 'time_correction', 'leave', 'business_trip',
       'overtime', 'outdoor_punch', 'shift_swap', 'schedule_dispatch',
     ])
   })
@@ -50,6 +51,7 @@ describe('ATTENDANCE_APPROVAL_REQUEST_TYPES', () => {
     expect(block, 'REQUEST_TYPES array not found in backend').toBeTruthy()
     const backendTypes = Array.from(block![1].matchAll(/'([a-z_]+)'/g)).map(m => m[1])
     expect([...ATTENDANCE_APPROVAL_REQUEST_TYPES].sort()).toEqual([...backendTypes].sort())
+    expect(ATTENDANCE_APPROVAL_REQUEST_TYPES).not.toContain('unsupported_request_type')
   })
 })
 
@@ -376,9 +378,13 @@ describe('useAttendanceAdminUsers endpoint (review P2)', () => {
       calls.push(path)
       return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [] } }) } as unknown as Response
     }
-    const { loadUsers } = useAttendanceAdminUsers({ apiFetch, endpoint: '/api/attendance-admin/users/search' })
+    const { loadUsers } = useAttendanceAdminUsers({
+      apiFetch,
+      endpoint: '/api/attendance-admin/users/search',
+      orgId: ref('org-a'),
+    })
     await loadUsers('bob')
-    expect(calls[0]).toBe('/api/attendance-admin/users/search?q=bob')
+    expect(calls[0]).toBe('/api/attendance-admin/users/search?q=bob&orgId=org-a')
     expect(calls.some(p => p.startsWith('/api/admin/users'))).toBe(false)
   })
 })

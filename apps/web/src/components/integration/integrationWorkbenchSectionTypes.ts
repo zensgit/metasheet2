@@ -80,9 +80,9 @@ export interface ConnectionDraft {
   status: ConnectionDraftStatus
   configText: string
   capabilitiesText: string
-  // C2b: structured config for the read-only data-source bridge (kind 'data-source:sql-readonly').
-  // The connection only ever references a data_sources id — credentials stay in /data-sources.
-  dataSourceId: string
+  // PR-1 canonical binding for data-source:sql-readonly. Physical credentials
+  // stay in /data-sources and the Binding stores only this opaque reference.
+  connectionId: string
   dataSourceObject: string
 }
 

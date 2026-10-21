@@ -1,0 +1,930 @@
+name: Approval S1 Org Backfill Evidence (Read-Only)
+
+# READ-ONLY evidence pack for the Lock-10 (S1) `approval_instances.org_id` migration
+# (`zzzz20260821100000_add_approval_instance_org_id`). Answers, per environment: is the migration
+# in the ledger, how many rows carry an org, and how many instances would go dark if
+# `APPROVAL_S1_ORG_PIN_ENABLED` were flipped ON.
+#
+# THIS WORKFLOW NEVER WRITES. Every remote statement is a SELECT, a `docker inspect`, or a
+# `printenv`. (An earlier draft also ran `migrate.js --confirm` as corroboration; it was REMOVED —
+# on a pre-`5fa1038017` image the argument falls through to `migrateToLatest()`, which takes the
+# production migration advisory lock and can even apply migrations. The raw ledger SELECT (p01)
+# is version-independent and is the sole authority.)
+#
+# There is NO host git-sync step (the docker-gc template's sync mutates the host checkout and a
+# read-only probe has no use for it), NO compose
+# up/down, and NO `db:migrate`. Reading the staging DB does not go through the window runner:
+# `metasheet-staging-postgres` lives on the SAME deploy host, and window-runner exclusivity is a
+# DEPLOY constraint, not a READ constraint.
+#
+# VALUES-FREE DISCIPLINE. `approval_instances.org_id` values are tenant labels and instance ids are
+# record identifiers; neither is ever selected, echoed, or interpolated into an error. Every probe
+# returns a BARE INTEGER validated by `^[0-9]+$`; the ONE non-integer output is the migration's own
+# ledger timestamp, which is a deploy time, not tenant data. Bucket labels are repo-authored
+# constants, never values read from the database. psql stderr is deliberately NOT surfaced: a
+# Postgres error message can embed a row value (CHECK-violation detail), so a failing probe reports
+# its NAME and exit status only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environments:
+        description: 'Which deployments to probe: prod | staging | both'
+        required: false
+        default: 'both'
+        type: choice
+        options: [both, prod, staging]
+
+concurrency:
+  # NOT cancel-in-progress: a cancelled evidence run leaves a partial artifact that reads as a
+  # complete one.
+  group: approval-s1-org-backfill-evidence
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Collect org-backfill evidence (read-only)
+        id: probe
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          ENVIRONMENTS: ${{ github.event.inputs.environments || 'both' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_SSH_KEY_B64" ]] || { echo "DEPLOY_SSH_KEY_B64 is required" >&2; exit 2; }
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+
+          case "$ENVIRONMENTS" in prod|staging|both) ;; *) echo "invalid environments input" >&2; exit 2;; esac
+
+          mkdir -p output/s1-org-evidence
+          evidence_log="output/s1-org-evidence/evidence.log"
+
+          # Quoted heredoc: nothing in the remote script is interpolated by the runner shell.
+          # Environment selection arrives as a positional arg, so no runner-side value is ever
+          # spliced into remote SQL.
+          set +e
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- "$ENVIRONMENTS" <<'REMOTE' 2>&1 | tee "$evidence_log"
+          set -uo pipefail
+
+          MIGRATION_NAME='zzzz20260821100000_add_approval_instance_org_id'
+          ENVIRONMENTS="${1:-both}"
+          PROBE_VALUE=''
+
+          abort() { echo "[s1-evidence][fatal] $*" >&2; exit 2; }
+
+          # probe <pg_container> <pg_user> <pg_db> <name> <sql>
+          #
+          # Shape adapted from `residue_check`
+          # (scripts/ops/attendance-staging-window-runner-remote.sh:~593): tuples-only, unaligned,
+          # ON_ERROR_STOP=1, and a HARD FAILURE when the result is not a bare integer — a query
+          # that errors, drops its connection, or returns the wrong shape is NEVER silently
+          # recorded as 0. The `name=value` record line is this function's ONLY stdout; the numeric
+          # value is returned through the PROBE_VALUE global, never through stdout, so a caller can
+          # never capture a log line as the value (the failure mode that file records against run
+          # 29395824577).
+          probe() {
+            local container="$1" pg_user="$2" pg_db="$3" name="$4" sql="$5" value rc
+            PROBE_VALUE=''
+            value="$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA -c "$sql" 2>/dev/null | tr -d '[:space:]')"
+            rc=$?
+            if [[ "$rc" != "0" || ! "$value" =~ ^[0-9]+$ ]]; then
+              # The offending value is NOT echoed: psql error text can embed a row value.
+              echo "${name}=ERROR"
+              echo "[s1-evidence][error] probe '${name}' failed or returned a non-integer (psql rc=${rc}; value suppressed by values-free policy)" >&2
+              return 1
+            fi
+            PROBE_VALUE="$value"
+            echo "${name}=${value}"
+            return 0
+          }
+
+          # resolve_creds <pg_container> -> "<POSTGRES_USER> <POSTGRES_DB>" on stdout, read from the
+          # RUNNING container's own env (same helper shape as the window runner's
+          # resolve_postgres_creds, lines 188-197) so credentials are never hardcoded here.
+          resolve_creds() {
+            local container="$1" pg_user pg_db
+            pg_user="$(docker exec "$container" printenv POSTGRES_USER 2>/dev/null || true)"
+            pg_db="$(docker exec "$container" printenv POSTGRES_DB 2>/dev/null || true)"
+            [[ -n "$pg_user" && -n "$pg_db" ]] || return 1
+            printf '%s %s' "$pg_user" "$pg_db"
+          }
+
+          # run_env <label> <pg_container> <backend_container>
+          run_env() {
+            local label="$1" pg_container="$2" backend_container="$3"
+            local pg_user pg_db creds ledger column executed_at
+            local rc=0
+
+            echo "=== S1 EVIDENCE START ${label} ==="
+            echo "env=${label}"
+            echo "pg_container=${pg_container}"
+
+            if ! docker inspect -f '{{.State.Running}}' "$pg_container" 2>/dev/null | grep -qx true; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=pg_container_not_running"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+
+            if ! creds="$(resolve_creds "$pg_container")"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=cannot_resolve_postgres_user_or_db_from_container_env"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            read -r pg_user pg_db <<< "$creds"
+
+            # ---- GATE: is the migration applied here at all? -------------------------------
+            # The RAW LEDGER SELECT is the sole applied-check — version-independent, and the
+            # only acceptable one (see the header note on the removed --confirm corroboration).
+            if ! probe "$pg_container" "$pg_user" "$pg_db" "${label}.p01_ledger_row_present" \
+                 "SELECT count(*) FROM kysely_migration WHERE name = '${MIGRATION_NAME}'"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_probe_failed"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            ledger="$PROBE_VALUE"
+
+            if ! probe "$pg_container" "$pg_user" "$pg_db" "${label}.p02_org_id_column_present" \
+                 "SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'approval_instances'
+                     AND column_name = 'org_id'"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=column_probe_failed"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            column="$PROBE_VALUE"
+
+            # ---- STAGING PRE-GATE (deep-review P2-2): the U1/p10 population probes below do NOT
+            # depend on the S1 migration (org_id column) at all — they read `user_orgs`, `users`,
+            # `directory_integrations`, and `approval_instances`, none of which the migration
+            # creates. They are therefore emitted here, above BOTH early returns immediately below
+            # (NOT_APPLIED and the ledger/column-disagreement INDETERMINATE), rather than only after
+            # them — an environment where the migration has never run there previously (staging is
+            # exactly that environment today) got NONE of this population measured, and staging is
+            # where a second active org (dual-corp DingTalk) would make Migration B's single-org
+            # guard ABORT. A failure in any probe here still accumulates into `rc` for the
+            # APPLIED/INDETERMINATE paths reached further down, but `rc` is never consulted by the
+            # NOT_APPLIED return two blocks below (it is unconditional) — verdict=NOT_APPLIED stays
+            # byte-identical even when one of these probes errors; the probes are additional lines
+            # above it, not a precondition of it.
+            # ---- Lock-11 U1 probes (writer-org-derivation draft §8; all counts-only) ----------
+            # U1a: does ANY org other than the blanket-backfilled one exist on user_orgs, and how
+            # many active users hold >=2 active memberships (sizes Lock-11 outage class 1 / D-10's
+            # moot condition: u1a_distinct_active_orgs = 1 means "nowhere to move to").
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_distinct_active_orgs" \
+              "SELECT count(DISTINCT org_id) FROM user_orgs WHERE is_active" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_multi_org_active_users" \
+              "SELECT count(*) FROM (SELECT user_id FROM user_orgs WHERE is_active
+                 GROUP BY user_id HAVING count(*) > 1) t" || rc=1
+            # U1b: active users with NO active membership — outage class 1b, the class no arm
+            # serves (feeds D-8). The draft marks this the count most likely to be non-zero.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+
+            # U1b SPLIT (closeout deep-review P1-1): the provisioning migration's ON CONFLICT DO
+            # NOTHING does NOT resurrect a DEACTIVATED membership row, so a u1b user holding only
+            # deactivated rows is NOT provisioned — the aggregate above cannot see that shape.
+            # Both splits must be ZERO before any arm-(a) writer slice merges (W1W2 merge gate).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_no_row_at_all" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_only_deactivated_rows" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active
+                  AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                    WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+
+            # Recovery09: values-free source census for a multi-org-safe repair. These probes do
+            # not choose or emit an org id. They only report whether each zero-membership active
+            # user has zero / exactly one / multiple independently linked directory org sources,
+            # and the same cardinality buckets across existing attendance facts. A migration may
+            # use a source only when it is a singleton; zero and multi remain fail-closed.
+            # Older schemas may lack these tables/columns. Measure the complete query shape first;
+            # otherwise emit NOT_MEASURED rather than misreporting absence as a zero population.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_directory_source_schema_present" \
+              "SELECT count(*) FROM (SELECT 1 WHERE
+                 (SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public'
+                     AND (table_name, column_name) IN (
+                       ('directory_account_links', 'local_user_id'),
+                       ('directory_account_links', 'directory_account_id'),
+                       ('directory_account_links', 'link_status'),
+                       ('directory_accounts', 'id'),
+                       ('directory_accounts', 'integration_id'),
+                       ('directory_accounts', 'is_active'),
+                       ('directory_integrations', 'id'),
+                       ('directory_integrations', 'org_id'),
+                       ('directory_integrations', 'status')
+                     )) = 9) q" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_unique_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') = 1
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_no_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') = 0
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_multi_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') > 1
+               ) q" || rc=1
+            else
+              echo "${label}.r09_u1b_unique_linked_directory_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_no_linked_directory_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_multi_linked_directory_org=NOT_MEASURED"
+            fi
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_attendance_source_schema_present" \
+              "SELECT count(*) FROM (SELECT 1 WHERE
+                 (SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public'
+                     AND (table_name, column_name) IN (
+                       ('attendance_records', 'user_id'),
+                       ('attendance_records', 'org_id'),
+                       ('attendance_requests', 'user_id'),
+                       ('attendance_requests', 'org_id')
+                     )) = 4) q" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_unique_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) = 1
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_no_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) = 0
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_multi_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) > 1
+               ) q" || rc=1
+            else
+              echo "${label}.r09_u1b_unique_attendance_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_no_attendance_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_multi_attendance_org=NOT_MEASURED"
+            fi
+            # U1c: the second backfill's discriminator — distinct orgs on directory_integrations
+            # (a non-'default' integration org means the multi-org population was already
+            # manufactured, which changes how u1a reads). COUNT DISTINCT only, no org values.
+            # Guarded on table existence so an older schema cannot poison the whole env verdict:
+            # when the table is absent, the presence probe reports 0 and the count probe is
+            # deliberately NOT emitted (absence of the line + presence=0 is the honest record).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integrations_table_present" \
+              "SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'directory_integrations'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integration_distinct_orgs" \
+                "SELECT count(DISTINCT org_id) FROM directory_integrations" || rc=1
+              # The DISCRIMINATING half (gate P2-1): the draft's decision rule is "one non-'default'
+              # integration org ⇒ the multi-org population was already manufactured", which
+              # count(DISTINCT) cannot express ('default' is the repo-authored backfill constant,
+              # zzzz20260324150000:5 — a literal of the same class as the 'plm:%' prefixes).
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_non_default_integration_rows" \
+                "SELECT count(*) FROM directory_integrations WHERE org_id <> 'default'" || rc=1
+            fi
+
+            # p10 (moved from the old "Population totals" section, deep-review P2-2): the
+            # environment's total instance count is itself a population probe with no S1
+            # dependency, so it belongs in this pre-gate block too. NEWLY guarded on table
+            # existence, mirroring u1c immediately above — unlike u1a/u1b/u1b_split (which read
+            # `users`/`user_orgs`, tables that predate this migration by months), running this
+            # probe THIS early means `approval_instances` existing at all is no longer guaranteed
+            # by an already-passed p02 check (p02 only proves the org_id COLUMN, and only when the
+            # column count is nonzero), so an unguarded query here could ERROR on a genuinely
+            # pre-approval-module deployment instead of reporting absence honestly.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_table_present" \
+              "SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'approval_instances'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_total" \
+                "SELECT count(*) FROM approval_instances" || rc=1
+
+              # Recovery09: split the pre-Phase-1 class-6-shaped population by requester posture.
+              # No requester, instance, or org value is selected; the mutually exclusive buckets
+              # make the later repair policy reviewable without exposing tenant data.
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_approval_attachments_table_present" \
+                "SELECT count(*) FROM information_schema.tables
+                  WHERE table_schema = 'public' AND table_name = 'approval_attachments'" || rc=1
+              if [[ "$PROBE_VALUE" == "1" ]]; then
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_active_requester_no_membership_rows" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_active_requester_only_deactivated_rows" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_inactive_requester" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND NOT u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = u.id AND uo.is_active
+                       GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_requester_missing_from_users" \
+                  "SELECT count(*) FROM approval_instances i
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM users u
+                       WHERE u.id = i.requester_snapshot->>'id')
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active
+                       GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+              fi
+            fi
+
+            # U3' (Lock-11 §8, RATIFIED — docs/development/approval-lock11-writer-org-derivation-
+            # 20260822.md:1624; the §5 activation row at :1382 states: "Activation additionally
+            # needs its own ledger row … and the §8-U3' probe as a precondition, since no gate
+            # detects field divergence"). Field question: do prod attendance rows carry `org_id`
+            # values ABSENT from `user_orgs`? A YES here is outage class 4, "stamped but still
+            # dark" — W-4's attendance-org derivation would treat the row as fixed while the pin
+            # denies every viewer, and no CHECK constraint or existing gate can see this shape
+            # (§4.2's own disclosure). SQL reproduced VERBATIM from the lock's own §8 U3' row (not
+            # re-derived here), for both attendance tables the lock names. Guarded on the org_id
+            # COLUMN's presence, NOT merely the table's — same idiom as p02 above
+            # (information_schema.columns, not .tables): `zzzz20260114100000_add_attendance_
+            # org_id.ts` adds `org_id` to `attendance_records`/`attendance_requests` as a SEPARATE,
+            # LATER migration than the one that creates the tables (`zzzz20260114090000_create_
+            # attendance_tables.ts`), and itself defensively re-checks `checkTableExists` before
+            # adding the column — a table-only guard would let a table-exists-but-column-absent
+            # deployment ERROR here, flipping that environment's verdict from APPLIED to
+            # INDETERMINATE and voiding the whole evidence pack for a probe that isn't even about
+            # the S1 migration. A missing column (or missing table — information_schema.columns
+            # returns empty for a nonexistent table too, never an error) reports absence honestly
+            # via the SAME single guarded count, strictly stronger than a table-only check.
+            # Activation PRECONDITION, not a merge gate — a nonzero count is a real, actionable
+            # finding for whoever runs the activation dispatch, not a workflow failure by itself.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_column_present" \
+              "SELECT count(*) FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'attendance_records'
+                  AND column_name = 'org_id'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_not_in_user_orgs" \
+                "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_records) a
+                  WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            else
+              # deep-review P3-4: "no violation line appeared" is otherwise produced identically by
+              # measured-and-zero and by never-measured (column absent) — a scanning auditor cannot
+              # tell them apart from silence alone. This bare `echo` (not `probe()` — its own
+              # `^[0-9]+$` contract would reject a non-numeric token) makes the never-measured case
+              # an explicit, grep-able line instead of an absence.
+              echo "${label}.u3_attendance_records_org_id_not_in_user_orgs=NOT_MEASURED"
+            fi
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_column_present" \
+              "SELECT count(*) FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'attendance_requests'
+                  AND column_name = 'org_id'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_not_in_user_orgs" \
+                "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_requests) a
+                  WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            else
+              # deep-review P3-4 (same reasoning as the records branch above).
+              echo "${label}.u3_attendance_requests_org_id_not_in_user_orgs=NOT_MEASURED"
+            fi
+
+            if [[ "$ledger" == "0" && "$column" == "0" ]]; then
+              # NOT_APPLIED is a real, reportable verdict — never a skip and never a PASS.
+              echo "verdict=NOT_APPLIED"
+              echo "reason=no_ledger_row_and_no_org_id_column"
+              # deep-review P2-2: this line used to claim EVERY population probe was N/A, which was
+              # true before this slice but became false the moment u1a/u1b/u1c/p10/u3 moved above
+              # this early return — those probes above DID run and their values are real. Only the
+              # S1-DEPENDENT probes (p03 onward: p05/p06/p11-p23/b1-b4/p30-p53/c1/c3/c6), which this
+              # early return never reaches, are N/A for ${label}.
+              echo "note=the u1a/u1b/u1c/p10/u3 population lines above ARE measured for ${label} (S1-independent, emitted pre-gate); every S1-dependent probe below this line (p03, p05-p53, b1-b4, c1/c3/c6) is N/A because the migration has not run there"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 0
+            fi
+            if [[ "$ledger" != "$column" ]]; then
+              # A ledger row without the column, or the column without a ledger row: schema and
+              # history disagree. Hard fail — never report numbers off an inconsistent baseline.
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_and_column_disagree"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+
+            # Ledger timestamp: the ONLY non-integer output line. Values-free — kysely writes
+            # `new Date().toISOString()` into a varchar(255); it carries no tenant or record
+            # identity and is what ties this pack to a specific deploy/CI run.
+            executed_at="$(docker exec "$pg_container" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA \
+              -c "SELECT timestamp FROM kysely_migration WHERE name = '${MIGRATION_NAME}'" 2>/dev/null | tr -d '[:space:]')"
+            if [[ ! "$executed_at" =~ ^[0-9T:.Z+-]+$ ]]; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_timestamp_not_iso_shaped"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            echo "${label}.p03_migration_executed_at=${executed_at}"
+
+            # ---- Constraint shape ----------------------------------------------------------
+            # p05 expected 1 (Phase-1 non-blank CHECK landed). p06 expected 0 — Phase 3
+            # (`approval_instance_org_present`) must NOT be present; landing it before every writer
+            # stamps an org would 500 every create.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p05_constraint_org_nonblank_present" \
+              "SELECT count(*) FROM pg_constraint
+                WHERE conname = 'approval_instance_org_nonblank'
+                  AND conrelid = 'approval_instances'::regclass" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p06_constraint_phase3_org_present_present" \
+              "SELECT count(*) FROM pg_constraint
+                WHERE conname = 'approval_instance_org_present'
+                  AND conrelid = 'approval_instances'::regclass" || rc=1
+
+            # ---- Population totals ---------------------------------------------------------
+            # p10_instances_total now lives in the staging pre-gate block above (deep-review P2-2
+            # move), guarded there by p10_instances_table_present.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p11_org_present_total" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NOT NULL" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p12_org_null_total" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NULL" || rc=1
+
+            # ---- (b) THE DECISIVE NUMBER FOR ORG-PIN ACTIVATION -----------------------------
+            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts, the Lock-10
+            # OD-S1-1/OD-S1-12 comment above the platform-branch admission check (anchored by
+            # SYMBOL, not line number — line cites drifted twice; locate by the quoted text),
+            # "per-instance admission for PLATFORM ids only (the `plm:` branch above
+            # already returned)". With
+            # APPROVAL_S1_ORG_PIN_ENABLED=true the predicate conjoins `i.org_id = ANY(viewerOrgIds)`;
+            # a NULL org_id makes that NULL, i.e. DENY for everyone including admins (OD-S1-9(e)).
+            # p20 is therefore exactly the count of instances that go dark on activation.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p20_platform_id_org_null" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NULL AND id NOT LIKE 'plm:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p21_platform_id_total" \
+              "SELECT count(*) FROM approval_instances WHERE id NOT LIKE 'plm:%'" || rc=1
+
+            # ---- RULED-POSTURE VIOLATIONS (expected 0; no CHECK can catch these) ------------
+            # The class-2 UPDATE carries NO id-prefix guard, so a `plm:` mirror that carries a
+            # bound attachment WOULD BE stamped with an org — against OD-S1-18(b)'s rule that class
+            # 5 stays NULL permanently. The MECHANISM is proven (a PG15 replay of the migration's
+            # verbatim SQL stamps such a row); whether any such row EXISTS in a given deployment is
+            # UNKNOWN, and is exactly what this probe measures. Attachment binding may in practice
+            # be unreachable for `plm:` ids (they are minted by plm-approval-bridge.ts:43 and both
+            # consumers branch to the PLM adapter before the predicate), in which case this reads 0.
+            # It is worth probing anyway because the future Phase-3 CHECK is an OR
+            # (`org_id IS NOT NULL OR id LIKE 'plm:%'`), so it PASSES on such a row and can never
+            # detect it — verified by replay: with every genuinely-NULL platform row stamped,
+            # VALIDATE CONSTRAINT succeeded while a wrongly-stamped `plm:` row was present.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p22_plm_prefix_org_present_VIOLATION" \
+              "SELECT count(*) FROM approval_instances WHERE id LIKE 'plm:%' AND org_id IS NOT NULL" || rc=1
+            # Same hole for class 4: the lock rules that an unset after-sales org must ABORT the
+            # migration, never default — yet an `afs:` mirror with a bound attachment would be
+            # stamped instead. Same status as p22: mechanism proven, population unknown.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p23_afs_prefix_org_present_VIOLATION" \
+              "SELECT count(*) FROM approval_instances WHERE id LIKE 'afs:%' AND org_id IS NOT NULL" || rc=1
+
+            # ---- (c) STRUCTURAL BUCKET DISTRIBUTION ----------------------------------------
+            # STRUCTURAL buckets, deliberately NOT named class-1..6. Classes 1, 3 and 6 have no
+            # in-DB discriminator at this baseline (the lock records that class 1's source column
+            # does not exist), so a four-way structural split is an APPROXIMATION of the ratified
+            # taxonomy, not the taxonomy. Buckets are mutually exclusive and exhaustive by
+            # construction; the summary step asserts b1+b2+b3+b4 == p10 mechanically.
+            # The attachment EXISTS mirrors the migration's own source predicate verbatim: no
+            # status filter, no bind_kind filter, and NOT `staged_instance_id` (Lock-9's staging
+            # column, which the S1 backfill never read).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b1_id_prefix_plm_total" \
+              "SELECT count(*) FROM approval_instances i WHERE i.id LIKE 'plm:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b1_id_prefix_plm_org_null" \
+              "SELECT count(*) FROM approval_instances i WHERE i.id LIKE 'plm:%' AND i.org_id IS NULL" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b2_id_prefix_afs_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id LIKE 'afs:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b2_id_prefix_afs_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id LIKE 'afs:%' AND i.org_id IS NULL" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b3_has_bound_attachment_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b3_has_bound_attachment_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%' AND i.org_id IS NULL
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b4_no_structural_source_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b4_no_structural_source_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%' AND i.org_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+
+            # ---- Class-2 backfill fidelity + post-migration writer drift --------------------
+            # p30 mirrors EXACTLY the population the migration's UPDATE targeted, so it was 0 the
+            # instant the migration committed. Non-zero TODAY is writer drift, not a migration
+            # defect: the six `approval_instances` writers still stamp no org.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p30_attachment_bearing_still_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            # p31 isolates that drift by creation time. kysely stores the ledger timestamp as
+            # varchar(255) holding `new Date().toISOString()`, which casts cleanly to timestamptz;
+            # if it ever does not, this probe ERRORS rather than reporting a false 0.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p31_platform_org_null_created_after_migration" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%'
+                  AND i.created_at > (SELECT (m.timestamp)::timestamptz FROM kysely_migration m
+                                       WHERE m.name = '${MIGRATION_NAME}')" || rc=1
+
+            # ---- FAIL-LOUD predicate, re-run as a count ------------------------------------
+            # The migration's own cross-class conflict predicate, verbatim, wrapped in a COUNT. The
+            # migration's abort message interpolates the offending instance ids into its error
+            # text; this probe deliberately reports the CARDINALITY ONLY.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p40_cross_org_attachment_conflict_unbackfilled" \
+              "SELECT count(*) FROM (
+                 SELECT a.instance_id
+                   FROM approval_attachments a
+                   JOIN approval_instances i ON i.id = a.instance_id
+                  WHERE a.instance_id IS NOT NULL AND i.org_id IS NULL
+                  GROUP BY a.instance_id
+                 HAVING count(DISTINCT a.org_id) > 1
+               ) c" || rc=1
+            # p41: already-stamped instances whose attachments disagree with the stamp — the rows
+            # where the instance-level pin and the attachment route's independent gate 0
+            # (`viewerOrgId != row.orgId`, approval-attachment-storage.ts) would disagree.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p41_instance_attachment_org_mismatch" \
+              "SELECT count(DISTINCT a.instance_id)
+                 FROM approval_attachments a
+                 JOIN approval_instances i ON i.id = a.instance_id
+                WHERE i.org_id IS NOT NULL AND a.org_id IS DISTINCT FROM i.org_id" || rc=1
+
+            # ---- Tenant cardinality (COUNT DISTINCT only — no org value is selected) --------
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p50_distinct_org_values" \
+              "SELECT count(DISTINCT org_id) FROM approval_instances WHERE org_id IS NOT NULL" || rc=1
+            # p51: instances stamped with an org that NO active `user_orgs` membership references.
+            # Those go dark on activation even though they WERE backfilled, because the pin is
+            # `org_id = ANY(viewer's ACTIVE memberships)` (viewerActiveOrgIds).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p51_org_with_no_active_membership" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.org_id = i.org_id AND uo.is_active = TRUE)" || rc=1
+
+            # p52 is the SHARPEST activation number in this pack, and p20 cannot see it: these are
+            # instances that WERE backfilled (org_id NOT NULL) but whose OWN REQUESTER — readability
+            # arm 1, `i.requester_snapshot->>'id'` — holds no active `user_orgs` membership in that
+            # org, so the pin's `i.org_id = ANY(viewerActiveOrgIds)` conjunct denies them their own
+            # instance. This is the expected shape, not an edge case: `user_orgs` blanket-backfilled
+            # every active user into `'default'` (zzzz20260114110000:34-41) while the class-2
+            # backfill writes REAL tenant orgs copied from `approval_attachments.org_id`.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p52_backfilled_requester_would_be_denied" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL
+                  AND i.requester_snapshot->>'id' IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.user_id = i.requester_snapshot->>'id'
+                                     AND uo.org_id = i.org_id AND uo.is_active = TRUE)" || rc=1
+            # p53 keeps p52's denominator honest: `requester_snapshot` is JSONB NOT NULL DEFAULT
+            # '{}' (zzzz20260404100000:36/58/67), so rows with no `id` key are silently OUTSIDE p52
+            # rather than counted as safe. Report them, never fold them in.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p53_backfilled_requester_id_absent" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL AND i.requester_snapshot->>'id' IS NULL" || rc=1
+
+            # ---- MIGRATION B CLASS PROBES over the residual NULL population ------------------
+            # These probe the SAME p20 population (platform-id, org_id NULL) by Lock-10 §2.2(b)
+            # row class. CORRECTED (fix round, gate NIT-1): they do NOT partition p20 — c1
+            # (template-originated) and c3_unique (uniquely-resolvable) are NOT mutually exclusive
+            # (a template-originated row can ALSO be uniquely-resolvable; on prod today they are
+            # the exact same 2 rows, via class-3's ordered fall-through onto class-1 residue), so
+            # c1 + c3_unique + c3_multi_org + c3_zero_membership + c3_requester_id_absent can
+            # double-count and need not sum to p20. UPDATED at the Lock-11 §10 D-8(β) revision:
+            # `c6_terminal_org_null` is NO LONGER by itself a reliable ABORT predictor — read it
+            # TOGETHER with `u1a_distinct_active_orgs` below. A nonzero `c6` now means the
+            # migration's class-6 arm will EITHER stamp every counted row with the unique active
+            # org (`u1a_distinct_active_orgs == 1`) OR abort exactly as before
+            # (`u1a_distinct_active_orgs != 1`) — see that migration's "CLASS-6 REVISION" docblock
+            # note and gates H15/H38/H39 in its `.db.test.ts`. Necessary-for-an-abort, not
+            # sufficient — p31 already proves writer drift is live, so a row created between this
+            # probe and deploy could still be class-6 shaped (narrow, because user_orgs
+            # blanket-backfills active users to exactly one 'default', but nonzero). A nonzero
+            # `c6` combined with `u1a_distinct_active_orgs != 1` is an OWNER ESCALATION, not an
+            # implementer decision to route around: the lock ruled ABORT for that case and ruled
+            # nothing about what to do when it fires. A nonzero `c6` combined with
+            # `u1a_distinct_active_orgs == 1` is the RATIFIED stamp arm and requires no escalation.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c1_template_originated_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.template_id IS NOT NULL" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_unique_active_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_multi_org_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) >= 2)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_zero_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_requester_id_absent_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NULL" || rc=1
+            # c6_terminal_org_null — THE §2.2(b) class-6 predicate (population, UNCHANGED by the
+            # D-8(β) revision), reproduced VERBATIM from
+            # `zzzz20260823100000_backfill_approval_instance_org_id.ts`'s CLASS_6_PREDICATE
+            # comment, pre-flight census query, AND (new at the D-8(β) revision) its class-6 STAMP
+            # UPDATE — this probe is now the FOURTH verbatim reproduction, not the second; if any
+            # of the four ever diverge, a green probe here stops predicting a green migration.
+            # What CHANGED at D-8(β) is not this predicate but what the migration does with the
+            # rows it counts — see the comment above this probe block and the migration's own
+            # "CLASS-6 REVISION" docblock note. Gates H15/H38/H39 in that migration's
+            # `.db.test.ts` prove the migration side; this probe is the only way to see the number
+            # in a real deployment before the migration runs there.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c6_terminal_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL
+                  AND i.id NOT LIKE 'plm:%'
+                  AND i.id NOT LIKE 'afs:%'
+                  AND COALESCE(i.source_system, 'platform') = 'platform'
+                  AND i.template_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM user_orgs uo
+                     WHERE uo.user_id = i.requester_snapshot->>'id'
+                       AND uo.is_active = TRUE
+                     GROUP BY uo.user_id
+                    HAVING count(*) = 1
+                  )" || rc=1
+            # u1a/u1b/u1b_split/u1c now live in the staging pre-gate block above (deep-review
+            # P2-2 move) — emitted before the NOT_APPLIED/INDETERMINATE early returns instead of
+            # only after them.
+
+            if [[ "$rc" == "0" ]]; then
+              echo "verdict=APPLIED"
+            else
+              echo "verdict=INDETERMINATE"
+              echo "reason=one_or_more_probes_errored"
+            fi
+            echo "=== S1 EVIDENCE END ${label} ==="
+            return "$rc"
+          }
+
+          case "$ENVIRONMENTS" in
+            prod)    targets="prod:metasheet-postgres:metasheet-backend" ;;
+            staging) targets="staging:metasheet-staging-postgres:metasheet-staging-backend" ;;
+            both)    targets="prod:metasheet-postgres:metasheet-backend staging:metasheet-staging-postgres:metasheet-staging-backend" ;;
+            *)       abort "unknown environments input (expected prod|staging|both)" ;;
+          esac
+
+          overall_rc=0
+          for t in $targets; do
+            IFS=':' read -r t_label t_pg t_backend <<< "$t"
+            run_env "$t_label" "$t_pg" "$t_backend" || overall_rc=1
+          done
+          exit "$overall_rc"
+          REMOTE
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "probe_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          PROBE_RC: ${{ steps.probe.outputs.probe_rc }}
+          ENVIRONMENTS: ${{ github.event.inputs.environments || 'both' }}
+        run: |
+          set -euo pipefail
+          log="output/s1-org-evidence/evidence.log"
+          {
+            echo "## Approval S1 org-backfill evidence (read-only)"
+            echo ""
+            echo "- Migration: \`zzzz20260821100000_add_approval_instance_org_id\`"
+            echo "- Environments requested: \`${ENVIRONMENTS}\`"
+            echo "- Remote exit code: \`${PROBE_RC:-missing}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -f "$log" ]]; then
+            echo "- Status: **INDETERMINATE** (evidence.log missing)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          get() { awk -v k="$1=" 'index($0,k)==1 { sub(/^[^=]*=/,""); print; exit }' "$log"; }
+
+          # Per-environment blocks are rendered SEPARATELY and labelled, so a staging NOT_APPLIED
+          # can never be read as covering prod.
+          for env_label in prod staging; do
+            if ! grep -q "=== S1 EVIDENCE START ${env_label} ===" "$log"; then continue; fi
+            verdict="$(awk -v e="$env_label" '
+              $0 == "=== S1 EVIDENCE START " e " ===" { p=1; next }
+              $0 == "=== S1 EVIDENCE END " e " ===" { p=0 }
+              p && /^verdict=/ { sub(/^verdict=/, ""); print; exit }' "$log")"
+            {
+              echo "### ${env_label} — verdict: **${verdict:-INDETERMINATE}**"
+              echo ""
+              echo '```'
+              awk -v e="$env_label" '
+                $0 == "=== S1 EVIDENCE START " e " ===" { p=1 }
+                p { print }
+                $0 == "=== S1 EVIDENCE END " e " ===" { p=0 }' "$log"
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # Mechanical exclusivity/exhaustiveness self-test on the four structural buckets.
+            total="$(get "${env_label}.p10_instances_total")"
+            b1="$(get "${env_label}.b1_id_prefix_plm_total")"
+            b2="$(get "${env_label}.b2_id_prefix_afs_total")"
+            b3="$(get "${env_label}.b3_has_bound_attachment_total")"
+            b4="$(get "${env_label}.b4_no_structural_source_total")"
+            if [[ "$total$b1$b2$b3$b4" =~ ^[0-9]+$ ]] && [[ -n "$total" && -n "$b1" && -n "$b2" && -n "$b3" && -n "$b4" ]]; then
+              sum=$(( b1 + b2 + b3 + b4 ))
+              if [[ "$sum" == "$total" ]]; then
+                echo "- Bucket partition self-test: **OK** (b1+b2+b3+b4 == p10 == ${total})" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- Bucket partition self-test: **FAILED** (sum=${sum} != p10=${total}) — the buckets are not a partition; do not trust the distribution" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            # u1b split self-test (#5116 gate P3-3): the two splits (no-row-at-all vs
+            # only-deactivated-rows) must partition the aggregate exactly, same discipline as the
+            # bucket partition self-test above. `get()` returns an EMPTY string for a key that
+            # never appeared in the log (no matching `awk` line ever prints), and `probe()` itself
+            # emits the literal string "ERROR" on a failed probe — the `-n` presence check plus the
+            # `^[0-9]+$` shape guard on the concatenation reject both alongside each other, so an
+            # errored OR a never-run probe (staging pre-gate line simply absent) renders NO
+            # self-test line at all, never a spurious FAILED or OK.
+            u1b_no_row="$(get "${env_label}.u1b_split_no_row_at_all")"
+            u1b_only_deactivated="$(get "${env_label}.u1b_split_only_deactivated_rows")"
+            u1b_zero_membership="$(get "${env_label}.u1b_zero_membership_active_users")"
+            if [[ "$u1b_no_row$u1b_only_deactivated$u1b_zero_membership" =~ ^[0-9]+$ ]] \
+               && [[ -n "$u1b_no_row" && -n "$u1b_only_deactivated" && -n "$u1b_zero_membership" ]]; then
+              u1b_sum=$(( u1b_no_row + u1b_only_deactivated ))
+              if [[ "$u1b_sum" == "$u1b_zero_membership" ]]; then
+                echo "- u1b split self-test: **OK** (u1b_split_no_row_at_all + u1b_split_only_deactivated_rows == u1b_zero_membership_active_users == ${u1b_zero_membership})" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- u1b split self-test: **FAILED** (no_row_at_all=${u1b_no_row} + only_deactivated_rows=${u1b_only_deactivated} = ${u1b_sum} != zero_membership_active_users=${u1b_zero_membership}) — the split identity broke; do not trust u1b_split_* against the aggregate" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            # Ruled-posture violations, surfaced at the top level so they cannot be missed.
+            for v in p22_plm_prefix_org_present_VIOLATION p23_afs_prefix_org_present_VIOLATION; do
+              val="$(get "${env_label}.${v}")"
+              if [[ "$val" =~ ^[0-9]+$ ]] && [[ "$val" != "0" ]]; then
+                echo "- **RULED-POSTURE VIOLATION** \`${v}\` = ${val} on ${env_label} — the Phase-3 CHECK cannot detect this; owner decision required before activation" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            # deep-review P3-5: U3' (Lock-11 §8) is the named SOLE detector of outage class 4
+            # ("stamped but still dark") — A-1's own argument is that NO CHECK or gate can see field
+            # divergence, which is exactly the same "no CHECK can catch this" category as p22/p23
+            # above, so it is surfaced the same way rather than living only inside the fenced raw
+            # log block. NOT_MEASURED (P3-4's marker for an absent org_id column) is deliberately
+            # NOT a violation and does not match ^[0-9]+$, so it never fires this line — an
+            # unmeasured environment is a runbook escalation (see the S5 precondition-audit
+            # criterion), not a workflow-level violation.
+            for v in u3_attendance_records_org_id_not_in_user_orgs u3_attendance_requests_org_id_not_in_user_orgs; do
+              val="$(get "${env_label}.${v}")"
+              if [[ "$val" =~ ^[0-9]+$ ]] && [[ "$val" != "0" ]]; then
+                echo "- **RULED-POSTURE VIOLATION** \`${v}\` = ${val} on ${env_label} — no CHECK or gate can detect this (Lock-11 §8 U3', outage class 4: \"stamped but still dark\"); owner decision required before activation" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          mkdir -p output/s1-org-evidence
+          cp "$GITHUB_STEP_SUMMARY" output/s1-org-evidence/step-summary.md
+
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-s1-org-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            output/s1-org-evidence/**
+
+      - name: Fail when the remote probe failed
+        if: always()
+        run: |
+          rc="${{ steps.probe.outputs.probe_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "probe_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote evidence probe failed: rc=$rc (see the per-environment verdicts in the summary)" >&2
+            exit 1
+          fi

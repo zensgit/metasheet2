@@ -28,10 +28,12 @@ const auditMocks = vi.hoisted(() => ({
 
 const namespaceAdmissionMocks = vi.hoisted(() => ({
   deriveDelegatedAdminNamespace: vi.fn(),
+  grantNamespaceAdmissions: vi.fn(async () => [] as string[]),
   disableNamespaceAdmissionsWithoutRoles: vi.fn(),
   isNamespaceAdmissionControlledResource: vi.fn(),
   listRoleNamespaces: vi.fn(),
   listUserNamespaceAdmissionSnapshots: vi.fn(),
+  lockNamespaceAdmissionWrites: vi.fn(),
   normalizeNamespace: vi.fn(),
   roleIdMatchesNamespaces: vi.fn(),
   setUserNamespaceAdmission: vi.fn(),
@@ -112,12 +114,29 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
-vi.mock('../../src/rbac/namespace-admission', () => ({
+vi.mock('../../src/rbac/namespace-admission', async () => ({
+  // `deriveGrantNamespaces` is deliberately NOT stubbed: provisioning's admission write must be
+  // driven by the SHIPPED derivation. A stub here could agree with a caller that derives the
+  // wrong namespaces, which is precisely the coupling this suite needs to observe.
+  deriveGrantNamespaces: (
+    await vi.importActual<typeof import('../../src/rbac/namespace-admission')>(
+      '../../src/rbac/namespace-admission',
+    )
+  ).deriveGrantNamespaces,
+  // Same reasoning: the delegated platform-code refusal classifies each permission code with the
+  // SHIPPED derivation, so a stub cannot agree with a wrong classification.
+  derivePermissionNamespace: (
+    await vi.importActual<typeof import('../../src/rbac/namespace-admission')>(
+      '../../src/rbac/namespace-admission',
+    )
+  ).derivePermissionNamespace,
+  grantNamespaceAdmissions: namespaceAdmissionMocks.grantNamespaceAdmissions,
   deriveDelegatedAdminNamespace: namespaceAdmissionMocks.deriveDelegatedAdminNamespace,
   disableNamespaceAdmissionsWithoutRoles: namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles,
   isNamespaceAdmissionControlledResource: namespaceAdmissionMocks.isNamespaceAdmissionControlledResource,
   listRoleNamespaces: namespaceAdmissionMocks.listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots: namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots,
+  lockNamespaceAdmissionWrites: namespaceAdmissionMocks.lockNamespaceAdmissionWrites,
   normalizeNamespace: namespaceAdmissionMocks.normalizeNamespace,
   roleIdMatchesNamespaces: namespaceAdmissionMocks.roleIdMatchesNamespaces,
   setUserNamespaceAdmission: namespaceAdmissionMocks.setUserNamespaceAdmission,
@@ -135,7 +154,16 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
 vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
+import { LOGIN_NAME_RULE_MESSAGE } from '../../src/auth/login-name-rule'
 import { adminUsersRouter } from '../../src/routes/admin-users'
+import { transaction } from '../../src/db/pg'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('admin-users-routes.test.ts')
 
 function createMockResponse() {
   return {
@@ -254,8 +282,12 @@ describe('admin-users routes', () => {
     ))
     namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockReset()
     namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockResolvedValue([])
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockReset()
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockResolvedValue(undefined)
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockReset()
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockImplementation((namespace: string) => Boolean(namespace))
+    namespaceAdmissionMocks.grantNamespaceAdmissions.mockClear()
+    namespaceAdmissionMocks.grantNamespaceAdmissions.mockResolvedValue([])
     namespaceAdmissionMocks.listRoleNamespaces.mockReset()
     namespaceAdmissionMocks.listRoleNamespaces.mockResolvedValue([])
     namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockReset()
@@ -1067,6 +1099,353 @@ describe('admin-users routes', () => {
     })
   })
 
+  describe('member-admission organizations (read-only user_orgs view, slice B)', () => {
+    type OrgRow = { user_id: string; org_id: string; is_active: boolean }
+    type EvidenceRow = { local_user_id: string; status: string }
+
+    // Slice C (#6079): the history statement shared with the local-account guard
+    // (directory/org-membership-history.ts) is answered from the same fixtures. Like the active read
+    // below, each predicate is applied ONLY when the statement carries it, so dropping the user
+    // filter, adding an `is_active` filter (ignoring deactivated rows), dropping the `'applied'`
+    // status filter or turning the event/effect OR into AND reds the slice C cases below.
+    const historyCalls: Array<{ sql: string; params: unknown[] }> = []
+
+    function evaluateHistory(
+      sql: string,
+      params: unknown[],
+      input: { rows: OrgRow[]; events: EvidenceRow[]; effects: EvidenceRow[] },
+    ) {
+      const [anySegment = '', afterAny = ''] = sql.split('AS has_any_row')
+      const [orgSegment = '', evidenceSegment = ''] = afterAny.split('AS has_org_row')
+      const userRows = (segment: string) => input.rows
+        .filter((row) => !/uo\.user_id = \$1/.test(segment) || row.user_id === params[0])
+        .filter((row) => !/is_active/.test(segment) || row.is_active)
+      const eventsSegment = evidenceSegment.split('directory_deprovision_effects')[0] ?? ''
+      const effectsSegment = evidenceSegment.split('directory_deprovision_effects')[1] ?? ''
+      const liveEvidence = (rows: EvidenceRow[], segment: string, alias: 'event' | 'effect') => rows
+        .filter((row) => !new RegExp(`${alias}[.]local_user_id = [$]1`).test(segment) || row.local_user_id === params[0])
+        .filter((row) => !new RegExp(`${alias}[.]status = 'applied'`).test(segment) || row.status === 'applied')
+        .length > 0
+      const eventLive = liveEvidence(input.events, eventsSegment, 'event')
+      const effectLive = liveEvidence(input.effects, effectsSegment, 'effect')
+      const combinedWithOr = /[)]\s*OR\s+EXISTS/.test(evidenceSegment)
+      return {
+        has_any_row: userRows(anySegment).length > 0,
+        has_org_row: userRows(orgSegment)
+          .filter((row) => !/uo\.org_id = \$2/.test(orgSegment) || row.org_id === params[1])
+          .length > 0,
+        deprovision_applied: combinedWithOr ? eventLive || effectLive : eventLive && effectLive,
+      }
+    }
+
+    // A small fake of the two tables the organizations read joins. It applies each filter ONLY when
+    // the route's SQL carries the matching predicate, so dropping `uo.user_id = $1`,
+    // `uo.is_active = true` or `u.is_active = true` from the route lets the filtered rows through
+    // and these cases go red (fixtures carry another user's rows for the user filter).
+    function installOrgFake(input: { userActive: boolean; rows: OrgRow[]; events?: EvidenceRow[]; effects?: EvidenceRow[] }) {
+      const orgCalls: Array<{ sql: string; params: unknown[] }> = []
+      historyCalls.length = 0
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) {
+          historyCalls.push({ sql, params })
+          if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)) throw new Error('organizations read must not write')
+          return { rows: [evaluateHistory(sql, params, { rows: input.rows, events: input.events ?? [], effects: input.effects ?? [] })] }
+        }
+        if (/FROM users\s+WHERE id = \$1/.test(sql)) {
+          return {
+            rows: [{
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+              role: 'user',
+              is_active: input.userActive,
+              is_admin: false,
+              last_login_at: null,
+              created_at: '2026-03-12T00:00:00.000Z',
+              updated_at: '2026-03-12T00:00:00.000Z',
+            }],
+          }
+        }
+        if (sql.includes('FROM user_orgs')) {
+          orgCalls.push({ sql, params })
+          if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)) throw new Error('organizations read must not write')
+          const filterUser = /uo\.user_id = \$1/.test(sql)
+          const filterRowActive = /uo\.is_active = true/.test(sql)
+          const filterUserActive = /JOIN users u ON u\.id = uo\.user_id/.test(sql) && /u\.is_active = true/.test(sql)
+          const rows = input.rows
+            .filter((row) => !filterUser || row.user_id === params[0])
+            .filter((row) => !filterRowActive || row.is_active)
+            .filter(() => !filterUserActive || input.userActive)
+            .map((row) => ({ org_id: row.org_id }))
+          return { rows }
+        }
+        return { rows: [] }
+      })
+      return orgCalls
+    }
+
+    async function readOrganizations() {
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+      expect(response.statusCode).toBe(200)
+      return (response.body as Record<string, any>).data.organizations
+    }
+
+    beforeEach(() => {
+      rbacMocks.isAdmin.mockResolvedValue(true)
+    })
+
+    it('zero active rows: empty list and no tenant context (an inactive row does not count)', async () => {
+      const orgCalls = installOrgFake({
+        userActive: true,
+        rows: [
+          { user_id: 'user-1', org_id: 'org-old', is_active: false },
+          { user_id: 'user-2', org_id: 'org-b', is_active: true },
+        ],
+      })
+      // The deactivated `org-old` row is history: no tenant context, but `hasAnyRow` is true.
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+      expect(orgCalls).toHaveLength(1)
+      expect(orgCalls[0].params).toEqual(['user-1'])
+    })
+
+    it('exactly one active row: that org and a tenant context (the login claim predicate)', async () => {
+      const orgCalls = installOrgFake({
+        userActive: true,
+        rows: [
+          { user_id: 'user-1', org_id: 'org-a', is_active: true },
+          { user_id: 'user-1', org_id: 'org-z', is_active: false },
+          { user_id: 'user-2', org_id: 'org-b', is_active: true },
+        ],
+      })
+      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false })
+      expect(orgCalls.map((call) => call.params)).toEqual([['user-1']])
+    })
+
+    it('two active rows: both orgs listed but NO tenant context (login would need an explicit choice)', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [
+          { user_id: 'user-1', org_id: 'org-a', is_active: true },
+          { user_id: 'user-1', org_id: 'org-b', is_active: true },
+        ],
+      })
+      expect(await readOrganizations()).toEqual({
+        active: [{ orgId: 'org-a' }, { orgId: 'org-b' }],
+        hasTenantContext: false,
+        hasAnyRow: true,
+        deprovisionApplied: false,
+      })
+    })
+
+    it('an inactive user is filtered out like at login: active rows are not reported and there is no tenant context', async () => {
+      installOrgFake({
+        userActive: false,
+        rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }],
+      })
+      // History is about rows, not about the user's own active flag: the row still counts.
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+    })
+
+    it('a blank org id still counts as a row for the exactly-one rule (login parity) but is not listed', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [
+          { user_id: 'user-1', org_id: '', is_active: true },
+          { user_id: 'user-1', org_id: 'org-a', is_active: true },
+        ],
+      })
+      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+    })
+
+    it('a single blank org id gives no tenant context, like login (a blank resolved id is "no tenant")', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-1', org_id: '', is_active: true }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+    })
+
+    it('a failing user_orgs read answers 200 with organizations: null, keeps the rest, and logs values-free', async () => {
+      const MARKER = 'MARKER_orgs_q7 connect ECONNREFUSED 198.51.100.7:5432 role=fixture-role'
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([
+        { namespace: 'crm', enabled: true, effective: true, hasRole: true, source: 'seed_backfill', grantedBy: null, updatedBy: null, createdAt: null, updatedAt: null },
+      ])
+      installOrgFake({ userActive: true, rows: [] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('FROM user_orgs')) throw new Error(MARKER)
+        return fake(sql, params)
+      })
+
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      const data = (response.body as Record<string, any>).data
+      expect(data).toHaveProperty('organizations', null)
+      expect(data).toMatchObject({
+        userId: 'user-1',
+        accountEnabled: true,
+        namespaceAdmissions: [expect.objectContaining({ namespace: 'crm', enabled: true })],
+      })
+      expect(JSON.stringify(response.body)).not.toContain('MARKER_orgs_q7')
+      const lines = warn.mock.calls.map((call) => String(call[0]))
+      expect(lines).toEqual([expect.stringMatching(/^admin-users\.organizations-read-failed errorClass=Error(?: correlationId=\S+)?$/)])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('MARKER_orgs_q7')
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('198.51.100.7')
+      warn.mockRestore()
+    })
+
+    // ---- Slice C (#6079): hasAnyRow / deprovisionApplied, the read-only mirror of the
+    // POST /api/admin/directory/local/accounts guard (one shared statement). ----
+
+    it('slice C: no user_orgs row at all and no applied evidence: hasAnyRow=false, deprovisionApplied=false (the only shape the panel may offer "join")', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-2', org_id: 'default', is_active: false }],
+        events: [{ local_user_id: 'user-2', status: 'applied' }],
+        effects: [{ local_user_id: 'user-2', status: 'applied' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false })
+      expect(historyCalls).toHaveLength(1)
+      // The user id and NO org: the field is about any org; the guard passes its own org.
+      expect(historyCalls[0].params).toEqual(['user-1', null])
+      expect(historyCalls[0].sql).toMatch(/^\s*SELECT/)
+    })
+
+    it('slice C: a deactivated row in any org is history: hasAnyRow=true while active stays empty', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-1', org_id: 'default', is_active: false }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+    })
+
+    it('slice C: an applied deprovision event alone gives deprovisionApplied=true and leaves hasAnyRow=false (the two fields are not swapped)', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'applied' }],
+        effects: [{ local_user_id: 'user-1', status: 'superseded' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: true })
+    })
+
+    it('slice C: an applied deprovision effect alone (its event no longer applied) also gives deprovisionApplied=true', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'fully_resolved' }],
+        effects: [{ local_user_id: 'user-1', status: 'applied' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: true })
+    })
+
+    it('slice C: only resolved / superseded evidence is not "applied": deprovisionApplied=false', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'superseded' }, { local_user_id: 'user-1', status: 'fully_resolved' }],
+        effects: [{ local_user_id: 'user-1', status: 'superseded' }, { local_user_id: 'user-1', status: 'reversed' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false })
+    })
+
+    it('slice C: a failing history read keeps active / hasTenantContext, answers hasAnyRow / deprovisionApplied as null, and logs values-free', async () => {
+      const MARKER = 'MARKER_hist_k4 connect ECONNREFUSED 198.51.100.9:5432 role=fixture-role'
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      installOrgFake({ userActive: true, rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) throw new Error(MARKER)
+        return fake(sql, params)
+      })
+
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.organizations).toEqual({
+        active: [{ orgId: 'org-a' }],
+        hasTenantContext: true,
+        hasAnyRow: null,
+        deprovisionApplied: null,
+      })
+      expect(JSON.stringify(response.body)).not.toContain('MARKER_hist_k4')
+      const lines = warn.mock.calls.map((call) => String(call[0]))
+      expect(lines).toEqual([expect.stringMatching(/^admin-users\.organization-history-read-failed errorClass=Error(?: correlationId=\S+)?$/)])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('MARKER_hist_k4')
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('198.51.100.9')
+      warn.mockRestore()
+    })
+
+    it('slice C: a history read that answers a non-boolean is "unknown" (null), never coerced to false', async () => {
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      installOrgFake({ userActive: true, rows: [] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) return { rows: [{ has_any_row: null, has_org_row: false, deprovision_applied: 'f' }] }
+        return fake(sql, params)
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: null, deprovisionApplied: null })
+      warn.mockRestore()
+    })
+
+    it('an unknown user is a 404 and user_orgs is never read', async () => {
+      const orgCalls: string[] = []
+      pgMocks.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM user_orgs')) orgCalls.push(sql)
+        return { rows: [] }
+      })
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'missing-user' },
+      })
+      expect(response.statusCode).toBe(404)
+      expect(orgCalls).toEqual([])
+    })
+
+    it('a non-admin is refused before any user_orgs read', async () => {
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      const orgCalls = installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }],
+      })
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+      expect(response.statusCode).toBe(403)
+      expect(orgCalls).toEqual([])
+      expect(historyCalls).toEqual([])
+    })
+  })
+
+  it('answers a fixed 500 when the delegated role read fails before the handler, instead of leaving the request unanswered', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockRejectedValueOnce(new Error('MARKER_rd_f3q7 connect ECONNREFUSED'))
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'ROLE_DELEGATION_CHECK_FAILED', message: 'Failed to verify delegated role-admin access' },
+    })
+    expect(JSON.stringify(response.body)).not.toContain('MARKER_rd_f3q7')
+    expect(JSON.stringify(response.body)).not.toContain('ECONNREFUSED')
+  })
+
   it('returns delegated role summary for a plugin admin', async () => {
     state.authUser = {
       id: 'crm-admin-1',
@@ -1114,8 +1493,9 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data).toMatchObject({
       isPlatformAdmin: false,
       delegableNamespaces: ['crm'],
+      // Owner ruling 2026-10-10: the namespace main-admin role `crm_admin` is platform-only, so
+      // a delegate's assignable list no longer offers it.
       roleCatalog: [
-        { id: 'crm_admin' },
         { id: 'crm_operator' },
       ],
       scopeAssignments: [
@@ -1560,6 +1940,12 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      // in-transaction role lock + the role's codes (delegated platform-code check)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -1657,6 +2043,12 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      // in-transaction role lock + the role's codes (delegated platform-code check)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -1709,7 +2101,7 @@ describe('admin-users routes', () => {
   // P23: same discriminator/mapping as the '/api/admin/users/:userId/roles/assign' coverage
   // above, exercised on the sibling delegated-role route (this is the route the P23 write-up
   // names directly — its user_roles write used to fall through to an unclassified 500 too).
-  it('maps a busy recovery authority lease to a retryable 409 on the delegated role-assign route', async () => {
+  it('[recovery-census:admin-users:delegated-role-action] maps a busy recovery authority lease to a retryable 409 on the delegated role-assign route', async () => {
     state.authUser = { id: 'admin-1', role: 'user' }
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
@@ -1742,6 +2134,7 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
     expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:delegated-role-action')
   })
 
   it('blocks delegated role access when no department scope is configured', async () => {
@@ -2585,7 +2978,7 @@ describe('admin-users routes', () => {
   // that (like every other error) to an unclassified 500 — mock the write throwing that exact
   // shape (no real trigger needed) and assert the route now maps it to a retryable 409 using
   // the SAME discriminator/code the multitable permission routes already use.
-  it('maps a busy recovery authority lease to a retryable 409 instead of an unclassified 500', async () => {
+  it('[recovery-census:admin-users:role-assign] [recovery-census:admin-users:busy-delegation] maps a busy recovery authority lease to a retryable 409 instead of an unclassified 500', async () => {
     rbacMocks.isAdmin
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
@@ -2622,6 +3015,8 @@ describe('admin-users routes', () => {
     // Not the unclassified fallback this route used to return for every error.
     expect((response.body as Record<string, any>).error.code).not.toBe('ROLE_ASSIGN_FAILED')
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:role-assign')
+    census.record('admin-users:busy-delegation')
   })
 
   it('assigns platform admin and syncs legacy admin columns', async () => {
@@ -2785,6 +3180,170 @@ describe('admin-users routes', () => {
       expect.stringContaining('SET role = CASE'),
       ['user-1', false],
     )
+  })
+
+  it.each(['platform', 'delegated'] as const)('%s unassign holds one transaction through lock, DELETE and revoke witness', async (entry) => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const events: string[] = []
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql.includes('DELETE FROM user_roles')) events.push('delete')
+        return pgMocks.query(sql, params)
+      }),
+    }
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM users')) return { rows: [{ id: 'user-1', role: 'user', is_active: true, permissions: [] }] }
+      if (sql.includes('FROM roles WHERE')) return { rows: [{ id: 'attendance_employee' }] }
+      if (sql.includes('DELETE FROM user_roles')) return { rows: [{ user_id: 'user-1' }], rowCount: 1 }
+      return { rows: [] }
+    })
+    vi.mocked(transaction).mockImplementationOnce(async (callback) => {
+      events.push('begin')
+      const result = await callback(client)
+      events.push('commit')
+      return result
+    })
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockImplementationOnce(async (executor, userId) => {
+      expect(executor).toBe(client)
+      expect(userId).toBe('user-1')
+      events.push('lock')
+    })
+    namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockImplementationOnce(async (options, runQuery) => {
+      expect(runQuery).toBe(client.query)
+      expect(options).toEqual({
+        userId: 'user-1', namespaces: [], actorId: 'admin-1',
+        source: 'role_unassigned', revokedRoleId: 'attendance_employee',
+      })
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+      events.push('witness')
+      return []
+    })
+
+    const response = await invokeRoute('post', entry === 'platform'
+      ? '/api/admin/users/:userId/roles/unassign'
+      : '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'unassign' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(events).toEqual(['begin', 'lock', 'delete', 'witness', 'commit'])
+    expect(namespaceAdmissionMocks.listRoleNamespaces).toHaveBeenCalledWith('attendance_employee', client.query)
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
+  })
+
+  it('unassigns attendance_employee with DELETE rowCount 1 and reports roleHeld false', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['workflow:read'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ user_id: 'user-1' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      changedRoleId: 'attendance_employee',
+      actorId: 'admin-1',
+      roleHeld: false,
+      membershipChanged: true,
+      roles: [],
+      permissions: ['workflow:read'],
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('DELETE FROM user_roles'))).toBe(true)
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
+  })
+
+  it('reports leftover membership when unassign DELETE rowCount is 0 and the snapshot still holds the role', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'attendance_employee' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      changedRoleId: 'attendance_employee',
+      actorId: 'admin-1',
+      roleHeld: true,
+      membershipChanged: false,
+      roles: ['attendance_employee'],
+      permissions: ['attendance:read'],
+    })
   })
 
   it('lists role catalog with permissions and member counts', async () => {
@@ -2984,6 +3543,52 @@ describe('admin-users routes', () => {
       '2026-05-29',
     ]))
     expect(auditMocks.auditLog).toHaveBeenCalled()
+    // The grant's two halves must land together: without the enabled admission row the
+    // permission codes written alongside it are filtered out of every effective-permission
+    // read, so the provisioned role would resolve to nothing. Asserted on the DERIVED
+    // namespaces and on the transaction client, not on a literal.
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).toHaveBeenCalledTimes(1)
+    const [admissionExecutor, admissionOptions] = namespaceAdmissionMocks.grantNamespaceAdmissions.mock.calls[0] as [
+      { query: unknown },
+      { userId: string; namespaces: string[]; source?: string },
+    ]
+    expect(typeof admissionExecutor?.query).toBe('function')
+    expect(admissionOptions.namespaces).toEqual(['attendance'])
+    const usersInsert = pgMocks.query.mock.calls.find((args) => String(args[0]).includes('INSERT INTO users ('))
+    expect(admissionOptions.userId).toBe(String((usersInsert?.[1] as unknown[])?.[0]))
+  })
+
+  it('POSITIVE CONTROL — provisioning a preset that derives no namespace writes no admission', async () => {
+    // Without this, the leg above would also pass against a route that enables an admission
+    // unconditionally — which would over-grant every platform preset.
+    rbacMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM users\n     WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-plat', email: 'plat@example.com', name: 'Plat', role: 'user',
+            is_active: true, is_admin: false, created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'plat@example.com',
+        name: 'Plat',
+        password: 'WelcomePass9A',
+        presetId: 'platform-viewer',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
   })
 
   it('creates attendance group membership and default shift assignment during user provisioning', async () => {
@@ -3209,6 +3814,60 @@ describe('admin-users routes', () => {
 
     expect(response.statusCode).toBe(400)
     expect((response.body as Record<string, any>).error.code).toBe('PASSWORD_POLICY_FAILED')
+    // English message and the `details.details` string array are unchanged; `details.reasons`
+    // is the additive machine-readable list the web console localises by.
+    expect((response.body as Record<string, any>).error.message).toBe('Password does not meet requirements')
+    expect((response.body as Record<string, any>).error.details).toEqual({
+      details: [
+        'Password must be at least 8 characters long',
+        'Password must contain at least one uppercase letter',
+        'Password must contain at least one number',
+      ],
+      reasons: ['too_short', 'no_uppercase', 'no_digit'],
+    })
+  })
+
+  it('rejects a create-user password containing a common fragment with only the weak_pattern reason', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: 'operator.a',
+        name: 'Operator A',
+        password: '123456Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'PASSWORD_POLICY_FAILED',
+      message: 'Password does not meet requirements',
+      details: {
+        details: ['Password contains a common weak pattern'],
+        reasons: ['weak_pattern'],
+      },
+    })
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
+  })
+
+  it('rejects a non-ASCII login name with INVALID_USERNAME and the stable login_name_ascii rule code', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: '测试员',
+        name: '测试员',
+        password: '12345Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'INVALID_USERNAME',
+      message: 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed',
+      details: { rule: 'login_name_ascii' },
+    })
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
   })
 
   it('creates a no-email user with username/mobile and skips invite issuance', async () => {
@@ -4317,4 +4976,171 @@ describe('admin-users routes', () => {
       }),
     )
   })
+
+  // #6259: POST /api/admin/users and the DingTalk directory admission use ONE login-name rule
+  // (auth/login-name-rule.ts). This leg pins that the create-user route answers with the shared
+  // module's sentence and accepts what the shared rule accepts; login-name-rule.test.ts pins that
+  // no private copy of the rule is left in this route.
+  it('create-user applies the shared login-name rule (#6259)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const rejected = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: '测试员',
+        name: '测试员',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(rejected.statusCode).toBe(400)
+    expect((rejected.body as Record<string, any>).error.code).toBe('INVALID_USERNAME')
+    expect((rejected.body as Record<string, any>).error.message).toBe(LOGIN_NAME_RULE_MESSAGE)
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
+
+    for (const tooShort of ['ab', '12345']) {
+      const response = await invokeRoute('post', '/api/admin/users', {
+        body: { username: tooShort, name: 'Operator A', password: 'WelcomePass9A' },
+      })
+      expect(response.statusCode, tooShort).toBe(400)
+      expect((response.body as Record<string, any>).error.message, tooShort).toBe(LOGIN_NAME_RULE_MESSAGE)
+    }
+  })
+
+// O2-A1 (census reachability): one discriminating behaviour leg PER
+// sendIfRecoveryAuthorityBusy writer call site that had none. Each leg drives the REAL
+// route until its recovery-authority write raises the marker 40001 and asserts the
+// retryable 409 — so `if (false && sendIfRecoveryAuthorityBusy(res, error))` at that
+// one site turns exactly its leg red (the error would fall through to the surface's
+// original *_FAILED 500 instead).
+describe('admin-users remaining recovery-authority-busy writer sites', () => {
+  function recoveryBusyError(): Error & { code: string } {
+    const error = new Error('METASHEET_RECOVERY_AUTHORITY_BUSY') as Error & { code: string }
+    error.code = '40001'
+    return error
+  }
+
+  const USER_ROW = {
+    id: 'user-1',
+    email: 'alpha@example.com',
+    name: 'Alpha',
+    role: 'user',
+    is_active: true,
+    is_admin: false,
+    last_login_at: null,
+    created_at: '2026-03-12T00:00:00.000Z',
+    updated_at: '2026-03-12T00:00:00.000Z',
+  }
+
+  function expectRetryable409(response: { statusCode: number; body: unknown }): void {
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+  }
+
+  it('[recovery-census:admin-users:member-group-action] member-group assign: busy lease on the membership write → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [USER_ROW] }) // fetchUserProfile
+      .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] }) // group lookup
+      .mockImplementationOnce(async () => {
+        throw recoveryBusyError() // INSERT INTO platform_member_group_members
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { groupId: 'group-1' },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:member-group-action')
+  })
+
+  it('[recovery-census:admin-users:create-user] create user: busy lease on the users INSERT → retryable 409', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true) // ensurePlatformAdmin
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('INSERT INTO users (')) throw recoveryBusyError()
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expectRetryable409(response)
+    census.record('admin-users:create-user')
+  })
+
+  it('create user: a non-40001 insert failure keeps the ORIGINAL USER_CREATE_FAILED 500 (control)', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('INSERT INTO users (')) {
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).error.code).toBe('USER_CREATE_FAILED')
+  })
+
+  it('[recovery-census:admin-users:role-unassign] role unassign: busy lease on the user_roles DELETE → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [USER_ROW] }) // fetchUserProfile
+      .mockImplementationOnce(async () => {
+        throw recoveryBusyError() // DELETE FROM user_roles
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_admin' },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:role-unassign')
+  })
+
+  it('[recovery-census:admin-users:status] status update: busy lease inside the access-graph lock transaction → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    // The transaction mock runs its handler against pgMocks.query; the FIRST in-txn
+    // query is lockUsersForAccessGraphWrite's FOR UPDATE read — the realistic point for
+    // the marker 40001 while recovery holds the per-subject lease.
+    pgMocks.query.mockImplementationOnce(async () => {
+      throw recoveryBusyError()
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/status', {
+      params: { userId: 'user-1' },
+      body: { isActive: false },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:status')
+  })
+})
 })

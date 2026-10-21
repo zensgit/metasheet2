@@ -251,10 +251,14 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
     }
   })
 
-  it('G-2: a contract-unimplemented kind (user_group) is rejected at authoring and never persisted', async () => {
+  it('G-2: a contract-unimplemented kind is rejected at authoring and never persisted', async () => {
+    // Lock-1 §K1 landed `user_group` (this file's PREVIOUS fixture here) — swapped to a kind
+    // that is genuinely undeclared anywhere in the union, so this arm keeps testing the SAME
+    // default-arm rejection mechanism (`normalizeApprovalAssigneeSources`'s `default:` choke)
+    // rather than silently starting to exercise the (now-implemented) K1 create path instead.
     const graph = JSON.parse(JSON.stringify(COMPANY_SCOPE_GRAPH)) as typeof COMPANY_SCOPE_GRAPH
-    ;(graph.nodes[1].config as { assigneeSources: unknown[] }).assigneeSources = [{ kind: 'user_group', groupIds: ['g1'] }]
-    const key = `rchoice-${TS}-g2-usergroup`
+    ;(graph.nodes[1].config as { assigneeSources: unknown[] }).assigneeSources = [{ kind: 'not_a_real_kind', groupIds: ['g1'] }]
+    const key = `rchoice-${TS}-g2-notreal`
     const res = await req(base, '/api/approval-templates', reqTok, {
       method: 'POST',
       body: { key, name: key, formSchema: FORM_SCHEMA, approvalGraph: graph },

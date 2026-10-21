@@ -28,7 +28,19 @@
           <span class="meta-person-picker__item-label">{{ member.display }}</span>
           <span v-if="member.subtitle" class="meta-person-picker__item-sub">{{ member.subtitle }}</span>
         </label>
-        <div v-if="!loading && !errorMessage && !members.length" class="meta-person-picker__empty">{{ pp('personPicker.empty') }}</div>
+        <!-- #5781: a term-less directory call answers `requiresQuery` + an empty list (the endpoint no
+             longer dumps the roster). That is a PROMPT, not an empty result — never show "no members". -->
+        <div
+          v-if="!loading && !errorMessage && requiresQuery"
+          class="meta-person-picker__hint"
+          data-test="person-picker-search-required"
+        >{{ pp('personPicker.typeToSearch') }}</div>
+        <div v-else-if="!loading && !errorMessage && !members.length" class="meta-person-picker__empty">{{ pp('personPicker.empty') }}</div>
+        <div
+          v-if="!loading && !errorMessage && hasMore"
+          class="meta-person-picker__hint"
+          data-test="person-picker-truncated"
+        >{{ pp('personPicker.refineSearch') }}</div>
       </div>
       <div class="meta-person-picker__footer">
         <span class="meta-person-picker__count">{{ selectedCountText }}</span>
@@ -67,6 +79,15 @@ const props = defineProps<{
   field?: MetaField | null
   sheetId: string
   currentValue?: unknown
+  /** #5781 follow-up — the display names the OPENER already holds for `currentValue`
+   *  (grid.personSummaries[recordId][fieldId]). Load-bearing since #5781: the directory endpoint no
+   *  longer answers the term-less open call with the roster, so the fetch below can no longer be the
+   *  place an ALREADY-ASSIGNED id learns its name. Without this the "Selected" chip — and, on
+   *  confirm, the grid cell and the drawer — fall back to the raw userId for every assignee the user
+   *  did not happen to type a search for. Passing summaries the client ALREADY has discloses nothing
+   *  new (deliberately NOT an ids→names lookup on the server, which would re-widen the read #5781
+   *  just bounded). Optional: an opener with nothing cached keeps the raw-id fallback. */
+  currentSummaries?: PersonSummary[] | null
 }>()
 
 const emit = defineEmits<{
@@ -80,6 +101,10 @@ const search = ref('')
 const members = ref<PersonMember[]>([])
 const loading = ref(false)
 const errorMessage = ref('')
+// #5781 directory response markers: `requiresQuery` = the server refused to answer without a search
+// term (empty list is a prompt, not a result); `hasMore` = the answer was clamped to the server ceiling.
+const requiresQuery = ref(false)
+const hasMore = ref(false)
 const selected = reactive(new Set<string>())
 const summaryById = reactive<Record<string, PersonSummary>>({})
 const { isZh } = useLocale()
@@ -101,9 +126,19 @@ watch(() => props.visible, async (visible) => {
   Object.keys(summaryById).forEach((id) => delete summaryById[id])
   const currentValue = props.currentValue
   const ids = Array.isArray(currentValue) ? currentValue.map(String) : currentValue ? [String(currentValue)] : []
+  // Seed from the opener's cached summaries (see `currentSummaries`): since #5781 the term-less open
+  // fetch returns NOTHING, so this is the only display source a pre-selected id has. A cached entry
+  // that is itself a raw-id placeholder is NOT pinned — it stays the same fallback, so a later
+  // directory answer can still upgrade it. `inactive` rides along (2c-S4 cue survives a confirm).
+  const known = new Map(
+    (Array.isArray(props.currentSummaries) ? props.currentSummaries : [])
+      .filter((entry): entry is PersonSummary => !!entry && typeof entry.id === 'string')
+      .map((entry) => [entry.id, entry] as const),
+  )
   ids.forEach((id) => {
     selected.add(id)
-    summaryById[id] = { id, display: id }
+    const cached = known.get(id)
+    summaryById[id] = cached && cached.display && cached.display !== id ? { ...cached, id } : { id, display: id }
   })
   search.value = ''
   await loadMembers()
@@ -117,6 +152,8 @@ async function loadMembers() {
   // chips still render from `selected` / `summaryById`, so nothing already-set is dropped.
   if (!fieldId) {
     members.value = []
+    requiresQuery.value = false
+    hasMore.value = false
     return
   }
   loading.value = true
@@ -125,6 +162,8 @@ async function loadMembers() {
     const data = await multitableClient.listPersonFieldDirectory(props.sheetId, fieldId, {
       q: search.value || undefined,
     })
+    requiresQuery.value = data.requiresQuery === true
+    hasMore.value = data.hasMore === true
     members.value = (data.items ?? []).map((item) => ({
       id: item.userId,
       display: item.name || item.email || item.userId,
@@ -137,6 +176,8 @@ async function loadMembers() {
     }
   } catch (error: any) {
     members.value = []
+    requiresQuery.value = false
+    hasMore.value = false
     errorMessage.value = error?.message ?? pp('personPicker.errorLoad')
   } finally {
     loading.value = false
@@ -202,7 +243,8 @@ function onConfirm() {
 .meta-person-picker__body { flex: 1; overflow-y: auto; padding: 0 16px; max-height: 300px; }
 .meta-person-picker__item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; cursor: pointer; }
 .meta-person-picker__item-sub { color: #909399; font-size: 12px; margin-left: auto; }
-.meta-person-picker__loading, .meta-person-picker__empty, .meta-person-picker__error { text-align: center; padding: 20px; color: #999; font-size: 13px; }
+.meta-person-picker__loading, .meta-person-picker__empty, .meta-person-picker__error, .meta-person-picker__hint { text-align: center; padding: 20px; color: #999; font-size: 13px; }
+.meta-person-picker__hint { padding: 12px 20px; }
 .meta-person-picker__error { color: #f56c6c; }
 .meta-person-picker__footer { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-person-picker__count { font-size: 12px; color: #666; }

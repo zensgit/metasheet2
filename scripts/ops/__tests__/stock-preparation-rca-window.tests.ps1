@@ -10,7 +10,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 $source = Get-Content -LiteralPath $scriptPath -Raw
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-$workflowPath = Join-Path $repoRoot '.github/workflows/plugin-tests.yml'
+$workflowPath = Join-Path $repoRoot '.github/workflows/stock-prep-powershell51.yml'
 $workflowSource = Get-Content -LiteralPath $workflowPath -Raw
 $attributesPath = Join-Path $repoRoot '.gitattributes'
 $attributeLines = if (Test-Path -LiteralPath $attributesPath -PathType Leaf) {

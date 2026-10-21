@@ -53,6 +53,14 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       return typeof value === 'string' || typeof value === 'number'
     case 'multi-select':
       return Array.isArray(value)
+    case 'department':
+      return Array.isArray(value) && value.length > 0 && value.every((entry) => (
+        entry !== null
+        && typeof entry === 'object'
+        && !Array.isArray(entry)
+        && typeof (entry as { id?: unknown }).id === 'string'
+        && (entry as { id: string }).id.trim().length > 0
+      ))
     case 'detail':
       return Array.isArray(value)
     case 'record-link':
@@ -67,6 +75,11 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       // their own value shape, so a stale-granularity value could otherwise silently repopulate a
       // picker of the wrong kind). Safe by construction: the field just keeps its normal blank/
       // default-seeded value, same as any other never-prefilled type.
+      return false
+    case 'explanation':
+      // Lock-8 L8-A: explanation carries no submitted value (A-1) — it is never a snapshot key on
+      // a legitimately-published field, so this arm is defensive (an out-of-band/legacy snapshot
+      // carrying a stray key here must not resurrect it as if it were a real answer).
       return false
     default:
       return false
@@ -125,7 +138,9 @@ export function prefillFromSnapshot(
     // Dropped-from-current-schema fields never reach this loop at all (it only iterates the
     // CURRENT schema's fields); a RETYPED field is caught here instead, by shape.
     if (!isCompatibleValue(field.type, value)) continue
-    result[field.id] = value
+    result[field.id] = field.type === 'department'
+      ? (value as Array<{ id: string }>).map((entry) => ({ id: entry.id }))
+      : value
   }
   return result
 }

@@ -124,6 +124,93 @@ describe('base management API', () => {
     expect(JSON.parse(fetchFn.mock.calls[0][1].body).baseName).toBe('Launch Base')
   })
 
+  // #5861 —— 在途合并:同一 (模板, 落点参数) 的并发重复调用共用一次请求。
+  // 客户在「使用模板」看起来无响应时反复点,装出了 4 个同名 Base;权威去重在服务端,
+  // 这里是前端侧的第二道闸门(任何调用方、任何触发路径都被它盖住)。
+  it('installTemplate coalesces concurrent duplicate calls into one request', async () => {
+    const payload = {
+      ok: true,
+      data: {
+        template: { id: 'project-tracker', name: 'Project Tracker', description: '', category: 'Project management', icon: 'kanban', color: '#2563eb', sheets: [] },
+        base: { id: 'base_new', name: 'Project Tracker' },
+        sheets: [],
+        fields: [],
+        views: [],
+      },
+    }
+    // 响应压住不放 —— 模拟「请求卡住、界面看起来没反应」的那一刻。
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const fetchFn = vi.fn().mockImplementation(async () => {
+      await gate
+      return new Response(JSON.stringify(payload), { status: 201 })
+    })
+    const client = mockClientWithFn(fetchFn)
+
+    const first = client.installTemplate('project-tracker', { baseName: 'Launch Base' })
+    const second = client.installTemplate('project-tracker', { baseName: 'Launch Base' })
+    const third = client.installTemplate('project-tracker', { baseName: 'Launch Base' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    release()
+    const [a, b, c] = await Promise.all([first, second, third])
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(a.base.id).toBe('base_new')
+    expect(b).toBe(a)
+    expect(c).toBe(a)
+  })
+
+  // 合并只针对**在途**调用:上一次落地之后再装是另一回事,前端不许把它永久挡住
+  // (要不要建第二个由服务端的去重窗口说了算)。
+  it('installTemplate does not coalesce sequential calls', async () => {
+    const payload = {
+      ok: true,
+      data: {
+        template: { id: 'project-tracker', name: 'Project Tracker', description: '', category: 'Project management', icon: 'kanban', color: '#2563eb', sheets: [] },
+        base: { id: 'base_new', name: 'Project Tracker' },
+        sheets: [],
+        fields: [],
+        views: [],
+      },
+    }
+    const fetchFn = vi.fn().mockImplementation(async () => new Response(JSON.stringify(payload), { status: 201 }))
+    const client = mockClientWithFn(fetchFn)
+
+    await client.installTemplate('project-tracker')
+    await client.installTemplate('project-tracker')
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  // 不同模板 / 不同落点不是同一次意图,不该被合并成一次请求。
+  it('installTemplate keeps different templates and base names separate', async () => {
+    const payload = {
+      ok: true,
+      data: {
+        template: { id: 'project-tracker', name: 'Project Tracker', description: '', category: 'Project management', icon: 'kanban', color: '#2563eb', sheets: [] },
+        base: { id: 'base_new', name: 'Project Tracker' },
+        sheets: [],
+        fields: [],
+        views: [],
+      },
+    }
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const fetchFn = vi.fn().mockImplementation(async () => {
+      await gate
+      return new Response(JSON.stringify(payload), { status: 201 })
+    })
+    const client = mockClientWithFn(fetchFn)
+
+    const a = client.installTemplate('project-tracker', { baseName: 'One' })
+    const b = client.installTemplate('project-tracker', { baseName: 'Two' })
+    const c = client.installTemplate('sales-crm', { baseName: 'One' })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+
+    release()
+    await Promise.all([a, b, c])
+  })
+
   it('loadContext calls correct endpoint with params', async () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({

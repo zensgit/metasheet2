@@ -384,6 +384,8 @@ export interface MultitableRepairTransactionSurface {
     baseId: string | null
     name: string
     description: string | null
+    /** Server-owned `meta_sheets.system_kind` (null when unset). See MultitableProvisioningAPI.findObjectSheet. */
+    systemKind: string | null
   } | null>
   resolveExistingObjectFieldIds(input: {
     projectId: string
@@ -402,9 +404,53 @@ export interface MultitableRepairTransactionSurface {
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
 }
 
+/** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
+export type MultitableRelabelDisplayNameStatus =
+  | 'renamed'
+  | 'would_rename'
+  | 'already_target'
+  | 'skipped_name_changed'
+  | 'skipped_name_taken'
+  | 'missing'
+
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  /**
+   * IS THIS SHEET OWNED BY THIS PROJECT — the only tenancy fact about a sheet that is recorded.
+   *
+   * `meta_sheets` carries no project column; a sheet's project appears only inside its DERIVED id
+   * (`sheet_ + sha1(projectId:objectId)`), which is one-way and, more importantly, is not an
+   * invariant any consumer maintains: `sheetId` and `objectId` are independent fields on a table
+   * action, and a deployment may legitimately point an objectId at a sheet created under a different
+   * one. Reversing the hash is therefore neither possible nor sufficient.
+   *
+   * What IS recorded is `plugin_multitable_object_registry`, written by plugin-scoped
+   * `provisioning.ensureObject` and keyed by `sheet_id`. This asks that row a YES/NO question.
+   *
+   * DELIBERATELY A BOOLEAN, never the owning project id. The plugin-scope wrapper can only narrow by
+   * PROJECT NAMESPACE, and every tenant of one plugin shares that namespace
+   * (`tenant-a:integration-core` and `tenant-b:integration-core` both end in `integration-core`), so
+   * a port that RETURNED the owner would hand one tenant's caller another tenant's project id and
+   * pass the namespace guard while doing it. A boolean cannot: the caller must already know the
+   * project it is asking about, and learns nothing about any other.
+   *
+   * False means "not provably owned by that project" and covers both "owned by someone else" and
+   * "not in the registry at all" — the two are not distinguishable here, and deliberately so. A
+   * caller deciding a tenancy question must treat false as a failure to prove ownership, never as
+   * permission.
+   */
+  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
+  /**
+   * The deterministic id of one of a provisioned object's views — the read-only sibling of
+   * `getObjectSheetId` and `getFieldId`, and derived by the same content hash.
+   *
+   * PURE: it performs no IO and touches no view. It does NOT assert that the view exists, grant any
+   * access to it, or say anything about who may open it — it composes an id, exactly as the two
+   * accessors beside it do. A caller that needs existence must prove it separately (the stock-prep
+   * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
+   */
+  getObjectViewId(projectId: string, objectId: string, viewId: string): string
   findObjectSheet(input: {
     projectId: string
     objectId: string
@@ -413,6 +459,13 @@ export interface MultitableProvisioningAPI {
     baseId: string | null
     name: string
     description: string | null
+    /**
+     * S3: the server-owned `meta_sheets.system_kind` (null when unset, or on a database without the
+     * column). A plugin that relies on a host-owned stamp (the stock-preparation overview) reads it here
+     * and FAILS CLOSED when it is not the kind it asked for — e.g. a sheet created before the stamp
+     * existed keeps NULL forever, because the host never rewrites an existing row's kind.
+     */
+    systemKind: string | null
   } | null>
   resolveFieldIds(input: {
     projectId: string
@@ -439,16 +492,54 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  // Default-view provisioning. A sheet with ZERO views cannot be opened and blocks its
+  // whole base, so a managed table must be created WITH one. Creates a single grid view
+  // ONLY when the sheet has no views at all; a sheet that already has any view (e.g. the
+  // role views a customer pack created) is left completely alone — never appended to,
+  // renamed or reordered. Idempotent: a re-ensure writes nothing.
+  ensureObjectDefaultView(input: {
+    projectId: string
+    objectId: string
+    name: string
+    type?: string
+  }): Promise<{ created: boolean; viewId: string | null; existingViewCount: number }>
   // W2/P2-3 (round-5 review): run a repair's read → additive-write → re-read → verify
   // sequence inside ONE host transaction. If `fn` throws (mutated/incomplete/race), the
   // additive write ROLLS BACK — atomic fail-close, not a post-commit detection canary.
   runObjectFieldsRepairTransaction<T>(
     fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
   ): Promise<T>
+  /**
+   * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL) so a plugin's
+   * managed tables need not land in the shared `base_legacy`. The plugin-scope wrapper enforces
+   * `baseId` starts with `base_<pluginSlug>_` (MultitableBaseScopeError otherwise); core refuses
+   * `base_legacy`, malformed ids and blank/oversized names (MultitableSystemBaseInputError), and
+   * FAILS CLOSED on adopting an owned / workspace-scoped / soft-deleted row
+   * (409 MULTITABLE_BASE_ADOPTION_REFUSED). OPTIONAL like `findObjectView`: a plugin newer than
+   * its host must degrade, never crash.
+   */
+  ensureSystemBase?(input: { baseId: string; name: string }): Promise<{ baseId: string; created: boolean }>
   ensureObject(input: {
     projectId: string
     baseId?: string | null
     descriptor: MultitableProvisioningObjectDescriptor
+    /**
+     * P0-S S3: destructive-reconcile mode for this ONE call. Omit (the normal case) to get
+     * the fail-closed default — re-ensuring an EXISTING field whose name/type/property/order
+     * the descriptor would change throws MultitableEnsureFieldsRefusedError instead of
+     * silently overwriting the tenant's row. Additive evolution (a brand-new field id) and
+     * first installs are unaffected either way. Pass 'overwrite' ONLY if this plugin owns
+     * the columns it re-derives; prefer ensureMissingObjectFields for additive repair.
+     */
+    overwriteMode?: 'refuse' | 'overwrite' | 'observe' | 'preserve'
+    /**
+     * S3 (ADR adr-stock-prep-project-sheets-20261008 §5): a HOST-OWNED `meta_sheets.system_kind` stamp,
+     * written at INSERT only (an existing sheet's kind is never changed). Admitted for exactly one caller —
+     * plugin-integration-core provisioning its project overview object with the `stock_prep_overview` kind;
+     * the plugin-scope wrapper refuses every other combination with 403 MULTITABLE_SYSTEM_KIND_FORBIDDEN
+     * before any IO. Omit it (every other caller) for the unchanged behaviour.
+     */
+    systemKind?: string | null
   }): Promise<{
     baseId: string
     sheet: {
@@ -456,6 +547,8 @@ export interface MultitableProvisioningAPI {
       baseId: string | null
       name: string
       description: string | null
+      /** Server-owned `meta_sheets.system_kind` as stored (null when unset). See findObjectSheet. */
+      systemKind: string | null
     }
     fields: Array<{
       id: string
@@ -470,6 +563,13 @@ export interface MultitableProvisioningAPI {
     projectId: string
     sheetId: string
     descriptor: MultitableProvisioningViewDescriptor
+    /**
+     * S3 follow-up E (register R-37): the overview module's marker on the views it provisions for the read-only
+     * stock-preparation project overview. The plugin-scope wrapper admits a view on the STAMPED overview only with
+     * it (plugin-integration-core, the `stock_prep_overview` kind, this project's derived overview sheet), refuses
+     * a misused one, and never forwards it to the host. Omit it (every other caller) for the unchanged behaviour.
+     */
+    systemKind?: string | null
   }): Promise<{
     id: string
     sheetId: string
@@ -481,6 +581,30 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   }>
+  /**
+   * READ-ONLY sibling of `ensureView`: does this provisioned view EXIST, and with what shape?
+   * Null when it does not. `getObjectViewId` only COMPOSES an id, so a plugin that deep-links to
+   * one of its own provisioned views had no way to tell a provisioned view from a composed id.
+   *
+   * OPTIONAL on purpose: a plugin newer than its host must degrade ("cannot prove it exists"),
+   * never crash. It grants nothing `ensureView` does not already grant — same project namespace,
+   * same object scope, and an id derived from the caller's own project + object.
+   */
+  findObjectView?(input: {
+    projectId: string
+    objectId: string
+    viewId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: string
+    filterInfo: Record<string, unknown>
+    sortInfo: Record<string, unknown>
+    groupInfo: Record<string, unknown>
+    hiddenFieldIds: string[]
+    config: Record<string, unknown>
+  } | null>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string
@@ -494,6 +618,97 @@ export interface MultitableProvisioningAPI {
     property: Record<string, unknown>
     order: number
   }>
+  /**
+   * RELABEL an already-provisioned object's DISPLAY NAMES — compare-and-set, one transaction, one
+   * `meta_config_revisions` row per rename (multitable/object-display-name-relabel.ts).
+   *
+   * Renames a field (or the sheet) ONLY while its current name equals `expectedName`; a name a
+   * person already changed is reported `skipped_name_changed` and left alone, and a target another
+   * field on the sheet already carries is `skipped_name_taken` (for the sheet: a sibling sheet in
+   * the same base, or a name in `takenSheetNames`). Nothing but `name` is written: the field id,
+   * type, property, order and permissions are untouched.
+   *
+   * `apply` must be exactly `true` to write; anything else is a dry run that writes nothing and
+   * answers a `planDigest`. The write leg is DEFAULT OFF — it refuses (409
+   * MULTITABLE_RELABEL_APPLY_DISABLED) unless `MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED` is exactly
+   * 'true' — and it REQUIRES `expectedPlanDigest` equal to the plan it recomputes under its own
+   * locks (409 MULTITABLE_RELABEL_PLAN_CHANGED otherwise), so nothing un-previewed is written.
+   *
+   * Scoped like every other write here — project namespace, then object scope — and the host
+   * additionally refuses unless the plugin object registry binds the derived sheet to this very
+   * (project, object). OPTIONAL like `ensureSystemBase`: a plugin newer than its host must degrade.
+   */
+  relabelObjectDisplayNames?(input: {
+    projectId: string
+    objectId: string
+    sheetName?: { expectedName: string; nextName: string } | null
+    fields: Array<{ fieldId: string; expectedName: string; nextName: string }>
+    takenSheetNames?: string[] | null
+    apply?: boolean
+    expectedPlanDigest?: string | null
+    actorId?: string | null
+  }): Promise<{
+    present: boolean
+    applied: boolean
+    sheetId: string
+    sheetName: { status: MultitableRelabelDisplayNameStatus } | null
+    fields: Array<{ fieldId: string; status: MultitableRelabelDisplayNameStatus }>
+    planDigest: string
+    revisionCount: number
+    batchId: string | null
+  }>
+  /**
+   * 一个项目一张备料表 G1 (ADR adr-stock-prep-project-sheets-20261008 §2, addendum A.6; R-35): grant
+   * the SERVER-CONFIGURED roles `spreadsheet:write` on ONE project sheet the plugin just created.
+   *
+   * THE NARROWEST AUTHORIZATION VERB THIS SURFACE HAS, bounded by the host, not by the caller:
+   * role subjects only, every role inside the `stock-prep` namespace and existing; the level is the
+   * literal `spreadsheet:write` (never read, never admin); ADD-ONLY (`ON CONFLICT DO NOTHING`, no
+   * revoke, no downgrade); only a sheet whose objectId has the project-sheet shape, whose id is the
+   * one derived for (projectId, objectId), and which the plugin object registry records as this
+   * plugin's and this project's. Every grant that lands writes a config-revision row. See
+   * multitable/stock-preparation-project-sheet-grant-contract.ts. OPTIONAL like `ensureSystemBase`:
+   * a plugin newer than its host must degrade (report `api_unavailable`), never crash.
+   */
+  grantSheetRoleWrite?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    roleIds: string[]
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    granted: string[]
+    alreadyGranted: string[]
+  }>
+  /**
+   * 一个项目一张备料表 S3 fix round 1 (R1) — G1 for the PROJECT OVERVIEW: grant the server-configured
+   * `stock-prep` roles `spreadsheet:read` (a literal — never write, never admin) on the overview sheet
+   * only: the objectId must be the overview's, the sheet id the one derived for (projectId, objectId), the
+   * registry must record it as this plugin's and this project's, and the host re-checks inside the write
+   * transaction that the sheet carries the `stock_prep_overview` kind. Role subjects only, add-only, a
+   * config-revision row per landed grant that changes the level. Handed to plugin-integration-core ONLY.
+   * OPTIONAL like `grantSheetRoleWrite`: an older host has no port and the plugin reports
+   * `api_unavailable` (an admin grants read by hand, G2).
+   */
+  grantOverviewRoleRead?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    roleIds: string[]
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    granted: string[]
+    alreadyGranted: string[]
+  }>
+  /**
+   * S3 fix round 1 (R8c): the host stamps a requested `systemKind` at INSERT, refuses to adopt an existing
+   * sheet whose kind differs, and reports `systemKind` on every sheet it returns. A plugin that relies on
+   * the stamp checks this declaration BEFORE any write and fails closed (503) when it is not `true` — an
+   * older host would otherwise create an ordinary, writable sheet where a read-only one was meant.
+   */
+  readonly supportsSystemKindStamp?: boolean
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {
     projectId: string
@@ -522,7 +737,18 @@ export interface MultitableRecordsAPI {
   }>>
   queryRecords(input: {
     sheetId: string
-    filters?: Record<string, string | number | boolean | null>
+    /**
+     * W9: a value may be a LIST of candidates, which matches a row whose key equals ANY element —
+     * the set form of the single-value equality, answering in one statement what N single-value
+     * queries answer one at a time. An empty list matches nothing (and costs no query). A `null`
+     * ELEMENT is refused: `null` as the whole value means "the key is JSON null", which set
+     * equality cannot express, so the two are never mixed silently.
+     *
+     * ONLY use it when `supportsFilterValueLists` is true on this API — an older host rejects a
+     * list as an unsupported filter value, and there is no way to tell that apart from a real
+     * validation failure after the fact.
+     */
+    filters?: Record<string, string | number | boolean | null | Array<string | number | boolean>>
     search?: string
     orderBy?: {
       fieldId?: string
@@ -558,6 +784,7 @@ export interface MultitableRecordsAPI {
     sheetId: string
     recordId: string
     changes: Record<string, unknown>
+    expectedVersion?: number
   }): Promise<{
     id: string
     sheetId: string
@@ -573,6 +800,37 @@ export interface MultitableRecordsAPI {
     version: number
   }>
   /**
+   * W8-4 (L1) request-scoped table-metadata memo. Runs `operation` in a scope where the sheet row,
+   * the field list and the sheet-scope assertion for a given sheetId are loaded ONCE instead of
+   * once per records call — the shape a chunked bulk write needs (measured on 222: 2x `meta_fields`
+   * + 2x registry + 3x `meta_sheets` per created row). The scope holds schema metadata only, never
+   * record values, and is never shared with another request: it is not a process cache.
+   *
+   * READ THIS BEFORE CALLING IT. The scope's length is YOURS, not the host's, and inside it two
+   * things stop being re-derived per call:
+   *   - the sheet row and field list are FROZEN at first read, so a field added, dropped or
+   *     retyped, or the sheet soft-deleted, mid-scope is not seen until the scope ends;
+   *   - an ownership assertion that already PASSED for a `(plugin, sheet)` pair is not repeated,
+   *     so a registry change that revokes your access is not seen until the scope ends either.
+   * Keep `operation` no longer than one request — one chunk of a bulk write is the intended shape.
+   * The host caps it regardless (a scope older than its deadline silently stops memoizing and every
+   * call re-reads and re-asserts), but the cap is a backstop, not a licence to hold a scope open.
+   * Do not run schema changes or open a unit of work inside it.
+   *
+   * `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE` gates the whole mechanism and is OFF by default:
+   * while it is off this call is a plain passthrough that memoizes nothing. Optional on the type,
+   * so a host that does not provide it simply is not memoized — call it only if it is present.
+   */
+  withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
+   * W9 capability probe: `true` iff this host's `queryRecords` understands an ARRAY filter value
+   * (see `filters` above). Absent or `false` on every older host, and on any records surface that
+   * did not forward the declaration — a caller must then ask one key at a time. It is a plain
+   * declaration, not a switch: nothing turns it on, and a records surface that wraps another one
+   * may only forward it when the surface underneath declares it, never assert it on its own.
+   */
+  supportsFilterValueLists?: boolean
+  /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
    */
@@ -580,6 +838,48 @@ export interface MultitableRecordsAPI {
     input: StockPreparationPersistUnitOfWorkInput,
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
   ): Promise<T>
+  /**
+   * S3 fix round 2 (F3; register R-37): READ-ONLY probe — `true` iff a GENERIC record write to this sheet
+   * would be refused because it is a read-only system sheet (today: the stock-preparation project overview,
+   * `meta_sheets.system_kind = 'stock_prep_overview'`). A writer whose sheet id comes from configuration (the
+   * multitable target adapter) asks first and refuses with its own typed error. Absent on an older host. The
+   * host refuses the write itself either way; this only lets a caller fail earlier and clearer.
+   */
+  isReadOnlySystemSheet?(input: { sheetId: string }): Promise<boolean>
+  /**
+   * S3 fix round 2 (F3; register R-37): THE ONLY write path to the stock-preparation project overview,
+   * exposed only to `plugin-integration-core`. The caller names a PROJECT (its staging project id), never a
+   * sheet: the host derives the overview's sheet id for that project itself, checks the plugin owns it and
+   * that the host stamped it `stock_prep_overview`, and only then writes. The generic `createRecord` /
+   * `patchRecord` / `deleteRecord` (and the persist unit of work) refuse the overview for every plugin.
+   */
+  stockPreparationOverview?: StockPreparationOverviewRecordsPort
+}
+
+/** S3 fix round 2 (F3): see `MultitableRecordsAPI.stockPreparationOverview`. */
+export interface StockPreparationOverviewRecordsPort {
+  createRecord(input: { projectId: string; data: Record<string, unknown> }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  patchRecord(input: {
+    projectId: string
+    recordId: string
+    changes: Record<string, unknown>
+    expectedVersion?: number
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  deleteRecord(input: { projectId: string; recordId: string }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+  }>
 }
 
 export interface StockPreparationPersistUnitOfWorkInput {
@@ -1123,6 +1423,293 @@ export interface PluginServices {
     >
   }
   /**
+   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A + A2 —
+   * host→plugin port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
+   * and `POST …/cancel-round/actions` / `…/cancel-round/withdraw` (P-1 Q1′ = (i) attendance-side
+   * mounting; P-3 = (iii) round-summary carrier; P-4 summary read; A2 = owner 2026-09-29
+   * 「Attendance-side + OFF flag (Recommended)」). Same posture as `approvalAssigneeResolver` above:
+   * core-backend is the PROVIDER and ONLY plugin-attendance receives it; every other plugin gets
+   * `undefined`, and without it the consumer registers none of the routes (fail-closed). `launch` is
+   * the ONE plugin-reachable path to the dedicated cancel-round creation path (never the public
+   * `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance` applied to the
+   * ORIGINAL document instance; `decide` / `withdraw` hand approve / reject / revoke on the round's
+   * own instance to `ApprovalProductService.dispatchAction`, unchanged; `listSeatedPendingRounds`
+   * (C2, owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」, behind plugin-attendance's
+   * `GET /api/attendance/cancel-rounds/pending`) answers the pending rounds the viewer could decide
+   * now, by the decision door's own seat predicate. Implementation:
+   * `approvals/approval-cancel-round-entry-port.ts`.
+   */
+  approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort
+  /**
+   * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
+   * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
+   * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
+   * `isFieldWriteForbidden`). Same posture as `approvalAssigneeResolver` above: core-backend is the
+   * PROVIDER and ONLY plugin-integration-core receives it; every other plugin gets `undefined` and
+   * a consumer must check before use. Implementation:
+   * `services/stock-preparation-field-permissions.ts` (the concrete class is deliberately NOT
+   * exported into this type surface — only this structural shape is).
+   *
+   * Each entry means "this ROLE may NOT WRITE this column". THE LOAD-BEARING PROPERTY: the port
+   * scopes WRITE ONLY and is structurally incapable of restricting READ — `field_permissions.visible`
+   * is a hardcoded literal inside the implementation, not a parameter of this method, so no caller
+   * can hide a column through this port. That is required by the 备料 flow: 采购 and 仓库 must keep
+   * SEEING the production band (材料类型 / 毛胚类型 / 需求日期 / 提前周期 …) and each other's
+   * responses. Read scoping stays an operator action on
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions`. Fail-closed: unknown sheet /
+   * field-not-on-sheet / unknown role rejects the whole call with nothing written.
+   *
+   * WRITES ARE ADDITIVE UNLESS THE CALLER DECLARES A REGION. With no `reconcile` the call only ever
+   * upserts and `removed` is empty. With one, the SAME transaction also drops this port's OWN,
+   * still-denying rows inside that (columns × roles) region which the new declaration does not want
+   * — the fix for the one silent failure upsert-only cannot survive: a pack revision that MOVES a
+   * column's owner leaves the old denial standing next to the new one, and the write gate ORs
+   * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
+   * the install reports success. The delete is bounded FIVE ways — the target sheet only (the only
+   * project/tenant bound this table can carry); this PACK's `created_by` marker, plus the pack-less
+   * LEGACY marker only when the caller passes `legacyAdoptable` (a row an operator AUTHORED and a
+   * sibling pack's row are outside the predicate either way); `read_only = true` only; inside the
+   * declared region only (which the implementation REQUIRES to contain every entry being written);
+   * and never a row the same call just wrote — so it can neither reach another consumer's rows nor
+   * become "clear this sheet". Removals are returned, never silent.
+   *
+   * THE ONE THING IT CANNOT SEE: an operator edit made through the authoring route BEFORE that route
+   * started stamping `operator:<actorId>` left the PACK's marker on the row, so such a row is
+   * indistinguishable from installer output and a reconcile can retire it. Rows edited since are
+   * attributed and untouchable. There is no signal in the data to recover the difference.
+   *
+   * An entries-EMPTY call WITH a region is a legitimate "this rectangle should now hold no denial",
+   * not a no-op: that is exactly how a revision that hands every governed column to every declared
+   * role is expressed. Only entries-empty AND region-absent does nothing at all.
+   *
+   * The two READ methods are SELECT-only. `listRoleWriteScopes` is the in-process form of the
+   * provenance census (`WHERE created_by = <this port's marker>`); the reconcile heals orphans
+   * inside the caller's region, and this census is how a consumer finds and REPORTS the ones outside
+   * it. `findMissingRoleIds` lets a consumer ask "does this role exist" BEFORE it starts creating
+   * columns, instead of learning it from the write call after the schema is already half-applied.
+   * Neither can hide a column or drop a restriction. Both are OPTIONAL on this type: a consumer must
+   * degrade explicitly (say "not checked") rather than assume, so an older host stays usable.
+   */
+  stockPreparationFieldPermissions?: {
+    /**
+     * TRUE means this host HONOURS a `reconcile` region. A consumer must check it: an older host
+     * accepts the argument and ignores it, and the difference between "reconciled" and "silently
+     * did nothing" is not otherwise observable until the deployment is already wrong.
+     */
+    supportsWriteScopeReconcile?: boolean
+    applyRoleWriteScopes(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      /** Stamps `<marker>#<packId>` and is the reconcile's owner predicate. REQUIRED with `reconcile`. */
+      packId?: string
+      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
+      /**
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may this
+       * call adopt or retire the pack-LESS legacy rows it addresses. Default false.
+       *
+       * IT BINDS BOTH PATHS, and they FAIL DIFFERENTLY — the difference is the whole of what a
+       * caller must plan for:
+       *  · WITH `reconcile`: an unattributed pack-less row inside the rectangle REFUSES the call
+       *    (`LEGACY_UNATTRIBUTED`), before a single row is written.
+       *  · ENTRIES-ONLY (no `reconcile`): there is no refusal. The upsert's ownership guard simply
+       *    takes the ELSE branch on all three columns, so such a row keeps its `visible`,
+       *    `read_only` and `created_by` exactly as found — including an operator's earlier
+       *    decision. The declaration does NOT land for that pair; it is named in
+       *    `skippedUnattributed` and excluded from `applied` rather than silently counted.
+       */
+      legacyAdoptable?: boolean
+    }): Promise<{
+      applied: number
+      entries: Array<{ fieldId: string; roleId: string }>
+      removed?: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs an operator holds: the upsert was SKIPPED, the row is untouched. */
+      operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
+      governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /**
+       * Declared pairs whose EXISTING row this call was not entitled to rewrite (an operator's row,
+       * a NULL-provenance row, a sibling pack's row, or a pack-less legacy row without
+       * `legacyAdoptable`). The row is byte-identical to what it was, and — if it was RELAXED —
+       * THE DENIAL THIS CALL DECLARED IS NOT IN FORCE. Excluded from `applied`. OPTIONAL: an older
+       * host omits it, which a consumer must read as "not checked", never as "nothing was skipped".
+       */
+      skippedUnattributed?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+    }>
+    /**
+     * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row
+     * lock, read-only and outside a transaction. A consumer that has this can say exactly what an
+     * install will change, retire, refuse and defer BEFORE it changes anything.
+     */
+    classifyRoleWriteScopeRegion?(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      packId: string
+      reconcile: { fieldIds: readonly string[]; roleIds: readonly string[] }
+      legacyAdoptable?: boolean
+    }): Promise<{
+      sheetId: string
+      packId: string
+      legacyAdoptable: boolean
+      /** Rows the reconcile WILL delete: this pack's, in-region, still denying, no longer declared. */
+      willRetire: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs ANOTHER pack governs. Non-empty = the install refuses. */
+      packConflicts: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** In-region pack-less rows this pack cannot prove are its own. Non-empty = the install refuses. */
+      legacyUnattributed: Array<{ fieldId: string; roleId: string }>
+      /** In-region rows a HUMAN holds. Never changed; the upsert is skipped for the declared ones. */
+      operatorHeldInRegion: Array<{
+        fieldId: string
+        roleId: string
+        createdBy: string | null
+        declared: boolean
+        visible: boolean
+        readOnly: boolean
+      }>
+      /** Another pack's in-region rows on undeclared pairs. Not stale, not the operator's to clear. */
+      governedByOtherPacks: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** This pack's OWN denials OUTSIDE the region — the only genuine operator to-do list. */
+      operatorMustClear: Array<{ fieldId: string; roleId: string; packId: string | null }>
+    }>
+    listRoleWriteScopes?(input: {
+      sheetId: string
+    }): Promise<{
+      sheetId: string
+      /** What THIS PLUGIN wrote, attributed by pack (`packId: null` = a legacy, pack-less row). */
+      entries: Array<{ fieldId: string; roleId: string; createdBy?: string; packId?: string | null }>
+      /** Role-scoped denials this plugin did NOT write. Reportable, never claimable, never deletable. */
+      foreignEntries?: Array<{ fieldId: string; roleId: string; createdBy?: string | null }>
+    }>
+    findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
+    /** The column twin of `findMissingRoleIds`, asked about the columns an install will NOT create. */
+    findMissingFieldIds?(input: {
+      sheetId: string
+      fieldIds: readonly string[]
+    }): Promise<{ missing: string[] }>
+  }
+  /**
+   * E-learning L2 — host-provided reminder-intent producer. Only
+   * plugin-elearning receives this port. The plugin submits a persisted job
+   * envelope; core owns same-org eligibility, canonical occurrence-key
+   * derivation, and durable notification-ledger insertion.
+   */
+  elearningReminderProducer?: {
+    produce(
+      input: import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderInput,
+    ): Promise<
+      import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderResult
+    >
+  }
+  /**
+   * E-learning L3 timed-attempt settlement. Only plugin-elearning receives
+   * this port. The plugin supplies the persisted job org/ref; core owns the
+   * row lock, database-clock expiry check, immutable grading, and idempotency.
+   */
+  elearningExamExpirySettlement?: {
+    settle(
+      input: import('../services/elearning-exam').SettleExpiredElearningExamAttemptInput,
+    ): Promise<
+      import('../services/elearning-exam').SettleExpiredElearningExamAttemptResult
+    >
+  }
+  /**
+   * E-learning L5 daily analytics materialization. Only plugin-elearning
+   * receives this port. The plugin supplies the persisted job identity; core
+   * owns current directory membership, suppression, locking, and projection.
+   */
+  elearningStatsDailyProjection?: {
+    enqueueDue(): Promise<
+      import('../services/elearning-stats-daily-job-producer').EnqueueElearningStatsDailyJobsResult
+    >
+    project(
+      input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
+    ): Promise<
+      import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyResult
+    >
+  }
+  /**
+   * E-learning L5 aggregate export materialization. Only plugin-elearning
+   * receives this port. Core owns export rows, suppression, byte storage,
+   * idempotency and cleanup; the plugin supplies only persisted job identity.
+   */
+  elearningAnalyticsExport?: {
+    materialize(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportResult
+    >
+    cleanup(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').CleanupElearningAnalyticsExportResult
+    >
+  }
+  /**
+   * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
+   * plugin-elearning; the notification worker must call it immediately before
+   * every effect-side dispatch.
+   */
+  elearningNotificationEligibility?: {
+    check(
+      input: import('../services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+        | { orgId: string; deliveryId: string; recipientUserId: string },
+    ): Promise<boolean>
+  }
+  elearningNotificationSource?: {
+    collect(): Promise<unknown>
+  }
+  /**
+   * Optional L2 platform-channel provider. The provider MUST deduplicate the
+   * external or durable platform effect by `(orgId, idempotencyKey)` and must
+   * return `outcome_unknown` when it cannot prove whether the effect happened.
+   * No unsafe adapter to the generic notification service is inferred.
+   */
+  elearningNotificationDispatch?: {
+    dispatch(input: {
+      assignmentMemberId: string | null
+      deliveryId: string
+      idempotencyKey: string
+      kind: 'assignment_reminder' | 'training_available' | 'result_published'
+      orgId: string
+      payload: Record<string, unknown>
+      recipientUserId: string
+    }): Promise<
+      | { outcome: 'sent' }
+      | { outcome: 'retryable'; code: string }
+      | { outcome: 'failed'; code: string }
+      | { outcome: 'outcome_unknown'; code?: string }
+    >
+  }
+  /** ACP-1B: attendance-only canonical anchor writer; never exposed to generic plugins. */
+  attendanceMultitableCleaningAuthority?: {
+    assertActor(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput): Promise<void>
+    cleanupProposal(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+      reason: string,
+    ): Promise<{ version: number }>
+    readCompletedInTransaction(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & { projectionRecordId: string; sourceRef: string },
+    ): Promise<unknown[]>
+    readCompleted(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & {
+      projectionRecordId: string; sourceRef: string;
+    }): Promise<unknown[]>
+    readSeed(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput):
+      ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>
+    lockSource(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+    ): ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').lockAttendanceCleaningSource>
+    refresh(input: {
+      projectionRecordId: string
+      canonicalRecordId: string
+      sourceFingerprint: string
+    }): Promise<void>
+    withhold(projectionRecordIds: readonly string[]): Promise<void>
+  }
+  /**
    * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
    * least-privilege W4 segment-calculation port. Same posture as
    * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
@@ -1136,6 +1723,17 @@ export interface PluginServices {
    */
   attendanceW4SegmentCalculation?: {
     validateIanaTimezone(zone: unknown): string
+    resolveLocalWallTime: typeof import('../attendance/w4c1-strict-time').resolveAttendanceLocalWallTimeV1
+    validateFrozenTimezoneContext(context:unknown): boolean
+    validateFrozenTimezoneAttribution(attribution:unknown): boolean
+    registerTimezoneSourceGuard(
+      guard: ((trx: Pick<import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,'query'>,
+        input:{orgId:string;userIds:string[]|null}) => Promise<() => Promise<void>>) | null,
+    ): void
+    acquireTimezoneRuntimeLocks(
+      trx: import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,
+      input: Parameters<typeof import('../attendance/attendance-timezone-runtime-locks').acquireAttendanceTimezoneRuntimeLocksV1>[1],
+    ): Promise<void>
     /**
      * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
      * removes only the second mutable post-upsert pass"). The canonical live
@@ -1161,6 +1759,32 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * Approval-change-request lock §3 C-1 — bind the boundary built by `createRequestOperationBoundary`
+     * as the process-wide 完整业务取消 provider, so the approval side's cancel-round redemption can
+     * reach it through `attendance-cancellation-execution-port` without a compile-time dependency on
+     * this plugin. Registers the WHOLE boundary (lock §3 C-1 「复用同一套 W4 操作协议 … 仅移交连接与
+     * 事务生命周期的所有权」 — never a narrower cancel-only entry). Unbound ⇒ the approval side FAILS
+     * CLOSED (the round stays `pending`), unlike `workdayCalendar`, which fails open.
+     */
+    registerCancelRoundExecutionBoundary(
+      boundary: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1,
+    ): void
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+     * delivery. Separate from `registerCancelRoundExecutionBoundary` because it is NOT part of the
+     * W4 transaction protocol: it runs after the approval side's COMMIT, owns no connection and no
+     * transaction, and writes nothing. The bound function is the SAME one the plugin's HTTP cancel
+     * route calls, so the emit gate (`legacy` / `legacy_compat` only) and the payload shape exist
+     * once; the approval side hands over the W4 result verbatim and decides nothing.
+     *
+     * Unbound ⇒ the approval side logs a warning and proceeds (fail OPEN), the opposite of the
+     * execution boundary: by the time this is reached the business cancellation is already
+     * committed, so a throw could not undo it and would only turn a success into a 500.
+     */
+    registerCancelRoundCancelledEventDelivery(
+      deliver: import('../core/attendance-cancellation-execution-port').CancelRoundCancelledEventDeliveryV1,
+    ): void
     /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
     createRecordOperationBoundary(config: {
       adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
@@ -1199,6 +1823,10 @@ export interface PluginServices {
      * The host acquires the canonical shared rollout lock and resolves the one
      * posture seam on the caller's existing transaction/connection.
      */
+    resolveTimezoneSegmentReferencePosture(
+      trx: Pick<import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
+      orgId: string,
+    ): Promise<{ readonly referenceSegments: boolean }>
     resolveOrgSegmentCalculationPosture(
       trx: DatabaseTransaction,
       orgId: string,
@@ -1206,6 +1834,32 @@ export interface PluginServices {
       readonly effectiveState: string
       readonly referenceSegments: boolean
     }>
+    /**
+     * Lock-11 §10 W-4 — least-privilege access to the ONE org-derivation primitive
+     * (`services/approval-instance-org-derivation.ts`) for `approval_instances.org_id`
+     * writer-side stamping in `upsertAttendanceApprovalInstance`. Result-shaped (never throws
+     * a host error class across the plugin boundary — the plugin must not `instanceof` a host
+     * error, see feedback_attack_your_own_criterion): `ok: true` with the org to stamp, or
+     * `ok: false` with one of the three values-free refusal reasons. `trxQuery` MUST be bound
+     * to the plugin's own open transaction client (same TOCTOU discipline as W-1/W-2's
+     * in-transaction derivation call).
+     *
+     * `requestNamedOrgId === null` ⇒ arm (a) (subject's single active membership).
+     * `requestNamedOrgId !== null` ⇒ arm (f): the named org validated against the SUBJECT's
+     * (`subjectUserId`) active `user_orgs` memberships — falls through to the same refusal
+     * reason set on a miss.
+     */
+    deriveApprovalInstanceOrgIdForAttendanceSubjectV1(input: {
+      trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+      subjectUserId: string
+      requestNamedOrgId: string | null
+    }): Promise<
+      | { readonly ok: true; readonly orgId: string }
+      | {
+          readonly ok: false
+          readonly reason: 'zero_memberships' | 'multiple_memberships' | 'selector_not_permitted'
+        }
+    >
     /**
      * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
      * §8.2 step 7 second clause ("source-definition fingerprint equality").
@@ -1469,6 +2123,30 @@ export interface PluginServices {
           status: 'rolled_back'
         }
     >
+  }
+  /**
+   * 一线看得见自己工厂的项目 — the TENANT PRINCIPAL DIRECTORY port. Injected for
+   * `plugin-integration-core` only, and the narrowest port in this interface:
+   * the plugin submits two identity strings and receives one boolean.
+   *
+   * It exists because a plugin cannot establish tenancy from `req.user.tenantId`
+   * alone — `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto
+   * that field when the verified token carried no tenant claim — and the plugin's
+   * first tenant-scoped VALUE-BEARING read must not be founded on a
+   * caller-supplied string. Core owns the membership relation, the SQL, the pool
+   * and the liveness predicate; no table name, SQL, connection or callback
+   * crosses this port, and a refusal is indistinguishable from a non-membership.
+   *
+   * Grants NOTHING on its own: it is not a permission, not an ACL check, not a
+   * workspace check (no user-to-workspace relation exists in this schema), and it
+   * neither consults nor weakens multitable's ACL domain. Fail-closed — malformed
+   * input and query errors both yield `member: false`.
+   */
+  tenantPrincipalDirectory?: {
+    verifyTenantMembership(input: {
+      userId: string
+      tenantId: string
+    }): Promise<{ member: boolean }>
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

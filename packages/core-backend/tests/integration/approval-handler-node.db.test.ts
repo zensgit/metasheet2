@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { query } from '../../src/db/pg'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 /**
@@ -14,6 +15,16 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  * authorization, G-11 transfer/epoch, G-12 mode semantics, G-16 audit + action verb (incl. the DB
  * CHECK), G-17 preview distinguishability, G-18 values-free errors, plus the §1.5/G-13 backend
  * registry rejection. Every absence assertion carries a positive control (Lock-3 §4).
+ *
+ * W1-1d (2026-10-10) — Lock-3 §1.5 forward rows, RATIFIED: "`user_group` (K1), `requester_choice`
+ * (K2) and `dept_head_at_level` (K5-b) ADMIT … `prior_node_approver` (K3) and `continuous_dept_heads`
+ * (K4) do NOT". The G-13 backend case gains the three positives + the two "do NOT" negatives, and a
+ * dedicated block proves each forward kind END TO END with the kind ONLY on the handler node (the
+ * `handlerThenApprovalGraph` approval node is static, so it can never mask a missing handler arm):
+ * the create/publish collectors (`collectApprovalGraphMemberGroupIds`,
+ * `assertUserGroupSourcesBoundToOrg`, `collectRuntimeGraphRequesterChoiceSources`,
+ * `runtimeGraphUsesDeptHeadChain`) must read handler nodes, else the handler resolves EMPTY and fails
+ * `APPROVAL_ASSIGNEE_EMPTY` at dispatch — that is the mutation each case reds on.
  *
  * NOT here (covered elsewhere): G-13 exact-set + G-14 tabs + G-20 recognised-types = FE unit specs
  * (approval-handler-node-config / approval-handler-node-authoring). G-3 R-14 org-read fail-closed =
@@ -154,10 +165,15 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect(published.status, await published.clone().text()).toBe(200)
     return tid
   }
-  async function createInstance(tid: string): Promise<string> {
-    const ok = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+  async function createInstance(tid: string, extra: Record<string, unknown> = {}): Promise<string> {
+    const ok = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' }, ...extra } })
     expect(ok.status, await ok.clone().text()).toBe(201)
     return ((await ok.json()) as { id: string }).id
+  }
+  async function instanceCount(tid: string): Promise<number> {
+    const pool = poolManager.get()
+    const rows = await pool.query(`SELECT COUNT(*)::int AS n FROM approval_instances WHERE template_id = $1`, [tid])
+    return (rows.rows[0] as { n: number }).n
   }
   async function act(iid: string, token: string, body: Record<string, unknown>): Promise<Response> {
     return req(base, `/api/approvals/${iid}/actions`, token, { method: 'POST', body })
@@ -256,14 +272,150 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     }
   })
 
-  // ── §1.5 / G-13 (backend arm) — the seven-member handler registry rejects an unadmitted kind ──
-  it('G-13(backend): continuous_managers on a handler is 400 APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED; direct_manager (admitted) saves', async () => {
-    // positive control: an admitted kind saves
+  // ── §1.5 / G-13 (backend arm) — the handler registry rejects an unadmitted kind ──────────────
+  it('G-13(backend): continuous_managers / continuous_dept_heads / prior_node_approver on a handler are 400 APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED; direct_manager and the three Lock-3 §1.5 forward kinds (user_group / requester_choice / dept_head_at_level) save', async () => {
+    // positive controls: admitted kinds save — the base roster and, since W1-1d, Lock-3 §1.5's
+    // forward rows ("`user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b)
+    // ADMIT"). Template CREATE is a shape check only: a user_group's binding is the PUBLISH gate's
+    // job (proven end to end in the W1-1d block below), so a synthetic group id saves here.
     await createTemplateId(`${KEYPFX}-g13-ok`, handlerThenApprovalGraph({ assigneeSources: [{ kind: 'direct_manager' }] }))
-    const res = await createTemplate(`${KEYPFX}-g13-bad`, handlerThenApprovalGraph({ assigneeSources: [{ kind: 'continuous_managers', levels: 2 }] }))
-    expect(res.status).toBe(400)
-    const body = (await res.json()) as ErrorBody
-    expect(errorCode(body)).toBe('APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED')
+    await createTemplateId(`${KEYPFX}-g13-ok-ug`, handlerThenApprovalGraph({ assigneeSources: [{ kind: 'user_group', groupIds: [`hnode-grp-shape-${TS}`] }] }))
+    await createTemplateId(`${KEYPFX}-g13-ok-rc`, handlerThenApprovalGraph({ assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] }))
+    await createTemplateId(`${KEYPFX}-g13-ok-dhal`, handlerThenApprovalGraph({ assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] }))
+    // negatives: OD-L3-6(a) (continuous_managers) + §1.5 "`prior_node_approver` (K3) and
+    // `continuous_dept_heads` (K4) do NOT" — rejected on the KIND, never silently dropped.
+    const bad: Array<{ label: string; source: Record<string, unknown> }> = [
+      { label: 'continuous_managers', source: { kind: 'continuous_managers', levels: 2 } },
+      { label: 'continuous_dept_heads', source: { kind: 'continuous_dept_heads', levels: 2 } },
+      { label: 'prior_node_approver', source: { kind: 'prior_node_approver', nodeKey: 'approval_final' } },
+    ]
+    for (const { label, source } of bad) {
+      const res = await createTemplate(`${KEYPFX}-g13-bad-${label}`, handlerThenApprovalGraph({ assigneeSources: [source] }))
+      expect(res.status, label).toBe(400)
+      const body = (await res.json()) as ErrorBody
+      expect(errorCode(body), label).toBe('APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED')
+      expect(errorDetails(body)?.nodeKey, label).toBe('handler_h')
+    }
+  })
+
+  // ── W1-1d — Lock-3 §1.5 forward rows END TO END, each kind ONLY on the handler node ───────────
+  // (the static approval_final node in handlerThenApprovalGraph can never mask a missing handler
+  // arm — a graph whose approval node carried the same kind would have baked the snapshot anyway.)
+  describe('W1-1d: Lock-3 §1.5 forward rows on a handler-ONLY carrier', () => {
+    it('requester_choice (K2): an OMITTED choice for the handler node is a create-time 422 REQUIRED with zero rows; a choice keyed by the handler node is validated + frozen and seats exactly the chosen user, who can then handle', async () => {
+      const tid = await createPublished(`${KEYPFX}-w11d-rc`, handlerThenApprovalGraph({
+        assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }],
+        handlerMode: 'all',
+      }))
+      // MUTATION (collector approval-only): the handler is never REQUIRED, so this create would 201
+      // or fail 400 APPROVAL_ASSIGNEE_EMPTY at dispatch instead of the fail-closed 422 below.
+      const missing = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+      expect(missing.status, await missing.clone().text()).toBe(422)
+      const missingBody = (await missing.json()) as ErrorBody
+      expect(errorCode(missingBody)).toBe('APPROVAL_REQUESTER_CHOICE_REQUIRED')
+      expect(errorDetails(missingBody)?.nodeKey).toBe('handler_h')
+      expect(await instanceCount(tid)).toBe(0)
+      // MUTATION (collector approval-only): the handler key is unknown → 422 UNKNOWN_NODE here.
+      const iid = await createInstance(tid, { requesterChoices: { handler_h: [H1] } })
+      const seats = await activeAssignees(iid)
+      expect(seats.map((seat) => [seat.node_key, seat.assignee_id])).toEqual([['handler_h', H1]])
+      expect((seats[0].metadata as { resolvedFrom?: { kind?: string } } | null)?.resolvedFrom?.kind).toBe('requester_choice')
+      // the frozen choice is a REAL seat: the chosen handler can handle, and the walk advances.
+      const handled = await act(iid, h1Tok, { action: 'handle' })
+      expect(handled.status, await handled.clone().text()).toBe(200)
+      expect((await instanceRow(iid)).current_node_key).toBe('approval_final')
+    })
+
+    it('user_group (K1): publish fails closed (400 GROUP_NOT_BOUND, nodeKey = the handler) while the group is unbound; once bound, create freezes the members and the handler seats are exactly the group members (resolvedFrom.groupId)', async () => {
+      const pool = poolManager.get()
+      // Group tables are provisioned by migrations in the real-DB lane; the defensive guards mirror
+      // approval-user-group.db.test.ts so a bare schema still runs this case.
+      await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`)
+      await pool.query(`CREATE TABLE IF NOT EXISTS platform_member_groups (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, description text, created_by text, updated_by text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`)
+      await pool.query(`CREATE TABLE IF NOT EXISTS platform_member_group_members (group_id uuid NOT NULL REFERENCES platform_member_groups(id) ON DELETE CASCADE, user_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (group_id, user_id))`)
+      await pool.query(`CREATE TABLE IF NOT EXISTS approval_usable_member_groups (org_id text NOT NULL, group_id uuid NOT NULL REFERENCES platform_member_groups(id) ON DELETE CASCADE, created_by text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (org_id, group_id))`)
+      const groupId = (await pool.query<{ id: string }>(`INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id`, [`hnode-grp-${TS}`])).rows[0].id
+      await pool.query(`INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1, $2), ($1, $3)`, [groupId, H1, H2])
+      try {
+        const tid = await createTemplateId(`${KEYPFX}-w11d-ug`, handlerThenApprovalGraph({
+          assigneeSources: [{ kind: 'user_group', groupIds: [groupId] }],
+          handlerMode: 'all',
+        }))
+        // MUTATION (publish gate approval-only): this publish would succeed with a dangling group.
+        const unbound = await publishTemplate(tid)
+        expect(unbound.status, await unbound.clone().text()).toBe(400)
+        const unboundBody = (await unbound.json()) as ErrorBody
+        expect(errorCode(unboundBody)).toBe('APPROVAL_ASSIGNEE_GROUP_NOT_BOUND')
+        expect(errorDetails(unboundBody)?.nodeKey).toBe('handler_h')
+        // bind through the curated route (DEFAULT org — publish omits orgId) → publish succeeds.
+        const bound = await req(base, '/api/approval-templates/directory/member-groups/bind', reqTok, { method: 'POST', body: { orgId: 'default', groupId } })
+        expect(bound.status, await bound.clone().text()).toBe(200)
+        const published = await publishTemplate(tid)
+        expect(published.status, await published.clone().text()).toBe(200)
+        // MUTATION (freeze collector approval-only): nothing frozen for a handler-only group id →
+        // the handler resolves EMPTY → create fails 400 APPROVAL_ASSIGNEE_EMPTY instead of 201.
+        const iid = await createInstance(tid)
+        const seats = await activeAssignees(iid)
+        expect(seats.map((seat) => [seat.node_key, seat.assignee_id])).toEqual([['handler_h', H1], ['handler_h', H2]])
+        for (const seat of seats) {
+          expect((seat.metadata as { resolvedFrom?: { kind?: string; groupId?: string } } | null)?.resolvedFrom).toMatchObject({ kind: 'user_group', groupId })
+        }
+      } finally {
+        await pool.query(`DELETE FROM approval_usable_member_groups WHERE group_id = $1`, [groupId])
+        await pool.query(`DELETE FROM platform_member_group_members WHERE group_id = $1`, [groupId])
+        await pool.query(`DELETE FROM platform_member_groups WHERE id = $1`, [groupId])
+      }
+    })
+
+    it('dept_head_at_level (K5-b): a handler-ONLY carrier bakes deptHeadChainIds at create — the handler seat is EXACTLY the level-1 department head (resolvedFrom.kind = dept_head_at_level), never APPROVAL_ASSIGNEE_EMPTY', async () => {
+      // Minimal directory fixture (mirrors approval-dept-head-at-level.db.test.ts): one integration,
+      // one department headed by OTHER, REQ primary in it. OTHER ≠ REQ, so self-exclusion is inert.
+      const EXT_DEPT = `hnodedept-${TS}`
+      const EXT_HEAD = `hnodeehead-${TS}`
+      const EXT_REQ = `hnodeereq-${TS}`
+      const integ = await query<{ id: string }>(`INSERT INTO directory_integrations (name, corp_id) VALUES ($1, $2) RETURNING id`, [`hnode-dir-${TS}`, `hnode-corp-${TS}`])
+      const integrationId = integ.rows[0].id
+      try {
+        const dept = await query<{ id: string }>(
+          `INSERT INTO directory_departments (integration_id, external_department_id, external_parent_department_id, name, is_active, raw)
+           VALUES ($1, $2, NULL, 'Dept', true, $3::jsonb) RETURNING id`,
+          [integrationId, EXT_DEPT, JSON.stringify({ dept_manager_userid_list: [EXT_HEAD] })],
+        )
+        const accReq = await query<{ id: string }>(
+          `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, raw) VALUES ($1, $2, $3, 'Req', '{}'::jsonb) RETURNING id`,
+          [integrationId, EXT_REQ, `hnode-k-req-${TS}`],
+        )
+        const accHead = await query<{ id: string }>(
+          `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, raw) VALUES ($1, $2, $3, 'Head', '{}'::jsonb) RETURNING id`,
+          [integrationId, EXT_HEAD, `hnode-k-head-${TS}`],
+        )
+        await query(
+          `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+           VALUES ($1, $2, 'linked', 'manual'), ($3, $4, 'linked', 'manual')`,
+          [accReq.rows[0].id, REQ, accHead.rows[0].id, OTHER],
+        )
+        await query(
+          `INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_primary) VALUES ($1, $2, true)`,
+          [accReq.rows[0].id, dept.rows[0].id],
+        )
+        const tid = await createPublished(`${KEYPFX}-w11d-dhal`, handlerThenApprovalGraph({
+          assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }],
+          handlerMode: 'all',
+        }))
+        // MUTATION (bake detector approval-only): deptHeadChainIds never baked → the handler's
+        // positional read sees undefined → EMPTY → create fails 400 APPROVAL_ASSIGNEE_EMPTY.
+        const iid = await createInstance(tid)
+        const seats = await activeAssignees(iid)
+        expect(seats.map((seat) => [seat.node_key, seat.assignee_id])).toEqual([['handler_h', OTHER]])
+        expect((seats[0].metadata as { resolvedFrom?: { kind?: string } } | null)?.resolvedFrom?.kind).toBe('dept_head_at_level')
+        const handled = await act(iid, otherTok, { action: 'handle' })
+        expect(handled.status, await handled.clone().text()).toBe(200)
+      } finally {
+        await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId])
+        await query(`DELETE FROM directory_departments WHERE integration_id = $1`, [integrationId])
+        await query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
+      }
+    })
   })
 
   // ── G-8 — topology: parallel region / join forbidden; main-path + condition-branch allowed ────

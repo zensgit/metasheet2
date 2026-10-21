@@ -2,12 +2,26 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
+  isRoleAssignable,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
+import {
+  disableNamespaceAdmissionsWithoutRoles,
+  listRoleNamespaces,
+  lockNamespaceAdmissionWrites,
+} from '../rbac/namespace-admission'
 import {
   ATTENDANCE_SETUP_READINESS_PER_STEP,
   ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
@@ -194,7 +208,7 @@ function readStrictString(value: unknown): string | null {
 
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
-const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
+export const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   id: AttendanceRoleTemplateId
   roleId: string
   permissions: string[]
@@ -224,6 +238,95 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
     permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
     description: 'Full attendance administration (rules, imports, holidays, groups).',
   },
+}
+
+/**
+ * The namespaces this router's role-membership writes are bounded to.
+ *
+ * It is the router's OWN rbac resource — the same literal named by the
+ * `rbacGuard('attendance', 'admin')` mount below — so every role write this router performs
+ * is bounded to the one namespace the mount itself admits, whatever shape the caller's grant
+ * takes. Deriving the list from the router keeps the bound identical for every caller the
+ * mount lets through. A router mounted behind `rbacGuard('foo', 'admin')` would pass `['foo']`.
+ *
+ * The writers never receive a scope constant: each role route hands them the scope DERIVED from
+ * the caller's resolved user scope (`deriveAttendanceRoleAssignmentScope`), so the platform arm is
+ * reachable only through a resolution that proved a platform administrator.
+ */
+const ATTENDANCE_ROLE_NAMESPACES: readonly string[] = ['attendance']
+
+/**
+ * The ROLE-ID pre-check bound only (`resolveAttendanceRoleAssignment`, before the caller's scope is
+ * resolved): the widest role-id set this router can ever write. It is never passed to a writer.
+ */
+const ATTENDANCE_ROLE_ID_BOUND: RoleAssignmentScope = {
+  kind: 'platform-admin-in-namespaces',
+  namespaces: ATTENDANCE_ROLE_NAMESPACES,
+}
+
+/**
+ * The authority a role write of this router runs under, derived from the caller's RESOLVED user
+ * scope rather than asserted by a comment beside a constant:
+ *  - `global` → `platform-admin-in-namespaces`. `resolveAttendanceAdminUserScope` grants `global`
+ *    only to a platform administrator (legacy claim or the `admin` role), and a platform
+ *    administrator may appoint `attendance_admin` (owner ruling 「只有平台管理员能任命 *_admin」).
+ *    The role-id bound is the router's own namespace.
+ *  - anything else (`org`, or a shape this function does not know) → refused,
+ *    ORG_SCOPED_ROLE_WRITE_UNAVAILABLE: `user_roles` has no org_id, so a delegated write would grant
+ *    or revoke the role in every organization the target belongs to although the request proved
+ *    only one. If an org-scoped role store ever exists, THIS is the function that must change, and
+ *    the delegated arm for it is `{ kind: 'namespaces' }` (which refuses main-admin and
+ *    admin-equivalent roles) — never the platform arm.
+ */
+export function deriveAttendanceRoleAssignmentScope(scope: AttendanceAdminUserScope): RoleAssignmentScope {
+  if (scope?.kind === 'global') {
+    return { kind: 'platform-admin-in-namespaces', namespaces: ATTENDANCE_ROLE_NAMESPACES }
+  }
+  throw new AttendanceAdminUserScopeError(
+    403,
+    'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE',
+    'Organization-scoped role changes require an organization-scoped role store',
+  )
+}
+
+/** Single-object result: this package compiles with `strict: false`, where narrowing a
+ *  boolean-discriminated union is unreliable, so the error is a nullable field instead. */
+type AttendanceRoleResolution = {
+  roleId: string
+  error: { status: number; code: string; message: string } | null
+}
+
+/**
+ * Resolve which role id a role route will act on: a named template, or a caller-supplied
+ * role id constrained to this router's scope.
+ *
+ * One implementation for all four role routes, so the constraint lives in exactly one place
+ * per router and a fifth route gets it by construction, on top of the boundary's own
+ * assertion in `rbac/role-assignment.ts`.
+ */
+function resolveAttendanceRoleAssignment(body: unknown): AttendanceRoleResolution {
+  const record = (body ?? {}) as Record<string, unknown>
+  const templateId = String(record.template || '').trim() as AttendanceRoleTemplateId
+  const roleId = String(record.roleId || '').trim()
+  const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+  const finalRoleId = resolved?.roleId || roleId
+  if (!finalRoleId) {
+    return {
+      roleId: '',
+      error: { status: 400, code: 'ROLE_REQUIRED', message: 'template or roleId is required' },
+    }
+  }
+  if (!isRoleAssignable(finalRoleId, ATTENDANCE_ROLE_ID_BOUND)) {
+    return {
+      roleId: finalRoleId,
+      error: {
+        status: 403,
+        code: 'ROLE_OUT_OF_SCOPE',
+        message: 'Role is outside the attendance role-assignment scope',
+      },
+    }
+  }
+  return { roleId: finalRoleId, error: null }
 }
 
 function csvCell(value: unknown): string {
@@ -374,9 +477,9 @@ function withLimit<T>(items: T[], limit = 200): { items: T[]; truncated: boolean
   return { items: items.slice(0, limit), truncated: true }
 }
 
-async function ensureAttendanceRoleTemplates(): Promise<void> {
+async function ensureAttendanceRoleTemplates(runQuery: typeof query = query): Promise<void> {
   // Ensure permission codes exist.
-  await query(
+  await runQuery(
     `INSERT INTO permissions (code, name, description)
      VALUES
       ('attendance:read', 'Attendance Read', 'Read attendance records and summaries'),
@@ -395,7 +498,7 @@ async function ensureAttendanceRoleTemplates(): Promise<void> {
 
   const values = pairs.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
   const params = pairs.flat()
-  await query(
+  await runQuery(
     `INSERT INTO role_permissions (role_id, permission_code)
      VALUES ${values}
      ON CONFLICT DO NOTHING`,
@@ -403,8 +506,11 @@ async function ensureAttendanceRoleTemplates(): Promise<void> {
   )
 }
 
-async function fetchUserProfile(userId: string): Promise<Record<string, unknown> | null> {
-  const { rows } = await query<{
+async function fetchUserProfile(
+  userId: string,
+  runQuery: typeof query = query,
+): Promise<Record<string, unknown> | null> {
+  const { rows } = await runQuery<{
     id: string
     email: string
     name: string | null
@@ -425,8 +531,8 @@ async function fetchUserProfile(userId: string): Promise<Record<string, unknown>
   return rows[0] as unknown as Record<string, unknown>
 }
 
-async function fetchUserRoleIds(userId: string): Promise<string[]> {
-  const { rows } = await query<{ role_id: string }>(
+async function fetchUserRoleIds(userId: string, runQuery: typeof query = query): Promise<string[]> {
+  const { rows } = await runQuery<{ role_id: string }>(
     `SELECT role_id
      FROM user_roles
      WHERE user_id = $1
@@ -434,6 +540,70 @@ async function fetchUserRoleIds(userId: string): Promise<string[]> {
     [userId],
   )
   return rows.map((row) => row.role_id).filter(Boolean)
+}
+
+const ATTENDANCE_ROLE_IDS = Object.values(ATTENDANCE_ROLE_TEMPLATES).map((template) => template.roleId)
+
+async function fetchAttendanceScopedUserProfile(
+  userId: string,
+  runQuery: typeof query,
+): Promise<Record<string, unknown> | null> {
+  const { rows } = await runQuery(
+    `SELECT id, email, name, employee_no AS "employeeNo", department, is_active, created_at
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [userId],
+  )
+  return (rows[0] as Record<string, unknown> | undefined) ?? null
+}
+
+async function fetchAttendanceScopedRoleIds(userId: string, runQuery: typeof query): Promise<string[]> {
+  const { rows } = await runQuery<{ role_id: string }>(
+    `SELECT role_id
+     FROM user_roles
+     WHERE user_id = $1
+       AND role_id = ANY($2::text[])
+     ORDER BY role_id ASC`,
+    [userId, ATTENDANCE_ROLE_IDS],
+  )
+  return rows.map((row) => row.role_id).filter(Boolean)
+}
+
+async function fetchAttendanceScopedPermissionCodes(userId: string, runQuery: typeof query): Promise<string[]> {
+  const admission = await runQuery<{ enabled: boolean }>(
+    `SELECT enabled
+     FROM user_namespace_admissions
+     WHERE user_id = $1 AND namespace = 'attendance'
+     LIMIT 1`,
+    [userId],
+  )
+  if (admission.rows[0]?.enabled !== true) return []
+
+  const { rows } = await runQuery<{ code: string }>(
+    `SELECT DISTINCT permission_code AS code
+     FROM (
+       SELECT up.permission_code
+       FROM user_permissions up
+       WHERE up.user_id = $1
+       UNION ALL
+       SELECT rp.permission_code
+       FROM user_roles ur
+       JOIN role_permissions rp ON rp.role_id = ur.role_id
+       WHERE ur.user_id = $1
+     ) permissions
+     WHERE permission_code LIKE 'attendance:%'
+     ORDER BY permission_code ASC`,
+    [userId],
+  )
+  const legacy = await runQuery<{ permissions: unknown }>(
+    `SELECT permissions FROM users WHERE id = $1 LIMIT 1`,
+    [userId],
+  )
+  const legacyPermissions = Array.isArray(legacy.rows[0]?.permissions)
+    ? legacy.rows[0].permissions.map((code) => String(code)).filter((code) => code.startsWith('attendance:'))
+    : []
+  return Array.from(new Set([...rows.map((row) => row.code), ...legacyPermissions])).sort()
 }
 
 function normalizeBatchUserIds(rawIds: unknown[]): { userIds: string[]; invalidUserIds: string[] } {
@@ -460,7 +630,102 @@ type AttendanceAdminResolvedUser = {
   is_active: boolean
 }
 
-async function resolveBatchUsers(userIds: string[]): Promise<{
+export type AttendanceAdminUserScope =
+  | { kind: 'global' }
+  | { kind: 'org'; orgId: string }
+
+class AttendanceAdminUserScopeError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'AttendanceAdminUserScopeError'
+  }
+}
+
+function sendIfAttendanceAdminUserScopeError(res: Response, error: unknown): boolean {
+  if (!(error instanceof AttendanceAdminUserScopeError)) return false
+  jsonError(res, error.status, error.code, error.message)
+  return true
+}
+
+function readAttendanceAdminScopeField(req: Request, field: 'orgId' | 'scope'): string {
+  const queryValue = readStrictString(req.query?.[field])
+  const bodyValue = readStrictString((req.body as Record<string, unknown> | undefined)?.[field])
+  if (queryValue && bodyValue && queryValue !== bodyValue) {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_MISMATCH', `${field} does not match across request inputs`)
+  }
+  return bodyValue || queryValue
+}
+
+/**
+ * Every attendance-admin user-directory request names its authority explicitly.
+ *
+ * `orgId` is the delegated path and requires the authenticated actor to be an active
+ * member of that exact org. Platform status does not implicitly pierce this branch.
+ * Platform administrators who need the global directory must instead ask for
+ * `scope=global`, making the wider authority visible at every call site.
+ *
+ * Write routes call this helper with their transaction client and lock the actor's
+ * membership row, so membership revocation cannot race the target check and role write.
+ */
+async function resolveAttendanceAdminUserScope(
+  req: Request,
+  runQuery: typeof query = query,
+  lockMembership = false,
+): Promise<AttendanceAdminUserScope> {
+  const actorId = getAttendanceAdminRequestUserId(req)
+  if (!actorId) {
+    throw new AttendanceAdminUserScopeError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+
+  const orgId = readAttendanceAdminScopeField(req, 'orgId')
+  const requestedScope = readAttendanceAdminScopeField(req, 'scope')
+  if (requestedScope && requestedScope !== 'org' && requestedScope !== 'global') {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_INVALID', 'scope must be org or global')
+  }
+
+  if (requestedScope === 'global') {
+    if (orgId) {
+      throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_MISMATCH', 'orgId cannot be combined with global scope')
+    }
+    if (!(hasLegacyAdminClaim(req) || await isRbacAdmin(actorId, runQuery))) {
+      throw new AttendanceAdminUserScopeError(403, 'FORBIDDEN', 'Platform admin access required for global user scope')
+    }
+    return { kind: 'global' }
+  }
+
+  if (!orgId) {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_REQUIRED', 'orgId or explicit global scope is required')
+  }
+
+  const lockClause = lockMembership ? 'FOR SHARE OF u, uo' : ''
+  const membership = await runQuery(
+    `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.org_id = $2
+       AND uo.is_active = true
+       AND u.is_active = true
+     LIMIT 1
+     ${lockClause}`,
+    [actorId, orgId],
+  )
+  if (membership.rows.length === 0) {
+    throw new AttendanceAdminUserScopeError(403, 'FORBIDDEN', 'Active org membership required')
+  }
+  return { kind: 'org', orgId }
+}
+
+async function resolveBatchUsers(
+  userIds: string[],
+  scope: AttendanceAdminUserScope,
+  runQuery: typeof query = query,
+  lockMembership = false,
+): Promise<{
   items: AttendanceAdminResolvedUser[]
   missingUserIds: string[]
   inactiveUserIds: string[]
@@ -469,12 +734,29 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
     return { items: [], missingUserIds: [], inactiveUserIds: [] }
   }
 
-  const found = await query<AttendanceAdminResolvedUser>(
-    `SELECT id, email, name, employee_no AS "employeeNo", department, is_active
-     FROM users
-     WHERE id = ANY($1::text[])`,
-    [userIds],
-  )
+  const lockClause = lockMembership
+    ? scope.kind === 'org' ? 'FOR SHARE OF u, uo' : 'FOR SHARE OF u'
+    : ''
+  const found = scope.kind === 'org'
+    ? await runQuery<AttendanceAdminResolvedUser>(
+      `SELECT u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department, u.is_active
+       FROM users u
+       JOIN user_orgs uo
+         ON uo.user_id = u.id
+        AND uo.org_id = $2
+        AND uo.is_active = true
+       WHERE u.id = ANY($1::text[])
+         AND u.is_active = true
+       ${lockClause}`,
+      [userIds, scope.orgId],
+    )
+    : await runQuery<AttendanceAdminResolvedUser>(
+      `SELECT u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department, u.is_active
+       FROM users u
+       WHERE u.id = ANY($1::text[])
+       ${lockClause}`,
+      [userIds],
+    )
 
   const byId = new Map(found.rows.map((row) => [String(row.id), row]))
   const items: AttendanceAdminResolvedUser[] = []
@@ -494,6 +776,20 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
     .map((item) => item.id)
 
   return { items, missingUserIds, inactiveUserIds }
+}
+
+function assertAllRoleTargetsEligible(
+  userIds: string[],
+  resolved: Awaited<ReturnType<typeof resolveBatchUsers>>,
+): void {
+  if (
+    resolved.items.length !== userIds.length
+    || resolved.missingUserIds.length > 0
+    || resolved.inactiveUserIds.length > 0
+  ) {
+    // Foreign-org, inactive and nonexistent identities intentionally share one response.
+    throw new AttendanceAdminUserScopeError(404, 'USER_TARGET_NOT_FOUND', 'User not found in requested scope')
+  }
 }
 
 function getAttendanceAdminRequestUserId(req: Request): string {
@@ -846,27 +1142,55 @@ export function attendanceAdminRouter(): Router {
         defaultPageSize: 20,
         maxPageSize: 100,
       })
+      const result = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const term = q ? `%${q}%` : '%'
+        const from = scope.kind === 'org'
+          ? `FROM users u
+             JOIN user_orgs uo
+               ON uo.user_id = u.id
+              AND uo.org_id = $1
+              AND uo.is_active = true`
+          : 'FROM users u'
+        const whereParams: unknown[] = scope.kind === 'org' ? [scope.orgId] : []
+        const clauses: string[] = scope.kind === 'org' ? ['u.is_active = true'] : []
+        if (q) {
+          whereParams.push(term)
+          const termIndex = whereParams.length
+          clauses.push(`(
+            COALESCE(u.email, '') ILIKE $${termIndex}
+            OR COALESCE(u.username, '') ILIKE $${termIndex}
+            OR u.name ILIKE $${termIndex}
+            OR COALESCE(u.mobile, '') ILIKE $${termIndex}
+            OR COALESCE(u.employee_no, '') ILIKE $${termIndex}
+            OR COALESCE(u.department, '') ILIKE $${termIndex}
+            OR u.id ILIKE $${termIndex}
+          )`)
+        }
+        const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+        const countSql = `SELECT COUNT(*)::int AS c ${from} ${where}`
+        const projection = scope.kind === 'org'
+          ? `u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department,
+             u.is_active, u.created_at`
+          : `u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department,
+             u.role, u.is_active, u.is_admin, u.last_login_at, u.created_at`
+        const listSql = `
+          SELECT ${projection}
+          ${from}
+          ${where}
+          ORDER BY u.created_at DESC
+          LIMIT $${whereParams.length + 1} OFFSET $${whereParams.length + 2}
+        `
 
-      const term = q ? `%${q}%` : '%'
-      const where = q
-        ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1'
-        : ''
-      const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
-      const listSql = `
-        SELECT id, email, name, employee_no AS "employeeNo", department, role, is_active, is_admin, last_login_at, created_at
-        FROM users
-        ${where}
-        ORDER BY created_at DESC
-        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
-      `
+        const count = await runQuery<{ c: number }>(countSql, whereParams)
+        const list = await runQuery(listSql, [...whereParams, pageSize, offset])
+        return { items: list.rows, total: count.rows[0]?.c ?? 0 }
+      })
 
-      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
-      const total = count.rows[0]?.c ?? 0
-      const listParams = q ? [term, pageSize, offset] : [pageSize, offset]
-      const list = await query(listSql, listParams)
-
-      return jsonOk(res, { items: list.rows, page, pageSize, total })
+      return jsonOk(res, { ...result, page, pageSize })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'USER_SEARCH_FAILED', (error as Error)?.message || 'Failed to search users')
     }
   })
@@ -880,7 +1204,11 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const resolved = await resolveBatchUsers(userIds)
+      const resolved = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        return resolveBatchUsers(userIds, scope, runQuery, true)
+      })
       return jsonOk(res, {
         requested: userIds.length,
         found: resolved.items.length,
@@ -889,6 +1217,7 @@ export function attendanceAdminRouter(): Router {
         items: resolved.items,
       })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'BATCH_USER_RESOLVE_FAILED', (error as Error)?.message || 'Failed to resolve users')
     }
   })
@@ -902,53 +1231,48 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolvedTemplate = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolvedTemplate?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
-
-      await ensureAttendanceRoleTemplates()
-
-      const resolvedUsers = await resolveBatchUsers(userIds)
-      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
-      if (eligibleUserIds.length === 0) {
-        return jsonOk(res, {
-          roleId: finalRoleId,
-          requested: userIds.length,
-          eligible: 0,
-          updated: 0,
-          affectedUserIds: [],
-          affectedUserIdsTruncated: false,
-          unchangedUserIds: [],
-          unchangedUserIdsTruncated: false,
-          missingUserIds: resolvedUsers.missingUserIds,
-          inactiveUserIds: resolvedUsers.inactiveUserIds,
-          items: resolvedUsers.items,
-        })
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
       }
+      const finalRoleId = roleResolution.roleId
 
-      const insert = await query<{ user_id: string }>(
-        `INSERT INTO user_roles (user_id, role_id)
-         SELECT unnest($1::text[]), $2
-         ON CONFLICT DO NOTHING
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const { insert, resolvedUsers } = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
+        await ensureAttendanceRoleTemplates(runQuery)
+        const result = await assignUserRoles({
+          userIds,
+          roleId: finalRoleId,
+          scope: roleWriteScope,
+          executor: client,
+        })
+        return { insert: result, resolvedUsers: resolved }
+      })
+      // Post-commit: a fresh `attendance_admin` appointment drops audience left from an earlier
+      // tenure inside the transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: insert?.delegatedAdminScopeCleanup,
+      })
 
-      const affectedUserIdsRaw = insert.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = insert.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
-      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const unchangedUserIdsRaw = userIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
       const unchangedUserIds = withLimit(unchangedUserIdsRaw)
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
-        eligible: eligibleUserIds.length,
-        updated: insert.rowCount ?? insert.rows.length,
+        eligible: userIds.length,
+        updated: insert.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -958,6 +1282,15 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: user_roles is a recovery-authority table — a marker 40001 under a held
+      // recovery lease is a retryable 409, not a 500. Every other error keeps its path.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
     }
   })
@@ -971,50 +1304,62 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
-
-      const resolvedUsers = await resolveBatchUsers(userIds)
-      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
-      if (eligibleUserIds.length === 0) {
-        return jsonOk(res, {
-          roleId: finalRoleId,
-          requested: userIds.length,
-          eligible: 0,
-          updated: 0,
-          affectedUserIds: [],
-          affectedUserIdsTruncated: false,
-          unchangedUserIds: [],
-          unchangedUserIdsTruncated: false,
-          missingUserIds: resolvedUsers.missingUserIds,
-          inactiveUserIds: resolvedUsers.inactiveUserIds,
-          items: resolvedUsers.items,
-        })
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
       }
+      const finalRoleId = roleResolution.roleId
 
-      const del = await query<{ user_id: string }>(
-        `DELETE FROM user_roles
-         WHERE role_id = $2 AND user_id = ANY($1::text[])
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const { del, resolvedUsers } = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
+        // Every subject lock is taken, in sorted id order, before the membership
+        // DELETE. Each witness uses this same client and finishes before commit.
+        const admissionTargetIds = [...userIds].sort()
+        for (const targetId of admissionTargetIds) {
+          await lockNamespaceAdmissionWrites(client, targetId)
+        }
+        const result = await unassignUserRoles({
+          userIds,
+          roleId: finalRoleId,
+          scope: roleWriteScope,
+          executor: client,
+        })
+        for (const targetId of admissionTargetIds) {
+          await disableNamespaceAdmissionsWithoutRoles({
+            userId: targetId,
+            namespaces: await listRoleNamespaces(finalRoleId, client.query),
+            actorId: getAttendanceAdminRequestUserId(req),
+            source: 'role_unassigned',
+            revokedRoleId: finalRoleId,
+          }, client.query)
+        }
+        return { del: result, resolvedUsers: resolved }
+      })
+      // Post-commit: revoking `attendance_admin` dropped the delegated audience inside the
+      // transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: del?.delegatedAdminScopeCleanup,
+      })
 
-      const affectedUserIdsRaw = del.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = del.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
-      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const unchangedUserIdsRaw = userIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
       const unchangedUserIds = withLimit(unchangedUserIdsRaw)
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
-        eligible: eligibleUserIds.length,
-        updated: del.rowCount ?? del.rows.length,
+        eligible: userIds.length,
+        updated: del.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -1024,6 +1369,14 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
     }
   })
@@ -1033,22 +1386,36 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      const [roles, permissions, isAdmin] = await Promise.all([
-        fetchUserRoleIds(userId),
-        listUserPermissions(userId),
-        isRbacAdmin(userId),
-      ])
+      const scoped = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        if (scope.kind === 'org') {
+          const [profile, roles, permissions] = await Promise.all([
+            fetchAttendanceScopedUserProfile(userId, runQuery),
+            fetchAttendanceScopedRoleIds(userId, runQuery),
+            fetchAttendanceScopedPermissionCodes(userId, runQuery),
+          ])
+          return { profile, roles, permissions, isAdmin: undefined }
+        }
+        const [profile, roles, isAdmin] = await Promise.all([
+          fetchUserProfile(userId, runQuery),
+          fetchUserRoleIds(userId, runQuery),
+          isRbacAdmin(userId, runQuery),
+        ])
+        return { profile, roles, permissions: null, isAdmin }
+      })
+      const permissions = scoped.permissions ?? await listUserPermissions(userId)
 
       return jsonOk(res, {
-        user: profile,
-        roles,
+        user: scoped.profile,
+        roles: scoped.roles,
         permissions,
-        isAdmin,
+        ...(scoped.isAdmin === undefined ? {} : { isAdmin: scoped.isAdmin }),
       })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
     }
   })
@@ -1058,23 +1425,35 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
-      await ensureAttendanceRoleTemplates()
-
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, finalRoleId],
-      )
+      let membership: Awaited<ReturnType<typeof assignUserRoles>> | undefined
+      const profile = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        await ensureAttendanceRoleTemplates(runQuery)
+        membership = await assignUserRoles({
+          userIds: [userId],
+          roleId: finalRoleId,
+          scope: roleWriteScope,
+          executor: client,
+        })
+        return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -1089,6 +1468,14 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
     }
   })
@@ -1098,20 +1485,43 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, finalRoleId],
-      )
+      let membership: Awaited<ReturnType<typeof unassignUserRoles>> | undefined
+      const profile = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        // Same client through the subject lock, membership DELETE and revoke witness.
+        await lockNamespaceAdmissionWrites(client, userId)
+        membership = await unassignUserRoles({
+          userIds: [userId],
+          roleId: finalRoleId,
+          scope: roleWriteScope,
+          executor: client,
+        })
+        await disableNamespaceAdmissionsWithoutRoles({
+          userId,
+          namespaces: await listRoleNamespaces(finalRoleId, client.query),
+          actorId: getAttendanceAdminRequestUserId(req),
+          source: 'role_unassigned',
+          revokedRoleId: finalRoleId,
+        }, client.query)
+        return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -1126,6 +1536,14 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
     }
   })

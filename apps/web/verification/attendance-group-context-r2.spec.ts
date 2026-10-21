@@ -145,6 +145,30 @@ async function assertReadyAssignments(page: Page): Promise<void> {
   await expect(page).toHaveURL(new RegExp(`/attendance/admin/groups/${GROUP_ID}/schedule\\?`))
 }
 
+async function assertNoHorizontalOverflow(page: Page): Promise<void> {
+  const overflow = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))
+  expect(
+    overflow.scrollWidth,
+    `horizontal overflow: scrollWidth ${overflow.scrollWidth} vs clientWidth ${overflow.clientWidth}`,
+  ).toBeLessThanOrEqual(overflow.clientWidth + 1)
+}
+
+async function assertElementsFitViewport(page: Page, selector: string, viewportWidth: number): Promise<void> {
+  const bounds = await page.locator(selector).evaluateAll(elements => elements.map((element) => {
+    const rect = element.getBoundingClientRect()
+    return { left: rect.left, right: rect.right, width: rect.width }
+  }))
+  expect(bounds.length, `expected elements for ${selector}`).toBeGreaterThan(0)
+  for (const bound of bounds) {
+    expect(bound.width, `${selector} width`).toBeGreaterThan(0)
+    expect(bound.left, `${selector} left edge`).toBeGreaterThanOrEqual(-1)
+    expect(bound.right, `${selector} right edge`).toBeLessThanOrEqual(viewportWidth + 1)
+  }
+}
+
 test.beforeAll(() => {
   mkdirSync(EVIDENCE_DIR, { recursive: true })
 })
@@ -181,13 +205,92 @@ test('desktop drawer navigation survives Back, Forward, and refresh', async ({ b
   await page.reload()
   await assertReadyAssignments(page)
 
+  // WRITES, not "non-GET verbs". Two endpoints in this app are verb-shaped like a write and are not
+  // one, so the claim this test makes — navigating, going Back/Forward and refreshing never mutates
+  // anything — is about effects, not about methods:
+  //   * POST /api/attendance-admin/users/batch/resolve — a batch READ whose input is too long for a
+  //     query string.
+  //   * DELETE /api/method-probe — the DELETE transport probe (src/utils/delete-fallback.ts, fired
+  //     once per page session from main.ts after bootstrapSession). The route reads no request input
+  //     and touches no data; it exists only so the client can learn whether HTTP DELETE survives the
+  //     customer's egress at all (packages/core-backend/src/routes/method-probe.ts). One entry per
+  //     page load is expected here: the reload gives the probe a fresh JS context.
+  // Anything else non-GET is a real mutation and still fails this test.
   const writes = requests.filter(({ method, pathname }) => !(
     method === 'GET'
     || (method === 'POST' && pathname === '/api/attendance-admin/users/batch/resolve')
+    || (method === 'DELETE' && pathname === '/api/method-probe')
   ))
   expect(writes).toEqual([])
+  // Positive control: the probe really did fire, so the exemption above is carrying weight rather
+  // than quietly covering for a probe that stopped running.
+  expect(requests).toContainEqual({ method: 'DELETE', pathname: '/api/method-probe' })
   await context.close()
 })
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+] as const) {
+  test(`${viewport.name} attendance group workspace fits the issue #4354 viewport contract`, async ({ browser }) => {
+    const context = await browser.newContext({
+      viewport: { width: viewport.width, height: viewport.height },
+      hasTouch: viewport.name === 'mobile',
+    })
+    await installSession(context)
+    const page = await context.newPage()
+    const requests: RequestFact[] = []
+    await installApiStubs(page, requests)
+
+    await page.goto(RETURN_TO)
+    const list = page.locator('[data-attendance-group-list]')
+    const detail = page.locator('[data-attendance-group-detail]')
+    await expect(list).toBeVisible()
+    await expect(detail).toBeVisible()
+
+    const positions = await page.locator('[data-attendance-group-list], [data-attendance-group-detail]')
+      .evaluateAll(elements => elements.map((element) => {
+        const rect = element.getBoundingClientRect()
+        return { x: rect.x, y: rect.y }
+      }))
+    expect(positions).toHaveLength(2)
+    if (viewport.name === 'mobile') {
+      expect(positions[0]!.y).toBeLessThan(positions[1]!.y)
+    } else {
+      expect(positions[0]!.x).toBeLessThan(positions[1]!.x)
+    }
+
+    const rowMeta = page.locator('[data-attendance-group-row]').first().locator('.attendance__group-list-meta span')
+    await expect(rowMeta).toHaveCount(3)
+    await expect(rowMeta.nth(0)).toContainText('member')
+    await expect(rowMeta.nth(1)).toContainText('Fixed shift')
+    await expect(rowMeta.nth(2)).toContainText('Operations Rules')
+
+    await assertElementsFitViewport(page, '[data-attendance-group-list], [data-attendance-group-detail]', viewport.width)
+    await assertElementsFitViewport(page, '[data-attendance-group-workflow-step]', viewport.width)
+    await assertElementsFitViewport(page, '#attendance-group-stage-basics input, #attendance-group-stage-basics select', viewport.width)
+    await assertNoHorizontalOverflow(page)
+
+    const stages = page.locator('[data-attendance-group-workflow-step]')
+    await expect(stages).toHaveCount(4)
+    for (let index = 0; index < 4; index += 1) {
+      const stage = stages.nth(index)
+      const targetId = await stage.getAttribute('aria-controls')
+      expect(targetId).toBeTruthy()
+      await stage.click()
+      await expect(stage).toHaveAttribute('aria-current', 'step')
+      await expect(page.locator(`#${targetId}`)).toBeVisible()
+      await assertElementsFitViewport(page, `#${targetId}`, viewport.width)
+      await assertNoHorizontalOverflow(page)
+    }
+
+    await page.screenshot({
+      path: path.resolve(process.cwd(), `verification-output/attendance-group-4354-${viewport.name}.png`),
+      fullPage: true,
+    })
+    await context.close()
+  })
+}
 
 test('narrow touch keeps the route intact and blocks all group probes', async ({ browser }) => {
   const context = await browser.newContext({
@@ -212,7 +315,9 @@ test('narrow touch keeps the route intact and blocks all group probes', async ({
     fullPage: true,
   })
   await page.getByRole('button', { name: 'Back to Overview' }).click()
-  await expect(page).toHaveURL(new RegExp('/attendance\\?tab=admin&section=attendance-admin-groups$'))
+  await expect(page).toHaveURL(new RegExp(
+    '/attendance\\?tab=admin&section=attendance-admin-groups(?:#attendance-admin-groups)?$',
+  ))
   await context.close()
 })
 

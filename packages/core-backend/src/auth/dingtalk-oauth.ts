@@ -24,6 +24,7 @@ import {
   LoginAliasClaimError,
 } from './login-alias-service'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
@@ -533,6 +534,70 @@ async function ensureGrant(localUserId: string): Promise<void> {
   })
 }
 
+type BackfillTransactionClient = {
+  query: (sql: string, params?: unknown[]) => Promise<unknown>
+}
+
+const DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT = 'dingtalk_directory_open_id_backfill'
+
+/**
+ * Copy the openId this login just proved into the directory member row(s) of the SAME person
+ * (same corp, same unionId) that still lack one. 通讯录 user/get never returns openId, so
+ * without this the directory page kept showing "缺 openId" (and its "refresh this member" hint
+ * could never succeed) even after the member had scanned in.
+ *
+ * Best effort, never able to fail a login on its own:
+ *  - runs inside the caller's transaction (commits together with the identity write) behind a
+ *    SAVEPOINT, so a failing UPDATE is rolled back to the savepoint and only logged. Only a
+ *    failure of the SAVEPOINT / ROLLBACK TO SAVEPOINT statements themselves propagates — the
+ *    transaction is unusable then, and hiding it would silently roll back the identity write;
+ *  - `FOR UPDATE SKIP LOCKED` never waits: a member row held by a running directory sync is
+ *    skipped (that sync now keeps a known openId, and both the grant check and the directory
+ *    page's grantOpenIdAvailable read the identity's openId directly), so a login can neither
+ *    block on nor deadlock with a sync;
+ *  - only rows whose open_id is empty are touched — an openId already on file is never replaced.
+ */
+async function backfillDirectoryAccountOpenIdInTransaction(
+  client: BackfillTransactionClient,
+  dtUser: DingTalkUserInfo,
+  corpId: string | null | undefined,
+): Promise<void> {
+  const openId = String(dtUser.openId ?? '').trim()
+  const unionId = String(dtUser.unionId ?? '').trim()
+  const normalizedCorpId = String(corpId ?? '').trim()
+  if (!openId || !unionId || !normalizedCorpId) return
+
+  // Not caught: a failing SAVEPOINT leaves the transaction aborted, and swallowing it would turn
+  // the caller's COMMIT into a silent ROLLBACK of the identity write.
+  await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  try {
+    await client.query(
+      `UPDATE directory_accounts AS account
+       SET open_id = $4, updated_at = NOW()
+       WHERE account.id IN (
+         SELECT candidate.id
+         FROM directory_accounts candidate
+         WHERE candidate.provider = $1
+           AND candidate.corp_id = $2
+           AND candidate.union_id = $3
+           AND COALESCE(candidate.open_id, '') = ''
+         FOR UPDATE SKIP LOCKED
+       )`,
+      // The candidate filter is the ONLY "never replace a known openId" guard: under READ COMMITTED
+      // a row locked by FOR UPDATE is re-checked against it on its latest version, so a row that
+      // gained an openId meanwhile is dropped. (A duplicate outer re-check would mask its removal.)
+      [PROVIDER, normalizedCorpId, unionId, openId],
+    )
+    await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  } catch (error) {
+    logger.warn('DingTalk directory openId backfill failed; login continues', error instanceof Error ? error : undefined)
+    // If the rollback itself fails the transaction stays aborted, and PostgreSQL answers the
+    // caller's COMMIT with a silent ROLLBACK — the identity write would vanish while the login
+    // "succeeded". Let that failure surface instead (the login transaction fails visibly).
+    await client.query(`ROLLBACK TO SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
+  }
+}
+
 async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
   const config = readDingTalkOauthConfig()
   const externalKey = buildExternalKey(dtUser)
@@ -633,6 +698,8 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
         reason: 'DingTalk OAuth identity binding changed',
       })
     }
+
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
   })
 }
 
@@ -683,6 +750,10 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
          AND COALESCE(provider_open_id, '') = ''`,
       [PROVIDER, localUserId, externalKey, dtUser.unionId || null, openId, config.corpId || null, profile],
     )
+
+    // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
+    // what the directory page needs before an admin can turn the grant on.
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
   })
 }
 
@@ -821,7 +892,10 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
     // Load-bearing alias writer hook: claim real email/mobile inside the same transaction
     // as the JIT users insert. Removing claimNonEmptyLoginAliasesOrThrow must fail the
     // dingtalk_jit writer tests. Placeholder email is intentionally omitted from claims.
-    const row = await transaction(async (client) => {
+    // O2-S2: the JIT INSERT into users (a recovery-authority table) under a held recovery
+    // lease fails with the marker 40001 → named retryable RecoveryConflictError. Strictly
+    // additive: every other error falls through the fail-closed mappings below unchanged.
+    const row = await translateRecoveryConflict(() => transaction(async (client) => {
       // Persist real mobile on users.mobile in the same transaction as the alias claim.
       // Claiming a mobile login alias without storing users.mobile left profile/login
       // mirrors inconsistent under T2a OR-column reads.
@@ -857,7 +931,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
       }
 
       return created
-    })
+    }))
     return row
   } catch (error) {
     if (error instanceof LoginAliasClaimError && error.code === 'ALIAS_CONFLICT') {
@@ -1282,7 +1356,10 @@ export async function bindDingTalkIdentityToUser(input: {
   const openId = dtUser.openId || ''
   const unionId = dtUser.unionId || ''
 
-  await transaction(async (client) => {
+  // O2-S2: bind runs under the access-graph users mutex — a marker 40001 (recovery lease
+  // held) re-raises as the named retryable RecoveryConflictError; every policy error and
+  // fail-closed path below rethrows unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -1393,7 +1470,7 @@ export async function bindDingTalkIdentityToUser(input: {
         reason: 'DingTalk identity bound by OAuth callback',
       })
     }
-  })
+  }))
 }
 
 export async function unbindSelfManagedDingTalkIdentity(input: {
@@ -1404,7 +1481,9 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
   const actorId = String(input.actorId || '').trim() || localUserId
   if (!localUserId) throw new Error('localUserId is required')
 
-  return transaction(async (client) => {
+  // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → named
+  // retryable RecoveryConflictError; every other error rethrows unchanged.
+  return translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -1447,7 +1526,7 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
       reason: 'DingTalk identity unbound by the local user',
     })
     return true
-  })
+  }))
 }
 
 /**

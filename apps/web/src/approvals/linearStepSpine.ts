@@ -1,5 +1,5 @@
 import { assigneeSourceSummary } from './assigneeSource'
-import { parseIdsText, sourceFromStep, type ApprovalStepDraft } from './templateAuthoring'
+import { parseIdsText, sourceFromStep, stepOmitsAssigneeSources, type ApprovalStepDraft } from './templateAuthoring'
 
 /**
  * G-B2-06 — read-only "flow spine" for a LINEAR template's steps: 发起人 → 步骤1 → 步骤2 → … one
@@ -51,6 +51,11 @@ export function isStepSourceResolvable(step: ApprovalStepDraft): boolean {
       return parseIdsText(step.idsText).length > 0
     case 'form_field_user':
       return step.fieldId.trim().length > 0
+    // Lock-1 §K3: a prior_node_approver step needs a chosen earlier-step reference
+    // (authoring-completeness only — strict-earlier ordering is validateTemplateApprovalFlow's
+    // and ultimately the backend publish dominance gate's job).
+    case 'prior_node_approver':
+      return step.priorStepLocalId.trim().length > 0
     default:
       return true
   }
@@ -60,9 +65,13 @@ export function isStepSourceResolvable(step: ApprovalStepDraft): boolean {
 // when their id array is empty. `form_field_user` is the one shape it does not already cover
 // (an unset fieldId renders as the bare `表单用户字段：`) — so that one case gets the same
 // honest-placeholder treatment here, in the SAME bracket convention, instead of a half-empty label.
-function stepSourceSummary(step: ApprovalStepDraft, resolvable: boolean): string {
+// Lock-1 §K3: `allSteps` threads through to `sourceFromStep` so a prior_node_approver chip can
+// derive its referenced step's positional key; an unchosen reference gets the same
+// honest-placeholder treatment.
+function stepSourceSummary(step: ApprovalStepDraft, resolvable: boolean, allSteps: ApprovalStepDraft[]): string {
   if (step.sourceKind === 'form_field_user' && !resolvable) return '表单用户字段：（未选择）'
-  return assigneeSourceSummary(sourceFromStep(step))
+  if (step.sourceKind === 'prior_node_approver' && !resolvable) return '节点审批人：（未选择）'
+  return assigneeSourceSummary(sourceFromStep(step, allSteps))
 }
 
 /**
@@ -81,12 +90,17 @@ export function buildLinearStepSpine(steps: ApprovalStepDraft[]): LinearStepSpin
   }
   const stepChips = steps.map((step, index) => {
     const position = index + 1
-    const resolvable = isStepSourceResolvable(step)
+    // Lock-4 §1 F4-A: a step whose sources are omitted saves NO source — its hidden scratch source
+    // (`requester` by default, or whatever the author configured before choosing 自动通过) must
+    // neither be described nor flagged unresolvable. A step that still carries a source keeps the
+    // source's own completeness check (that source is saved and validated).
+    const omitsSource = stepOmitsAssigneeSources(step)
+    const resolvable = omitsSource || isStepSourceResolvable(step)
     return {
       key: step.localId,
       role: 'step' as const,
       label: step.name.trim() || `审批人 ${position}`,
-      sourceSummary: stepSourceSummary(step, resolvable),
+      sourceSummary: step.approvalType === 'auto_approve' ? '自动通过' : stepSourceSummary(step, resolvable, steps),
       resolvable,
       stepIndex: position,
     }

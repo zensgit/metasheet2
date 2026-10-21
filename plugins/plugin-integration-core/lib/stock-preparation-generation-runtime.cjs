@@ -518,6 +518,13 @@ function resolveEvidence(mode) {
 module.exports = {
   REQUIRED_PERMISSION,
   RESOLUTION_ACTIONS,
+  // The exception-queue SELECT values this module writes. Exported so the option-catalog sweep can
+  // prove they are seeded in stock_preparation_exception_status_v1 /
+  // stock_preparation_exception_severity_v1 — `status` and `severity` are common English words that
+  // the sweep's source scan deliberately does not chase, so their containment is checked here instead.
+  EXCEPTION_STATUS_OPEN,
+  EXCEPTION_STATUS_RESOLVED,
+  BLOCKING_SEVERITY,
   PREP_LINE_OBJECT_ID,
   EXCEPTION_OBJECT_ID,
   StockPreparationGenerationRuntimeError,

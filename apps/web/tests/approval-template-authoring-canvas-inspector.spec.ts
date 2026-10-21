@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
@@ -42,7 +43,14 @@ const CANVAS_INSPECTOR_SHELL_SOURCE = readFileSync(
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
-let routeParams: Record<string, string> = {}
+// REACTIVE route mock (NIT-10, gate on 6d6c6013cd): the view watches route.params.id — a plain
+// object here means a future route-switch test in THIS spec would never fire the watcher and
+// pass vacuously. Same shape as approvalTemplateAuthoring.spec.ts.
+const routeMock = reactive({ params: {} as Record<string, string>, query: {}, path: '/approval-templates/new' })
+function setRouteParams(next: Record<string, string>): void {
+  routeMock.params = next
+  routeMock.path = next.id ? `/approval-templates/${next.id}/edit` : '/approval-templates/new'
+}
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -53,12 +61,7 @@ vi.mock('vue-router', async () => {
       replace: replaceSpy,
       back: vi.fn(),
     }),
-    useRoute: () => ({
-      params: routeParams,
-      query: {},
-      path: routeParams.id ? `/approval-templates/${routeParams.id}/edit` : '/approval-templates/new',
-      meta: {},
-    }),
+    useRoute: () => routeMock,
   }
 })
 
@@ -88,7 +91,17 @@ vi.mock('../src/approvals/api', () => ({
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
-  getTemplate: (id: string) => getTemplateSpy(id),
+  // Server-faithful seam (round 4, same as approvalTemplateAuthoring.spec.ts): the real
+  // GET /templates/:id answers WITH that id, and the view's equality gate now requires it.
+  // Fixtures carrying the shared default 'tpl_canvas_inspector' inherit the requested id.
+  getTemplate: async (id: string) => {
+    const template = await getTemplateSpy(id)
+    if (template && typeof template === 'object'
+      && (template as { id?: string }).id === 'tpl_canvas_inspector' && id !== 'tpl_canvas_inspector') {
+      return { ...(template as object), id } as typeof template
+    }
+    return template
+  },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 
@@ -126,7 +139,13 @@ const ElInput = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): `ElInput` emits nothing when the typed text
+      // equals the text it already shows (`String(modelValue ?? '')`).
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -168,6 +187,13 @@ const ElSelect = defineComponent({
         const value = target.multiple ? Array.from(target.selectedOptions).map((option) => option.value) : target.value
         this.$emit('update:modelValue', value)
         this.$emit('change', value)
+      },
+      // T5a / verify X1 stub fidelity (test-only): Element Plus 2.11 clears a `clearable` select by
+      // emitting its `valueOnClear`, whose default is `undefined` (use-empty-values
+      // DEFAULT_VALUE_ON_CLEAR) — NOT ''. A test dispatches `ep-clear` to reproduce that exactly.
+      onEpClear: () => {
+        this.$emit('update:modelValue', undefined)
+        this.$emit('change', undefined)
       },
     }, this.$slots.default?.())
   },
@@ -401,6 +427,54 @@ function buildLinearReorderGraph() {
   }
 }
 
+/** T5a: two rule branches + a default, all rejoining at cc_1 (the image4 shape with a 2nd branch). */
+function buildTwoBranchConditionGraph(options: { handlerInSecondBranch?: boolean } = {}) {
+  const approval = (key: string, name: string, kind: string) => ({
+    key,
+    type: 'approval',
+    name,
+    config: { assigneeSources: [{ kind }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+  })
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'cond_1',
+        type: 'condition',
+        name: '金额判断',
+        config: {
+          branches: [
+            { edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' },
+            { edgeKey: 'e-b', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }], conjunction: 'and' },
+          ],
+          defaultEdgeKey: 'e-low',
+        },
+      },
+      approval('app_a', '高额审批', 'dept_head'),
+      approval('app_b', '中额审批', 'direct_manager'),
+      ...(options.handlerInSecondBranch
+        ? [{ key: 'handler_b', type: 'handler', name: '中额办理', config: { assigneeSources: [{ kind: 'requester' }] } }]
+        : []),
+      { key: 'cc_1', type: 'cc', name: '抄送财务', config: { targetType: 'user', targetIds: ['u_finance'] } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-c', source: 'start', target: 'cond_1' },
+      { key: 'e-a', source: 'cond_1', target: 'app_a' },
+      { key: 'e-b', source: 'cond_1', target: 'app_b' },
+      { key: 'e-low', source: 'cond_1', target: 'cc_1' },
+      { key: 'e-a-cc', source: 'app_a', target: 'cc_1' },
+      ...(options.handlerInSecondBranch
+        ? [
+            { key: 'e-b-h', source: 'app_b', target: 'handler_b' },
+            { key: 'e-h-cc', source: 'handler_b', target: 'cc_1' },
+          ]
+        : [{ key: 'e-b-cc', source: 'app_b', target: 'cc_1' }]),
+      { key: 'e-cc-end', source: 'cc_1', target: 'end' },
+    ],
+  }
+}
+
 let container: HTMLDivElement | null = null
 let app: VueApp<Element> | null = null
 
@@ -430,7 +504,7 @@ function clickCanvasNode(nodeKey: string) {
 
 describe('Canvas V2 Slice A — canvas inspector', () => {
   beforeEach(() => {
-    routeParams = {}
+    setRouteParams({})
     canManageTemplates.value = true
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
@@ -453,12 +527,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('selecting approval/condition/cc/parallel nodes opens the matching right-side inspector', async () => {
-    routeParams = { id: 'tpl_inspector_types' }
+    setRouteParams({ id: 'tpl_inspector_types' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
@@ -500,12 +571,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('opens the inspector from the keyboard-accessible node selector', async () => {
-    routeParams = { id: 'tpl_inspector_keyboard' }
+    setRouteParams({ id: 'tpl_inspector_keyboard' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     const node = container!.querySelector(
@@ -524,12 +592,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('renders navigation controls and persists semantic drag/drop plus Alt+Arrow reorder', async () => {
-    routeParams = { id: 'tpl_canvas_navigation' }
+    setRouteParams({ id: 'tpl_canvas_navigation' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildLinearReorderGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-canvas-toolbar"]')).not.toBeNull()
@@ -577,12 +642,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('shows business labels instead of internal topology keys in the inspector', async () => {
-    routeParams = { id: 'tpl_inspector_labels' }
+    setRouteParams({ id: 'tpl_inspector_labels' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     clickCanvasNode('cond_1')
@@ -613,15 +675,12 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('uses a business type label when the selected node has no display name', async () => {
-    routeParams = { id: 'tpl_inspector_unnamed' }
+    setRouteParams({ id: 'tpl_inspector_unnamed' })
     const graph = buildMixedGraph()
     const ccNode = graph.nodes.find((node) => node.key === 'cc_1')!
     ccNode.name = ''
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('cc_1')
     await flushUi()
@@ -632,12 +691,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('a representative inspector edit writes through to the existing draft save payload', async () => {
-    routeParams = { id: 'tpl_inspector_edit' }
+    setRouteParams({ id: 'tpl_inspector_edit' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('fork_1')
     await flushUi()
@@ -651,15 +707,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     joinMode.dispatchEvent(new Event('change'))
     await flushUi()
 
-    // Switching to list keeps a still-valid selection; the list surface shows the same draft value.
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
-    await flushUi()
-    const listJoin = container!.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
-    expect(listJoin.value).toBe('any')
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-    // Selection preserved across list/canvas while the node still exists.
+    // The inspector remains the single editing surface and keeps the same draft value.
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
     expect(inspector?.getAttribute('data-inspector-node')).toBe('fork_1')
     expect(
@@ -678,7 +726,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('deleting the selected node clears selection and closes the inspector', async () => {
-    routeParams = { id: 'tpl_inspector_delete' }
+    setRouteParams({ id: 'tpl_inspector_delete' })
     // Must be a COMPLEX graph (cc) so the canvas toggle mounts; approval_mid is a linear
     // mid-chain approval (1 in / 1 out) so removeLinearNode + the canvas remove button apply.
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -712,9 +760,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_mid')
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).not.toBeNull()
@@ -725,18 +770,174 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelector('[data-canvas-node="approval_mid"]')).toBeNull()
   })
 
+  // ── T5a (test report 2026-10-08): 「删除分支」 on condition branch cards ─────────────────────────
+  function inspectorBranchCards(): HTMLElement[] {
+    return Array.from(container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    )) as HTMLElement[]
+  }
+
+  it('T5a: non-default branch cards carry 「删除分支」, the default card never does; deleting one branch keeps the gateway selected, drops the branch body + rule, and is ONE undo step', async () => {
+    setRouteParams({ id: 'tpl_t5a_branch_delete' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      const remove = card.querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement | null
+      expect(remove, 'every non-default branch card offers delete').not.toBeNull()
+      expect(remove!.disabled).toBe(false)
+      expect(remove!.textContent?.trim()).toBe('删除分支')
+    }
+    // D0 §4.1: the default card has NO delete control at all (structural, not merely disabled).
+    const defaultCard = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-default-branch"]',
+    ) as HTMLElement
+    expect(defaultCard).not.toBeNull()
+    expect(defaultCard.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull()
+
+    ;(cards[1].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.getAttribute('data-inspector-node')).toBe('cond_1') // gateway stays selected
+    expect(inspectorBranchCards()).toHaveLength(1)
+    expect(container!.querySelector('[data-canvas-node="app_b"]')).toBeNull()
+
+    // ONE undo restores the branch, its body node and its rule (same unified history as every
+    // structural edit). Selection-on-undo follows the session history's recorded selection — a
+    // pre-existing contract this slice does not change — so the gateway is re-selected to inspect.
+    const undoBtn = container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement
+    expect(undoBtn.disabled).toBe(false)
+    undoBtn.click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="app_b"]')).not.toBeNull()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    expect(inspectorBranchCards()).toHaveLength(2)
+
+    // Redo, then save: the payload carries neither the branch, its node, its edges, nor its rule.
+    ;(container!.querySelector('[data-testid="approval-canvas-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const condition = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1')
+    expect(condition.config.branches.map((b: any) => b.edgeKey)).toEqual(['e-a'])
+    expect(condition.config.defaultEdgeKey).toBe('e-low')
+    expect(payload.approvalGraph.nodes.some((n: any) => n.key === 'app_b')).toBe(false)
+    expect(payload.approvalGraph.edges.some((e: any) => e.key === 'e-b' || e.key === 'e-b-cc')).toBe(false)
+  })
+
+  it('T5a: deleting the LAST non-default branch removes the condition node, keeps the default path, closes the inspector, and undo brings it all back', async () => {
+    setRouteParams({ id: 'tpl_t5a_last_branch' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(1)
+    ;(cards[0].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-canvas-node="cond_1"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_high"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="cc_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+    // Gate r1 P3-4 / D0 §5: the inspector that held focus is gone with the gateway — keyboard focus
+    // goes to the node now occupying its slot (the default path's head), not to <body>.
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-canvas-node="cc_1"] [data-testid="approval-canvas-node-select"]'),
+    )
+
+    ;(container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="cond_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_high"]')).not.toBeNull()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    expect(inspectorBranchCards()).toHaveLength(1)
+
+    ;(container!.querySelector('[data-testid="approval-canvas-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.some((n: any) => n.type === 'condition')).toBe(false)
+    // The start edge keeps its key and now enters the old default path head.
+    expect(payload.approvalGraph.edges.find((e: any) => e.key === 'e-start-c')).toMatchObject({ source: 'start', target: 'cc_1' })
+  })
+
+  it('T5a: a branch the command refuses (it carries a 办理 node) keeps 「删除分支」 disabled and states why', async () => {
+    setRouteParams({ id: 'tpl_t5a_refused' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph({ handlerInSecondBranch: true }) as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(2)
+    const deletable = cards[0].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement
+    const refused = cards[1].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement
+    expect(deletable.disabled).toBe(false) // positive control on the same gateway
+    expect(refused.disabled).toBe(true)
+    expect(cards[1].querySelector('[data-testid="approval-condition-branch-remove-blocked"]')?.textContent?.trim())
+      .toBe('该分支含办理节点，暂不支持删除')
+    expect(cards[0].querySelector('[data-testid="approval-condition-branch-remove-blocked"]')).toBeNull()
+  })
+
+  it('T5a / verify X1: clearing the clearable default-branch picker (Element Plus emits undefined) stores "no default" instead of throwing', async () => {
+    setRouteParams({ id: 'tpl_t5a_clear_default' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const nodeCount = container!.querySelectorAll('[data-testid="approval-canvas-node"]').length
+    const picker = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-default-edge"]',
+    ) as HTMLSelectElement
+    expect(picker).not.toBeNull()
+    picker.dispatchEvent(new Event('ep-clear'))
+    await flushUi()
+
+    // The canvas still renders (its effective graph did not throw) and the honest empty state shows.
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(nodeCount)
+    expect(container!.querySelector('[data-testid="approval-condition-default-copy-empty"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect('defaultEdgeKey' in payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config).toBe(false)
+  })
+
   it('read-only mode renders inspector details but disables mutation controls', async () => {
-    routeParams = { id: 'tpl_inspector_readonly' }
+    setRouteParams({ id: 'tpl_inspector_readonly' })
     // Load while manage is allowed (onMounted early-returns when canManageTemplates is false),
     // then flip to read-only so the inspector still mounts with disabled controls.
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
+    // Gate r1 P3-3 (T5a): 「删除分支」 honours read-only. Positive control first — while manage is
+    // allowed, this gateway's only branch is deletable (no refusal applies), so after the flip the
+    // ONLY thing that can disable it is read-only.
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const branchRemove = () => container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch-remove"]',
+    ) as HTMLButtonElement | null
+    expect(branchRemove()).not.toBeNull()
+    expect(branchRemove()!.disabled).toBe(false)
     canManageTemplates.value = false
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
+    expect(branchRemove(), 'the control still renders in read-only mode, disabled').not.toBeNull()
+    expect(branchRemove()!.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-condition-branch-remove-blocked"]')).toBeNull()
     clickCanvasNode('fork_1')
     await flushUi()
 
@@ -756,12 +957,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('inspector close button clears selection and closes the panel', async () => {
-    routeParams = { id: 'tpl_inspector_close' }
+    setRouteParams({ id: 'tpl_inspector_close' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('cond_1')
     await flushUi()
@@ -780,6 +978,260 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ).toBe(false)
   })
 
+  // ── B1: fixed bottom action bar (取消/确定) ────────────────────────────────────────────────────
+  it('B1 (E-P2-3): the footer renders exactly ONE 关闭 — the 取消/确定 pair was a lying control over live-committing fields and ratified A-8 forbids it', async () => {
+    setRouteParams({ id: 'tpl_inspector_footer' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+
+    const footer = container!.querySelector('[data-testid="approval-canvas-inspector-footer"]') as HTMLElement
+    expect(footer).not.toBeNull()
+    // E-P2-3: exactly ONE footer button, 关闭 — pure navigation. The former 取消/确定 pair both
+    // aliased close while edits committed live, i.e. a 取消 that could not discard anything: a
+    // lying control, and a direct A-8 violation (no Save/Cancel/Apply in the inspector).
+    const footerButtons = footer.querySelectorAll('button')
+    expect(footerButtons.length).toBe(1)
+    const closeBtn = footer.querySelector('[data-testid="approval-canvas-inspector-footer-close"]') as HTMLButtonElement
+    expect(closeBtn?.textContent?.trim()).toBe('关闭')
+
+    closeBtn.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+  })
+
+  it('B1: the footer stays visible regardless of the active tab (chrome-level, not tab content) and outside the scrolling body', async () => {
+    setRouteParams({ id: 'tpl_inspector_footer_tabs' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-footer"]')).not.toBeNull()
+    // The footer is a sibling of the scrolling body, not inside the tabpanel.
+    const tabPanel = inspector.querySelector('[data-testid="approval-canvas-inspector-tabpanel"]') as HTMLElement
+    expect(tabPanel.querySelector('[data-testid="approval-canvas-inspector-footer"]')).toBeNull()
+  })
+
+  // ── B2: inline title rename ────────────────────────────────────────────────────────────────────
+  it('B2: pencil affordance enters edit mode pre-filled with the current name; Enter commits, updates the displayed label, and reaches the save payload', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    const pencil = inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement
+    expect(pencil).not.toBeNull()
+    expect(pencil.getAttribute('aria-label')).toBe('重命名高额审批节点')
+    pencil.click()
+    await flushUi()
+
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.value).toBe('高额审批')
+
+    input.value = '大额审批（>1000）'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('大额审批（>1000）')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const renamed = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_high')
+    expect(renamed.name).toBe('大额审批（>1000）')
+  })
+
+  it('B2 (E-P2-4): rename is a HISTORY entry — undo restores the old name, redo the new, and the save payload matches the visible state', async () => {
+    // The first B2 shape mutated draft.preservedGraph directly: no history entry, undo stayed
+    // disabled after a rename, and a later topology undo resurrected stale names through the
+    // live-name overlay (gate P3-1 probe). Rename now runs through the SAME undo stack as every
+    // other structural edit (external review P2-4), and the overlay is gone.
+    setRouteParams({ id: 'tpl_inspector_rename_history' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const originalName = '高额审批'
+
+    const pencil = inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement
+    pencil.click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '改名后的审批'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(inspector.textContent).toContain('改名后的审批')
+
+    // UNDO restores the old name — the rename made a history entry. Names render only in the
+    // inspector header (canvas tiles show type labels + config summaries), so the assertion
+    // surface is the reopened inspector, not the canvas.
+    const undoBtn = container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement
+    expect(undoBtn).not.toBeNull()
+    expect(undoBtn.disabled).toBe(false)
+    undoBtn.click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspectorAfterUndo = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspectorAfterUndo.textContent).toContain(originalName)
+    expect(inspectorAfterUndo.textContent).not.toContain('改名后的审批')
+
+    // REDO restores the new name.
+    const redoBtn = container!.querySelector('[data-testid="approval-canvas-redo"]') as HTMLButtonElement
+    expect(redoBtn.disabled).toBe(false)
+    redoBtn.click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspectorAfterRedo = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspectorAfterRedo.textContent).toContain('改名后的审批')
+
+    // And what is SAVED is what is VISIBLE.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_high').name).toBe('改名后的审批')
+  })
+
+  it('B2 (G-P3-1): clearing the name to blank is ALSO undoable — undo resurrects the original, not the void', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename_blank' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '   '
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    const undoBtn = container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement
+    expect(undoBtn.disabled).toBe(false)
+    undoBtn.click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspectorAfterUndo = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspectorAfterUndo.textContent).toContain('高额审批')
+  })
+
+  it('B2: Esc reverts without committing; blur commits the same as Enter', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename_esc' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    let input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '不应保存的名字'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('高额审批')
+    expect(inspector.textContent).not.toContain('不应保存的名字')
+
+    // Blur commits, same as Enter.
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '经由失焦提交'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new Event('blur'))
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('经由失焦提交')
+  })
+
+  it('B2: switching node selection mid-rename discards the pending edit rather than leaking it onto the new node', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename_switch' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '半途而废'
+    input.dispatchEvent(new Event('input'))
+
+    clickCanvasNode('cc_1')
+    await flushUi()
+    const reInspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(reInspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(reInspector.textContent).toContain('抄送财务')
+    expect(reInspector.textContent).not.toContain('半途而废')
+
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.textContent).toContain('高额审批')
+  })
+
+  it('B2: a whitespace-only commit clears the name override, falling back to the node-type label', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename_clear' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cc_1')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '   '
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const cleared = payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1')
+    expect(cleared.name).toBeUndefined()
+  })
+
+  it('B2: read-only mode does not render the rename affordance', async () => {
+    setRouteParams({ id: 'tpl_inspector_rename_readonly' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    canManageTemplates.value = false
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]')).toBeNull()
+  })
+
   it('narrow canvas selection scrolls the stacked inspector below the sticky step rail', async () => {
     const originalMatchMedia = window.matchMedia
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
@@ -794,12 +1246,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     })
 
     try {
-      routeParams = { id: 'tpl_inspector_mobile_scroll' }
+      setRouteParams({ id: 'tpl_inspector_mobile_scroll' })
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
-      await flushUi()
-
-      ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
       await flushUi()
       clickCanvasNode('cond_1')
       await flushUi()
@@ -821,7 +1270,60 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }
   })
 
-  it('child-owned condition styles apply in list and canvas inspector (scoped CSS ownership)', async () => {
+  // ── T5c (test report 2026-10-08): the inspector stays in view on a long flow ──────────────────
+  // jsdom cannot lay anything out, so these pin the MECHANISM; the real-browser proof (scroll the
+  // document to the last node, click it, the inspector heading/footer are in the viewport and not
+  // under the sticky bars) is verification/approval-canvas-sole-surface.spec.ts.
+  it('T5c: on desktop the rail is sticky below the sticky header + step bar and capped to the visible height; the flow card stops clipping sticky; ≤960px stays stacked', () => {
+    const rail = CANVAS_INSPECTOR_SHELL_SOURCE.match(/\.template-authoring__canvas-inspector\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rail).toMatch(/position:\s*sticky;/)
+    expect(rail).toMatch(/top:\s*128px;/)
+    expect(rail).toMatch(/max-height:\s*max\(320px, calc\(100vh - 320px\)\);/)
+    expect(rail).not.toMatch(/max-height:\s*none/)
+    expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(
+      /@media \(max-width: 960px\)\s*\{\s*\.template-authoring__canvas-inspector\s*\{[^}]*position:\s*static;[^}]*max-height:\s*none;/,
+    )
+    // el-card ships overflow:hidden, which makes the CARD the sticky scroller (sticky never engages).
+    expect(PARENT_AUTHORING_SOURCE).toMatch(/\.template-authoring__panel--flow\s*\{\s*overflow:\s*clip;\s*\}/)
+    expect(PARENT_AUTHORING_SOURCE).toMatch(/class="template-authoring__panel template-authoring__panel--flow"/)
+  })
+
+  it('T5c: desktop selection does not drag the page to the inspector (the sticky rail is already in view)', async () => {
+    const originalMatchMedia = window.matchMedia
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    const scrollIntoViewSpy = vi.fn()
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: vi.fn().mockReturnValue({ matches: false }) })
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoViewSpy })
+    try {
+      setRouteParams({ id: 'tpl_t5c_desktop' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+      await mountView()
+      await flushUi()
+      clickCanvasNode('join_1')
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-node')).toBe('join_1')
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(window, 'matchMedia', { configurable: true, value: originalMatchMedia })
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
+    }
+  })
+
+  it('T5c / D0 §5: closing the inspector returns keyboard focus to the node it was editing', async () => {
+    setRouteParams({ id: 'tpl_t5c_focus' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cc_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-close"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+    const selector = container!.querySelector('[data-canvas-node="cc_1"] [data-testid="approval-canvas-node-select"]')
+    expect(document.activeElement).toBe(selector)
+  })
+
+  it('child-owned condition styles apply in the canvas inspector (scoped CSS ownership)', async () => {
     // Source contract: condition layout rules live on the extracted child, not only the parent.
     // (Parent scoped CSS cannot style the child's markup; this guards against regressing that.)
     expect(CHILD_EDITOR_SOURCE).toMatch(/\.template-authoring__condition-branch\s*\{[\s\S]*?border:\s*1px dashed/)
@@ -834,45 +1336,11 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // Desktop inspector shell is wide enough for ms-w-360 controls (~400px) — PR4 extract.
     expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
 
-    routeParams = { id: 'tpl_inspector_styles' }
+    setRouteParams({ id: 'tpl_inspector_styles' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
 
-    // Canvas is the ordinary-user default; switch to the retained accessible list surface.
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
-    await flushUi()
-
-    // List surface: condition branch must receive child-owned dashed border + wrap head.
-    const listBranch = container!.querySelector(
-      '[data-testid="approval-graph-readonly-list"] .template-authoring__condition-branch',
-    ) as HTMLElement | null
-    expect(listBranch).not.toBeNull()
-    const listBranchStyle = getComputedStyle(listBranch!)
-    const listHead = listBranch!.querySelector('.template-authoring__condition-branch-head') as HTMLElement
-    const listHeadStyle = getComputedStyle(listHead)
-    const listRule = listBranch!.querySelector('.template-authoring__condition-rule') as HTMLElement | null
-    // Prefer computed-style proof when jsdom/Vite injects scoped CSS; fall back to class presence.
-    const listBorderApplied =
-      listBranchStyle.borderTopStyle === 'dashed'
-      || listBranchStyle.borderStyle === 'dashed'
-      || listBranchStyle.getPropertyValue('border-top-style') === 'dashed'
-    if (listBorderApplied) {
-      expect(listBorderApplied).toBe(true)
-      expect(listHeadStyle.flexWrap === 'wrap' || listHeadStyle.getPropertyValue('flex-wrap') === 'wrap').toBe(true)
-      if (listRule) {
-        const ruleStyle = getComputedStyle(listRule)
-        expect(ruleStyle.flexWrap === 'wrap' || ruleStyle.getPropertyValue('flex-wrap') === 'wrap').toBe(true)
-      }
-    } else {
-      // jsdom did not apply scoped CSS — source contract above is the ownership proof;
-      // still assert the markup + class contract that the styles target.
-      expect(listBranch!.classList.contains('template-authoring__condition-branch')).toBe(true)
-      expect(listHead.classList.contains('template-authoring__condition-branch-head')).toBe(true)
-    }
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('cond_1')
     await flushUi()
     const inspectorBranch = container!.querySelector(
@@ -895,13 +1363,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   // ── Lock-0 P1-A acceptance gates (docs/development/approval-lock0-d0-interaction-delta-20260817.md) ──
 
-  it('A-1/A-2: the shipped registry renders exactly 审批人设置/表单权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
-    routeParams = { id: 'tpl_a1_a2' }
+  // Lock-5 §1.1 L5-A / gate E-1 landed the first server-enforced per-node operation policies, so the
+  // shipped registry now declares three tabs on an `approval` node. Lock-0 A-1/A-2 STILL HOLD — what
+  // changed is which fixture carries the absence half: Lock-5 E-1's positive control is "a registry
+  // fixture with zero ratified policies renders NO third tab", which is the dedicated test below
+  // ("A-2 (re-pointed by Lock-5 E-1) …"). This test keeps the per-tab-content and no-Save/Cancel
+  // halves of A-1/A-8 against the SHIPPED registry.
+  it('A-1/A-8: the shipped registry renders 审批人设置/字段权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
+    setRouteParams({ id: 'tpl_a1_a2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -910,7 +1381,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tablist = inspector.querySelector('[data-testid="approval-canvas-inspector-tablist"]') as HTMLElement
     expect(tablist).not.toBeNull()
     const tabs = Array.from(tablist.querySelectorAll('[role="tab"]')) as HTMLElement[]
-    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限'])
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '字段权限', '操作权限'])
 
     // A-1 "per-tab content matches the L0-1 table" — not just tab labels: the CONTENT visibility
     // actually follows the active tab. `v-show` only toggles `style.display` (deliberately, so it
@@ -930,30 +1401,41 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(assigneeSection.style.display).toBe('none')
     expect(fieldPermSection.style.display).not.toBe('none')
 
-    // A-2: no 操作权限 tab/content with the shipped (Lock-5-absent) registry.
-    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    // Lock-5 E-1: the 操作权限 tab now exists on the shipped registry, and its CONTENT follows the
+    // active tab exactly like the other two — it is `v-if`-mounted (not `v-show`), so absence while
+    // another tab is active is the assertion, and presence after clicking it is the control.
     expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
-    expect(inspector.textContent).not.toContain('操作权限')
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(assigneeSection.style.display).toBe('none')
+    expect(fieldPermSection.style.display).toBe('none')
+    expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).not.toBeNull()
 
-    // A-8 (negative half): no Save/Cancel/Apply control anywhere in the inspector — tabs are
-    // presentation only. Each label checked individually — `not.toEqual(arrayContaining([...]))`
-    // only fails if ALL three are present, so it would pass a real Save button by itself.
+    // A-8 (negative half, RESTORED to full-inspector scope 2026-08-25): no Save/Cancel/Apply
+    // control ANYWHERE in the inspector — field edits commit live with no staged buffer, so any
+    // such control would either lie (a cancel that cannot discard) or invert the immediate-command
+    // model (an apply gate). The B1 re-scoping to the tabpanel was proven a hole by the gate on
+    // 9948f3be5a (M9: adding a 保存 button to the footer passed 75/75) and the external review
+    // showed the 取消/确定 pair it protected violated the RATIFIED A-8 outright — the footer now
+    // carries a single 关闭 (pure navigation), pinned EXHAUSTIVELY below.
     expect(inspector.querySelector('[data-testid*="save"]')).toBeNull()
     expect(inspector.querySelector('[data-testid*="cancel"]')).toBeNull()
     expect(inspector.querySelector('[data-testid*="apply"]')).toBeNull()
-    const buttonLabels = Array.from(inspector.querySelectorAll('button')).map((btn) => btn.textContent?.trim())
-    expect(buttonLabels).not.toContain('保存')
-    expect(buttonLabels).not.toContain('取消')
-    expect(buttonLabels).not.toContain('应用')
+    const inspectorButtonLabels = Array.from(inspector.querySelectorAll('button')).map((btn) => btn.textContent?.trim())
+    expect(inspectorButtonLabels).not.toContain('保存')
+    expect(inspectorButtonLabels).not.toContain('取消')
+    expect(inspectorButtonLabels).not.toContain('应用')
+    expect(inspectorButtonLabels).not.toContain('确定')
+    const footerButtons = Array.from(
+      inspector.querySelectorAll('[data-testid="approval-canvas-inspector-footer"] button'),
+    ).map((btn) => btn.textContent?.trim())
+    expect(footerButtons).toEqual(['关闭'])
   })
 
   it('D1/D2: the configured-summary echo uses the RATIFIED §10.3 label, not the pre-D1 incidental wording (dept_head/requester)', async () => {
-    routeParams = { id: 'tpl_d1_echo' }
+    setRouteParams({ id: 'tpl_d1_echo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // approval_high: dept_head. D1 supersedes the incidental "部门主管" with "部门负责人".
@@ -983,7 +1465,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all eleven assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all fifteen assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -1003,20 +1485,32 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // SAME slice that lands the resolver arm end to end (Lock-1 §2.3 table: "Admitted when: K4
       // landed").
       dept_head_at_level: '指定层级部门负责人',
+      // Lock-1 §K3 (RATIFIED 2026-08-17) — the 节点审批人 registry row, admitted in the SAME
+      // slice that lands the dominance validator + caller-supplied decider resolution end to end
+      // (Lock-1 §2.3 table: "Admitted when: OD-L1-3 + OD-L1-4 decided; dominance validator
+      // landed" — both recorded (a) in the §4 block).
+      prior_node_approver: '节点审批人',
+      // Lock-1 §K1 (RATIFIED 2026-08-17) — the 用户组 registry row, admitted in the SAME slice
+      // that lands the resolver arm + org binding + picker end to end (Lock-1 §2.3 table:
+      // "Admitted when: OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed").
+      // The cc-as-recipient row (OD-L1-7) is a SEPARATE row NOT admitted by this slice.
+      user_group: '用户组',
+      // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
+      // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
+      // fieldDerivedAssigneeIds snapshot end to end (Lock-2 §2.4 table).
+      form_field_user_manager: '表单内联系人上级',
+      form_field_user_dept_head: '表单内联系人部门负责人',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 12th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 16th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(11)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(15)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
-    routeParams = { id: 'tpl_a7' }
+    setRouteParams({ id: 'tpl_a7' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1036,11 +1530,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   it('A-8: a field edit + tab switch yields the same undo state as the same edit without a switch; the counter can move (positive control, not vacuous)', async () => {
     async function measureUndoDisabledAfterFieldEdit(withTabSwitch: boolean): Promise<boolean> {
-      routeParams = { id: `tpl_a8_${withTabSwitch}` }
+      setRouteParams({ id: `tpl_a8_${withTabSwitch}` })
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
-      await flushUi()
-      ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
       await flushUi()
       clickCanvasNode('approval_high')
       await flushUi()
@@ -1078,11 +1570,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // move), not the unmet "exactly one" literal.
     expect(withSwitch).toBe(withoutSwitch)
 
-    routeParams = { id: 'tpl_a8_positive_control' }
+    setRouteParams({ id: 'tpl_a8_positive_control' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1103,11 +1593,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "arrow onto this radio" here — the real keyboard mechanism is covered separately by the
   // real-browser check (verification/approval-inspector-keyboard.spec.ts).
   it('P1-1 regression: roster kind-switch caches and restores the outgoing payload — traversal away and back does not destroy configured roleIds, and Save succeeds with the original JSON intact', async () => {
-    routeParams = { id: 'tpl_p1_1_regression' }
+    setRouteParams({ id: 'tpl_p1_1_regression' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_b: static_role, roleIds:['legal'] — the exact gate Link A fixture.
@@ -1157,11 +1645,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // EXISTING cards. Append never shifts card 0's index, so a naive "clear on any structural change"
   // implementation would needlessly re-open the exact P1-1 config-loss bug in a new sequence.
   it('P1-B: adding a 2nd card does NOT clear card 0\'s P1-1 kind-switch cache — switching card 0 away then back still restores its configured roleIds', async () => {
-    routeParams = { id: 'tpl_p1b_add_preserves_cache' }
+    setRouteParams({ id: 'tpl_p1b_add_preserves_cache' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_b: static_role, roleIds:['legal'] at card 0 (the same P1-1 fixture as above).
@@ -1198,11 +1684,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // index must NOT inherit that removed card's stale per-index cached payload. This was load-bearing
   // but had zero coverage (mutation: deleting the clear-on-remove call left all 186 tests green).
   it('P1-B / P2(a): removing card 0 does NOT leak its cached kind-switch payload into the survivor that slides into its old index', async () => {
-    routeParams = { id: 'tpl_p1b_remove_clears_cache' }
+    setRouteParams({ id: 'tpl_p1b_remove_clears_cache' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_b: static_role, roleIds:['legal'] at card 0.
@@ -1277,11 +1761,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // DOM: selecting `readonly` renders NO readonly hint in the canvas inspector (readonly is now
     // enforced, not disclosed-as-pending). Positive control that the tab + selector still work: the
     // routing hint path (a different span) is exercised by the D5 test below.
-    routeParams = { id: 'tpl_g13' }
+    setRouteParams({ id: 'tpl_g13' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1296,6 +1778,25 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     access.dispatchEvent(new Event('change'))
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
+  })
+
+  it('Lock-7B OD-L7B-7 / G-15: the field-permissions select on an APPROVAL node renders EXACTLY three options — 必填 is ABSENT, not a disabled fourth (M7)', async () => {
+    setRouteParams({ id: 'tpl_l7b_absent' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const access = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    expect(access).not.toBeNull()
+    const options = Array.from(access.querySelectorAll('option'))
+    expect(options).toHaveLength(3)
+    expect(options.map((o) => o.getAttribute('value')).sort()).toEqual(['editable', 'hidden', 'readonly'])
+    // Not merely absent from the value list — no disabled option node exists in the DOM at all.
+    expect(access.querySelector('option[value="required"]')).toBeNull()
   })
 
   it('D5 (P2-1): the routing-hint string is pinned by anchored exact equality (not substring), and the hint now actually renders on a complex graph via the graph-wide computed', async () => {
@@ -1314,11 +1815,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // did NOT work — it pointed at the linear-only computed, which is structurally empty (`draft.
     // steps.length === 0`) whenever the canvas inspector is mounted at all (a complex graph). This
     // reproduces that probe end-to-end and asserts it now renders.
-    routeParams = { id: 'tpl_d5_routing_hint' }
+    setRouteParams({ id: 'tpl_d5_routing_hint' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_a: switch its assignee source to form_field_user → reviewer (a real routing driver).
@@ -1360,11 +1859,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('A-11: tab strip uses the tablist roving-tabindex pattern; every tab is keyboard reachable', async () => {
-    routeParams = { id: 'tpl_a11' }
+    setRouteParams({ id: 'tpl_a11' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1400,11 +1897,9 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('A-12: tab strip Left/Right stays within the strip; the toolbar Left/Right stays within itself; boundaries hold in both directions', async () => {
-    routeParams = { id: 'tpl_a12' }
+    setRouteParams({ id: 'tpl_a12' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1448,6 +1943,374 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // tablist's single active tab rather than a stale one.
     const tabsInSequence = [tab1, tab2].filter((tab) => tab.tabIndex === 0)
     expect(tabsInSequence).toHaveLength(1)
+  })
+
+  // Fix-round follow-up (gate P2-2): the mount spec for `ApprovalGraphNodeConfigEditor.vue` in
+  // approval-node-threshold-timeout-config.spec.ts uses a hand-built stub API whose
+  // `setApprovalNodeMode`/`setApprovalNodeTimeoutEnabled` carry NO parallel-region guard — it can
+  // only ever prove the render-layer `:disabled` option/checkbox, never the setter itself. THIS view
+  // mount uses the REAL `TemplateAuthoringView.vue` setters (via
+  // `provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, ...)`), so forcing the underlying
+  // `<select>`/`<input type=checkbox>` past its disabled affordance — exactly what a stray
+  // programmatic caller would do — reaches the real guard. `app_a`/`app_b` sit INSIDE `fork_1`'s
+  // parallel region in `buildMixedGraph` (same shape as the compat test's PARALLEL_GRAPH).
+  // Assertion is on the STRUCTURAL v-if (the N-input / timeout-detail block), not the raw stub
+  // `<select>`/`<input>`'s own DOM `.value`/`.checked`: Vue's component-update bail-out skips
+  // re-invoking a child (the el-select/el-checkbox stub) whose props are unchanged from the last
+  // render, so a manually-forced native DOM value that the guard correctly refused to adopt into
+  // reactive state does NOT get patched back — only the PARENT's own v-if (driven directly by the
+  // reactive `approvalNodeMode`/`approvalNodeTimeout` getters) reliably reflects whether the setter
+  // actually mutated anything.
+  it('setApprovalNodeMode refuses threshold for a node inside a parallel region even past the disabled option (setter guard, not just render-layer)', async () => {
+    setRouteParams({ id: 'tpl_setter_guard_mode' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('app_a')
+    await flushUi()
+    const select = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(select.value).toBe('single')
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+
+    select.value = 'threshold'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The N-input is gated by `v-if="approvalNodeMode(node.key) === 'threshold'"` — it must stay
+    // ABSENT if (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+  })
+
+  it('setApprovalNodeTimeoutEnabled refuses to enable a timeout for a node inside a parallel region even past the disabled checkbox (setter guard, not just render-layer)', async () => {
+    setRouteParams({ id: 'tpl_setter_guard_timeout' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('app_b')
+    await flushUi()
+    const checkbox = container!.querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    expect(checkbox).not.toBeNull()
+    expect(checkbox.checked).toBe(false)
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The detail block is gated by `v-if="approvalNodeTimeout(node.key)"` — it must stay ABSENT if
+    // (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+  })
+
+  // ── Lock-4 §1 F4-A — node-level 审批类型 in the canvas inspector ─────────────────────────────────
+  // docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A; L0-1 places the control in the
+  // 审批人设置 tab; OD-L4-2(a) ships 人工审批 / 自动通过 only. `app_a` sits inside `fork_1`'s parallel
+  // region in `buildMixedGraph`, where the backend rejects a non-manual node in v1
+  // (APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED); `approval_high` does not.
+  it('F4-A: the 审批类型 control is a two-option native radiogroup INSIDE the 审批人设置 tab section, never the 字段权限 section (L0-1)', async () => {
+    setRouteParams({ id: 'tpl_f4a_tab_placement' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const group = inspector.querySelector('[data-testid="approval-node-approval-type"]') as HTMLElement
+    expect(group).not.toBeNull()
+    expect(group.getAttribute('role')).toBe('radiogroup')
+    const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+    expect(radios.map((radio) => radio.value)).toEqual(['manual', 'auto_approve'])
+    expect(radios.map((radio) => radio.name)).toEqual(['approval-node-approval-type-approval_high', 'approval-node-approval-type-approval_high'])
+    expect(Array.from(group.querySelectorAll('label')).map((label) => label.textContent?.trim())).toEqual(['人工审批', '自动通过'])
+    expect(radios[0]!.checked).toBe(true)
+    expect(inspector.textContent).not.toContain('自动拒绝')
+
+    const assigneeSection = inspector.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const fieldPermSection = inspector.querySelector('[data-testid="approval-node-section-field-permissions"]') as HTMLElement
+    expect(assigneeSection.contains(group)).toBe(true)
+    expect(fieldPermSection.contains(group)).toBe(false)
+    // The tab set itself is unchanged by this slice (A-1).
+    const tabs = Array.from(inspector.querySelectorAll('[data-testid="approval-canvas-inspector-tablist"] [role="tab"]'))
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '字段权限', '操作权限'])
+  })
+
+  it('F4-A: inside a parallel region 自动通过 is disabled with the hint, and the setter refuses even past the disabled radio; POSITIVE CONTROL: outside the region it is enabled', async () => {
+    setRouteParams({ id: 'tpl_f4a_parallel' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('app_a')
+    await flushUi()
+    const auto = container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement
+    expect(auto.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-parallel-hint"]')).not.toBeNull()
+    // Forced past the disabled affordance — reaches the REAL view setter (approvalNodeInParallelRegion).
+    auto.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(1)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).toBeNull()
+    expect((container!.querySelector('[data-testid="approval-node-approval-type-manual"]') as HTMLInputElement).checked).toBe(true)
+
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).disabled).toBe(false)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-parallel-hint"]')).toBeNull()
+  })
+
+  it('F4-A: choosing 自动通过 hides the cards / policy / timeout, the canvas card reads 自动通过, and the save payload carries approvalType with NO assigneeSources', async () => {
+    setRouteParams({ id: 'tpl_f4a_choose_auto' })
+    const graph = buildMixedGraph()
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(1)
+
+    ;(container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+    expect(container!.querySelector('[data-testid="approval-node-source-add"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-empty-policy"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).not.toBeNull()
+    const card = container!.querySelector('[data-testid="approval-canvas-node"][data-canvas-node="approval_high"]') as HTMLElement
+    expect(card.querySelector('.template-authoring__canvas-node-summary')?.textContent).toContain('自动通过')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const saved = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const config = saved.nodes.find((n: any) => n.key === 'approval_high').config
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(config.approvalMode).toBe('single')
+    // Every OTHER node and every edge are unchanged (the byte-for-byte pin itself lives in the
+    // dedicated via-API round-trip tests, approvalTemplateAuthoring.spec.ts).
+    for (const original of graph.nodes.filter((n) => n.key !== 'approval_high')) {
+      expect(saved.nodes.find((n: any) => n.key === original.key)).toEqual(original)
+    }
+    expect(saved.edges).toEqual(graph.edges)
+  })
+
+  it('F4-A HIDDEN-BLOCK GUARD (Canvas-first inspector): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {
+    setRouteParams({ id: 'tpl_f4a_hidden_timeout' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const pick = (testId: string, value: string) => {
+      const el = inspector().querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement
+      el.value = value
+      el.dispatchEvent(new Event('change'))
+    }
+    const enable = inspector().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    enable.checked = true
+    enable.dispatchEvent(new Event('change'))
+    await flushUi()
+    pick('approval-node-timeout-effect', 'transfer')
+    await flushUi()
+    ;(inspector().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+
+    expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-transfer-target"]')).not.toBeNull()
+    const notice = inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]') as HTMLElement
+    expect(notice).not.toBeNull()
+    expect(notice.textContent).toContain('审批节点 approval_high 的超时转交需要选择接收人')
+    expect(notice.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    pick('approval-node-timeout-effect', 'remind')
+    await flushUi()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_high').config
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+
+  // The canvas flag is the Canvas-first surface: entering 流程 PROMOTES a linear draft onto the
+  // canvas model (`promoteLinearDraftToGraphAuthoring` → `approvalNodeEditsFromGraph`), so a linear
+  // template is authored through THIS inspector, not the step cards. A sourceless auto_approve node
+  // only stays editable here because this slice seeds it into the edit model.
+  const f4aLinearGraph = (config: Record<string, unknown>) => ({
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): a sourceless auto_approve template loaded through the API is promoted onto the canvas on entering 流程, stays editable with 自动通过 checked, and saves byte-for-byte', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear' })
+    const graph = f4aLinearGraph({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(0)
+
+    clickCanvasNode('approval_1')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-node-editor"]')).not.toBeNull()
+    expect((inspector.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+    expect(inspector.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify((updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph)).toBe(JSON.stringify(graph))
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): choosing 自动通过 on a promoted manual node saves approvalType with NO assigneeSources', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear_choose' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: f4aLinearGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }) as any,
+    }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+    // Content, not key order: a key the author ADDS on the canvas is appended by the spread-and-set
+    // rebuild (as every newly authored canvas key is) and the backend re-normalizes the order on save.
+    // The byte-for-byte pin is for an UNTOUCHED loaded template (the test above).
+    expect(config).toEqual({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+  })
+
+  // W1-1a (merge-train r3 F9) — canvas STICKY REVEAL through the Canvas-first inspector, which reuses
+  // ONE ApprovalGraphNodeConfigEditor instance across node selections: the sticky state must live per
+  // node key in the view, so it can neither leak to another node nor be lost by re-selecting.
+  it('W1-1a canvas sticky reveal (Canvas-first inspector): the policy grid revealed by 转交指定人员 without a target stays mounted after the pick, never leaks to another node through the reused editor, survives another node\'s 审批类型 change, and is released by its own', async () => {
+    const roles = [{ id: 'role-pick', name: '审批管理员' }]
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => (
+      /\/api\/approval-templates\/directory\/roles(?:\?|$)/.test(String(input))
+        ? { ok: true, status: 200, json: async () => ({ roles }) }
+        : { ok: false, status: 503, json: async () => null }
+    )))
+    try {
+      setRouteParams({ id: 'tpl_w11a_canvas_sticky' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'app_a', type: 'approval', name: '审批 A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'cc_b', type: 'cc', name: '抄送 B', config: { targetType: 'user', targetIds: ['u_finance'] } },
+            // A sourceless auto_approve node whose hidden blocks are valid: its policy grid is hidden.
+            { key: 'app_c', type: 'approval', name: '审批 C', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-a', source: 'start', target: 'app_a' },
+            { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
+            { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
+            { key: 'e-c-end', source: 'app_c', target: 'end' },
+          ],
+        } as any,
+      }))
+      await mountView()
+      await flushUi()
+      const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+      const inInspector = <T extends Element = HTMLElement>(testId: string) => inspector().querySelector(`[data-testid="${testId}"]`) as T | null
+      const chooseType = async (type: 'manual' | 'auto-approve') => {
+        inInspector<HTMLInputElement>(`approval-node-approval-type-${type}`)!.click()
+        await flushUi()
+      }
+
+      // Positive control for the leak check: app_c on its own renders no policy grid.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector<HTMLInputElement>('approval-node-approval-type-auto-approve')!.checked).toBe(true)
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      // app_a: 转交指定人员 with no target, then 自动通过 → revealed by the live error, notice names it.
+      clickCanvasNode('app_a')
+      await flushUi()
+      const emptyPolicy = inInspector<HTMLSelectElement>('approval-node-empty-policy')!
+      emptyPolicy.value = 'designated'
+      emptyPolicy.dispatchEvent(new Event('change'))
+      await flushUi()
+      await chooseType('auto-approve')
+      expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')!.textContent)
+        .toContain('审批节点 app_a 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色')
+      const rolePicker = inInspector<HTMLSelectElement>('approval-node-empty-fallback-role-picker')!
+      expect(rolePicker).not.toBeNull()
+      await vi.waitFor(() => expect(Array.from(rolePicker.options).find((option) => option.value === 'role-pick')?.textContent).toBe('审批管理员'))
+      for (const option of Array.from(rolePicker.options)) option.selected = option.value === 'role-pick'
+      rolePicker.dispatchEvent(new Event('change'))
+      await flushUi()
+      // The pick clears the notice; the picker being edited stays mounted (STICKY: the same element).
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBe(rolePicker)
+
+      // NO LEAK: the same editor instance now shows app_c, whose policy grid stays hidden.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-policy')).toBeNull()
+      // app_c's own 审批类型 change (人工审批 shows its grid, 自动通过 hides it) never releases app_a.
+      await chooseType('manual')
+      expect(inInspector('approval-node-mode')).not.toBeNull()
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      clickCanvasNode('app_a')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_a')
+      expect(inInspector<HTMLSelectElement>('approval-node-empty-policy')!.value).toBe('designated')
+      expect(inInspector('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      // app_a's own 审批类型 change releases it: back on 自动通过 with a valid target, the grid is hidden.
+      await chooseType('manual')
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBeNull()
+
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const configA = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'app_a').config
+      expect(configA.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(configA, 'assigneeSources')).toBe(false)
+      expect(configA.emptyAssigneePolicy).toBe('designated')
+      expect(configA.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 
@@ -1521,7 +2384,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                     : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
                       // Lock-1 §K5-b: same default shape as manager_at_level.
                       : kind === 'dept_head_at_level' ? { kind, level: 1 }
-                        : { kind }
+                        // Lock-1 §K1: '' = no group selected yet.
+                        : kind === 'user_group' ? { kind, groupIds: [] }
+                          : { kind }
         const nextSources = edit.assigneeSources.slice()
         nextSources[sourceIndex] = next
         edit.assigneeSources = nextSources
@@ -1536,6 +2401,13 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         if (!source) return
         if (source.kind === 'static_user') source.userIds = ids
         else if (source.kind === 'static_role') source.roleIds = ids
+      },
+      // Lock-1 §K1: the user_group source's dedicated id carrier.
+      approvalSourceGroupIds: (nodeKey: string, sourceIndex: number) =>
+        (edits[nodeKey]?.assigneeSources[sourceIndex]?.groupIds as string[]) ?? [],
+      setApprovalSourceGroupIds: (nodeKey: string, sourceIndex: number, ids: string[]) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
+        if (source && source.kind === 'user_group') source.groupIds = ids
       },
       approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.fieldId as string) ?? '',
       setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => {
@@ -1567,7 +2439,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                   : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 }
                     : defaultKind === 'continuous_dept_heads' ? { kind: defaultKind, levels: 1 }
                       : defaultKind === 'dept_head_at_level' ? { kind: defaultKind, level: 1 }
-                        : { kind: defaultKind }
+                        : defaultKind === 'user_group' ? { kind: defaultKind, groupIds: [] }
+                          : { kind: defaultKind }
         edit.assigneeSources = [...edit.assigneeSources, next]
       },
       removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => {
@@ -1577,10 +2450,27 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       },
       approvalNodeMode: () => 'single',
       setApprovalNodeMode: () => {},
+      // P1-C — this spec never exercises threshold/timeout; stub-only so ApprovalGraphNodeConfigEditor's
+      // unconditional `node.type === 'approval'` calls to these don't throw.
+      approvalNodeThreshold: () => 1,
+      setApprovalNodeThreshold: () => {},
+      approvalNodeInParallelRegion: () => false,
+      approvalNodeTimeout: () => undefined,
+      setApprovalNodeTimeoutEnabled: () => {},
+      setApprovalNodeTimeoutAfterMinutes: () => {},
+      setApprovalNodeTimeoutEffect: () => {},
+      setApprovalNodeTimeoutTransferToUserId: () => {},
+      setApprovalNodeTimeoutJumpToNodeKey: () => {},
+      setApprovalNodeTimeoutUnit: () => {},
+      timeoutJumpTargetOptions: () => [],
       approvalNodeEmptyPolicy: () => 'error',
       setApprovalNodeEmptyPolicy: () => {},
-      approvalNodeMergeWithRequester: () => false,
-      setApprovalNodeMergeWithRequester: () => {},
+      // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+      // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+      // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+      // full TemplateAuthoringView mounts.
+      setApprovalNodeSamePersonPolicy: () => {},
+      setApprovalNodeEmptyAssigneeFallbackIds: () => {},
       approvalNodeFieldAccess: (nodeKey: string, fieldId: string) =>
         (edits[nodeKey]?.fieldPermissions.find((p) => p.fieldId === fieldId)?.access as any) ?? 'editable',
       setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: any) => {
@@ -1595,8 +2485,16 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       directoryUsersLoading: false,
       directoryRoles: [],
       formulaRoles: [],
+      // Lock-1 §K1: two fixture options, both bound — enough to exercise the multi-select without
+      // an empty-roster hint masking the mount.
+      memberGroupOptions: [
+        { id: 'grp-1', name: '销售组', memberCount: 3 },
+        { id: 'grp-2', name: '财务组', memberCount: 5 },
+      ],
+      memberGroupOptionsLoading: false,
       formatUserLabel: (u: { id: string }) => u.id,
       formatRoleLabel: (r: { id: string }) => r.id,
+      formatMemberGroupLabel: (g: { id: string; name: string; memberCount: number }) => `${g.name || g.id}（${g.memberCount} 人）`,
     }
   }
 
@@ -1715,7 +2613,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     // `querySelector` at the inspector root cannot distinguish from "moved to the wrong tab").
     const modeControl = tabbed.container.querySelector('[data-testid="approval-node-mode"]')
     const emptyPolicyControl = tabbed.container.querySelector('[data-testid="approval-node-empty-policy"]')
-    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-merge-with-requester"]')
+    // W1-1a: 自审策略 is now the four-value same-person select (Lock-0 L0-1 keeps it in 审批人设置).
+    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]')
     expect(modeControl).not.toBeNull()
     expect(emptyPolicyControl).not.toBeNull()
     expect(mergeControl).not.toBeNull()
@@ -1737,11 +2636,95 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     tabbed.unmount()
   })
 
+  it("W1-1a: the 'designated' fallback pickers + same-person hint render INSIDE 审批人设置 (Lock-0 L0-1) — positive control: no pickers under 报错", () => {
+    const node = makeApprovalNode('approval_x')
+    const baseApi = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const designatedApi: ApprovalNodeConfigEditorApi = { ...baseApi, approvalNodeEmptyPolicy: () => 'designated' }
+
+    const tabbed = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: designatedApi })
+    const assignee = tabbed.container.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const fieldPerms = tabbed.container.querySelector('[data-testid="approval-node-section-field-permissions"]') as HTMLElement
+    for (const testId of [
+      'approval-node-empty-fallback-user-picker',
+      'approval-node-empty-fallback-role-picker',
+      'approval-node-empty-fallback-hint',
+      'approval-node-same-person-policy',
+      'approval-node-same-person-hint',
+    ]) {
+      const control = tabbed.container.querySelector(`[data-testid="${testId}"]`)
+      expect(control, testId).not.toBeNull()
+      expect(assignee.contains(control), testId).toBe(true)
+      expect(fieldPerms.contains(control), testId).toBe(false)
+    }
+    // The 默认 option leads and is selected for a node with no policy (default (b): the key is omitted).
+    const samePerson = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    tabbed.unmount()
+
+    const plain = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: baseApi })
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-policy"]')).not.toBeNull()
+    plain.unmount()
+  })
+
+  // Gate r1 P3-1: inside TemplateAuthoringView an off-enum samePersonPolicy already makes the whole
+  // template read-only (so the view-level X-3 test cannot tell the component's own clause apart from
+  // the host's readOnly). This direct mount keeps the HOST editable (`readOnly: false`) to pin the
+  // component-level contract: an unknown persisted value is never offered as an editable control.
+  it('W1-1a (gate r1 P3-1): an off-enum samePersonPolicy renders the control disabled even when the host is EDITABLE — positive control: a known value stays enabled', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    expect(api.readOnly).toBe(false)
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_to_ceo' }
+    const offEnum = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const offEnumSelect = offEnum.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(offEnumSelect.disabled).toBe(true)
+    expect(offEnumSelect.value).toBe('__unknown__')
+    expect(offEnumSelect.textContent).not.toContain('transfer_to_ceo')
+    offEnum.unmount()
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_dept_head' }
+    const known = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const knownSelect = known.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(knownSelect.disabled).toBe(false)
+    expect(knownSelect.value).toBe('transfer_dept_head')
+    known.unmount()
+  })
+
+  it('W1-1a (gate r1 NIT-1/NIT-2): a node that already carries another node-level auto-approval key gets the neutral 默认 label and the already-overrides hint — positive control: no sibling key keeps 跟随模板 + the conditional hint', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    // All-false sibling: enables no rule, yet its presence suppresses the template tier at this node.
+    edit.autoApprovalPolicy = { mergeAdjacentApprover: false }
+    const sibling = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const siblingSelect = sibling.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(siblingSelect.value).toBe('default')
+    expect(siblingSelect.options[0]!.textContent).toBe('默认（本节点已有单独的自动审批设置）')
+    expect(sibling.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。')
+    sibling.unmount()
+
+    delete edit.autoApprovalPolicy
+    const plain = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const plainSelect = plain.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(plainSelect.options[0]!.textContent).toBe('默认（跟随模板设置）')
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。')
+    plain.unmount()
+  })
+
   it('A-1 positive control: a registry WITH a ratified operation policy renders a third 操作权限 tab', () => {
     const node = makeApprovalNode('approval_x')
     const registry: ApprovalCapabilityRegistry = {
       assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
-      operationPoliciesByNodeType: { approval: [{ id: 'transfer', label: '转交' }] },
+      operationPoliciesByNodeType: {
+        approval: [{ id: 'transfer', label: '转交', policyKeys: ['allowTransfer'] }],
+      },
     }
     const { container: c, unmount } = mountDirectInspector({
       node,
@@ -1749,43 +2732,96 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
     })
     const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((el) => el.textContent)
-    expect(tabs).toEqual(['审批人设置', '表单权限', '操作权限'])
+    expect(tabs).toEqual(['审批人设置', '字段权限', '操作权限'])
     unmount()
   })
 
-  it('A-2: with the shipped (Lock-5-absent) registry, no 操作权限 element exists — the A-1 fixture proves the tab is not a dead path', () => {
+  // Lock-5 §1.1 landed the first ratified operation policies, so the SHIPPED registry now declares
+  // them and the tab renders. Lock-0 A-2's mechanism assertion is unchanged and still needs a
+  // negative: per Lock-5 gate E-1 ("a registry fixture with zero ratified policies renders NO third
+  // tab — Lock-0 A-1/A-2 still hold"), the fixture carrying that half is an EMPTY
+  // `operationPoliciesByNodeType`, paired with the A-1 positive control directly above. Asserting it
+  // against the shipped registry instead would now be asserting the opposite of the contract.
+  it('A-2 (re-pointed by Lock-5 E-1): a registry with ZERO ratified operation policies renders no 操作权限 element — the tab is registry-driven, not hardcoded', () => {
+    const node = makeApprovalNode('approval_x')
+    const registry: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
+      operationPoliciesByNodeType: {},
+    }
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry,
+      api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
+    })
+    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
+    expect(c.textContent).not.toContain('操作权限')
+    unmount()
+  })
+
+  // Lock-5 gate E-2 — "no inert control". The tab renders EXACTLY the registry's implemented
+  // fields. `returnReviewMode` (§1.2) and `commentRequired` (§1.3) are part of the persisted schema
+  // but have no landed enforcement, and `signaturePolicy` renders nothing anywhere (OD-L5-10(a)) —
+  // none of them may appear. Paired with the rendered-control assertions so the absence half is not
+  // green against an empty tab.
+  it('E-2: the 操作权限 tab renders the three implemented controls and NO control for an unenforced key', async () => {
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
       node,
       registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
       api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
     })
-    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
-    expect(c.textContent).not.toContain('操作权限')
+    ;(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const section = c.querySelector('[data-testid="approval-node-section-operations"]') as HTMLElement
+    expect(section).not.toBeNull()
+    // Rendered (enforcement landed this slice).
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-transfer"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).not.toBeNull()
+    expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(3)
+    // NOT rendered (declared in the schema, enforcement deferred) — and `signaturePolicy` nowhere.
+    expect(section.textContent).not.toContain('回退方式')
+    expect(section.textContent).not.toContain('审批意见')
+    expect(section.textContent).not.toContain('手写签名')
+    expect(c.querySelector('[data-testid*="signature"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="returnReviewMode"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="commentRequired"]')).toBeNull()
     unmount()
   })
 
-  it('A-3: roster equals the eleven-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the fifteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
     // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
-    // `dept_head_at_level`.
-    const CANONICAL_ELEVEN = [
+    // `dept_head_at_level`, K3 `prior_node_approver`, K1 `user_group`; Lock-2 §2.4 adds the
+    // contact-derived pair `form_field_user_manager` / `form_field_user_dept_head` in the SAME
+    // slice as the kinds.
+    const CANONICAL_FIFTEEN = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
       'dept_head_at_level',
       'direct_manager',
       'form_field_user',
+      'form_field_user_dept_head',
+      'form_field_user_manager',
       'manager_at_level',
+      'prior_node_approver',
       'requester',
       'requester_choice',
       'static_role',
       'static_user',
+      'user_group',
     ]
+    // Lock-2 §2.4 hazard closure: the roster ORDER array and the LABELS record must name the
+    // exact same kind set — a kind present in the labels record but absent from the order array
+    // used to render with a green build and a green suite; this set-equality makes that red.
+    expect([...Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)].sort()).toEqual(CANONICAL_FIFTEEN)
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_ELEVEN)
+    expect(roster).toEqual(CANONICAL_FIFTEEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1798,7 +2834,134 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_ELEVEN)
+    expect(rendered).toEqual(CANONICAL_FIFTEEN)
+    unmount()
+  })
+
+  // Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc half's registry treatment + picker (G-4 FE side;
+  // G-16 unknown-value safety). The "`user_group` (cc) | 用户组 | cc" row is the SEPARATE row the
+  // lock requires ("the approver row does not admit it"); the cc editor offers 用户组 in its
+  // target-type select ONLY while that row is present (M4, read mechanically from the registry).
+  function makeCcNode(key: string, targetType: string, targetIds: string[]): ApprovalNode {
+    return { key, type: 'cc', name: '抄送', config: { targetType, targetIds } as never }
+  }
+  function ccStubApi(
+    edit: { targetType: string; targetIds: string[] },
+    overrides: Partial<ApprovalNodeConfigEditorApi> = {},
+  ): ApprovalNodeConfigEditorApi {
+    const reactiveEdit = reactive({ nodeKey: 'cc_g', ...edit })
+    return {
+      ...createStubConfigApi({}),
+      ccEditFor: () => reactiveEdit as any,
+      ccTargetTypeLabel: (t: string) => (t === 'role' ? '角色' : t === 'group' ? '用户组' : '用户'),
+      ...overrides,
+    }
+  }
+  const REGISTRY_WITHOUT_CC_ROW: ApprovalCapabilityRegistry = {
+    ...DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+    assigneeSourcesByNodeType: {
+      approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval'),
+      handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'),
+    },
+  }
+
+  it('OD-L1-7(a) registry row: the cc roster is exactly the single user_group row; the cc editor offers 用户组 AND renders the bound-group picker only while that row is present (without it a persisted group target is read-only, G-16)', () => {
+    expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'cc')).toEqual([{ kind: 'user_group', label: '用户组' }])
+
+    const node = makeCcNode('cc_g', 'group', ['grp-1'])
+    const withRow = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: ['grp-1'] }),
+    })
+    const editor = withRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editor).not.toBeNull()
+    expect(editor.getAttribute('data-cc-target-types')).toBe('user,role,group')
+    // The group branch rendered (typed bound-group multi-select), not the role branch and not the
+    // unknown line; the fixture has two bound options so no empty hint.
+    expect(editor.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-unknown"]')).toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    withRow.unmount()
+
+    // Positive control (M4) + G-16 parity (Lock-1 §2.3: a persisted kind OUTSIDE the registry
+    // renders READ-ONLY and round-trips unchanged): without the cc row, 用户组 is NOT offered, the
+    // persisted 'group' value renders the read-only unknown line (count shown, NO picker, no
+    // empty-group hint), and the edit model is untouched — never re-typed, ids preserved.
+    const apiNoRow = ccStubApi({ targetType: 'group', targetIds: ['grp-1'] })
+    const noRow = mountDirectInspector({
+      node,
+      registry: REGISTRY_WITHOUT_CC_ROW,
+      api: apiNoRow,
+    })
+    const editorNoRow = noRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editorNoRow.getAttribute('data-cc-target-types')).toBe('user,role')
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    const unknownNoRow = editorNoRow.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknownNoRow).not.toBeNull()
+    expect(unknownNoRow.textContent).toContain('group')
+    expect(unknownNoRow.textContent).toContain('1 个对象')
+    expect(apiNoRow.ccEditFor('cc_g')).toMatchObject({ targetType: 'group', targetIds: ['grp-1'] })
+    noRow.unmount()
+  })
+
+  it('OD-L1-7(a) type switch: changing the cc target type clears the previous type\'s ids (setCcTargetIds(key, []) — user ids never land under 用户组)', async () => {
+    const node = makeCcNode('cc_g', 'user', ['u-1'])
+    const setCcTargetIds = vi.fn()
+    const syncCcOptions = vi.fn()
+    const api = ccStubApi({ targetType: 'user', targetIds: ['u-1'] }, { setCcTargetIds, syncCcOptions })
+    const { container: c, unmount } = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const select = c.querySelector('[data-testid="approval-cc-target-type"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['user', 'role', 'group'])
+    select.value = 'group'
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    // v-model wrote the new type; the change handler cleared the ids THROUGH the shared draft API
+    // (the production handler sets `edit.targetIds = []` and re-syncs the picker options).
+    expect(api.ccEditFor('cc_g')?.targetType).toBe('group')
+    expect(setCcTargetIds).toHaveBeenCalledTimes(1)
+    expect(setCcTargetIds).toHaveBeenCalledWith('cc_g', [])
+    // Negative control: a bare options re-sync (the pre-fix wiring, which kept the stale ids) is
+    // NOT what the type change calls.
+    expect(syncCcOptions).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('OD-L1-7(a) group picker: an empty bound-group list shows the honest empty hint (proves the group branch rendered, not the role branch)', () => {
+    const node = makeCcNode('cc_g', 'group', [])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: [] }, { memberGroupOptions: [] }),
+    })
+    expect(c.querySelector('[data-testid="approval-cc-target-group-empty"]')).not.toBeNull()
+    unmount()
+    // Positive control: the role branch has no such hint even with zero roles.
+    const roleNode = makeCcNode('cc_g', 'role', [])
+    const roleMount = mountDirectInspector({
+      node: roleNode,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'role', targetIds: [] }, { memberGroupOptions: [], directoryRoles: [] }),
+    })
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    roleMount.unmount()
+  })
+
+  it('G-16: an off-enum persisted cc targetType renders the read-only unknown line (ids preserved, count shown), never a picker', () => {
+    const node = makeCcNode('cc_g', 'dept', ['d-1', 'd-2'])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'dept', targetIds: ['d-1', 'd-2'] }),
+    })
+    const unknown = c.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknown).not.toBeNull()
+    expect(unknown.textContent).toContain('dept')
+    expect(unknown.textContent).toContain('2 个对象')
+    expect(c.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
     unmount()
   })
 
@@ -1838,6 +3001,153 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
     unmount()
+  })
+
+  // Lock-1 §K1 — user_group authoring sub-form: registry-admitted, renders EDITABLE with the
+  // TYPED bound-group multi-select (D0 §10.2 — never a free-text/raw-id input), no unknown-kind
+  // hint. An empty option list shows the honest no-bound-groups hint (mirrors K3's empty-candidate
+  // posture) rather than an inert always-selectable-nothing control.
+  it('K1: user_group renders EDITABLE with the typed bound-group multi-select (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_ug')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ug: { assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-user_group"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-group-picker"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-2 §L2-C — the contact-extension pair's authoring sub-form (canvas/graph inspector
+  // surface): registry-admitted, renders EDITABLE with the TYPED contact-field picker (a select
+  // over the form's user fields — never a raw field-id input) PLUS the single level input, the
+  // publish-pins disclosure hint, and no unknown-kind warning. Both kinds share one sub-form.
+  it('K6: form_field_user_manager renders EDITABLE with the contact-field picker + level input (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_ffum')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ffum: { assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'reviewer', level: 2 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-contact-level"]')).not.toBeNull()
+    // OD-L2-4 authoring-copy disclosure: the pins hint renders with the picker.
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field-hint"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  it('K1: user_group with zero bound options shows the honest empty-roster hint, not an inert control', () => {
+    const node = makeApprovalNode('approval_ug_empty')
+    const api = createStubConfigApi({ approval_ug_empty: { assigneeSources: [{ kind: 'user_group', groupIds: [] }] } })
+    api.memberGroupOptions = []
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).not.toBeNull()
+    unmount()
+  })
+
+  it('K6: form_field_user_dept_head renders EDITABLE with the same contact sub-form (pointer-distinct kind, same shape)', () => {
+    const node = makeApprovalNode('approval_ffudh')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ffudh: { assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'reviewer', level: 1 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-contact-level"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
+  // OFFERED only when the form declares an eligible user field — the affordance is
+  // schema-selected. Negative arm: no user field → neither radio renders (while the rest of the
+  // roster still does — the filter is kind-selected, not blanket). Positive control: the SAME
+  // node with a user field present renders both. Already-configured escape: a node ALREADY
+  // carrying the kind keeps its radio even with zero user fields, so a persisted value is never
+  // orphaned by a later form edit.
+  it('D-6: contact-extension kinds are schema-selected — absent without a user field, present with one, and a configured source survives field removal', () => {
+    const node = makeApprovalNode('approval_d6')
+    const apiNoUserFields = createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    apiNoUserFields.userFields = []
+    const bare = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: apiNoUserFields })
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]')).toBeNull()
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).toBeNull()
+    // kind-selected, not blanket: the rest of the roster still renders.
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-direct_manager"]')).not.toBeNull()
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user"]')).not.toBeNull()
+    bare.unmount()
+
+    // Positive control: with a user field declared, both radios render (schema-selected).
+    const withField = mountDirectInspector({
+      node: makeApprovalNode('approval_d6'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'direct_manager' }] } }),
+    })
+    expect(withField.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]')).not.toBeNull()
+    expect(withField.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).not.toBeNull()
+    withField.unmount()
+
+    // Already-configured escape: zero user fields but the node ALREADY carries the kind — its
+    // radio stays (checked), while the OTHER unconfigured extension kind stays absent.
+    const apiConfigured = createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'gone', level: 1 }] } })
+    apiConfigured.userFields = []
+    const configured = mountDirectInspector({ node: makeApprovalNode('approval_d6'), registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: apiConfigured })
+    const kept = configured.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]') as HTMLInputElement
+    expect(kept).not.toBeNull()
+    expect(kept.checked).toBe(true)
+    expect(configured.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).toBeNull()
+    configured.unmount()
+  })
+
+  // Lock-1 §K3 — prior_node_approver authoring sub-form: registry-admitted, renders EDITABLE with
+  // the TYPED node picker (a select over the api-supplied legal-upstream candidates — D0 §10.2:
+  // never a free-text node-key input), no unknown-kind hint. The api's `priorApproverNodeOptions`
+  // is the OPTIONAL member the shipped view provides via legalPriorApproverNodeKeys.
+  it('K3: prior_node_approver renders EDITABLE with the typed upstream-node picker; an empty candidate list shows the honest no-upstream hint', () => {
+    const node = makeApprovalNode('approval_k3')
+    const api = createStubConfigApi({ approval_k3: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] } })
+    api.priorApproverNodeOptions = (nodeKey: string) => (nodeKey === 'approval_k3' ? [{ key: 'gate', label: '预审' }] : [])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-prior_node_approver"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-prior-node"]')).not.toBeNull()
+    // With ≥1 legal candidate the no-upstream hint must NOT render (hint is candidate-selected).
+    expect(c.querySelector('[data-testid="approval-node-source-prior-node-empty"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+
+    // Empty candidate list (e.g. the FIRST approval node, nothing upstream): the picker stays
+    // (typed, still no free-text path) and the honest hint renders.
+    const apiEmpty = createStubConfigApi({ approval_k3: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '' }] } })
+    apiEmpty.priorApproverNodeOptions = () => []
+    const emptyMount = mountDirectInspector({
+      node: makeApprovalNode('approval_k3'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: apiEmpty,
+    })
+    expect(emptyMount.container.querySelector('[data-testid="approval-node-source-prior-node-empty"]')).not.toBeNull()
+    emptyMount.unmount()
   })
 
   // A-4 SCOPE NOTE: this proves the ROSTER COMPONENT's own branching mechanism — given an
@@ -1890,7 +3200,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
   })
 
   it('A-4 reachability (empirical): a complex graph with an unknown assignee-source kind on ONE node opens the WHOLE template read-only via the pre-existing G-1 guard, not scoped to that node', async () => {
-    routeParams = { id: 'tpl_a4_reachability' }
+    setRouteParams({ id: 'tpl_a4_reachability' })
     getTemplateSpy.mockResolvedValue(
       buildTemplate({
         approvalGraph: {
@@ -2125,7 +3435,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       unmount()
     })
 
-    // A `handler` node's own "add defaults from the seven-member handler roster" case is covered in
+    // A `handler` node's own "add defaults from the handler roster" case is covered in
     // approval-handler-node-config.spec.ts's stub, which (unlike this file's createStubConfigApi)
     // already implements handlerNodeMode/handlerNodeOpinionRequired — required for a handler node
     // to render at all through THIS harness's `installStubs`.

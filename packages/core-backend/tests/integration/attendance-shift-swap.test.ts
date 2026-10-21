@@ -65,11 +65,77 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  let ownedDefaultRuleId: string | null = null
+  const seededMemberIds = new Set<string>()
+  const seededAdminGrantIds = new Set<string>()
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
+  function tokenClaimsAttendanceAdmin(perms: string): boolean {
+    return perms.split(',').some(item => item.trim() === 'attendance:admin')
+  }
+
+  async function ensureSyntheticMember(userId: string, attendanceAdmin = false): Promise<void> {
+    seededMemberIds.add(userId)
+    if (attendanceAdmin) seededAdminGrantIds.add(userId)
+    await pool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES (
+         $1, $2, $1, 'shift-swap fixture', 'x', 'user', '[]'::jsonb,
+         true, false, 'activated', now(), now()
+       )
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true,
+             activation_status = 'activated',
+             updated_at = now()`,
+      [userId, `${userId}@shift-swap-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
+    if (attendanceAdmin) {
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:admin')
+         ON CONFLICT DO NOTHING`,
+        [userId],
+      )
+    }
+  }
+
+  async function ensureAuthoritativeDefault(): Promise<void> {
+    const existing = await pool.query(
+      `SELECT id FROM attendance_rules WHERE org_id = $1 AND is_default = true`,
+      [ORG],
+    )
+    if (existing.rows.length !== 0) return
+    const id = randomUUID()
+    const inserted = await pool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+          severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+       SELECT $1, $2, $3, 'UTC', '09:00', '18:00', 5, 5, 30, 60, 5, $4::jsonb, true
+        WHERE NOT EXISTS (
+          SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true
+        )
+       RETURNING id`,
+      [id, ORG, `shift-swap-default-${id}`, JSON.stringify([0, 1, 2, 3, 4, 5, 6])],
+    )
+    if (inserted.rows[0]?.id) ownedDefaultRuleId = String(inserted.rows[0].id)
+  }
+
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Lock-11 §10 W-4 fixture delta: every dev-token subject minted here may go on to create a
+    // shift-swap approval request with no org selector (arm a, falls back to getOrgId's
+    // 'default') — seed exactly one active 'default' membership so arm (a) resolves.
+    // tenantId carries the authenticated org for settings routes. Token roles do not grant
+    // timezone manage; attendance:admin is written only when the minted perms already claim it.
+    await ensureSyntheticMember(userId, tokenClaimsAttendanceAdmin(perms))
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -118,6 +184,8 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
   } = {}) {
     const requester = `${prefix}-a`
     const counterparty = `${prefix}-b`
+    await ensureSyntheticMember(requester)
+    await ensureSyntheticMember(counterparty)
     const shiftA = randomUUID()
     const shiftB = randomUUID()
     const assignmentA = randomUUID()
@@ -163,6 +231,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
   async function seedExtraSource(prefix: string, userSuffix = 'c') {
     const user = `${prefix}-${userSuffix}`
+    await ensureSyntheticMember(user)
     const shiftId = randomUUID()
     const assignmentId = randomUUID()
     await pool.query(
@@ -269,6 +338,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
+    await ensureAuthoritativeDefault()
   })
 
   afterEach(async () => {
@@ -283,6 +353,38 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
   afterAll(async () => {
     await cleanupPrefix('swap-').catch(() => undefined)
+    if (pool) {
+      const memberIds = [...seededMemberIds]
+      const adminGrantIds = [...seededAdminGrantIds]
+      if (adminGrantIds.length > 0) {
+        await pool.query(
+          `DELETE FROM user_permissions WHERE user_id = ANY($1::text[]) AND permission_code = 'attendance:admin'`,
+          [adminGrantIds],
+        ).catch(() => undefined)
+      }
+      if (memberIds.length > 0) {
+        await pool.query(
+          `DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2`,
+          [memberIds, ORG],
+        ).catch(() => undefined)
+        await pool.query(
+          `DELETE FROM users WHERE id = ANY($1::text[])`,
+          [memberIds],
+        ).catch(() => undefined)
+      }
+      // Same retain predicate as the live-scheduled fixture: keep this owned default when an
+      // active assignment, active rotation, companion, or trip arrangement still uses the org.
+      if (ownedDefaultRuleId) {
+        await pool.query(
+          `DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+             AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+             AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+             AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+             AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+          [[ownedDefaultRuleId]],
+        ).catch(() => undefined)
+      }
+    }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
   })
@@ -384,13 +486,13 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
       await insertDetail(requestId, `${prefix}:source`)
       const detail = (await pool.query(
-        `SELECT counterparty_status, requester_work_date, counterparty_work_date
+        `SELECT counterparty_status, requester_work_date::text, counterparty_work_date::text
          FROM attendance_shift_swap_requests WHERE request_id = $1`,
         [requestId],
       )).rows[0]
       expect(detail.counterparty_status).toBe('pending')
-      expect(new Date(detail.requester_work_date).toISOString().slice(0, 10)).toBe('2049-06-14')
-      expect(new Date(detail.counterparty_work_date).toISOString().slice(0, 10)).toBe('2049-06-15')
+      expect(detail.requester_work_date).toBe('2049-06-14')
+      expect(detail.counterparty_work_date).toBe('2049-06-15')
 
       await expectPgReject(insertDetail(duplicateRequestId, `${prefix}:source`), '23505')
       await expectPgReject(insertDetail(multiDayRequestId, `${prefix}:multi`, '2049-06-16'), '23514')
@@ -502,7 +604,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
       expect(sourceRows.rows.map(row => row.is_active)).toEqual([false, false])
 
       const replacementRows = await pool.query(
-        `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+        `SELECT id, user_id, shift_id, slot_index, start_date::text, end_date::text, is_active,
                 publish_status, published_at, published_by, locked_at,
                 producer_type, producer_ref_id, producer_key, producer_run_id
            FROM attendance_shift_assignments
@@ -533,10 +635,10 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
         producer_ref_id: requestId,
         producer_run_id: requestId,
       })
-      expect(new Date(requesterReplacement.start_date).toISOString().slice(0, 10)).toBe(pair.counterpartyDate)
-      expect(new Date(requesterReplacement.end_date).toISOString().slice(0, 10)).toBe(pair.counterpartyDate)
-      expect(new Date(counterpartyReplacement.start_date).toISOString().slice(0, 10)).toBe(pair.requesterDate)
-      expect(new Date(counterpartyReplacement.end_date).toISOString().slice(0, 10)).toBe(pair.requesterDate)
+      expect(requesterReplacement.start_date).toBe(pair.counterpartyDate)
+      expect(requesterReplacement.end_date).toBe(pair.counterpartyDate)
+      expect(counterpartyReplacement.start_date).toBe(pair.requesterDate)
+      expect(counterpartyReplacement.end_date).toBe(pair.requesterDate)
       expect(requesterReplacement.locked_at).toBeTruthy()
       expect(counterpartyReplacement.locked_at).toBeTruthy()
       expect(requesterReplacement.producer_key).toBe(`shift_swap:${requestId}:${pair.requester}:${pair.counterpartyDate}:0`)

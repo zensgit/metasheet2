@@ -1,0 +1,211 @@
+paths:
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `provenanceByRow` (~L10012) calling pipelineRegistry.listProvenanceByRow
+  # (plugins/plugin-integration-core/lib/pipelines.cjs ~L761). Distinct from
+  # GET /api/integration/runs/{runId}/provenance, which selects by the runId already in the
+  # path and returns `{items}` — this route is the CROSS-RUN by-rowId timeline, requires
+  # `rowId`, and returns a plain array (no `{items}` wrapper: the handler is
+  # `sendOk(res, await pipelineRegistry.listProvenanceByRow(...))`, no intermediate object).
+  /api/integration/provenance:
+    get:
+      summary: List one row's cross-run provenance timeline
+      description: >-
+        Read-only cross-run provenance timeline for one rowId, scoped by (tenantId,
+        workspaceId, rowId) and optionally narrowed by pipelineId and a
+        [from, to] window on the run's `created_at`. Reads the migration-060
+        integration_provenance_by_row view; ordered oldest-first (by run_created_at, then a
+        stable secondary compare). `attrs` were redacted at write (DF-N2-2b scrub gate); this
+        read path does NOT re-redact and never returns raw payloads. No write, replay or retry.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: rowId
+          required: true
+          description: Row id to fetch the timeline for. Missing/empty is a 400 (ROW_ID_REQUIRED).
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+        - in: query
+          name: pipelineId
+          required: false
+          description: Restrict the timeline to events from one pipeline.
+          schema: { type: string }
+        - in: query
+          name: from
+          required: false
+          description: >-
+            Inclusive lower bound on the owning run's created_at. Must be an ISO date-time;
+            an unparsable value is a 400 (PipelineValidationError).
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          required: false
+          description: >-
+            Inclusive upper bound on the owning run's created_at. Must be an ISO date-time;
+            an unparsable value is a 400 (PipelineValidationError).
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max events to return. Capped at 500 at the route (the registry's own ceiling is
+            higher; the tighter of the two always wins).
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - in: query
+          name: offset
+          required: false
+          description: Events to skip.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProvenanceTimelineEntry' }
+        '400':
+          description: rowId missing, or an unparsable from/to.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                row_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: ROW_ID_REQUIRED
+                      message: rowId is required
+                from_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineValidationError
+                      message: from must be an ISO date-time
+                      details: { field: from }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501':
+          description: The host's pipeline registry does not implement the by-row provenance read.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                provenance_read_not_implemented:
+                  value:
+                    ok: false
+                    error:
+                      code: PROVENANCE_READ_NOT_IMPLEMENTED
+                      message: Provenance read is not implemented
+  # Q4c. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler
+  # `deadLettersList` (~L10032) calling deadLetterStore.listDeadLetters
+  # (plugins/plugin-integration-core/lib/dead-letter.cjs ~L121), each row passed through
+  # `redactDeadLetter` (plugins/plugin-integration-core/lib/http-routes.cjs ~L2920) before
+  # the wire. No replay/retry is performed by this route (see the sibling POST
+  # /api/integration/dead-letters/{id}/replay, out of scope for this contract).
+  /api/integration/dead-letters:
+    get:
+      summary: List dead letters
+      description: >-
+        Read-only dead-letter listing, scoped by (tenantId, workspaceId) and optionally
+        narrowed by pipelineId/runId/status. `data` is a plain array of IntegrationDeadLetter,
+        newest first (ORDER BY created_at DESC); there is no cursor or total count.
+        `sourcePayload`/`transformedPayload` are stripped by default; only a caller whose
+        session resolves as admin AND passes `includePayload=true` gets them back (sanitized).
+        A non-admin caller passing `includePayload=true` is silently ignored (redacted view),
+        not rejected.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+        - in: query
+          name: pipelineId
+          required: false
+          description: Restrict to dead letters from one pipeline.
+          schema: { type: string }
+        - in: query
+          name: runId
+          required: false
+          description: Restrict to dead letters from one run.
+          schema: { type: string }
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to one status. An unrecognized value is a 400 (DeadLetterError), not an
+            empty result.
+          schema:
+            type: string
+            enum: [open, replayed, discarded]
+        - in: query
+          name: includePayload
+          required: false
+          description: >-
+            Admin-only. Must be the exact string `true`; any other value (including for a
+            non-admin caller) keeps the redacted (payload-stripped) projection.
+          schema: { type: string, enum: ['true', 'false'], default: 'false' }
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or non-positive
+            value is silently ignored (registry default applies). Capped at 500 server-side.
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or non-positive value is
+            silently ignored (registry default applies), not rejected.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/IntegrationDeadLetter' }
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: DeadLetterError
+                      message: status must be one of open, replayed, discarded
+                      details: { field: status, status: bogus }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }

@@ -9,6 +9,7 @@ import {
   evaluateWorkflowReadiness,
   main,
   parseArgs,
+  readRunsFromGh,
   renderMarkdown,
 } from './integration-erp-plm-deploy-readiness.mjs'
 
@@ -29,7 +30,11 @@ function run(workflowName, overrides = {}) {
 
 function successRuns() {
   return [
-    run('Build and Push Docker Images'),
+    run('Build and Push Docker Images', {
+      event: 'workflow_dispatch',
+      jobs: [{ name: 'build', head_sha: HEAD, status: 'completed', conclusion: 'success',
+        steps: [{ name: 'Publish approved commit images', status: 'completed', conclusion: 'success' }] }],
+    }),
     run('Plugin System Tests'),
     run('Phase 5 Production Flags Guard'),
     run('Deploy to Production'),
@@ -92,6 +97,62 @@ test('evaluateWorkflowReadiness passes required workflows for the selected head'
 
   assert.equal(summary.ok, true)
   assert.equal(summary.results.length, 4)
+})
+
+test('Docker workflow success alone never proves image publication', () => {
+  for (const event of ['push', undefined, 'workflow_dispatch']) {
+    const runs = successRuns()
+    runs[0] = { ...runs[0], event, jobs: [] }
+    const summary = evaluateWorkflowReadiness(runs, { headSha: HEAD })
+    assert.equal(summary.ok, false)
+    assert.equal(summary.results[0].reason, 'IMAGE_PUBLICATION_NOT_VERIFIED')
+  }
+  const mutations = [
+    (run) => { run.event = 'push' },
+    (run) => { run.jobs[0].head_sha = 'other' },
+    (run) => { run.jobs[0].name = 'other' },
+    (run) => { run.jobs[0].status = 'in_progress' },
+    (run) => { run.jobs[0].conclusion = 'failure' },
+    (run) => { run.jobs.push(run.jobs[0]) },
+    (run) => { run.jobs[0].steps = [] },
+    (run) => { run.jobs[0].steps[0].status = 'in_progress' },
+    (run) => { run.jobs[0].steps[0].conclusion = 'skipped' },
+    (run) => { run.jobs[0].steps[0].conclusion = 'failure' },
+  ]
+  for (const mutate of mutations) {
+    const runs = successRuns()
+    mutate(runs[0])
+    assert.equal(evaluateWorkflowReadiness(runs, { headSha: HEAD }).ok, false)
+  }
+})
+
+test('live readiness reads exact-run publication jobs and fails closed on unavailable evidence', () => {
+  for (const failure of [false, true]) {
+    const calls = []
+    const fixtures = successRuns()
+    const jobs = fixtures[0].jobs
+    delete fixtures[0].jobs
+    const runs = readRunsFromGh({ repo: 'zensgit/metasheet2', branch: 'main' }, HEAD, (command, args) => {
+      calls.push([command, ...args])
+      if (args[0] === 'run') return JSON.stringify(fixtures)
+      if (failure) throw new Error('secret-sentinel')
+      return JSON.stringify({ jobs })
+    })
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[1], ['gh', 'api', '--method', 'GET', `repos/zensgit/metasheet2/actions/runs/${fixtures[0].databaseId}/jobs`])
+    const summary = evaluateWorkflowReadiness(runs, { headSha: HEAD })
+    assert.equal(summary.ok, !failure)
+    assert.doesNotMatch(JSON.stringify(summary), /secret-sentinel/)
+  }
+  const fixtures = successRuns()
+  fixtures[0].event = 'push'
+  let calls = 0
+  const runs = readRunsFromGh({ repo: 'zensgit/metasheet2', branch: 'main' }, HEAD, () => {
+    calls += 1
+    return JSON.stringify(fixtures)
+  })
+  assert.equal(calls, 1)
+  assert.equal(evaluateWorkflowReadiness(runs, { headSha: HEAD }).ok, false)
 })
 
 test('evaluateWorkflowReadiness fails missing, pending, and failed workflow gates', () => {

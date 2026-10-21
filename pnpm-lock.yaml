@@ -358,6 +358,8 @@ importers:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@20.19.25)(less@4.4.2)
 
+  plugins/plugin-elearning: {}
+
   plugins/plugin-integration-core:
     dependencies:
       '@metasheet/mssql-readonly-utils':

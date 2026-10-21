@@ -12,12 +12,19 @@
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
  *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
- *      (#4711 R0, reachability only), else redirect /attendance
- *   4. plm-workbench focus    → prefix allowlist, else redirect /plm
+ *      (#4711 R0) + exact /learn and /admin/elearning (reachability only),
+ *      else redirect /attendance
+ *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning,
+ *      else redirect /plm
  *   5. allow
  */
 import { isRoutePermitted } from './routeAccess'
 import { isAttendanceGroupContextPath } from './attendanceGroupContextRoute'
+import {
+  STOCK_PREP_PERMISSION_CODES,
+  satisfiesStockPrepAccess,
+  type StockPrepAccessSnapshot,
+} from '../services/integration/stockPreparation/workbenchAccess'
 
 /**
  * Attendance focus mode allows these EXACT paths, plus — since #4711 R0 — paths exactly
@@ -29,6 +36,25 @@ export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
   '/p/plugin-attendance/attendance',
   '/settings',
 ])
+
+/**
+ * Cloud-classroom exact paths reachable inside attendance and plm-workbench focus
+ * modes. Reachability only — required-feature and route permission gates still run
+ * first. Sibling and prefix-neighbor paths stay redirected.
+ * '/elearning/grading': the L3 manual-grading surface — without this entry a
+ * grader working inside an attendance- or plm-focused org would be silently
+ * bounced to that focus mode's home instead of reaching a route they hold
+ * elearning:grade permission for.
+ */
+export const ELEARNING_FOCUS_EXACT_PATHS: readonly string[] = Object.freeze([
+  '/learn',
+  '/admin/elearning',
+  '/elearning/grading',
+])
+
+export function isElearningFocusExactPath(path: string): boolean {
+  return ELEARNING_FOCUS_EXACT_PATHS.includes(path)
+}
 
 /**
  * Attendance-focus reachability predicate (design lock §3.3, #4711 R0). The exact legacy
@@ -47,6 +73,11 @@ export function isAttendanceFocusAllowedPath(path: string): boolean {
  * audience (#4468, owner-confirmed gap). Routes keep their own permission gates — this list only
  * governs reachability inside the focus mode. Every entry must be a non-empty absolute path: an
  * empty string would prefix-match EVERY route (behavior-tested).
+ *
+ * O2 / R-11: '/stock-prep' stays here unchanged. Focus-mode reachability confers NO permission — step
+ * 2 of resolveRouteGuardDecision has already run by the time this list is consulted, so the route's
+ * own `stock-prep:read` gate decides access and this entry only keeps the page from being bounced to
+ * /plm for someone who already passed it.
  */
 export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/plm',
@@ -56,7 +87,17 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/stock-prep',
 ])
 
-const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm'] as const
+/**
+ * Exported since O2 / R-11 so a suite can pin what is NOT here as well as what is.
+ *
+ * `/stock-prep` deliberately declares no `requiredFeature`, and the O2 permission work deliberately
+ * did not add one. A product-feature flag is a SECOND, independent gate: with the flag off, step 1
+ * redirects everyone — platform admins included — before the permission gate is ever consulted. That
+ * would be a privilege regression on every deployment that has not turned the flag on, in a change
+ * whose whole point is that admins lose nothing. The workbench's access story is therefore carried
+ * entirely by the permission gate (step 2) and the shared vocabulary behind it.
+ */
+export const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning', 'tasks'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }
@@ -77,7 +118,23 @@ export interface RouteGuardPolicyContext {
  * adapter tests pin), and the plm-focus typeof tolerance lives here, not inline in main.ts.
  */
 export interface RouteGuardRuntimeDeps {
-  auth: { hasPermission: (permission: string) => boolean }
+  auth: {
+    hasPermission: (permission: string) => boolean
+    /**
+     * REQUIRED, and required for a reason. The three `stock-prep:*` codes are answered by the
+     * server's own literal ladder rather than by `hasPermission` (see
+     * `buildStockPrepAwarePermissionProbe`), and that ladder needs the `{ roles, permissions }`
+     * principal, not a yes/no probe. Declaring it non-optional makes the TWO TYPED src call sites
+     * (`main.ts`, `MyAppsLandingView.vue`) a compile error if they forget it, rather than a silent,
+     * quieter-in-the-wrong-direction fallback.
+     *
+     * SCOPED CLAIM, said out loud: that is a guarantee about those call sites, NOT about every
+     * caller. A spec assembling a deps literal, or any untyped JS caller, is not reached by the
+     * type at all — which is why `buildStockPrepAwarePermissionProbe` ALSO fails closed at runtime
+     * when the snapshot cannot be read, instead of trusting the type to have prevented it.
+     */
+    getAccessSnapshot: () => StockPrepAccessSnapshot
+  }
   flags: {
     hasFeature: (feature: KnownRequiredFeature) => boolean
     isAttendanceFocused: () => boolean
@@ -96,10 +153,48 @@ export function buildRouteGuardInput(to: { path?: unknown; meta?: unknown }): { 
   return { path: String((to && to.path) || ''), meta: to ? to.meta : undefined }
 }
 
+/**
+ * THE ROUTE PROBE, with the three stock-prep codes answered by the workbench's own gate.
+ *
+ * `useAuth().hasPermission` is the app-wide probe and it EXPANDS: `stock-prep:*` and `*:*` both
+ * satisfy `stock-prep:read`, `:write` implies `:read`, and `users:write` counts as admin. The
+ * stock-prep server gate (`stock-preparation-workbench-access.cjs`, mirrored expression-for-
+ * expression by `satisfiesStockPrepAccess`) matches LITERALLY and does none of that — so before this
+ * wrapper, `/stock-prep` admitted three principals every panel behind it then refused, and
+ * redirected one (a bare `integration:admin`) the server serves in full.
+ *
+ * SCOPE IS EXACTLY THREE CODES. Every other permission on every other route still goes to
+ * `hasPermission`, byte for byte; `/stock-prep` is the only route in `appRoutes.ts` whose
+ * `meta.permissions` names one of these, so nothing else changes behaviour. FAIL-CLOSED on a
+ * snapshot that cannot be read: an unreadable principal is an empty one, and an empty principal
+ * satisfies nothing.
+ */
+export function buildStockPrepAwarePermissionProbe(
+  hasPermission: (permission: string) => boolean,
+  getAccessSnapshot: () => StockPrepAccessSnapshot,
+): (permission: string) => boolean {
+  return (permission) => {
+    if (!STOCK_PREP_PERMISSION_CODES.includes(permission)) return hasPermission(permission)
+    let snapshot: StockPrepAccessSnapshot
+    try {
+      snapshot = getAccessSnapshot()
+    } catch {
+      // No principal readable -> no stock-prep code held. Never falls through to the wider probe:
+      // a fallback that widens on failure is how a gate quietly stops being one.
+      return false
+    }
+    return satisfiesStockPrepAccess(snapshot, permission)
+  }
+}
+
 export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardPolicyContext {
+  const permissionProbe = buildStockPrepAwarePermissionProbe(
+    (permission) => deps.auth.hasPermission(permission),
+    () => deps.auth.getAccessSnapshot(),
+  )
   return {
     hasFeature: (feature) => deps.flags.hasFeature(feature),
-    hasPermission: (permission) => deps.auth.hasPermission(permission),
+    hasPermission: (permission) => permissionProbe(permission),
     attendanceFocused: deps.flags.isAttendanceFocused(),
     plmWorkbenchFocused:
       typeof deps.flags.isPlmWorkbenchFocused === 'function' &&
@@ -131,16 +226,21 @@ export function resolveRouteGuardDecision(
 
   const path = String(input.path || '')
 
-  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix.
-  if (ctx.attendanceFocused && !isAttendanceFocusAllowedPath(path)) {
+  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix
+  //    + exact cloud-classroom paths.
+  if (
+    ctx.attendanceFocused
+    && !isAttendanceFocusAllowedPath(path)
+    && !isElearningFocusExactPath(path)
+  ) {
     return { action: 'redirect', target: '/attendance' }
   }
 
-  // 4. plm-workbench focus: prefix allowlist.
+  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths.
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    )
+    ) || isElearningFocusExactPath(path)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }

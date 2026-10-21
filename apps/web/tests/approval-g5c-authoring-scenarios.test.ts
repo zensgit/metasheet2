@@ -39,6 +39,10 @@ import { buildVersionGraphOverlay } from '../src/approvals/versionGraphOverlay'
 import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 
 const VIEW_PATH = join(__dirname, '../src/views/approval/TemplateAuthoringView.vue')
+const OWNER_UAT_SMOKE_PATH = join(
+  __dirname,
+  '../../../scripts/ops/approval-canvas-owner-uat-smoke.sh',
+)
 
 function identityFor(type: AuthorableFieldType, n: number): FormFieldIdentity {
   const base = {
@@ -306,8 +310,8 @@ describe('G5-C S11 100-node operable layout', () => {
   })
 })
 
-describe('G5-C S12 accessible alternative retained on authoring surface', () => {
-  it('TemplateAuthoringView keeps list alternative, undo/redo, canvas-first, edge insert, palette; no node clusters', () => {
+describe('G5-C Canvas-only ordinary authoring surface', () => {
+  it('TemplateAuthoringView keeps rollback list flag-gated, with undo/redo, edge insert, palette; no node clusters', () => {
     const src = readFileSync(VIEW_PATH, 'utf8')
     const canvasShell = readFileSync(
       join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
@@ -323,12 +327,13 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
       join(__dirname, '../src/approvals/components/ApprovalFormInlineEditor.vue'),
       'utf8',
     )
-    expect(src).toMatch(/data-testid="approval-view-list"/)
-    expect(src).toMatch(/辅助编辑模式/)
+    expect(src).not.toMatch(/data-testid="approval-view-list"/)
+    expect(src).not.toMatch(/辅助编辑模式/)
+    expect(src).toMatch(/graphReadOnly && !canvasV2Enabled/)
     // Undo/redo + edge insert live on extracted ApprovalFlowCanvas (PR4).
     expect(canvasShell).toMatch(/data-testid="approval-canvas-undo"/)
     expect(canvasShell).toMatch(/data-testid="approval-canvas-redo"/)
-    expect(src).toMatch(/const canvasViewMode = ref<'list' \| 'canvas'>\('canvas'\)/)
+    expect(src).not.toMatch(/canvasViewMode/)
     expect(src).toMatch(/applyCanvasCommandToSession|undoAuthoringSession/)
     expect(src).toMatch(/promoteLinearDraftToGraphAuthoring/)
     expect(canvasShell).toMatch(/data-testid="approval-canvas-edge-insert"/)
@@ -341,6 +346,15 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
     // PR4 extract: shell components owned under approvals/components
     expect(src).toMatch(/ApprovalFlowCanvas/)
     expect(src).toMatch(/ApprovalCanvasNodeInspector/)
+  })
+
+  it('keeps the owner UAT smoke aligned with the default-ON backend contract', () => {
+    const smoke = readFileSync(OWNER_UAT_SMOKE_PATH, 'utf8')
+    expect(smoke).toContain("return value === '' || value === 'true'")
+    expect(smoke).toContain('tests/unit/approval-canvas-flag.test.ts')
+    expect(smoke).toContain('pre-session fallback is false')
+    expect(smoke).not.toContain('strict true only')
+    expect(smoke).not.toContain("expected APPROVAL_CANVAS_V2_ENABLED === 'true' only")
   })
 })
 

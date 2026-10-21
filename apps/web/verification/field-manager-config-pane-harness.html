@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Field manager config pane height verification</title>
+    <!-- No favicon request: the spec fails on ANY console error, and a 404 for /favicon.ico is noise. -->
+    <link rel="icon" href="data:," />
+    <!--
+      客户反馈 2026-09-24 #7a (配置区高度调不了、⤢ 无效). The component under test is the REAL
+      apps/web/src/multitable/components/MetaFieldManager.vue, compiled by Vite with its own
+      <style scoped> block; nothing of it is copied here. The only CSS below is copied VERBATIM from
+      apps/web/src/App.vue's global (unscoped) reset, which every page of the real app carries and which
+      the dialog's box arithmetic depends on (`box-sizing: border-box`, zeroed margins).
+    -->
+    <style>
+      /* Reset and base styles */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html, body {
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        color: #333;
+        background-color: var(--ms-bg-page);
+      }
+
+      #app {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/verification/field-manager-config-pane-harness.ts"></script>
+  </body>
+</html>

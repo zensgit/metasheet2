@@ -493,4 +493,60 @@ describe('MetaCommentsDrawer', () => {
     app.unmount()
     container.remove()
   })
+
+  // #5795 refuter round: the compat shell must forward the host's server-side mention search to the real
+  // MetaCommentsPanel -> MetaCommentComposer chain (no stubs), or `@term` silently stops searching.
+  it('forwards mentionSearch through the real panel: typing "@term" calls the host search', async () => {
+    const search = vi.fn(async (_q: string) => ({ items: [], requiresQuery: false, hasMore: false }))
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'home', component: defineComponent({ render: () => h('div') }) },
+        { path: '/multitable/comments/inbox', name: 'multitable-comment-inbox', component: defineComponent({ render: () => h('div') }) },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      setup() {
+        const draft = ref('')
+        return { draft }
+      },
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [],
+          loading: false,
+          canComment: true,
+          canResolve: false,
+          draft: this.draft,
+          mentionSearch: search,
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          'onUpdate:draft': (value: string) => { this.draft = value },
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
+    textarea.value = '@fakedrawer'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 220))
+    await flushUi()
+
+    expect(search).toHaveBeenCalledWith('fakedrawer')
+
+    app.unmount()
+    container.remove()
+  })
 })

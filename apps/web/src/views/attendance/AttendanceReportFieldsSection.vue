@@ -16,6 +16,7 @@
         </div>
       </div>
       <div class="attendance__admin-actions">
+        <AttendanceReportFieldsHelp :tr="tr" />
         <a
           v-if="multitableHref"
           class="attendance__btn"
@@ -33,6 +34,27 @@
         </button>
       </div>
     </div>
+
+    <section v-if="cleaningReview" data-cleaning-section>
+      <h4>{{ tr('Attendance cleaning proposals', '考勤清洗建议') }}</h4>
+      <p>{{ tr('Review proposals from the daily multitable. Only eligible anomalies can be corrected to normal; raw punches and leave/travel facts are not edited.', '审阅每日多维表中的建议。仅将符合条件的异常更正为正常，不修改原始打卡、请假或出差事实。') }}</p>
+      <button class="attendance__btn" type="button" data-cleaning-load :disabled="cleaningBusy" @click="loadCleaningProposals(false)">{{ tr('Reload proposals', '重载建议') }}</button>
+      <span>{{ tr('Loaded proposals', '已加载建议') }}: {{ cleaningRows.length }}</span>
+      <ul>
+        <li v-for="row in cleaningRows" :key="row.id">
+          <span>{{ row.employee }} · {{ row.date }} · {{ row.reason }}</span>
+          <button class="attendance__btn" type="button" data-cleaning-review :disabled="cleaningBusy" @click="cleaningSelected = row">{{ tr('Review correction', '审阅更正') }}</button>
+        </li>
+      </ul>
+      <button v-if="cleaningCursor" class="attendance__btn" type="button" :disabled="cleaningBusy" @click="loadCleaningProposals(true)">{{ tr('Load more proposals', '加载更多建议') }}</button>
+      <div v-if="cleaningSelected">
+        <p>{{ cleaningSelected.employee }} · {{ cleaningSelected.date }} · {{ cleaningSelected.reason }}</p>
+        <p>{{ tr('Confirm this reviewed proposal to normal? The server will recheck permissions and both source versions.', '确认按此建议更正为正常？服务端将重新校验权限及两侧数据版本。') }}</p>
+        <button class="attendance__btn" type="button" data-cleaning-confirm :disabled="cleaningBusy" @click="applyCleaningProposal">{{ tr('Confirm correction', '确认更正') }}</button>
+        <button class="attendance__btn" type="button" :disabled="cleaningBusy" @click="cleaningSelected = null">{{ tr('Cancel', '取消') }}</button>
+      </div>
+      <p v-if="cleaningMessage" role="status">{{ cleaningMessage }}</p>
+    </section>
 
     <div
       v-if="syncStatusMessage"
@@ -137,12 +159,12 @@
       </div>
     </div>
 
-    <div
+    <details
       v-if="reportFields.length > 0"
       class="attendance-report-fields__basis attendance-report-fields__formula-reference"
       data-report-field-formula-reference
     >
-      <div class="attendance-report-fields__basis-header">
+      <summary class="attendance-report-fields__basis-header">
         <div>
           <div class="attendance-report-fields__basis-title">
             {{ tr('Formula reference', '公式参考') }}
@@ -154,7 +176,7 @@
         <span class="attendance-report-fields__status-pill attendance-report-fields__status-pill--ok">
           {{ tr('Record + summary', '单记录 + 汇总') }}
         </span>
-      </div>
+      </summary>
       <div class="attendance-report-fields__formula-reference-layout">
         <div class="attendance-report-fields__formula-reference-block">
           <div class="attendance-report-fields__formula-reference-label">
@@ -257,7 +279,13 @@
           </ul>
         </div>
       </div>
-      <div class="attendance-report-fields__formula-create" data-report-field-formula-create>
+    </details>
+
+    <div
+      v-if="reportFields.length > 0"
+      class="attendance-report-fields__basis attendance-report-fields__formula-create"
+      data-report-field-formula-create
+    >
         <div class="attendance-report-fields__formula-reference-label">
           {{ tr('Create formula field', '创建公式字段') }}
         </div>
@@ -343,11 +371,11 @@
           <button
             class="attendance__btn"
             type="button"
-            :disabled="savingFormulaCode === newFormulaDraft.code.trim()"
+            :disabled="creatingFormulaField"
             data-report-field-formula-create-save
             @click="saveNewFormulaField"
           >
-            {{ savingFormulaCode === newFormulaDraft.code.trim() ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
+            {{ creatingFormulaField ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
           </button>
         </div>
         <div
@@ -363,7 +391,6 @@
           {{ formulaDraftStatusMessage }}
         </div>
       </div>
-    </div>
 
     <div
       v-if="formulaDependencyGraph && reportFields.length > 0 && !hasActiveFieldFilters"
@@ -500,21 +527,17 @@
       <div class="attendance-report-fields__record-sync-form">
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-from">
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-from"
             v-model="recordSyncFrom"
-            type="date"
-            data-report-record-sync-from
-          >
+            data-report-record-sync-from />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-to">
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-to"
             v-model="recordSyncTo"
-            type="date"
-            data-report-record-sync-to
-          >
+            data-report-record-sync-to />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-user">
           <span>{{ tr('User ID', '员工 ID') }}</span>
@@ -643,12 +666,10 @@
           for="attendance-report-period-summary-sync-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-from"
             v-model="periodSummarySyncFrom"
-            type="date"
-            data-report-period-summary-sync-from
-          >
+            data-report-period-summary-sync-from />
         </label>
         <label
           v-if="periodSummarySyncMode === 'date_range'"
@@ -656,12 +677,10 @@
           for="attendance-report-period-summary-sync-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-to"
             v-model="periodSummarySyncTo"
-            type="date"
-            data-report-period-summary-sync-to
-          >
+            data-report-period-summary-sync-to />
         </label>
         <label
           v-if="periodSummarySyncMode === 'payroll_cycle'"
@@ -834,12 +853,10 @@
           for="attendance-report-sync-job-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-from"
             v-model="reportSyncJobFrom"
-            type="date"
-            data-report-sync-job-from
-          >
+            data-report-sync-job-from />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'date_range'"
@@ -847,12 +864,10 @@
           for="attendance-report-sync-job-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-to"
             v-model="reportSyncJobTo"
-            type="date"
-            data-report-sync-job-to
-          >
+            data-report-sync-job-to />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'payroll_cycle'"
@@ -1132,7 +1147,7 @@
                       class="attendance__field-hint attendance-report-fields__formula-editor-help"
                       :data-report-field-formula-editor-help="field.code"
                     >
-                      {{ tr('See the function reference panel above for syntax, allowed functions, and disabled functions. Preview before saving.', '上方公式参考面板列出可用函数与禁用函数,保存前请先预览。') }}
+                      {{ tr('Open the function reference panel above for allowed and disabled functions. Preview before saving.', '展开上方公式参考面板，查看可用函数与禁用函数。保存前请先预览。') }}
                     </div>
                     <label class="attendance-report-fields__formula-editor-field">
                       <span>{{ tr('Expression', '表达式') }}</span>
@@ -1231,8 +1246,11 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceReportFieldsHelp from './AttendanceReportFieldsHelp.vue'
 import { computed, ref, watch } from 'vue'
-import { apiFetch } from '../../utils/api'
+import { apiFetch as sendApiFetch } from '../../utils/api'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../../utils/error'
 
 type TranslateFn = (en: string, zh: string) => string
@@ -1297,6 +1315,12 @@ interface FormulaDependencyGraph {
 }
 
 interface AttendanceReportFieldsPayload {
+  cleaningReview?: {
+    enabled: boolean
+    orgId?: string
+    sheetId?: string
+    fieldIds?: Record<string, string>
+  }
   categories?: AttendanceReportFieldCategory[]
   items?: AttendanceReportFieldItem[]
   droppedReservedCodes?: string[]
@@ -1467,10 +1491,81 @@ const props = defineProps<{
   orgId?: string
 }>()
 
+const sessionGuard = useAttendanceSessionGuard()
+const apiFetch = sessionGuard.wrapFetch(sendApiFetch)
 const tr = props.tr
 const loading = ref(false)
 const syncing = ref(false)
 const loadError = ref('')
+interface CleaningReviewRow { id: string; version: number; reason: string; employee: string; date: string }
+const cleaningRows = ref<CleaningReviewRow[]>([])
+const cleaningSelected = ref<CleaningReviewRow | null>(null)
+const cleaningBusy = ref(false)
+const cleaningMessage = ref('')
+const cleaningCursor = ref('')
+const cleaningReview = computed(() => {
+  const review = reportFieldsPayload.value.cleaningReview
+  return review?.enabled === true && review.orgId === props.orgId && review.sheetId && review.fieldIds
+    && ['cleaning_requested', 'cleaning_reason', 'employee_name', 'work_date'].every(code => review.fieldIds![code]?.startsWith('fld_'))
+    ? review : null
+})
+
+async function loadCleaningProposals(append: boolean): Promise<void> {
+  const review = cleaningReview.value
+  if (!review || cleaningBusy.value) return
+  cleaningBusy.value = true
+  cleaningSelected.value = null
+  cleaningMessage.value = ''
+  if (!append) { cleaningRows.value = []; cleaningCursor.value = '' }
+  try {
+    const query = new URLSearchParams({ sheetId: review.sheetId!, limit: '50', [`filter.${review.fieldIds!.cleaning_requested}`]: 'true' })
+    if (append && cleaningCursor.value) query.set('cursor', cleaningCursor.value)
+    const response = await apiFetch(`/api/multitable/records?${query}`, { headers: { 'X-Org-Id': review.orgId! } })
+    const payload = await response.json()
+    if (cleaningReview.value !== review) return
+    if (!response.ok || payload?.ok !== true || !Array.isArray(payload.data?.records)) throw new Error('CLEANING_READ_FAILED')
+    const fields = review.fieldIds!
+    const rows: CleaningReviewRow[] = payload.data.records.filter((row: { id?: string; version?: number; data?: Record<string, unknown> }) =>
+      typeof row.id === 'string' && /^rec_[A-Za-z0-9_-]+$/.test(row.id) && Number.isSafeInteger(row.version) && row.version! > 0
+      && row.data?.[fields.cleaning_requested] === true && typeof row.data?.[fields.cleaning_reason] === 'string'
+      && String(row.data[fields.cleaning_reason]).trim().length > 0 && String(row.data[fields.cleaning_reason]).trim().length <= 500)
+      .map((row: { id: string; version: number; data: Record<string, unknown> }) => ({ id: row.id, version: row.version,
+        reason: String(row.data[fields.cleaning_reason]).trim(), employee: typeof row.data[fields.employee_name] === 'string' ? String(row.data[fields.employee_name]) : '',
+        date: typeof row.data[fields.work_date] === 'string' ? String(row.data[fields.work_date]) : '' }))
+    cleaningRows.value = append ? [...cleaningRows.value, ...rows.filter(row => !cleaningRows.value.some(existing => existing.id === row.id))] : rows
+    cleaningCursor.value = payload.data.hasMore && typeof payload.data.nextCursor === 'string' ? payload.data.nextCursor : ''
+  } catch {
+    if (cleaningReview.value === review) cleaningMessage.value = tr('Unable to read proposals. Check access and reload.', '无法读取建议，请检查权限后重载。')
+  } finally { cleaningBusy.value = false }
+}
+
+async function applyCleaningProposal(): Promise<void> {
+  try { sessionGuard.assertCurrent() } catch { return }
+  const review = cleaningReview.value
+  const row = cleaningSelected.value
+  if (!review || !row || cleaningBusy.value) return
+  cleaningBusy.value = true
+  cleaningMessage.value = ''
+  try {
+    const response = await apiFetch(`/api/attendance/report-records/${encodeURIComponent(row.id)}/cleaning-apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Org-Id': review.orgId! }, body: JSON.stringify({ expectedVersion: row.version }),
+    })
+    const payload = await response.json()
+    if (cleaningReview.value !== review) return
+    if (!response.ok || payload?.ok !== true) throw new Error('CLEANING_APPLY_FAILED')
+    if (payload.data?.cleaningState === 'consumed') {
+      cleaningRows.value = cleaningRows.value.filter(item => item.id !== row.id)
+      cleaningMessage.value = tr('Attendance updated; proposal consumed.', '考勤已更新，建议已处理。')
+    } else if (payload.data?.cleaningState === 'applied_pending_cleanup') {
+      cleaningMessage.value = tr('Attendance updated; proposal cleanup pending. Reload and retry as the original reviewer.', '考勤已更新，建议清理待重试。请由原审阅人重载后重试。')
+    } else throw new Error('CLEANING_OUTCOME_UNKNOWN')
+  } catch {
+    if (sessionGuard.isCurrent() && cleaningReview.value === review) cleaningMessage.value = tr('Correction not confirmed. Reload to check permissions, source changes or a pending cleanup before retrying.', '未确认更正结果。请重载检查权限、数据变化或待清理状态后再重试。')
+  } finally {
+    if (sessionGuard.isCurrent()) cleaningSelected.value = null
+    cleaningBusy.value = false
+  }
+}
 const syncStatusMessage = ref('')
 const syncStatusKind = ref<'info' | 'error'>('info')
 const recordSyncing = ref(false)
@@ -1517,6 +1612,7 @@ const fieldCategoryFilter = ref('all')
 const editingFormulaCode = ref('')
 const previewingFormulaCode = ref('')
 const savingFormulaCode = ref('')
+const creatingFormulaField = ref(false)
 const formulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const newFormulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const formulaPreviewResult = ref<FormulaPreviewResult | null>(null)
@@ -2148,9 +2244,20 @@ async function saveEditingFormulaField(): Promise<void> {
 }
 
 async function saveNewFormulaField(): Promise<void> {
-  await saveFormulaDraft(newFormulaDraft.value)
-  if (formulaDraftStatusKind.value !== 'error') {
-    newFormulaDraft.value = createBlankFormulaDraft()
+  if (creatingFormulaField.value) return
+  // Idle `savingFormulaCode` is ''. A blank draft code must not look like an in-flight save.
+  if (!newFormulaDraft.value.code.trim()) {
+    await saveFormulaDraft(newFormulaDraft.value)
+    return
+  }
+  creatingFormulaField.value = true
+  try {
+    await saveFormulaDraft(newFormulaDraft.value)
+    if (formulaDraftStatusKind.value !== 'error') {
+      newFormulaDraft.value = createBlankFormulaDraft()
+    }
+  } finally {
+    creatingFormulaField.value = false
   }
 }
 
@@ -2447,7 +2554,10 @@ function buildReportPeriodSummariesSyncStatusMessage(data: AttendanceReportPerio
   return `${tr('Period summaries synchronized.', '周期汇总已同步。')}${summary}`
 }
 
+let reportFieldsLoadEpoch = 0
+
 async function loadReportFields(): Promise<void> {
+  const epoch = ++reportFieldsLoadEpoch
   loading.value = true
   loadError.value = ''
   try {
@@ -2457,14 +2567,17 @@ async function loadReportFields(): Promise<void> {
     const suffix = params.toString()
     const response = await apiFetch(`/api/attendance/report-fields${suffix ? `?${suffix}` : ''}`)
     const payload = await response.json()
+    if (epoch !== reportFieldsLoadEpoch) return
     if (!response.ok || payload?.ok === false) {
       throw payload
     }
     reportFieldsPayload.value = payload?.data ?? { categories: [], items: [], multitable: { available: false } }
   } catch (error) {
-    loadError.value = readErrorMessage(error, tr('Failed to load report fields', '加载统计字段失败'))
+    if (epoch === reportFieldsLoadEpoch) {
+      loadError.value = readErrorMessage(error, tr('Failed to load report fields', '加载统计字段失败'))
+    }
   } finally {
-    loading.value = false
+    if (epoch === reportFieldsLoadEpoch) loading.value = false
   }
 }
 
@@ -2682,6 +2795,10 @@ async function cancelReportSyncJob(job: AttendanceReportSyncJob): Promise<void> 
 watch(
   () => props.orgId,
   () => {
+    cleaningRows.value = []
+    cleaningSelected.value = null
+    cleaningCursor.value = ''
+    cleaningMessage.value = ''
     void loadReportFields()
   },
   { immediate: true },
@@ -2946,6 +3063,11 @@ watch(
   gap: 6px;
 }
 
+.attendance-report-fields__formula-reference-chips {
+  max-height: 96px;
+  overflow: auto;
+}
+
 .attendance-report-fields__formula-reference-group {
   display: flex;
   align-items: center;
@@ -3031,13 +3153,18 @@ watch(
 
 .attendance-report-fields__formula-create-grid {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(150px, 1fr) minmax(140px, 0.8fr) minmax(150px, 0.8fr) minmax(260px, 1.6fr) auto;
-  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
   align-items: end;
 }
 
 .attendance-report-fields__formula-create-expression {
-  min-width: 260px;
+  grid-column: 1 / 5;
+  min-width: 0;
+}
+
+.attendance-report-fields__formula-create-grid > button {
+  grid-column: 5;
 }
 
 .attendance-report-fields__formula-dependency-edges {
@@ -3274,6 +3401,11 @@ watch(
 
   .attendance-report-fields__formula-create-grid {
     grid-template-columns: 1fr;
+  }
+
+  .attendance-report-fields__formula-create-expression,
+  .attendance-report-fields__formula-create-grid > button {
+    grid-column: auto;
   }
 }
 </style>

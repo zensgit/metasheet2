@@ -52,7 +52,8 @@ const USER_LIMITED = `u_dry_limited_${TS}` // sheet-scoped grant on SHEET_ID onl
 const FOREIGN_CANARY = 'do-not-leak-foreign-canary' // FOL-2 D3: hydrated-then-masked value must never leak
 
 let app: Express
-let testPerms: string[] = ['multitable:write'] // canManageFields requires multitable:write
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+let testPerms: string[] = ['multitable:write', 'multitable:manage-schema'] // canManageFields requires multitable:manage-schema
 let testUserId: string = USER_ID // #5c: mutable so a test can drop the user to assert 401
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const post = (body: unknown) => request(app).post(`/api/multitable/sheets/${SHEET_ID}/formula/dry-run`).send(body as object)
@@ -141,7 +142,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   test('happy path: evaluates a {fld}-only expression against sample values', async () => {
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
     const res = await post({ expression: `={${FLD_A}}+{${FLD_B}}`, sampleValues: { [FLD_A]: 2, [FLD_B]: 3 } })
     expect(res.status).toBe(200)
     expect(res.body.data.success).toBe(true)
@@ -150,7 +151,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('unknown field reference → 200 success:false (NOT evaluated), no false-green', async () => {
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
     const res = await post({ expression: `={fld_missing_${TS}}+1`, sampleValues: {} })
     expect(res.status).toBe(200)
     expect(res.body.data.success).toBe(false)
@@ -161,7 +162,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('type mismatch carries structured context over the wire', async () => {
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
     const res = await post({ expression: `={${FLD_A}}+1`, sampleValues: { [FLD_A]: 'x' } }) // string for a number field
     expect(res.status).toBe(200)
     const mismatch = res.body.data.diagnostics.find((d: { kind: string }) => d.kind === 'type_mismatch')
@@ -172,7 +173,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     testPerms = ['multitable:read']
     const res = await post({ expression: `={${FLD_A}}+1`, sampleValues: { [FLD_A]: 1 } })
     expect(res.status).toBe(403)
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
   })
 
   test('missing expression → 400', async () => {
@@ -193,7 +194,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('structural cap: more than 64 referenced fields → 422 DRYRUN_TOO_MANY_REFS', async () => {
-    testPerms = ['multitable:write'] // ref-count check runs after the canManageFields gate
+    testPerms = ['multitable:write', 'multitable:manage-schema'] // ref-count check runs after the canManageFields gate
     const expr = '=' + Array.from({ length: 65 }, (_, i) => `{fld_x${i}}`).join('+')
     const res = await post({ expression: expr, sampleValues: {} })
     expect(res.status).toBe(422)
@@ -206,7 +207,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   // NOT a per-record read-deny. The real field-read deny gate is field_permissions (T2).
 
   test('#5c T1a: recordId not on this sheet → 404 (record-level gate, existence)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const res = await post({ expression: `={${FLD_A}}+1`, recordId: `rec_ghost_${TS}` })
     expect(res.status).toBe(404)
   })
@@ -215,18 +216,18 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     testPerms = []; testUserId = USER_ID // no multitable:read/write → canRead false
     const res = await post({ expression: `={${FLD_A}}+1`, recordId: REC_ID })
     expect(res.status).toBe(403)
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
   })
 
   test('#5c T1c: valid recordId but unauthenticated → 401 (record-level gate, no userId)', async () => {
-    testUserId = ''; testPerms = ['multitable:write'] // no user object on the request
+    testUserId = ''; testPerms = ['multitable:write', 'multitable:manage-schema'] // no user object on the request
     const res = await post({ expression: `={${FLD_A}}+1`, recordId: REC_ID })
     expect(res.status).toBe(401)
     testUserId = USER_ID
   })
 
   test('#5c T2: field-scope-denied value never leaks via real-record sampling (wire round-trip)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // FLD_SECRET carries SECRET_CANARY in the record but is denied (field_permissions.visible=false).
     const res = await post({ expression: `={${FLD_SECRET}}`, recordId: REC_ID })
     expect(res.status).toBe(200)
@@ -240,7 +241,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('#5c T3: visible record values are sampled; explicit manual values override per-field', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const base = await post({ expression: `={${FLD_A}}+{${FLD_B}}`, recordId: REC_ID }) // record A=10,B=20
     expect(base.status).toBe(200)
     expect(base.body.data.success).toBe(true)
@@ -250,7 +251,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('#5c T4 (flipped by FOL-2): null-cfg lookup-ref hydrates to [] — no missing_sample, "" substitution', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // FLD_LOOKUP has property {} (cfg parses to null) → applyLookupRollup hydrates it to [],
     // which substitutes as "" (joined-string A2b contract) → numeric coercion 0 in arithmetic.
     // Pre-FOL-2 this asserted missing_sample (raw read); production recalc evaluates HYDRATED
@@ -266,7 +267,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('#5c T5: no recordId → unchanged #5b manual-sample path (additive, not regressed)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const res = await post({ expression: `={${FLD_A}}+{${FLD_B}}`, sampleValues: { [FLD_A]: 2, [FLD_B]: 3 } })
     expect(res.status).toBe(200)
     expect(res.body.data.result).toBe(5) // manual values; record never consulted
@@ -278,11 +279,11 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     testPerms = ['multitable:read']; testUserId = USER_ID
     const res = await post({ expression: `={${FLD_A}}+1`, recordId: REC_ID })
     expect(res.status).toBe(403)
-    testPerms = ['multitable:write']
+    testPerms = ['multitable:write', 'multitable:manage-schema']
   })
 
   test('#5c T2b: property.hidden field value never leaks via real-record sampling (second mask channel)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // FLD_HIDDEN is statically hidden (property.hidden=true) and carries HIDDEN_CANARY in the record;
     // filterVisiblePropertyFields drops it → masked out → missing_sample, value never on the wire.
     const res = await post({ expression: `={${FLD_HIDDEN}}`, recordId: REC_ID })
@@ -300,7 +301,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   // a sum rollup hydrates to a number, an empty/unreadable one to null → '0' substitution.
 
   test('FOL-2 D1: linked lookup ref hydrates — [100] → "100" joined-string → +1 = 101', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const arith = await post({ expression: `={${FLD_LU_A}}+1`, recordId: REC_ID })
     expect(arith.status).toBe(200)
     expect(arith.body.data.success).toBe(true)
@@ -315,7 +316,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('FOL-2 D2: rollup ref hydrates — sum over [100] → 100 → +1 = 101', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const arith = await post({ expression: `={${FLD_RU_A}}+1`, recordId: REC_ID })
     expect(arith.status).toBe(200)
     expect(arith.body.data.success).toBe(true)
@@ -328,7 +329,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('FOL-2 D3: field_permissions-denied lookup stays missing_sample; hydrated foreign value never leaks (hydrate → mask order)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // FLD_LU_DENIED is a properly-configured lookup whose foreign target carries FOREIGN_CANARY;
     // it hydrates (referenced) but the mask drops the key BEFORE the engine sees it.
     const res = await post({ expression: `={${FLD_LU_DENIED}}`, recordId: REC_ID })
@@ -349,7 +350,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     expect(missing).toBeUndefined()
     const arith = await post({ expression: `={${FLD_LU_A}}+1`, recordId: REC_ID })
     expect(arith.body.data.result).toBe(1) // "" coerces to 0 in arithmetic
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
   })
 
   test('FOL-2 D4b: requester cannot read the foreign sheet — rollup hydrates to null → \'0\' substitution (diverges from lookup)', async () => {
@@ -363,11 +364,11 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     expect(missing).toBeUndefined() // hydrated (to null) — sampled, no longer missing
     const arith = await post({ expression: `={${FLD_RU_A}}+1`, recordId: REC_ID })
     expect(arith.body.data.result).toBe(1)
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
   })
 
   test('FOL-2 D5: manual sampleValues beat hydration; a masked lookup accepts a manual sample', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // {...masked, ...sampleValues}: the manual 5 wins over the hydrated [100].
     const overridden = await post({ expression: `={${FLD_LU_A}}+1`, recordId: REC_ID, sampleValues: { [FLD_LU_A]: 5 } })
     expect(overridden.status).toBe(200)
@@ -379,7 +380,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('FOL-2 D6: hydration is expression-scoped — no computed ref → zero link/foreign reads; unreferenced lookup\'s sheet never queried', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     // (a) expression references NO lookup/rollup → ZERO foreign-sheet queries, no meta_links read.
     const plain = await captureQueries(async () => {
       const res = await post({ expression: `={${FLD_A}}+{${FLD_B}}`, recordId: REC_ID })
@@ -402,7 +403,7 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
   })
 
   test('FOL-2 D7: no recordId → #5b manual path unchanged (lookup ref stays missing_sample, zero hydration reads)', async () => {
-    testPerms = ['multitable:write']; testUserId = USER_ID
+    testPerms = ['multitable:write', 'multitable:manage-schema']; testUserId = USER_ID
     const captured = await captureQueries(async () => {
       const res = await post({ expression: `={${FLD_LU_A}}+1` })
       expect(res.status).toBe(200)

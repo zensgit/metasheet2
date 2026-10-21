@@ -11,7 +11,11 @@
     @drop.prevent="onDrop"
   >
     <span class="meta-field-header__icon">{{ fieldTypeIcon }}</span>
-    <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
+    <span
+      class="meta-field-header__name"
+      :title="headerTitle"
+      :data-meta-datetime-zone-hint="dateTimeHint || undefined"
+    >{{ field.name }}</span>
     <span v-if="sortDirection" class="meta-field-header__sort">
       {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
     </span>
@@ -36,6 +40,8 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { dateTimeZoneHint } from '../utils/business-timezone'
+import { dateTimeFieldTimezone, isDateTimeLikeFieldType } from '../utils/field-display'
 
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
@@ -84,22 +90,38 @@ function onDrop(e: DragEvent) {
 
 const fieldTypeIcon = computed(() => FIELD_ICONS[props.field.type] ?? '?')
 
+// 客户反馈 2026-09-24 #4c (N6): a date-time column's cells show the BUSINESS wall clock (北京时间), not the
+// browser's. Rather than a hint in every cell, the column header's tooltip says so ONCE — and only when
+// the browser's clock actually differs from the business zone (a Beijing laptop sees no hint).
+const dateTimeHint = computed(() =>
+  isDateTimeLikeFieldType(props.field.type) ? dateTimeZoneHint(dateTimeFieldTimezone(props.field), isZh.value) : '')
+const headerTitle = computed(() => (dateTimeHint.value ? `${props.field.name} · ${dateTimeHint.value}` : props.field.name))
+
 const headerStyle = computed(() => {
-  const style: Record<string, string> = {}
+  // #5863: the header row is ALWAYS sticky to the top of the grid's scroll container
+  // (`.meta-grid__table-wrap`, the nearest `overflow: auto` ancestor) — not just when a
+  // column is frozen. zIndex 3 sits above a frozen body cell's zIndex 2 (MetaGridTable.vue
+  // cellStyle) so the header paints over body content scrolling underneath it.
+  const style: Record<string, string> = {
+    position: 'sticky',
+    top: '0',
+    zIndex: '3',
+    background: 'var(--ms-bg-card, #fff)',
+  }
   if (props.width) {
     style.width = `${props.width}px`
     style.minWidth = `${props.width}px`
     style.maxWidth = `${props.width}px`
   }
-  // frozen header: inline position:sticky overrides the CSS `position: relative`, giving horizontal
-  // stickiness; the absolute resize handle still anchors to this th (sticky is a containing block).
+  // frozen header: also sticks horizontally (left), with a HIGHER zIndex than a plain sticky
+  // header cell — this cell is the intersection of the frozen-left stack and the sticky-top
+  // header, so it must paint over both a frozen body cell (zIndex 2) and a plain header cell
+  // (zIndex 3) when they'd otherwise overlap during diagonal scroll.
   if (props.frozenLeft != null) {
-    style.position = 'sticky'
     style.left = `${props.frozenLeft}px`
     style.zIndex = '4'
-    style.background = 'var(--ms-bg-card, #fff)'
   }
-  return Object.keys(style).length ? style : undefined
+  return style
 })
 
 function onResizeStart(e: MouseEvent) {
@@ -122,7 +144,12 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header {
   padding: 8px 12px; text-align: left; font-weight: 500; font-size: 13px;
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); white-space: nowrap;
-  user-select: none; position: sticky; top: 0; z-index: 1; position: relative;
+  user-select: none;
+  /* #5863: position/top/z-index are now set inline (headerStyle, always-on sticky-top) so they
+   * stay in sync with the frozen-left zIndex bump; this rule only carries the non-positioning
+   * look. `position: relative` keeps the absolute resize handle anchored when headerStyle hasn't
+   * applied yet (e.g. SSR/no-JS fallback). */
+  position: relative;
 }
 .meta-field-header--sortable { cursor: pointer; }
 .meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }

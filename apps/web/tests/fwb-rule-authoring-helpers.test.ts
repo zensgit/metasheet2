@@ -156,6 +156,15 @@ describe('fwbRuleAuthoring helpers', () => {
         { id: 2, label: 'bad' },
       ],
     })).toEqual([{ id: 'f1', label: 'Reason' }])
+    // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1): explanation carries no
+    // submitted value (A-1) — excluded from the FWB mapping source candidate list; a text field
+    // in the SAME schema IS still included (positive control — exclusion is type-selected).
+    expect(templateSchemaToFwbFields({
+      fields: [
+        { id: 'note', label: '说明', type: 'explanation' },
+        { id: 'reason', label: 'Reason', type: 'text' },
+      ],
+    })).toEqual([{ id: 'reason', label: 'Reason' }])
     expect(templateSchemaToFwbRecordLinks({
       fields: [
         { id: 'linked', label: 'Order', type: 'record-link', props: { baseId: 'base_1', sheetId: 'sheet_1' } },

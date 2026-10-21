@@ -92,10 +92,11 @@ export function buildAttendanceDecisionTraceRequestPath(
 }
 
 interface UseAttendanceDecisionTraceOptions {
+  isSessionCurrent?: () => boolean
   apiFetch?: ApiFetchFn
 }
 
-export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch }: UseAttendanceDecisionTraceOptions = {}) {
+export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch, isSessionCurrent = () => true }: UseAttendanceDecisionTraceOptions = {}) {
   const state: Ref<AttendanceDecisionTraceLoadState> = ref('idle')
   const trace: Ref<AttendanceDecisionTraceParsed | null> = ref(null)
   const errorKind: Ref<AttendanceDecisionTraceErrorKind | null> = ref(null)
@@ -108,6 +109,7 @@ export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch }: UseAt
     target: AttendanceDecisionTraceTarget,
     scope: { orgId?: string; userId?: string } = {},
   ): Promise<void> {
+    if (!isSessionCurrent()) return
     const seq = ++requestSeq
     const path = buildAttendanceDecisionTraceRequestPath(host, target, scope)
     if (!path) {
@@ -122,11 +124,11 @@ export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch }: UseAt
     errorKind.value = null
     try {
       const response = await apiFetch(path)
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       const body = (await response.json().catch(() => null)) as
         | { ok?: boolean; data?: unknown; error?: { code?: string } }
         | null
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       if (response.status === 403) {
         errorKind.value = 'forbidden'
         state.value = 'error'
@@ -164,7 +166,7 @@ export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch }: UseAt
       errorKind.value = null
       state.value = 'loaded'
     } catch {
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       trace.value = null
       errorKind.value = 'error'
       state.value = 'error'
@@ -172,6 +174,7 @@ export function useAttendanceDecisionTrace({ apiFetch = defaultApiFetch }: UseAt
   }
 
   function resetTrace(): void {
+    if (!isSessionCurrent()) return
     requestSeq += 1
     state.value = 'idle'
     trace.value = null

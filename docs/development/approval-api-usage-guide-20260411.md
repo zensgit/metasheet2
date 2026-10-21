@@ -475,31 +475,41 @@ curl -s -X POST http://localhost:8900/api/approvals \
 
 ### 审批列表（4 个 Tab）
 
+> **更新于 2026-09-06，2026-09-07 订正。** 这四个示例原本都不带 `tab`，并依赖 `requesterId` /
+> `ccRecipientId` 这两个路由从未读取的参数。现在 `GET /api/approvals` 的可见集合由服务端决定：平台行
+> 只包含调用者本人的参与（发起 / 席位 / 处理过 / 被抄送），非平台镜像行沿用 phase-1 可见性；省略 `tab`
+> 会落到默认的 `pending` 页签，因而同时带上 `status = 'pending'` 条件——**除非请求自带 `status`
+> 过滤，此时不再附加任何页签条件，返回的是服务端可见范围与该 `status` 的交集**。订正的正是这一条：
+> 上一版这段话（以及当时的接口描述）说不带 `tab` 又带 `status=approved` 会返回空，那是当时代码的行为，
+> 现在不再成立——该形态会返回调用者自己的已通过行。空值 `status=` 视为未提供，仍走默认页签；显式写出的
+> `tab` 不受此规则影响，`?tab=pending&status=approved` 仍是两个条件同时生效。下面每条仍显式给出
+> `tab`，返回的也只会是调用者自己范围内的行——`assignee` 之类的参数只能在该范围内继续收窄，不能扩大它。
+
 #### 待审批
 
 ```bash
-curl -s "http://localhost:8900/api/approvals?assignee=user_wang_director&status=pending&limit=20&offset=0" \
+curl -s "http://localhost:8900/api/approvals?tab=pending&limit=20&offset=0" \
   -H "$AUTH"
 ```
 
 #### 我发起的
 
 ```bash
-curl -s "http://localhost:8900/api/approvals?requesterId=user_zhang&limit=20&offset=0" \
+curl -s "http://localhost:8900/api/approvals?tab=mine&limit=20&offset=0" \
   -H "$AUTH"
 ```
 
 #### 抄送我
 
 ```bash
-curl -s "http://localhost:8900/api/approvals?ccRecipientId=user_li_finance&limit=20&offset=0" \
+curl -s "http://localhost:8900/api/approvals?tab=cc&limit=20&offset=0" \
   -H "$AUTH"
 ```
 
 #### 已完成
 
 ```bash
-curl -s "http://localhost:8900/api/approvals?status=approved&limit=20&offset=0" \
+curl -s "http://localhost:8900/api/approvals?tab=completed&limit=20&offset=0" \
   -H "$AUTH"
 ```
 

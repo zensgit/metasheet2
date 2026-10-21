@@ -28,8 +28,8 @@ export interface ProductFeatures {
    */
   approvalAttachments: boolean
   /**
-   * Approval Canvas V2 authoring surface. Default OFF and enabled only by an explicit backend
-   * session value or the existing authorized development override.
+   * Approval Canvas V2 authoring surface. The backend defaults it ON; an explicit false session
+   * value or authorized development override selects the operator rollback surface.
    */
   approvalCanvasV2: boolean
   /**
@@ -40,12 +40,40 @@ export interface ProductFeatures {
    */
   approvalFwbWriteback: boolean
   /**
+   * 抄送我的 unread badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_CC_UNREAD_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/cc-unread-count. While false the approval center issues no count
+   * request and shows no badge or row dot on 抄送我的. Never inferred from role/mode/plugin state.
+   */
+  approvalCcUnreadBadge: boolean
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_MINE_OUTCOME_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/mine-outcomes/unseen-count. While false the approval center issues no
+   * count request and shows no badge or row dot on 我发起的. Never inferred from role/mode/plugin.
+   */
+  approvalMineOutcomeBadge: boolean
+  /**
    * W6-3 (#4556) OD-W6-7=(a) — group effective-policy panel gate. Mirrors the backend's two-layer
    * default-OFF switch (master `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED` env AND a per-org
    * exact allowlist — see `w6-group-effective-policy-panel-flag.ts`). No role/mode/plugin
    * inference: OFF keeps `AttendanceGroupContextHost.vue` byte-identical to before this slice.
    */
   attendanceGroupEffectivePolicyPanel: boolean
+  /**
+   * E-learning V0.1 named-pilot navigation/route gate. Default OFF. True only when
+   * the backend session payload (or the existing authorized dev override) supplies
+   * an explicit boolean — never inferred from admin role, product mode, or plugin state.
+   */
+  elearning: boolean
+  /**
+   * Tasks (/tasks, the top-bar 任务 entry and its pending badge). Mirrors the backend's
+   * TASKS_ENABLED switch, the same switch that decides whether /api/tasks is mounted at all.
+   * Default OFF: true only from an explicit boolean in the session payload (or the authorized dev
+   * override). A session payload that carries no tasks value (an older backend) is OFF. Never
+   * inferred from admin role, product mode or plugin state.
+   */
+  tasks: boolean
   mode: ProductMode
 }
 
@@ -80,7 +108,11 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalAttachments: false,
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
+  approvalCcUnreadBadge: false,
+  approvalMineOutcomeBadge: false,
   attendanceGroupEffectivePolicyPanel: false,
+  elearning: false,
+  tasks: false,
   mode: 'platform',
 }
 
@@ -116,9 +148,48 @@ function parseJwtPayload(token: string | null): Record<string, unknown> {
   }
 }
 
-function isFeatureOverrideAllowed(): boolean {
+// Exported (Navigability audit fix 1, 2026-08-22) so the "Capability not available" empty state
+// can surface — not reinvent — this EXACT existing predicate: the state shows the local-override
+// toggle only when this returns true, and an "ask your administrator" line otherwise. The
+// predicate itself is unchanged (still DEV-mode-or-explicit-env-flag), matching the design-lock's
+// "do not change... the override gate's own predicate" constraint.
+export function isFeatureOverrideAllowed(): boolean {
   if (import.meta.env.DEV) return true
   return String(import.meta.env.VITE_ALLOW_FEATURE_OVERRIDE || '').trim().toLowerCase() === 'true'
+}
+
+/** Pure read-merge-write over the SAME `metasheet_features` localStorage key
+ * `parseOverrideFeatures()` already reads (Navigability audit fix 1) — exported for direct unit
+ * testing. Never touches keys other than the ones present in `patch`, so it cannot clobber a flag
+ * a developer already set through the pre-existing manual localStorage-editing path. */
+export function mergeFeatureOverrideJson(
+  rawJson: string | null,
+  patch: Partial<Record<keyof Omit<ProductFeatures, 'mode'>, boolean>>,
+): string {
+  let base: Record<string, unknown> = {}
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed
+    } catch {
+      base = {}
+    }
+  }
+  return JSON.stringify({ ...base, ...patch })
+}
+
+/**
+ * Enables (or disables) a single ProductFeatures flag in the local dev/QA override — the SAME
+ * sanctioned path `parseOverrideFeatures()` already reads, just no longer requiring hand-editing
+ * `localStorage` directly. No-ops when `isFeatureOverrideAllowed()` is false (never grants the
+ * override capability itself). Callers must re-run `loadProductFeatures(true)` to pick up the
+ * change — this function only persists it.
+ */
+export function setLocalFeatureOverride(feature: keyof Omit<ProductFeatures, 'mode'>, value: boolean): void {
+  if (!isFeatureOverrideAllowed()) return
+  if (typeof localStorage === 'undefined') return
+  const next = mergeFeatureOverrideJson(localStorage.getItem('metasheet_features'), { [feature]: value })
+  localStorage.setItem('metasheet_features', next)
 }
 
 function parseOverrideFeatures(): Partial<ProductFeatures> {
@@ -222,12 +293,18 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_fwb_writeback === 'boolean'
           ? featuresNode.approval_fwb_writeback
           : undefined,
+    approvalCcUnreadBadge:
+      typeof featuresNode.approvalCcUnreadBadge === 'boolean' ? featuresNode.approvalCcUnreadBadge : undefined,
+    approvalMineOutcomeBadge:
+      typeof featuresNode.approvalMineOutcomeBadge === 'boolean' ? featuresNode.approvalMineOutcomeBadge : undefined,
     attendanceGroupEffectivePolicyPanel:
       typeof featuresNode.attendanceGroupEffectivePolicyPanel === 'boolean'
         ? featuresNode.attendanceGroupEffectivePolicyPanel
         : typeof featuresNode.attendance_group_effective_policy_panel === 'boolean'
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
+    elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
+    tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -336,7 +413,8 @@ function resolveFeatures(
     backend.approvalAttachments,
   )
 
-  // Canvas V2 follows the same explicit-only rollout discipline as approval attachments/mobile.
+  // Canvas V2 is still session-authoritative: the backend now defaults it ON, while an explicit
+  // false response selects the operator rollback surface. No role or product-mode inference.
   const approvalCanvasV2 = boolOrDefault(
     override.approvalCanvasV2,
     backend.approvalCanvasV2,
@@ -348,11 +426,36 @@ function resolveFeatures(
     backend.approvalFwbWriteback,
   )
 
+  // 抄送我的 unread badge: same default-OFF discipline — only an explicit backend/override boolean.
+  const approvalCcUnreadBadge = boolOrDefault(
+    override.approvalCcUnreadBadge,
+    backend.approvalCcUnreadBadge,
+  )
+  // 我发起的 new-outcome badge: same default-OFF discipline.
+  const approvalMineOutcomeBadge = boolOrDefault(
+    override.approvalMineOutcomeBadge,
+    backend.approvalMineOutcomeBadge,
+  )
+
   // W6-3 (#4556) OD-W6-7=(a): same default-OFF discipline — only an explicit backend/override
   // boolean enables it; no admin/mode/plugin inference.
   const attendanceGroupEffectivePolicyPanel = boolOrDefault(
     override.attendanceGroupEffectivePolicyPanel,
     backend.attendanceGroupEffectivePolicyPanel,
+  )
+
+  // E-learning V0.1: default OFF. Only an explicit backend/override boolean enables
+  // it — no inference from admin role, product mode, or plugin state.
+  const elearning = boolOrDefault(
+    override.elearning,
+    backend.elearning,
+  )
+
+  // Tasks: same default-OFF discipline. A payload without a tasks boolean (an older backend)
+  // resolves to false here; no admin/mode/plugin inference.
+  const tasks = boolOrDefault(
+    override.tasks,
+    backend.tasks,
   )
 
   return {
@@ -365,7 +468,11 @@ function resolveFeatures(
     approvalAttachments,
     approvalCanvasV2,
     approvalFwbWriteback,
+    approvalCcUnreadBadge,
+    approvalMineOutcomeBadge,
     attendanceGroupEffectivePolicyPanel,
+    elearning,
+    tasks,
     mode,
   }
 }
@@ -418,7 +525,13 @@ async function loadProductFeatures(
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
+    // Session-aware means "resolved from THIS session's payload". A load that skipped the session
+    // probe (the login, DingTalk callback and forced-password views run one right after a new token
+    // is set) resolved from an empty payload, so it must clear the mark: otherwise the router
+    // guard's next load returns early and a second sign-in in the same tab keeps features resolved
+    // without its session (tasks/elearning hidden until a hard reload). The guard's re-read hits
+    // the session those views have just primed, so it issues no extra request.
+    state.sessionAwareLoaded = requiresSessionProbe
     state.loading = false
 
     return state.features
@@ -443,11 +556,22 @@ function isPlmWorkbenchFocused(): boolean {
   return state.features.mode === 'plm-workbench' && state.features.plm
 }
 
+/**
+ * Post-login / fallback landing path. #5392: the owner's finding was that logging in — and any
+ * unknown or partial deep link — dropped every user onto the attendance clock-in page, with 14
+ * flat nav items and no starting point. `/home` (MyAppsLandingView) is now that starting point
+ * for the ordinary multi-app deployment.
+ *
+ * The two FOCUSED product modes are deliberately UNCHANGED: a tenant explicitly configured as
+ * attendance-only or plm-workbench-only (App.vue's attendanceFocused/plmWorkbenchFocused, which
+ * also drive a different nav chrome — see guardPolicy's focus-mode allowlists) is a distinct,
+ * single-product deployment where that one surface IS the whole product; that nav-chrome
+ * question is out of scope here (full nav IA restructure is a separate, deferred item).
+ */
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
   if (isPlmWorkbenchFocused()) return '/plm'
-  if (state.features.attendance && !state.features.plm) return '/attendance'
-  return '/multitable'
+  return '/home'
 }
 
 export function useFeatureFlags() {
@@ -460,5 +584,7 @@ export function useFeatureFlags() {
     isAttendanceFocused,
     isPlmWorkbenchFocused,
     resolveHomePath,
+    isFeatureOverrideAllowed,
+    setLocalFeatureOverride,
   }
 }

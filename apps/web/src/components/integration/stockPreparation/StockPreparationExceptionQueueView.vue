@@ -7,7 +7,7 @@
       data-testid="stock-prep-exception-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看异常确认队列。', 'Select a project to see the exception confirmation queue.') }}
+      {{ bi('请选择一个项目,这里会列出这个项目卡住的事。', 'Select a project and this page lists what is stuck on it.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -17,7 +17,7 @@
       data-testid="stock-prep-exception-loading"
       role="status"
     >
-      {{ bi('正在加载异常队列…', 'Loading exception queue…') }}
+      {{ bi('正在读取待处理的事…', 'Reading what needs handling…') }}
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
@@ -60,19 +60,19 @@
           )"
         >
           <span class="sp-exq__metric-label">
-            {{ bi('未解决阻断异常', 'Unresolved blocking') }}
+            {{ bi('卡着出不了料的事', 'Blocking the result') }}
             <span class="sp-exq__metric-caveat" data-testid="stock-prep-exception-blocking-caveat">
-              {{ bi('(当前筛选,展示口径)', '(current filter, display only)') }}
+              {{ bi('(按当前筛选统计,不是最终判定)', '(counted under the current filter, not the final verdict)') }}
             </span>
           </span>
           <span class="sp-exq__metric-value" data-testid="stock-prep-exception-blocking-count">{{ list.unresolvedBlockingCount }}</span>
         </div>
         <div class="sp-exq__metric" data-testid="stock-prep-exception-metric" data-kind="total">
-          <span class="sp-exq__metric-label">{{ bi('异常总数', 'Total exceptions') }}</span>
+          <span class="sp-exq__metric-label">{{ bi('一共几件事', 'Things in total') }}</span>
           <span class="sp-exq__metric-value">{{ list.rowCount }}</span>
         </div>
         <div class="sp-exq__metric sp-exq__metric--chips" data-testid="stock-prep-exception-metric" data-kind="type">
-          <span class="sp-exq__metric-label">{{ bi('按异常类型', 'By type') }}</span>
+          <span class="sp-exq__metric-label">{{ bi('按问题分', 'By what went wrong') }}</span>
           <span class="sp-exq__chips">
             <span
               v-for="entry in typeEntries"
@@ -80,11 +80,12 @@
               class="sp-exq__chip"
               data-testid="stock-prep-exception-type-count"
               :data-type="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ typeLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
         <div class="sp-exq__metric sp-exq__metric--chips" data-testid="stock-prep-exception-metric" data-kind="status">
-          <span class="sp-exq__metric-label">{{ bi('按状态', 'By status') }}</span>
+          <span class="sp-exq__metric-label">{{ bi('按进展分', 'By where it stands') }}</span>
           <span class="sp-exq__chips">
             <span
               v-for="entry in statusEntries"
@@ -92,7 +93,8 @@
               class="sp-exq__chip"
               data-testid="stock-prep-exception-status-count"
               :data-status="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ statusLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
       </header>
@@ -101,24 +103,24 @@
            the per-row and the bulk resolve stay disabled until the operator picks a reason. -->
       <div class="sp-exq__controls">
         <label class="sp-exq__field sp-exq__field--inline">
-          <span class="sp-exq__field-label">{{ bi('状态过滤', 'Status filter') }}</span>
+          <span class="sp-exq__field-label">{{ bi('只看这种进展', 'Show only') }}</span>
           <select v-model="statusFilter" data-testid="stock-prep-exception-filter-status">
             <option value="">{{ bi('全部', 'all') }}</option>
-            <option v-for="status in exceptionStatuses" :key="status" :value="status">{{ status }}</option>
+            <option v-for="status in exceptionStatuses" :key="status" :value="status">{{ statusLabel(status) }}</option>
           </select>
         </label>
         <label class="sp-exq__field sp-exq__field--inline">
-          <span class="sp-exq__field-label">{{ bi('类型过滤', 'Type filter') }}</span>
+          <span class="sp-exq__field-label">{{ bi('只看这类问题', 'Only this problem') }}</span>
           <select v-model="typeFilter" data-testid="stock-prep-exception-filter-type">
             <option value="">{{ bi('全部', 'all') }}</option>
-            <option v-for="type in exceptionTypes" :key="type" :value="type">{{ type }}</option>
+            <option v-for="type in exceptionTypes" :key="type" :value="type">{{ typeLabel(type) }}</option>
           </select>
         </label>
         <label class="sp-exq__field sp-exq__field--inline">
-          <span class="sp-exq__field-label">{{ bi('处理动作(必选)', 'Resolution action (required)') }}</span>
+          <span class="sp-exq__field-label">{{ bi('打算怎么处理(必选)', 'How to handle it (required)') }}</span>
           <select v-model="resolutionAction" data-testid="stock-prep-exception-action-select">
-            <option value="" disabled>{{ bi('请选择处理动作', 'Select a resolution action') }}</option>
-            <option v-for="action in resolutionActions" :key="action" :value="action">{{ action }}</option>
+            <option value="" disabled>{{ bi('请先选一个处理办法', 'Pick how to handle it first') }}</option>
+            <option v-for="action in resolutionActions" :key="action" :value="action">{{ actionLabel(action) }}</option>
           </select>
         </label>
       </div>
@@ -136,7 +138,7 @@
           :disabled="busy || !resolutionAction || selectedIds.length === 0 || mixedTypesSelected"
           @click="bulkResolve"
         >
-          {{ bi('批量解决', 'Bulk resolve') }}
+          {{ bi('选中的一起处理', 'Handle the selected ones together') }}
         </button>
         <span
           v-if="mixedTypesSelected"
@@ -145,23 +147,24 @@
           role="alert"
         >
           {{ bi(
-            '所选行的异常类型不一致——批量解决要求同一类型(同因闸,以服务端校验为准)。',
-            'Selected rows mix exception types — bulk resolve requires ONE shared type (same-reason gate; the server check stays authoritative).',
+            '您选的这几行不是同一类问题。一起处理只能用在同一类问题上 —— 请分批选,或逐条处理。',
+            'The rows you picked are not all the same kind of problem. Handling several at once only works within one kind — select them in batches, or handle them one by one.',
           ) }}
         </span>
       </div>
 
       <!-- Row-action feedback (values-free: clamped code / field NAME / mode enums / counts only). -->
       <p v-if="actionNotice" class="sp-exq__state sp-exq__state--ok" data-testid="stock-prep-exception-action-notice">
-        {{ bi('操作完成', 'Action done') }}: {{ actionNotice.mode }}
-        <template v-if="actionNotice.resolved !== null"> · {{ bi('已解决', 'resolved') }} {{ actionNotice.resolved }} · {{ bi('跳过', 'skipped') }} {{ actionNotice.skipped }}</template>
+        {{ bi('处理好了', 'Handled') }}<template v-if="actionNotice.resolved !== null">:{{ bi('处理了', 'handled') }} {{ actionNotice.resolved }} {{ bi('件,跳过', ', skipped') }} {{ actionNotice.skipped }} {{ bi('件(那几件已经处理过了)', ' that were already handled') }}</template>
+        <code class="sp-exq__token">{{ actionNotice.mode }}</code>
       </p>
       <p v-if="actionError" class="sp-exq__state sp-exq__state--warn" data-testid="stock-prep-exception-action-error" role="alert">
-        {{ bi('操作失败', 'Action failed') }} ({{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template>)
+        {{ bi(errorPlain(actionError.code).zh, errorPlain(actionError.code).en) }}
+        <code class="sp-exq__token">{{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template></code>
       </p>
 
       <p v-if="list.rowCount === 0" class="sp-exq__state sp-exq__state--muted" data-testid="stock-prep-exception-empty">
-        {{ bi('当前无异常行。', 'No exception rows.') }}
+        {{ bi('没有需要处理的事 —— 都清了。', 'Nothing to handle — it is all clear.') }}
       </p>
       <!-- VALUES-FREE queue rows: handles + enums + booleans only — the exception message (business
            text) never crosses the wire, so it can never render here. Resolved rows are READ-ONLY:
@@ -181,12 +184,12 @@
           <thead>
             <tr>
               <th scope="col" class="sp-exq__col-select">{{ bi('选择', 'Select') }}</th>
-              <th scope="col">{{ bi('异常标识', 'Exception handle') }}</th>
-              <th scope="col">{{ bi('类型', 'Type') }}</th>
-              <th scope="col">{{ bi('级别', 'Severity') }}</th>
-              <th scope="col">{{ bi('状态', 'Status') }}</th>
-              <th scope="col">{{ bi('处理动作', 'Resolution') }}</th>
-              <th scope="col">{{ bi('处理人', 'Resolver') }}</th>
+              <th scope="col">{{ bi('编号', 'Reference') }}</th>
+              <th scope="col">{{ bi('什么问题', 'What went wrong') }}</th>
+              <th scope="col">{{ bi('要紧程度', 'How urgent') }}</th>
+              <th scope="col">{{ bi('进展', 'Where it stands') }}</th>
+              <th scope="col">{{ bi('怎么处理的', 'How it was handled') }}</th>
+              <th scope="col">{{ bi('有人处理了吗', 'Someone handled it') }}</th>
               <th scope="col" class="sp-exq__col-action">{{ bi('操作', 'Actions') }}</th>
             </tr>
           </thead>
@@ -208,28 +211,31 @@
                 />
               </td>
               <td><code class="sp-exq__handle" data-testid="stock-prep-exception-row-handle">{{ row.exceptionId ?? '—' }}</code></td>
+              <!-- PLAIN FIRST, TOKEN KEPT. The badge says what went wrong in words; the element
+                   carrying the testid still holds the server enum, unchanged and byte-exact, because
+                   that is what an implementer greps and what the values-free suites pin. -->
               <td>
-                <span class="sp-exq__badge" data-testid="stock-prep-exception-row-type" :data-type="row.exceptionType ?? 'unknown'">
-                  {{ row.exceptionType ?? '—' }}
-                </span>
+                <span v-if="row.exceptionType" class="sp-exq__badge">{{ typeLabel(row.exceptionType) }}</span>
+                <code class="sp-exq__token" data-testid="stock-prep-exception-row-type" :data-type="row.exceptionType ?? 'unknown'">{{ row.exceptionType ?? '—' }}</code>
               </td>
               <td>
-                <span class="sp-exq__badge" data-testid="stock-prep-exception-row-severity" :data-severity="row.severity ?? 'unknown'">
-                  {{ row.severity ?? '—' }}
-                </span>
+                <span
+                  v-if="row.severity"
+                  class="sp-exq__badge"
+                  :class="{ 'sp-exq__badge--blocking': row.severity === 'blocking' }"
+                >{{ severityLabel(row.severity) }}</span>
+                <code class="sp-exq__token" data-testid="stock-prep-exception-row-severity" :data-severity="row.severity ?? 'unknown'">{{ row.severity ?? '—' }}</code>
               </td>
               <td>
-                <span class="sp-exq__badge" data-testid="stock-prep-exception-row-status" :data-status="row.status ?? 'unknown'">
-                  {{ row.status ?? '—' }}
-                </span>
+                <span v-if="row.status" class="sp-exq__badge">{{ statusLabel(row.status) }}</span>
+                <code class="sp-exq__token" data-testid="stock-prep-exception-row-status" :data-status="row.status ?? 'unknown'">{{ row.status ?? '—' }}</code>
               </td>
               <td>
-                <span class="sp-exq__badge" data-testid="stock-prep-exception-row-resolution" :data-action="row.resolutionAction ?? 'none'">
-                  {{ row.resolutionAction ?? '—' }}
-                </span>
+                <span v-if="row.resolutionAction" class="sp-exq__badge">{{ actionLabel(row.resolutionAction) }}</span>
+                <code class="sp-exq__token" data-testid="stock-prep-exception-row-resolution" :data-action="row.resolutionAction ?? 'none'">{{ row.resolutionAction ?? '—' }}</code>
               </td>
               <td data-testid="stock-prep-exception-row-resolver" :data-flag="String(row.resolvedByPresent)">
-                {{ row.resolvedByPresent ? bi('有', 'present') : bi('无', 'absent') }}
+                {{ row.resolvedByPresent ? bi('有', 'yes') : bi('无', 'not yet') }}
               </td>
               <td class="sp-exq__col-action">
                 <button
@@ -239,13 +245,45 @@
                   :disabled="row.resolved || !row.exceptionId || !resolutionAction || busy"
                   @click="resolveRow(row)"
                 >
-                  {{ bi('解决', 'Resolve') }}
+                  {{ bi('处理掉', 'Handle it') }}
                 </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <!-- The vocabularies this queue speaks, and the one caveat the blocking count carries. -->
+      <StockPrepTechnicalDetails testid="stock-prep-exception-tech">
+        <dl>
+          <dt>{{ bi('问题类型枚举', 'Exception-type vocabulary') }}</dt>
+          <dd>
+            <span v-for="type in exceptionTypes" :key="type"><code>{{ type }}</code> = {{ typeLabel(type) }}; </span>
+          </dd>
+          <dt>{{ bi('进展枚举', 'Status vocabulary') }}</dt>
+          <dd>
+            <span v-for="status in exceptionStatuses" :key="status"><code>{{ status }}</code> = {{ statusLabel(status) }}; </span>
+          </dd>
+          <dt>{{ bi('处理办法枚举', 'Resolution-action vocabulary') }}</dt>
+          <dd>
+            <span v-for="action in resolutionActions" :key="action"><code>{{ action }}</code> = {{ actionLabel(action) }}; </span>
+          </dd>
+          <dt>{{ bi('阻断计数的口径', 'What the blocking count is') }}</dt>
+          <dd>
+            {{ bi(
+              '当前视图筛选下的未解决阻断异常计数 —— 展示口径,并非生成闸实际执行的判定值;生成时服务端会基于全量重新计算真实值。',
+              'The unresolved blocking count under the current view filter — a display figure, not the value the generation gate enforces; the server recomputes it from the full set when generation runs.',
+            ) }}
+          </dd>
+          <dt>{{ bi('批量同因闸', 'Same-reason bulk gate') }}</dt>
+          <dd>
+            {{ bi(
+              '批量解决要求所选行 exceptionType 一致;前端只是镜像,服务端 409 EXCEPTION_BULK_MIXED_TYPES 为准。',
+              'A bulk resolve requires one shared exceptionType. The front end only mirrors that; the server\'s 409 EXCEPTION_BULK_MIXED_TYPES stays authoritative.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -281,6 +319,15 @@ import {
   type StockPreparationExceptionType,
   type StockPreparationResolutionAction,
 } from '../../../services/integration/stockPreparation/exceptionQueue'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_EXCEPTION_ACTION_PLAIN,
+  STOCK_PREP_EXCEPTION_SEVERITY_PLAIN,
+  STOCK_PREP_EXCEPTION_STATUS_PLAIN,
+  STOCK_PREP_EXCEPTION_TYPE_PLAIN,
+  stockPrepEnumPlain,
+  stockPrepErrorPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -298,6 +345,33 @@ const { locale } = useLocale()
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
+
+/**
+ * The four server vocabularies in words. Every one falls back to the raw token, so an enum added
+ * server-side reads exactly as it does today instead of blanking a cell — and the token itself is
+ * still on screen beside the words, because it is what a support thread quotes.
+ */
+function typeLabel(type: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_EXCEPTION_TYPE_PLAIN, type)
+  return plain ? bi(plain.zh, plain.en) : (type ?? '—')
+}
+
+function severityLabel(severity: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_EXCEPTION_SEVERITY_PLAIN, severity)
+  return plain ? bi(plain.zh, plain.en) : (severity ?? '—')
+}
+
+function statusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_EXCEPTION_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+function actionLabel(action: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_EXCEPTION_ACTION_PLAIN, action)
+  return plain ? bi(plain.zh, plain.en) : (action ?? '—')
+}
+
+const errorPlain = stockPrepErrorPlain
 
 const exceptionStatuses = STOCK_PREPARATION_EXCEPTION_STATUSES
 const exceptionTypes = STOCK_PREPARATION_EXCEPTION_TYPES
@@ -585,6 +659,21 @@ watch([statusFilter, typeFilter], reloadList)
   display: flex;
   flex-wrap: wrap;
   gap: var(--ms-space-1);
+}
+
+/* The server token, kept beside the words it means: still selectable and copyable, visibly
+   subordinate to the badge in front of it. */
+.sp-exq__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.sp-exq__badge--blocking {
+  background: var(--el-color-danger-light-9, #fde2e2);
+  color: var(--el-color-danger, #c45656);
 }
 
 .sp-exq__chip,

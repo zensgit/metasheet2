@@ -15,6 +15,7 @@ import {
   extractSelectOptions,
   isPersonSingleRecord,
   normalizeMultiSelectValue,
+  classifySelectCellValue,
   normalizeJson,
   normalizeJsonArray,
   validateLongTextValue,
@@ -40,6 +41,7 @@ import {
   isWriterFenceEnabled,
 } from './canonical-sheet-fence'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
 import {
@@ -48,11 +50,24 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
+import { isFieldAlwaysReadOnly, isFieldPermissionHidden, isFieldReadOnlyForPeople } from './permission-derivation'
+import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  RecordLinkFencePlanChangedError,
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  assertRecordLinkRestoreTargetsLive,
+  assertRecordLinkRestoreTrashStateCurrent,
+  enterLinkWriterFencePlan,
+  enterRecordLinkDeleteFencePlan,
+  enterRecordLinkRestoreFencePlan,
+  prepareLinkWriterFencePlan,
+  prepareRecordLinkDeleteFencePlan,
+  prepareRecordLinkRestoreFencePlan,
+} from './link-writer-fence'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
@@ -147,12 +162,21 @@ export class RecordNotFoundError extends Error {
 }
 
 export class RecordValidationError extends Error {
+  /**
+   * The field the refusal is about, when the throw site knows it. Copy-sheet (ADR §7.3 / CS-18) answers
+   * `{ rowIndex, fieldId, code }` and NEVER forwards `message` (it carries cell values — e.g. the
+   * out-of-set select option, the missing link id); every other route keeps reading `message`.
+   */
+  public readonly fieldId?: string
+
   constructor(
     message: string,
     public code: string = 'VALIDATION_ERROR',
+    fieldId?: string,
   ) {
     super(message)
     this.name = 'RecordValidationError'
+    if (typeof fieldId === 'string' && fieldId.length > 0) this.fieldId = fieldId
   }
 }
 
@@ -211,6 +235,56 @@ export class RecordPatchFieldValidationError extends Error {
   }
 }
 
+/**
+ * 「复制数据表（含数据）」的 `createRecord` 复制扩展（设计锁 ADR
+ * docs/development/multitable-copy-sheet-with-data-adr-20260926.md §7.3 —— 记录写路径唯一入口的**唯一变更**）。
+ *
+ * 存在时：
+ *   - `capabilities` 必须**就是** {@link COPY_SHEET_RECORD_CAPABILITIES} 这个常量对象（按引用比较），由复制路由
+ *     在两侧门通过后 mint；不从客户端或全局能力派生（否则只读的复制者在授权行写入后 `canCreateRecord=false`，
+ *     §4.4）。
+ *   - 校验 = shape-only（CS-21）：不跑 `property.validation`、person 名册/组限制、select/multiSelect 选项集；
+ *     link 外表记录存在 + 附件归属照跑。`null` / 空值键由调用方省略。
+ *   - `INSERT … created_at = startedAt + ordinal µs, created_by = createdBy`（CS-13：序数时间戳保序、保留源
+ *     `created_by`，write-own 行策略键于此）；`modified_by` = 复制者。
+ *   - 修订 `source = 'copy-sheet'`、`batchId` 共用一批（Time Machine 一批 create）。
+ *   - **抑制**（CS-19）：不 durable enqueue、不 legacy emit、不 realtime、不逐行 formula hook。
+ *   - 围栏**不变**：照旧取围栏；复制事务已在第 4 步持有全集，PG 咨询锁同会话重入零等待（§7.2）。
+ */
+export type RecordCopyWriteContext = {
+  /** 一次复制 = 一批修订。 */
+  batchId: string
+  /** 行序数（0 起）。`created_at = startedAt + ordinal µs`，保持源表默认列表序（ORDER BY created_at, id）。 */
+  ordinal: number
+  /** 复制事务起点（路由在事务内取一次，所有行共用）。 */
+  startedAt: Date
+  /** 源行的 `created_by`，原样保留（CS-13）。 */
+  createdBy: string | null
+}
+
+/** 修订 `source` 字面量：新表的 Time Machine 从一批这样的 create 修订开始（ADR §7.7）。 */
+export const COPY_SHEET_REVISION_SOURCE = 'copy-sheet'
+
+/**
+ * 复制路径写记录时的服务端常量能力（ADR §7.3）：只开 `canCreateRecord`，其余全关。冻结 + 按引用比较：
+ * `createRecord` 在 `copy` 存在时要求 `input.capabilities === COPY_SHEET_RECORD_CAPABILITIES`，
+ * 一个形状相同的别的对象（比如从客户端 / 全局能力派生出来的）会被拒绝。
+ */
+export const COPY_SHEET_RECORD_CAPABILITIES: Readonly<MultitableCapabilities> = Object.freeze({
+  canRead: false,
+  canCreateRecord: true,
+  canEditRecord: false,
+  canDeleteRecord: false,
+  canManageFields: false,
+  canManageSheetAccess: false,
+  canManageViews: false,
+  canComment: false,
+  canManageAutomation: false,
+  canExport: false,
+  canSendNotification: false,
+  canSubmitApproval: false,
+})
+
 export type RecordCreateInput = {
   sheetId: string
   data: Record<string, unknown>
@@ -218,6 +292,8 @@ export type RecordCreateInput = {
   capabilities: MultitableCapabilities
   /** OAPI-2a (§6): present only for a token write → committed audit row inserted IN-TXN (fail-closed). No-op for session. */
   oapiAudit?: OapiWriteAuditContext
+  /** Copy-sheet write context (ADR §7.3). Present ONLY on the copy-sheet path; see {@link RecordCopyWriteContext}. */
+  copy?: RecordCopyWriteContext
 }
 
 export type RecordCreateResult = {
@@ -450,7 +526,8 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       const property = normalizeJson(field.property)
       const base: FieldMutationGuard = {
         type: field.type,
-        readOnly: isFieldAlwaysReadOnly(field),
+        // Person write spine (REST single-record patch): always-read-only OR the human write lock.
+        readOnly: isFieldReadOnlyForPeople(field),
         hidden: isFieldPermissionHidden(field),
         property,
       }
@@ -466,6 +543,33 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       return [field.id, base] as const
     }),
   )
+}
+
+/**
+ * Copy-sheet shape-only normaliser for the two id-array types (`multiSelect`, `person`) — CS-21: the option
+ * set / member roster is NOT consulted (grandfathered source values are copied as they stand); only the
+ * SHAPE is enforced (an array of string|number ids, trimmed, deduped, order-preserving). Mirrors the array
+ * handling of `normalizeMultiSelectValue` / `validatePersonValue` minus their membership checks.
+ */
+function normalizeIdArrayShapeForCopy(value: unknown, fieldId: string, label: string): string[] {
+  if (value === null || value === undefined || value === '') return []
+  if (!Array.isArray(value)) {
+    throw new RecordValidationError(`${label} value must be an array for ${fieldId}`, 'VALIDATION_ERROR', fieldId)
+  }
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' && typeof item !== 'number') {
+      throw new RecordValidationError(`${label} value must be an array of strings for ${fieldId}`, 'VALIDATION_ERROR', fieldId)
+    }
+    const option = String(item).trim()
+    if (!option) continue
+    if (!seen.has(option)) {
+      seen.add(option)
+      normalized.push(option)
+    }
+  }
+  return normalized
 }
 
 function buildDirectValidationFields(rows: unknown[]) {
@@ -521,6 +625,16 @@ export class RecordService {
 
   async createRecord(input: RecordCreateInput): Promise<RecordCreateResult> {
     const { sheetId, data, actorId, capabilities } = input
+    // ADR §7.3: the copy extension is active ONLY when the caller hands the server constant capability object
+    // itself. Any other object — even one with the same shape — is refused BEFORE any read, so a copy path
+    // can never run on client- or globally-derived capabilities.
+    const copy = input.copy ?? null
+    if (copy && capabilities !== COPY_SHEET_RECORD_CAPABILITIES) {
+      throw new RecordPermissionError('Copy-sheet writes require the server copy capability constant')
+    }
+    if (copy && (!Number.isInteger(copy.ordinal) || copy.ordinal < 0 || !(copy.startedAt instanceof Date) || !copy.batchId)) {
+      throw new RecordValidationError('Copy-sheet write context is malformed', 'COPY_CONTEXT_INVALID')
+    }
 
     const sheetRes = await this.pool.query(
       'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
@@ -546,12 +660,21 @@ export class RecordService {
       data: patch,
       actorId,
     })
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
     const recordRes = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
       // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
       // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
-      await acquireCanonicalSheetFence(query, sheetId)
-      if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+      } else {
+        await acquireCanonicalSheetFence(query, sheetId)
+        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      }
       // W0-1 L6-a: mint the sealed operation AFTER the fence (so seq reflects commit order). Inert when the
       // fence flag is off / L6 migration absent ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
@@ -578,11 +701,26 @@ export class RecordService {
         const fid = typeof row.id === 'string' ? row.id : ''
         if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
+      // Human write lock (human-write-lock.ts), read off the RAW stored property: the create guard map keeps
+      // no property for scalar types, and a person must not seed a PLM-system column on a NEW row either
+      // (REST create and xlsx import land here; record duplicate already drops read-only fields upstream via
+      // `deriveFieldPermissions`). Closed code, 403 at POST /records. The copy-sheet caller never meets a
+      // lock: `remapFieldProperty` drops it from the copy's fields.
+      const humanLockKindByFieldId = new Map<string, NonNullable<ReturnType<typeof fieldHumanWriteLockKind>>>()
+      for (const row of fieldRes.rows as Array<Record<string, unknown>>) {
+        const kind = fieldHumanWriteLockKind({ property: row.property })
+        if (kind && typeof row.id === 'string') humanLockKindByFieldId.set(row.id, kind)
+      }
 
       for (const [fieldId, value] of Object.entries(data)) {
         const field = fieldById.get(fieldId)
         if (!field) {
-          throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
+          throw new RecordValidationError(`Unknown fieldId: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
+        }
+
+        const humanLockKind = humanLockKindByFieldId.get(fieldId)
+        if (humanLockKind) {
+          throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${fieldId}`, fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 
         if (isFieldAlwaysReadOnly(field)) {
@@ -590,29 +728,42 @@ export class RecordService {
         }
 
         if (field.type === 'person') {
+          if (copy) {
+            // CS-21: shape only — the roster / group restriction is a WRITE-time gate for new input; the
+            // source cell is a grandfathered fact (a deactivated user stays a deactivated user).
+            patch[fieldId] = normalizeIdArrayShapeForCopy(value, fieldId, 'Person')
+            continue
+          }
           try {
             const allowed = await resolvePersonAllowed(personRestrictByFieldId.get(fieldId) ?? [])
             patch[fieldId] = validatePersonValue(value, fieldId, allowed, isPersonSingleRecord(field.property))
           } catch (error) {
-            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error), 'VALIDATION_ERROR', fieldId)
           }
           continue
         }
 
         if (field.type === 'select') {
           if (typeof value !== 'string') {
-            throw new RecordValidationError(`Select value must be string: ${fieldId}`)
+            throw new RecordValidationError(`Select value must be string: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
           }
-          const allowed = new Set(field.options ?? [])
-          if (value !== '' && !allowed.has(value)) {
-            throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
+          // CS-21: a copy keeps an out-of-set option as it stands (the source already holds it).
+          if (!copy) {
+            const allowed = new Set(field.options ?? [])
+            if (value !== '' && !allowed.has(value)) {
+              throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`, 'VALIDATION_ERROR', fieldId)
+            }
           }
         }
         if (field.type === 'multiSelect') {
+          if (copy) {
+            patch[fieldId] = normalizeIdArrayShapeForCopy(value, fieldId, 'Multi-select')
+            continue
+          }
           try {
             patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
           } catch (error) {
-            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error), 'VALIDATION_ERROR', fieldId)
           }
           continue
         }
@@ -621,11 +772,11 @@ export class RecordService {
           if (field.link) {
             const ids = normalizeLinkIds(value)
             if (field.link.limitSingleRecord && ids.length > 1) {
-              throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`)
+              throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
             }
             const tooLong = ids.find((id) => id.length > 50)
             if (tooLong) {
-              throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
+              throw new RecordValidationError(`Link id too long (>50): ${tooLong}`, 'VALIDATION_ERROR', fieldId)
             }
 
             if (ids.length > 0) {
@@ -642,6 +793,8 @@ export class RecordService {
               if (missing.length > 0) {
                 throw new RecordValidationError(
                   `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
+                  'LINK_TARGET_NOT_FOUND',
+                  fieldId,
                 )
               }
             }
@@ -652,7 +805,7 @@ export class RecordService {
           }
 
           if (typeof value !== 'string') {
-            throw new RecordValidationError(`Link value must be string: ${fieldId}`)
+            throw new RecordValidationError(`Link value must be string: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
           }
         }
 
@@ -660,7 +813,7 @@ export class RecordService {
           const ids = normalizeAttachmentIdsShared(value)
           const tooLong = ids.find((id) => id.length > 100)
           if (tooLong) {
-            throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
+            throw new RecordValidationError(`Attachment id too long: ${tooLong}`, 'VALIDATION_ERROR', fieldId)
           }
           const attachmentError = await ensureAttachmentIdsExistShared({
             query,
@@ -669,7 +822,7 @@ export class RecordService {
             attachmentIds: ids,
           })
           if (attachmentError) {
-            throw new RecordValidationError(attachmentError)
+            throw new RecordValidationError(attachmentError, 'VALIDATION_ERROR', fieldId)
           }
           patch[fieldId] = ids
           continue
@@ -684,7 +837,7 @@ export class RecordService {
           try {
             patch[fieldId] = validateLongTextValue(value, fieldId, field.property)
           } catch (error) {
-            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error), 'VALIDATION_ERROR', fieldId)
           }
           continue
         }
@@ -693,7 +846,7 @@ export class RecordService {
           try {
             patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
           } catch (error) {
-            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error), 'VALIDATION_ERROR', fieldId)
           }
           continue
         }
@@ -701,12 +854,16 @@ export class RecordService {
         patch[fieldId] = value
       }
 
-      const directValidationResult = validateRecord(
-        buildDirectValidationFields(fieldRes.rows),
-        patch,
-      )
-      if (!directValidationResult.valid) {
-        throw new RecordValidationFailedError(directValidationResult.errors)
+      // CS-21: the copy path skips `property.validation` (required / min / max / regex …) — the source rows
+      // are grandfathered facts and a snapshot must not do the source table's homework.
+      if (!copy) {
+        const directValidationResult = validateRecord(
+          buildDirectValidationFields(fieldRes.rows),
+          patch,
+        )
+        if (!directValidationResult.valid) {
+          throw new RecordValidationFailedError(directValidationResult.errors)
+        }
       }
 
       Object.assign(patch, await allocateAutoNumberValues(query, sheetId, Array.from(fieldById, ([id, field]) => ({
@@ -714,13 +871,27 @@ export class RecordService {
         type: field.type,
         property: field.property,
       }))))
-      // revision-emitted: REST createRecord — recordRecordRevision(action:'create') below, same txn.
-      const inserted = await query(
-        `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
-         VALUES ($1, $2, $3::jsonb, 1, $4, $4)
-         RETURNING version`,
-        [recordId, sheetId, JSON.stringify(patch), actorId],
-      )
+      // Copy-sheet (CS-13 / §7.3): `created_at` is the copy transaction's start + the row ordinal in
+      // MICROSECONDS, so the new sheet's default list order (created_at ASC, id ASC) reproduces the source
+      // order exactly — `DEFAULT now()` is the transaction start for EVERY row of a single transaction, so
+      // 2000 rows would tie and sort by random id. `created_by` keeps the SOURCE creator (write-own row
+      // policy keys on it); `modified_by` is the copier. Both INSERTs below are followed by the SAME
+      // recordRecordRevision(action:'create') in this transaction (OD-6 disposition markers per statement).
+      const inserted = copy
+        // revision-emitted: copy-sheet createRecord — recordRecordRevision(action:'create', source:'copy-sheet', batchId) below, same txn.
+        ? await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at)
+           VALUES ($1, $2, $3::jsonb, 1, $4, $5, $6::timestamptz + ($7::int * interval '1 microsecond'))
+           RETURNING version`,
+          [recordId, sheetId, JSON.stringify(patch), copy.createdBy, actorId, copy.startedAt.toISOString(), copy.ordinal],
+        )
+        // revision-emitted: REST createRecord — recordRecordRevision(action:'create') below, same txn.
+        : await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4, $4)
+           RETURNING version`,
+          [recordId, sheetId, JSON.stringify(patch), actorId],
+        )
 
       if (linkUpdates.size > 0) {
         // Bidirectional / mirror links (design 2026-06-14 §4): a forward link write here changes what the
@@ -755,12 +926,15 @@ export class RecordService {
         recordId,
         version,
         action: 'create',
-        source: 'rest',
+        // Copy-sheet: ONE batch per copy (`copy.batchId`) so the new sheet's history starts as a single
+        // 'copy-sheet' batch (ADR §7.7); the REST path keeps its per-row default batch.
+        source: copy ? COPY_SHEET_REVISION_SOURCE : 'rest',
         actorId,
         changedFieldIds: Object.keys(patch),
         patch,
         snapshot: patch,
         ledger: op,
+        ...(copy ? { batchId: copy.batchId } : {}),
       })
 
       // OAPI-2a §6: committed token-write audit INSIDE the create txn (fail-closed). No-op for session.
@@ -773,11 +947,21 @@ export class RecordService {
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the INSERT +
       // revision above (any validation/permission throw rolls back and enqueues nothing by construction).
       // Flag OFF ⇒ no-op (the legacy emit below fires instead). `patch` is fully populated by this point.
-      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', createdEventPayload)
+      // Copy-sheet (CS-19): SUPPRESSED — no per-row `record.created` leaves the copy path on either leg;
+      // the route emits at most one values-free `multitable.sheet.copied` after COMMIT.
+      if (!copy) {
+        await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', createdEventPayload)
+      }
       return inserted
     })
 
     const version = Number((recordRes.rows[0] as { version?: unknown } | undefined)?.version ?? 1)
+
+    // Copy-sheet (CS-19 / §7.3): no per-row formula hook, no per-row realtime, no legacy emit. The route
+    // recomputes formulas once, chunked, after COMMIT and reports the outcome in its own 201 body.
+    if (copy) {
+      return { recordId, version, data: patch }
+    }
 
     // A-min-create (#2255): compute the new record's same-record formula fields (lookup/rollup
     // hydrated) now that insert + meta_links are committed, and merge the formula values into the
@@ -854,6 +1038,12 @@ export class RecordService {
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
+    const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      recordId,
+    )
+
     // P1#2 REPLACE — build the deleted-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
     // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
     const deletedEventPayload = withAutomationEventId({
@@ -864,7 +1054,8 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
       // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+      else await fenceWriterEntry(query, sheetId)
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const lockedRecordRes = await query(
@@ -1137,13 +1328,40 @@ export class RecordService {
 
     let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
     const inboundEnabled = isRecordUndeleteInboundEnabled()
+    const collectOutboundTargets = (data: Record<string, unknown>) => linkFieldIds
+      .map((fieldId) => ({ fieldId, recordIds: normalizeLinkIds(data[fieldId]) }))
+      .filter(({ recordIds }) => recordIds.length > 0)
+    const restoreLinkFencePlan = await prepareRecordLinkRestoreFencePlan(
+      this.pool.query.bind(this.pool),
+      {
+        sourceSheetId: sheetId,
+        deleteRevisionId: inboundEnabled && typeof trashRow.delete_revision_id === 'string'
+          ? trashRow.delete_revision_id
+          : null,
+        candidateFieldIds: Object.keys(snapshot),
+        outboundTargets: collectOutboundTargets(snapshot),
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof RecordLinkFencePlanChangedError) {
+        throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+      }
+      throw error
+    })
     // P1#2 REPLACE — build the restored(created)-event payload ONCE (stable `_eventId`) so the same-txn durable
     // enqueue (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same identity.
     const restoredEventPayload = withAutomationEventId({ sheetId, recordId, actorId })
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      try {
+        if (restoreLinkFencePlan) await enterRecordLinkRestoreFencePlan(query, restoreLinkFencePlan)
+        else await fenceWriterEntry(query, sheetId)
+      } catch (error) {
+        if (error instanceof RecordLinkFencePlanChangedError) {
+          throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+        }
+        throw error
+      }
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
@@ -1155,6 +1373,19 @@ export class RecordService {
       }
       const lockedRow = locked.rows[0] as Record<string, unknown>
       const deleteRevisionId = typeof lockedRow.delete_revision_id === 'string' ? lockedRow.delete_revision_id : null
+      if (restoreLinkFencePlan) {
+        try {
+          assertRecordLinkRestoreTrashStateCurrent(restoreLinkFencePlan, {
+            deleteRevisionId: inboundEnabled ? deleteRevisionId : null,
+            outboundTargets: collectOutboundTargets(normalizeJson(lockedRow.data)),
+          })
+        } catch (error) {
+          if (error instanceof RecordLinkFencePlanChangedError) {
+            throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+          }
+          throw error
+        }
+      }
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
@@ -1175,6 +1406,16 @@ export class RecordService {
           throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
         }
         throw err
+      }
+      if (restoreLinkFencePlan) {
+        try {
+          await assertRecordLinkRestoreTargetsLive(query, restoreLinkFencePlan)
+        } catch (error) {
+          if (error instanceof RecordLinkFencePlanChangedError) {
+            throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+          }
+          throw error
+        }
       }
       // Rebuild outbound meta_links from the restored snapshot (same insert shape as create/patch).
       for (const fieldId of linkFieldIds) {
@@ -1202,7 +1443,13 @@ export class RecordService {
       if (inboundEnabled) {
         if (deleteRevisionId) {
           try {
-            const replay = await replayInboundLinks(query, deleteRevisionId)
+            const replay = await replayInboundLinks(
+              query,
+              deleteRevisionId,
+              restoreLinkFencePlan
+                ? { allowedParticipantSheetIds: restoreLinkFencePlan.participantSheetIds }
+                : undefined,
+            )
             inboundOut = { ...replay, recoverable: replay.total > 0 }
           } catch (error) {
             if (isRetryableLiveLinkDatabaseConflict(error)) {
@@ -1258,6 +1505,11 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
     const patchActorId = input.actorId ?? access.userId ?? null
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
 
     const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
     if (fields.length === 0) {
@@ -1265,6 +1517,9 @@ export class RecordService {
     }
 
     const fieldById = buildFieldMutationGuardMap(fields)
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const fieldErrors: Record<string, string> = {}
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -1304,12 +1559,12 @@ export class RecordService {
         continue
       }
       if (field.type === 'select') {
-        if (typeof value !== 'string') {
+        const verdict = classifySelectCellValue(value, field.options ?? [])
+        if (verdict === 'not_string') {
           fieldErrors[fieldId] = 'Select value must be a string'
           continue
         }
-        const allowed = new Set(field.options ?? [])
-        if (value !== '' && !allowed.has(value)) {
+        if (verdict === 'not_in_options') {
           fieldErrors[fieldId] = 'Invalid select option'
           continue
         }
@@ -1443,7 +1698,30 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+        for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+          if (ids.length === 0) continue
+          const exists = await query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            [cfg.foreignSheetId, ids],
+          )
+          const found = new Set(
+            (exists.rows as Array<Record<string, unknown>>)
+              .map((row) => (typeof row.id === 'string' ? row.id : ''))
+              .filter((id) => id.length > 0),
+          )
+          if (ids.some((id) => !found.has(id))) {
+            throw new RecordPatchFieldValidationError({ [fieldId]: 'Linked record not found' })
+          }
+        }
+      } else {
+        await fenceWriterEntry(query, sheetId)
+      }
+      // Field retype slice 3a (ADR §3.11 row 4, REST + OAPI single-record PATCH): `fieldById` was loaded through
+      // the pool BEFORE this transaction and the patch was validated against it. Re-read the touched fields FOR
+      // SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift. No query unless the conversion flag AND the writer fence are both on.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, fieldById, Object.keys(data))
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const currentRes = await query(

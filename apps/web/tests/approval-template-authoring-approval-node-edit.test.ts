@@ -1,21 +1,32 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalAssigneeSource, ApprovalAssigneeSourceKind, ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
+  approvalNodeEditHiddenBlockLiveErrors,
   buildApprovalGraph,
   draftFromTemplate,
+  isComplexApprovalGraph,
+  setStepApprovalType,
+  stepHiddenBlockLiveErrors,
   unsupportedTemplateAuthoringReason,
+  validateTemplateApprovalFlow,
   validateTemplateDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import {
   addAssigneeSourceCard,
   applyApprovalNodeEditsToGraph,
+  applyApprovalTypeChoice,
+  approvalNodeEditOmitsAssigneeSources,
   approvalNodeEditsFromGraph,
+  isSourcelessAutoApproveNode,
+  legalPriorApproverNodeKeys,
+  multisetDifference,
   placeholderRoleNodeKeys,
   removeAssigneeSourceCard,
   validateApprovalNodeEdits,
   type ApprovalNodeEdits,
 } from '../src/approvals/approvalNodeEdit'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 
 // Approval-node editing inside the graph authoring model. PURE-LOGIC tests (no .vue)
 // so they run under approval-web-guard. The GATE is topology + cross-phase + WITHIN-NODE
@@ -255,14 +266,156 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', assigneeSources: [{ kind: 'dept_head_at_level', level: 1.5 }] },
     })[0]).toMatch(/dept_head_at_level/)
   })
-  // Lock-3 §1.5 deferral invariant: dept_head_at_level (K5-b) is NOT in the handler roster in
-  // this slice (Lock-3's forward ADMIT is a separate follow-up — see
-  // approval-handler-node-authoring.spec.ts's exact-set test). A handler carrying it must fail
-  // closed here too.
-  it('Lock-3 §1.5 deferral: a HANDLER node carrying dept_head_at_level is rejected (not in the seven-member handler roster)', () => {
+  it('Lock-2 §L2-C: form_field_user_manager / form_field_user_dept_head — a schema-present fieldId + positive integer level passes; blank/dangling fieldId and 0/non-integer level are flagged (isAssigneeSourceValid mirror site)', () => {
+    const fields = [{ id: 'contact', type: 'user' as const, label: '联系人' }]
+    for (const kind of ['form_field_user_manager', 'form_field_user_dept_head'] as const) {
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 2 }] },
+      }, fields)).toEqual([])
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: '', level: 2 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'dangling', level: 2 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 0 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 1.5 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+    }
+  })
+  // Lock-2 §2.4: the contact-extension pair IS handler-admitted — a handler edit carrying either
+  // kind must PASS the roster check (positive control for the 7→9 growth).
+  it('Lock-2 §2.4: a HANDLER node carrying form_field_user_manager / form_field_user_dept_head passes the handler roster', () => {
+    const fields = [{ id: 'contact', type: 'user' as const, label: '联系人' }]
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }] },
+    }, fields)).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }] },
+    }, fields)).toEqual([])
+  })
+
+  // W1-1d — Lock-3 §1.5 forward rows (RATIFIED), quoted: "`user_group` (K1), `requester_choice`
+  // (K2) and `dept_head_at_level` (K5-b) ADMIT". The preview mirrors the widened
+  // HANDLER_ASSIGNEE_SOURCE_KINDS (9→12): a handler edit carrying any of the three now PASSES the
+  // roster check (before W1-1d, dept_head_at_level and user_group were deferral negatives here).
+  // The per-kind SHAPE rule still applies on a handler exactly as on an approval node — the
+  // malformed-shape controls below are flagged as 配置无效 (shape), never 不支持 (roster), so
+  // passing is the roster's doing, not a blanket handler exemption.
+  it('W1-1d / Lock-3 §1.5: a HANDLER node carrying dept_head_at_level / user_group / requester_choice passes the handler roster; a malformed shape is still flagged', () => {
     expect(validateApprovalNodeEdits({
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] },
-    })[0]).toMatch(/dept_head_at_level/)
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 0 }] },
+    })[0]).toMatch(/dept_head_at_level）配置无效/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: [] }] },
+    })[0]).toMatch(/user_group）配置无效/)
+  })
+  // Lock-3 §1.5 "do NOT" row: continuous_dept_heads (K4) stays OUT of the handler roster — the
+  // negative control proving the W1-1d widening is row-selected, not a blanket handler admission
+  // (flagged as 不支持 = roster, not 配置无效 = shape).
+  it('Lock-1 §K4 / Lock-3 §1.5 "do NOT": a HANDLER node carrying continuous_dept_heads is rejected (not in the handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 2 }] },
+    })[0]).toMatch(/continuous_dept_heads）不支持/)
+  })
+
+  it('Lock-1 §K3: prior_node_approver — a non-empty nodeKey passes; an empty/blank one is flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '' }] },
+    })[0]).toMatch(/prior_node_approver/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '   ' }] },
+    })[0]).toMatch(/prior_node_approver/)
+  })
+  // Lock-3 §1.5: prior_node_approver (K3) has NO handler row at all (not even a forward ADMIT) —
+  // a handler carrying it must fail closed.
+  it('Lock-1 §K3 / Lock-3 §1.5: a HANDLER node carrying prior_node_approver is rejected (not in the handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
+    })[0]).toMatch(/prior_node_approver/)
+  })
+
+  it('Lock-1 §K1: user_group — a non-empty groupIds array passes; empty / blank-only entries are flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: [] }] },
+    })[0]).toMatch(/user_group/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: ['   '] }] },
+    })[0]).toMatch(/user_group/)
+  })
+})
+
+// Lock-1 §K3 — legalPriorApproverNodeKeys: the FE mirror of the backend publish dominance gate
+// (`assertPriorNodeApproverReferencesUpstream`), driving the typed node picker. Candidate ⟺
+// approval node, ≠ carrier, strictly upstream on EVERY runtime-reachable path (removal test).
+// The full shape matrix (condition-branch / parallel-sibling / downstream / dangling) is owned by
+// the backend gate's own unit suite; this proves the MIRROR agrees on the discriminating shapes.
+describe('Lock-1 §K3: legalPriorApproverNodeKeys (typed picker candidates)', () => {
+  it('linear chain: offers exactly the strictly-earlier approval nodes (never self, never downstream, never start/end)', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'a1', type: 'approval', name: '一审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'a2', type: 'approval', name: '二审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'a3', type: 'approval', name: '三审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'a1' },
+        { key: 'e2', source: 'a1', target: 'a2' },
+        { key: 'e3', source: 'a2', target: 'a3' },
+        { key: 'e4', source: 'a3', target: 'end' },
+      ],
+    }
+    expect(legalPriorApproverNodeKeys(graph, 'a3')).toEqual(['a1', 'a2'])
+    expect(legalPriorApproverNodeKeys(graph, 'a2')).toEqual(['a1'])
+    // The first approval node has nothing upstream — an empty candidate list (positive control
+    // that the non-empty lists above are carrier-selected, not a constant).
+    expect(legalPriorApproverNodeKeys(graph, 'a1')).toEqual([])
+  })
+
+  it('condition merge: a node reachable only through ONE branch is NOT offered after the merge; the pre-condition node is', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'pre', type: 'approval', name: '预审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'route', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'edge-b1', rules: [{ fieldId: 'amount', operator: 'gt', value: 1 }] }], defaultEdgeKey: 'edge-b2' } },
+        { key: 'branch-a', type: 'approval', name: '高额', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'branch-b', type: 'approval', name: '低额', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'merge', type: 'approval', name: '终审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'pre' },
+        { key: 'e2', source: 'pre', target: 'route' },
+        { key: 'edge-b1', source: 'route', target: 'branch-a' },
+        { key: 'edge-b2', source: 'route', target: 'branch-b' },
+        { key: 'e3', source: 'branch-a', target: 'merge' },
+        { key: 'e4', source: 'branch-b', target: 'merge' },
+        { key: 'e5', source: 'merge', target: 'end' },
+      ],
+    }
+    expect(legalPriorApproverNodeKeys(graph, 'merge')).toEqual(['pre'])
+    // Within a branch, the pre-condition node is still on every path — offered.
+    expect(legalPriorApproverNodeKeys(graph, 'branch-a')).toEqual(['pre'])
   })
 })
 
@@ -374,6 +527,50 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   })
   it('K5-b: a dept_head_at_level source with an unknown extra key forces read-only', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2, futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-2 §L2-C — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: the contact-extension pair
+  // must be ALLOWED (present in the allowlist) on the complex path, and an extra key must still
+  // be caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K6: form_field_user_manager / form_field_user_dept_head are allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }] }),
+    ))).toBeNull()
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }] }),
+    ))).toBeNull()
+  })
+  it('K6: a contact-extension source with an unknown extra key forces read-only', () => {
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2, futureFlag: true }] }),
+    ))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1, futureFlag: true }] }),
+    ))).not.toBeNull()
+  })
+
+  // Lock-1 §K3 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: prior_node_approver must be
+  // ALLOWED (present in the allowlist) on the complex path, and an extra key on it must still be
+  // caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K3: prior_node_approver is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_0' }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K3: a prior_node_approver source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_0', futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-1 §K1 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: user_group must be ALLOWED
+  // (present in the allowlist) on the complex path, and an extra key on it must still be caught
+  // (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K1: user_group is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K1: a user_group source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'], futureFlag: true }] })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })
@@ -596,5 +793,384 @@ describe('P1-B: placeholderRoleNodeKeys widened to ALL sources (backend assertNo
       },
     }
     expect(placeholderRoleNodeKeys(edits)).toEqual([])
+  })
+})
+
+// I3 (residual-hardening, 2026-08-19; closes the linear/authoring half of P1-C's "single door"
+// discipline). templateAuthoring.ts:1244's `if (!['static_user', ... 'form_field_user_dept_head']
+// .includes(source?.kind)) return true` is the LINEAR branch's OWN inline allowlist — a SEPARATE
+// hand-maintained list from the complex path's BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND (the file warns
+// at :858-862 they must not be shared/derived from one another). stepDraftFromApprovalNode defaults
+// sourceKind to 'requester' (:631) for any kind it doesn't recognize, so a hole in THIS guard means
+// hydrate silently flattens an out-of-registry kind to 'requester' and persistDraft re-saves the
+// flattened value — i.e. a real 会签/自定义源 loses its configuration on the very next save. This is
+// the exact linear analogue of the already-covered P1-C approvalMode "single door" at :1220. The
+// COMPLEX path already covers the kind guard (node-edit spec above, 'flags an unknown assignee
+// source KIND', via complexWith() forcing the complex branch) and the display-degradation half is
+// covered too (approval-assignee-source.test.ts). The LINEAR authoring-guard half was the one
+// genuine gap this closes.
+describe('I3 — LINEAR path assignee-source-kind allowlist (fail-closed, closes the linear half of the P1-C single-door discipline)', () => {
+  // Two linear approval nodes (not one): `prior_node_approver`'s own shape check requires a
+  // STRICTLY-EARLIER approval node in the ordered chain, so the per-kind loop below needs a real
+  // upstream approval node to reference when it is approval_1's turn.
+  function buildLinearTwoStepGraph(secondSource: ApprovalAssigneeSource): ApprovalGraph {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'approval_0', type: 'approval', name: '一级',
+          config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+        },
+        {
+          key: 'approval_1', type: 'approval', name: '二级',
+          config: { assigneeSources: [secondSource], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_0', source: 'start', target: 'approval_0' },
+        { key: 'edge-approval_0-approval_1', source: 'approval_0', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('sanity: this fixture is genuinely LINEAR (isComplexApprovalGraph is false), so the linear branch under test is the one that actually runs', () => {
+    const graph = buildLinearTwoStepGraph({ kind: 'direct_manager' })
+    expect(isComplexApprovalGraph(graph)).toBe(false)
+  })
+
+  it('NEGATIVE: an out-of-registry assignee-source kind on a LINEAR graph forces read-only (blocks the :631 default-requester flatten)', () => {
+    const graph = buildLinearTwoStepGraph({ kind: 'future_kind' } as unknown as ApprovalAssigneeSource)
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Every SHIPPED kind, well-formed, must stay editable on the linear path — this loop is also the
+  // guard against the INVERSE drift (a shipped kind accidentally dropped from the :1244 inline
+  // list, which would falsely force a real template read-only).
+  const VALID_SHAPE_BY_KIND: Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource> = {
+    static_user: { kind: 'static_user', userIds: ['u1'] },
+    static_role: { kind: 'static_role', roleIds: ['r1'] },
+    requester: { kind: 'requester' },
+    form_field_user: { kind: 'form_field_user', fieldId: 'mgr_field' },
+    direct_manager: { kind: 'direct_manager' },
+    dept_head: { kind: 'dept_head' },
+    continuous_managers: { kind: 'continuous_managers', levels: 2 },
+    manager_at_level: { kind: 'manager_at_level', level: 2 },
+    requester_choice: { kind: 'requester_choice', mode: 'single', scope: { type: 'company' } },
+    continuous_dept_heads: { kind: 'continuous_dept_heads', levels: 2 },
+    dept_head_at_level: { kind: 'dept_head_at_level', level: 2 },
+    // References approval_0 — the strictly-earlier approval node buildLinearTwoStepGraph seeds.
+    prior_node_approver: { kind: 'prior_node_approver', nodeKey: 'approval_0' },
+    user_group: { kind: 'user_group', groupIds: ['g1'] },
+    form_field_user_manager: { kind: 'form_field_user_manager', fieldId: 'mgr_field', level: 1 },
+    form_field_user_dept_head: { kind: 'form_field_user_dept_head', fieldId: 'mgr_field', level: 1 },
+  }
+
+  for (const kind of Object.keys(VALID_SHAPE_BY_KIND) as ApprovalAssigneeSourceKind[]) {
+    it(`POSITIVE (${kind}): a shipped kind with a well-formed shape stays editable on the LINEAR path`, () => {
+      const graph = buildLinearTwoStepGraph(VALID_SHAPE_BY_KIND[kind])
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+    })
+  }
+})
+
+// ── Lock-4 §1 F4-A — the canvas edit model for approvalType (审批类型) ─────────────────────────────
+// docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A: "Assignee resolution is SKIPPED,
+// so an empty source list is legal here and only here". The backend 400s an EMPTY `assigneeSources`
+// array even for auto_approve (`normalizeApprovalAssigneeSources`: "must not be empty"), so a
+// sourceless node carries NO key at all. Before this slice such a node was never seeded into the edit
+// model (it was cloned verbatim and was not editable on the canvas).
+const F4A_EDIT_GRAPH: ApprovalGraph = {
+  nodes: [
+    { key: 'start', type: 'start', name: '发起', config: {} },
+    { key: 'auto_1', type: 'approval', name: '自动', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' } as never },
+    { key: 'manual_1', type: 'approval', name: '主管', config: { assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'all', emptyAssigneePolicy: 'error' } },
+    { key: 'approval_legacy', type: 'approval', name: '旧式', config: { assigneeType: 'role', assigneeIds: ['legacy_role'], approvalMode: 'single' } },
+    { key: 'handler_1', type: 'handler', name: '办理', config: { assigneeSources: [{ kind: 'requester' }] } },
+    { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+    { key: 'end', type: 'end', name: '结束', config: {} },
+  ],
+  edges: [
+    { key: 'e1', source: 'start', target: 'auto_1' },
+    { key: 'e2', source: 'auto_1', target: 'manual_1' },
+    { key: 'e3', source: 'manual_1', target: 'approval_legacy' },
+    { key: 'e4', source: 'approval_legacy', target: 'handler_1' },
+    { key: 'e5', source: 'handler_1', target: 'cc_1' },
+    { key: 'e6', source: 'cc_1', target: 'end' },
+  ],
+}
+
+describe('Lock-4 §1 F4-A — seeding and rebuilding a sourceless auto_approve node on the canvas', () => {
+  it('isSourcelessAutoApproveNode admits ONLY an approval node that is auto_approve with no assignee carrier at all', () => {
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'auto_1'))).toBe(true)
+    // POSITIVE CONTROLS — each neighbouring shape is excluded.
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'manual_1'))).toBe(false)
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'approval_legacy'))).toBe(false)
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'handler_1'))).toBe(false)
+    expect(isSourcelessAutoApproveNode({ key: 'x', type: 'approval', name: 'x', config: { approvalType: 'manual' } as never })).toBe(false)
+    expect(isSourcelessAutoApproveNode({ key: 'x', type: 'approval', name: 'x', config: { approvalType: 'auto_approve', assigneeType: 'role', assigneeIds: ['r'] } as never })).toBe(false)
+  })
+
+  it('seeds the sourceless node (empty card list + omit flag); a legacy node is still NOT seeded; a pre-F4-A node gets no approvalType key', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(edits.auto_1).toEqual({
+      nodeKey: 'auto_1',
+      assigneeSources: [],
+      approvalMode: 'single',
+      approvalType: 'auto_approve',
+      omitAssigneeSources: true,
+      emptyAssigneePolicy: 'error',
+    })
+    expect(edits.approval_legacy).toBeUndefined()
+    expect(Object.prototype.hasOwnProperty.call(edits.manual_1, 'approvalType')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(edits.manual_1, 'omitAssigneeSources')).toBe(false)
+  })
+
+  it('an untouched seed rebuilds the WHOLE graph byte-for-byte (key order included)', () => {
+    const rebuilt = applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, approvalNodeEditsFromGraph(F4A_EDIT_GRAPH))
+    expect(JSON.stringify(rebuilt)).toBe(JSON.stringify(F4A_EDIT_GRAPH))
+  })
+
+  it('approvalNodeEditOmitsAssigneeSources: auto_approve AND the omit flag, never on a handler', () => {
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: 'auto_approve', omitAssigneeSources: true })).toBe(true)
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: 'auto_approve' })).toBe(false)
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: null, omitAssigneeSources: true })).toBe(false)
+    expect(approvalNodeEditOmitsAssigneeSources({ nodeType: 'handler', approvalType: 'auto_approve', omitAssigneeSources: true })).toBe(false)
+  })
+})
+
+describe('Lock-4 §1 F4-A — applyApprovalTypeChoice (the canvas 审批类型 radio mutation)', () => {
+  it('自动通过 on a manual node: the rebuild carries approvalType and NO assigneeSources key (never []), while the cards stay as scratch', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)).toBe(true)
+    expect(edits.manual_1!.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1'] }])
+    const config = node(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits), 'manual_1').config as Record<string, unknown>
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+
+  it('人工审批 straight after 自动通过 restores the node byte-for-byte: an arrow-key traversal of the native radiogroup is lossless (canvas history does not record config edits, A-8)', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(JSON.stringify(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits))).toBe(JSON.stringify(F4A_EDIT_GRAPH))
+  })
+
+  it('人工审批 on a SEEDED sourceless node removes the key and lands on one valid requester card (never a ≥1-source error)', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(applyApprovalTypeChoice(edits.auto_1!, 'manual', false)).toBe(true)
+    expect(edits.auto_1!.approvalType).toBeNull()
+    expect(edits.auto_1!.assigneeSources).toEqual([{ kind: 'requester' }])
+    const config = node(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits), 'auto_1').config as Record<string, unknown>
+    expect(config).toEqual({ approvalMode: 'single', emptyAssigneePolicy: 'error', assigneeSources: [{ kind: 'requester' }] })
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+
+  it("an explicit persisted 'manual' is left as it is by 人工审批; toggled away and back it is saved ABSENT (absent ≡ manual — implementer default)", () => {
+    const graph: ApprovalGraph = clone(F4A_EDIT_GRAPH)
+    ;(node(graph, 'manual_1').config as Record<string, unknown>).approvalType = 'manual'
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.manual_1!.approvalType).toBe('manual')
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect((node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config as Record<string, unknown>).approvalType).toBe('manual')
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    const config = node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'approvalType')).toBe(false)
+    expect(config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1'] }])
+  })
+
+  it('refuses 自动通过 inside a parallel region and on a handler edit, leaving the edit untouched; 人工审批 stays allowed in a parallel region', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    const manualBefore = JSON.stringify(edits.manual_1)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', true)).toBe(false)
+    expect(JSON.stringify(edits.manual_1)).toBe(manualBefore)
+    const handlerBefore = JSON.stringify(edits.handler_1)
+    expect(applyApprovalTypeChoice(edits.handler_1!, 'auto_approve', false)).toBe(false)
+    expect(applyApprovalTypeChoice(edits.handler_1!, 'manual', false)).toBe(false)
+    expect(JSON.stringify(edits.handler_1)).toBe(handlerBefore)
+    // POSITIVE CONTROL — the refusal is region-selected: the same choice outside the region lands.
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'manual', true)).toBe(true)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)).toBe(true)
+  })
+
+  it('choosing 自动通过 again on an auto_approve node that still CARRIES sources drops them (the notice action)', () => {
+    const graph: ApprovalGraph = clone(F4A_EDIT_GRAPH)
+    ;(node(graph, 'manual_1').config as Record<string, unknown>).approvalType = 'auto_approve'
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(approvalNodeEditOmitsAssigneeSources(edits.manual_1!)).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config, 'assigneeSources')).toBe(true)
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(approvalNodeEditOmitsAssigneeSources(edits.manual_1!)).toBe(true)
+    expect(Object.prototype.hasOwnProperty.call(node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config, 'assigneeSources')).toBe(false)
+  })
+})
+
+describe('Lock-4 §1 F4-A — validateApprovalNodeEdits and the publish placeholder checklist', () => {
+  const sourceErrors = (errors: string[], key: string) => errors.filter((error) => error.includes(key) && (error.includes('审批人来源') || error.includes('配置无效')))
+
+  it("omitted scratch cards are NOT validated (they are never sent); POSITIVE CONTROL: the same cards are validated once 人工审批 makes them live", () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    edits.manual_1!.assigneeSources = [{ kind: 'static_user', userIds: [] }]
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(sourceErrors(validateApprovalNodeEdits(edits), 'manual_1')).toEqual([])
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(sourceErrors(validateApprovalNodeEdits(edits), 'manual_1')).toHaveLength(1)
+  })
+
+  it('a manual node with zero cards still fails the ≥1 rule; the same zero-card list is legal ONLY on an omitted auto_approve node', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+    edits.auto_1!.omitAssigneeSources = false
+    expect(validateApprovalNodeEdits(edits).some((error) => error.includes('auto_1') && error.includes('至少需要一个审批人来源'))).toBe(true)
+  })
+
+  it('mirrors APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED: auto_approve inside a parallel region blocks save; POSITIVE CONTROL: outside it does not', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    const parallelError = (errors: string[]) => errors.filter((error) => error.includes('auto_1') && error.includes('不支持自动通过'))
+    expect(parallelError(validateApprovalNodeEdits(edits, undefined, new Set(['auto_1'])))).toHaveLength(1)
+    expect(parallelError(validateApprovalNodeEdits(edits, undefined, new Set(['manual_1'])))).toHaveLength(0)
+  })
+
+  it("an off-union approvalType ('auto_reject') on an approval edit, and ANY approvalType on a handler edit, are errors; POSITIVE CONTROL: the known values are not", () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    ;(edits.manual_1 as { approvalType?: unknown }).approvalType = 'auto_reject'
+    ;(edits.handler_1 as { approvalType?: unknown }).approvalType = 'auto_approve'
+    const errors = validateApprovalNodeEdits(edits)
+    expect(errors.some((error) => error.includes('manual_1') && error.includes('审批类型无效'))).toBe(true)
+    expect(errors.some((error) => error.includes('handler_1') && error.includes('不支持审批类型'))).toBe(true)
+    const clean = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    clean.manual_1!.approvalType = 'manual'
+    expect(validateApprovalNodeEdits(clean).some((error) => error.includes('审批类型'))).toBe(false)
+  })
+
+  it('a placeholder role left on an omitted scratch card is not flagged for publish; POSITIVE CONTROL: it is flagged once live', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    edits.manual_1!.assigneeSources = [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }]
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(placeholderRoleNodeKeys(edits)).toEqual([])
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(placeholderRoleNodeKeys(edits)).toEqual(['manual_1'])
+  })
+})
+
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — a hidden block (policy / timeout) on a sourceless auto_approve
+// node/step is still saved and validated, so its live errors are attributed to it (validator diff,
+// no second copy of any rule) and the editors render it again. These pin the attribution itself;
+// the mounted pins (visibility, save blocked, fix ⇒ save) live in approvalTemplateAuthoring.spec.ts.
+describe('Lock-4 §1 F4-A — hidden-block guard: attributing live errors to hidden blocks', () => {
+  const F4A_LINEAR_GRAPH: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  it('multisetDifference keeps duplicates one-for-one (two same-named steps yield identical messages)', () => {
+    expect(multisetDifference(['a', 'a', 'b'], ['a'])).toEqual(['a', 'b'])
+    expect(multisetDifference(['a', 'a'], ['a', 'a'])).toEqual([])
+    expect(multisetDifference([], ['a'])).toEqual([])
+  })
+
+  it('CANVAS: a transfer timeout with no target on a sourceless auto_approve node is attributed to the timeout block, exactly as the save validator words it', () => {
+    const draft = draftFromTemplate(buildTemplate(F4A_EDIT_GRAPH))
+    draft.approvalNodeEdits!.auto_1!.timeout = { afterMinutes: 60, effect: 'transfer' }
+    const flowErrors = validateTemplateApprovalFlow(draft)
+    const live = approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')
+    expect(live).toEqual({ timeout: ['审批节点 auto_1 的超时转交需要选择接收人'] })
+    expect(flowErrors).toContain(live.timeout![0])
+    // POSITIVE CONTROLS: a valid hidden timeout is NOT live (stays hidden, preserved verbatim) …
+    draft.approvalNodeEdits!.auto_1!.timeout = { afterMinutes: 60, effect: 'remind' }
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')).toEqual({})
+    // … and a manual node's blocks are never "hidden", so the guard does not judge them.
+    draft.approvalNodeEdits!.manual_1!.timeout = { afterMinutes: 60, effect: 'transfer' }
+    expect(validateTemplateApprovalFlow(draft).some((error) => error.includes('manual_1'))).toBe(true)
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'manual_1')).toEqual({})
+  })
+
+  it('CANVAS: an invalid threshold on a sourceless auto_approve node is attributed to the policy block', () => {
+    const draft = draftFromTemplate(buildTemplate(F4A_EDIT_GRAPH))
+    draft.approvalNodeEdits!.auto_1!.approvalMode = 'threshold'
+    draft.approvalNodeEdits!.auto_1!.approvalThreshold = 0
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')).toEqual({
+      policy: ['审批节点 auto_1 的门槛会签人数必须是不小于 1 的整数'],
+    })
+  })
+
+  it('LINEAR: an enabled-but-empty timeout on a sourceless auto_approve step is attributed to the timeout block; a valid one is not', () => {
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(F4A_LINEAR_GRAPH))
+    expect(draft.steps).toHaveLength(1)
+    const step = draft.steps[0]!
+    step.timeoutEnabled = true
+    setStepApprovalType(step, 'auto_approve')
+    const live = stepHiddenBlockLiveErrors(draft, step)
+    expect(Object.keys(live)).toEqual(['timeout'])
+    expect(live.timeout).toHaveLength(2)
+    for (const message of live.timeout!) expect(validateTemplateApprovalFlow(draft)).toContain(message)
+    step.timeoutAfterMinutesText = '30'
+    step.timeoutEffect = 'remind'
+    expect(stepHiddenBlockLiveErrors(draft, step)).toEqual({})
+    // POSITIVE CONTROL: the same broken timeout on a MANUAL step is not the guard's business.
+    step.timeoutAfterMinutesText = ''
+    setStepApprovalType(step, 'manual')
+    expect(stepHiddenBlockLiveErrors(draft, step)).toEqual({})
+  })
+
+  it('LINEAR call-site multiset (gate r2 P2-1): two SAME-NAMED sourceless auto_approve steps with broken timeouts each get BOTH of their own timeout errors', () => {
+    // Same-named steps label their errors identically (`step.name || 审批步骤 N`), so neutralizing one
+    // step's timeout leaves the OTHER step's identical messages in the "after" list. A set difference
+    // at the hiddenBlockLiveErrors call site would let each copy mask the other ⇒ neither step is
+    // revealed ⇒ the original trap. Only one-for-one (multiset) subtraction attributes them.
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ],
+    }
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(graph))
+    expect(draft.steps).toHaveLength(2)
+    for (const step of draft.steps) {
+      step.timeoutEnabled = true
+      setStepApprovalType(step, 'auto_approve')
+    }
+    // Precondition — the collision is real (otherwise this passes vacuously under a set difference).
+    expect(draft.steps[0]!.name).toBe(draft.steps[1]!.name)
+    const flowErrors = validateTemplateApprovalFlow(draft)
+    expect(flowErrors).toHaveLength(4)
+    const counts = new Map<string, number>()
+    for (const message of flowErrors) counts.set(message, (counts.get(message) ?? 0) + 1)
+    expect([...counts.values()]).toEqual([2, 2])
+    for (const step of draft.steps) {
+      const live = stepHiddenBlockLiveErrors(draft, step)
+      expect(Object.keys(live)).toEqual(['timeout'])
+      expect(live.timeout).toHaveLength(2)
+      expect([...new Set(live.timeout)].sort()).toEqual([...counts.keys()].sort())
+    }
+  })
+
+  it('LINEAR: an invalid threshold on a sourceless auto_approve step is attributed to the policy block', () => {
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(F4A_LINEAR_GRAPH))
+    const step = draft.steps[0]!
+    step.approvalMode = 'threshold'
+    step.approvalThreshold = 0
+    setStepApprovalType(step, 'auto_approve')
+    const live = stepHiddenBlockLiveErrors(draft, step)
+    expect(Object.keys(live)).toEqual(['policy'])
+    expect(live.policy).toHaveLength(1)
+    expect(live.policy![0]).toContain('门槛会签人数')
   })
 })

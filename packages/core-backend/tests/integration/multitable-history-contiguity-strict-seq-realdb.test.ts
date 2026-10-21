@@ -50,6 +50,17 @@ import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-t
 import { checkStrictEnablementPrecondition } from '../../src/multitable/history-trust-precondition'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+// Deliberately outside describeIfDatabase: the dedicated multitable real-DB allowlist step marks
+// itself with METASHEET_REAL_DB_TEST_STEP. If that step ever loses DATABASE_URL, this test reds
+// instead of allowing the whole suite (including an in-describe sentinel) to skip-green.
+test('sentinel: the multitable real-DB allowlist step must have DATABASE_URL', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('multitable real-DB allowlist step is missing DATABASE_URL')
+  }
+  expect(true).toBe(true)
+})
+
 const TS = Date.now()
 const BASE = `base_hcss_${TS}`
 const SHEET = `sheet_hcss_${TS}`
@@ -152,6 +163,8 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true' // default OFF in real deployments; this test process only
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])
@@ -162,7 +175,42 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, `rec_h_${TS}`, 2, 'update', { [NAME]: 'new' }, T2)
   })
 
-  test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
+  async function appendDeleteRevision(
+    recordId: string,
+    data: Record<string, unknown>,
+    version: number,
+  ): Promise<{ id: string; seq: string }> {
+    const deleted = await q(
+      `INSERT INTO meta_record_revisions
+         (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+       VALUES (gen_random_uuid(),$1,$2,$3,'delete','rest',ARRAY[]::text[],'{}'::jsonb,$4::jsonb)
+       RETURNING id::text, seq::text`,
+      [SHEET, recordId, version, JSON.stringify(data)],
+    )
+    return deleted.rows[0] as { id: string; seq: string }
+  }
+
+  async function seedWindowDeletedRecord(recordId: string): Promise<{
+    checkpointId: string
+    trustedSinceSeq: string
+    deleteRevisionId: string
+    deleteSeq: string
+  }> {
+    await rev(SHEET, recordId, 1, 'create', {})
+    await insertLive(SHEET, recordId, {}, 1)
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    const deleted = await appendDeleteRevision(recordId, {}, 1)
+    await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, SHEET])
+    return {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      deleteRevisionId: deleted.id,
+      deleteSeq: deleted.seq,
+    }
+  }
 
   // ── FLAG-OFF PARITY ──────────────────────────────────────────────────────────────────────────────────────
   test('FLAG-OFF PARITY: an older-generation hole with a clean terminal generation PASSES with strict OFF (byte-identical #4269), REFUSES with strict ON', async () => {
@@ -222,6 +270,242 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await insertLive(SHEET, R, { [NAME]: 'g2-v2' }, 2)
 
     await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
+  })
+
+  test('TRUST-FLOOR: pre-checkpoint corruption is excluded because the live baseline is the trusted prefix', async () => {
+    const R = `rec_hcss_floor_live_${TS}`
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'old' })
+    await rev(SHEET, R, 3, 'update', { [NAME]: 'trusted' }) // pre-floor v2 hole
+    await insertLive(SHEET, R, { [NAME]: 'trusted' }, 3)
+
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq: checkpoint.trustedSinceSeq,
+    })).toEqual({ ok: true })
+  })
+
+  test('TRUST-FLOOR DELETE/RECREATE: a corrupt deleted generation before the floor cannot poison a clean recreation after it', async () => {
+    const R = `rec_hcss_floor_recreate_${TS}`
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'old-v1' })
+    await rev(SHEET, R, 3, 'update', { [NAME]: 'old-v3' }) // pre-floor v2 hole
+    const deleted = await q(
+      `INSERT INTO meta_record_revisions
+         (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+       VALUES (gen_random_uuid(),$1,$2,3,'delete','rest',ARRAY[]::text[],'{}'::jsonb,$3::jsonb)
+       RETURNING id`,
+      [SHEET, R, JSON.stringify({ [NAME]: 'old-v3' })],
+    )
+    const deleteRevisionId = String((deleted.rows[0] as { id: unknown }).id)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,3,$4)`,
+      [R, SHEET, JSON.stringify({ [NAME]: 'old-v3' }), deleteRevisionId],
+    )
+
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'new-v1' })
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'new-v2' })
+    await insertLive(SHEET, R, { [NAME]: 'new-v2' }, 2)
+    const anchorSeq = String((await q(
+      'SELECT max(seq)::text AS seq FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+      [SHEET, R],
+    )).rows[0]?.seq)
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq,
+    })).toEqual({ ok: true })
+  })
+
+  test('TRUST-FLOOR UPPER BOUND: a post-anchor hole does not contaminate the target generation while current live drift is still checked', async () => {
+    const R = `rec_hcss_floor_upper_${TS}`
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'baseline' })
+    await insertLive(SHEET, R, { [NAME]: 'baseline' }, 1)
+
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'at-anchor' })
+    const anchorSeq = String((await q(
+      'SELECT max(seq)::text AS seq FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+      [SHEET, R],
+    )).rows[0]?.seq)
+
+    // A later current-state update skips v3. It must not be pulled backwards into the target generation.
+    // The separate current projection still proves that the live row equals the latest captured state.
+    await rev(SHEET, R, 4, 'update', { [NAME]: 'current' })
+    await q('UPDATE meta_records SET data = $2::jsonb, version = 4 WHERE id = $1', [R, JSON.stringify({ [NAME]: 'current' })])
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq,
+    })).toEqual({ ok: true })
+  })
+
+  test('TRUST-FLOOR CURRENT DRIFT: post-anchor latest captured payload must still equal current live state', async () => {
+    const R = `rec_hcss_floor_current_drift_${TS}`
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'baseline' })
+    await insertLive(SHEET, R, { [NAME]: 'baseline' }, 1)
+
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'at-anchor' })
+    const anchorSeq = String((await q(
+      'SELECT max(seq)::text AS seq FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+      [SHEET, R],
+    )).rows[0]?.seq)
+
+    await rev(SHEET, R, 3, 'update', { [NAME]: 'captured-current' })
+    await q('UPDATE meta_records SET data = $2::jsonb, version = 3 WHERE id = $1', [
+      R,
+      JSON.stringify({ [NAME]: 'uncaptured-current' }),
+    ])
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq,
+    })).toEqual({ ok: false, reason: 'content_mismatch' })
+  })
+
+  test('TARGET-WINDOW MALFORMED LIVE: scalar meta_records.data fails closed even when an empty object projection would compare equal', async () => {
+    const R = `rec_hcss_bad_live_data_${TS}`
+    await rev(SHEET, R, 1, 'create', {})
+    await insertLive(SHEET, R, {}, 1)
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await q('UPDATE meta_records SET data = $2::jsonb WHERE id = $1 AND sheet_id = $3', [
+      R,
+      JSON.stringify('not-an-object'),
+      SHEET,
+    ])
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq: checkpoint.trustedSinceSeq,
+    })).toEqual({ ok: false, reason: 'comparator_error' })
+  })
+
+  test('TARGET-WINDOW MALFORMED TRASH DATA: scalar trash.data fails closed with otherwise valid delete linkage', async () => {
+    const R = `rec_hcss_bad_trash_data_${TS}`
+    const window = await seedWindowDeletedRecord(R)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,1,$4)`,
+      [R, SHEET, JSON.stringify('not-an-object'), window.deleteRevisionId],
+    )
+
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: window.checkpointId,
+      trustedSinceSeq: window.trustedSinceSeq,
+      anchorSeq: window.deleteSeq,
+    })).toEqual({ ok: false, reason: 'comparator_error' })
+  })
+
+  test('TARGET-WINDOW MALFORMED TRASH VERSION: non-positive original_version fails closed with otherwise valid delete linkage', async () => {
+    const R = `rec_hcss_bad_trash_version_${TS}`
+    const window = await seedWindowDeletedRecord(R)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,'{}'::jsonb,0,$3)`,
+      [R, SHEET, window.deleteRevisionId],
+    )
+
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: window.checkpointId,
+      trustedSinceSeq: window.trustedSinceSeq,
+      anchorSeq: window.deleteSeq,
+    })).toEqual({ ok: false, reason: 'comparator_error' })
+  })
+
+  test('TARGET-WINDOW UNPROVABLE TRASH LINK: a dangling delete_revision_id fails closed', async () => {
+    const R = `rec_hcss_bad_trash_link_${TS}`
+    const window = await seedWindowDeletedRecord(R)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,'{}'::jsonb,1,'00000000-0000-4000-8000-000000000001')`,
+      [R, SHEET],
+    )
+
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: window.checkpointId,
+      trustedSinceSeq: window.trustedSinceSeq,
+      anchorSeq: window.deleteSeq,
+    })).toEqual({ ok: false, reason: 'comparator_error' })
+  })
+
+  test('TARGET-WINDOW LIVE-WINS: stale malformed trash is non-authoritative while a valid live row exists', async () => {
+    const R = `rec_hcss_live_wins_${TS}`
+    await rev(SHEET, R, 1, 'create', {})
+    await insertLive(SHEET, R, {}, 1)
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,0,NULL)`,
+      [R, SHEET, JSON.stringify('stale-non-authority')],
+    )
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq: checkpoint.trustedSinceSeq,
+    })).toEqual({ ok: true })
+  })
+
+  test('TARGET-WINDOW MULTI-VINTAGE: two attributable trash vintages select the latest causal delete and stay valid', async () => {
+    const R = `rec_hcss_multi_vintage_${TS}`
+    const first = await seedWindowDeletedRecord(R)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,'{}'::jsonb,1,$3)`,
+      [R, SHEET, first.deleteRevisionId],
+    )
+    const secondData = { [NAME]: 'second-vintage' }
+    await rev(SHEET, R, 1, 'create', secondData)
+    await insertLive(SHEET, R, secondData, 1)
+    const secondDelete = await appendDeleteRevision(R, secondData, 1)
+    await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R, SHEET])
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,1,$4)`,
+      [R, SHEET, JSON.stringify(secondData), secondDelete.id],
+    )
+
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: first.checkpointId,
+      trustedSinceSeq: first.trustedSinceSeq,
+      anchorSeq: secondDelete.seq,
+    })).toEqual({ ok: true })
   })
 
   // ── GENERATION-0 HOLE (owner High-2 counterexample, #4339) ───────────────────────────────────────────────

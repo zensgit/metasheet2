@@ -1,0 +1,166 @@
+name: Approval real-DB acceptance (Lock-11 W-1/W-2 org stamping — G-L11-0/1/2/3/10 + refusal precedence)
+
+# EVIDENCE LANE for Lock-11 §10 (docs/development/approval-lock11-writer-org-derivation-20260822.md,
+# RATIFIED 2026-08-22): the shared arm-(a) org derivation
+# (src/services/approval-instance-org-derivation.ts's deriveApprovalInstanceOrgId), wired into
+# ApprovalProductService.createApproval immediately after the final approvals:write DB recheck and
+# before the approval_instances INSERT, gated end-to-end through BOTH landing writers:
+#   - W-1: POST /api/approvals (the Express route, real HTTP)
+#   - W-2: the multitable automation start_approval bridge
+#     (AutomationApprovalBridgeService.startApproval, reached via AutomationService.executeRule) —
+#     choice (A) "propagate": the bridge's existing createApproval catch already calls
+#     markBridgeFailed then rethrows, so the shared derivation's
+#     ServiceError(..., 422, 'APPROVAL_ORG_UNRESOLVED') surfaces unchanged; no new failure
+#     plumbing was added on the W-2 side.
+#
+# Gates: G-L11-0 (cardinality asserted at assertion time), G-L11-1 (W-1 exactly-one / zero /
+# multi), G-L11-2 (the x-tenant-id / actor.tenantId header-forgery trap — routes/approvals.ts's
+# resolveApprovalTenantId is never consulted), G-L11-3 (W-2 exactly-one / multi, typed
+# ServiceError, bridge row status=failed, no approval_instances row), G-L11-10 (zero-membership
+# fixture verified zero by a direct COUNT query, then refuses values-free), plus a refusal-
+# precedence case pinning that the derivation slot sits AFTER the DB-only final write-authorization
+# boundary (a requester failing both gets 403, never 422).
+#
+# EXPLICITLY EXCLUDED from this lane (see the test file's own docblock): G-L11-6 (actor≠requester,
+# cannot be constructed at this baseline — W-4-only), G-L11-5 (reader∘writer round-trip —
+# W-4-only, no gate of that shape assigned to W-1/W-2), G-L11-4/8/9 (attendance_requests twin /
+# DO UPDATE / operationId legs — W-4-only), G-L11-7 (boot-assert — W-3 arm (c) only), G-L11-11
+# (OpenAPI contract regeneration — verified manually via the four-step source→generate:sdk→git
+# diff→guard:codegen procedure, not a vitest assertion).
+#
+# BINDING ORDERING (Lock-11 §10.2, part of ruled arm D-8(β)): this lane may run green on this PR
+# without the PR being merged — the revised #5103 (provisioning migration + class-6 revision) must
+# land FIRST, emptying the zero-membership population, before any arm-(a) writer slice (this one)
+# may merge. This lane's green run is NOT a merge authorization.
+#
+# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
+# every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
+# approval-realdb-org-writer-plm-mirror-s1.yml / approval-realdb-instance-readability-s1.yml lanes.
+# plugin-tests.yml is left byte-identical.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
+# actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run
+# in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
+# file as skipped.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the sibling approval-realdb-* evidence lanes (a
+  # merge_group event does not honour the `paths` filter the way `pull_request` does, so declaring
+  # it would spin up this PostgreSQL job for every merge group regardless of relevance).
+  pull_request:
+    # No `branches:` filter (mirrors the sibling approval-realdb-* precedents): a brand-new
+    # workflow cannot be workflow_dispatch-ed until it has run once via a trigger it responds to.
+    # The `paths` filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-org-writer-w1w2-s1.db.test.ts'
+      - 'packages/core-backend/src/services/approval-instance-org-derivation.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/multitable/automation-approval-bridge-service.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/auth/jwt-middleware.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-org-writer-w1w2-s1.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-org-writer-w1w2-s1.db.test.ts'
+      - 'packages/core-backend/src/services/approval-instance-org-derivation.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/multitable/automation-approval-bridge-service.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/auth/jwt-middleware.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-org-writer-w1w2-s1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-org-writer-w1w2-s1:
+    name: approval-realdb-org-writer-w1w2-s1
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-11 W-1/W-2 org stamping real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-org-writer-w1w2-s1.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-org-writer-w1w2-s1.db.test.ts"
+            echo "scope=Lock-11 §10 W-1/W-2 org derivation — G-L11-0/1/2/3/10 + refusal precedence"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+            echo "mergeAuthorization=NONE — binding ordering (Lock-11 §10.2 / D-8(β)) requires the revised #5103 to merge FIRST"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

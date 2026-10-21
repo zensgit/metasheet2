@@ -39,6 +39,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { query, transaction } from '../../src/db/pg'
+import { Logger } from '../../src/core/logger'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
 import {
   createDirectoryIntegration,
@@ -52,6 +53,9 @@ import {
   startDirectorySyncScheduler,
   stopDirectorySyncScheduler,
 } from '../../src/directory/directory-sync-scheduler'
+import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import type { ApprovalGraph, FormSchema } from '../../src/types/approval-product'
+import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -70,6 +74,7 @@ type MockUser = {
   unionId?: string
   openId?: string
   email?: string
+  source?: Record<string, unknown>
 }
 
 type MockDirectory = {
@@ -121,7 +126,7 @@ beforeAll(() => {
       userId: user.userId,
       name: user.name,
       departmentIds: user.departmentIds,
-      source: {},
+      source: user.source ?? {},
     })),
     nextCursor: null,
     hasMore: false,
@@ -136,7 +141,7 @@ beforeAll(() => {
       email: user.email,
       mobile: undefined,
       departmentIds: user.departmentIds,
-      source: {},
+      source: user.source ?? {},
     }
   })
 })
@@ -552,6 +557,34 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
   // arms run the REAL sync over a departure.
   // -------------------------------------------------------------------------
   describe('deprovision executor wiring inside the sync run (OPS-01 call site)', () => {
+    const approvalService = new ApprovalProductService()
+    const approvalFormSchema: FormSchema = {
+      fields: [{ id: 'reason', type: 'text', label: 'Reason', required: true }],
+    }
+
+    function approvalGraph(assigneeId: string): ApprovalGraph {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: 'Approval',
+            config: {
+              assigneeSources: [{ kind: 'static_user', userIds: [assigneeId] }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+            },
+          },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start', source: 'start', target: 'approval_1' },
+          { key: 'edge-end', source: 'approval_1', target: 'end' },
+        ],
+      }
+    }
+
     async function seedDepartureFixture(tag: string): Promise<{
       accountId: string
       departedExternalUserId: string
@@ -618,6 +651,159 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
         departedUnionId,
         deptId: `dso-dep-dept-${tag}-${TS}`,
         survivorExt: `dso-dep-surv-${tag}-${TS}`,
+      }
+    }
+
+    async function seedApprovalDepartureSyncFixture(
+      tag: string,
+      policy: 'mark_inactive' | 'disable_grant_only',
+      options: { withAutoAdmission?: boolean } = {},
+    ): Promise<{
+      accountId: string
+      approvalId: string
+      autoAdmissionEmail?: string
+      deptId: string
+      directory: MockDirectory
+      integrationId: string
+      localUserId: string
+      managerExternalId: string
+      managerUserId: string
+      requesterUserId: string
+      templateId: string
+      extraUserEmails: string[]
+      extraUserIds: string[]
+    }> {
+      const corpId = `dso-f4e-corp-${tag}-${TS}`
+      const deptId = `dso-f4e-dept-${tag}-${TS}`
+      const autoAdmissionEmail = options.withAutoAdmission
+        ? `dso-f4e-admit-${tag}-${TS}@example.test`
+        : undefined
+      const integration = await createDirectoryIntegration({
+        name: `dso-f4e-${tag}-${TS}`,
+        corpId,
+        appKey: `dso-f4e-appkey-${tag}-${TS}`,
+        appSecret: 'dso-secret',
+        admissionMode: options.withAutoAdmission ? 'auto_for_scoped_departments' : 'manual_only',
+        admissionDepartmentIds: options.withAutoAdmission ? [deptId] : [],
+        defaultDeprovisionPolicy: policy,
+      })
+      const localUserId = `dso-f4e-departed-${tag}-${TS}`
+      const managerUserId = `dso-f4e-manager-${tag}-${TS}`
+      const requesterUserId = `dso-f4e-requester-${tag}-${TS}`
+      await query(
+        `INSERT INTO users (id, email, password_hash, is_active)
+         VALUES ($1, $2, 'x', TRUE), ($3, $4, 'x', TRUE), ($5, $6, 'x', TRUE)`,
+        [
+          localUserId,
+          `${localUserId}@example.test`,
+          managerUserId,
+          `${managerUserId}@example.test`,
+          requesterUserId,
+          `${requesterUserId}@example.test`,
+        ],
+      )
+      await grantApprovalWriteForIntegrationActor(requesterUserId)
+      await query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, 'default', TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [localUserId],
+      )
+      await query(
+        `INSERT INTO user_external_auth_grants (
+           provider, local_user_id, enabled, granted_by, created_at, updated_at
+         ) VALUES ('dingtalk', $1, TRUE, 'system:test-fixture', NOW(), NOW())`,
+        [localUserId],
+      )
+
+      const department = await query<{ id: string }>(
+        `INSERT INTO directory_departments (
+           integration_id, external_department_id, name, is_active, raw
+         ) VALUES ($1, $2, 'F4E', TRUE, '{}'::jsonb)
+         RETURNING id::text AS id`,
+        [integration.id, deptId],
+      )
+      const departedExternalId = `dso-f4e-ext-departed-${tag}-${TS}`
+      const managerExternalId = `dso-f4e-ext-manager-${tag}-${TS}`
+      const departedAccount = await query<{ id: string }>(
+        `INSERT INTO directory_accounts (
+           integration_id, corp_id, external_user_id, external_key, name, is_active, last_seen_at, raw
+         ) VALUES ($1, $2, $3, $3, 'Departed', TRUE, NOW(), '{}'::jsonb)
+         RETURNING id::text AS id`,
+        [integration.id, corpId, departedExternalId],
+      )
+      const managerSource = { leader_in_dept: [{ dept_id: deptId, leader: true }] }
+      const managerAccount = await query<{ id: string }>(
+        `INSERT INTO directory_accounts (
+           integration_id, corp_id, external_user_id, external_key, name, is_active, last_seen_at, raw
+         ) VALUES ($1, $2, $3, $3, 'Manager', TRUE, NOW(), $4::jsonb)
+         RETURNING id::text AS id`,
+        [integration.id, corpId, managerExternalId, JSON.stringify(managerSource)],
+      )
+      await query(
+        `INSERT INTO directory_account_links (
+           directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
+         ) VALUES
+           ($1, $2, 'linked', 'manual', NOW(), NOW()),
+           ($3, $4, 'linked', 'manual', NOW(), NOW())`,
+        [departedAccount.rows[0].id, localUserId, managerAccount.rows[0].id, managerUserId],
+      )
+      await query(
+        `INSERT INTO directory_account_departments (
+           directory_account_id, directory_department_id, is_primary
+         ) VALUES ($1, $3, TRUE), ($2, $3, TRUE)`,
+        [departedAccount.rows[0].id, managerAccount.rows[0].id, department.rows[0].id],
+      )
+
+      const templateKey = `dso-f4e-template-${tag}-${TS}`
+      const template = await approvalService.createTemplate({
+        key: templateKey,
+        name: templateKey,
+        formSchema: approvalFormSchema,
+        approvalGraph: approvalGraph(localUserId),
+      })
+      await approvalService.publishTemplate(template.id, { policy: { allowRevoke: true } })
+      const approval = await approvalService.createApproval(
+        { templateId: template.id, formData: { reason: 'departure wiring' } },
+        { userId: requesterUserId, userName: requesterUserId },
+      )
+
+      return {
+        accountId: departedAccount.rows[0].id,
+        approvalId: approval.id,
+        autoAdmissionEmail,
+        deptId,
+        directory: {
+          departments: [{ id: deptId, parentId: '1', name: 'F4E', order: 0 }],
+          usersByDept: {
+            [deptId]: [
+              {
+                userId: managerExternalId,
+                name: 'Manager',
+                departmentIds: [deptId],
+                source: managerSource,
+              },
+              ...(autoAdmissionEmail
+                ? [{
+                    userId: `dso-f4e-ext-admit-${tag}-${TS}`,
+                    name: 'Auto Admission',
+                    departmentIds: [deptId],
+                    unionId: `dso-f4e-union-admit-${tag}-${TS}`,
+                    openId: `dso-f4e-open-admit-${tag}-${TS}`,
+                    email: autoAdmissionEmail,
+                  }]
+                : []),
+            ],
+          },
+        },
+        integrationId: integration.id,
+        localUserId,
+        managerExternalId,
+        managerUserId,
+        requesterUserId,
+        templateId: template.id,
+        extraUserEmails: autoAdmissionEmail ? [autoAdmissionEmail] : [],
+        extraUserIds: [managerUserId, requesterUserId],
       }
     }
 
@@ -704,16 +890,389 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       }
     }
 
-    const cleanupTargets: Array<{ integrationId: string; localUserId: string; siblingIntegrationId?: string }> = []
+    const cleanupTargets: Array<{
+      approvalId?: string
+      extraUserEmails?: string[]
+      extraUserIds?: string[]
+      integrationId: string
+      localUserId: string
+      siblingIntegrationId?: string
+      templateId?: string
+    }> = []
 
     afterAll(async () => {
       for (const target of cleanupTargets) {
+        if (target.approvalId) {
+          await query(`DELETE FROM approval_records WHERE instance_id = $1`, [target.approvalId])
+          await query(`DELETE FROM approval_assignments WHERE instance_id = $1`, [target.approvalId])
+          await query(`DELETE FROM approval_metrics WHERE instance_id = $1`, [target.approvalId])
+          await query(`DELETE FROM approval_instances WHERE id = $1`, [target.approvalId])
+        }
+        if (target.templateId) {
+          await query(`DELETE FROM approval_published_definitions WHERE template_id = $1::uuid`, [target.templateId])
+          await query(`DELETE FROM approval_template_versions WHERE template_id = $1::uuid`, [target.templateId])
+          await query(`DELETE FROM approval_templates WHERE id = $1::uuid`, [target.templateId])
+        }
         await cleanupIntegration(target.integrationId)
         if (target.siblingIntegrationId) await cleanupIntegration(target.siblingIntegrationId)
-        await query(`DELETE FROM user_orgs WHERE user_id = $1`, [target.localUserId])
-        await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = $1`, [target.localUserId])
-        await query(`DELETE FROM users WHERE id = $1`, [target.localUserId])
+        const userIds = [target.localUserId, ...(target.extraUserIds ?? [])]
+        await query(`DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`, [userIds])
+        await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [userIds])
+        await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = ANY($1::text[])`, [userIds])
+        await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [userIds])
+        await deleteUsersByEmail(target.extraUserEmails ?? [])
       }
+    })
+
+    it('F4-E consumes the committed mark_inactive user_changed signal and transfers the active seat to the live manager at the same epoch', async () => {
+      const fixture = await seedApprovalDepartureSyncFixture('approval-on', 'mark_inactive')
+      cleanupTargets.push(fixture)
+      activeDirectory = fixture.directory
+      const before = await query<{ entry_epoch: number; id: string }>(
+        `SELECT id::text AS id, entry_epoch
+           FROM approval_assignments
+          WHERE instance_id = $1 AND assignee_id = $2 AND is_active = TRUE`,
+        [fixture.approvalId, fixture.localUserId],
+      )
+      expect(before.rows).toHaveLength(1)
+
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      let runId = ''
+      try {
+        const result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-f4e-on')
+        runId = result.run.id
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+      }
+      const dispatchWarnings = warnSpy.mock.calls
+        .map((call) => call[0])
+        .filter((message) => message.startsWith('Approval departure dispatch'))
+      warnSpy.mockRestore()
+      expect(dispatchWarnings).toEqual([])
+
+      const signal = await query<{ local_user_id: string }>(
+        `SELECT event.local_user_id
+           FROM directory_deprovision_events event
+           JOIN directory_deprovision_effects effect ON effect.event_id = event.id
+          WHERE event.run_id = $1::uuid
+            AND effect.effect_type = 'user_changed'
+            AND event.status = 'applied'
+            AND effect.status = 'applied'`,
+        [runId],
+      )
+      expect(signal.rows).toEqual([{ local_user_id: fixture.localUserId }])
+
+      const managerDirectoryState = await query<{
+        external_department_id: string
+        is_active: boolean
+        is_primary: boolean
+        leader_department_id: string | null
+        link_status: string
+        local_user_id: string | null
+      }>(
+        `SELECT a.is_active,
+                l.link_status,
+                l.local_user_id,
+                d.external_department_id,
+                ad.is_primary,
+                a.raw -> 'leader_in_dept' -> 0 ->> 'dept_id' AS leader_department_id
+           FROM directory_accounts a
+           JOIN directory_account_links l ON l.directory_account_id = a.id
+           JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+           JOIN directory_departments d ON d.id = ad.directory_department_id
+          WHERE a.integration_id = $1::uuid
+            AND a.external_user_id = $2`,
+        [fixture.integrationId, fixture.managerExternalId],
+      )
+      expect(managerDirectoryState.rows).toEqual([{
+        external_department_id: fixture.deptId,
+        is_active: true,
+        is_primary: true,
+        leader_department_id: fixture.deptId,
+        link_status: 'linked',
+        local_user_id: fixture.managerUserId,
+      }])
+
+      const audit = await query<{
+        actor_id: string
+        metadata: Record<string, unknown>
+        target_user_id: string | null
+      }>(
+        `SELECT actor_id, metadata, target_user_id
+           FROM approval_records
+          WHERE instance_id = $1 AND action = 'reassign'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [fixture.approvalId],
+      )
+      expect(audit.rows).toHaveLength(1)
+      expect(audit.rows[0]).toMatchObject({
+        actor_id: 'system:approval-departure',
+        target_user_id: fixture.managerUserId,
+        metadata: {
+          departureTransfer: true,
+          fromUserId: fixture.localUserId,
+          outcome: 'transferred',
+          toUserId: fixture.managerUserId,
+        },
+      })
+
+      const seats = await query<{
+        assignee_id: string
+        entry_epoch: number
+        is_active: boolean
+      }>(
+        `SELECT assignee_id, entry_epoch, is_active
+           FROM approval_assignments
+          WHERE instance_id = $1
+          ORDER BY created_at ASC`,
+        [fixture.approvalId],
+      )
+      expect(seats.rows).toEqual([
+        {
+          assignee_id: fixture.localUserId,
+          entry_epoch: before.rows[0].entry_epoch,
+          is_active: false,
+        },
+        {
+          assignee_id: fixture.managerUserId,
+          entry_epoch: before.rows[0].entry_epoch,
+          is_active: true,
+        },
+      ])
+    })
+
+    it('keeps a committed mixed run completed and dispatches F4-E once when the invitation ledger throws hostile values', async () => {
+      const fixture = await seedApprovalDepartureSyncFixture(
+        'approval-invite-failure',
+        'mark_inactive',
+        { withAutoAdmission: true },
+      )
+      cleanupTargets.push(fixture)
+      activeDirectory = fixture.directory
+      if (!fixture.autoAdmissionEmail) throw new Error('auto-admission fixture email is required')
+
+      const triggerName = `dso_f4e_invite_fail_${TS}`
+      const functionName = `dso_f4e_invite_fail_fn_${TS}`
+      const hostileMessage = [
+        'hostile-invite-error',
+        fixture.autoAdmissionEmail,
+        fixture.localUserId,
+        fixture.approvalId,
+      ].join(':')
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+      const dispatchSpy = vi.spyOn(ApprovalProductService.prototype, 'applyApprovalDepartureTransfer')
+      let dispatchCallCount = 0
+      let dispatchFirstArgs: unknown[] | undefined
+      let inviteWarningCount = 0
+      let inviteWarningMeta: unknown
+      let warningEvidence = ''
+      let result: Awaited<ReturnType<typeof syncDirectoryIntegration>> | undefined
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      try {
+        await query(
+          `CREATE FUNCTION ${functionName}() RETURNS trigger AS $trigger$
+           BEGIN
+             RAISE EXCEPTION USING MESSAGE = '${hostileMessage}';
+           END;
+           $trigger$ LANGUAGE plpgsql`,
+        )
+        await query(
+          `CREATE TRIGGER ${triggerName}
+           BEFORE INSERT ON user_invites
+           FOR EACH ROW
+           WHEN (NEW.email = '${fixture.autoAdmissionEmail}')
+           EXECUTE FUNCTION ${functionName}()`,
+        )
+        result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-f4e-invite-failure')
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+        await query(`DROP TRIGGER IF EXISTS ${triggerName} ON user_invites`)
+        await query(`DROP FUNCTION IF EXISTS ${functionName}()`)
+        dispatchCallCount = dispatchSpy.mock.calls.length
+        dispatchFirstArgs = dispatchSpy.mock.calls[0]
+        const inviteWarnings = warnSpy.mock.calls.filter(
+          ([message]) => message === 'Directory auto-admission invite ledger failed after directory commit',
+        )
+        inviteWarningCount = inviteWarnings.length
+        inviteWarningMeta = inviteWarnings[0]?.[1]
+        warningEvidence = JSON.stringify(warnSpy.mock.calls)
+        dispatchSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
+
+      expect(result).toBeDefined()
+      if (!result) throw new Error('directory sync result is required')
+      expect(result.run.status).toBe('completed')
+      expect(dispatchCallCount).toBe(1)
+      expect(dispatchFirstArgs).toEqual([fixture.localUserId, {
+        resolvedManagerId: fixture.managerUserId,
+      }])
+
+      const run = await readRun(result.run.id)
+      expect(run.status).toBe('completed')
+      expect(run.error_message).toBeNull()
+      expect(run.finished_at).not.toBeNull()
+
+      const durableSignal = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM directory_deprovision_events event
+           JOIN directory_deprovision_effects effect
+             ON effect.event_id = event.id
+            AND effect.local_user_id = event.local_user_id
+          WHERE event.run_id = $1::uuid
+            AND event.integration_id = $2::uuid
+            AND event.status = 'applied'
+            AND effect.status = 'applied'
+            AND effect.effect_type = 'user_changed'`,
+        [result.run.id, fixture.integrationId],
+      )
+      expect(durableSignal.rows).toEqual([{ count: '1' }])
+
+      const admittedUser = await query<{ id: string; is_active: boolean }>(
+        `SELECT id, is_active FROM users WHERE email = $1`,
+        [fixture.autoAdmissionEmail],
+      )
+      expect(admittedUser.rows).toHaveLength(1)
+      fixture.extraUserIds.push(admittedUser.rows[0].id)
+      expect(admittedUser.rows[0].is_active).toBe(true)
+
+      const inviteCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM user_invites WHERE email = $1`,
+        [fixture.autoAdmissionEmail],
+      )
+      expect(inviteCount.rows).toEqual([{ count: '0' }])
+
+      const reassignCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM approval_records
+          WHERE instance_id = $1 AND action = 'reassign'`,
+        [fixture.approvalId],
+      )
+      expect(reassignCount.rows).toEqual([{ count: '1' }])
+
+      expect(inviteWarningCount).toBe(1)
+      expect(inviteWarningMeta).toEqual({ reason: 'invite_ledger_failed' })
+      expect(warningEvidence).not.toContain(hostileMessage)
+      expect(warningEvidence).not.toContain(fixture.autoAdmissionEmail)
+      expect(warningEvidence).not.toContain(fixture.localUserId)
+      expect(warningEvidence).not.toContain(fixture.approvalId)
+    })
+
+    it('F4-E leaves the active seat in place and audits when the committed departure has no live manager', async () => {
+      const fixture = await seedApprovalDepartureSyncFixture('approval-no-manager', 'mark_inactive')
+      cleanupTargets.push(fixture)
+      const manager = fixture.directory.usersByDept[fixture.deptId][0]
+      manager.source = { leader_in_dept: [{ dept_id: fixture.deptId, leader: false }] }
+      activeDirectory = fixture.directory
+
+      const before = await query<{
+        assignee_id: string
+        id: string
+        is_active: boolean
+      }>(
+        `SELECT id::text AS id, assignee_id, is_active
+           FROM approval_assignments
+          WHERE instance_id = $1 AND is_active = TRUE`,
+        [fixture.approvalId],
+      )
+      expect(before.rows).toHaveLength(1)
+      expect(before.rows[0]).toMatchObject({
+        assignee_id: fixture.localUserId,
+        is_active: true,
+      })
+
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      try {
+        await syncDirectoryIntegration(fixture.integrationId, 'system:dso-f4e-no-manager')
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+      }
+
+      const after = await query<{
+        assignee_id: string
+        id: string
+        is_active: boolean
+      }>(
+        `SELECT id::text AS id, assignee_id, is_active
+           FROM approval_assignments
+          WHERE instance_id = $1
+          ORDER BY created_at ASC`,
+        [fixture.approvalId],
+      )
+      expect(after.rows).toEqual(before.rows)
+
+      const audit = await query<{
+        actor_id: string
+        from_status: string
+        from_version: number
+        metadata: Record<string, unknown>
+        target_user_id: string | null
+        to_status: string
+        to_version: number
+      }>(
+        `SELECT actor_id, from_status, from_version, metadata, target_user_id, to_status, to_version
+           FROM approval_records
+          WHERE instance_id = $1 AND action = 'reassign'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [fixture.approvalId],
+      )
+      expect(audit.rows).toHaveLength(1)
+      expect(audit.rows[0]).toMatchObject({
+        actor_id: 'system:approval-departure',
+        target_user_id: null,
+        metadata: {
+          departureTransfer: true,
+          fromUserId: fixture.localUserId,
+          outcome: 'no_manager_resolved',
+        },
+      })
+      expect(audit.rows[0].from_status).toBe(audit.rows[0].to_status)
+      expect(Number(audit.rows[0].from_version)).toBe(Number(audit.rows[0].to_version))
+    })
+
+    it('F4-E does not transfer for a grant-only deprovision event without user_changed', async () => {
+      const fixture = await seedApprovalDepartureSyncFixture('approval-grant-only', 'disable_grant_only')
+      cleanupTargets.push(fixture)
+      activeDirectory = fixture.directory
+
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      let runId = ''
+      try {
+        const result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-f4e-grant-only')
+        runId = result.run.id
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+      }
+
+      const effectTypes = await query<{ effect_type: string }>(
+        `SELECT effect.effect_type
+           FROM directory_deprovision_events event
+           JOIN directory_deprovision_effects effect ON effect.event_id = event.id
+          WHERE event.run_id = $1::uuid
+          ORDER BY effect.effect_type ASC`,
+        [runId],
+      )
+      expect(effectTypes.rows).toEqual([
+        { effect_type: 'grant_changed' },
+        { effect_type: 'membership_changed' },
+      ])
+      const activeSeat = await query<{ assignee_id: string; is_active: boolean }>(
+        `SELECT assignee_id, is_active
+           FROM approval_assignments
+          WHERE instance_id = $1 AND is_active = TRUE`,
+        [fixture.approvalId],
+      )
+      expect(activeSeat.rows).toEqual([{ assignee_id: fixture.localUserId, is_active: true }])
+      const reassignCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM approval_records
+          WHERE instance_id = $1 AND action = 'reassign'`,
+        [fixture.approvalId],
+      )
+      expect(reassignCount.rows).toEqual([{ count: '0' }])
     })
 
     it('with the policy enabled, a departure triggers the executor inside the run: grant revoked + user deactivated per policy', async () => {

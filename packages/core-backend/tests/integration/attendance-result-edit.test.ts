@@ -1,3 +1,5 @@
+import { captureAttendanceRecordTimezoneFixture } from '../utils/attendance-record-timezone-fixture'
+import type { PoolClient } from 'pg'
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
 import { createRequire } from 'module'
 import {
@@ -99,6 +101,7 @@ const codeOf = (r: HttpResponse) => (r.body as ErrBody | undefined)?.error?.code
 const dataOf = (r: HttpResponse) => (r.body as { data?: any } | undefined)?.data
 
 describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
+  const recordTimezoneFixture = captureAttendanceRecordTimezoneFixture()
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
@@ -109,7 +112,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -184,10 +187,11 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     isWorkday?: boolean
     meta?: Record<string, unknown>
     org?: string
+    currentTimezoneContext?: boolean
   }): Promise<string> {
     const id = randomUUID()
     await ensureActiveIdentity(input.userId, input.org ?? ORG)
-    await pool.query(
+    const insert = (client: Pool | PoolClient) => client.query(
       `INSERT INTO attendance_records
        (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, 'Asia/Shanghai', $5, $6, $7, $8, $9, $10, $11, $12::jsonb, NULL, now(), now())`,
@@ -206,6 +210,11 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
         JSON.stringify(input.meta ?? {}),
       ],
     )
+    if (input.currentTimezoneContext) {
+      await recordTimezoneFixture.seed(pool, { orgId: input.org ?? ORG, userId: input.userId, workDate: input.workDate, timezone: 'Asia/Shanghai' }, insert)
+    } else {
+      await insert(pool)
+    }
     return id
   }
 
@@ -329,6 +338,12 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       [ADMIN_USER_ID],
     )
     await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'attendance:admin')
+       ON CONFLICT DO NOTHING`,
+      [ADMIN_USER_ID],
+    )
+    await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active)
        VALUES ($1, $2, true)
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
@@ -368,12 +383,17 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   afterAll(async () => {
+    recordTimezoneFixture.restore()
     if (pool) {
       await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_record_result_edits WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_records WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_payroll_cycles WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM user_roles WHERE user_id = ANY($1)`, [[...seededUserIds]]).catch(() => undefined)
+      await pool.query(
+        `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'attendance:admin'`,
+        [ADMIN_USER_ID],
+      ).catch(() => undefined)
       await pool.query(`DELETE FROM user_orgs WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM users WHERE id = ANY($1)`, [[...seededUserIds]]).catch(() => undefined)
     }
@@ -662,10 +682,11 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('AE-1b durability: approved request explicit override is intentional and clears a stale manual marker', async () => {
+    await withDefaultRule({ timezone: 'Asia/Shanghai' }, async () => {
     const userId = ADMIN_USER_ID
     const workDate = ymd(6)
     const recordId = await seedRecord({
-      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 40, earlyLeaveMinutes: 0,
+      currentTimezoneContext: true, userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 40, earlyLeaveMinutes: 0,
       firstInAt: `${workDate}T01:40:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
     })
     const edit = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '核验后更正', idempotencyKey: `k-durable-approve-${RUN}` })
@@ -691,6 +712,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(rec.first_in_at?.toISOString()).toBe(`${workDate}T01:25:00.000Z`)
     expect(rec.meta?.manual_result_edit).toBeUndefined()
     expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+    })
   })
 
   it('W2 overtime final approval rejects a missing frozen anchor before every state/accounting write', async () => {
@@ -726,8 +748,9 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     )
     await pool.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, 'attendance_request_approval', $6::jsonb)`,
       [requestId, overtimeUserId, workDate, ORG, approvalId, JSON.stringify({ minutes: 60 })],
     )
 
@@ -813,8 +836,9 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     )
     await pool.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, 'attendance_request_approval', $6::jsonb)`,
       [
         requestId,
         overtimeUserId,
@@ -923,8 +947,8 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       await pool.query(
         `INSERT INTO attendance_requests
            (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
-            requested_in_at, requested_out_at, reason, metadata)
-         VALUES ($1, $2, $3, 'time_correction', 'pending', $4, $5, $6, $7, $8, '{}'::jsonb)`,
+            approval_workflow_key, requested_in_at, requested_out_at, reason, metadata)
+         VALUES ($1, $2, $3, 'time_correction', 'pending', $4, $5, 'attendance_request_approval', $6, $7, $8, '{}'::jsonb)`,
         [
           requestId,
           ambiguityUserId,

@@ -39,6 +39,10 @@ const OWNER = `u_f2_owner_${TS}`
 const BASE = `base_f2_${TS}`
 const SHEET = `sheet_f2_${TS}`
 const FLD = `fld_f2_title_${TS}`
+// 客户反馈 2026-09-24 #3 (F2-G7..G9): a dedicated sheet + a STORED「record.deleted → delete_record」rule for the
+// end-to-end chain golden, so no other golden's executeRule can ever be matched by handleEvent here.
+const SHEET_CHAIN = `sheet_f2_chain_${TS}`
+const RULE_CHAIN = `atr_f2_chain_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -118,6 +122,15 @@ describeIfDatabase('P1#2c — producer family 2: executor Class-A record events 
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE, 'F2 Base', OWNER])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'F2 Sheet'])
     await q(`INSERT INTO meta_fields (id, sheet_id, name, type, "order") VALUES ($1,$2,'Title','string',0)`, [FLD, SHEET])
+    // F2-G9 fixture — inserted DIRECTLY (createRule now REFUSES this shape with DELETED_TRIGGER_SELF_MUTATION),
+    // exactly like the customer's pre-existing rule on the demo server.
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_CHAIN, BASE, 'F2 Chain Sheet'])
+    await q(
+      `INSERT INTO automation_rules
+         (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by, actions)
+       VALUES ($1, $2, $3, 'record.deleted', '{}'::jsonb, 'delete_record', '{}'::jsonb, true, $4, $5::jsonb)`,
+      [RULE_CHAIN, SHEET_CHAIN, '记录删除时 → 删除记录', OWNER, JSON.stringify([{ type: 'delete_record', config: {} }])],
+    )
   })
 
   afterEach(() => {
@@ -126,6 +139,11 @@ describeIfDatabase('P1#2c — producer family 2: executor Class-A record events 
   })
 
   afterAll(async () => {
+    await q('DELETE FROM multitable_automation_executions WHERE rule_id = $1', [RULE_CHAIN]).catch(() => {})
+    await q('DELETE FROM meta_automation_event_fires WHERE rule_id = $1', [RULE_CHAIN]).catch(() => {})
+    await q('DELETE FROM automation_rules WHERE id = $1', [RULE_CHAIN]).catch(() => {})
+    await q(`DELETE FROM meta_automation_outbox WHERE payload->>'sheetId' = $1`, [SHEET_CHAIN]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_CHAIN]).catch(() => {})
     await q(
       `DELETE FROM meta_automation_outbox
         WHERE payload->>'recordId' IN (SELECT id FROM meta_records WHERE sheet_id = $1)
@@ -268,5 +286,73 @@ describeIfDatabase('P1#2c — producer family 2: executor Class-A record events 
     expect(second.steps[0]?.alreadyApplied).toBe(true)
     // The duplicate-claim early-return skipped the enqueue exactly as it skips the legacy emit.
     expect(await outboxRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074) — deleting NOTHING publishes NOTHING ───────────────────────────
+  // The customer's rule「记录删除时 → 删除记录（同表）」: under record.deleted the same-base delete addresses the
+  // trigger record, which is already gone. The 0-row DELETE used to report success AND enqueue/emit a fresh
+  // multitable.record.deleted (new _eventId, depth+1) — re-firing the rule to the depth cap: 1 delete ⇒ 3 logs.
+  test('F2-G7 flag ON delete_record of a MISSING record: step skipped, ZERO outbox rows, legacy silent', async () => {
+    process.env[DURABLE_FLAG] = 'true'
+    const bus = new EventBus()
+    const seen = spyRecordEvents(bus)
+    const ghost = `rec_f2_ghost_on_${TS}`
+    const exec = await realService(bus).executeRule(
+      ruleFor(SHEET, { type: 'delete_record', config: {} }),
+      { recordId: ghost, actorId: OWNER, data: {} },
+    )
+    expect(exec.status).toBe('skipped')
+    expect(exec.steps[0]).toMatchObject({
+      actionType: 'delete_record',
+      status: 'skipped',
+      output: { recordId: ghost, sheetId: SHEET, reason: 'target_record_missing' },
+    })
+    expect(await outboxRowsForRecord(ghost)).toHaveLength(0)
+    expect(seen).toHaveLength(0)
+  })
+
+  test('F2-G8 flag OFF delete_record of a MISSING record: step skipped, NO legacy emit, ZERO outbox rows', async () => {
+    const bus = new EventBus()
+    const seen = spyRecordEvents(bus)
+    const ghost = `rec_f2_ghost_off_${TS}`
+    const exec = await realService(bus).executeRule(
+      ruleFor(SHEET, { type: 'delete_record', config: {} }),
+      { recordId: ghost, actorId: OWNER, data: {} },
+    )
+    expect(exec.steps[0]?.status).toBe('skipped')
+    expect(seen).toHaveLength(0)
+    expect(await outboxRowsForRecord(ghost)).toHaveLength(0)
+  })
+
+  test('F2-G9 END TO END (flag OFF, the demo server shape): ONE user delete ⇒ exactly ONE execution row (skipped), ZERO chain events', async () => {
+    const bus = new EventBus()
+    const seen = spyRecordEvents(bus)
+    const svc = realService(bus)
+    // Subscribe the producer lane to OUR bus — the loop a chain event travels (bus → handleEvent → executor).
+    svc.init()
+    const ghost = `rec_f2_chain_ghost_${TS}`
+    try {
+      // The event the record-service delete sink publishes for one user delete (identity stamped like production).
+      await svc.handleEvent('multitable.record.deleted', {
+        sheetId: SHEET_CHAIN,
+        recordId: ghost,
+        actorId: OWNER,
+        data: {},
+        _eventId: `evt_f2_user_delete_${TS}`,
+      } as never)
+      // Give a would-be chain time to land (each hop is a tracked async handleEvent), then drain the lane.
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    } finally {
+      await svc.stopProducerAdmissions()
+    }
+
+    const executions = (
+      await q('SELECT status, steps FROM multitable_automation_executions WHERE rule_id = $1 ORDER BY triggered_at', [RULE_CHAIN])
+    ).rows as Array<{ status: string; steps: unknown }>
+    // The customer saw THREE rows here.
+    expect(executions).toHaveLength(1)
+    expect(executions[0].status).toBe('skipped')
+    expect(seen.filter((event) => event.type === 'multitable.record.deleted')).toHaveLength(0)
+    expect(await outboxRowsForRecord(ghost)).toHaveLength(0)
   })
 })

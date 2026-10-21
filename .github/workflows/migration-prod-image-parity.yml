@@ -1,0 +1,214 @@
+name: Migration parity — production postgres image (advisory)
+
+# ADVISORY LANE — NOT a required check (no branch-protection entry references this workflow).
+# Runs the FULL migration chain against postgres:15-alpine, which is the EXACT image pin
+# production/staging actually run — confirmed identical, character-for-character, in:
+#   docker-compose.app.yml:5           image: postgres:15-alpine
+#   docker-compose.app.staging.yml:3   image: postgres:15-alpine
+#   docker-compose.dev.yml:5           image: postgres:15-alpine
+# (verified 2026-08-21 against the fresh-origin/main checkout this workflow was authored from).
+#
+# WHY THIS LANE EXISTS (2026-08-21): a PG15-alpine arm run for an unrelated task surfaced a
+# latent CI-blind divergence. postgres:15-alpine's pg_collation table has NO libc en_US.utf8
+# entry (verified: collprovider='c' rows are exactly C / POSIX / ucs_basic, plus one 'default'
+# pseudo-entry — everything else, 900+ rows, is collprovider='i' ICU; musl libc does not ship
+# glibc's locale data, and Alpine's postgres build does not compile a libc-locale provider in).
+# Every EXISTING CI arm that runs migrations does so against a DIFFERENT postgres build than
+# production:
+#   - plugin-tests.yml: ankane/setup-postgres, postgres-version: 14 — Debian glibc (see its
+#     "Start Postgres" step).
+#   - observability-strict.yml / observability-e2e.yml / safety-guard-e2e.yml:
+#     quay.io/enterprisedb/postgresql:15 as a `services:` container — RHEL 8.10 / glibc 2.28,
+#     NOT Debian and NOT the ankane/setup-postgres runner-native install; still glibc, still not
+#     the alpine/musl build.
+#   - migration-replay.yml: ankane/setup-postgres, postgres-version: 15 — Debian glibc, NOT the
+#     alpine/musl build; the major version number matching does not make it image-parity.
+#   - approval-realdb-*.yml (this repo's real-DB acceptance lanes): postgres:16 (Debian glibc
+#     Docker image) as a `services:` container.
+# A migration that wrote `COLLATE "en_US.utf8"` on any text column would PASS every one of the
+# above — glibc resolves that collation name fine — and then error at migrate time on the actual
+# image production runs: `ERROR: collation "en_US.utf8" for encoding "UTF8" does not exist`
+# (SQLSTATE 42704). Even a hypothetical alpine-vs-alpine comparison would not be safe here: musl
+# orders strings differently from glibc under the SAME nominal locale name, so a collation that
+# merely happens to resolve on both libcs can still silently produce different sort/comparison
+# results between the CI arm and production — image identity, not just "some postgres:15", is
+# the thing this lane pins.
+#
+# WHY NOT A REGEX LINT (scripts/ci/lint-sql-migrations.sh already exists, and is the wrong
+# shape): that script is referenced by NO workflow in this repo (`grep -rl lint-sql-migrations
+# .github/workflows/` is empty — dead tooling, not a running gate) and only scans `*.sql` files,
+# while live migration authorship in this repo is overwhelmingly `.ts` (kysely) — a `COLLATE
+# "en_US.utf8"` inside a `sql\`...\`` template literal in a `.ts` migration is invisible to a
+# glob that only opens `.sql` files. Even fixed and wired in, a text-pattern lint over migration
+# source is a DELETABLE GUARD (this repo's trap-enumeration lesson: a lint rule constrains only
+# the exact spelling it was written against — `COLLATE 'en_US.UTF-8'`, a differently-cased or
+# `-quoted variant, or any OTHER libc-specific collation/locale-dependent construct entirely
+# sails through untouched). The mechanism-level fix is to actually RUN the migrations against
+# the actual image and let Postgres itself be the oracle — that is what this workflow does.
+#
+# TEETH, verified locally before this workflow was ever pushed (postgres:15-alpine container,
+# same MIGRATION_EXCLUDE as below): the full 319-migration chain applies cleanly (exit 0). A
+# throwaway migration containing `id text COLLATE "en_US.utf8"` was then added (never committed)
+# and re-run: FAILS on postgres:15-alpine with exactly `error: collation "en_US.utf8" for
+# encoding "UTF8" does not exist` (exit 1), while the SAME throwaway migration file, run against
+# a fresh Debian-glibc postgres:16 container, APPLIES CLEANLY (exit 0) — reproducing, end to end,
+# the exact CI-blind gap this lane closes. The throwaway file was deleted before this PR.
+#
+# TWO-POINT SCOPE NOTE (honest, not closed by this file): the `paths:` trigger below only
+# watches packages/core-backend/src/db/migrations/** (the modern kysely stream) + migrate.ts +
+# this workflow — NOT packages/core-backend/migrations/** (the smaller legacy raw-SQL folder
+# migration-provider.ts also loads). A migration authored only in that legacy folder would not
+# fire this lane on its own PR; it would still be caught on the next PR that also touches a
+# watched path, or via workflow_dispatch. Widening the trigger is a follow-up, not silently
+# assumed done here.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/db/migrations/**'
+      - 'packages/core-backend/src/db/migrate.ts'
+      - '.github/workflows/migration-prod-image-parity.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  migration-prod-image-parity:
+    name: migration-prod-image-parity (postgres:15-alpine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        # PIN: this MUST stay byte-identical to docker-compose.app.yml's `image:` line — see the
+        # header comment above for the cross-file verification. Changing this tag (e.g. to a
+        # Debian-based image, or a different alpine minor) silently defeats the parity guarantee
+        # this whole lane exists for; the "Confirm live server is musl" step below is the
+        # mechanical guard against exactly that drift going unnoticed.
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_migration_prod_parity
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_migration_prod_parity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_migration_prod_parity
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run full migration chain against postgres:15-alpine
+        env:
+          # SAME per-PR-gate exclusion list the approval real-DB lanes use
+          # (.github/workflows/approval-realdb-acceptance.yml / plugin-tests.yml's "Run DB
+          # migrations" step) — this lane provisions the identical schema those lanes run
+          # against, so a divergence found here is not an artifact of a different exclude set.
+          # See packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md for the per-item detail.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: |
+          set -o pipefail
+          pnpm --filter @metasheet/core-backend db:migrate 2>&1 | tee /tmp/migration-prod-image-parity-output.log
+
+      - name: Positive assertion — migration count executed > 0 (no skip-green)
+        # `db:migrate` exiting 0 is not by itself proof anything ran (a provider returning zero
+        # migrations, or every migration being excluded, also exits 0) — this repo's own
+        # migrate.ts docs that exact gap for --confirm. Count the "was executed successfully"
+        # lines kysely's reporter prints per applied migration and hard-fail on zero: an EMPTY
+        # migration run must RED this lane, never quietly report green.
+        run: |
+          set -o pipefail
+          executedCount=$(grep -c 'was executed successfully' /tmp/migration-prod-image-parity-output.log || true)
+          failedCount=$(grep -c 'failed to execute migration' /tmp/migration-prod-image-parity-output.log || true)
+          echo "migrationsExecuted=${executedCount}"
+          echo "migrationsFailed=${failedCount}"
+          if [ -z "${executedCount}" ] || [ "${executedCount}" -le 0 ]; then
+            echo "::error::migration-prod-image-parity: 0 migrations were executed against postgres:15-alpine. An empty run is a FAILURE here, not a skip-green — the whole point of this lane is that migrations actually ran against the production image." >&2
+            exit 1
+          fi
+          if [ -n "${failedCount}" ] && [ "${failedCount}" -gt 0 ]; then
+            echo "::error::migration-prod-image-parity: ${failedCount} migration(s) reported failure against postgres:15-alpine." >&2
+            exit 1
+          fi
+          {
+            echo "positiveAssertion=migrations_executed_gt_zero"
+            echo "migrationsExecuted=${executedCount}"
+            echo "migrationsFailed=${failedCount}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Ensure psql client
+        run: command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+
+      - name: Confirm live server is musl (production-image parity guard)
+        # If someone silently repoints the `postgres` service image above at a Debian-based tag
+        # (or any non-musl build), the collation-availability gap this lane exists to catch stops
+        # applying and the whole parity guarantee quietly evaporates while the workflow keeps
+        # passing for an unrelated reason. Assert the live server actually reports "musl" in
+        # `version()`, not just that SOME postgres answered on port 5432.
+        #
+        # Connect via the full $DATABASE_URL (job-level env), NOT `-h 127.0.0.1 -U postgres`
+        # with no credential: the official postgres image's default host-auth (scram/md5 once
+        # POSTGRES_PASSWORD is set) rejects a passwordless TCP connection with `fe_sendauth: no
+        # password supplied` — verified locally (exit 2) before this fix, and confirmed fixed by
+        # switching to the DSN form (exit 0) — see the PR body's TCP-auth-fix note.
+        run: |
+          set -o pipefail
+          versionString="$(psql "${DATABASE_URL}" -tAc 'select version();')"
+          echo "serverVersionString=${versionString}"
+          case "${versionString}" in
+            *musl*) echo "muslImageConfirmed=PASS" ;;
+            *)
+              echo "::error::migration-prod-image-parity: live server version() does not contain \"musl\" — the postgres service image is no longer the production musl/alpine build, so this lane's parity guarantee no longer holds. version()=${versionString}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Canary — resulting schema is queryable
+        # Cheap smoke batch: the migration ledger row count matches what was actually applied,
+        # and a representative table the migration chain creates answers a real query. Not a
+        # correctness suite (that is what the other real-DB lanes are for) — just proof the
+        # schema this chain produced on THIS image is live and queryable, not merely "migrate
+        # exited 0 and nobody looked at the result".
+        run: |
+          set -o pipefail
+          ledgerCount="$(psql "${DATABASE_URL}" -tAc 'select count(*) from kysely_migration;' | tr -d '[:space:]')"
+          echo "kyselyMigrationLedgerCount=${ledgerCount}"
+          if [ -z "${ledgerCount}" ] || [ "${ledgerCount}" -le 0 ]; then
+            echo "::error::migration-prod-image-parity: kysely_migration ledger is empty after a claimed-successful migrate run." >&2
+            exit 1
+          fi
+          tableExists="$(psql "${DATABASE_URL}" -tAc "select to_regclass('public.approval_records') is not null;" | tr -d '[:space:]')"
+          echo "approvalRecordsTableQueryable=${tableExists}"
+          if [ "${tableExists}" != "t" ]; then
+            echo "::error::migration-prod-image-parity: public.approval_records is not queryable after migrate — the resulting schema is not usable." >&2
+            exit 1
+          fi
+          {
+            echo "canary=schema_queryable"
+            echo "kyselyMigrationLedgerCount=${ledgerCount}"
+            echo "approvalRecordsTableQueryable=${tableExists}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

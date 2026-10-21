@@ -30,12 +30,14 @@
  *
  * Values-free discipline: closed codes only; no caller value is echoed.
  */
+import { requireOnlinePunchRequestV1, readOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, ONLINE_PUNCH_SOURCE_REF, OLD_OUTDOOR_PUNCH_SOURCE_REF, OnlinePunchClaimCollisionError, isOnlinePunchClaimPrimaryKeyCollision, type OnlinePunchRequestV1 } from './online-punch-request'
 import type {
   AttendanceSourceEntrypointV1,
   AttendanceW4TransactionClientV1,
   VerifiedAttendanceOperationIdentityV1,
   VerifiedAttendanceOrgIdentityV1,
 } from './w4c0-identity'
+import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
@@ -76,6 +78,11 @@ export class AttendanceW4RegistryError extends Error {
     this.name = 'AttendanceW4RegistryError'
     this.code = code
   }
+}
+
+/** The caller must destroy, not return, this pooled connection. */
+export class AttendanceCleaningConnectionUncertainError extends AttendanceW4RegistryError {
+  constructor() { super('W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN') }
 }
 
 function fail(code: string): never {
@@ -553,7 +560,14 @@ async function insertClaimedItemRow(
 // ---------------------------------------------------------------------------
 
 export type AttendanceResultOperationPreflightResultV1 =
-  | { readonly kind: 'replay'; readonly responses: AttendanceOperationReplayResponsesV1 }
+  | {
+      readonly kind: 'replay'
+      readonly responses: AttendanceOperationReplayResponsesV1
+      /** ACP only: completed, not claimed; never execute, enqueue or reseal. */
+      readonly lockedAttendanceCleaning?: {
+        readonly org: VerifiedAttendanceOrgIdentityV1
+      }
+    }
   | { readonly kind: 'suspended' }
   | {
       readonly kind: 'claimed'
@@ -586,6 +600,7 @@ export async function attendanceResultOperationPreflightV1(
   trx: AttendanceW4TransactionClientV1,
   authorization: unknown,
   envelope: AttendanceResultOperationEnvelopeInputV1,
+  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' } | { readonly onlinePunch: OnlinePunchRequestV1 },
 ): Promise<AttendanceResultOperationPreflightResultV1> {
   const plan = planEnvelope(envelope)
   // Step 1: branded authorization covers every envelope item; org binding; SQL recheck.
@@ -594,6 +609,27 @@ export async function attendanceResultOperationPreflightV1(
     throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
   }
   await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
+  // Internal adapter decision, never inferred from a sourceRef or HTTP body.
+  if (options !== undefined && (Object.keys(options).length !== 1
+    || (!('onlinePunch' in options) && !('attendanceCleaningReplay' in options)))) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  const onlinePunch = options && 'onlinePunch' in options ? requireOnlinePunchRequestV1(options.onlinePunch) : null
+  if (onlinePunch && (plan.entrypoint !== 'live_punch' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF
+    || auth.actorId !== onlinePunch.userId || plan.orgKey !== onlinePunch.orgId
+    || plan.sourced[0]!.candidateOperationId !== onlinePunch.operationId
+    || plan.sourced[0]!.input.commandFingerprint !== onlinePunch.fingerprint)) fail('W4C0_ENVELOPE_INVALID')
+  const onlineCompanion = readOnlinePunchCompanionV1(trx)
+  if (onlineCompanion && (plan.entrypoint !== 'request_create' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== OLD_OUTDOOR_PUNCH_SOURCE_REF
+    || auth.orgId !== onlineCompanion.orgId || auth.actorId !== onlineCompanion.userId
+    || plan.sourced[0]!.candidateOperationId !== onlineCompanion.operationId)) fail('W4C0_ENVELOPE_INVALID')
+  const cleaningReplay = options && 'attendanceCleaningReplay' in options ? options.attendanceCleaningReplay : undefined
+  if (options !== undefined && !onlinePunch && (
+    (cleaningReplay !== 'allow-new' && cleaningReplay !== 'require-completed')
+    || plan.entrypoint !== 'manual_edit' || plan.batch !== null
+    || plan.sourced.length !== 1 || plan.legacyNullIdCount !== 0
+    || !/^attendance-cleaning-source-v1:[0-9a-f]{64}$/.test(auth.sourceRef)
+  )) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
 
   // Step 1 (cont.): non-locking read of exact keys in stable order — an
   // all-completed congruent replay returns with zero DML even under suspension.
@@ -601,7 +637,7 @@ export async function attendanceResultOperationPreflightV1(
   const preBatchRow = plan.batch ? await readBatchRow(trx, plan.orgKey, plan.entrypoint, plan.batch.batchCommandId) : null
   const preRows = await readOperationRows(trx, plan.orgKey, plan.entrypoint, candidateIds)
   const preClassification = classify(plan, auth, preBatchRow, preRows, false)
-  if (preClassification.kind === 'all_completed_congruent') {
+  if (preClassification.kind === 'all_completed_congruent' && cleaningReplay === undefined) {
     return { kind: 'replay', responses: preClassification.responses }
   }
 
@@ -650,7 +686,10 @@ export async function attendanceResultOperationPreflightV1(
 
   // Canonical exclusive identity advisory locks for ALL supplied identities.
   const allIdentities = batchIdentity ? [batchIdentity, ...itemIdentities] : [...itemIdentities]
+  if (onlinePunch) allIdentities.push(createVerifiedAttendanceOperationIdentityV1({ org, kind: 'item',
+    entrypoint: 'request_create', source: { sourceKind: 'direct_request_create', clientOperationId: onlinePunch.operationId } }))
   await acquireAttendanceResultOperationLocks(trx, allIdentities)
+  if (onlinePunch) await refuseOldOutdoorPunchV1(trx, onlinePunch)
 
   // Re-read under locks; now strict: mixed/incomplete/non-congruent conflicts.
   const lockedBatchRow = plan.batch
@@ -659,8 +698,14 @@ export async function attendanceResultOperationPreflightV1(
   const lockedRows = await readOperationRows(trx, plan.orgKey, plan.entrypoint, candidateIds)
   const lockedClassification = classify(plan, auth, lockedBatchRow, lockedRows, true)
   if (lockedClassification.kind === 'all_completed_congruent') {
+    if (cleaningReplay !== undefined) {
+      return { kind: 'replay', responses: lockedClassification.responses,
+        lockedAttendanceCleaning: Object.freeze({ org }) }
+    }
     return { kind: 'replay', responses: lockedClassification.responses }
   }
+  // A completed locator may not degrade into a fresh claim after locking.
+  if (cleaningReplay === 'require-completed') conflict('ATTENDANCE_OPERATION_CONFLICT')
 
   // Section 8.2 step 2 (P07/P08): after the operation rows, lock and re-read the
   // V1 operational-job reservation for this batch tuple. A W4C-0 synchronous
@@ -691,16 +736,15 @@ export async function attendanceResultOperationPreflightV1(
     .map((item, index) => ({ item, identity: itemIdentities[index] }))
     .sort((a, b) => (a.identity.id < b.identity.id ? -1 : a.identity.id > b.identity.id ? 1 : 0))
   for (const { item, identity } of orderedForInsert) {
-    await insertClaimedItemRow(
-      trx,
-      org,
-      identity,
-      auth,
-      item.input.commandFingerprint,
-      plan.batch ? plan.batch.batchCommandId : null,
-      item.ordinal,
-      item.input.normalizedBusinessInputSnapshot,
-    )
+    try {
+      await insertClaimedItemRow(
+        trx, org, identity, auth, item.input.commandFingerprint,
+        plan.batch ? plan.batch.batchCommandId : null, item.ordinal, item.input.normalizedBusinessInputSnapshot,
+      )
+    } catch (error) {
+      if ((onlinePunch || onlineCompanion) && isOnlinePunchClaimPrimaryKeyCollision(error)) throw new OnlinePunchClaimCollisionError()
+      throw error
+    }
   }
   return {
     kind: 'claimed',
@@ -710,6 +754,27 @@ export async function attendanceResultOperationPreflightV1(
     legacyNullIdCount: plan.legacyNullIdCount,
     referenceSegments: posture.referenceSegments,
   }
+}
+
+/** Online read probe never claims; immutable completed rows preserve replay before suspension. */
+export async function readOnlinePunchReplayV1(
+  trx: AttendanceW4TransactionClientV1, authorization: unknown, input: OnlinePunchRequestV1,
+): Promise<unknown | null> {
+  const request = requireOnlinePunchRequestV1(input)
+  const auth = requireAuthorizedCapabilityForEntrypointV1(authorization, 'live_punch')
+  if (auth.orgId !== request.orgId || auth.actorId !== request.userId || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF) {
+    throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+  }
+  await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
+  const rows = await readOperationRows(trx, request.orgId, 'live_punch', [request.operationId])
+  if (!rows.size) { await refuseOldOutdoorPunchV1(trx, request); return null }
+  const result = classify(planEnvelope(request.registryInput), auth, null, rows, true)
+  if (result.kind !== 'all_completed_congruent') conflict('ATTENDANCE_OPERATION_CONFLICT')
+  return result.responses.itemResponses[request.operationId] ?? null
+}
+async function refuseOldOutdoorPunchV1(trx: AttendanceW4TransactionClientV1, request: OnlinePunchRequestV1): Promise<void> {
+  const rows = await readOperationRows(trx, request.orgId, 'request_create', [request.operationId])
+  if (rows.get(request.operationId)?.source_ref === OLD_OUTDOOR_PUNCH_SOURCE_REF) conflict('ATTENDANCE_OPERATION_CONFLICT')
 }
 
 // ---------------------------------------------------------------------------
@@ -934,10 +999,62 @@ export function isRetryableSqlState(error: unknown): boolean {
   return code === '40001' || code === '40P01'
 }
 
+async function acquireCleaningSessionFences(
+  connection: AttendanceW4TransactionClientV1,
+  sheetIds: readonly string[],
+  held: string[],
+): Promise<void> {
+  if (!Array.isArray(sheetIds) || sheetIds.length < 1 || sheetIds.length > 2
+    || sheetIds.some(id => typeof id !== 'string' || id.length === 0 || id.length > 256)) {
+    fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  }
+  // Sort/deduplicate the actual signed PG keys, including hash collisions.
+  const keys = await connection.query(`SELECT DISTINCT hashtext(value)::bigint AS key
+    FROM unnest($1::text[]) AS value ORDER BY key`, [sheetIds.map(canonicalSheetFenceKey)])
+  for (const row of keys.rows as Array<{ key: string }>) {
+    const key = String(row.key)
+    const existing = await connection.query(`SELECT 1 FROM pg_locks
+      WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted
+        AND objsubid = 1 AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+        AND objid::bigint = ($1::bigint & 4294967295)`, [key])
+    // Session acquisition is reentrant. Never increment/release somebody else's count.
+    if (existing.rows.length !== 0) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+    let result
+    try {
+      result = await connection.query('SELECT pg_try_advisory_lock($1::bigint) AS acquired', [key])
+    } catch {
+      // A lost result cannot tell us whether this session acquired the lock.
+      throw new AttendanceCleaningConnectionUncertainError()
+    }
+    const acquired = (result.rows[0] as { acquired?: unknown } | undefined)?.acquired
+    if (acquired === false) fail('W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY')
+    if (acquired !== true) throw new AttendanceCleaningConnectionUncertainError()
+    held.push(key)
+  }
+}
+
+async function releaseCleaningSessionFences(
+  connection: AttendanceW4TransactionClientV1,
+  held: readonly string[],
+): Promise<void> {
+  let uncertain = false
+  for (const key of [...held].reverse()) {
+    try {
+      const result = await connection.query('SELECT pg_advisory_unlock($1::bigint) AS released', [key])
+      if ((result.rows[0] as { released?: unknown } | undefined)?.released !== true) uncertain = true
+    } catch { uncertain = true }
+  }
+  if (uncertain) throw new AttendanceCleaningConnectionUncertainError()
+}
+
 export async function runAttendanceResultOperationTransactionV1<T>(
   connection: AttendanceW4TransactionClientV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+  options?: { readonly attendanceCleaningAuthority: true; readonly attendanceCleaningSheetIds: readonly string[] },
 ): Promise<T> {
+  if (options !== undefined && (options.attendanceCleaningAuthority !== true
+    || !Array.isArray(options.attendanceCleaningSheetIds) || options.attendanceCleaningSheetIds.length < 1
+    || options.attendanceCleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
   // Gate E (#4844) first batch: `connection` is CALLER-supplied. PostgreSQL only WARNs on a
   // nested `BEGIN` (never errors) — on a dirty caller connection this function's own `COMMIT`
   // below would durably publish the caller's uncommitted writes, strictly worse than a merely
@@ -951,8 +1068,34 @@ export async function runAttendanceResultOperationTransactionV1<T>(
   let attempt = 0
   // W4_TRANSACTION_MAX_RETRIES retries => up to (1 + retries) attempts.
   for (;;) {
+    const held: string[] = []
+    const sessionFenced = options?.attendanceCleaningSheetIds !== undefined
     try {
-      await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])
+      if (sessionFenced) await acquireCleaningSessionFences(connection, options.attendanceCleaningSheetIds!, held)
+      try {
+        await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])
+      } catch (error) {
+        if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+        throw error
+      }
+      if (options?.attendanceCleaningAuthority === true) {
+        // LOCK is a utility statement: fence before even set_config's SELECT can
+        // establish the SERIALIZABLE snapshot. Fixed relations only, no table input.
+        // Deliberately table-wide and default-off; unrelated authority DML waits.
+        try {
+          await connection.query(`LOCK TABLE
+            public.attendance_leave_types, public.attendance_overtime_rules,
+            public.field_permissions, public.meta_fields, public.meta_sheets,
+            public.platform_member_group_members, public.plugin_multitable_object_registry,
+            public.record_permissions, public.role_permissions, public.spreadsheet_permissions,
+            public.system_configs, public.user_namespace_admissions, public.user_orgs,
+            public.user_permissions, public.user_roles, public.users
+            IN SHARE MODE NOWAIT`, [])
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code
+          fail(code === '55P03' ? 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY' : 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_UNAVAILABLE')
+        }
+      }
       await connection.query("SELECT set_config('statement_timeout', $1, true)", [
         String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
       ])
@@ -960,15 +1103,29 @@ export async function runAttendanceResultOperationTransactionV1<T>(
         String(W4_TRANSACTION_LOCK_TIMEOUT_MS),
       ])
       const result = await body(connection)
-      await connection.query('COMMIT', [])
+      try {
+        await connection.query('COMMIT', [])
+      } catch (error) {
+        // Retry only an explicit serialization/deadlock rollback; an ambiguous
+        // commit must recover via the durable operation, never blindly reapply.
+        if (sessionFenced && !isRetryableSqlState(error)) throw new AttendanceCleaningConnectionUncertainError()
+        throw error
+      }
       return result
     } catch (error) {
-      await connection.query('ROLLBACK', []).catch(() => undefined)
+      try { await connection.query('ROLLBACK', []) } catch {
+        if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+        if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+      }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1
         continue
       }
       throw error
+    } finally {
+      // Each retry gives up every session lock before starting its next attempt.
+      // Never unlock-all or silently return an uncertain connection to its pool.
+      if (sessionFenced) await releaseCleaningSessionFences(connection, held)
     }
   }
 }

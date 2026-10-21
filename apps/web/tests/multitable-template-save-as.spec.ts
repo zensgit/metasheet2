@@ -1,0 +1,1027 @@
+/**
+ * 模板中心「把 Base 存为模板」入口(09-10 测试反馈第 8 条:模板中心只能用、不能建)。
+ *
+ * 覆盖:
+ *  - 入口按权限显隐(镜像服务端 canManageFields = 管理员角色或 multitable:manage-schema);
+ *  - 表单校验(没选 Base / 没填名字 → 提交禁用);
+ *  - 提交调 client.createTemplateFromBase 并把服务端的降级 warnings 原样展示,列表强制刷新;
+ *  - 自定义模板卡片带「自定义」角标与删除入口,内置模板两者都没有;
+ *  - 删除走 client.deleteTemplate 并刷新列表;
+ *  - 可见性:「共享给本租户」默认不勾,提交的 visibility 是 'private';勾了才是 'tenant';
+ *  - 服务端的 customTemplatesUnavailable 降级标志位必须在页面上明说(而不是表现成「你没建过模板」)。
+ *
+ * F7(09-11 反馈第 7 条:「在表里调好字段后一键存为模板」)追加的第二个 describe:
+ * 工作台工具栏的「存为模板」入口 —— 按 caps.canManageFields 与 activeSheetId 显隐、
+ * 对话框默认值(模板名 = 当前**数据表**名、字段默认全选、「共享给本租户」默认不勾)、
+ * 以及提交出去的 payload 形状 { baseId, sheetIds:[当前表], fieldIds:[勾选的] }。
+ *
+ * 隐藏只是 UX,服务端才是门 —— 路由级证明在
+ * packages/core-backend/tests/unit/multitable-custom-template-routes.test.ts。
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import MultitableTemplateCenterView from '../src/views/MultitableTemplateCenterView.vue'
+import { useLocale } from '../src/composables/useLocale'
+import { workbenchLabel } from '../src/multitable/utils/workbench-labels'
+
+const USER_PERMISSIONS_KEY = 'user_permissions'
+
+const mocks = vi.hoisted(() => ({
+  push: vi.fn(),
+  listTemplates: vi.fn(),
+  installTemplate: vi.fn(),
+  listBases: vi.fn(),
+  createTemplateFromBase: vi.fn(),
+  deleteTemplate: vi.fn(),
+}))
+
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
+  return {
+    ...actual,
+    useRouter: () => ({ push: mocks.push }),
+    // F7's success footer renders a real <RouterLink> (workbench.vue extended its existing
+    // `useRouter` import to also pull `RouterLink` from 'vue-router', matching
+    // MetaRecordInspector.vue / MetaRecordApprovalPanel.vue). A real RouterLink's setup()
+    // injects the router instance directly (bypassing the mocked `useRouter` above), which
+    // throws when no router plugin is installed -- same stub already used by
+    // multitable-workbench-1672-1673.spec.ts / -history-field-scope-wiring.spec.ts /
+    // -permission-wiring.spec.ts for the same reason.
+    RouterLink: defineComponent({ props: ['to'], setup(_, { slots }) { return () => h('a', {}, slots.default?.()) } }),
+  }
+})
+
+// 只换掉 `multitableClient` 这一个单例,模块里别的导出(MultitableApiClient 类、
+// normalizeMultitableComment 等)保留真身 —— 工作台一路拉起来的 composable 里有好几个
+// 在模块作用域就引用它们,整模块替换会在 import 期就炸。
+vi.mock('../src/multitable/api/client', async () => {
+  const actual = await vi.importActual<typeof import('../src/multitable/api/client')>('../src/multitable/api/client')
+  return {
+    ...actual,
+    multitableClient: {
+      listTemplates: mocks.listTemplates,
+      installTemplate: mocks.installTemplate,
+      listBases: mocks.listBases,
+      createTemplateFromBase: mocks.createTemplateFromBase,
+      deleteTemplate: mocks.deleteTemplate,
+    },
+  }
+})
+
+// ── 工作台入口用的替身(第二个 describe)。模板中心那张视图一个都不用,所以这些
+// file 级 mock 不会影响上面的用例。
+function stubComponent(name: string) {
+  return defineComponent({ name, render() { return h('div', { [`data-stub-${name}`]: 'true' }) } })
+}
+
+let workbenchMock: any
+let gridMock: any
+let capsMock: any
+
+vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
+  useMultitableWorkbench: () => workbenchMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
+  useMultitableGrid: () => gridMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
+  useMultitableCapabilities: () => capsMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableComments', () => ({
+  useMultitableComments: () => ({
+    comments: ref([]), loading: ref(false), submitting: ref(false), resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]), deletingIds: ref<string[]>([]), error: ref<string | null>(null),
+    reactingKeys: ref<string[]>([]),
+    loadComments: vi.fn(), addComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(),
+    resolveComment: vi.fn(), clearComments: vi.fn(), addReaction: vi.fn(), removeReaction: vi.fn(),
+  }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
+  useMultitableCommentInbox: () => ({ unreadCount: ref(0), refreshUnreadCount: vi.fn().mockResolvedValue(0) }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({ useMultitableCommentRealtime: vi.fn() }))
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({ useMultitableSheetRealtime: vi.fn() }))
+vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
+vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
+vi.mock('../src/multitable/components/RestorePreviewDialog.vue', () => ({ default: stubComponent('RestorePreviewDialog') }))
+vi.mock('../src/multitable/components/RestoreBatchDialog.vue', () => ({ default: stubComponent('RestoreBatchDialog') }))
+vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
+vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
+vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
+vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
+vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
+vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
+vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
+vi.mock('../src/multitable/components/MetaToast.vue', () => ({ default: stubComponent('MetaToast') }))
+
+async function flushUi(cycles = 6): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
+function makeTemplate(overrides: {
+  id: string
+  name: string
+  custom?: boolean
+  category?: string
+  visibility?: 'private' | 'tenant'
+}) {
+  return {
+    id: overrides.id,
+    name: overrides.name,
+    description: '',
+    category: overrides.category ?? 'Operations',
+    icon: 'T',
+    color: '#2563eb',
+    sheets: [{ id: 's1', name: 'Sheet', fields: [{ id: 'f1' }], views: [{ id: 'v1', name: 'Grid', type: 'grid' }] }],
+    ...(overrides.custom ? { custom: true, visibility: overrides.visibility ?? 'private' } : {}),
+  }
+}
+
+function setValue(input: HTMLInputElement | HTMLSelectElement, value: string): void {
+  input.value = value
+  input.dispatchEvent(new Event('input'))
+  input.dispatchEvent(new Event('change'))
+}
+
+// A10 phase 1 面板刷新用例专用:canCreateBasesAndSheets 读 useAuth().getAccessSnapshot(),
+// 而一个没有 token 的会话会被 bootstrapSession -> resetSessionBootstrap 清空已存的
+// user_permissions 快照(镜像 multitable-workbench-drawer-button-wiring.spec.ts 同款注释)——
+// 权限必须塞进 token payload,不能只写 localStorage 的 user_permissions。
+function signedTestToken(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/=+$/, '')
+  const head = encode({ alg: 'none', typ: 'JWT' })
+  const body = encode({ ...payload, exp: Math.floor(Date.now() / 1000) + 3600 })
+  return [head, body, 'sig'].join('.')
+}
+
+describe('模板中心 —— 把 Base 存为模板', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    localStorage.removeItem(USER_PERMISSIONS_KEY)
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+    mocks.listBases.mockResolvedValue({ bases: [{ id: 'base_ops', name: '运营库' }] })
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    localStorage.removeItem(USER_PERMISSIONS_KEY)
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  function mountView(): HTMLElement {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(MultitableTemplateCenterView as Component)
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        const href = typeof this.$props.to === 'string' ? this.$props.to : JSON.stringify(this.$props.to)
+        return h('a', { href, 'data-router-link-to': href }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    return container
+  }
+
+  it('没有 multitable:manage-schema 时不给「存为模板」入口', async () => {
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="template-create-open"]')).toBeNull()
+    expect(root.querySelector('[data-testid="template-create-form"]')).toBeNull()
+  })
+
+  it('有 multitable:manage-schema:打开表单会拉 Base 列表,选 Base 自动带出名字', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    const root = mountView()
+    await flushUi()
+
+    const open = root.querySelector<HTMLButtonElement>('[data-testid="template-create-open"]')
+    expect(open).not.toBeNull()
+    open!.click()
+    await flushUi()
+
+    expect(mocks.listBases).toHaveBeenCalledTimes(1)
+    const form = root.querySelector('[data-testid="template-create-form"]')
+    expect(form).not.toBeNull()
+    // 未选 Base / 未填名字 → 提交禁用
+    const submit = root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')
+    expect(submit!.disabled).toBe(true)
+
+    const select = root.querySelector<HTMLSelectElement>('[data-testid="template-create-base"]')!
+    setValue(select, 'base_ops')
+    await flushUi()
+    const name = root.querySelector<HTMLInputElement>('[data-testid="template-create-name"]')!
+    expect(name.value).toBe('运营库')
+    expect(root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.disabled).toBe(false)
+
+    // 名字清空 → 又不可提交(只有 Base 不够)
+    setValue(name, '   ')
+    await flushUi()
+    expect(root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.disabled).toBe(true)
+  })
+
+  it('提交后调用 createTemplateFromBase、展示降级 warnings、并强制刷新模板列表', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_abc', name: '订单模板', custom: true }),
+      warnings: ['字段「关联客户」是 link 类型,依赖当前 Base 的其它表/字段,模板里已转为文本列。'],
+    })
+    const root = mountView()
+    await flushUi()
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-open"]')!.click()
+    await flushUi()
+
+    setValue(root.querySelector<HTMLSelectElement>('[data-testid="template-create-base"]')!, 'base_ops')
+    await flushUi()
+    setValue(root.querySelector<HTMLInputElement>('[data-testid="template-create-name"]')!, '订单模板')
+    setValue(root.querySelector<HTMLInputElement>('[data-testid="template-create-description"]')!, '订单跟进')
+    setValue(root.querySelector<HTMLInputElement>('[data-testid="template-create-category"]')!, '运营')
+    await flushUi()
+
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'mtpl_abc', name: '订单模板', custom: true })],
+    })
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.click()
+    await flushUi(10)
+
+    // 精确 deep-equal:多一个键、少一个键、或 visibility 变成 'tenant' 都要红 ——
+    // 默认必须是 private(模板携带表名与全部字段名,发布给整租户得是显式动作)。
+    expect(mocks.createTemplateFromBase).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      name: '订单模板',
+      description: '订单跟进',
+      category: '运营',
+      visibility: 'private',
+    })
+    // 列表强制刷新(否则客户端缓存会让刚建的模板不出现)
+    expect(mocks.listTemplates).toHaveBeenLastCalledWith({ force: true })
+    const warnings = root.querySelector('[data-testid="template-create-warnings"]')
+    expect(warnings?.textContent).toContain('关联客户')
+    expect(root.querySelector('[data-testid="template-create-notice"]')?.textContent).toContain('订单模板')
+  })
+
+  it('创建失败时把服务端错误显示出来,且不刷新列表', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    mocks.createTemplateFromBase.mockRejectedValue(new Error('Saving a base as a template requires schema authority'))
+    const root = mountView()
+    await flushUi()
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-open"]')!.click()
+    await flushUi()
+    setValue(root.querySelector<HTMLSelectElement>('[data-testid="template-create-base"]')!, 'base_ops')
+    await flushUi()
+
+    const callsBefore = mocks.listTemplates.mock.calls.length
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.click()
+    await flushUi(10)
+
+    expect(root.querySelector('[data-testid="template-create-error"]')?.textContent).toContain('schema authority')
+    expect(mocks.listTemplates.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('自定义模板卡片带「自定义」角标与删除入口;内置模板没有', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        makeTemplate({ id: 'mtpl_abc', name: '订单模板', custom: true }),
+        makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+      ],
+    })
+    mocks.deleteTemplate.mockResolvedValue({ templateId: 'mtpl_abc' })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const root = mountView()
+    await flushUi()
+
+    const customCard = root.querySelector<HTMLElement>('[data-template-id="mtpl_abc"]')!
+    const builtinCard = root.querySelector<HTMLElement>('[data-template-id="project-tracker"]')!
+    expect(customCard.querySelector('[data-testid="template-card-custom-badge"]')?.textContent?.trim()).toBe('自定义')
+    expect(builtinCard.querySelector('[data-testid="template-card-custom-badge"]')).toBeNull()
+    expect(customCard.querySelector('[data-testid="template-card-delete"]')).not.toBeNull()
+    expect(builtinCard.querySelector('[data-testid="template-card-delete"]')).toBeNull()
+
+    customCard.querySelector<HTMLButtonElement>('[data-testid="template-card-delete"]')!.click()
+    await flushUi(10)
+
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(mocks.deleteTemplate).toHaveBeenCalledWith('mtpl_abc')
+    expect(mocks.listTemplates).toHaveBeenLastCalledWith({ force: true })
+    confirmSpy.mockRestore()
+  })
+
+  it('没有 manage-schema 时自定义模板也不给删除入口', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'mtpl_abc', name: '订单模板', custom: true })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="template-card-custom-badge"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="template-card-delete"]')).toBeNull()
+  })
+
+  it('勾了「共享给本租户」才提交 visibility:tenant,提示按服务端返回的可见性说话', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_shared', name: '共享模板', custom: true, visibility: 'tenant' }),
+      warnings: [],
+    })
+    const root = mountView()
+    await flushUi()
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-open"]')!.click()
+    await flushUi()
+    setValue(root.querySelector<HTMLSelectElement>('[data-testid="template-create-base"]')!, 'base_ops')
+    await flushUi()
+
+    const share = root.querySelector<HTMLInputElement>('[data-testid="template-create-shared"]')!
+    // 默认不勾:发布给整租户必须是一次显式动作
+    expect(share.checked).toBe(false)
+    share.checked = true
+    share.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.click()
+    await flushUi(10)
+
+    expect(mocks.createTemplateFromBase.mock.calls[0]?.[0]?.visibility).toBe('tenant')
+    expect(root.querySelector('[data-testid="template-create-notice"]')?.textContent).toContain('已共享给本租户')
+  })
+
+  it('服务端说自定义模板暂不可用时页面必须明说(不能表现成「你没建过模板」)', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })],
+      customTemplatesUnavailable: true,
+    })
+    const root = mountView()
+    await flushUi()
+
+    const banner = root.querySelector('[data-testid="template-custom-unavailable"]')
+    expect(banner).not.toBeNull()
+    expect(banner!.textContent).toContain('自定义模板暂不可用')
+    // 内置模板照常列出来
+    expect(root.querySelector('[data-template-id="project-tracker"]')).not.toBeNull()
+  })
+
+  it('服务端没有降级标志位时不显示那条提示', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="template-custom-unavailable"]')).toBeNull()
+  })
+
+  it('私有模板卡片带「仅自己可见」角标;共享给租户的没有', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        makeTemplate({ id: 'mtpl_priv', name: '私有模板', custom: true }),
+        makeTemplate({ id: 'mtpl_shared', name: '共享模板', custom: true, visibility: 'tenant' }),
+        makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+      ],
+    })
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-template-id="mtpl_priv"] [data-testid="template-card-private-badge"]')).not.toBeNull()
+    expect(root.querySelector('[data-template-id="mtpl_shared"] [data-testid="template-card-private-badge"]')).toBeNull()
+    expect(root.querySelector('[data-template-id="project-tracker"] [data-testid="template-card-private-badge"]')).toBeNull()
+  })
+})
+
+// ── F7:工作台工具栏「把当前数据表存为模板」 ──────────────────────────────────
+//
+// 这一段证明的是**入口与 payload 形状**:按钮按 caps.canManageFields / activeSheetId 显隐、
+// 对话框默认值、以及提交出去的 { baseId, sheetIds, fieldIds } 逐字形状。收窄参数到底有没有
+// 被服务端下推进 SQL,是路由级 spec(F7-1/F7-1b/F7-3)的事,这里不冒充。
+
+const SHEET_FIELDS = [
+  { id: 'fld_title', name: '订单号', type: 'string', property: {}, order: 0, options: [] },
+  { id: 'fld_status', name: '状态', type: 'select', property: {}, order: 1, options: [] },
+  { id: 'fld_owner', name: '负责人', type: 'person', property: {}, order: 2, options: [] },
+]
+
+function createWorkbenchMock() {
+  const activeBaseId = ref('base_ops')
+  const activeSheetId = ref<string | null>('sheet_orders')
+  const activeViewId = ref('view_grid')
+  const views = ref([{ id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} }])
+  return {
+    client: {
+      listBases: vi.fn().mockResolvedValue({ bases: [{ id: 'base_ops', name: '运营库' }] }),
+      loadContext: vi.fn().mockResolvedValue({ base: { id: 'base_ops' }, sheet: null, sheets: [], views: [], capabilities: {} }),
+      listTemplates: mocks.listTemplates,
+      installTemplate: mocks.installTemplate,
+      createTemplateFromBase: mocks.createTemplateFromBase,
+      loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(),
+      renameSheet: vi.fn(), createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(),
+      deleteField: vi.fn(), createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(),
+      submitForm: vi.fn(), updateView: vi.fn(), deleteSheet: vi.fn(),
+    },
+    sheets: ref([
+      { id: 'sheet_orders', baseId: 'base_ops', name: '订单', description: null },
+      { id: 'sheet_archive', baseId: 'base_ops', name: '归档', description: null },
+    ]),
+    fields: ref(SHEET_FIELDS),
+    views, activeBaseId, activeSheetId, activeViewId,
+    bases: ref([]),
+    capabilities: ref({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: true,
+      canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: false,
+      canExport: true, canSendNotification: true, canDeleteSheet: true,
+    }),
+    capabilityOrigin: ref(null), fieldPermissions: ref({}), viewPermissions: ref({}),
+    activeView: computed(() => views.value.find((v) => v.id === activeViewId.value) ?? null),
+    loading: ref(false), error: ref<string | null>(null),
+    loadSheets: vi.fn().mockResolvedValue(true), loadBaseContext: vi.fn().mockResolvedValue(true),
+    loadSheetMeta: vi.fn().mockResolvedValue(true), switchBase: vi.fn().mockResolvedValue(true),
+    syncExternalContext: vi.fn().mockResolvedValue(true),
+    selectBase: vi.fn(), selectSheet: vi.fn(), selectView: vi.fn(),
+  }
+}
+
+function createGridMock() {
+  return {
+    fields: ref(SHEET_FIELDS), rows: ref([]), loading: ref(false), currentPage: ref(1), totalPages: ref(1),
+    page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }), visibleFields: ref(SHEET_FIELDS),
+    sortRules: ref([]), filterRules: ref([]), filterConjunction: ref('and'), filterGroups: ref([]),
+    canLoadMore: ref(false), canUndo: ref(false), canRedo: ref(false),
+    groupFieldId: ref<string | null>(null), groupFieldIds: ref([]), groupField: ref(null), groupFields: ref([]),
+    hiddenFieldIds: ref<string[]>([]), columnWidths: ref<Record<string, number>>({}),
+    linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
+    fieldPermissions: ref({}), viewPermission: ref(null), rowActions: ref(null), rowActionOverrides: ref({}),
+    capabilityOrigin: ref(null), conflict: ref(null), error: ref<string | null>(null), sortFilterDirty: ref(false),
+    toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),
+    updateFilterRule: vi.fn(), removeFilterRule: vi.fn(), clearFilters: vi.fn(), applySortFilter: vi.fn(),
+    undo: vi.fn(), redo: vi.fn(), setGroupField: vi.fn(), setGroupFields: vi.fn(), goToPage: vi.fn(),
+    patchCell: vi.fn(), createRecord: vi.fn(), deleteRecord: vi.fn(), resolveRowActions: vi.fn(() => null),
+    loadViewData: vi.fn().mockResolvedValue(true), reloadCurrentPage: vi.fn(), dismissConflict: vi.fn(),
+    retryConflict: vi.fn(), setColumnWidth: vi.fn(), setSearchQuery: vi.fn(),
+  }
+}
+
+function createCapsMock(overrides: Record<string, boolean> = {}) {
+  const base: Record<string, boolean> = {
+    canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true,
+    canManageAutomation: false, canExport: true, canSendNotification: true, canDeleteSheet: true,
+    ...overrides,
+  }
+  return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, ref(value)]))
+}
+
+// MultitableWorkbench.vue 是 4700+ 行的单文件组件,下面每条用例都真挂一次整棵工作台。
+// vitest 默认 testTimeout 是 5000ms,apps/web 的 vite.config.ts 既没抬过它也没有 retry
+// (对比 packages/core-backend/vitest.config.ts 的 testTimeout: 30000 + CI retry: 2),
+// 本机同一条命令跑 7 次有 2 次红在「Test timed out in 5000ms」而不是断言不成立 ——
+// 首挂的 SFC 编译/求值在冷 CI worker 上就是能吃满 5s。这里只给真挂载的用例抬超时,
+// 断言一个字都不改:超时假红会让必过检查 multitable-web-guard 以「与改动无关」的形态挂掉。
+const WORKBENCH_MOUNT_TIMEOUT_MS = 20000
+
+describe('工作台 —— 把当前数据表存为模板(F7)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capsMock = createCapsMock()
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  async function mountWorkbench(): Promise<HTMLElement> {
+    const MultitableWorkbench = (await import('../src/multitable/views/MultitableWorkbench.vue')).default
+    app = createApp(defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } }))
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        const href = typeof this.$props.to === 'string' ? this.$props.to : JSON.stringify(this.$props.to)
+        return h('a', { href, 'data-router-link-to': href }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container!)
+    await flushUi()
+    return container!
+  }
+
+  function entry(root: HTMLElement): HTMLButtonElement | null {
+    return root.querySelector('[data-action="save-sheet-as-template"]')
+  }
+
+  async function openDialog(root: HTMLElement): Promise<HTMLElement> {
+    entry(root)!.click()
+    await flushUi()
+    const dialog = root.querySelector('[data-testid="save-sheet-as-template-dialog"]') as HTMLElement
+    expect(dialog).toBeTruthy()
+    return dialog
+  }
+
+  it('入口按 canManageFields 显隐;没有激活数据表时不渲染', async () => {
+    const root = await mountWorkbench()
+    expect(entry(root)).toBeTruthy()
+
+    capsMock.canManageFields.value = false
+    await flushUi()
+    expect(entry(root)).toBeNull()
+
+    capsMock.canManageFields.value = true
+    workbenchMock.activeSheetId.value = null
+    await flushUi()
+    expect(entry(root)).toBeNull()
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('对话框默认值:模板名 = 当前数据表名、字段默认全选、「共享给本租户」默认不勾', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+
+    const name = dialog.querySelector('[data-testid="save-sheet-as-template-name"]') as HTMLInputElement
+    // 取的是**数据表**名(订单),不是工作区名(运营库)
+    expect(name.value).toBe('订单')
+
+    const boxes = Array.from(dialog.querySelectorAll('[data-save-template-field]')) as HTMLInputElement[]
+    expect(boxes.map((box) => box.getAttribute('data-save-template-field'))).toEqual(['fld_title', 'fld_status', 'fld_owner'])
+    expect(boxes.every((box) => box.checked)).toBe(true)
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-count"]')?.textContent?.trim()).toBe('3 / 3')
+
+    const share = dialog.querySelector('[data-testid="save-sheet-as-template-share"]') as HTMLInputElement
+    expect(share.checked).toBe(false)
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('勾掉两列后提交的 payload 逐字等于 { baseId, name, sheetIds:[当前表], fieldIds:[勾选的], visibility:private }', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+
+    for (const fieldId of ['fld_status', 'fld_owner']) {
+      const box = dialog.querySelector(`[data-save-template-field="${fieldId}"]`) as HTMLInputElement
+      box.click()
+      await flushUi()
+    }
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-count"]')?.textContent?.trim()).toBe('1 / 3')
+
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(mocks.createTemplateFromBase).toHaveBeenCalledTimes(1)
+    expect(mocks.createTemplateFromBase.mock.calls[0][0]).toEqual({
+      baseId: 'base_ops',
+      name: '订单',
+      sheetIds: ['sheet_orders'],
+      fieldIds: ['fld_title'],
+      visibility: 'private',
+    })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('勾了「共享给本租户」才发 visibility: tenant', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_shared', name: '订单', custom: true, visibility: 'tenant' }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const share = dialog.querySelector('[data-testid="save-sheet-as-template-share"]') as HTMLInputElement
+    share.click()
+    await flushUi()
+
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(mocks.createTemplateFromBase.mock.calls[0][0].visibility).toBe('tenant')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('一个字段都不勾时不发请求,并给出可读的错误', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-select-none"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(mocks.createTemplateFromBase).not.toHaveBeenCalled()
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent).toContain('字段')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('成功后原样列出服务端 warnings,并给一条「去模板中心查看」的链接', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: ['字段「通知」是 button 类型,模板里已转为文本列。'],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const result = dialog.querySelector('[data-testid="save-sheet-as-template-result"]')
+    expect(result).toBeTruthy()
+    const warnings = Array.from(dialog.querySelectorAll('[data-testid="save-sheet-as-template-warnings"] li'))
+    expect(warnings.map((li) => li.textContent)).toEqual(['字段「通知」是 button 类型,模板里已转为文本列。'])
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-center-link"]')).toBeTruthy()
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('失败时把服务端的话原样显示,对话框不切到成功态', async () => {
+    mocks.createTemplateFromBase.mockRejectedValue(new Error('This base has no readable table with fields to save as a template'))
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-result"]')).toBeNull()
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent)
+      .toContain('no readable table')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // ── A10 phase 1(客户反馈 2026-09-24 #8,裁定见 PR #6074):对话框说清楚存的是哪张表/
+  // 哪些视图,字段类型不再显示原始 type 值,存成功后模板面板能看见新模板,导出选项文案准确。
+
+  it('对话框头部点名来源:工作区名 / 数据表名', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    // bases 来自 client.listBases()(运营库),数据表名来自 workbench.sheets(订单)——
+    // 两者都不是同一个来源,证明这行不是「凑巧读了同一个字段两次」。
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-source"]')?.textContent).toBe('来源：运营库 / 订单')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('字段清单显示翻译过的类型标签,不是原始 type 值', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const typeEls = Array.from(dialog.querySelectorAll('.mt-save-tpl__fields .mt-save-tpl__item-type'))
+    // SHEET_FIELDS 的原始类型是 string/select/person —— 存在任何一个原样漏出来都算回归。
+    expect(typeEls.map((el) => el.textContent)).toEqual(['文本', '单选', '人员'])
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N7(2026-09-26 对抗评审):bases 是异步加载的,列表落地前打开对话框会拿到空 baseName——
+  // 不能拼出「来源：/ 订单」这种带空前缀的怪文案,未知工作区名时只显示数据表名。
+  it('工作区名未知时,来源行只显示数据表名(没有空的"/"前缀)', async () => {
+    workbenchMock.client.listBases = vi.fn().mockResolvedValue({ bases: [] })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-source"]')?.textContent).toBe('来源：订单')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('只读列出将保存的视图,并说明哪些不保存(筛选/排序/列顺序与列宽/时间轴甘特起止/层级父级)', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const list = dialog.querySelector('[data-testid="save-sheet-as-template-views"]') as HTMLElement
+    expect(list).toBeTruthy()
+    const names = Array.from(list.querySelectorAll('.mt-save-tpl__item-name')).map((el) => el.textContent)
+    const types = Array.from(list.querySelectorAll('.mt-save-tpl__item-type')).map((el) => el.textContent)
+    expect(names).toEqual(['Grid'])
+    // 视图类型也走翻译标签(viewTypeLabel),不是原始 'grid'
+    expect(types).toEqual(['网格'])
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-views-note"]')?.textContent)
+      .toContain('视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；不保存筛选、排序、列顺序与列宽、时间轴/甘特的起止字段、层级的父级字段')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // S4(2026-09-26 对抗评审):清单必须用 workbench.views(未经视图权限过滤)——服务端存模板时
+  // 是把这张表的**全部** meta_views 抽进去,不看视图权限(custom-template-store.ts 的
+  // extractTemplateSheets 只按 sheetIds/fieldIds 收窄,没有第三个"按视图权限收窄"的步骤)。
+  // 钉死这一点:换成 visibleWorkbenchViews(按 canAccess 过滤)这条断言必须变红。
+  it('S4: canAccess:false 的视图也照样列出、顺序不变(钉死用的是未过滤的 workbench.views)', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} },
+      { id: 'view_restricted', sheetId: 'sheet_orders', name: 'Restricted', type: 'kanban', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} },
+    ]
+    // 非当前激活视图,所以不会被 grid.viewPermission 的合并覆盖——effectiveViewPermissions 只会
+    // 看到这一条,visibleWorkbenchViews 会把它过滤掉。
+    workbenchMock.viewPermissions.value = { view_restricted: { canAccess: false } }
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const list = dialog.querySelector('[data-testid="save-sheet-as-template-views"]') as HTMLElement
+    const names = Array.from(list.querySelectorAll('.mt-save-tpl__item-name')).map((el) => el.textContent)
+    expect(names).toEqual(['Grid', 'Restricted'])
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('成功后给出「装模板 = 新建工作区 + 空表,关联/公式/按钮列会降级」的说明', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-install-note"]')?.textContent)
+      .toContain('使用模板会新建工作区，其中是空表；关联/公式/按钮等列会变成文本列')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('存成功后模板面板刷新:面板已开着时立刻重拉;面板没开时标 stale,下次打开重拉', async () => {
+    // 「open-template-library」按钮按 canCreateBasesAndSheets(读真实 auth.getAccessSnapshot(),
+    // 不走 capsMock)显隐,这里显式授予,和其它 F7 用例(不碰这颗按钮)互不影响。权限必须塞进
+    // token payload——没有 token 的会话会被 bootstrapSession 清空只写在 user_permissions 的快照。
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      mocks.listTemplates.mockResolvedValue({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] })
+      const root = await mountWorkbench()
+
+      const openLibrary = root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')
+      expect(openLibrary).toBeTruthy()
+      openLibrary!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      expect(root.querySelector('[data-template-id="project-tracker"]')).toBeTruthy()
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeNull()
+
+      // 关闭面板(不清空 templates.value——镜像真实的「加载过一次」状态)
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+
+      // 存一张新模板;服务端返回的列表现在包含它
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+        warnings: [],
+      })
+      mocks.listTemplates.mockResolvedValue({
+        templates: [
+          makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+          makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+        ],
+      })
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板此刻是关着的:标 stale,不会背着用户偷偷发请求
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 重新打开面板:必须重拉,新模板必须出现——这正是 09-24 反馈第 8 条要修的那个洞
+      // (旧逻辑 `templates.value.length === 0` 的门槛在面板加载过一次之后就再也打不开了)。
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('存成功时面板正开着:不等下次打开,立刻重拉', async () => {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      const root = await mountWorkbench()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      expect(root.querySelector('[data-template-id="mtpl_live"]')).toBeNull()
+
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_live', name: '实时模板', custom: true }),
+        warnings: [],
+      })
+      mocks.listTemplates.mockResolvedValue({
+        templates: [makeTemplate({ id: 'mtpl_live', name: '实时模板', custom: true })],
+      })
+
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板全程没关——立刻重拉了一次,不用等用户再点开一次
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_live"]')).toBeTruthy()
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // S3(2026-09-26 对抗评审):存成功后立刻重拉——如果这次重拉本身失败(网络抖动/服务端 5xx),
+  // "需要刷新"这个待办不能被这次失败的调用消掉。旧实现在发起重拉前就把它清空了,一次失败的
+  // 重拉会让面板卡在错误提示上,直到用户手动做点别的事才会再试。
+  it('S3: 存成功后的重拉如果失败,面板显示错误但不卡死——关闭重开会重试', async () => {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      // 首次加载给一张**非空**列表——templates.value.length !== 0 之后就不再是"必须重拉"的
+      // 独立触发条件,后面 3 次开面板能否重试,只取决于失败重拉是否正确留下了"需要刷新"的信号
+      // (不是靠"列表还是空的"这个不相关的条件顺带触发)。
+      mocks.listTemplates
+        .mockResolvedValueOnce({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] }) // 面板首次打开
+        .mockRejectedValueOnce(new Error('network blip')) // 存成功后立刻重拉——这次失败
+        .mockResolvedValueOnce({
+          templates: [
+            makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+            makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+          ],
+        }) // 关闭重开后重试,这次成功
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+        warnings: [],
+      })
+      const root = await mountWorkbench()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板还开着,立刻重拉了一次——这次失败,面板显示错误(不是静默吞掉、也不是假装刷新过了)
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('network blip')
+
+      // 关闭保存对话框、关闭面板、重新打开——必须重试(不能卡在上一条错误上不动)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(3)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).not.toContain('network blip')
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // ── N4 / 第二轮对抗评审 N-1 / N-2:面板首次加载还在飞的时候存了模板 ──────────────────
+  // 三条共用的起手式:面板打开、第一次 listTemplates 挂在空中(还没 resolve),再存一张模板。
+  // 放开的那个旧响应一律是**非空**列表(N-2):空列表会让 openTemplateLibrary 的
+  // `templates.value.length === 0` 门槛自己触发重拉,把"旧响应误清掉待刷新标记"这类回归兜住,
+  // 用例就成了空转的绿。
+  const PRE_SAVE_SNAPSHOT = () => ({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] })
+  const POST_SAVE_LIST = () => ({
+    templates: [
+      makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+      makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+    ],
+  })
+
+  async function saveWhileFirstLoadInFlight(): Promise<{
+    root: HTMLElement
+    dialog: HTMLElement
+    resolveFirst: (value: { templates: unknown[] }) => void
+  }> {
+    let resolveFirst: ((value: { templates: unknown[] }) => void) | null = null
+    mocks.listTemplates.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve }),
+    )
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+    await flushUi()
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('正在加载模板')
+
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    // 面板正开着,onSaveSheetAsTemplate 想立刻重拉——但上一个还在飞,这次调用必须被跳过
+    // (不是又发一个请求出去跟第一个赛跑:两个响应谁后落地谁说了算,和发起顺序无关)。
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+    expect(resolveFirst).toBeTruthy()
+    return { root, dialog, resolveFirst: resolveFirst! }
+  }
+
+  function withTemplateLibraryAccess(): () => void {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    return () => {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }
+
+  // N-1:旧响应落地后,面板还开着——必须自动补拉一次,不用用户关掉重开;补拉只发生一次。
+  it('N4/N-1: 首次加载在飞时存模板——不起并发请求;旧响应落地后面板不关也自动补拉一次,新模板出现', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, resolveFirst } = await saveWhileFirstLoadInFlight()
+      mocks.listTemplates.mockResolvedValue(POST_SAVE_LIST())
+
+      // 放开第一个请求——它的数据是存模板**之前**的快照(非空,没有新模板)。
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      await flushUi()
+      await flushUi()
+
+      // 面板全程没关:旧响应落地后立刻补拉了一次,新模板出现。
+      expect(root.querySelector('[data-testid="multitable-template-library"]')).toBeTruthy()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+      expect(root.querySelector('[data-template-id="project-tracker"]')).toBeTruthy()
+
+      // 补拉成功之后不再继续拉(不是一个自我触发的循环)。
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+    } finally {
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N-2:面板在旧请求飞行中被关掉——不背着用户补拉;旧的**非空**响应不能把"需要刷新"误清掉,
+  // 重开时必须重拉。把 loadTemplateLibrary 里"只推进到发起时的标记"改成"推进到最新标记",
+  // 这条就红(重开时 templates 非空、标记已追平、没有错误 → 不拉)。
+  it('N4/N-2: 旧请求在飞时面板被关——不偷偷补拉;旧的非空响应不会把"需要刷新"误清空,重开必重拉', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, dialog, resolveFirst } = await saveWhileFirstLoadInFlight()
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      await flushUi()
+      await flushUi()
+      // 面板是关着的:旧响应落地后不补拉。
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+
+      mocks.listTemplates.mockResolvedValueOnce(POST_SAVE_LIST())
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+    } finally {
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N-1 的防循环:补拉本身失败时只补这一次,不对一个一直失败的接口连环重试。触发条件是
+  // "这次请求飞行期间待刷新标记被推高",不是"面板仍然是旧的"——换成后者,这条就红。
+  // 失败用 setTimeout 延到下一个宏任务,变异后的死循环也会让出事件循环,断言能红而不是卡死。
+  it('N-1 防循环: 补拉失败只补一次——显示错误,不连环重试', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, resolveFirst } = await saveWhileFirstLoadInFlight()
+      mocks.listTemplates.mockImplementation(
+        () => new Promise((_resolve, reject) => { setTimeout(() => reject(new Error('still down')), 0) }),
+      )
+
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      for (let i = 0; i < 5; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        await flushUi()
+      }
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('still down')
+    } finally {
+      // 变异构建里若真在循环,让它下一轮成功、自行停下,不把失败请求漏到后面的用例。
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+})
+
+// N-5(第二轮对抗评审):中英两版文案都要说清楚「不保存什么」和「会降级什么」。中文在上面的挂载用例里
+// 逐字断言;英文版工作台用例不切语言,这里直接读标签表。
+describe('存为模板文案 —— 英文版说清不保存/降级的边界(N-5)', () => {
+  it('viewsNote(en) 列出不保存的项:筛选、排序、列顺序与列宽、时间轴/甘特起止字段、层级父级字段', () => {
+    const note = workbenchLabel('saveTpl.viewsNote', false)
+    for (const phrase of ['Not saved:', 'filters', 'sort', 'column order and widths', 'timeline/gantt start and end fields', 'hierarchy parent field']) {
+      expect(note).toContain(phrase)
+    }
+  })
+
+  it('installNote(en) 和中文版一样点名按钮列也会变成文本列', () => {
+    expect(workbenchLabel('saveTpl.installNote', false)).toContain('button')
+    expect(workbenchLabel('saveTpl.installNote', false)).toContain('become plain text columns')
+    expect(workbenchLabel('saveTpl.installNote', true)).toContain('按钮')
+  })
+})
