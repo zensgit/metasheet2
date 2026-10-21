@@ -125,6 +125,21 @@ const RESTORE_JOB_BLOCK_LOCK = "multitable/recovery-archive-restore-jobs.ts :: S
 
 const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
   [
+    'integration/automation-read-ledger.ts :: SELECT id,base_id FROM meta_sheets WHERE id=$1 AND deleted_at IS NULL FOR SHARE NOWAIT',
+    'Read-preview date activation pins the rule sheet before date-schedule authority; the SQL filters '
+    + 'deleted_at and a missing or mismatched row is denied. No permission table is written here.',
+  ],
+  [
+    'integration/automation-read-rule-authority.ts :: SELECT id, base_id, deleted_at FROM meta_sheets WHERE id = $1 FOR SHARE NOWAIT',
+    'Read-preview rule authority pins the exact rule sheet and checks its base plus deleted_at under '
+    + 'the same transaction before reading the rule. Covered by automation-read-rule-authority.test.ts.',
+  ],
+  [
+    'integration/automation-read-target-authority.ts :: SELECT id, base_id, deleted_at, row_level_read_permissions_enabled FROM meta_sheets WHERE id = $1 FOR SHARE NOWAIT',
+    'Read-preview target authority pins the exact target sheet, rejects deleted/missing liveness and '
+    + 'checks the base before evaluating row permissions. Covered by automation-read-target-authority.test.ts.',
+  ],
+  [
     'multitable/sheet-liveness.ts :: SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE',
     'THE helper. The one statement that locks the row and re-reads `deleted_at` together.',
   ],

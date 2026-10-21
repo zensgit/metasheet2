@@ -211,6 +211,75 @@ async function prepareYidaDeliveryInTransaction(trx, input) {
   }
 }
 
+async function locked(trx, identity) {
+  const row = await trx.selectOneForUpdate(LEDGER, { ...identity.where, owner_id: identity.ownerId })
+  if (!row || row.owner_id !== identity.ownerId) fail('NOT_FOUND')
+  return row
+}
+
+function finishIdentity(input, kind) {
+  if (kind !== 'acknowledgement' && kind !== 'unknown') fail('INPUT')
+  const names = kind === 'acknowledgement' ? ['actorId', 'claimToken', 'ack'] : ['actorId', 'claimToken', 'reason']
+  const identity = scope(input, names)
+  const actorId = opaque(identity.parsed.actorId)
+  const claimToken = token(identity.parsed.claimToken)
+  let ack = null, reason = null
+  if (kind === 'acknowledgement') {
+    ack = dataObject(identity.parsed.ack, ['statusCode', 'instanceId'])
+    if (!Number.isInteger(ack.statusCode) || ack.statusCode < 200 || ack.statusCode > 299) fail('ACK')
+    try { opaque(ack.instanceId) } catch { fail('ACK') }
+  } else {
+    reason = identity.parsed.reason
+    if (!UNKNOWN_REASONS.has(reason)) fail('INPUT')
+  }
+  return { identity, actorId, claimToken, ack, reason, kind }
+}
+
+async function finishFixedInTransaction(trx, fixed) {
+  if (!trx || ['selectOneForUpdate', 'updateRow', 'insertOne'].some(key => typeof trx[key] !== 'function')) fail('UNAVAILABLE')
+  const { identity, actorId, claimToken, ack, reason, kind } = fixed
+  const row = await locked(trx, identity)
+  if (row.status !== 'dispatching') fail('STATE')
+  if (row.claim_actor_id !== actorId || !equalToken(row.claim_token, claimToken)) fail('TOKEN')
+  if (ack && row.intent === 'update' && ack.instanceId !== row.instance_id) fail('ACK')
+  const status = kind === 'acknowledgement' ? 'acknowledged' : 'outcome_unknown'
+  const set = ack ? { status, ack_status_code: ack.statusCode, ack_instance_id: ack.instanceId } : { status }
+  const changed = first(await trx.updateRow(LEDGER, set, {
+    id: row.id, ...identity.where, owner_id: identity.ownerId,
+    status: 'dispatching', claim_token: claimToken, claim_actor_id: actorId,
+  }))
+  if (!changed) fail('STATE')
+  await audit(trx, row.id, kind === 'acknowledgement' ? 'acknowledgement' : 'unknown', status, reason)
+  return project(changed)
+}
+
+// Same terminal mechanism, no BEGIN/retry/COMMIT. The host can hold and recheck
+// its actual delegated fence in this transaction without duplicating ACK SQL.
+async function finishYidaDeliveryInTransaction(trx, input, kind) {
+  try { return await finishFixedInTransaction(trx, finishIdentity(input, kind)) }
+  catch (error) { dbError(error) }
+}
+
+async function claimFixedInTransaction(trx, identity, actorId) {
+  if (!trx || ['selectOneForUpdate', 'updateRow', 'insertOne'].some(key => typeof trx[key] !== 'function')) fail('UNAVAILABLE')
+  const row = await locked(trx, identity)
+  if (row.status !== 'prepared') fail('STATE')
+  const claimToken = crypto.randomBytes(32).toString('hex')
+  const changed = first(await trx.updateRow(LEDGER, {
+    status: 'dispatching', claim_token: claimToken, claim_actor_id: actorId,
+  }, { id: row.id, ...identity.where, owner_id: identity.ownerId, status: 'prepared' }))
+  if (!changed) fail('STATE')
+  await audit(trx, row.id, 'claim', 'dispatching')
+  return { record: project(changed), claimToken }
+}
+
+async function claimYidaDeliveryInTransaction(trx, input) {
+  try {
+    const identity = scope(input, ['actorId'])
+    return await claimFixedInTransaction(trx, identity, opaque(identity.parsed.actorId))
+  } catch (error) { dbError(error) }
+}
+
 function createYidaDeliveryStore({ db } = {}) {
   if (!db || ['transaction', 'selectOne'].some((name) => typeof db[name] !== 'function')) fail('UNAVAILABLE')
 
@@ -223,12 +292,6 @@ function createYidaDeliveryStore({ db } = {}) {
         return callback(trx)
       })
     } catch (error) { dbError(error) }
-  }
-
-  async function locked(trx, identity) {
-    const row = await trx.selectOneForUpdate(LEDGER, { ...identity.where, owner_id: identity.ownerId })
-    if (!row || row.owner_id !== identity.ownerId) fail('NOT_FOUND')
-    return row
   }
 
   async function prepare(input) {
@@ -263,51 +326,12 @@ function createYidaDeliveryStore({ db } = {}) {
   async function claim(input) {
     const identity = scope(input, ['actorId'])
     const actorId = opaque(identity.parsed.actorId)
-    return transaction(async (trx) => {
-      const row = await locked(trx, identity)
-      if (row.status !== 'prepared') fail('STATE')
-      const claimToken = crypto.randomBytes(32).toString('hex')
-      const changed = first(await trx.updateRow(LEDGER, {
-        status: 'dispatching', claim_token: claimToken, claim_actor_id: actorId,
-      }, { id: row.id, ...identity.where, owner_id: identity.ownerId, status: 'prepared' }))
-      if (!changed) fail('STATE')
-      await audit(trx, row.id, 'claim', 'dispatching')
-      return { record: project(changed), claimToken }
-    })
+    return transaction(trx => claimFixedInTransaction(trx, identity, actorId))
   }
 
   async function finish(input, kind) {
-    const names = kind === 'acknowledgement' ? ['actorId', 'claimToken', 'ack'] : ['actorId', 'claimToken', 'reason']
-    const identity = scope(input, names)
-    const actorId = opaque(identity.parsed.actorId)
-    const claimToken = token(identity.parsed.claimToken)
-    let ack = null
-    let reason = null
-    if (kind === 'acknowledgement') {
-      ack = dataObject(identity.parsed.ack, ['statusCode', 'instanceId'])
-      if (!Number.isInteger(ack.statusCode) || ack.statusCode < 200 || ack.statusCode > 299) fail('ACK')
-      try { opaque(ack.instanceId) } catch { fail('ACK') }
-    } else {
-      reason = identity.parsed.reason
-      if (!UNKNOWN_REASONS.has(reason)) fail('INPUT')
-    }
-    return transaction(async (trx) => {
-      const row = await locked(trx, identity)
-      if (row.status !== 'dispatching') fail('STATE')
-      if (row.claim_actor_id !== actorId || !equalToken(row.claim_token, claimToken)) fail('TOKEN')
-      if (ack && row.intent === 'update' && ack.instanceId !== row.instance_id) fail('ACK')
-      const status = kind === 'acknowledgement' ? 'acknowledged' : 'outcome_unknown'
-      const set = ack
-        ? { status, ack_status_code: ack.statusCode, ack_instance_id: ack.instanceId }
-        : { status }
-      const changed = first(await trx.updateRow(LEDGER, set, {
-        id: row.id, ...identity.where, owner_id: identity.ownerId,
-        status: 'dispatching', claim_token: claimToken, claim_actor_id: actorId,
-      }))
-      if (!changed) fail('STATE')
-      await audit(trx, row.id, kind === 'acknowledgement' ? 'acknowledgement' : 'unknown', status, reason)
-      return project(changed)
-    })
+    const fixed = finishIdentity(input, kind)
+    return transaction(trx => finishFixedInTransaction(trx, fixed))
   }
 
   async function recordAcknowledgement(input) { return finish(input, 'acknowledgement') }
@@ -339,4 +363,5 @@ function createYidaDeliveryStore({ db } = {}) {
   return { prepare, claim, recordAcknowledgement, markUnknown, cancelPrepared, get }
 }
 
-module.exports = { createYidaDeliveryStore, YidaDeliveryStoreError, prepareYidaDeliveryInTransaction }
+module.exports = { createYidaDeliveryStore, YidaDeliveryStoreError, prepareYidaDeliveryInTransaction,
+  claimYidaDeliveryInTransaction, finishYidaDeliveryInTransaction }

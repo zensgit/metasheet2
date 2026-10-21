@@ -700,6 +700,13 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     else {
       notifyAuthPrincipalChange()
       localStorage.setItem('auth_token', 'synthetic-new-principal')
+      await nextTick()
+      // A session change must remove the previous principal's rows, not merely
+      // suppress the pending retry response while retaining their detail panel.
+      expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+      expect(mounted.container.querySelector('[data-detail="true"]')).toBeNull()
+      expect(mounted.container.querySelector('[data-action="rerun"]')).toBeNull()
+      expect(client.listAutomationRuns).toHaveBeenCalledTimes(1)
     }
     if (outcome === 'success') resolveRetry({ ...FAILED_DETAIL, id: 'axe_old_result' })
     else rejectRetry(new Error('synthetic-old-error'))
@@ -708,6 +715,17 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     expect(mounted.container.querySelector('[data-field="rerun-error"]')).toBeNull()
     expect(mounted.container.textContent).not.toContain('axe_old_result')
     expect(mounted.container.textContent).not.toContain('synthetic-old-error')
+    if (transition === 'principal') {
+      expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+      // Only an explicit refresh may load the new session's rows. Re-expand a
+      // freshly fetched row to prove the old retry also released its busy state.
+      ;(mounted.container.querySelector('[data-action="refresh"]') as HTMLElement).click()
+      await settle()
+      expect(client.listAutomationRuns).toHaveBeenCalledTimes(2)
+      await expandRow(mounted.container, 'axe_f')
+      expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+      expect(mounted.container.querySelector('[data-field="rerun-error"]')).toBeNull()
+    }
     expect((mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement).disabled).toBe(false)
   })
 

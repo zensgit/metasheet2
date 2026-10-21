@@ -4,6 +4,8 @@
  */
 
 import { randomUUID } from 'crypto'
+import { AUTOMATION_READ_EXECUTION_UNAVAILABLE, containsAutomationReadAction } from '../integration/automation-read-authoring-policy'
+import { YIDA_AUTOMATION_ACTION_TYPE, YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, containsYidaAutomationAction } from '../integration/yida-automation-authoring-policy'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
@@ -30,6 +32,12 @@ import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import {
+  AUTOMATION_RECORD_AFTER_IMAGE_RETURNING,
+  persistAutomationRecordAfterImage,
+  type AutomationRecordAfterImageInput,
+} from './automation-record-after-image'
+import { captureAutomationRecordSchema } from './automation-record-schema'
 import { produceAutomationEvent } from './automation-durable-activation'
 import {
   extractExactLinkedRecordId,
@@ -815,6 +823,11 @@ export interface AutomationExecution {
   triggeredAt: string
   status: 'running' | 'success' | 'failed' | 'skipped'
   steps: AutomationStepResult[]
+  /** Values-free projection of the separately authorized private read request. */
+  integrationRead?: {
+    requestId: string
+    status: 'queued' | 'running' | 'succeeded' | 'blocked' | 'failed' | 'cancelled' | 'outcome_unknown'
+  }
   error?: string
   duration?: number
   // ── A1 run-governance snapshot (persisted; secret-shaped values redacted at write) ──
@@ -947,6 +960,8 @@ function simulationDisposition(actionType: AutomationActionType): 'execute' | 's
     case 'condition_branch':
     case 'parallel_branch':
     case 'record_click':
+    case 'integration_read_preview':
+    case 'integration_yida_send_authorized':
       return 'execute'
     case 'update_record':
     case 'create_record':
@@ -1739,6 +1754,27 @@ export class SameBaseTargetRecordMissingSignal extends Error {
 /** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
 export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
 
+/** Ordinary automation has no owner grant or private read authority. Refuse
+ * before condition reads, job factories or action dispatch (including simulate).
+ * Do not copy raw trigger/config material into this fixed refusal record.
+ */
+function refusedReadExecution(rule: AutomationRule, id: string, dispatchMode: AutomationDispatchMode): AutomationExecution {
+  const now = new Date().toISOString()
+  return {
+    id, ruleId: rule.id, sheetId: rule.sheetId, triggeredBy: 'event', triggeredAt: now,
+    finishedAt: now, duration: 0, status: 'failed', error: AUTOMATION_READ_EXECUTION_UNAVAILABLE,
+    steps: [{ actionType: 'integration_read_preview', status: 'failed',
+      error: AUTOMATION_READ_EXECUTION_UNAVAILABLE, durationMs: 0 }],
+    schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
+    ...(dispatchMode === 'simulate' ? { dryRun: true } : {}),
+  }
+}
+
+function refusedYidaExecution(rule: AutomationRule, id: string, dispatchMode: AutomationDispatchMode): AutomationExecution {
+  return { ...refusedReadExecution(rule, id, dispatchMode), error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE,
+    steps: [{ actionType: YIDA_AUTOMATION_ACTION_TYPE, status: 'failed', error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, durationMs: 0 }] }
+}
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -1803,6 +1839,10 @@ export class AutomationExecutor {
     ledgerKind: ExecutionLedgerKind = 'execution',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, executionId, dispatchMode)
+    if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
+      return refusedReadExecution(rule, executionId, dispatchMode)
+    }
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
     // is supplied by the service ONLY for 'workflow_job_v1' rules → legacy rules never write jobs.
     const jobLifecycle = jobLifecycleFactory ? jobLifecycleFactory(executionId) : undefined
@@ -1907,6 +1947,10 @@ export class AutomationExecutor {
     jobLifecycle?: ActionJobLifecycle,
     settledStepResult?: AutomationStepResult,
   ): Promise<AutomationExecution> {
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, execution.id, context.dispatchMode ?? 'live')
+    if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
+      return refusedReadExecution(rule, execution.id, context.dispatchMode ?? 'live')
+    }
     const startTime = Date.now()
     execution.status = 'running'
 
@@ -1969,6 +2013,10 @@ export class AutomationExecutor {
     cursor: ConditionBranchResumeCursor,
     jobLifecycle: ActionJobLifecycle,
   ): Promise<AutomationExecution> {
+    if (containsYidaAutomationAction(undefined, undefined, rule.actions)) return refusedYidaExecution(rule, execution.id, context.dispatchMode ?? 'live')
+    if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
+      return refusedReadExecution(rule, execution.id, context.dispatchMode ?? 'live')
+    }
     const startTime = Date.now()
     execution.status = 'running'
 
@@ -2698,6 +2746,13 @@ export class AutomationExecutor {
     // claim-then-skip-on-duplicate; every other action ignores it.
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
+    if (containsYidaAutomationAction(action.type, action.config, null)) {
+      return { actionType: YIDA_AUTOMATION_ACTION_TYPE, status: 'failed', error: YIDA_AUTOMATION_EXECUTION_UNAVAILABLE, durationMs: 0 }
+    }
+    if (containsAutomationReadAction(action.type, action.config, null)) {
+      return { actionType: 'integration_read_preview', status: 'failed',
+        error: AUTOMATION_READ_EXECUTION_UNAVAILABLE, durationMs: 0 }
+    }
     if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
       return simulatedStep(action, context)
     }
@@ -3386,6 +3441,9 @@ export class AutomationExecutor {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
         }
 
+        const producerTrx = { query, isTransaction: true } as unknown as TransactionalQueryable
+        const durableEnabled = isDurableDeliveryEnabled()
+        const recordSchema = await captureAutomationRecordSchema(producerTrx, effectiveSheetId)
         // RETURNING version, data: the FULL post-merge row becomes the revision snapshot (NOT the
         // patch — D-1c §4.2's merge trap: a naive `snapshot: patch` truncates every multi-field
         // record; `reconstructRecordsAtT` reads `snapshot` as the full record, record-reconstructor.ts:63).
@@ -3399,10 +3457,16 @@ export class AutomationExecutor {
                version = version + 1,
                updated_at = NOW()
            WHERE id = $2 AND sheet_id = $3
-           RETURNING version, data`,
+           RETURNING ${durableEnabled ? `data, ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}` : 'version, data'}`,
           [JSON.stringify(patch), effectiveRecordId, effectiveSheetId],
         )
-        const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+        const updatedRow = updateRes.rows[0] as {
+          version?: unknown; data?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+        } | undefined
+        if (durableEnabled && updatedRow && (updateRes.rows.length !== 1
+          || !Number.isSafeInteger(Number(updatedRow.version)) || Number(updatedRow.version) < 1)) {
+          throw new Error('AUTOMATION_RECORD_UPDATE_RECEIPT_INVALID')
+        }
         // W0 slice ③ zero-row fail-closed (same class as slices ①/②, applied to fit THIS lane's
         // pre-existing contract). The lock SELECT above takes NO row lock (no `FOR UPDATE` —
         // unchanged from before this slice), so a concurrent DELETE of this exact record between that
@@ -3446,9 +3510,19 @@ export class AutomationExecutor {
         // defect was the emit, and `output.noop` now says so in the execution log.
         if (updatedRow) {
           await enqueueRecordEventIfDurable(
-            { query, isTransaction: true } as unknown as TransactionalQueryable,
+            producerTrx,
             'multitable.record.updated',
             chainEventPayload,
+            undefined,
+            durableEnabled ? {
+              sheetId: effectiveSheetId,
+              recordId: effectiveRecordId,
+              recordVersion: Number(updatedRow.version),
+              data: undefined,
+              rawJson: updatedRow.automation_after_image_json,
+              oversized: updatedRow.automation_after_image_oversized === true,
+              schema: recordSchema,
+            } : undefined,
           )
         }
         return null
@@ -3880,11 +3954,9 @@ export class AutomationExecutor {
       // record and its create revision either both exist or neither does — closing §0's corrected risk
       // (a record created via an uncaptured path is invisible-forever to `reconstructRecordsAtT`, so a
       // later Reset-to-T cannot distinguish "created after T" from "created before T but uncaptured" and
-      // destroys it unconditionally). No zero-row guard is added here (unlike the UPDATE branch above):
-      // a bare INSERT ... RETURNING with no ON CONFLICT clause cannot return zero rows without the
-      // statement itself throwing — there is no "concurrently deleted" analogue for a row that does not
-      // exist yet (mirrors slice ①'s form-submit CREATE branch and slice ②'s plugin `createRecord`,
-      // neither of which added one).
+      // destroys it unconditionally). The durable path requires one real INSERT RETURNING receipt:
+      // a BEFORE trigger may suppress the INSERT or change its version/data. Private evidence must
+      // follow that stored row; the flag-OFF path retains the original INSERT/revision behavior.
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes. revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
@@ -3900,13 +3972,23 @@ export class AutomationExecutor {
         // ADR §3.12, gated (R-22): same validation as update_record, on the same read. `data` is normalised in place,
         // as sanitizeRichLongTextInWritePayload above already does; gate off ⇒ `{}` ⇒ untouched.
         Object.assign(data, validateAutomationOptionValues(currentFields, data))
+        const producerTrx = { query, isTransaction: true } as unknown as TransactionalQueryable
+        const durableEnabled = isDurableDeliveryEnabled()
+        const recordSchema = await captureAutomationRecordSchema(producerTrx, targetSheetId)
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
-        await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
+        const inserted = await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)${durableEnabled ? ` RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}` : ''}`,
           [recordId, targetSheetId, JSON.stringify(data)],
         )
+        const savedRow = (durableEnabled ? inserted.rows[0] : undefined) as {
+          version?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+        } | undefined
+        if (durableEnabled && (inserted.rows.length !== 1
+          || !Number.isSafeInteger(Number(savedRow?.version)) || Number(savedRow?.version) < 1)) {
+          throw new Error('AUTOMATION_RECORD_CREATE_RECEIPT_INVALID')
+        }
         // source='automation' (OD-2). actorId=context.actorId ?? null (OD-3 — the automation actor
         // when present; never a fabricated system actor). snapshot=data: a create's `data` IS the
         // submitted patch (`reconstructRecordsAtT` reads `snapshot` as the full record,
@@ -3926,9 +4008,19 @@ export class AutomationExecutor {
         // INSERT + birth revision (a revision throw rolls it back; the duplicate-claim early-return above
         // skips it, exactly as the caller below skips the legacy emit). Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(
-          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          producerTrx,
           'multitable.record.created',
           chainEventPayload,
+          undefined,
+          durableEnabled ? {
+            sheetId: targetSheetId,
+            recordId,
+            recordVersion: Number(savedRow?.version),
+            data: undefined,
+            rawJson: savedRow?.automation_after_image_json,
+            oversized: savedRow?.automation_after_image_oversized === true,
+            schema: recordSchema,
+          } : undefined,
         )
         return null
       })
@@ -4168,15 +4260,40 @@ export class AutomationExecutor {
         ? rawSnap
         : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
       const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
+      let afterImage: AutomationRecordAfterImageInput | undefined
       const seam: FwbRecordWriteSeam = {
         createRecordWithRevision: async (t, targetSheetId, values) => {
           const recordId = `rec_${randomUUID()}`
+          const durableEnabled = isDurableDeliveryEnabled()
+          // The seam runs only after Q6 + mapping + a successful claim. Capture before DML on
+          // this exact transaction object; duplicate claims never enter the capture/write seam.
+          const recordSchema = await captureAutomationRecordSchema(t, targetSheetId)
           // xbase-write-exempt: FWB-1 writes ONLY the rule's OWN sheet (FWB0 D2).
           // revision-emitted: recordRecordRevision(action:'create') immediately below, SAME transaction.
-          await t.query(
-            'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)',
+          const inserted = await t.query(
+            `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)${durableEnabled ? ` RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}` : ''}`,
             [recordId, targetSheetId, JSON.stringify(values)],
           )
+          const savedRow = (durableEnabled ? inserted.rows[0] : undefined) as {
+            version?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+          } | undefined
+          if (durableEnabled) {
+            if (inserted.rows.length !== 1
+              || !Number.isSafeInteger(Number(savedRow?.version)) || Number(savedRow?.version) < 1) {
+              throw new Error('AUTOMATION_RECORD_CREATE_RECEIPT_INVALID')
+            }
+            // Private evidence is the actual bounded stored row, never the mapped form values.
+            // Keep the existing birth revision's patch/snapshot semantics below unchanged.
+            afterImage = {
+              sheetId: targetSheetId,
+              recordId,
+              recordVersion: Number(savedRow?.version),
+              data: undefined,
+              rawJson: savedRow?.automation_after_image_json,
+              oversized: savedRow?.automation_after_image_oversized === true,
+              schema: recordSchema,
+            }
+          }
           await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
             sheetId: targetSheetId,
             recordId,
@@ -4191,10 +4308,16 @@ export class AutomationExecutor {
           return recordId
         },
         enqueueOutbox: async (t, event) => {
-          await produceAutomationEvent(
-            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+          // Reuse the same object as pre-DML capture: its private schema token is identity-bound.
+          const producerTrx = t as TransactionalQueryable
+          const receipt = await produceAutomationEvent(
+            producerTrx,
             { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
           )
+          if (receipt !== null) {
+            if (!afterImage) throw new Error('AUTOMATION_RECORD_CREATE_RECEIPT_INVALID')
+            await persistAutomationRecordAfterImage(producerTrx, receipt, afterImage)
+          }
         },
       }
       return executeWriteApprovalFormValues(trx, {
@@ -4432,8 +4555,13 @@ export class AutomationExecutor {
         },
       }
 
+      let updateAfterImage: AutomationRecordAfterImageInput | undefined
       const seam: FwbUpdateSeam = {
         updateRecordWithRevision: async (t, sheetId, recordId, values) => {
+          const durableEnabled = isDurableDeliveryEnabled()
+          // Bound-record authority, its row lock and the business claim precede this seam.
+          // The derived target's pre-DML token belongs to this exact transaction object.
+          const recordSchema = await captureAutomationRecordSchema(t, sheetId)
           // xbase-write-gated: evaluateCrossBaseWriteGate accepted the server-pinned target above.
           // lock-guarded: recordExists holds FOR UPDATE and calls ensureRecordNotLocked in this transaction.
           // revision-emitted: recordRecordRevision runs below in this transaction before commit.
@@ -4443,14 +4571,30 @@ export class AutomationExecutor {
                  version = version + 1,
                  updated_at = NOW()
              WHERE id = $2 AND sheet_id = $3
-             RETURNING version, data`,
+             RETURNING version, data${durableEnabled ? `, ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}` : ''}`,
             [JSON.stringify(values), recordId, sheetId],
           )
-          const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+          const updatedRow = updateRes.rows[0] as {
+            version?: unknown; data?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+          } | undefined
           // Fail closed if the locked row vanished between FOR UPDATE and UPDATE (should be impossible
           // under FOR UPDATE, but never report success with a missing mutation).
           if (!updatedRow) throw new Error('fwb_rejected:linked_record_unavailable')
           const nextVersion = Number(updatedRow.version)
+          if (durableEnabled) {
+            if (updateRes.rows.length !== 1 || !Number.isSafeInteger(nextVersion) || nextVersion < 1) {
+              throw new Error('AUTOMATION_RECORD_UPDATE_RECEIPT_INVALID')
+            }
+            updateAfterImage = {
+              sheetId,
+              recordId,
+              recordVersion: nextVersion,
+              data: undefined,
+              rawJson: updatedRow.automation_after_image_json,
+              oversized: updatedRow.automation_after_image_oversized === true,
+              schema: recordSchema,
+            }
+          }
           await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
             sheetId,
             recordId,
@@ -4465,10 +4609,16 @@ export class AutomationExecutor {
           })
         },
         enqueueOutbox: async (t, event) => {
-          await produceAutomationEvent(
-            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+          // Schema evidence is object-bound: do not reconstruct a transaction wrapper here.
+          const updateProducerTrx = t as TransactionalQueryable
+          const receipt = await produceAutomationEvent(
+            updateProducerTrx,
             { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
           )
+          if (receipt !== null) {
+            if (!updateAfterImage) throw new Error('AUTOMATION_RECORD_UPDATE_RECEIPT_INVALID')
+            await persistAutomationRecordAfterImage(updateProducerTrx, receipt, updateAfterImage)
+          }
         },
       }
 

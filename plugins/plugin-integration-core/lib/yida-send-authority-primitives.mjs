@@ -86,7 +86,7 @@ function reconstructRows(compiled) {
   return { sourceRows, verified }
 }
 
-function createPrimitives(options) {
+function createPrimitives(options, internalExecutionActor) {
   const parsed = record(options, ['security', 'context'])
   const fixed = record(parsed.context, CONTEXT)
   opaque(fixed.tenantId); opaque(fixed.ownerId)
@@ -152,7 +152,9 @@ function createPrimitives(options) {
       const grant = record(input, ['grantRef', 'expiresAt', 'actorId'])
       opaque(grant.grantRef); opaque(grant.actorId)
       if (!Number.isSafeInteger(grant.expiresAt) || grant.expiresAt < 1) fail('INPUT')
-      if (grant.actorId !== fixed.ownerId) fail('CONFLICT')
+      if (internalExecutionActor === undefined) {
+        if (grant.actorId !== fixed.ownerId) fail('CONFLICT')
+      } else if (grant.actorId !== internalExecutionActor) fail('CONFLICT')
       return executionDigest.buildYidaExecutionPayloadDigest({ snapshot: { ...selection, ...grant }, intent: 'create', data })
     } catch (error) { closed(error) }
   }
@@ -184,6 +186,25 @@ function createPrimitives(options) {
       return material
     } catch (error) { closed(error) }
   }
+  async function finishInTransaction(trx, input, kind) {
+    try {
+      if (kind !== 'acknowledgement' && kind !== 'unknown') fail('INPUT')
+      const requested = record(input, [...CONTEXT, 'operationId', 'rowKey', 'actorId', 'claimToken',
+        kind === 'acknowledgement' ? 'ack' : 'reason'])
+      if (!CONTEXT.every(key => requested[key] === fixed[key])
+        || requested.actorId !== (internalExecutionActor ?? fixed.ownerId)) fail('CONFLICT')
+      return Object.freeze(await delivery.finishYidaDeliveryInTransaction(crud(trx), requested, kind))
+    } catch (error) { closed(error) }
+  }
+  async function claimInTransaction(trx, input) {
+    try {
+      const requested = record(input, [...CONTEXT, 'operationId', 'rowKey', 'actorId'])
+      if (!CONTEXT.every(key => requested[key] === fixed[key])
+        || requested.actorId !== (internalExecutionActor ?? fixed.ownerId)) fail('CONFLICT')
+      const claimed = await delivery.claimYidaDeliveryInTransaction(crud(trx), requested)
+      return Object.freeze({ record: Object.freeze(claimed.record), claimToken: claimed.claimToken })
+    } catch (error) { closed(error) }
+  }
   async function previewInTransaction(trx, input) {
     try {
       const selection = await resolveSelectionInTransaction(trx, input)
@@ -210,10 +231,26 @@ function createPrimitives(options) {
           requiresExplicitConfirmation: true, unknownMustNotRetry: true }, canSend: false, externalWriteAttempted: false })
     } catch (error) { closed(error) }
   }
-  return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, prepareInTransaction, loadExecutionMaterialInTransaction })
+  const shared = { prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
+    executionPayloadDigest, prepareInTransaction, loadExecutionMaterialInTransaction }
+  // Preserve the original six-method owner contract. Only the explicit private
+  // delegated factory exposes transaction-bound service transition mechanisms.
+  return Object.freeze(internalExecutionActor === undefined ? shared : { ...shared, claimInTransaction, finishInTransaction })
 }
 
 export function createYidaSendAuthorityPrimitives(options) {
   try { return createPrimitives(options) } catch (error) { closed(error) }
+}
+
+// Explicit host-private PURE mechanism; not a sender or execution authority.
+// No runAs/skip flag is accepted by the original owner factory. Material stays
+// resource-owner scoped while the digest records the real bound service actor.
+// Selection branding and the original payload/digest implementation are shared.
+export function createInternalYidaAutomationAuthorityPrimitives(options) {
+  try {
+    const parsed = record(options, ['security', 'context', 'workerId'])
+    const context = record(parsed.context, CONTEXT), workerId = opaque(parsed.workerId)
+    if (workerId === context.ownerId) fail('CONFLICT')
+    return createPrimitives({ security: parsed.security, context }, workerId)
+  } catch (error) { closed(error) }
 }

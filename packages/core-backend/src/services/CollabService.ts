@@ -25,6 +25,12 @@ type AuthenticatedSocketData = {
 
 export class CollabService {
   private io: SocketServer | null = null
+  private initializationStarted = false
+  private shutdownPromise: Promise<void> | null = null
+  private cellUpdateSubscription: string | null = null
+  private httpServer: HttpServer | null = null
+  private httpServerClosed = false
+  private readonly onHttpServerClose = () => { this.httpServerClosed = true }
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
   private sheetMembershipBySocket = new Map<string, Set<string>>()
   private commentInboxUserBySocket = new Map<string, string>()
@@ -59,7 +65,7 @@ export class CollabService {
   }
 
   private setupEventListeners() {
-    this.eventBus.subscribe('spreadsheet.cell.updated', (payload) => {
+    this.cellUpdateSubscription = this.eventBus.subscribe('spreadsheet.cell.updated', (payload) => {
       if (!this.io) return
       const data = payload as { spreadsheetId?: string }
       if (!data?.spreadsheetId) return
@@ -367,6 +373,13 @@ export class CollabService {
   }
 
   initialize(httpServer: HttpServer): void {
+    if (this.shutdownPromise) throw new Error('COLLAB_SERVICE_SHUT_DOWN')
+    if (this.initializationStarted) throw new Error('COLLAB_SERVICE_ALREADY_INITIALIZED')
+    // Initialization is synchronous. Keep the assigned server available to shutdown
+    // even if a later initialization step fails; this instance cannot be restarted.
+    this.initializationStarted = true
+    this.httpServer = httpServer
+    httpServer.once('close', this.onHttpServerClose)
     this.io = new SocketServer(httpServer, {
       cors: {
         origin: '*',
@@ -466,6 +479,62 @@ export class CollabService {
     })
 
     this.logger.info('CollabService (WebSocket) initialized')
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    // Cache before invoking cleanup so concurrent/reentrant callers share the same
+    // terminal result, including shutdown requested during synchronous initialize.
+    this.shutdownPromise = Promise.resolve().then(async () => {
+      const io = this.io
+      this.io = null
+      let failed = false
+      try {
+        if (this.cellUpdateSubscription !== null) {
+          this.eventBus.unsubscribe(this.cellUpdateSubscription)
+          this.cellUpdateSubscription = null
+        }
+      } catch {
+        failed = true
+      }
+      try {
+        if (io) {
+          await new Promise<void>((resolve, reject) => {
+            let closeFinished = false
+            let callbackFinished = false
+            let closeFailed = false
+            const finish = () => {
+              if (!closeFinished || !callbackFinished) return
+              if (closeFailed) reject(new Error('COLLAB_SHUTDOWN_FAILED'))
+              else resolve()
+            }
+            // Socket.IO closes its sockets, namespace adapters and engine, then
+            // also closes HTTP. Wait for both its promise and HTTP callback.
+            void io.close((error) => {
+              const alreadyClosed = (error as NodeJS.ErrnoException | undefined)?.code === 'ERR_SERVER_NOT_RUNNING'
+                && this.httpServerClosed && this.httpServer?.listening === false
+              closeFailed = Boolean(error) && !alreadyClosed
+              callbackFinished = true
+              finish()
+            }).then(() => {
+              closeFinished = true
+              finish()
+            }, () => reject(new Error('COLLAB_SHUTDOWN_FAILED')))
+          })
+        }
+      } catch {
+        failed = true
+      } finally {
+        this.httpServer?.off('close', this.onHttpServerClose)
+        this.httpServer = null
+        this.sheetPresenceBySheet.clear()
+        this.sheetMembershipBySocket.clear()
+        this.commentInboxUserBySocket.clear()
+        this.commentInboxSocketsByUser.clear()
+      }
+      if (failed) throw new Error('COLLAB_SHUTDOWN_FAILED')
+    })
+    return this.shutdownPromise
   }
 
   getIO(): SocketServer | null {

@@ -15,9 +15,11 @@
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude).
  */
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { Kysely, PostgresDialect } from 'kysely'
+import { Pool } from 'pg'
 
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
@@ -39,6 +41,15 @@ import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capa
 import { isAdmin as rbacIsAdmin, invalidateUserPerms } from '../../src/rbac/service'
 import { isAdminOnQuery } from '../../src/services/approval-record-link-txn-auth'
 import { fenceWriterEntriesInOrder } from '../../src/multitable/canonical-sheet-fence'
+import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
+import { createAutomationReadRecordConditions } from '../../src/integration/automation-read-record-conditions'
+import { bootstrapOwnedApprovalAfterImageSchema } from '../utils/automation-approval-after-image-schema'
+import { up as addFwbClaims } from '../../src/db/migrations/zzzz20260715200000_create_fwb_action_applied'
+import { up as addFwbAction } from '../../src/db/migrations/zzzz20260720120000_add_write_approval_form_values_automation_action'
+import { up as addEventFires } from '../../src/db/migrations/zzzz20260701120000_create_automation_event_fires'
+import { up as addEventFireLease } from '../../src/db/migrations/zzzz20260716140000_event_fires_lease'
+import { up as addAuditLogs } from '../../src/db/migrations/20250926_create_operation_audit_logs'
+import { up as hardenAuditLogs } from '../../src/db/migrations/zzzz20260209100000_fix_operation_audit_logs_schema'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -214,27 +225,6 @@ async function approveInstance(instanceId: string): Promise<void> {
     { action: 'approve', comment: 'ok' } as never,
     { userId: APPROVER, userName: APPROVER },
   )
-}
-
-function completionEvent(instanceId: string, eventId: string) {
-  return {
-    version: 1,
-    source: 'approval-product',
-    eventType: 'approval.approved',
-    eventId,
-    occurredAt: new Date().toISOString(),
-    approval: { instanceId, templateId, templateVersionId, status: 'approved' },
-    transition: {
-      action: 'approve',
-      fromStatus: 'pending',
-      toStatus: 'approved',
-      fromVersion: 1,
-      toVersion: 2,
-      nodeKey: 'approval_1',
-    },
-    requester: { id: REQUESTER, name: REQUESTER },
-    actor: null,
-  } as never
 }
 
 function executorRule(ruleId: string, actionConfig: Record<string, unknown>): ExecutorRule {
@@ -1564,4 +1554,387 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
       setWriterFence(false)
     }
   })
+})
+
+describeIfDatabase('SA06AP FWB update after-image', () => {
+  const schema = 'automation_approval_image_' + randomBytes(8).toString('hex')
+  const identity = randomBytes(8).toString('hex')
+  const baseId = 'base_sa06ap_' + identity
+  const ruleSheetId = 'sheet_sa06ap_rule_' + identity
+  const targetSheetId = 'sheet_sa06ap_target_' + identity
+  const fieldId = 'fld_sa06ap_title_' + identity
+  const preservedFieldId = 'fld_sa06ap_preserved_' + identity
+  const creatorId = 'u_sa06ap_creator_' + identity
+  const requesterId = 'u_sa06ap_requester_' + identity
+  const approverId = 'u_sa06ap_approver_' + identity
+  const mappings = [{ formFieldId: 'summary', targetFieldId: fieldId, targetType: 'text' as const }]
+  const transport: Array<{ mockRestore(): void }> = []
+  const metricsObservers: Array<{ mock: { results: Array<{ type: string; value: unknown }> }; mockRestore(): void }> = []
+  let ownedPool: Pool, ownedDb: Kysely<unknown>, created = false
+  let service: AutomationService, product: ApprovalProductService
+
+  async function drainMetrics(): Promise<void> {
+    let observedCount: number
+    do {
+      const returned = metricsObservers.flatMap(observed => observed.mock.results
+        .filter(result => result.type === 'return' && result.value instanceof Promise)
+        .map(result => result.value as Promise<unknown>))
+      observedCount = returned.length
+      await Promise.allSettled(returned)
+    } while (metricsObservers.reduce((count, observed) => count + observed.mock.results
+      .filter(result => result.type === 'return' && result.value instanceof Promise).length, 0) !== observedCount)
+  }
+
+  beforeAll(async () => {
+    ownedPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 8,
+      options: '-c search_path=' + schema + ' -c statement_timeout=8000' })
+    await ownedPool.query('CREATE SCHEMA "' + schema + '"')
+    created = true
+    ownedDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: ownedPool }) })
+    const infrastructure = poolManager.get(), originalPool = infrastructure.getInternalPool()
+    // Only transport is forwarded: retain production transaction BEGIN/COMMIT and gate queries.
+    transport.push(vi.spyOn(originalPool, 'connect').mockImplementation(ownedPool.connect.bind(ownedPool)))
+    transport.push(vi.spyOn(originalPool, 'query').mockImplementation(ownedPool.query.bind(ownedPool)))
+    transport.push(vi.spyOn(infrastructure, 'query').mockImplementation((statement, params) => ownedPool.query(statement, params)))
+    transport.push(vi.spyOn(infrastructure, 'getInternalPool').mockReturnValue(ownedPool))
+    await bootstrapOwnedApprovalAfterImageSchema({ db: ownedDb, query: (statement, params) => ownedPool.query(statement, params), mode: 'empty' })
+    // The real record-link submit/update fence SELECTs grant ids, even with no grants.
+    // Complete only this owned fixture's simplified relation, never repair public storage.
+    await q('ALTER TABLE record_permissions ADD COLUMN id uuid PRIMARY KEY DEFAULT gen_random_uuid()')
+    for (const migration of [addFwbClaims, addFwbAction, addEventFires, addEventFireLease, addAuditLogs, hardenAuditLogs]) {
+      await ownedDb.transaction().execute(migration)
+    }
+    const { getApprovalMetricsService } = await import('../../src/services/ApprovalMetricsService')
+    const metrics = getApprovalMetricsService()
+    metricsObservers.push(vi.spyOn(metrics, 'recordInstanceStart'), vi.spyOn(metrics, 'recordNodeDecision'), vi.spyOn(metrics, 'recordTerminal'))
+    // Requester owns the synthetic base for the real record-link submit read gate.
+    await q('INSERT INTO meta_bases(id,name,owner_id) VALUES($1,$2,$3)', [baseId, 'Synthetic update image base', requesterId])
+    for (const id of [ruleSheetId, targetSheetId]) {
+      await q('INSERT INTO meta_sheets(id,base_id,name) VALUES($1,$2,$3)', [id, baseId, 'Synthetic update image sheet'])
+    }
+    for (const [index, id] of [fieldId, preservedFieldId].entries()) {
+      await q('INSERT INTO meta_fields(id,sheet_id,name,type,property,"order") VALUES($1,$2,$3,$4,$5::jsonb,$6)',
+        [id, targetSheetId, 'Synthetic update field', 'string', '{}', index + 1])
+    }
+    for (const uid of [creatorId, requesterId, approverId]) {
+      await q(`INSERT INTO users(id,email,name,password_hash,role,permissions,is_active,is_admin)
+        VALUES($1,$2,$1,'synthetic','user','[]',true,$3)`, [uid, uid + '@synthetic.test', uid === creatorId])
+    }
+    await q("INSERT INTO roles(id,name) VALUES('admin','admin')")
+    await q("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [creatorId])
+    // Base ownership passes base-read only; real record-link submit also needs sheet-read.
+    for (const [uid, permission] of [[creatorId, 'approvals:read'], [creatorId, 'multitable:read'],
+      [requesterId, 'approvals:write'], [requesterId, 'multitable:read'], [approverId, 'approvals:act']]) {
+      await q('INSERT INTO user_permissions(user_id,permission_code) VALUES($1,$2)', [uid, permission])
+      await invalidateUserPerms(uid)
+    }
+    await q("INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,'default',true)", [requesterId])
+    product = new ApprovalProductService()
+    // No subscription/init: consume exactly the original persisted approved payload through public API.
+    service = new AutomationService(integrationEventBus, db as never, queryFn)
+    metricsObservers.push(vi.spyOn(service, 'sweepEventDedupLedger'))
+  }, 30000)
+  beforeEach(() => {
+    vi.stubEnv('APPROVAL_FWB_WRITEBACK_ENABLED', 'true')
+    vi.stubEnv('AUTOMATION_DURABLE_DELIVERY_ENABLED', 'true')
+  })
+  afterEach(async () => { try { await drainMetrics() } finally { vi.unstubAllEnvs() } })
+  afterAll(async () => {
+    try {
+      await service?.shutdown()
+      await drainMetrics()
+      if (created) {
+        expect(schema).toMatch(/^automation_approval_image_[a-f0-9]{16}$/u)
+        expect((await ownedPool.query('SELECT current_schema() AS schema')).rows).toEqual([{ schema }])
+        await ownedPool.query('DROP SCHEMA "' + schema + '" CASCADE')
+      }
+    } finally {
+      for (const observed of metricsObservers.reverse()) observed.mockRestore()
+      for (const spy of transport.reverse()) spy.mockRestore()
+      if (ownedDb) await ownedDb.destroy()
+      else await ownedPool?.end()
+    }
+  })
+
+  async function completedApproval(summary: string) {
+    const recordId = 'rec_sa06ap_' + randomUUID()
+    await q('INSERT INTO meta_records(id,sheet_id,data,version,created_by) VALUES($1,$2,$3::jsonb,3,$4)',
+      [recordId, targetSheetId, JSON.stringify({ [fieldId]: 'synthetic before', [preservedFieldId]: 'synthetic untouched' }), requesterId])
+    const template = await product.createTemplate({ key: 'sa06ap-' + randomUUID(), name: 'Synthetic FWB update image',
+      visibilityScope: { type: 'all', ids: [] }, formSchema: { fields: [
+        { id: 'summary', type: 'text', label: 'Summary', required: true },
+        { id: 'linked', type: 'record-link', label: 'Bound synthetic record', required: true,
+          props: { baseId, sheetId: targetSheetId } },
+      ] }, approvalGraph: { nodes: [
+        { key: 'start', type: 'start', name: 'Start', config: {} },
+        { key: 'approval_1', type: 'approval', name: 'Approver',
+          config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [approverId] }] } },
+        { key: 'end', type: 'end', name: 'End', config: {} },
+      ], edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ] } } as never)
+    await product.publishTemplate(template.id, { policy: { allowRevoke: true }, actorUserId: creatorId } as never)
+    const versionId = String((await q('SELECT active_version_id FROM approval_templates WHERE id=$1', [template.id])).rows[0].active_version_id)
+    const confirmationHash = deriveFwbConfirmationHash({ templateId: template.id, sourceTemplateVersionId: versionId,
+      targetBaseId: baseId, targetSheetId, mappings, mode: 'update', recordLinkFieldId: 'linked' })
+    // Dedicated storage receipt, explicitly not an HTTP confirmation-route claim.
+    await q(`INSERT INTO operation_audit_logs(actor_id,actor_type,action,resource_type,resource_id,metadata,meta)
+      VALUES($1,'user','automation.fwb_confirm','automation_fwb_confirmation',$2,$3::jsonb,$3::jsonb)`,
+    [creatorId, ruleSheetId, JSON.stringify({ confirmationHash })])
+    const rule = await service.createRule(ruleSheetId, { name: 'Synthetic FWB update RETURNING',
+      triggerType: 'approval.completed', triggerConfig: { templateId: template.id, outcomes: ['approved'] },
+      actionType: 'write_approval_form_values', actionConfig: { mode: 'update', recordLinkFieldId: 'linked',
+        mappings, sourceTemplateVersionId: versionId, confirmationHash }, createdBy: creatorId } as never)
+    const instance = await product.createApproval({ templateId: template.id, formData: { summary, linked: { recordId } } },
+      { userId: requesterId, userName: requesterId })
+    await product.dispatchAction(instance.id, { action: 'approve', comment: 'synthetic approval' } as never,
+      { userId: approverId, userName: approverId })
+    const completion = await q(`SELECT payload FROM meta_automation_outbox WHERE event_type='approval.approved'
+      AND payload->'approval'->>'instanceId'=$1`, [instance.id])
+    expect(completion.rows).toHaveLength(1)
+    const event = completion.rows[0].payload as Parameters<AutomationService['handleApprovalCompletionTrigger']>[0]
+    expect(event).toMatchObject({ source: 'approval-product', eventType: 'approval.approved',
+      approval: { instanceId: instance.id, templateId: template.id, templateVersionId: versionId },
+      transition: { toStatus: 'approved' } })
+    expect((await q('SELECT status FROM approval_instances WHERE id=$1', [instance.id])).rows).toEqual([{ status: 'approved' }])
+    await drainMetrics()
+    return { ruleId: rule.id, instanceId: instance.id, recordId, event }
+  }
+  async function execution(ruleId: string) {
+    const result = await q(`SELECT status,error,steps FROM multitable_automation_executions
+      WHERE rule_id=$1 ORDER BY triggered_at DESC,id DESC LIMIT 1`, [ruleId])
+    expect(result.rows).toHaveLength(1)
+    return result.rows[0] as { status: string; error: string | null; steps: Array<Record<string, unknown>> }
+  }
+  async function totals() {
+    return (await q(`SELECT (SELECT count(*)::int FROM meta_records) AS records,
+      (SELECT count(*)::int FROM meta_record_revisions) AS revisions,
+      (SELECT count(*)::int FROM meta_fwb_action_applied) AS claims,
+      (SELECT count(*)::int FROM meta_automation_record_after_images) AS images,
+      (SELECT count(*)::int FROM meta_automation_outbox WHERE event_type='multitable.record.updated') AS events`)).rows[0]
+  }
+  async function storedRecord(recordId: string) {
+    return (await q('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+  }
+  async function imageForRule(ruleId: string) {
+    const images = await q(`SELECT i.*,o.payload,o.event_id AS receipt_event_id,o.event_type AS receipt_event_type,
+      o.automation_depth,octet_length(i.after_image::text) AS pg_bytes,o.xmin::text AS event_xmin,i.xmin::text AS image_xmin
+      FROM meta_automation_record_after_images i JOIN meta_automation_outbox o ON o.id=i.outbox_id
+      WHERE o.event_id LIKE $1`, ['%::fwb::' + ruleId + '::%'])
+    expect(images.rows).toHaveLength(1)
+    return images.rows[0]
+  }
+  async function condition(image: Record<string, unknown>, value: string) {
+    const ruleId = 'sa06ap_condition_' + randomUUID()
+    await q(`INSERT INTO automation_rules(id,sheet_id,name,trigger_type,action_type,created_by,conditions)
+      VALUES($1,$2,'Synthetic update image condition','record.updated','send_webhook',$3,$4::jsonb)`,
+    [ruleId, targetSheetId, creatorId, JSON.stringify({ logic: 'and', conditions: [
+      { fieldId, operator: 'equals', value },
+      { fieldId: preservedFieldId, operator: 'equals', value: 'synthetic untouched' },
+    ] })])
+    const conditions = createAutomationReadRecordConditions({ businessTimeZone: 'Asia/Shanghai' })
+    return poolManager.get().transaction(async actual => {
+      const trx: TransactionalQueryable = { isTransaction: true, query: async (statement, params) => actual.query(statement, params) }
+      const locked = await conditions.lock(trx, { actorId: creatorId, ruleId, sheetId: targetSheetId, baseId })
+      return conditions.evaluate(trx, locked, { outboxId: String(image.outbox_id), eventId: String(image.event_id), eventType: 'multitable.record.updated' })
+    })
+  }
+  async function dropTrigger(name: string, table: string) {
+    await q(`DROP TRIGGER IF EXISTS ${name}_trg ON ${table}`)
+    await q(`DROP FUNCTION IF EXISTS ${name}()`)
+  }
+
+  test('derived target actual RETURNING image preserves full update revision and all five effects share one xid; new-event claim dedup', async () => {
+    const run = await completedApproval('synthetic input')
+    const trigger = 'sa06ap_returning_' + randomBytes(6).toString('hex')
+    const emits = vi.spyOn(integrationEventBus, 'emit')
+    try {
+      await q(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN
+          IF NOT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND relation='meta_fields'::regclass
+            AND mode='ShareLock' AND granted) THEN RAISE EXCEPTION 'SA06AP_SCHEMA_NOT_BEFORE_DML'; END IF;
+          NEW.data:=NEW.data || jsonb_build_object('${fieldId}','synthetic PG saved',
+            'synthetic_extra','not in input','synthetic_capture_xid',pg_current_xact_id()::text);
+          NEW.version:=9;
+          RETURN NEW;
+        END $fn$`)
+      await q(`CREATE TRIGGER ${trigger}_trg BEFORE UPDATE ON meta_records FOR EACH ROW EXECUTE FUNCTION ${trigger}()`)
+      await service.handleApprovalCompletionTrigger(run.event)
+      const exec = await execution(run.ruleId)
+      expect(exec.steps, JSON.stringify(exec)).toMatchObject([{ status: 'success', actionType: 'write_approval_form_values' }])
+      const image = await imageForRule(run.ruleId)
+      const record = (await q('SELECT data,version,xmin::text AS record_xmin FROM meta_records WHERE id=$1', [run.recordId])).rows[0]
+      expect(image).toMatchObject({ sheet_id: targetSheetId, record_id: run.recordId, status: 'captured', reason: null,
+        record_version: '9', after_image: record.data, capture_xid: record.data.synthetic_capture_xid,
+        event_type: 'multitable.record.updated', receipt_event_type: 'multitable.record.updated', automation_depth: 1 })
+      expect(record.version).toBe(9)
+      expect(record.data).toMatchObject({ [fieldId]: 'synthetic PG saved', [preservedFieldId]: 'synthetic untouched', synthetic_extra: 'not in input' })
+      expect(image.captured_bytes).toBe(image.pg_bytes)
+      expect(image.captured_bytes).toBeGreaterThan(0)
+      expect(image.event_id).toBe(image.receipt_event_id)
+      expect(image.payload).toEqual({ sheetId: targetSheetId, recordId: run.recordId })
+      const epochs = await q(`SELECT scope->>'id' AS sheet,revision::text FROM automation_read_material_epochs
+        WHERE kind='sheet' AND scope->>'id'=ANY($1::text[])`, [[ruleSheetId, targetSheetId]])
+      const targetRevision = epochs.rows.find(row => row.sheet === targetSheetId)?.revision
+      expect(typeof targetRevision).toBe('string')
+      expect(image.schema_revision).toBe(targetRevision)
+      expect(image.schema_revision).not.toBe(epochs.rows.find(row => row.sheet === ruleSheetId)?.revision)
+      const revisions = await q('SELECT version,patch,snapshot,actor_id,changed_field_ids,xmin::text AS revision_xmin FROM meta_record_revisions WHERE record_id=$1', [run.recordId])
+      expect(revisions.rows).toHaveLength(1)
+      expect(revisions.rows[0]).toMatchObject({ version: 9, patch: { [fieldId]: 'synthetic input' },
+        snapshot: record.data, changed_field_ids: [fieldId], actor_id: creatorId })
+      const claims = await q('SELECT xmin::text AS claim_xmin FROM meta_fwb_action_applied WHERE instance_id=$1 AND rule_id=$2', [run.instanceId, run.ruleId])
+      expect(claims.rows).toHaveLength(1)
+      const xid = (BigInt(String(image.capture_xid)) % 4294967296n).toString()
+      expect([record.record_xmin, revisions.rows[0].revision_xmin, image.event_xmin, image.image_xmin, claims.rows[0].claim_xmin])
+        .toEqual([xid, xid, xid, xid, xid])
+      expect(await condition(image, 'synthetic PG saved')).toEqual({ kind: 'match' })
+      expect(emits.mock.calls.filter(call => call[0] === 'multitable.record.updated')).toHaveLength(0)
+      const before = await totals(), beforeRecord = await storedRecord(run.recordId)
+      // New transport identity deliberately exercises instance/action claim, not event dedup.
+      await service.handleApprovalCompletionTrigger({ ...run.event, eventId: 'sa06ap_replay_' + randomUUID() })
+      expect(await totals()).toEqual(before)
+      expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+      expect((await execution(run.ruleId)).steps).toMatchObject([{ status: 'success', alreadyApplied: true }])
+    } finally {
+      try { await dropTrigger(trigger, 'meta_records') } finally { emits.mockRestore() }
+    }
+  }, 20000)
+
+  test('private image INSERT failure rolls back claim/update/revision/outbox/image; manual new-event retry commits once', async () => {
+    const run = await completedApproval('synthetic rollback'), before = await totals(), beforeRecord = await storedRecord(run.recordId)
+    const trigger = 'sa06ap_failure_' + randomBytes(6).toString('hex')
+    try {
+      await q(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN RAISE EXCEPTION 'SA06AP_IMAGE_INSERT_FAILURE'; END $fn$`)
+      await q(`CREATE TRIGGER ${trigger}_trg BEFORE INSERT ON meta_automation_record_after_images
+        FOR EACH ROW EXECUTE FUNCTION ${trigger}()`)
+      await expect(service.handleApprovalCompletionTrigger(run.event)).rejects.toThrow('approval_completed_trigger_retryable_failure')
+      expect((await execution(run.ruleId)).steps).toMatchObject([{ status: 'failed', error: 'fwb_execution_failed' }])
+      expect(await totals()).toEqual(before)
+      expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+      expect((await q('SELECT id FROM meta_fwb_action_applied WHERE instance_id=$1 AND rule_id=$2', [run.instanceId, run.ruleId])).rows).toHaveLength(0)
+      await dropTrigger(trigger, 'meta_automation_record_after_images')
+      // Manual transport-identity change, not proof that an original leased consumer retried.
+      await service.handleApprovalCompletionTrigger({ ...run.event, eventId: 'sa06ap_retry_' + randomUUID() })
+      expect((await execution(run.ruleId)).steps).toMatchObject([{ status: 'success' }])
+      expect(await totals()).toEqual({ ...before, revisions: Number(before.revisions) + 1, claims: Number(before.claims) + 1,
+        images: Number(before.images) + 1, events: Number(before.events) + 1 })
+      expect(await storedRecord(run.recordId)).toMatchObject({ version: 4, data: { [fieldId]: 'synthetic rollback' } })
+      expect((await imageForRule(run.ruleId)).status).toBe('captured')
+    } finally { await dropTrigger(trigger, 'meta_automation_record_after_images') }
+  }, 20000)
+
+  test.each([{ label: 'RETURN NULL zero-row', body: 'RETURN NULL;', error: 'fwb_rejected:linked_record_unavailable' },
+    { label: 'invalid durable version receipt', body: 'NEW.version:=0; RETURN NEW;', error: 'fwb_execution_failed' }])('$label rejects with no success image or effects', async variant => {
+    const run = await completedApproval('synthetic no receipt'), before = await totals(), beforeRecord = await storedRecord(run.recordId)
+    const trigger = 'sa06ap_receipt_' + randomBytes(6).toString('hex')
+    try {
+      await q(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN ${variant.body} END $fn$`)
+      await q(`CREATE TRIGGER ${trigger}_trg BEFORE UPDATE ON meta_records FOR EACH ROW EXECUTE FUNCTION ${trigger}()`)
+      if (variant.error === 'fwb_execution_failed') {
+        await expect(service.handleApprovalCompletionTrigger(run.event)).rejects.toThrow('approval_completed_trigger_retryable_failure')
+      } else await service.handleApprovalCompletionTrigger(run.event)
+      expect((await execution(run.ruleId)).steps).toMatchObject([{ status: 'failed', error: variant.error }])
+      expect(await totals()).toEqual(before)
+      expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+    } finally { await dropTrigger(trigger, 'meta_records') }
+  }, 15000)
+
+  test('real schema NOWAIT 55P03/savepoint permits update but unavailable schema fails condition closed', async () => {
+    const run = await completedApproval('synthetic nowait'), holder = await ownedPool.connect()
+    const infrastructure = poolManager.get(), originalTransaction = infrastructure.transaction.bind(infrastructure)
+    type ActualTransactionClient = Parameters<Parameters<typeof infrastructure.transaction>[0]>[0]
+    const observations: Array<{ statement: string; settled: PromiseSettledResult<unknown> }> = []
+    const observedTransaction = async <T>(handler: (actual: ActualTransactionClient) => Promise<T>): Promise<T> =>
+      originalTransaction(async actual => {
+        const originalQuery = actual.query, observationTasks: Promise<void>[] = []
+        // Forward the same client and returned promise; errors come from real PostgreSQL.
+        const observedQuery: typeof actual.query = (...args: Parameters<typeof actual.query>) => {
+          const sqlOrConfig: unknown = args[0]
+          const statement = typeof sqlOrConfig === 'string' ? sqlOrConfig
+            : sqlOrConfig !== null && typeof sqlOrConfig === 'object' && 'text' in sqlOrConfig
+              && typeof sqlOrConfig.text === 'string' ? sqlOrConfig.text : ''
+          const returned = originalQuery(...args) as Promise<unknown>
+          if (/LOCK TABLE meta_sheets, meta_fields|ROLLBACK TO SAVEPOINT automation_record_schema_capture/u.test(statement)) {
+            observationTasks.push(returned.then(value => {
+              observations.push({ statement, settled: { status: 'fulfilled', value } })
+            }, reason => {
+              observations.push({ statement, settled: { status: 'rejected', reason } })
+            }))
+          }
+          return returned
+        }
+        const queries = vi.spyOn(actual, 'query').mockImplementation(observedQuery)
+        try { return await handler(actual) } finally {
+          try { await Promise.allSettled(observationTasks) } finally { queries.mockRestore() }
+        }
+      })
+    const transactions = vi.spyOn(infrastructure, 'transaction').mockImplementation(observedTransaction)
+    try {
+      await holder.query('BEGIN')
+      await holder.query('LOCK TABLE meta_fields IN SHARE UPDATE EXCLUSIVE MODE')
+      await service.handleApprovalCompletionTrigger(run.event)
+      const exec = await execution(run.ruleId)
+      expect(exec.steps, JSON.stringify(exec)).toMatchObject([{ status: 'success' }])
+      const locks = observations.filter(observed => /LOCK TABLE meta_sheets, meta_fields/u.test(observed.statement))
+      expect(locks).toHaveLength(1)
+      expect(locks[0].settled).toMatchObject({ status: 'rejected', reason: { code: '55P03' } })
+      const rollbacks = observations.filter(observed => observed.statement === 'ROLLBACK TO SAVEPOINT automation_record_schema_capture')
+      expect(rollbacks).toHaveLength(1)
+      expect(rollbacks[0].settled.status).toBe('fulfilled')
+      await holder.query('ROLLBACK')
+      const image = await imageForRule(run.ruleId)
+      expect(image).toMatchObject({ status: 'captured', schema_revision: null, sheet_id: targetSheetId,
+        after_image: { [fieldId]: 'synthetic nowait', [preservedFieldId]: 'synthetic untouched' } })
+      expect(await condition(image, 'synthetic nowait')).toEqual({ kind: 'unreadable', reason: 'AFTER_IMAGE_UNAVAILABLE' })
+    } finally {
+      try { await holder.query('ROLLBACK') } finally {
+        try { holder.release() } finally { transactions.mockRestore() }
+      }
+    }
+  }, 20000)
+
+  test.each([{ label: 'OFF', fwb: 'false', durable: 'true', status: 'skipped' },
+    { label: 'half-durable', fwb: 'true', durable: 'false', status: 'failed' }])('$label preserves zero-update and zero-image contract', async flags => {
+    const run = await completedApproval('synthetic flags'), before = await totals(), beforeRecord = await storedRecord(run.recordId)
+    vi.stubEnv('APPROVAL_FWB_WRITEBACK_ENABLED', flags.fwb)
+    vi.stubEnv('AUTOMATION_DURABLE_DELIVERY_ENABLED', flags.durable)
+    await service.handleApprovalCompletionTrigger(run.event)
+    const exec = await execution(run.ruleId)
+    expect(exec.steps, JSON.stringify(exec)).toMatchObject([{ status: flags.status }])
+    if (flags.status === 'failed') expect(String(exec.steps[0]?.error)).toMatch(/AUTOMATION_DURABLE_DELIVERY_ENABLED/u)
+    expect(await totals()).toEqual(before)
+    expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+  }, 15000)
+
+  test('real record lock denies before claim/capture/update', async () => {
+    const run = await completedApproval('synthetic locked')
+    await q('UPDATE meta_records SET locked=true,locked_by=$1 WHERE id=$2', [requesterId, run.recordId])
+    const before = await totals(), beforeRecord = await storedRecord(run.recordId)
+    await service.handleApprovalCompletionTrigger(run.event)
+    expect((await execution(run.ruleId)).steps).toMatchObject([{ status: 'failed', error: 'fwb_rejected:linked_record_unavailable' }])
+    expect(await totals()).toEqual(before)
+    expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+  }, 15000)
+
+  test('real revoked target write authority fails production permission gates without claim/update/image', async () => {
+    const run = await completedApproval('synthetic revoked'), before = await totals(), beforeRecord = await storedRecord(run.recordId)
+    try {
+      await q('UPDATE users SET is_admin=false WHERE id=$1', [creatorId])
+      await q('DELETE FROM user_roles WHERE user_id=$1', [creatorId])
+      await invalidateUserPerms(creatorId)
+      await service.handleApprovalCompletionTrigger(run.event)
+      const exec = await execution(run.ruleId)
+      expect(exec.steps).toMatchObject([{ status: 'failed' }])
+      expect(String(exec.steps[0]?.error)).toMatch(/^fwb_rejected:permission_gates:.*target_writable/u)
+      expect(await totals()).toEqual(before)
+      expect(await storedRecord(run.recordId)).toEqual(beforeRecord)
+    } finally {
+      await q('UPDATE users SET is_admin=true WHERE id=$1', [creatorId])
+      await q("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [creatorId])
+      await invalidateUserPerms(creatorId)
+    }
+  }, 15000)
 })

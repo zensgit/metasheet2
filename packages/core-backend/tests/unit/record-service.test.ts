@@ -111,7 +111,9 @@ function createMockPool(
         rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4, data: { fld_title: 'Before' } }],
       }
     }
-    if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+    if (sql.startsWith('SELECT id, version, data, created_by, locked, locked_by')
+      && sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+      expect(sql).toContain('CASE WHEN octet_length(data::text)<=262144 THEN data::text ELSE NULL END AS automation_after_image_json')
       return responses.SELECT_PATCH_FOR_UPDATE ?? {
         rows: [{ id: 'rec_existing', version: 4, data: { fld_title: 'Before' }, created_by: 'user_1', locked: false, locked_by: null }],
       }
@@ -178,6 +180,7 @@ describe('RecordService', () => {
     expect(result.recordId).toMatch(/^rec_/)
     expect(result.version).toBe(1)
     expect(result.data).toEqual({ fld_title: 'Alpha' })
+    expect(pool.queryMock.mock.calls.some(([sql]) => String(sql).includes('automation_record_schema'))).toBe(false)
     expect(eventBus.emit).toHaveBeenCalledWith('multitable.record.created', {
       sheetId: 'sheet_ops',
       recordId: result.recordId,

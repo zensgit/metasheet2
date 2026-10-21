@@ -295,7 +295,7 @@ describe('AutomationService', () => {
         poolSpy.mockRestore()
       }
 
-      const updateCall = query.mock.calls.find(([sql]) =>
+      const updateCall = vi.mocked(query).mock.calls.find(([sql]) =>
         String(sql).includes('UPDATE meta_records') && String(sql).includes('SET data ='),
       )
       expect(updateCall).toBeTruthy()
@@ -308,7 +308,7 @@ describe('AutomationService', () => {
       ])
 
       // W0 slice ③: the same-txn revision insert actually ran (source=automation, action=update).
-      const revisionCall = query.mock.calls.find(([sql]) =>
+      const revisionCall = vi.mocked(query).mock.calls.find(([sql]) =>
         String(sql).includes('INSERT INTO meta_record_revisions'),
       )
       expect(revisionCall).toBeTruthy()
@@ -797,6 +797,93 @@ describe('AutomationService', () => {
   })
 
   describe('init / shutdown', () => {
+    it('waits for the actual admitted durable ordinary query before completing the producer stop', async () => {
+      let releaseQuery!: () => void
+      const queryGate = new Promise<void>((resolve) => { releaseQuery = resolve })
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => {
+        await queryGate
+        return { rows: [{ deleted_at: null }], rowCount: 1 }
+      })
+      const db = createMockDb([])
+      service = new AutomationService(bus, db as never, query)
+
+      // Only the query boundary is gated; the real loader and durable lifecycle entry run unchanged.
+      const delivery = service.handleDurableRecordEvent('multitable.record.created', {
+        sheetId: 'sheet1', recordId: 'rec1', data: {},
+      })
+      expect(query).toHaveBeenCalledTimes(1)
+      let stopSettled = false
+      const stopping = service.stopProducerAdmissions().then(() => { stopSettled = true })
+      try {
+        // Let all already-runnable promise continuations settle while the DB query remains blocked.
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(stopSettled).toBe(false)
+        expect(db.selectFrom).not.toHaveBeenCalled()
+      } finally {
+        releaseQuery()
+        await Promise.allSettled([delivery, stopping])
+      }
+      await expect(delivery).resolves.toBeUndefined()
+      await expect(stopping).resolves.toBeUndefined()
+      expect(stopSettled).toBe(true)
+      expect(db.selectFrom).toHaveBeenCalledWith('automation_rules')
+    })
+
+    it('refuses new durable entries as soon as stopping starts and after it finishes, without querying', async () => {
+      const query = createMockQuery([])
+      const db = createMockDb([])
+      service = new AutomationService(bus, db as never, query)
+      const payload = { sheetId: 'sheet1', recordId: 'rec1', data: {} }
+      const stopping = service.stopProducerAdmissions()
+      await expect(service.handleDurableRecordEvent('multitable.record.created', payload))
+        .rejects.toThrow('AUTOMATION_RECORD_ADMISSION_CLOSED')
+      await stopping
+      await expect(service.handleDurableRecordEvent('multitable.record.created', payload))
+        .rejects.toThrow('AUTOMATION_RECORD_ADMISSION_CLOSED')
+      expect(query).not.toHaveBeenCalled()
+      expect(db.selectFrom).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it.each(['record.created', 'record.updated'])('skips a private %s read in the durable ordinary leg but keeps the real EventBus fixed refusal', async triggerType => {
+      const rule = createMockRule({
+        trigger_type: triggerType,
+        action_type: 'integration_read_preview',
+        action_config: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false },
+      })
+      const query = vi.fn(async (sql: string, _params?: unknown[]) => {
+        if (!/FROM meta_sheets/i.test(sql)) throw new Error('unexpected query for fixed read refusal')
+        return { rows: [{ deleted_at: null }], rowCount: 1 }
+      })
+      const db = createMockDb([rule])
+      service = new AutomationService(bus, db as never, query)
+      const payload = { sheetId: 'sheet1', recordId: 'rec1', data: {} }
+      await service.handleDurableRecordEvent(`multitable.${triggerType}`, payload)
+      expect(db.selectFrom).toHaveBeenCalledTimes(1)
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+
+      service.init()
+      try {
+        bus.emit(`multitable.${triggerType}`, payload)
+        // EventBus callbacks are fire-and-forget; the real lifecycle barrier drains this admitted callback.
+        await service.stopProducerAdmissions()
+        expect(db.selectFrom).toHaveBeenCalledTimes(2)
+        expect(query).toHaveBeenCalledTimes(2)
+        expect(automationLogMocks.record).toHaveBeenCalledTimes(1)
+        expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+          ruleId: rule.id,
+          status: 'failed',
+          error: 'AUTOMATION_READ_EXECUTION_UNAVAILABLE',
+          steps: [expect.objectContaining({
+            actionType: 'integration_read_preview', status: 'failed',
+            error: 'AUTOMATION_READ_EXECUTION_UNAVAILABLE',
+          })],
+        }))
+      } finally {
+        await service.shutdown()
+      }
+    })
+
     it('subscribes to events on init and unsubscribes on shutdown', async () => {
       const query = createMockQuery([])
       service = new AutomationService(bus, createMockDb([]) as never, query)
@@ -1005,12 +1092,27 @@ describe('M5 — Automation route helpers', () => {
       ).toThrow(AutomationRuleValidationError)
     })
 
-    it('accepts every canonical automation action type (drift guard)', () => {
+    it('accepts every canonical automation action type with its valid authoring shape (drift guard)', () => {
       for (const actionType of ALL_ACTION_TYPES) {
         expect(
-          parseCreateRuleInput({ triggerType: 'record.created', actionType }, null).actionType,
+          parseCreateRuleInput({ triggerType: 'record.created', actionType,
+            ...(actionType === 'integration_read_preview' ? { actionConfig: {
+              operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false,
+            } } : {}),
+            ...(actionType === 'integration_yida_send_authorized' ? {
+              triggerType: 'schedule.interval', triggerConfig: { intervalMs: 60000 },
+              actionConfig: { authorizationSlot: 'synthetic-slot' },
+            } : {}),
+          }, null).actionType,
         ).toBe(actionType)
       }
+    })
+
+    it('does not admit the private YiDa action through the ordinary record-trigger shape', () => {
+      expect(() => parseCreateRuleInput({
+        triggerType: 'record.created', actionType: 'integration_yida_send_authorized',
+        actionConfig: { authorizationSlot: 'synthetic-slot' },
+      }, null)).toThrow(AutomationRuleValidationError)
     })
 
     it('throws AutomationRuleValidationError for malformed condition payloads', () => {

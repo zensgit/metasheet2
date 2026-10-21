@@ -7,6 +7,7 @@ const INTEGRATION_CORE_CUSTOMER_PACKS_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARA
 const INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
 const INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
 const INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
+const INTEGRATION_CORE_AUTOMATION_PROFILES_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_AUTOMATION_PROFILES_PATH'
 
 function parsePluginJsonEnv(env: NodeJS.ProcessEnv, key: string): unknown {
   const raw = env[key]
@@ -178,6 +179,20 @@ export function resolvePluginRuntimeConfig(
     INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV,
     'a JSON object with an ordered steps array'
   )
+  // Explicit deployment tenant bindings only. The host captures this config at
+  // activation; the real plugin preparer validates each descriptor before the
+  // producer is installed. No request/ALS tenant or persisted pointer fills it.
+  const automationProfiles = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_AUTOMATION_PROFILES_PATH_ENV,
+    'a JSON object containing only a profiles array'
+  )
+  if (automationProfiles !== undefined
+    && (Object.keys(automationProfiles).length !== 1
+      || !Object.hasOwn(automationProfiles, 'profiles')
+      || !Array.isArray(automationProfiles.profiles))) {
+    throw new Error(`${INTEGRATION_CORE_AUTOMATION_PROFILES_PATH_ENV} must point at a JSON object containing only a profiles array`)
+  }
 
   return {
     ...(tableActions !== undefined ? { tableActions } : {}),
@@ -186,6 +201,7 @@ export function resolvePluginRuntimeConfig(
     ...(stockPreparationExtFieldMapping !== undefined ? { stockPreparationExtFieldMapping } : {}),
     ...(b2aTrialRegistry !== undefined ? { b2aTrialRegistry } : {}),
     ...(stockPreparationHandoff !== undefined ? { stockPreparationHandoff } : {}),
+    ...(automationProfiles !== undefined ? { stockPreparationAutomationProfiles: automationProfiles.profiles } : {}),
     ...(c6TestFailureInjection !== undefined || c6TestFailureInjectionDeployEnabled
       ? {
           c6TestFailureInjection: {

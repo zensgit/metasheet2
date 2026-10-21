@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h as vh, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, h as vh, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
 import { readFileSync } from 'node:fs'
 import {
   ATTENDANCE_FOCUS_ALLOWED_PATHS,
@@ -674,6 +674,169 @@ describe('StockPreparationWorkspace shell', () => {
     await flushUi()
     return container!
   }
+
+  function prepareExecutionScopeReads(executionScope?: unknown): void {
+    localStorage.setItem('tenantId', 'scope-tenant')
+    localStorage.setItem('workspaceId', 'scope-workspace')
+    h.route.query = { tab: 'confirmation-queue', ...(executionScope === undefined ? {} : { executionScope }) }
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { projectCount: 0, statusCounts: {}, projects: [], rows: [], items: [] },
+    }), { status: 200 }))
+  }
+
+  function scopedReadUrls(): URL[] {
+    return h.apiFetch.mock.calls.map(([url]) => new URL(String(url), 'http://scope.invalid'))
+      .filter(url => url.pathname.startsWith('/api/integration/stock-preparation/') && url.searchParams.has('tenantId'))
+  }
+
+  it.each([
+    ['absent', undefined], ['workspace', 'workspace'], ['unknown', 'all'], ['case variant', 'TENANT'],
+    ['array', ['tenant']], ['repeated array', ['tenant', 'tenant']], ['null', null],
+    ['arbitrary object', { tenant: true }],
+  ])('keeps the original workspace for %s execution-scope query', async (_name, queryValue) => {
+    prepareExecutionScopeReads(queryValue)
+    const root = await mountShell()
+    const urls = scopedReadUrls()
+    expect(urls.length).toBeGreaterThan(0)
+    expect(urls.every(url => url.searchParams.get('tenantId') === 'scope-tenant'
+      && url.searchParams.get('workspaceId') === 'scope-workspace')).toBe(true)
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-current"]')?.textContent).toContain('当前工作区')
+  })
+
+  it.each(['integration:admin', 'role:admin'])('allows exact %s to select tenant scope without changing tenant or storage', async (permission) => {
+    h.permissions = [permission]
+    prepareExecutionScopeReads('tenant')
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    try {
+      const root = await mountShell()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-current"]')?.textContent).toContain('当前租户')
+      ;(root.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]') as HTMLButtonElement).click()
+      await waitForSelector(root, '[data-testid="stock-prep-confirmation-counts"]')
+      // Two separate real child services receive the shell's same scope.
+      ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+      await flushUi()
+      const urls = scopedReadUrls()
+      expect(urls.some(url => url.pathname.endsWith('/confirmation-decisions'))).toBe(true)
+      expect(urls.some(url => url.pathname.endsWith('/projects'))).toBe(true)
+      expect(urls.every(url => url.searchParams.get('tenantId') === 'scope-tenant'
+        && !url.searchParams.has('workspaceId'))).toBe(true)
+      expect(storageWrite).not.toHaveBeenCalled()
+      expect(localStorage.getItem('workspaceId')).toBe('scope-workspace')
+      expect(h.apiFetch.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
+    } finally { storageWrite.mockRestore() }
+  })
+
+  it.each(['stock-prep:read', 'stock-prep:admin', 'integration:*', '*:*'])('does not broaden %s through a tenant URL', async (permission) => {
+    h.permissions = [permission, 'stock-prep:read']
+    prepareExecutionScopeReads('tenant')
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-switch"]')).toBeNull()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-confirmation-counts"]')
+    const urls = scopedReadUrls()
+    expect(urls.length).toBeGreaterThan(0)
+    expect(urls.every(url => url.searchParams.get('tenantId') === 'scope-tenant'
+      && url.searchParams.get('workspaceId') === 'scope-workspace')).toBe(true)
+  })
+
+  it('cancels scope selection without navigation, storage writes or service calls', async () => {
+    prepareExecutionScopeReads()
+    const root = await mountShell()
+    h.apiFetch.mockClear()
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-execution-scope-tenant"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-confirm"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-current"]')?.textContent).toContain('当前工作区')
+      ;(root.querySelector('[data-testid="stock-prep-execution-scope-cancel"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-confirm"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-reload"]')).toBeNull()
+      expect(h.router.push).not.toHaveBeenCalled()
+      expect(h.router.replace).not.toHaveBeenCalled()
+      expect(h.apiFetch).not.toHaveBeenCalled()
+      expect(storageWrite).not.toHaveBeenCalled()
+    } finally { storageWrite.mockRestore() }
+  })
+
+  it.each([
+    ['workspace', undefined, 'tenant', '/stock-prep?tab=install&executionScope=tenant'],
+    ['tenant', 'tenant', 'workspace', '/stock-prep?tab=install'],
+  ])('confirms %s departure through a normal fixed-path anchor and retires the old panel', async (_from, initial, target, expectedHref) => {
+    prepareExecutionScopeReads(initial)
+    h.route.query = { ...h.route.query, projectId: 'old-project', projectNo: 'old-number', tenantId: 'foreign', workspaceId: 'foreign' }
+    const root = await mountShell()
+    h.apiFetch.mockClear()
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    try {
+      ;(root.querySelector(`[data-testid="stock-prep-execution-scope-${target}"]`) as HTMLButtonElement).click()
+      await flushUi()
+      const link = root.querySelector('[data-testid="stock-prep-execution-scope-switch"]') as HTMLAnchorElement
+      expect(link.tagName).toBe('A')
+      expect(link.getAttribute('href')).toBe(expectedHref)
+      // jsdom cannot load a new document. Prevent only its navigation in this
+      // test; the actual application leaves the anchor's default action intact.
+      let applicationPreventedNavigation: boolean | undefined
+      link.addEventListener('click', event => {
+        applicationPreventedNavigation = event.defaultPrevented
+        event.preventDefault()
+      })
+      link.click()
+      await flushUi()
+      expect(applicationPreventedNavigation).toBe(false)
+      expect(root.querySelector('[data-testid="stock-prep-panel"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-current"]')?.textContent).toContain('等待重新打开')
+      expect(root.querySelector('[data-testid="stock-prep-execution-scope-reload-link"]')?.getAttribute('href')).toBe(expectedHref)
+      expect(h.router.push).not.toHaveBeenCalled()
+      expect(h.router.replace).not.toHaveBeenCalled()
+      expect(h.apiFetch).not.toHaveBeenCalled()
+      expect(storageWrite).not.toHaveBeenCalled()
+      expect(localStorage.getItem('tenantId')).toBe('scope-tenant')
+      expect(localStorage.getItem('workspaceId')).toBe('scope-workspace')
+    } finally { storageWrite.mockRestore() }
+  })
+
+  it('refuses the pending tenant link if admin authority is lost before confirmation', async () => {
+    prepareExecutionScopeReads()
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-execution-scope-tenant"]') as HTMLButtonElement).click()
+    await flushUi()
+    const link = root.querySelector('[data-testid="stock-prep-execution-scope-switch"]') as HTMLAnchorElement
+    h.permissions = ['stock-prep:read']
+    h.apiFetch.mockClear()
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true })
+    link.dispatchEvent(event)
+    await flushUi()
+    expect(event.defaultPrevented).toBe(true)
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-switch"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-reload"]')).toBeNull()
+    expect(h.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('holds stale content on an in-app scope URL change without changing the live scope or issuing calls', async () => {
+    prepareExecutionScopeReads()
+    h.route = reactive({ ...h.route, query: { ...h.route.query } })
+    const root = await mountShell()
+    h.apiFetch.mockClear()
+    h.route.query.executionScope = 'tenant'
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-reload-link"]')?.getAttribute('href'))
+      .toBe('/stock-prep?tab=install&executionScope=tenant')
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.apiFetch).not.toHaveBeenCalled()
+    // A history traversal back must not resurrect the old preview/async state.
+    delete h.route.query.executionScope
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-execution-scope-reload-link"]')?.getAttribute('href')).toBe('/stock-prep?tab=install')
+    expect(h.router.replace).not.toHaveBeenCalled()
+    expect(h.apiFetch).not.toHaveBeenCalled()
+  })
 
   /**
    * Mount the shell and put 确认队列 on screen.

@@ -19,6 +19,82 @@ const contracts = ['scripts/ops/stock-preparation-yida-browser-ci.test.mjs',
 const probePrefix = 'YIDA_CALLER_SYNTHETIC_PROBE '
 const linuxShell = { skip: process.platform !== 'linux' ? 'GitHub Linux bash caller; source contract still runs on Windows' : false }
 
+// Evaluate only this closed conjunction subset of the actual Actions condition.
+// No arbitrary expression execution, credentials, database or network access.
+function cleanupRequired(condition, outcome) {
+  return condition.split(' && ').map(term => {
+    if (term === 'always()') return true
+    const match = /^steps\.attendance-timezone-db-create\.outcome (==|!=) '(skipped|success|failure|cancelled|)'$/u.exec(term)
+    assert.ok(match, 'cleanup condition must use the explicitly owned create outcome')
+    return match[1] === '==' ? outcome === match[2] : outcome !== match[2]
+  }).every(Boolean)
+}
+
+function attendanceCleanupContract(source) {
+  const create = '      - name: Create isolated attendance timezone database\n'
+  const cleanup = '      - name: Remove isolated attendance timezone database\n'
+  assert.equal(source.split(create).length, 2)
+  assert.equal(source.split(cleanup).length, 2)
+  const creation = source.split(create)[1].split('\n      - name:')[0]
+  const removal = source.split(cleanup)[1].split('\n      - name:')[0]
+  assert.match(creation, /^        id: attendance-timezone-db-create$/mu)
+  assert.match(creation, /^        run: createdb --host=localhost --username=postgres attendance_timezone_ci$/mu)
+  const condition = /^        if: (.+)$/mu.exec(removal)?.[1]
+  const command = /^        run: (.+)$/mu.exec(removal)?.[1]
+  assert.ok(condition)
+  assert.equal(command, 'dropdb --host=localhost --username=postgres --if-exists attendance_timezone_ci')
+  assert.ok(source.indexOf(create) < source.indexOf(cleanup))
+  for (const [outcome, expected] of [['', false], ['skipped', false], ['success', true], ['failure', true], ['cancelled', true]]) {
+    assert.equal(cleanupRequired(condition, outcome), expected, `cleanup create outcome: ${outcome || 'not-started'}`)
+  }
+  return { condition, command }
+}
+
+test('attendance cleanup avoids never-started PG but still covers failed and cancelled creation', () => {
+  const { condition } = attendanceCleanupContract(workflow)
+  for (const replacement of ['always()', "always() && steps.attendance-timezone-db-create.outcome == 'success'"]) {
+    assert.notEqual(condition, replacement)
+    assert.throws(() => attendanceCleanupContract(workflow.replace(`        if: ${condition}\n`, `        if: ${replacement}\n`)),
+      /cleanup create outcome:/u)
+  }
+})
+
+test('actual attendance cleanup shell preserves failure propagation after every attempted create', linuxShell, () => {
+  const { condition, command } = attendanceCleanupContract(workflow)
+  const temporaryRoot = path.join(root, 'tmp')
+  mkdirSync(temporaryRoot, { recursive: true })
+  const fixture = path.join(temporaryRoot, `yida-cleanup-contract-${randomUUID()}`)
+  mkdirSync(fixture, { mode: 0o700 })
+  const owner = JSON.stringify({ fixture, purpose: 'synthetic-cleanup-no-database' })
+  writeFileSync(path.join(fixture, 'owner.json'), owner, { mode: 0o600 })
+  // Exact argv and exit receipt of the actual run command; no PG executable used.
+  writeFileSync(path.join(fixture, 'dropdb'), '#!/bin/sh\n'
+    + 'test "$#" -eq 4 || exit 64\n'
+    + 'test "$1" = "--host=localhost" && test "$2" = "--username=postgres" && test "$3" = "--if-exists" && test "$4" = "attendance_timezone_ci" || exit 65\n'
+    + 'printf CLEANUP_CALLED\nexit "$SYNTHETIC_EXIT"\n', { mode: 0o700 })
+  try {
+    for (const outcome of ['', 'skipped', 'success', 'failure', 'cancelled']) {
+      for (const exit of [0, 7]) {
+        const required = cleanupRequired(condition, outcome)
+        const result = required ? spawnSync('/bin/bash', ['-e', '-c', command], {
+          cwd: fixture, env: { PATH: fixture + ':/usr/bin:/bin', SYNTHETIC_EXIT: String(exit) },
+          encoding: 'utf8', timeout: 10000,
+        }) : { status: 0, stdout: '', stderr: '', signal: null, error: undefined }
+        assert.equal(result.error, undefined)
+        assert.equal(result.signal, null)
+        assert.equal(result.stdout, required ? 'CLEANUP_CALLED' : '')
+        assert.equal(result.stderr, '')
+        assert.equal(result.status, required ? exit : 0)
+      }
+    }
+  } finally {
+    assert.equal(path.dirname(fixture), temporaryRoot)
+    assert.match(path.basename(fixture), /^yida-cleanup-contract-[a-f0-9-]{36}$/u)
+    assert.equal(readFileSync(path.join(fixture, 'owner.json'), 'utf8'), owner)
+    rmSync(fixture, { recursive: true, force: false })
+  }
+})
+
 function extractStep(source, selectedId = stepId) {
   const lines = source.split('\n')
   const matches = lines.flatMap((line, index) => line === `        id: ${selectedId}` ? [index] : [])
@@ -48,7 +124,7 @@ const candidateStep = extractStep(workflow, 'stock-preparation-pinned-browser-in
 const candidateArchiveSha = '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d'
 const candidateBinarySha = '43624de70dc3b379406282ec4a1365d9ba574c9741e4ab099d915b7e92811925'
 
-test('fixed candidate installer precedes the sole YiDa selector without changing other browser defaults', () => {
+test('fixed candidate installer precedes all four exact acceptance selectors without weakening default install', () => {
   assert.match(candidateStep.header, /if: matrix.node-version == '20.x'/u)
   assert.match(candidateStep.run, /set -euo pipefail/u)
   assert(candidateStep.run.includes('https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719529/chrome-linux.zip'))
@@ -56,13 +132,22 @@ test('fixed candidate installer precedes the sole YiDa selector without changing
   assert.match(candidateArchiveSha, /^[a-f0-9]{64}$/u)
   assert(candidateStep.run.includes(candidateBinarySha))
   assert(!candidateStep.run.includes('--location'))
-  const defaultPosition = workflow.indexOf('pnpm exec playwright install --with-deps chromium')
-  const fixedPosition = workflow.indexOf('id: stock-preparation-pinned-browser-install')
-  const ownerPosition = workflow.indexOf('id: stock-preparation-yida-owner-real-db')
-  assert(defaultPosition > 0 && defaultPosition < fixedPosition && fixedPosition < ownerPosition)
-  assert(step.run.includes(runner + ' --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529'))
-  assert.equal((workflow.match(/--browser-candidate(?:=| )upstream-1719529/gu) ?? []).length, 1)
-  assert(!workflow.includes('id: stock-preparation-plm-full-app\n'))
+  assert(workflow.includes('pnpm exec playwright install --with-deps chromium'))
+  assert(workflow.indexOf('id: stock-preparation-pinned-browser-install') < workflow.indexOf('id: stock-preparation-plm-full-app\n'))
+  const plm = extractStep(workflow, 'stock-preparation-plm-full-app')
+  assert.deepEqual(plm.run.trim().split('\n'), [
+    'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --browser-candidate=upstream-1719529',
+    'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval --browser-candidate=upstream-1719529',
+  ])
+  assert(step.run.includes(`${runner} --pg-bin "$yida_pg_bin" --browser-candidate upstream-1719529`))
+  const remaining = extractStep(workflow, 'stock-preparation-yida-remaining-unknown')
+  assert.match(remaining.header, /if: matrix.node-version == '20.x'/u)
+  assert.match(remaining.header, /timeout-minutes: 10/u)
+  assert(!remaining.header.includes('continue-on-error'))
+  assert.equal(remaining.run.trim(), 'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --yida-case=remaining-unknown --browser-candidate=upstream-1719529')
+  assert(workflow.indexOf('id: stock-preparation-plm-full-app\n') < workflow.indexOf('id: stock-preparation-yida-remaining-unknown\n'))
+  assert(workflow.indexOf('id: stock-preparation-yida-remaining-unknown\n') < workflow.indexOf(`id: ${stepId}\n`))
+  assert.equal((workflow.match(/--browser-candidate(?:=| )upstream-1719529/gu) ?? []).length, 4)
   assert(!candidateStep.header.includes('continue-on-error'))
 })
 

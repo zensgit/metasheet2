@@ -5,6 +5,8 @@
 import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
   type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 import { setBusinessTimezone } from '../utils/business-timezone'
+import { containsAutomationReadAction } from '../automationReadAuthoring'
+import { normalizeAutomationRunReadReference } from '../automationReadExecution'
 export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 
 import type {
@@ -809,6 +811,14 @@ function objectValue(value: unknown): Record<string, unknown> {
 function normalizeAutomationRulePayload(value: unknown): AutomationRule {
   const payload = isPlainObject(value) && isPlainObject(value.rule) ? value.rule : value
   const record = objectValue(payload)
+  const containsRead = containsAutomationReadAction(record)
+    || containsAutomationReadAction({ actionType: record.action_type, actionConfig: record.action_config })
+    || containsAutomationReadAction(record.actions)
+  if (containsRead && (
+    (record.actions != null && !Array.isArray(record.actions))
+    || (Array.isArray(record.actions) && record.actions.some(entry => !isPlainObject(entry)))
+    || ['executionMode', 'execution_mode'].some(key => record[key] != null && typeof record[key] !== 'string')
+  )) throw new Error('Invalid read-preview rule response')
   const triggerType = stringValue(record.triggerType ?? record.trigger_type) as AutomationRule['triggerType']
   const triggerConfig = objectValue(record.triggerConfig ?? record.trigger_config)
   const actionType = stringValue(record.actionType ?? record.action_type) as AutomationRule['actionType']
@@ -837,7 +847,9 @@ function normalizeAutomationRulePayload(value: unknown): AutomationRule {
     createdAt: optionalStringValue(record.createdAt ?? record.created_at),
     updatedAt: optionalStringValue(record.updatedAt ?? record.updated_at),
     createdBy: optionalStringValue(record.createdBy ?? record.created_by),
-    executionMode: optionalStringValue(record.executionMode ?? record.execution_mode) ?? null,
+    executionMode: containsRead
+      ? (record.executionMode ?? record.execution_mode ?? null) as string | null
+      : optionalStringValue(record.executionMode ?? record.execution_mode) ?? null,
   }
 }
 
@@ -4342,14 +4354,14 @@ export class MultitableApiClient implements CommentsApiClient {
     const data = await this.parseJson<{ executions: AutomationRunView[]; businessTimezone?: string }>(res)
     // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context; adopt the zone the list carries.
     setBusinessTimezone(data?.businessTimezone)
-    return Array.isArray(data?.executions) ? data.executions : []
+    return Array.isArray(data?.executions) ? data.executions.map(normalizeAutomationRunReadReference) : []
   }
 
   async getAutomationRun(executionId: string): Promise<AutomationRunView> {
     const res = await this.fetch(
       `/api/multitable/automation-executions/${encodeURIComponent(executionId)}`,
     )
-    return this.parseJson<AutomationRunView>(res)
+    return normalizeAutomationRunReadReference(await this.parseJson<AutomationRunView>(res))
   }
 
   /**

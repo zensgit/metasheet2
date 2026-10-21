@@ -664,7 +664,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     ])
   })
 
-  it('A5 — pre-gate prefix: the 17 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 19 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
@@ -680,7 +680,9 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { verb: 'use', unconditional: true, args: ['createElearningAppInstallationRouter()'] },
       { verb: 'use', unconditional: false, args: ['"/api/elearning"', 'authenticateElearningApp', 'requireElearningAppInstallation()'] },
       { verb: 'use', unconditional: false, args: ['elearningPilotRuntime.router'] },
+      { verb: 'use', unconditional: true, args: ['"/api/integration/automation-read"', 'automationReadNoStoreMiddleware'] },
       { verb: 'use', unconditional: true, args: ['YIDA_OWNER_HTTP_PREFIX', 'yidaOwnerNoStoreMiddleware', 'yidaOwnerJsonOnlyMiddleware', 'express.json()'] },
+      { verb: 'use', unconditional: true, args: ['YIDA_AUTOMATION_HTTP_PREFIX', 'yidaAutomationNoStore', 'yidaAutomationJsonOnly', 'express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
       { verb: 'use', unconditional: true, args: ['requestMetricsMiddleware'] },
@@ -699,6 +701,40 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     expect(parserOrdinal).toBeGreaterThanOrEqual(0)
     expect(parserOrdinal).toBeLessThan(gateOrdinal)
     expect(ownerOrdinal).toBeGreaterThan(gateOrdinal)
+  })
+
+  it('A7 — only Automation no-store runs before JWT; its owner router and terminal error handler stay after JWT', () => {
+    const ordinal = (subject: string) => {
+      const state = subjectState(model, subject)
+      expect(state.state).toBe('UNCONDITIONAL_SITE')
+      expect(state.sites).toHaveLength(1)
+      expect(state.sites[0].enclosingMethod).toBe('setupMiddleware')
+      return inSetup.findIndex(site => site.start === state.sites[0].start)
+    }
+    const headers = ordinal('automationReadNoStoreMiddleware')
+    const jwt = ordinal('jwtAuthMiddleware')
+    const owner = ordinal('createIntegrationAutomationReadRouter')
+    const errors = ordinal('automationReadParseErrorHandler')
+    expect(headers).toBeGreaterThanOrEqual(0)
+    expect(headers).toBeLessThan(jwt)
+    expect(owner).toBeGreaterThan(jwt)
+    expect(errors).toBeGreaterThan(owner)
+  })
+
+  it('A8 — authorized YiDa pre-gate middleware only parses; its management router and errors remain after JWT', () => {
+    const ordinal = (subject: string) => {
+      const state = subjectState(model, subject)
+      expect(state.state).toBe('UNCONDITIONAL_SITE')
+      expect(state.sites).toHaveLength(1)
+      expect(state.sites[0].enclosingMethod).toBe('setupMiddleware')
+      return inSetup.findIndex(site => site.start === state.sites[0].start)
+    }
+    const jwt = ordinal('jwtAuthMiddleware')
+    expect(ordinal('yidaAutomationNoStore')).toBeLessThan(jwt)
+    expect(ordinal('yidaAutomationJsonOnly')).toBeLessThan(jwt)
+    const owner = ordinal('createIntegrationYidaAutomationRouter')
+    expect(owner).toBeGreaterThan(jwt)
+    expect(ordinal('yidaAutomationParseError')).toBeGreaterThan(owner)
   })
 
   it('positive control (real code, no mutation): the approval-attachments pre-gate parser is the live CONDITIONAL witness — its own IfStatement guard is isApprovalAttachmentsEnabled(), proving the CONDITIONAL_SITE branch of the classifier actually discriminates on production source, not merely on a synthetic fixture', () => {
@@ -1112,12 +1148,33 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 52
-  const FROZEN_SAFE_HASH = 'c49ccdbf816cf4bab931ba3af632f60658e8fd03971eeddc1c3d623367afa21e'
+  const FROZEN_SAFE_COUNT = 69
+  const FROZEN_SAFE_HASH = 'edbacdccce6de03e63e49d86facf944405f6bddd722957258daa30bb251f1a47'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
   const FROZEN_SAFE_KEYS = new Set<string>([
+      // One owner-bound SA06D router port, mounted after global JWT. No name wildcard.
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yidaAutomationHost//#0",
+      // Host-owned TCP bookkeeping only: register listener, add socket, remove socket.
+      // Exact occurrences, not a property-name exemption or a live-derived allowlist.
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpServer//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpSockets//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>ExpressionStatement>CallExpression>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpSockets//#0",
+      // Exactly 13 host-owned dispatch closures, mounted after JWT (A7 below).
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#2",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#3",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#4",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#5",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#6",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#2",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#3",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#4",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadRuntime//#5",
       "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#1",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.afterSalesApprovalBridgeService//#0",
@@ -1214,7 +1271,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 52, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level count and sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1237,7 +1294,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
     })
 
-    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime'])(
+    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime', 'httpServer', 'httpSockets'])(
       'a new use of the registered %s still lands in UNKNOWN rather than inheriting a property-name exemption',
       (property) => {
         const marker = 'private setupMiddleware(): void {'
@@ -1249,6 +1306,16 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
         expect(mpart.unknown.some((occurrence) => occurrence.shape === `.${property}`)).toBe(true)
       },
     )
+
+    it('duplicating the constructor socket bookkeeping remains UNKNOWN despite the registered occurrence', () => {
+      const marker = 'this.httpSockets.add(socket)'
+      expect(indexText.split(marker)).toHaveLength(2)
+      const mutated = indexText.replace(marker, marker + '\n      ' + marker)
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      expect(mpart.total).toBe(independentThisStarts(source, SCOPE).length + 1)
+      expect(mpart.unknown.some((occurrence) => occurrence.shape === '.httpSockets')).toBe(true)
+    })
 
     it('P2-a LOAD-BEARING: a `this` inside an ordinary nested function ENTERS T (not pruned) and reds UNKNOWN — the reference set is not narrowed', () => {
       // Owner counterexample: pre-fix `inScope` EXCLUDED this `this` from T, so

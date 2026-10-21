@@ -16,6 +16,8 @@ export const TEST_FILES = Object.freeze([
   'tests/integration/stock-preparation-yida-initialization-http-realdb.test.ts',
   'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
 ])
+// Separate batch and receipt: never relabel the original 71 as history proof.
+export const RECONCILIATION_FILES = Object.freeze(['tests/integration/yida-reconciliation-http-realdb.test.ts'])
 export const CONFIG = 'vitest.yida-owner-realdb.config.ts'
 export const MAX_OUTPUT = 32 * 1024 * 1024
 export const DEADLINE_MS = 15 * 60 * 1000
@@ -208,7 +210,11 @@ export function fileHash(file) {
 function sourcePaths(node, cli, browserCandidate) {
   return [runner, nativePath, pgPath, helper, preload, candidatePath, node, cli, path.join(backend, CONFIG),
     ...(browserCandidate ? [browserCandidate.executablePath] : []),
-    ...TEST_FILES.map(file => path.join(backend, file)),
+    ...[...TEST_FILES, ...RECONCILIATION_FILES].map(file => path.join(backend, file)),
+    ...['tests/utils/yida-automation-http-fixture.ts', 'src/integration/yida-reconciliation-contracts.ts',
+      'src/integration/yida-reconciliation-store.ts', 'src/integration/yida-automation-management-host.ts',
+      'src/routes/integration-yida-automation.ts',
+      'migrations/zzzz20261021120000_create_yida_reconciliation_observations.sql'].map(file => path.join(backend, file)),
     ...['stock-preparation-yida-owner-browser-fixture.ts', 'stock-preparation-yida-owner-http-fixture.ts',
       'yida-native-module-import.cjs'].map(file => path.join(backend, 'tests/utils', file))]
 }
@@ -277,8 +283,17 @@ export default class Collector {
 
 export function validateTaskReceipt(receipt) {
   assert.deepEqual(receipt.files, [...TEST_FILES].sort())
-  assert.deepEqual(receipt.counts, { files: 5, tests: 70, passed: 70, failed: 0, skipped: 0,
+  assert.deepEqual(receipt.counts, { files: 5, tests: 71, passed: 71, failed: 0, skipped: 0,
     sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
+  assert.deepEqual(receipt.policy, { pool: 'forks', config: CONFIG, retry: 0, repeat: 0,
+    watch: false, filtered: false, setupFiles: 0, globalSetup: 0 })
+  return true
+}
+
+export function validateReconciliationReceipt(receipt) {
+  assert.deepEqual(receipt.files, [...RECONCILIATION_FILES])
+  assert.deepEqual(receipt.counts, { files: 1, tests: 15, passed: 15, failed: 0, skipped: 0,
+    sentinels: 1, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
   assert.deepEqual(receipt.policy, { pool: 'forks', config: CONFIG, retry: 0, repeat: 0,
     watch: false, filtered: false, setupFiles: 0, globalSetup: 0 })
   return true
@@ -393,6 +408,7 @@ async function worker(owner, ownerPath, ownerSha) {
       '--reporter=json', '--reporter=' + owner.collector, '--outputFile.json=' + json]
     native.assertBrowserNetworkIsolation()
     stage = 'VITEST_SPAWN'
+    const batchStarted = performance.now()
     result = await capture(owner.node, args, backend, env, evidence, 'vitest', DEADLINE_MS - 120000)
     stage = 'EXIT'
     assert(result.passed && !interrupted)
@@ -400,8 +416,29 @@ async function worker(owner, ownerPath, ownerSha) {
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
-    assert.equal(report.success, true); assert.equal(report.numTotalTests, 70); assert.equal(report.numPassedTests, 70)
+    assert.equal(report.success, true); assert.equal(report.numTotalTests, 71); assert.equal(report.numPassedTests, 71)
     for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(report[key], 0)
+    // Preserve the existing aggregate deadline and the original history file's
+    // 90-second budget. No caller selector, retries or broad setup is accepted.
+    const remaining = DEADLINE_MS - 120000 - (performance.now() - batchStarted)
+    assert(remaining > 0 && !interrupted)
+    const historyTasks = path.join(evidence, 'reconciliation-tasks.json')
+    const historyJson = path.join(evidence, 'reconciliation-vitest.json')
+    stage = 'VITEST_SPAWN'
+    result = await capture(owner.node, [owner.cli, 'run', '--config', CONFIG, '--reporter=verbose',
+      ...RECONCILIATION_FILES, '--reporter=json', '--reporter=' + owner.collector, '--outputFile.json=' + historyJson],
+    backend, { ...env, YIDA_BROWSER_CI_TASKS: historyTasks, PLM_FULL_APP_DATABASE_URL: database.url,
+      PLM_FULL_APP_ALLOW_OWN_HTTP: '1', STOCK_PREPARATION_YIDA_SEND_ENABLED: 'false',
+      STOCK_PREPARATION_YIDA_AUTOMATION_ENABLED: 'false' }, evidence, 'reconciliation', Math.min(90000, remaining))
+    stage = 'EXIT'
+    assert(result.passed && !interrupted)
+    stage = 'VALIDATE'
+    for (const file of [historyTasks, historyJson]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
+    validateReconciliationReceipt(JSON.parse(fs.readFileSync(historyTasks, 'utf8')))
+    const historyReport = JSON.parse(fs.readFileSync(historyJson, 'utf8'))
+    assert.equal(historyReport.success, true)
+    assert.equal(historyReport.numTotalTests, 15); assert.equal(historyReport.numPassedTests, 15)
+    for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(historyReport[key], 0)
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
     passed = true
@@ -417,7 +454,7 @@ async function worker(owner, ownerPath, ownerSha) {
     // available; only the original owned-PG module removes its own PG subtree.
     const receiptRaw = JSON.stringify({ protocol: owner.protocol,
       ownerSha, sourceSha: hash(JSON.stringify(owner.hashes)), passed, cleanup,
-      tests: passed ? 70 : 0, sentinels: passed ? 5 : 0, business: passed ? 65 : 0,
+      tests: passed ? 71 : 0, sentinels: passed ? 5 : 0, business: passed ? 66 : 0,
       isolatedNetwork: isolation.isolatedNetwork, unixIpcIsolated: false,
       sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage, result })
     privateWrite(path.join(evidence, 'receipt.json'), receiptRaw)
@@ -474,13 +511,18 @@ export function reportOuterResult(owner, ownerSha, terminal, evidence, write = c
     const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
     assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
     assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
-    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 70)
+    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 71)
+    const historyTasks = path.join(evidence, 'reconciliation-tasks.json')
+    assert(plain(historyTasks, false, 0o600).size < 4 * 1024 * 1024)
+    validateReconciliationReceipt(JSON.parse(fs.readFileSync(historyTasks, 'utf8')))
     passed = terminal.passed
   } catch { /* Original refusal remains; diagnostics carry only fixed fields. */ }
   if (!passed) write('YIDA_BROWSER_CI_CHILD_FAILED ' + JSON.stringify(
     childFailureDiagnostic(terminal, evidence, ownerSha, hash(JSON.stringify(owner.hashes)), postHashesVerified)))
-  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 70 : 0,
-    business: passed ? 65 : 0, sentinels: passed ? 5 : 0 }))
+  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 71 : 0,
+    business: passed ? 66 : 0, sentinels: passed ? 5 : 0 }))
+  if (passed) write('YIDA_RECONCILIATION_CI_RESULT ' + JSON.stringify({ passed: true, tests: 15,
+    business: 14, sentinels: 1 }))
   if (!passed) process.exitCode = 1
   return passed
 }

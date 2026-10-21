@@ -9,7 +9,7 @@ describe('send_dingtalk_approval_card automation action migration (A-2b)', () =>
   it('keeps this constraint in sync with app-level action types except those added by later migrations', () => {
     // No longer the LATEST migration (write_approval_form_values widened the constraint afterwards —
     // see fwb-automation-action-migration.test.ts for the live "latest in sync" guard).
-    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['write_approval_form_values'])
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['write_approval_form_values', 'integration_read_preview', 'integration_yida_send_authorized'])
     for (const actionType of ALL_ACTION_TYPES) {
       if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_APPROVAL_CARD).toContain(actionType)

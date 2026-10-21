@@ -8,7 +8,8 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { assertNoEnvironmentFiles, capture, childFailureDiagnostic, cleanEnvironment, CONFIG, DEADLINE_MS, fileHash, main, MAX_OUTPUT,
   parseChildFailureFrame, parsePublicArguments, parseWorkerFailureReceipt, reportOuterResult,
-  reportStartupFailure, startupFailureDiagnostic, TEST_FILES, validateTaskReceipt } from './run-stock-preparation-yida-browser-ci.mjs'
+  reportStartupFailure, startupFailureDiagnostic, TEST_FILES, validateTaskReceipt,
+  RECONCILIATION_FILES, validateReconciliationReceipt } from './run-stock-preparation-yida-browser-ci.mjs'
 import { assertOwnedScratch, assertPlainOwnedTree, SCRATCH_OWNER } from './lib/stock-preparation-plm-owned-pg.mjs'
 
 // Synthetic contracts only: never spawn PG, Chromium, namespaces or a socket.
@@ -29,11 +30,37 @@ function validSnapshot() {
   }
 }
 function validReceipt() {
-  return { files: [...TEST_FILES].sort(), counts: { files: 5, tests: 70, passed: 70, failed: 0, skipped: 0,
+  return { files: [...TEST_FILES].sort(), counts: { files: 5, tests: 71, passed: 71, failed: 0, skipped: 0,
     sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 },
   policy: { pool: 'forks', config: CONFIG, retry: 0, repeat: 0, watch: false,
     filtered: false, setupFiles: 0, globalSetup: 0 } }
 }
+
+function validHistoryReceipt() {
+  return { ...validReceipt(), files: [...RECONCILIATION_FILES], counts: { files: 1, tests: 15, passed: 15,
+    failed: 0, skipped: 0, sentinels: 1, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 } }
+}
+const historySuccess = 'YIDA_RECONCILIATION_CI_RESULT {"passed":true,"tests":15,"business":14,"sentinels":1}'
+async function historyFixture(sandbox, receipt = validHistoryReceipt()) {
+  await fs.writeFile(path.join(sandbox, 'reconciliation-tasks.json'), JSON.stringify(receipt), { mode: 0o600 })
+}
+
+test('history is a separate whole-file 14-business plus one-sentinel receipt, not the original 71', () => {
+  assert.equal(validateReconciliationReceipt(validHistoryReceipt()), true)
+  assert.throws(() => validateReconciliationReceipt(validReceipt()))
+  assert.throws(() => validateTaskReceipt(validHistoryReceipt()))
+  for (const key of Object.keys(validHistoryReceipt().counts)) {
+    const receipt = validHistoryReceipt(); receipt.counts[key]++
+    assert.throws(() => validateReconciliationReceipt(receipt), key)
+  }
+  for (const [key, value] of Object.entries({ pool: 'threads', config: 'other.ts', retry: 1, repeat: 1,
+    watch: true, filtered: true, setupFiles: 1, globalSetup: 1 })) {
+    const receipt = validHistoryReceipt(); receipt.policy[key] = value
+    assert.throws(() => validateReconciliationReceipt(receipt), key)
+  }
+  const wrong = validHistoryReceipt(); wrong.files[0] = TEST_FILES[0]
+  assert.throws(() => validateReconciliationReceipt(wrong))
+})
 
 test('ambient DB, PG, preload, credentials and production flags cannot enter child environment', () => {
   const env = cleanEnvironment({ PATH: 'poisoned-executable-path', HOME: root, TMPDIR: path.join(root, 'tmp'),
@@ -209,7 +236,7 @@ test('implicit Vite env files are refused by filename without reading their valu
   }
 })
 
-test('whole-five-file receipt preserves 65 business tests plus five sentinels', () => {
+test('whole-five-file receipt preserves 66 business tests plus five sentinels', () => {
   assert.equal(validateTaskReceipt(validReceipt()), true)
   for (const key of ['files', 'tests', 'passed', 'sentinels']) {
     const receipt = validReceipt(); receipt.counts[key]--
@@ -449,7 +476,8 @@ test('production capture and outer caller classify only exact unshare denial and
       owner.hashes[probe] = fileHash(probe)
       // Even an otherwise successful receipt cannot override the child exit.
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }), { mode: 0o600 })
+      await historyFixture(sandbox)
       const file = path.join(sandbox, 'namespace.stderr.log')
       if (variant === 'hash') await fs.appendFile(file, 'synthetic-secret')
       if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
@@ -747,10 +775,11 @@ test('diagnostic log hash, file mode, byte budget and source failures are fixed 
     // Original success criteria still govern even if the diagnostic view is
     // unavailable. No new protocol serves as a capability or success fallback.
     await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }), { mode: 0o600 })
+    await historyFixture(sandbox)
     const lines = []
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), true)
-    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":71,"business":66,"sentinels":5}', historySuccess])
     owner.hashes[path.join(lib, 'stock-preparation-plm-owned-pg.mjs')] = '0'.repeat(64)
     lines.length = 0
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false)
@@ -774,24 +803,29 @@ test('source wiring only: Python and worker phase labels and parent diagnostic c
 })
 
 test('production outer caller rejects each single failure against an otherwise successful capture and receipt', async () => {
-  for (const fault of ['none', 'cleanup', 'tests', 'passed', 'terminal', 'source']) {
+  for (const fault of ['none', 'cleanup', 'tests', 'passed', 'terminal', 'source', 'history-missing', 'history-skipped', 'history-original']) {
     await syntheticChild(async ({ terminal, sandbox }) => {
       const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64), probe = path.join(sandbox, 'source-probe.mjs')
       await fs.writeFile(probe, '// synthetic original source', { mode: 0o600 })
       owner.hashes[probe] = fileHash(probe)
       const receipt = { ownerSha, sourceSha: sha(JSON.stringify(owner.hashes)),
-        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }
+        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 71 }
       if (fault === 'cleanup') receipt.cleanup = 'stop-failed-data-retained'
-      if (fault === 'tests') receipt.tests = 69
+      if (fault === 'tests') receipt.tests = 70
       if (fault === 'passed') receipt.passed = false
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify(receipt), { mode: 0o600 })
+      if (fault !== 'history-missing') {
+        const history = fault === 'history-original' ? validReceipt() : validHistoryReceipt()
+        if (fault === 'history-skipped') { history.counts.passed--; history.counts.skipped++ }
+        await historyFixture(sandbox, history)
+      }
       // Mutate only a private synthetic source byte, keeping owner hashes and
       // receipt sourceSha unchanged so no second check masks this guard.
       if (fault === 'source') await fs.appendFile(probe, '\n// synthetic persistent drift')
       const lines = [], passed = reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line))
       assert.equal(passed, fault === 'none', fault)
       if (fault === 'none') assert.deepEqual(lines,
-        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":71,"business":66,"sentinels":5}', historySuccess])
       else {
         assert.equal(process.exitCode, 1, fault)
         assert.equal(lines.length, 2, fault)

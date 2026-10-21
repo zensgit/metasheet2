@@ -594,16 +594,24 @@ export class PatternManager extends EventEmitter {
   }
 
   /**
-   * Shutdown and cleanup
+   * Stop background maintenance without removing subscriptions or cached matches.
    */
-  async shutdown(): Promise<void> {
+  stopMaintenance(): void {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer)
+      this.cleanupTimer = undefined
     }
     if (this.metricsTimer) {
       clearInterval(this.metricsTimer)
+      this.metricsTimer = undefined
     }
+  }
 
+  /**
+   * Shutdown and cleanup
+   */
+  async shutdown(): Promise<void> {
+    this.stopMaintenance()
     this.clear()
     this.logger.info('Pattern manager shutdown complete')
     this.emit('shutdown')

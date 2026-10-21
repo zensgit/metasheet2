@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import { sql, type Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
-import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
+import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, scheduleIntervalMs, type AutomationTriggerType } from './automation-triggers'
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
@@ -34,6 +34,9 @@ import {
 import { isValidIanaTimeZone } from './automation-timezone'
 import { DurableSinkBusyError, isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import { AUTOMATION_RECORD_AFTER_IMAGE_RETURNING } from './automation-record-after-image'
+import { captureAutomationRecordSchema } from './automation-record-schema'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
 import {
   FWB_ACTION_TYPE,
@@ -66,7 +69,7 @@ import {
   type FieldSchemaSnapshotEntry,
 } from './field-schema-fence-recheck'
 import {
-  AUTOMATION_CONDITION_VALUE_INVALID_CODE,
+  type AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
   validateConditionGroupAgainstFields,
@@ -78,6 +81,9 @@ import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificati
 // route (one resolver, zero drift) — see assertNotificationRecipientsAtSave.
 import { loadSheetMemberUserIdSet } from './permission-service'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
+import { AUTOMATION_READ_AUTHORING_INVALID, containsAutomationReadAction, validAutomationReadAuthoringShape } from '../integration/automation-read-authoring-policy'
+import { YIDA_AUTOMATION_ACTION_TYPE, YIDA_AUTOMATION_AUTHORING_INVALID, containsYidaAutomationAction, validYidaAutomationAuthoringShape } from '../integration/yida-automation-authoring-policy'
+import type { ReadScheduleOccurrence } from '../integration/automation-read-contracts'
 import type { AutomationTrigger } from './automation-triggers'
 import {
   AutomationScheduler,
@@ -113,7 +119,7 @@ import {
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
-import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
+import { applyTemplateVisibilityFilter } from '../services/ApprovalProductService'
 import {
   isAdminOnQuery,
   loadApprovalTemplateVisibilityActorOnQuery,
@@ -152,6 +158,8 @@ const MAX_AUTOMATION_DEPTH = 3
  */
 export type AutomationRuleValidationCode =
   | 'VALIDATION_ERROR'
+  | typeof AUTOMATION_READ_AUTHORING_INVALID
+  | typeof YIDA_AUTOMATION_AUTHORING_INVALID
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
@@ -1260,6 +1268,7 @@ export type AutomationRule = {
   actions?: AutomationAction[] | null
   // A6-1 opt-in (nullable; NULL/'legacy' = no job rows, 'workflow_job_v1' = persist jobs)
   execution_mode?: string | null
+  integration_authority_revision?: string
 }
 
 export type AutomationQueryFn = (
@@ -1417,6 +1426,7 @@ export class AutomationService {
   private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
   private readonly completionConsumerInFlight = new Set<Promise<void>>()
   private producerStopPromise: Promise<void> | null = null
+  private readonly readScheduleController = new AbortController()
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
@@ -1437,6 +1447,9 @@ export class AutomationService {
     schedulerLeaderOptions: AutomationSchedulerLeaderOptions | null = null,
     schedulerRuntime: AutomationSchedulerRuntimeOptions = {},
     notificationService?: AutomationDeps['notificationService'],
+    automationReadSchedule?: Readonly<{ produce(occurrence: ReadScheduleOccurrence, signal: AbortSignal): Promise<void> }>,
+    yidaAutomationSchedule?: Readonly<{ produce(occurrence: Readonly<{ ruleId: string; triggerType: 'schedule.interval';
+      scheduledAtMs: number; anchorMs: number; intervalMs: number }>, signal: AbortSignal): Promise<void> }>,
   ) {
     this.eventBus = eventBus
     this.db = db
@@ -1498,7 +1511,35 @@ export class AutomationService {
     this.suspensionService = new AutomationSuspensionService(this.jobService)
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
-      async (rule) => {
+      async (rule, occurrence) => {
+        // A private authoring node must NEVER fall through to ordinary
+        // scheduler execution while its owner-bound producer is not installed.
+        if (containsYidaAutomationAction(undefined, undefined, rule.actions)) {
+          if (occurrence?.triggerType === 'schedule.interval' && rule.trigger.type === 'schedule.interval'
+            && !this.readScheduleController.signal.aborted && yidaAutomationSchedule) {
+            await yidaAutomationSchedule.produce(Object.freeze({ ruleId: rule.id, ...occurrence }), this.readScheduleController.signal)
+          }
+          return
+        }
+        if (containsAutomationReadAction(undefined, undefined, rule.actions)) {
+          // No ordinary executor fallback, even when no activation/runtime is
+          // installed. The producer independently locks the CURRENT DB rule,
+          // scope and authorization; this old scheduler snapshot is not proof.
+          if (occurrence?.triggerType === 'schedule.cron' && rule.trigger.type === 'schedule.cron'
+            && !this.readScheduleController.signal.aborted && automationReadSchedule) {
+            await automationReadSchedule.produce(Object.freeze({ ruleId: rule.id,
+              scheduledAtMs: occurrence.scheduledAtMs }), this.readScheduleController.signal)
+          } else if (occurrence?.triggerType === 'schedule.interval' && rule.trigger.type === 'schedule.interval'
+            && !this.readScheduleController.signal.aborted && automationReadSchedule) {
+            await automationReadSchedule.produce(Object.freeze({ ruleId: rule.id, ...occurrence }),
+              this.readScheduleController.signal)
+          } else if (occurrence?.triggerType === 'schedule.date_field' && rule.trigger.type === 'schedule.date_field'
+            && !this.readScheduleController.signal.aborted && automationReadSchedule) {
+            await automationReadSchedule.produce(Object.freeze({ ruleId: rule.id, ...occurrence }),
+              this.readScheduleController.signal)
+          }
+          return
+        }
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
         //
         // The record-triggered lanes are gated by `loadEnabledRules` below, but a scheduled rule
@@ -1614,6 +1655,15 @@ export class AutomationService {
    * Create a new automation rule persisted to PostgreSQL.
    */
   async createRule(sheetId: string, input: CreateRuleInput): Promise<AutomationRule> {
+    if (!validYidaAutomationAuthoringShape({ actionType: input.actionType, actionConfig: input.actionConfig,
+      actions: input.actions, executionMode: input.executionMode, triggerType: input.triggerType,
+      triggerConfig: input.triggerConfig, conditions: input.conditions })) {
+      throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+    }
+    if (!validAutomationReadAuthoringShape({
+      actionType: input.actionType, actionConfig: input.actionConfig, actions: input.actions,
+      executionMode: input.executionMode, triggerType: input.triggerType,
+    })) throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
     if (!VALID_TRIGGER_TYPES.has(input.triggerType)) {
       throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
     }
@@ -1711,6 +1761,10 @@ export class AutomationService {
     const cronTriggerError = this.validateCronTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
     if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
 
+    const intervalTriggerError = this.validateIntervalTriggerAtSave(input.triggerType, input.triggerConfig,
+      containsAutomationReadAction(input.actionType, actionConfig, actionsForValidation))
+    if (intervalTriggerError) throw new AutomationRuleValidationError(intervalTriggerError)
+
     const inboundWebhookError = validateInboundWebhookTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
     if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
 
@@ -1774,27 +1828,16 @@ export class AutomationService {
       execution_mode: executionMode,
     }
 
-    await this.db
+    const inserted = await this.db
       .insertInto('automation_rules')
       .values(row as never)
+      .returningAll()
       .execute()
 
-    const rule: AutomationRule = {
-      id: ruleId,
-      sheet_id: sheetId,
-      name: input.name ?? null,
-      trigger_type: input.triggerType,
-      trigger_config: persistedTriggerConfig,
-      action_type: input.actionType,
-      action_config: actionConfig,
-      enabled: input.enabled ?? true,
-      created_at: now,
-      updated_at: now,
-      created_by: input.createdBy ?? null,
-      conditions: input.conditions ?? null,
-      actions,
-      execution_mode: executionMode,
-    }
+    // Schedule phase is a persisted identity, not the host clock sampled before
+    // validation. Use the INSERT receipt immediately, just as reload/update do.
+    if (!inserted[0]) throw new Error('AUTOMATION_RULE_INSERT_NOT_RETURNED')
+    const rule = this.mapRow(inserted[0])
 
     this.registerSchedule(rule)
     return rule
@@ -1866,6 +1909,24 @@ export class AutomationService {
       const existing = await this.getRule(ruleId)
       existingRuleSnapshot = existing
       if (!existing || existing.sheet_id !== sheetId) return null
+
+      // Raw merged shape first: normalization must never erase forbidden keys.
+      if (!validYidaAutomationAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existing.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existing.action_config,
+        actions: input.actions !== undefined ? input.actions : existing.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existing.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existing.trigger_type,
+        triggerConfig: input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config,
+        conditions: input.conditions !== undefined ? input.conditions : existing.conditions,
+      })) throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+      if (!validAutomationReadAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existing.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existing.action_config,
+        actions: input.actions !== undefined ? input.actions : existing.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existing.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existing.trigger_type,
+      })) throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
 
       // F9: normalize the merged pair FIRST so every validator below (and the persisted row) sees the
       // canonical action. `update_field` without a fieldId is left alone by the normalizer and keeps
@@ -1962,6 +2023,18 @@ export class AutomationService {
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
     if (input.executionMode !== undefined) updates.execution_mode = normalizedExecutionModeForUpdate ?? normalizeExecutionMode(input.executionMode)
 
+    if (input.triggerType === undefined && input.triggerConfig === undefined && (input.enabled === true
+      || input.actionType !== undefined || input.actionConfig !== undefined || input.actions !== undefined)) {
+      const current = existingRuleSnapshot ?? await this.getRule(ruleId)
+      if (!current || current.sheet_id !== sheetId) return null
+      existingRuleSnapshot = current
+      const intervalError = this.validateIntervalTriggerAtSave(input.triggerType ?? current.trigger_type,
+        input.triggerConfig !== undefined ? input.triggerConfig : current.trigger_config,
+        containsAutomationReadAction(input.actionType ?? current.action_type,
+          input.actionConfig ?? current.action_config, input.actions !== undefined ? input.actions : current.actions))
+      if (intervalError) throw new AutomationRuleValidationError(intervalError)
+    }
+
     // W (date-reminder): validate a RESULTING schedule.date_field trigger at the SAVE boundary — fires when the
     // trigger type/config is being changed and the result is a date_field rule (explicit type, or a config
     // change on an existing date_field rule). Mirrors createRule's gate so the API can't bypass the UI contract.
@@ -1971,6 +2044,11 @@ export class AutomationService {
       if (!existingForTrigger || existingForTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForTrigger.trigger_type
       const nextTriggerConfig = input.triggerConfig !== undefined ? input.triggerConfig : existingForTrigger.trigger_config
+      const intervalError = this.validateIntervalTriggerAtSave(nextTriggerType, nextTriggerConfig,
+        containsAutomationReadAction(input.actionType ?? existingForTrigger.action_type,
+          input.actionConfig ?? existingForTrigger.action_config,
+          input.actions !== undefined ? input.actions : existingForTrigger.actions))
+      if (intervalError) throw new AutomationRuleValidationError(intervalError)
       const dateTriggerError = await this.validateDateFieldTriggerAtSave(
         sheetId,
         nextTriggerType,
@@ -2053,6 +2131,24 @@ export class AutomationService {
     ) {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
+      if (!validYidaAutomationAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existingForApproval.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existingForApproval.action_config,
+        actions: input.actions !== undefined ? input.actions : existingForApproval.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existingForApproval.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existingForApproval.trigger_type,
+        triggerConfig: input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config,
+        conditions: input.conditions !== undefined ? input.conditions : existingForApproval.conditions,
+      })) throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+      // Every write (including name, enabled, conditions and trigger-only edits)
+      // validates the resulting read action. DB CHECK closes the read/update race.
+      if (!validAutomationReadAuthoringShape({
+        actionType: input.actionType !== undefined ? input.actionType : existingForApproval.action_type,
+        actionConfig: input.actionConfig !== undefined ? input.actionConfig : existingForApproval.action_config,
+        actions: input.actions !== undefined ? input.actions : existingForApproval.actions,
+        executionMode: input.executionMode !== undefined ? input.executionMode : existingForApproval.execution_mode,
+        triggerType: input.triggerType !== undefined ? input.triggerType : existingForApproval.trigger_type,
+      })) throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
       const nextTriggerConfig = (
         input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
@@ -2210,6 +2306,19 @@ export class AutomationService {
       .where('sheet_id', '=', sheetId)
       .returningAll()
       .execute()
+      .catch((error: unknown) => {
+        // A concurrent partial edit can invalidate the final row AFTER the
+        // application check. Never expose PostgreSQL's row-containing DETAIL.
+        if (error && typeof error === 'object' && 'code' in error && error.code === '23514'
+          && 'constraint' in error && error.constraint === 'chk_automation_yida_authorized_shape') {
+          throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+        }
+        if (error && typeof error === 'object' && 'code' in error && error.code === '23514'
+          && 'constraint' in error && error.constraint === 'chk_automation_read_preview_shape') {
+          throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
+        }
+        throw error
+      })
 
     if (result.length === 0) return null
 
@@ -2324,6 +2433,10 @@ export class AutomationService {
    * Register a single rule for scheduling (called on rule create/update).
    */
   registerSchedule(rule: AutomationRule): void {
+    if (rule.enabled !== true) {
+      this.unregisterSchedule(rule.id)
+      return
+    }
     const execRule = toExecutorRule(rule)
     if (
       execRule.trigger.type === 'schedule.cron' ||
@@ -2617,6 +2730,9 @@ export class AutomationService {
     if (!rule.enabled) return
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
+    // The ordinary diagnostic scan reads full rows and uses the ordinary claim
+    // ledger. Controlled reads enter exclusively through the private producer.
+    if (containsAutomationReadAction(undefined, undefined, execRule.actions)) return
     await this.evaluateDateReminders(execRule)
   }
 
@@ -2783,6 +2899,13 @@ export class AutomationService {
    * being caught-and-UTC'd only at runtime. Accepts absent / '' / 'UTC' / 'Etc/UTC' / any valid IANA zone;
    * rejects only an invalid zone. No DB access (pure Intl validity check). No-op for any other trigger type.
    */
+  private validateIntervalTriggerAtSave(triggerType: string, config: unknown, read: boolean): string | null {
+    if (triggerType !== 'schedule.interval') return null
+    return scheduleIntervalMs(config, read) === null
+      ? 'schedule.interval requires an integer intervalMs between 1000 and 2147483647'
+      : null
+  }
+
   private validateCronTriggerAtSave(
     triggerType: string,
     triggerConfig: Record<string, unknown> | null | undefined,
@@ -2826,6 +2949,7 @@ export class AutomationService {
   }
 
   stopProducerAdmissions(): Promise<void> {
+    this.readScheduleController.abort()
     this.producerStopPromise ??= (async () => {
       for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
       const schedulerStop = this.scheduler.destroy()
@@ -3331,6 +3455,22 @@ export class AutomationService {
   }
 
   async handleEvent(eventType: string, payload: AutomationEventPayload): Promise<void> {
+    return this.handleRecordEvent(eventType, payload, false)
+  }
+
+  /** Ordinary leg only. The separate durable producer owns read admission;
+   * neither this method nor the EventBus can submit a private read request. */
+  async handleDurableRecordEvent(eventType: string, payload: AutomationEventPayload): Promise<void> {
+    if (this.producerStopPromise) throw new Error('AUTOMATION_RECORD_ADMISSION_CLOSED')
+    const task = this.handleRecordEvent(eventType, payload,
+      eventType === 'multitable.record.created' || eventType === 'multitable.record.updated')
+    // Unlike the dispatcher timeout race, the producer barrier waits for the
+    // actual ordinary task. Observe it here but preserve rejection to caller.
+    this.trackLifecycleTask(this.producerInFlight, task, () => {})
+    return task
+  }
+
+  private async handleRecordEvent(eventType: string, payload: AutomationEventPayload, skipPrivateRead: boolean): Promise<void> {
     const depth = typeof payload._automationDepth === 'number' ? payload._automationDepth : 0
     if (depth >= MAX_AUTOMATION_DEPTH) {
       logger.warn(`Automation recursion guard triggered (depth=${depth}) for ${eventType} on sheet ${payload.sheetId}`)
@@ -3352,6 +3492,7 @@ export class AutomationService {
     }
 
     for (const rule of rules) {
+      if (skipPrivateRead && containsAutomationReadAction(rule.action_type, rule.action_config, rule.actions)) continue
       const execRule = toExecutorRule(rule)
 
       if (!matchesTrigger(execRule.trigger, triggerType, payload)) continue
@@ -4480,16 +4621,31 @@ export class AutomationService {
         return false // record gone — the caller's missing-record path already handled it
       }
       ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
+      const producerTrx: TransactionalQueryable = {
+        isTransaction: true,
+        query: async (sql, params) => {
+          const r = await query(sql, params)
+          return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+        },
+      }
+      const durableEnabled = isDurableDeliveryEnabled()
+      const recordSchema = await captureAutomationRecordSchema(producerTrx, sheetId)
       // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId, the trigger actor for a cross-base target) enforced immediately above; a locked target throws and rolls back.
       // revision-emitted: D-1c slice ④ (A7 approval resultWriteback) — recordRecordRevision below, same txn.
       const updateRes = await query(
         `UPDATE meta_records
          SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
          WHERE id = $2 AND sheet_id = $3
-         RETURNING version, data`,
+         RETURNING ${durableEnabled ? `data, ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}` : 'version, data'}`,
         [JSON.stringify(patch), recordId, sheetId],
       )
-      const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+      const updatedRow = updateRes.rows[0] as {
+        version?: unknown; data?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+      } | undefined
+      if (durableEnabled && updatedRow && (updateRes.rows.length !== 1
+        || !Number.isSafeInteger(Number(updatedRow.version)) || Number(updatedRow.version) < 1)) {
+        throw new Error('AUTOMATION_RECORD_UPDATE_RECEIPT_INVALID')
+      }
       if (!updatedRow) {
         // 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3): the record vanished between the non-locking SELECT above
         // and this UPDATE. Nothing was written ⇒ nothing is announced: no revision, no enqueue (below is
@@ -4515,15 +4671,19 @@ export class AutomationService {
       // nothing by construction — and so does the 0-row guard above. Flag OFF ⇒ no-op (the legacy emit
       // below fires instead).
       await enqueueRecordEventIfDurable(
-        {
-          isTransaction: true,
-          query: async (sql, params) => {
-            const r = await query(sql, params)
-            return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
-          },
-        },
+        producerTrx,
         'multitable.record.updated',
         chainEventPayload,
+        undefined,
+        durableEnabled ? {
+          sheetId,
+          recordId,
+          recordVersion: Number(updatedRow.version),
+          data: undefined,
+          rawJson: updatedRow.automation_after_image_json,
+          oversized: updatedRow.automation_after_image_oversized === true,
+          schema: recordSchema,
+        } : undefined,
       )
       return true
     })
@@ -5131,6 +5291,9 @@ export class AutomationService {
       conditions: (row.conditions as ConditionGroup) ?? null,
       actions: (row.actions as AutomationAction[]) ?? null,
       execution_mode: (row.execution_mode as string) ?? null,
+      ...(row.action_type === YIDA_AUTOMATION_ACTION_TYPE && typeof row.integration_authority_revision === 'string'
+        && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(row.integration_authority_revision)
+        ? { integration_authority_revision: row.integration_authority_revision } : {}),
     }
   }
 }
@@ -5138,6 +5301,7 @@ export class AutomationService {
 // ── Route helpers ────────────────────────────────────────────────────────
 
 export type SerializedAutomationRule = {
+  integrationAuthorityRevision?: string
   id: string
   sheetId: string
   name: string
@@ -5185,6 +5349,9 @@ export function serializeAutomationRule(rule: AutomationRule): SerializedAutomat
     updatedAt: rule.updated_at,
     createdBy: rule.created_by ?? undefined,
     executionMode: rule.execution_mode ?? null,
+    ...(rule.action_type === YIDA_AUTOMATION_ACTION_TYPE && typeof rule.integration_authority_revision === 'string'
+      && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(rule.integration_authority_revision)
+      ? { integrationAuthorityRevision: rule.integration_authority_revision } : {}),
   }
 }
 
@@ -5206,6 +5373,7 @@ export function parseCreateRuleInput(
   body: Record<string, unknown> | undefined,
   createdBy: string | null,
 ): CreateRuleInput {
+  validateRawActionFields(body)
   const name = typeof body?.name === 'string' ? body.name : null
   const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
   const triggerConfig = body?.triggerConfig && typeof body.triggerConfig === 'object'
@@ -5220,6 +5388,17 @@ export function parseCreateRuleInput(
     ? body.actionConfig as Record<string, unknown>
     : {}
   if (!actionType && typeof firstAction?.type === 'string') actionType = firstAction.type
+  // An explicitly empty config cannot borrow a valid modern config and mask an
+  // invalid raw read action. Missing legacy config may still use the modern pair.
+  const rawActionConfig = body && Object.hasOwn(body, 'actionConfig') ? body.actionConfig : firstAction?.config
+  if (!validYidaAutomationAuthoringShape({ actionType, actionConfig: rawActionConfig, actions,
+    executionMode: body?.executionMode, triggerType, triggerConfig, conditions: body?.conditions })) {
+    throw new AutomationRuleValidationError(YIDA_AUTOMATION_AUTHORING_INVALID, YIDA_AUTOMATION_AUTHORING_INVALID)
+  }
+  if (!validAutomationReadAuthoringShape({ actionType, actionConfig: rawActionConfig,
+    actions, executionMode: body?.executionMode, triggerType })) {
+    throw new AutomationRuleValidationError(AUTOMATION_READ_AUTHORING_INVALID, AUTOMATION_READ_AUTHORING_INVALID)
+  }
   if (
     Object.keys(actionConfig).length === 0 &&
     firstAction?.config &&
@@ -5264,6 +5443,7 @@ export function parseCreateRuleInput(
  * action types.
  */
 export function parseUpdateRuleInput(body: Record<string, unknown> | undefined): UpdateRuleInput | null {
+  validateRawActionFields(body)
   const input: UpdateRuleInput = {}
   let touched = false
 
@@ -5313,6 +5493,28 @@ export function parseUpdateRuleInput(body: Record<string, unknown> | undefined):
   }
 
   return touched ? input : null
+}
+
+/** Explicit malformed fields are input errors, never silently dropped or reset.
+ * Null actions remains the supported clear operation; null config is not one.
+ */
+function validateRawActionFields(body: Record<string, unknown> | undefined): void {
+  if (!body) return
+  for (const key of ['actionType', 'triggerType']) {
+    if (Object.hasOwn(body, key) && typeof body[key] !== 'string') {
+      throw new AutomationRuleValidationError(`${key} must be a string`)
+    }
+  }
+  if (Object.hasOwn(body, 'actionConfig')) {
+    const config = body.actionConfig
+    if (!config || typeof config !== 'object' || Array.isArray(config)
+      || (Object.getPrototypeOf(config) !== Object.prototype && Object.getPrototypeOf(config) !== null)) {
+      throw new AutomationRuleValidationError('actionConfig must be a plain object')
+    }
+  }
+  if (Object.hasOwn(body, 'actions') && body.actions !== null && !Array.isArray(body.actions)) {
+    throw new AutomationRuleValidationError('actions must be an array or null')
+  }
 }
 
 /**

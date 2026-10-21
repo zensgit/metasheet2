@@ -3,7 +3,10 @@ import { planArchiveAttachmentCells, projectArchiveAttachmentCells, type Archive
 import { applyArchiveAttachmentBatch, type RecoveryArchiveAttachmentBatch } from './recovery-archive-attachment-batch'
 
 import type { QueryFn } from './permission-service'
-import { assertInTransaction } from './pg-transaction-guard'
+import { assertInTransaction, type TransactionalQueryable } from './pg-transaction-guard'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { AUTOMATION_RECORD_AFTER_IMAGE_RETURNING, type AutomationRecordAfterImageInput } from './automation-record-after-image'
+import { captureAutomationRecordSchema } from './automation-record-schema'
 import {
   acquireCanonicalSheetFencesInOrder,
   assertNoActiveWriterBlock,
@@ -454,6 +457,33 @@ export type ExactAnchorAppliedMutation =
  * propagates and forces the FULL rollback (atomicity is bidirectional — no half-enqueued recovery).
  */
 export type ExactAnchorMutationTxnHook = (query: QueryFn, mutation: ExactAnchorAppliedMutation) => Promise<void>
+
+type ExactAnchorRevertAfterImageEvidence = Readonly<{
+  transaction: TransactionalQueryable
+  afterImage: AutomationRecordAfterImageInput
+}>
+// Private producer material never joins the event/HTTP mutation DTO. The existing callback chain
+// carries the original mutation object through hot, synchronous archive and asynchronous recovery.
+const revertAfterImages = new WeakMap<ExactAnchorAppliedMutation,
+  ExactAnchorRevertAfterImageEvidence & { query: QueryFn }>()
+
+/** Observe only the executing revert's pre-DML/RETURNING evidence, inside its existing hook.
+ * Query identity is exact: a different function on the same client is not this source handle.
+ * Legacy event-only callers have no entry; a mismatched bound entry must never fall back to them.
+ */
+export function getExactAnchorRevertAfterImageEvidence(
+  query: QueryFn,
+  sheetId: string,
+  mutation: ExactAnchorAppliedMutation,
+): ExactAnchorRevertAfterImageEvidence | undefined {
+  const evidence = revertAfterImages.get(mutation)
+  if (evidence && (evidence.query !== query || evidence.afterImage.sheetId !== sheetId
+    || mutation.kind !== 'revert' || evidence.afterImage.recordId !== mutation.recordId
+    || evidence.afterImage.recordVersion !== mutation.version)) {
+    throw new Error('RECOVERY_MUTATION_AFTER_IMAGE_BINDING_INVALID')
+  }
+  return evidence
+}
 
 /** Typed control-flow error: thrown inside the txn to force a FULL rollback, mapped to a refusal outside.
  * `leaseBusy` marks the ONE retryable channel (O2-S3): the exclusive authority lease lost a NOWAIT race
@@ -2529,17 +2559,35 @@ async function applyExactAnchorRecoveryAttempt(
             () => new ApplyRefusalError('record-locked'),
           )
         }
+        // Capture only for an existing durable producer hook, after all recovery gates and row locks.
+        // This one object must survive the callback adapters unchanged through image persistence.
+        const revertProducerTrx: TransactionalQueryable | undefined = input.onMutationApplied && isDurableDeliveryEnabled()
+          ? {
+              isTransaction: true,
+              query: async (statement, params) => {
+                const result = await query(statement, params)
+                return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
+              },
+            }
+          : undefined
+        const revertRecordSchema = revertProducerTrx
+          ? await captureAutomationRecordSchema(revertProducerTrx, input.sheetId)
+          : undefined
         // lock-guarded: L8 revert apply — ensureRecordNotLocked just above, same txn.
         // revision-emitted: L8 revert apply — recordRecordRevision below, same txn (source 'restore').
         const upd = await query(
           `UPDATE meta_records SET data = $1::jsonb, version = version + 1, updated_at = now(), modified_by = $5
            WHERE id = $2 AND sheet_id = $3 AND version = $4
-           RETURNING version`,
+           RETURNING ${revertProducerTrx ? AUTOMATION_RECORD_AFTER_IMAGE_RETURNING : 'version'}`,
           [JSON.stringify(rw.projectedData), rw.recordId, input.sheetId, rw.liveVersion, input.actorId],
         )
         // CAS miss ⇒ the locked row moved under us ⇒ preview-drift, full rollback (never a bare Error).
-        const row = upd.rows[0] as { version?: unknown } | undefined
+        const row = upd.rows[0] as {
+          version?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+        } | undefined
         if (!row) throw new ApplyRefusalError('preview-drift')
+        if (revertProducerTrx && (upd.rows.length !== 1 || !Number.isSafeInteger(Number(row.version))
+          || Number(row.version) < 1)) throw new Error('AUTOMATION_RECOVERY_UPDATE_RECEIPT_INVALID')
         const linkInvalidationGroups = new Map<string, { recordIds: Set<string>; fieldIds: Set<string> }>()
         for (const lu of rw.linkUpdates) {
           const changedTargetIds = await syncOneOutboundLinkField(query, rw.recordId, lu.fieldId, lu.targetIds)
@@ -2571,7 +2619,7 @@ async function applyExactAnchorRecoveryAttempt(
         })
         // Same-txn mutation seam (durable event enqueue) — atomic with THIS revert's writes.
         if (input.onMutationApplied) {
-          await input.onMutationApplied(query, {
+          const mutation: ExactAnchorAppliedMutation = {
             kind: 'revert',
             recordId: rw.recordId,
             version: newVersion,
@@ -2579,7 +2627,23 @@ async function applyExactAnchorRecoveryAttempt(
             patch: rw.patch,
             revisionId,
             linkInvalidations: serializeLinkInvalidations(linkInvalidationGroups),
-          })
+          }
+          if (revertProducerTrx) {
+            revertAfterImages.set(mutation, {
+              query,
+              transaction: revertProducerTrx,
+              afterImage: {
+                sheetId: input.sheetId,
+                recordId: rw.recordId,
+                recordVersion: newVersion,
+                data: undefined,
+                rawJson: row.automation_after_image_json,
+                oversized: row.automation_after_image_oversized === true,
+                schema: revertRecordSchema,
+              },
+            })
+          }
+          try { await input.onMutationApplied(query, mutation) } finally { revertAfterImages.delete(mutation) }
         }
         revertsApplied++
       }

@@ -4,10 +4,12 @@ import canonical from './gip-canonical-json.cjs'
 import deliveryStore from './yida-delivery-store.cjs'
 import executionDigest from './yida-execution-digest.cjs'
 import formProtocol from './yida-form-transport.cjs'
+import tokenClientModule from './yida-token-client.cjs'
+import tokenExchangeModule from './yida-token-exchange.cjs'
 import { buildYidaStaticPlan } from './yida-static-plan.mjs'
 
-// Internal mechanism only. The injected resolver is a future trusted authority
-// boundary, NOT evidence of owner approval. No runtime consumer is registered.
+// Internal mechanism only. The resolver/authority must be supplied by the
+// trusted host, not public input. This module registers no runtime consumer.
 const { deepCloneFrozenCanonical, stableCanonicalStringify } = canonical
 const { createYidaDeliveryStore } = deliveryStore
 const { buildYidaExecutionPayloadDigest } = executionDigest
@@ -21,7 +23,7 @@ const SNAPSHOT_KEYS = [
 const ERROR_CODES = new Set([
   'INVALID_INPUT', 'DISABLED', 'BUSY', 'CANCELLED', 'TIMEOUT', 'CLOCK_INVALID',
   'SNAPSHOT_INVALID', 'SNAPSHOT_CHANGED', 'SNAPSHOT_EXPIRED', 'PREPARE_FAILED',
-  'TOKEN_FAILED', 'CLAIM_UNCONFIRMED',
+  'TOKEN_FAILED', 'CLAIM_UNCONFIRMED', 'STOP_FAILED',
 ].map((code) => `YIDA_RUN_${code}`))
 const ID_RE = /^[^\u0000-\u001f\u007f]+$/u
 const MAX_BYTES = 256 * 1024
@@ -209,6 +211,13 @@ export function createYidaDeliveryRunner(options) {
   }
   if (parsedContext.actorId !== parsedContext.ownerId) fail('INVALID_INPUT')
   const context = Object.freeze({ ...parsedContext })
+  return createDeliveryKernel(config, context)
+}
+
+// The mechanism is shared; neither ordinary caller options nor a scope object
+// select the delegated path. Its separate private entry consumes the host's
+// instance-local, known-COMMIT capability before any token/transport exists.
+function createDeliveryKernel(config, context) {
   const resolveExecutionSnapshot = config.resolveExecutionSnapshot
   const readEnablement = config.readEnablement === undefined ? () => 'false' : config.readEnablement
   const wallClock = config.wallClock === undefined ? Date.now : config.wallClock
@@ -221,6 +230,9 @@ export function createYidaDeliveryRunner(options) {
     send = config.formTransport.send.bind(config.formTransport)
     store = createYidaDeliveryStore({ db: config.db })
   } catch { fail('INVALID_INPUT') }
+  // Only the separate private constructor can supply terminal. The public
+  // manual options whitelist rejects this field and retains the original store.
+  const terminal = config.terminal === undefined ? store : config.terminal
   if (typeof resolveExecutionSnapshot !== 'function' || typeof readEnablement !== 'function'
     || typeof wallClock !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INVALID_INPUT')
   let busy = false
@@ -320,10 +332,10 @@ export function createYidaDeliveryRunner(options) {
       let claim
       // Await the real commit, including after cancellation: a late claim token
       // must be retained for cleanup, not abandoned by a Promise.race.
-      try { claim = await store.claim({ ...scope, actorId: context.actorId }) } catch { fail('CLAIM_UNCONFIRMED') }
+      try { claim = await terminal.claim({ ...scope, actorId: context.actorId }) } catch { fail('CLAIM_UNCONFIRMED') }
       const finish = { ...scope, actorId: context.actorId, claimToken: claim.claimToken }
       async function unknown(reason) {
-        try { return result(await store.markUnknown({ ...finish, reason }), externalWriteAttempted) } catch {
+        try { return result(await terminal.markUnknown({ ...finish, reason }), externalWriteAttempted) } catch {
           return result(null, externalWriteAttempted, false)
         }
       }
@@ -345,7 +357,7 @@ export function createYidaDeliveryRunner(options) {
       if (!ack) return await unknown('receipt_invalid')
       try {
         // Once an ACK commit is known, cancellation cannot undo durable history.
-        return result(await store.recordAcknowledgement({ ...finish, ack }), true)
+        return result(await terminal.recordAcknowledgement({ ...finish, ack }), true)
       } catch {
         let observed
         try { observed = await store.get(scope) } catch { /* Unknown readback is not proof of rollback. */ }
@@ -359,4 +371,86 @@ export function createYidaDeliveryRunner(options) {
     }
   }
   return Object.freeze({ run })
+}
+
+/** Host-private, one-attempt mechanism; NOT a registered action or public API.
+ * The trusted host installs the actual core authority. No protection against
+ * arbitrary malicious same-process code is claimed by dependency injection. */
+export function createInternalYidaAutomationSendAttempt(options) {
+  let handle
+  try {
+    const config = dataObject(options, ['db', 'context', 'authority', 'permit', 'fetch',
+      'readEnablement', 'wallClock', 'timeoutMs'], ['db', 'context', 'authority', 'permit', 'fetch'])
+    const parsedContext = dataObject(config.context, CONTEXT_KEYS)
+    for (const key of CONTEXT_KEYS) {
+      if (key === 'workspaceId' && parsedContext[key] === null) continue
+      opaque(parsedContext[key])
+    }
+    if (parsedContext.workspaceId !== null || parsedContext.actorId === parsedContext.ownerId
+      || typeof config.fetch !== 'function' || typeof config.authority?.takeExecution !== 'function') fail('INVALID_INPUT')
+    const context = Object.freeze({ ...parsedContext })
+    const readEnablement = config.readEnablement === undefined ? () => 'false' : config.readEnablement
+    const timeoutMs = config.timeoutMs === undefined ? 10000 : config.timeoutMs
+    if (typeof readEnablement !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000
+      || (config.wallClock !== undefined && typeof config.wallClock !== 'function')) fail('INVALID_INPUT')
+    handle = config.authority.takeExecution(config.permit)
+    if (!handle || CONTEXT_KEYS.some(key => handle.context[key] !== context[key])
+      || ['resolveExecutionSnapshot', 'loadCredential', 'assertActive', 'claim', 'recordAcknowledgement', 'markUnknown', 'close']
+        .some(key => typeof handle[key] !== 'function')) fail('INVALID_INPUT')
+    const operation = dataObject(handle.operation, ['operationId', 'rowKey'])
+    opaque(operation.operationId); opaque(operation.rowKey)
+    let used = false
+    async function run(options = {}) {
+      // Even pre-token failure consumes this attempt; no retry by reusing a
+      // prepared ledger/handle after a token fault or uncertain process result.
+      if (used) fail('INVALID_INPUT')
+      used = true
+      let client
+      try {
+        const caller = callerSignal(options)
+        if (caller && abortedGetter.call(caller)) fail('CANCELLED')
+        function check(signal) {
+          if (signal && abortedGetter.call(signal)) fail('CANCELLED')
+          handle.assertActive()
+          let enabled
+          try { enabled = readEnablement() } catch { fail('DISABLED') }
+          if (enabled !== 'true') { observeAccidentalPromise(enabled); fail('DISABLED') }
+        }
+        check(caller)
+        const guardedFetch = (url, init) => {
+          // A final local check directly before BOTH token and form fetch.
+          // This is not an atomic network revocation or a remote undo claim.
+          check(init.signal)
+          return config.fetch(url, init)
+        }
+        const exchangeToken = tokenExchangeModule.createDingTalkAppTokenExchange({ fetch: guardedFetch })
+        client = tokenClientModule.createYidaTokenClient({ loadCredential: handle.loadCredential, exchangeToken,
+          maxBindings: 1, maxOutstandingFlights: 1, maxWaitersPerFlight: 1, refreshTimeoutMs: timeoutMs })
+        client.activate(handle.credentialBinding)
+        const transport = formProtocol.createYidaFormTransport({ fetch: guardedFetch, readEnablement })
+        const kernel = createDeliveryKernel({ db: config.db, resolveExecutionSnapshot: handle.resolveExecutionSnapshot,
+          tokenClient: client, formTransport: transport, terminal: handle,
+          readEnablement, timeoutMs, wallClock: config.wallClock }, context)
+        return await kernel.run(operation, options)
+      } catch (error) {
+        if (!types.isProxy(error) && error instanceof YidaDeliveryRunError) throw error
+        fail('SNAPSHOT_INVALID')
+      } finally {
+        // Await the actual token flight drain. An unknown drain must not be
+        // reported as stopped or replaced by the preceding business outcome.
+        let stopFailed = false
+        try { handle.close() } catch { stopFailed = true }
+        try { if (client) await client.disposeAndDrain() } catch { stopFailed = true }
+        if (stopFailed) fail('STOP_FAILED')
+      }
+    }
+    return Object.freeze({ run, close() {
+      used = true
+      try { handle.close() } catch { fail('STOP_FAILED') }
+    } })
+  } catch (error) {
+    try { handle?.close() } catch { /* Construction releases no usable handle. */ }
+    if (error instanceof YidaDeliveryRunError) throw error
+    fail('INVALID_INPUT')
+  }
 }

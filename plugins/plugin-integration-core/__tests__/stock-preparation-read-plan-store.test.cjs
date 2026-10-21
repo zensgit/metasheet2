@@ -502,3 +502,252 @@ test('explicit activation replaces corrupt old pointer content only from a reche
   assert.equal(loaded.version.id, version.id)
   assert.deepEqual(loaded.sourceValidation, STATUS_FIXTURE_SOURCE)
 })
+
+// SQL-shaped fixture, not a PostgreSQL lock simulator. This drives the real
+// structured DB helper and shared source/receipt validators; a separate host
+// PostgreSQL suite must prove that row locks survive until the caller commits.
+function automationQueryable(db, { arrayResult = false, xids = ['101', '101'],
+  isolation = ['read committed', 'read committed'], beforeSelect } = {}) {
+  const statements = []
+  let probes = 0
+  const result = rows => arrayResult ? clone(rows) : { rows: clone(rows), rowCount: rows.length }
+  return {
+    statements,
+    async query(sql, params = []) {
+      statements.push({ sql, params: clone(params) })
+      if (sql === "SELECT pg_current_xact_id()::text AS xid, current_setting('transaction_isolation') AS isolation_level") {
+        const index = probes++
+        return result([{ xid: xids[index], isolation_level: isolation[index] }])
+      }
+      if (sql.includes('AS raw_authority')) {
+        const table = /FROM "([a-z_]+)" r/.exec(sql)[1]
+        assert.ok([VERSION_TABLE, VALIDATION_TABLE, ACTIVATION_TABLE].includes(table))
+        const locked = sql.endsWith(' FOR UPDATE')
+        assert.ok(locked || table === ACTIVATION_TABLE)
+        const where = { tenant_id: params[0], workspace_id: params[1],
+          [table === ACTIVATION_TABLE ? 'action_id' : 'id']: params[2] }
+        if (table === VALIDATION_TABLE) where.version_id = params[3]
+        if (beforeSelect) await beforeSelect({ table, locked, where })
+        const found = db.state[table].find(row => Object.entries(where).every(([key, value]) => row[key] === value))
+        if (!found) return result([])
+        // Simulate only the SQL JSON/timestamp transport, never DB nonce or lock guarantees.
+        const row = clone(found)
+        const clocks = table === VALIDATION_TABLE ? ['begun_at', 'expires_at', 'finished_at', 'confirmed_at'] : ['created_at', 'updated_at']
+        for (const key of clocks) {
+          row[key] = row[key] === null ? null : new Date(row[key]).toISOString().replace(/([0-9]{3})Z$/, '$1000Z')
+        }
+        return result([{ raw_authority: row }])
+      }
+      const parsed = /^SELECT \* FROM "([a-z_]+)" WHERE (.+) LIMIT 1(?: OFFSET 0)?( FOR UPDATE)?$/.exec(sql)
+      assert.ok(parsed, `Unexpected SQL in readonly source prerequisite: ${sql}`)
+      const [, table, conditions, locked] = parsed
+      assert.ok(Object.hasOwn(db.state, table), 'Only fixture-owned integration metadata can be queried')
+      const where = Object.fromEntries(conditions.split(' AND ').map(condition => {
+        const term = /^"([a-z_]+)" (?:IS NULL|= \$(\d+))$/.exec(condition)
+        assert.ok(term, `Unexpected structured predicate: ${condition}`)
+        return [term[1], term[2] ? params[Number(term[2]) - 1] : null]
+      }))
+      if (beforeSelect) await beforeSelect({ table, locked: Boolean(locked), where })
+      return result(db.state[table].filter(row => Object.entries(where)
+        .every(([key, value]) => row[key] === value)).slice(0, 1))
+    },
+  }
+}
+async function automationFixture() {
+  const db = eligibleDb()
+  const ledger = store(db)
+  const version = await ledger.saveVersion({ ...tenantScope, actor: 'actor-one', config: config() })
+  const proof = await seedConfirmedStatusFixture(ledger, version.id)
+  await ledger.approve({ ...tenantScope, id: version.id, actor: 'actor-one' })
+  const activation = await ledger.activate({ ...tenantScope, id: version.id, actor: 'actor-one', expectedGeneration: 0 })
+  // These are status fixtures only. Real nonce minting/ABA is proven by the PG suite.
+  for (const table of [VERSION_TABLE, VALIDATION_TABLE, ACTIVATION_TABLE]) {
+    for (const row of db.state[table]) {
+      row.automation_authority_revision = AUTOMATION_REVISION
+      if (table !== VALIDATION_TABLE) {
+        row.created_at = '2026-10-01T00:00:00.000Z'
+        row.updated_at = '2026-10-01T00:00:00.000Z'
+      }
+    }
+  }
+  return { db, ledger, version, proof, activation,
+    input: { ...tenantScope, actor: 'actor-one', actionId: config().actionId, systemId: 'source-one' } }
+}
+
+test('Automation source prerequisite uses caller transaction in the prescribed lock order, accepting Pg and host row shapes', async () => {
+  for (const arrayResult of [false, true]) {
+    const { db, ledger, input, version, proof, activation } = await automationFixture()
+    const queryable = automationQueryable(db, { arrayResult })
+    const beforeState = clone(db.state)
+    const beforeTrace = clone(db.trace)
+    const loaded = await ledger.lockActiveForAutomation(queryable, input)
+    assert.equal(loaded.activation.id, activation.id)
+    assert.equal(loaded.activation.validationId, proof.validationId)
+    assert.equal(loaded.version.id, version.id)
+    assert.deepEqual(loaded.sourceValidation, STATUS_FIXTURE_SOURCE)
+    assert.equal(Object.isFrozen(loaded.sourceValidation), true)
+    assert.deepEqual(Object.keys(loaded).sort(), ['activation', 'sourceAuthority', 'sourceValidation', 'version'])
+    assert.deepEqual(Object.keys(loaded.sourceAuthority).sort(), ['activationRevision', 'receipt', 'receiptRevision', 'versionRevision'])
+    assert.equal(loaded.sourceAuthority.versionRevision, AUTOMATION_REVISION)
+    assert.equal(loaded.sourceAuthority.receiptRevision, AUTOMATION_REVISION)
+    assert.equal(loaded.sourceAuthority.activationRevision, AUTOMATION_REVISION)
+    assert.equal(loaded.sourceAuthority.receipt.id, proof.validationId)
+    assert.equal(Object.isFrozen(loaded.sourceAuthority), true)
+    assert.equal(Object.isFrozen(loaded.sourceAuthority.receipt), true)
+    assert.equal(Object.isFrozen(loaded.sourceAuthority.receipt.counts), true)
+    assert.deepEqual(queryable.statements.map(({ sql }) => {
+      if (sql.includes('pg_current_xact_id()')) return 'transaction-probe'
+      const table = /FROM "([a-z_]+)"/.exec(sql)[1]
+      return `${sql.endsWith(' FOR UPDATE') ? 'lock' : 'hint'}:${table}`
+    }), ['transaction-probe', 'transaction-probe', `hint:${ACTIVATION_TABLE}`,
+      'lock:integration_external_systems', `lock:${SOURCE_REVISION_TABLE}`,
+      `lock:${VERSION_TABLE}`, `lock:${VALIDATION_TABLE}`, `lock:${ACTIVATION_TABLE}`])
+    assert.deepEqual(db.trace, beforeTrace, 'Must not use the store-owned database or transaction lifecycle')
+    assert.deepEqual(db.state, beforeState, 'Must not write any metadata or source rows')
+    assert.equal(queryable.statements.some(({ sql }) => /\b(BEGIN|COMMIT|ROLLBACK|SET|INSERT|UPDATE|DELETE)\b/.test(sql.replace(/ FOR UPDATE$/, ''))), false)
+  }
+})
+
+test('Automation source prerequisite rejects unusable, autocommit, and non-read-committed handles with fixed errors', async () => {
+  const { db, ledger, input } = await automationFixture()
+  const cases = [undefined, {}, { query: false },
+    { query: async () => { throw new Error('synthetic-sensitive-connection-details') } },
+    { query: async () => null }, { query: async () => ({ rows: [] }) },
+    automationQueryable(db, { xids: ['101', '102'] }),
+    automationQueryable(db, { xids: ['101', ''] }),
+    automationQueryable(db, { xids: [101, 101] }),
+    automationQueryable(db, { isolation: ['repeatable read', 'repeatable read'] }),
+    automationQueryable(db, { isolation: ['read committed', 'serializable'] }),
+    Object.assign(automationQueryable(db, { xids: ['101', '102'] }), { isTransaction: true }),
+  ]
+  for (const queryable of cases) {
+    await assert.rejects(ledger.lockActiveForAutomation(queryable, input), error => {
+      assert.equal(error.code, 'READ_PLAN_TRANSACTION_UNAVAILABLE')
+      assert.equal(error.status, 500)
+      assert.equal(error.message, error.code)
+      return true
+    })
+    if (queryable?.statements) assert.equal(queryable.statements.some(({ sql }) => sql.includes('FROM')), false)
+  }
+})
+
+test('Automation source prerequisite requires exact tenant, explicit null workspace, actor and active source', async () => {
+  const { db, ledger, input } = await automationFixture()
+  const cases = [
+    [{ ...input, tenantId: 'another' }, 'READ_PLAN_ACTIVATION_NOT_FOUND'],
+    [{ ...input, tenantId: '' }, 'READ_PLAN_SCOPE_INVALID'],
+    [{ ...input, workspaceId: undefined }, 'READ_PLAN_SCOPE_INVALID'],
+    [{ tenantId: input.tenantId, actor: input.actor, actionId: input.actionId, systemId: input.systemId }, 'READ_PLAN_SCOPE_INVALID'],
+    [{ ...input, workspaceId: 'workspace-one' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [{ ...input, actor: undefined }, 'READ_PLAN_ACTOR_INVALID'],
+    [{ ...input, actor: 'other-owner' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [{ ...input, actionId: 'another-action' }, 'READ_PLAN_ACTIVATION_NOT_FOUND'],
+    [{ ...input, systemId: 'another-source' }, 'READ_PLAN_ACTIVATION_SOURCE_MISMATCH'],
+  ]
+  for (const [args, code] of cases) {
+    await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), args), error => error.code === code)
+  }
+  db.state[ACTIVATION_TABLE][0].status = 'disabled'
+  await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), input), /READ_PLAN_ACTIVATION_DISABLED/)
+  db.state[ACTIVATION_TABLE].length = 0
+  await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), input), /READ_PLAN_ACTIVATION_NOT_FOUND/)
+})
+
+test('Automation source prerequisite reuses binding and current private-owner source eligibility validators', async () => {
+  const readable = await automationFixture()
+  readable.db.state.integration_external_systems[0].role = 'bidirectional'
+  assert.deepEqual((await readable.ledger.lockActiveForAutomation(automationQueryable(readable.db), readable.input)).sourceValidation,
+    STATUS_FIXTURE_SOURCE)
+  const mutations = [
+    [state => { state.integration_external_systems[0].tenant_id = 'another' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].workspace_id = 'workspace-one' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].connection_id = null }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].config = { dataSourceId: 'conflicting-legacy-source' } }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].kind = 'erp:k3-wise-webapi' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].status = 'inactive' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].role = 'target' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].tenant_id = 'another' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].workspace_id = 'workspace-one' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].owner_id = 'another' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].scope_kind = 'workspace' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].is_active = false }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].deleted_at = new Date() }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state[SOURCE_REVISION_TABLE][0].type = 'mysql' }, 'READ_PLAN_VALIDATION_SOURCE_INELIGIBLE'],
+    [state => { state.integration_external_systems[0].validation_revision = '33333333-3333-4333-8333-333333333333' }, 'READ_PLAN_VALIDATION_SOURCE_CHANGED'],
+    [state => { state[SOURCE_REVISION_TABLE][0].validation_revision = '33333333-3333-4333-8333-333333333333' }, 'READ_PLAN_VALIDATION_SOURCE_CHANGED'],
+  ]
+  for (const [mutate, code] of mutations) {
+    const { db, ledger, input } = await automationFixture()
+    mutate(db.state)
+    await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), input), error => error.code === code)
+  }
+})
+
+test('Automation source prerequisite refuses corrupt or retired versions and never borrows a receipt actor', async () => {
+  const cases = [
+    [state => { state[VERSION_TABLE][0].config.readPlan.part.object = 'Changed' }, 'READ_PLAN_CONTENT_INVALID'],
+    [state => { state[VERSION_TABLE][0].config.readPlan.part.object = ' SYN_Part ' }, 'READ_PLAN_CONTENT_INVALID'],
+    [state => { state[VERSION_TABLE][0].status = 'retired' }, 'READ_PLAN_NOT_APPROVED'],
+    [state => { state[VERSION_TABLE][0].status = 'draft' }, 'READ_PLAN_NOT_APPROVED'],
+    [state => { state[VERSION_TABLE].length = 0 }, 'READ_PLAN_ACTIVATION_INVALID'],
+    [state => { state[VALIDATION_TABLE][0].actor = 'another' }, 'READ_PLAN_VALIDATION_ACTOR_MISMATCH'],
+    [state => { state[VALIDATION_TABLE][0].status = 'passed'; state[VALIDATION_TABLE][0].confirmed_at = null }, 'READ_PLAN_VALIDATION_REQUIRED'],
+    [state => { state[VALIDATION_TABLE][0].tenant_id = 'another' }, 'READ_PLAN_VALIDATION_INVALID'],
+    [state => { state[ACTIVATION_TABLE][0].validation_id = null }, 'READ_PLAN_VALIDATION_REQUIRED'],
+    [state => { state[ACTIVATION_TABLE][0].content_key = '0'.repeat(64) }, 'READ_PLAN_ACTIVATION_INVALID'],
+  ]
+  for (const [mutate, code] of cases) {
+    const { db, ledger, input } = await automationFixture()
+    mutate(db.state)
+    await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), input), error => error.code === code)
+  }
+})
+
+test('Automation source prerequisite preserves the activation frozen receipt despite new pending evidence or receipt expiry', async () => {
+  const { db, ledger, input, version, proof } = await automationFixture()
+  const pending = await ledger.beginValidation({ ...tenantScope, actor: input.actor,
+    id: version.id, source: STATUS_FIXTURE_SOURCE })
+  assert.notEqual(pending.validationId, proof.validationId)
+  const receipt = db.state[VALIDATION_TABLE].find(row => row.id === proof.validationId)
+  for (const key of ['begun_at', 'expires_at', 'finished_at', 'confirmed_at']) {
+    receipt[key] = new Date(new Date(receipt[key]).getTime() - 60 * 60 * 1000)
+  }
+  const loaded = await ledger.lockActiveForAutomation(automationQueryable(db), input)
+  assert.equal(loaded.activation.validationId, proof.validationId)
+  assert.equal(loaded.version.validationId, pending.validationId)
+  assert.deepEqual(loaded.sourceValidation, STATUS_FIXTURE_SOURCE)
+})
+
+test('Automation source prerequisite rejects every pointer identity drift after the unlocked hint', async () => {
+  const changes = [
+    { id: 'replacement-pointer' }, { tenant_id: 'another' }, { workspace_id: 'workspace-one' },
+    { action_id: 'another-action' }, { generation: 2 }, { status: 'disabled' },
+    { version_id: 'replacement-version' }, { validation_id: 'replacement-receipt' },
+    { system_id: 'replacement-source' }, { content_key: '0'.repeat(64) },
+  ]
+  for (const changed of changes) {
+    const { db, ledger, input } = await automationFixture()
+    const queryable = automationQueryable(db, { beforeSelect({ table, locked }) {
+      if (table === ACTIVATION_TABLE && locked) Object.assign(db.state[ACTIVATION_TABLE][0], changed)
+    } })
+    await assert.rejects(ledger.lockActiveForAutomation(queryable, input), /READ_PLAN_GENERATION_CONFLICT/)
+    assert.equal(queryable.statements.filter(({ sql }) => sql.endsWith(' FOR UPDATE')).length, 5)
+  }
+})
+
+test('Automation source prerequisite requires DB epochs on all three actual source rows without public DTO leakage', async () => {
+  for (const table of [VERSION_TABLE, VALIDATION_TABLE, ACTIVATION_TABLE]) {
+    for (const revision of [undefined, null, '', 'invalid', AUTOMATION_REVISION.toUpperCase()]) {
+      const { db, ledger, input } = await automationFixture()
+      db.state[table][0].automation_authority_revision = revision
+      await assert.rejects(ledger.lockActiveForAutomation(automationQueryable(db), input),
+        error => error.code === 'READ_PLAN_AUTOMATION_AUTHORITY_INVALID')
+    }
+  }
+  const { db, ledger, input } = await automationFixture()
+  const loaded = await ledger.lockActiveForAutomation(automationQueryable(db), input)
+  assert.equal(Object.hasOwn(loaded.version, 'automation_authority_revision'), false)
+  assert.equal(Object.hasOwn(loaded.activation, 'automation_authority_revision'), false)
+  db.state[VALIDATION_TABLE][0].counts.sampleCount = 999
+  assert.deepEqual(loaded.sourceAuthority.receipt.counts, STATUS_FIXTURE_COUNTS)
+})

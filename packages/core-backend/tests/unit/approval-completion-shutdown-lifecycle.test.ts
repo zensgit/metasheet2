@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { connect } from 'node:net'
+import type { Server, ServerResponse } from 'node:http'
 
 import { pool as pgPool } from '../../src/db/pg'
 import { MetaSheetServer } from '../../src/index'
@@ -201,6 +203,69 @@ describe('MetaSheetServer approval completion shutdown barrier', () => {
     await expect(server.stop()).rejects.toThrow('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     expect(detach).not.toHaveBeenCalled()
     expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  test('real TCP preconnections close without waiting for the client or header timeout', async () => {
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const lifecycle = server as unknown as {
+      httpServer: Server
+      closeHttpServerForShutdown(): Promise<void>
+    }
+    await new Promise<void>(resolve => lifecycle.httpServer.listen(0, '127.0.0.1', resolve))
+    const address = lifecycle.httpServer.address()
+    expect(address && typeof address !== 'string').toBe(true)
+    const accepted = new Promise<import('node:net').Socket>(resolve => lifecycle.httpServer.once('connection', resolve))
+    const client = connect((address as import('node:net').AddressInfo).port, '127.0.0.1')
+    let stop: Promise<void> | undefined
+    let finished = false
+    try {
+      await new Promise<void>(resolve => client.once('connect', resolve))
+      const serverSocket = await accepted
+      expect(serverSocket.bytesRead).toBe(0)
+      stop = lifecycle.closeHttpServerForShutdown().then(() => { finished = true })
+      await vi.waitFor(() => expect(finished).toBe(true), { timeout: 1000 })
+      expect(serverSocket.destroyed).toBe(true)
+    } finally {
+      client.destroy()
+      await (stop ?? lifecycle.closeHttpServerForShutdown())
+    }
+  })
+
+  test('real admitted HTTP work still drains naturally; shutdown does not destroy its socket', async () => {
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const lifecycle = server as unknown as {
+      httpServer: Server
+      closeHttpServerForShutdown(): Promise<void>
+    }
+    // Retain the actual constructor/connection bookkeeping; only use a synthetic handler.
+    lifecycle.httpServer.removeAllListeners('request')
+    let respond!: ServerResponse
+    const admitted = new Promise<void>(resolve => lifecycle.httpServer.on('request', (_request, response) => {
+      respond = response
+      resolve()
+    }))
+    await new Promise<void>(resolve => lifecycle.httpServer.listen(0, '127.0.0.1', resolve))
+    const address = lifecycle.httpServer.address() as import('node:net').AddressInfo
+    const client = connect(address.port, '127.0.0.1')
+    let stopped = false, received = ''
+    client.on('data', bytes => { received += bytes.toString('utf8') })
+    let stop: Promise<void> | undefined
+    try {
+      await new Promise<void>(resolve => client.once('connect', resolve))
+      client.write('GET /synthetic-drain HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+      await admitted
+      stop = lifecycle.closeHttpServerForShutdown().then(() => { stopped = true })
+      await new Promise(resolve => setTimeout(resolve, 25))
+      expect(stopped).toBe(false)
+      expect(client.destroyed).toBe(false)
+      respond.end('synthetic-work-completed')
+      await stop
+      await vi.waitFor(() => expect(received).toContain('synthetic-work-completed'))
+    } finally {
+      respond?.end()
+      client.destroy()
+      await (stop ?? lifecycle.closeHttpServerForShutdown())
+    }
   })
 
   test('the bounded wait clears its timer on success and rejects a real timeout', async () => {

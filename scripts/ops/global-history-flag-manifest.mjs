@@ -48,6 +48,17 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true is an additional gate for the private finite delegated YiDa CREATE mechanism, not a grant or host registration. Manual OWNER_SEND does not enable this path. The installed host and original shared worker reuse the existing native token/form sender and delivery ledger. Admission requires live owner/admin, finite immutable consent, current material/rule, real outbox lease/fence, permanent CREATE fence and atomic budget, then known COMMIT before an instance-local ticket; replay or unknown COMMIT never remints. Token/form IO rechecks this literal and the private execution authority. History/revoke remain available without external IO. Stop/cancel cannot recall remote effects, clear unresolved CREATE or refund spent executions. No UPDATE, unlimited schedules or blind CREATE retry; real token exchange, sending and deployment require separate authorization.',
+    source: 'packages/core-backend/src/integration/yida-automation-execution-authority.ts#YIDA_AUTOMATION_SEND_FLAG',
+  },
+  {
     key: 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
     type: 'boolean',
     activationValue: 'true',

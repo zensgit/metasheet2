@@ -91,7 +91,16 @@ function makeHarness(sheetBases: Record<string, string | null> = {}): Harness {
   chain.values = vi.fn((row: unknown) => { insertRows.push(row as Record<string, unknown>); return chain })
   chain.set = vi.fn((row: unknown) => { setCalls.push(row as Record<string, unknown>); return chain })
   chain.execute = vi.fn(async () => {
-    if (lastVerb.startsWith('insert')) return []
+    if (lastVerb.startsWith('insert')) {
+      // INSERT RETURNING * supplies the actual persisted JSONB and DB defaults.
+      // Keep the submitted columns independently captured for refusal checks.
+      const receipt = storedRow({ ...insertRows.at(-1),
+        created_at: '2026-10-01T00:00:00.123Z', updated_at: '2026-10-01T00:00:00.123Z' })
+      for (const key of ['trigger_config', 'action_config', 'conditions', 'actions']) {
+        if (typeof receipt[key] === 'string') receipt[key] = JSON.parse(receipt[key] as string)
+      }
+      return [receipt]
+    }
     return executeResults.shift() ?? []
   })
   chain.executeTakeFirst = vi.fn(async () => stored)
@@ -109,7 +118,7 @@ function makeHarness(sheetBases: Record<string, string | null> = {}): Harness {
   }
 }
 
-function storedRow(overrides: Record<string, unknown> = {}) {
+function storedRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: RULE_ID,
     sheet_id: SHEET_ID,
@@ -252,6 +261,7 @@ describe('createRule — refuses the shape, writes nothing', () => {
       actions: [{ type: 'delete_record', config: CROSS_BASE_TRIPLE }],
     }))
     expect(rule.trigger_type).toBe('record.deleted')
+    expect(rule.created_at).toBe('2026-10-01T00:00:00.123Z')
     expect(h.insertedRows()).toHaveLength(1)
   })
 

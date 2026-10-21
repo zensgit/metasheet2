@@ -34,8 +34,8 @@
             <el-checkbox
               class="meta-rule-editor__label"
               data-field="executionModeToggle"
-              :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
-              :disabled="requiresJobMode"
+              :model-value="draftHasReadAction ? draft.executionMode !== null && draft.executionMode !== 'legacy' : draft.executionMode === 'workflow_job_v1' || requiresJobMode"
+              :disabled="draftHasReadAction ? draft.executionMode === null || draft.executionMode === 'legacy' : requiresJobMode"
               @change="setExecutionMode($event === true)"
             >
               {{ automationLabel('editor.executionModeLabel', isZh) }}
@@ -110,8 +110,14 @@
 
           <!-- schedule.interval config -->
           <template v-if="draft.triggerType === 'schedule.interval'">
-            <label class="meta-rule-editor__label">{{ automationLabel('trigger.intervalMinutes', isZh) }}</label>
-            <el-input v-model.number="(draft.triggerConfig.intervalMinutes as number | undefined)" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
+            <label class="meta-rule-editor__label">{{ isZh ? '间隔（秒，最多三位小数）' : 'Interval (seconds, up to three decimal places)' }}</label>
+            <el-input v-model="intervalSecondsText" type="text" placeholder="60" data-field="intervalSeconds" />
+            <div v-if="legacyIntervalMinutes" class="meta-rule-editor__hint" data-field="legacyIntervalNotice">
+              {{ isZh ? '旧分钟配置尚未转换；保存后才转换为毫秒。保存不赋予源读取权限。' : 'Legacy minutes are not converted yet; save explicitly converts to milliseconds. Saving does not grant source access.' }}
+            </div>
+            <el-button v-if="intervalConfigConflict" size="small" data-action="replaceIntervalConfig" @click="replaceIntervalConfig">
+              {{ isZh ? '用输入的秒数替换旧配置' : 'Replace old configuration with entered seconds' }}
+            </el-button>
           </template>
 
           <!-- schedule.date_field (date reminder) config -->
@@ -422,6 +428,16 @@
             </div>
 
             <!-- update_record config -->
+            <div v-if="action.type === 'integration_read_preview'" class="meta-rule-editor__action-config" data-action-config="integration_read_preview">
+              <div class="meta-rule-editor__hint" data-field="automationReadPolicy">{{ automationReadOwnerHint(isZh) }}</div>
+              <div>{{ isZh ? '固定操作：备料差异只读预览' : 'Fixed operation: preparation diff read preview' }}</div>
+              <el-checkbox :model-value="action.config.allowManual === true" @change="action.config.allowManual = $event === true" data-field="automationReadAllowManual">
+                {{ isZh ? '允许负责人授权后手动执行' : 'Allow manual execution after owner authorization' }}
+              </el-checkbox>
+              <el-button v-if="!isAutomationReadConfig(action.config)" data-action="reset-read-config" @click="resetReadConfig(action)">
+                {{ isZh ? '重置为固定只读配置（手动执行关闭）' : 'Reset fixed read configuration (manual off)' }}
+              </el-button>
+            </div>
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
                 <el-select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)">
@@ -1679,6 +1695,7 @@
             size="small"
             class="meta-rule-editor__btn"
             data-action="add-action"
+            :disabled="draftHasReadAction"
             @click="addAction"
           >{{ automationLabel('editor.addAction', isZh) }}</el-button>
         </section>
@@ -1686,6 +1703,9 @@
         <!-- G-B2-22: why Save is disabled, in place of a silent grey button. Each reason is its
              own clickable line — clicking scrolls the editor to the control it's about. A reason
              with no anchor (honestly) does nothing on click instead of pointing somewhere wrong. -->
+        <el-button v-if="persistedReadRepresentationMismatch && !readRepresentationRepairAcknowledged" data-action="repair-read-representation" @click="readRepresentationRepairAcknowledged = true">
+          {{ isZh ? '显式以当前动作列表替换不一致的旧版配置' : 'Explicitly replace inconsistent legacy configuration with the current action list' }}
+        </el-button>
         <div v-if="saveBlockReasons.length > 0" class="meta-rule-editor__save-block-alert" data-field="saveBlockReasons">
           <div class="meta-rule-editor__save-block-title">{{ automationLabel('editor.saveBlockedTitle', isZh) }}</div>
           <ul class="meta-rule-editor__save-block-list">
@@ -1707,6 +1727,7 @@
     <template #footer>
       <div class="meta-rule-editor__footer">
         <div class="meta-rule-editor__test-run-feedback">
+          <div v-if="testRunBlockedByReadAction" class="meta-rule-editor__hint" data-field="automationReadTestRunHint">{{ automationReadOwnerHint(isZh) }}</div>
           <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
             {{ automationLabel('testRun.warning', isZh) }}
           </div>
@@ -1734,7 +1755,7 @@
         </el-button>
         <el-button
           class="meta-rule-editor__btn"
-          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running' || testRunBlockedBySavedRuleDirty"
+          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running' || testRunBlockedBySavedRuleDirty || testRunBlockedByReadAction"
           @click="onTestRun"
           data-action="test"
         >
@@ -1751,6 +1772,14 @@ import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
+import {
+  AUTOMATION_READ_OPERATION,
+  automationReadAuthoringProblems,
+  automationReadOwnerHint,
+  buildAutomationReadConfig,
+  containsAutomationReadAction,
+  isAutomationReadConfig,
+} from '../automationReadAuthoring'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { getTemplate } from '../../approvals/api'
 import ApprovalFwbMappingEditor from '../../approvals/components/ApprovalFwbMappingEditor.vue'
@@ -2285,6 +2314,7 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   // so it is a first-class selectable action — both for new rules and to keep existing lock_record rules
   // editable (it must appear in SUPPORTED so an existing rule's option isn't dropped to empty).
   'lock_record',
+  'integration_read_preview',
 ]
 
 // A6-3-2a: BRANCH_AUTHORABLE_ACTION_TYPES (the v1 in-branch action subset) is imported from
@@ -3093,6 +3123,7 @@ function createDraftAction(
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'integration_read_preview') return { ...config }
   if (type === 'condition_branch') {
     const reason = conditionBranchUnsupportedReason(config)
     if (reason) {
@@ -3280,6 +3311,42 @@ function draftFromRule(rule: AutomationRule): Draft {
 }
 
 const draft = ref<Draft>(emptyDraft())
+const readRepresentationRepairAcknowledged = ref(false)
+const draftHasReadAction = computed(() => containsAutomationReadAction(draft.value.actions, true))
+const testRunBlockedByReadAction = computed(() => draftHasReadAction.value || containsAutomationReadAction(props.rule))
+const persistedReadRepresentationMismatch = computed(() => props.rule
+  ? automationReadAuthoringProblems({ ...props.rule, actions: props.rule.actions ?? null, executionMode: props.rule.executionMode ?? null }).includes('representation')
+    || (props.rule.actionType === 'integration_read_preview' && !isAutomationReadConfig(props.rule.actionConfig))
+  : false)
+const readAuthoringProblems = computed(() => {
+  const actions = draft.value.actions.map((action) => {
+    // Track editable read data fields without executing unknown config accessors.
+    if (action.type === 'integration_read_preview') {
+      Reflect.ownKeys(action.config)
+      for (const key of ['operation', 'allowManual']) {
+        const descriptor = Object.getOwnPropertyDescriptor(action.config, key)
+        if (descriptor && Object.hasOwn(descriptor, 'value')) Reflect.get(action.config, key)
+      }
+    }
+    return { type: action.type, config: action.config }
+  })
+  const problems = automationReadAuthoringProblems({
+    actionType: actions[0]?.type,
+    actionConfig: actions[0]?.config,
+    actions,
+    triggerType: draft.value.triggerType,
+    executionMode: draft.value.executionMode,
+  })
+  if (persistedReadRepresentationMismatch.value && !readRepresentationRepairAcknowledged.value
+    && !problems.includes('representation')) problems.push('representation')
+  return problems
+})
+
+function resetReadConfig(action: DraftAction): void {
+  action.config = { operation: AUTOMATION_READ_OPERATION, allowManual: false }
+  action.originalConfig = null
+  readRepresentationRepairAcknowledged.value = true
+}
 // B1-07: serialized snapshot taken when the editor opens — the dirty check for close-path
 // discard protection. JSON.stringify is stable here: the draft is rebuilt from the same
 // builders on every open, so key order is deterministic.
@@ -3304,7 +3371,7 @@ const requiresJobMode = computed(() =>
 // the user manually toggles it, "open" == requiresJobMode; a manual toggle then takes over.
 const advancedManualOpen = ref<string[] | null>(null)
 const advancedSectionOpen = computed<string[]>({
-  get: () => advancedManualOpen.value ?? (requiresJobMode.value ? ['advanced'] : []),
+  get: () => advancedManualOpen.value ?? (requiresJobMode.value || (draftHasReadAction.value && draft.value.executionMode !== null && draft.value.executionMode !== 'legacy') ? ['advanced'] : []),
   set: (value) => { advancedManualOpen.value = value },
 })
 const hasDeleteRecordAction = computed(() => draft.value.actions.some((a) => a.type === 'delete_record'))
@@ -3458,6 +3525,10 @@ function removeParallelBranch(action: DraftAction, index: number): void {
 }
 
 function setExecutionMode(checked: boolean): void {
+  if (draftHasReadAction.value) {
+    if (!checked) draft.value.executionMode = null
+    return
+  }
   // A6-1 opt-in: checkbox → the rule's persistent WorkflowJob mode (off = legacy/null).
   // A6-2b/A6-3-2a: cannot turn it off while a required-job-mode action is present.
   if (requiresJobMode.value) {
@@ -3552,6 +3623,7 @@ watch(
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
       cronPreset.value = cronPresetForDraft(draft.value)
+      readRepresentationRepairAcknowledged.value = false
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
@@ -3891,6 +3963,7 @@ function countAuthoredFieldPairs(pairs: unknown): number {
 // uses above, so the summary and the save-block reasons can never silently disagree about counts.
 function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot {
   const snapshot: ActionSummarySnapshot = { type: action.type }
+  if (action.type === 'integration_read_preview') snapshot.integrationReadPreview = { allowManual: action.config.allowManual }
   if (action.type === 'update_record') {
     const pairs = (action.config.fieldUpdates as FieldPair[] | undefined) ?? []
     snapshot.updateRecord = {
@@ -4016,9 +4089,45 @@ const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
 // derived from it below so the button's disabled state and the reasons shown to the author can
 // never disagree. See automationSaveBlockReasons.ts for the aggregation itself; every condition
 // here is the exact condition the old canSave silently checked (kept in the same order).
+function intervalTextToMs(text: string, factor = 1000): number | null {
+  const match = /^(\d{1,10})(?:\.(\d{1,3}))?$/.exec(text)
+  if (!match) return null
+  const value = BigInt(match[1]) * BigInt(factor)
+    + BigInt((match[2] ?? '').padEnd(3, '0')) * BigInt(factor) / 1000n
+  return value >= 1000n && value <= 2147483647n ? Number(value) : null
+}
+function intervalMsToText(value: number): string {
+  const whole = Math.floor(value / 1000), remainder = value % 1000
+  return remainder ? `${whole}.${String(remainder).padStart(3, '0').replace(/0+$/, '')}` : String(whole)
+}
+const legacyIntervalMinutes = computed(() => Object.hasOwn(draft.value.triggerConfig, 'intervalMinutes')
+  && !Object.hasOwn(draft.value.triggerConfig, 'intervalMs'))
+const intervalSecondsText = computed<string>({
+  get() {
+    const config = draft.value.triggerConfig
+    if (typeof config.intervalSecondsText === 'string') return config.intervalSecondsText
+    if (Object.hasOwn(config, 'intervalMs') && Object.hasOwn(config, 'intervalMinutes')) return ''
+    if (typeof config.intervalMs === 'number' && Number.isSafeInteger(config.intervalMs)
+      && config.intervalMs >= 1000 && config.intervalMs <= 2147483647) return intervalMsToText(config.intervalMs)
+    const legacy = legacyIntervalMinutes.value ? intervalTextToMs(String(config.intervalMinutes), 60000) : null
+    return legacy === null ? '' : intervalMsToText(legacy)
+  },
+  set(value) { draft.value.triggerConfig.intervalSecondsText = value },
+})
+const intervalConfigConflict = computed(() => {
+  const config = draft.value.triggerConfig
+  return (Object.hasOwn(config, 'intervalMs') && Object.hasOwn(config, 'intervalMinutes'))
+    || (draftHasReadAction.value && Object.keys(config).some(key =>
+      !['intervalMs', 'intervalMinutes', 'intervalSecondsText'].includes(key)))
+})
+function replaceIntervalConfig(): void {
+  draft.value.triggerConfig = { intervalSecondsText: intervalSecondsText.value }
+}
+
 const saveBlockReasons = computed<SaveBlockReason[]>(() => {
   const secret = typeof draft.value.triggerConfig.secret === 'string' ? draft.value.triggerConfig.secret.trim() : ''
-  return computeSaveBlockReasons({
+  const reasons = computeSaveBlockReasons({
+    automationReadProblems: readAuthoringProblems.value,
     isZh: isZh.value,
     name: draft.value.name,
     actionsCount: draft.value.actions.length,
@@ -4046,6 +4155,13 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     // #5742: client mirror of the backend select-option check on the approval-result writeback.
     startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
   })
+  if (draft.value.triggerType === 'schedule.interval'
+    && (intervalConfigConflict.value || intervalTextToMs(intervalSecondsText.value) === null)) {
+    reasons.push({ key: 'interval-config', anchor: '[data-field="intervalSeconds"]',
+      message: isZh.value ? '间隔须为 1–2147483.647 秒，最多三位小数；冲突配置须显式替换。'
+        : 'Interval must be 1–2147483.647 seconds, with up to three decimal places; replace conflicting configuration explicitly.' })
+  }
+  return reasons
 })
 
 const canSave = computed(() => saveBlockReasons.value.length === 0)
@@ -4099,6 +4215,7 @@ function removeConditionNode(path: ConditionPath) {
 }
 
 function addAction() {
+  if (draftHasReadAction.value) return
   if (draft.value.actions.length >= 3) return
   draft.value.actions.push(createDraftAction('update_record'))
 }
@@ -4804,6 +4921,8 @@ function appendPersonTemplateToken(
 
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
+    case 'integration_read_preview':
+      return { operation: AUTOMATION_READ_OPERATION, allowManual: false }
     case 'condition_branch':
       return { branches: [createEmptyBranchDraft(1)], defaultBranch: null, branchUnsupportedReason: null, branchOriginal: null }
     case 'parallel_branch':
@@ -5319,8 +5438,16 @@ function buildActionConfigFromOriginal(
 }
 
 function buildPayload(): Partial<AutomationRule> {
+  if (readAuthoringProblems.value.length) throw new Error(automationReadOwnerHint(isZh.value))
   const d = draft.value
   const triggerConfig = { ...d.triggerConfig }
+  if (d.triggerType === 'schedule.interval') {
+    const intervalMs = intervalTextToMs(intervalSecondsText.value)
+    if (intervalConfigConflict.value || intervalMs === null) throw new Error('Invalid interval configuration')
+    delete triggerConfig.intervalMinutes
+    delete triggerConfig.intervalSecondsText
+    triggerConfig.intervalMs = intervalMs
+  }
   if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
     triggerConfig.cron = cronPreset.value
   }
@@ -5359,6 +5486,7 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.secret = typeof triggerConfig.secret === 'string' ? triggerConfig.secret.trim() : ''
   }
   const actions = d.actions.map((action) => {
+    if (action.type === 'integration_read_preview') return { type: action.type, config: buildAutomationReadConfig(action.config) }
     if (action.type === 'condition_branch') {
       // A6-3-2a point #3: read-only (unsupported loaded shape) re-emits the preserved original
       // verbatim — never flattened. (canSave blocks save here anyway; this is the defensive floor.)
@@ -5688,6 +5816,7 @@ async function confirmDingTalkTestRun(): Promise<boolean> {
 }
 
 async function onTestRun(): Promise<void> {
+  if (testRunBlockedByReadAction.value) return
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
   if (testRunBlockedBySavedRuleDirty.value) return
   if (savedRuleHasDingTalkActions.value && !(await confirmDingTalkTestRun())) return

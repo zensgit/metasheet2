@@ -238,6 +238,9 @@ test('constructor denies actor impersonation and missing explicit workspace', as
   assert.throws(() => h.createRunner({ context: { ...context(), actorId: 'synthetic-admin' } }), { code: 'YIDA_RUN_INVALID_INPUT' })
   const absent = context(); delete absent.workspaceId
   assert.throws(() => h.createRunner({ context: absent }), { code: 'YIDA_RUN_INVALID_INPUT' })
+  // All ordinary owner dependencies are valid here. A second failure cannot
+  // mask this assertion: the public factory must reject the private override.
+  assert.throws(() => h.createRunner({ terminal: {} }), { code: 'YIDA_RUN_INVALID_INPUT' })
   assert.equal(h.snapshots.length + h.db.events.length, 0)
 })
 
@@ -271,6 +274,35 @@ test('expired grants and clock rollback fail closed', async (t) => {
   h.resolver = async () => { h.now -= 1; return copy(h.snapshot) }
   await rejects(h.runner.run(request()), 'CLOCK')
   assert.equal(h.businessFetches.length, 0)
+})
+
+test('wall-clock rollback after token exchange keeps the prepared ledger and never claims or sends', async (t) => {
+  const h = await harness(t)
+  h.now = 2000
+  const tokenFetch = h.tokenFetch
+  h.tokenFetch = async (...args) => {
+    const response = await tokenFetch(...args)
+    h.now -= 1352
+    return response
+  }
+  await rejects(h.runner.run(request()), 'CLOCK')
+  assert.equal(h.tokenFetches.length, 1)
+  assert.equal(h.businessFetches.length, 0)
+  assert.equal(h.db.rows()[0].status, 'prepared')
+  assert.deepEqual(h.db.rows(AUDIT).map(row => row.event), ['prepare'])
+  assert.equal(h.db.events.includes('commit:claim'), false)
+})
+
+test('wall-clock rollback after claim preserves an unknown outcome without sending or acknowledging', async (t) => {
+  const h = await harness(t)
+  h.now = 2000
+  h.db.afterCommit = async event => { if (event === 'claim') h.now -= 1352 }
+  safeResult(await h.runner.run(request()), 'outcome_unknown', false)
+  assert.equal(h.tokenFetches.length, 1)
+  assert.equal(h.businessFetches.length, 0)
+  assert.equal(h.db.rows()[0].status, 'outcome_unknown')
+  assert.deepEqual(h.db.rows(AUDIT).map(row => row.event), ['prepare', 'claim', 'unknown'])
+  assert.equal(h.db.events.includes('commit:acknowledgement'), false)
 })
 
 test('an accidentally async rejecting clock fails without leaking an unhandled private rejection', async (t) => {

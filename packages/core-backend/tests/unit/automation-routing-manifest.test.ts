@@ -5,6 +5,7 @@
  * the startup assertion catches BOTH failure directions with the exact offending keys named.
  */
 import { describe, expect, test } from 'vitest'
+import { YIDA_AUTOMATION_CONSUMER, YIDA_AUTOMATION_ROUTING_CANDIDATE } from '../../src/integration/yida-automation-outbox'
 
 import {
   APPROVAL_COMPLETION_CONSUMERS,
@@ -18,10 +19,19 @@ import {
   ROUTING_MANIFEST_V1,
   ROUTING_MANIFEST_V2,
   ROUTING_MANIFEST_V3,
+  ROUTING_MANIFEST_V4,
   SUPPORTED_MANIFEST_VERSIONS,
 } from '../../src/multitable/automation-routing-manifest'
 
 const registryOf = (...keys: string[]) => ({ keys: () => [...keys] })
+test('the private v5 candidate requires its actual consumer and never changes the default v4 fan-out', () => {
+  expect(CURRENT_ROUTING_MANIFEST).toBe(ROUTING_MANIFEST_V4)
+  const legacy = manifestConsumerKeys(CURRENT_ROUTING_MANIFEST)
+  expect(legacy).not.toContain(YIDA_AUTOMATION_CONSUMER)
+  expect(() => assertManifestCompleteness(registryOf(...legacy), YIDA_AUTOMATION_ROUTING_CANDIDATE)).toThrow(/NO registered adapter/)
+  expect(() => assertManifestCompleteness(registryOf(...legacy, YIDA_AUTOMATION_CONSUMER), YIDA_AUTOMATION_ROUTING_CANDIDATE)).not.toThrow()
+  expect(() => assertManifestCompleteness(registryOf(...legacy, YIDA_AUTOMATION_CONSUMER), CURRENT_ROUTING_MANIFEST)).toThrow(/NOT routed/)
+})
 const FULL_V1_KEYS = [
   'approval-bridge',
   'approval-trigger',
@@ -34,11 +44,12 @@ const FULL_V1_KEYS = [
 const FULL_V2_KEYS = [...FULL_V1_KEYS, 'multitable-record-approval']
 // v3 = v2 + the DingTalk approval-todo one-way mirror (plan B).
 const FULL_V3_KEYS = [...FULL_V2_KEYS, 'dingtalk-todo-mirror']
+const FULL_V4_KEYS = [...FULL_V3_KEYS, 'integration-read-preview']
 
 describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => {
   test('v1 routes exactly the ratified event families to their FULL consumer sets', () => {
     expect(ROUTING_MANIFEST_V1.version).toBe(1)
-    // EXPLICIT v1 manifest argument: the DEFAULT manifest is now v2, and an in-flight row stamped v1 must
+    // EXPLICIT v1 manifest argument: the DEFAULT manifest is now v4, and an in-flight row stamped v1 must
     // keep its v1 fan-out forever (#4203 manifest rule). Passing the default here would silently retire v1.
     for (const t of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       expect(expandConsumerKeysForEvent(t, ROUTING_MANIFEST_V1)).toEqual(['approval-bridge', 'approval-trigger', 'approval-projection'])
@@ -96,8 +107,9 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
   test('completeness: a registry serving exactly the manifest keys passes', () => {
     expect(() => assertManifestCompleteness(registryOf(...FULL_V1_KEYS), ROUTING_MANIFEST_V1)).not.toThrow()
     expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS), ROUTING_MANIFEST_V2)).not.toThrow()
-    // no explicit manifest = the CURRENT one (v3)
-    expect(() => assertManifestCompleteness(registryOf(...FULL_V3_KEYS))).not.toThrow()
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V3_KEYS), ROUTING_MANIFEST_V3)).not.toThrow()
+    // no explicit manifest = the CURRENT one (v4)
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS))).not.toThrow()
   })
 
   test('completeness direction 1: a manifest key with NO adapter throws naming that key (rows would park forever)', () => {
@@ -118,7 +130,7 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
 describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-level submit-for-approval)', () => {
   test('v2 adds multitable-record-approval to the FOUR completion families ONLY (frozen at that shape)', () => {
     expect(ROUTING_MANIFEST_V2.version).toBe(2)
-    // v2 is no longer CURRENT (v3 is) - but an in-flight v2 row must keep the v2 fan-out FOREVER, so
+    // v2 is no longer CURRENT (v4 is) - but an in-flight v2 row must keep the v2 fan-out FOREVER, so
     // every expectation here names the manifest explicitly instead of riding the default.
     for (const t of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       expect(expandConsumerKeysForEvent(t, ROUTING_MANIFEST_V2)).toEqual([
@@ -154,7 +166,7 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
     for (const arr of Object.values(ROUTING_MANIFEST_V2.routes)) expect(Object.isFrozen(arr)).toBe(true)
     expect(Object.isFrozen(APPROVAL_COMPLETION_CONSUMERS_V2)).toBe(true)
     expect(() => (APPROVAL_COMPLETION_CONSUMERS_V2 as string[]).push('x')).toThrow(TypeError)
-    expect([...SUPPORTED_MANIFEST_VERSIONS].sort()).toEqual([1, 2, 3])
+    expect([...SUPPORTED_MANIFEST_VERSIONS].sort()).toEqual([1, 2, 3, 4, 5])
   })
 
   test('SUPPORTED_MANIFEST_VERSIONS is ENFORCED, not prose: an undeclared manifest version fails the boot assertion', () => {
@@ -162,14 +174,15 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
     // dispatcher never compares manifest_version — the constant was read by nothing in src. It is now the
     // boot gate for the manifest THIS BUILD ships: stamping outbox rows with a version the fleet does not
     // declare must fail at startup, not at delivery time.
-    const v4 = { version: 4, routes: ROUTING_MANIFEST_V3.routes }
-    expect(() => assertManifestCompleteness(registryOf(...FULL_V3_KEYS), v4)).toThrow(
-      /manifest v4 is not in SUPPORTED_MANIFEST_VERSIONS/,
+    const v6 = { version: 6, routes: ROUTING_MANIFEST_V4.routes }
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS), v6)).toThrow(
+      /manifest v6 is not in SUPPORTED_MANIFEST_VERSIONS/,
     )
-    // all three DECLARED versions still pass with their own complete registries
+    // all four DECLARED versions still pass with their own complete registries
     expect(() => assertManifestCompleteness(registryOf(...FULL_V1_KEYS), ROUTING_MANIFEST_V1)).not.toThrow()
     expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS), ROUTING_MANIFEST_V2)).not.toThrow()
     expect(() => assertManifestCompleteness(registryOf(...FULL_V3_KEYS), ROUTING_MANIFEST_V3)).not.toThrow()
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS), ROUTING_MANIFEST_V4)).not.toThrow()
     // ...and the manifest this build actually ships is one of them
     expect(SUPPORTED_MANIFEST_VERSIONS.has(CURRENT_ROUTING_MANIFEST.version)).toBe(true)
   })
@@ -184,11 +197,10 @@ describe('P2 S3 — routing manifest v2 (multitable x approval phase 2: record-l
 })
 
 describe('P2 S3 - routing manifest v3 (DingTalk approval-todo one-way mirror, plan B)', () => {
-  test('v3 is the CURRENT manifest and adds dingtalk-todo-mirror to the four completion families AND task_created', () => {
+  test('v3 adds dingtalk-todo-mirror to the four completion families AND task_created', () => {
     expect(ROUTING_MANIFEST_V3.version).toBe(3)
-    expect(CURRENT_ROUTING_MANIFEST).toBe(ROUTING_MANIFEST_V3)
     for (const t of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
-      expect(expandConsumerKeysForEvent(t)).toEqual([
+      expect(expandConsumerKeysForEvent(t, ROUTING_MANIFEST_V3)).toEqual([
         'approval-bridge',
         'approval-trigger',
         'approval-projection',
@@ -197,15 +209,15 @@ describe('P2 S3 - routing manifest v3 (DingTalk approval-todo one-way mirror, pl
       ])
     }
     // task_created gains its SECOND consumer - the one route shape v1/v2 never had.
-    expect(expandConsumerKeysForEvent('approval.task_created')).toEqual(['approval-task-trigger', 'dingtalk-todo-mirror'])
+    expect(expandConsumerKeysForEvent('approval.task_created', ROUTING_MANIFEST_V3)).toEqual(['approval-task-trigger', 'dingtalk-todo-mirror'])
     // every record/form family is byte-identical to v1 - the delta is the approval fan-out, nothing else
     for (const t of ['multitable.record.created', 'multitable.record.updated', 'multitable.record.deleted']) {
-      expect(expandConsumerKeysForEvent(t)).toEqual(['automation-record-trigger', 'webhook-event-bridge'])
+      expect(expandConsumerKeysForEvent(t, ROUTING_MANIFEST_V3)).toEqual(['automation-record-trigger', 'webhook-event-bridge'])
     }
-    expect(expandConsumerKeysForEvent('multitable.form.submitted')).toEqual(['automation-record-trigger'])
+    expect(expandConsumerKeysForEvent('multitable.form.submitted', ROUTING_MANIFEST_V3)).toEqual(['automation-record-trigger'])
     // EXACT event-family set: v3 adds NO new family (a new route reds here even if it reused a key)
     expect(Object.keys(ROUTING_MANIFEST_V3.routes).sort()).toEqual(Object.keys(ROUTING_MANIFEST_V1.routes).sort())
-    expect([...manifestConsumerKeys()].sort()).toEqual([...FULL_V3_KEYS].sort())
+    expect([...manifestConsumerKeys(ROUTING_MANIFEST_V3)].sort()).toEqual([...FULL_V3_KEYS].sort())
   })
 
   test('v1 and v2 are UNCHANGED by v3 (an in-flight row keeps the fan-out it was enqueued with)', () => {
@@ -232,8 +244,36 @@ describe('P2 S3 - routing manifest v3 (DingTalk approval-todo one-way mirror, pl
   test('completeness: the v3 universe REQUIRES an adapter for dingtalk-todo-mirror (a v2-only worker reds)', () => {
     // A worker that registers only the seven v2 adapters would park every v3 mirror row - the boot
     // assertion must refuse that, naming the key.
-    expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS))).toThrow(
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V2_KEYS), ROUTING_MANIFEST_V3)).toThrow(
       /NO registered adapter.*dingtalk-todo-mirror/,
     )
+  })
+})
+
+describe('SA06P — routing manifest v4 (private integration read request)', () => {
+  test('v4 adds exactly the sole read consumer route and preserves every older fan-out', () => {
+    expect(CURRENT_ROUTING_MANIFEST).toBe(ROUTING_MANIFEST_V4)
+    expect(ROUTING_MANIFEST_V4.version).toBe(4)
+    expect(expandConsumerKeysForEvent('integration.read-preview.requested')).toEqual(['integration-read-preview'])
+    expect(Object.keys(ROUTING_MANIFEST_V4.routes).sort()).toEqual([
+      ...Object.keys(ROUTING_MANIFEST_V3.routes), 'integration.read-preview.requested',
+    ].sort())
+    expect(manifestConsumerKeys().sort()).toEqual([...FULL_V4_KEYS].sort())
+    for (const [event, consumers] of Object.entries(ROUTING_MANIFEST_V3.routes)) {
+      expect(ROUTING_MANIFEST_V4.routes[event]).toBe(consumers)
+    }
+    for (const previous of [ROUTING_MANIFEST_V1, ROUTING_MANIFEST_V2, ROUTING_MANIFEST_V3]) {
+      expect(expandConsumerKeysForEvent('integration.read-preview.requested', previous)).toBeUndefined()
+      expect(manifestConsumerKeys(previous)).not.toContain('integration-read-preview')
+    }
+  })
+
+  test('v4 is deep-frozen and cannot silently lose its only read recipient', () => {
+    expect(Object.isFrozen(ROUTING_MANIFEST_V4)).toBe(true)
+    expect(Object.isFrozen(ROUTING_MANIFEST_V4.routes)).toBe(true)
+    for (const keys of Object.values(ROUTING_MANIFEST_V4.routes)) expect(Object.isFrozen(keys)).toBe(true)
+    expect(() => (ROUTING_MANIFEST_V4.routes['integration.read-preview.requested'] as string[]).pop()).toThrow(TypeError)
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V3_KEYS))).toThrow(/NO registered adapter.*integration-read-preview/)
+    expect(() => assertManifestCompleteness(registryOf(...FULL_V4_KEYS))).not.toThrow()
   })
 })

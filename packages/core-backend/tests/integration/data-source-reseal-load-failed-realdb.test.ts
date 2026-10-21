@@ -566,7 +566,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       'data_sources', 'directory_integrations', 'dingtalk_group_destinations', 'integration_external_systems',
       'attendance_integrations', 'system_configs', 'integration_yida_credential_materials',
       'integration_yida_draft_targets', 'integration_yida_draft_operations', 'integration_yida_approved_target',
-      'integration_yida_send_approvals',
+      'integration_yida_send_approvals', 'integration_yida_auto_execution_snapshots',
     ]
     try {
       // data_sources: the same real migrations beforeAll runs (tenant_id / scope_kind come from the
@@ -593,7 +593,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       //   system_configs               src/db/migrations/z20251231_create_system_configs.ts (value text)
       await setupPool.query(`CREATE TABLE IF NOT EXISTS system_configs (
         id uuid PRIMARY KEY, key varchar(255) NOT NULL UNIQUE, value text NOT NULL, is_encrypted boolean NOT NULL DEFAULT false)`)
-      // YiDa probe-only column subsets from SQL migrations 092/093/094/095. Their encrypted columns
+      // YiDa probe-only column subsets from SQL migrations 092/093/094/095/099. Their encrypted columns
       // retain their real names, TEXT types and nullability; the approved target also retains its
       // permanent single-slot primary key / CHECK, so its two material variants cannot coexist.
       await setupPool.query(`CREATE TABLE integration_yida_credential_materials (
@@ -606,6 +606,11 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         slot INTEGER PRIMARY KEY CHECK (slot = 1), evidence_encrypted TEXT NOT NULL)`)
       await setupPool.query(`CREATE TABLE integration_yida_send_approvals (
         grant_id TEXT PRIMARY KEY, snapshot_encrypted TEXT NOT NULL)`)
+      // Retain 099's encrypted-column CHECK; this probe fixture does not exercise its business
+      // foreign keys or immutable/identity triggers (those have separate migration/runtime tests).
+      await setupPool.query(`CREATE TABLE integration_yida_auto_execution_snapshots (
+        admission_id TEXT PRIMARY KEY,
+        snapshot_encrypted TEXT NOT NULL CHECK (snapshot_encrypted LIKE 'enc:%' AND length(snapshot_encrypted)>4))`)
 
       const seedDataSource = async (id: string, credentials: Record<string, string>, active = true, deleted = false) => {
         await setupPool.query(
@@ -683,6 +688,11 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
            ('probe-yida-approval-a', $1), ('probe-yida-approval-b', $2)`,
         [cur('yida-approval'), prev('yida-approval')],
       )
+      await setupPool.query(
+        `INSERT INTO integration_yida_auto_execution_snapshots (admission_id, snapshot_encrypted) VALUES
+           ('probe-yida-execution-a', $1), ('probe-yida-execution-b', $2)`,
+        [cur('yida-auto-execution'), prev('yida-auto-execution')],
+      )
 
       const fingerprint = async () => {
         const parts: string[] = []
@@ -727,9 +737,10 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         ['integration_yida_draft_operations.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
         ['integration_yida_approved_target.evidence_encrypted', 'ok', 1, 1, approvedTargetUndecryptable, 0, null],
         ['integration_yida_send_approvals.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
+        ['integration_yida_auto_execution_snapshots.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
       ])
       expect(report.material.status).toBe('ok')
-      expect(report.totals).toMatchObject({ encrypted: 31, undecryptable: 15 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+      expect(report.totals).toMatchObject({ encrypted: 33, undecryptable: 16 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
       // one existence precheck per table + one SELECT per field, every one a SELECT, none rejected
       expect(statements).toHaveLength(TABLES.length + report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
@@ -749,7 +760,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       expect(rejected).toEqual([])
       expect(statements).toHaveLength(TABLES.length + report.stores.length - 2)
       expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
-      expect(degraded.totals).toMatchObject({ encrypted: 27, undecryptable: 13 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
+      expect(degraded.totals).toMatchObject({ encrypted: 29, undecryptable: 14 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
 
       const serialized = JSON.stringify([report, degraded])
       for (const secret of [...sealed, SECRET.secondPassword, SECRET.username, 'MARKER', CURRENT.key, PREVIOUS.key]) {

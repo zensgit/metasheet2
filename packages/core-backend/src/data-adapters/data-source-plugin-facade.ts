@@ -799,7 +799,7 @@ export function createDataSourcePluginFacade(
       assertValidationPair(manager, dataSourceId, adapter, validation)
       if (detail === 'columns') {
         // Native getColumns still runs through the adapter's guarded query path:
-        // Owner/read-only/revision checks remain at this facade seam.
+        // owner/read-only/revision checks and per-IO execution checkpoints remain.
         // Do not cache authority or invent empty constraints to emulate full detail.
         return {
           name: object,

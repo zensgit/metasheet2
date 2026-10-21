@@ -675,13 +675,20 @@ export class SafetyGuard {
   }
 
   /**
-   * Stop the service
+   * Stop token maintenance without discarding pending confirmations.
    */
-  destroy(): void {
+  stopMaintenance(): void {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+  }
+
+  /**
+   * Stop the service and reset pending confirmations.
+   */
+  destroy(): void {
+    this.stopMaintenance();
     this.pendingConfirmations.clear();
     logger.info('SafetyGuard destroyed', { context: 'SafetyGuard' });
   }
@@ -714,6 +721,11 @@ export class SafetyGuard {
 
 // Singleton instance
 let safetyGuardInstance: SafetyGuard | null = null;
+
+/** Stop maintenance only if the singleton has already been initialized. */
+export function stopSafetyGuardMaintenance(): void {
+  safetyGuardInstance?.stopMaintenance();
+}
 
 export function getSafetyGuard(): SafetyGuard {
   if (!safetyGuardInstance) {

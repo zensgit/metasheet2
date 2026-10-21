@@ -55,6 +55,7 @@ export class AutomationLogService {
         // A5 retry provenance — plain identifiers, NOT redacted (an execution id / a user id).
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
+        integration_read: persisted.integrationReadJsonb,
       })
       .execute()
   }
@@ -78,15 +79,16 @@ export class AutomationLogService {
    * PostgreSQL array literal).
    */
   async recordWithQuery(query: ExecutionLogQueryFn, execution: AutomationExecution): Promise<void> {
+    const integrationRead = closedIntegrationRead(execution.integrationRead)
     await query(
       `INSERT INTO multitable_automation_executions (
          id, rule_id, triggered_by, triggered_at, status, steps, error, duration,
          sheet_id, trigger_event, rule_snapshot, finished_at, schema_version,
-         rerun_of_execution_id, initiated_by, rule_action_fingerprint
+         rerun_of_execution_id, initiated_by, rule_action_fingerprint, integration_read
        ) VALUES (
          $1, $2, $3, $4, $5, $6::jsonb, $7, $8,
          $9, $10::jsonb, $11::jsonb, $12, $13,
-         $14, $15, $16
+         $14, $15, $16, $17::jsonb
        )`,
       [
         execution.id,
@@ -106,6 +108,7 @@ export class AutomationLogService {
         execution.initiatedBy ?? null,
         // #4196 §4: a values-free sha256 of the RAW action identities — NOT redacted (no business values).
         execution.ruleActionFingerprint ?? null,
+        integrationRead === undefined ? null : JSON.stringify(integrationRead),
       ],
     )
   }
@@ -135,6 +138,7 @@ export class AutomationLogService {
         // previously-captured fingerprint, silently disarming the retry RULE_CHANGED guard for that execution.
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
+        integration_read: persisted.integrationReadJsonb,
       })
       .where('id', '=', execution.id)
       .execute()
@@ -256,7 +260,9 @@ function toPersistedExecutionValues(execution: AutomationExecution): {
   triggerEventJsonb: Record<string, unknown> | null
   ruleSnapshotJsonb: Record<string, unknown> | null
   error: string | null
+  integrationReadJsonb: Record<string, unknown> | null
 } {
+  const integrationRead = closedIntegrationRead(execution.integrationRead)
   // Redact secret-shaped values out of ALL FOUR free-form channels BEFORE they
   // hit the DB (they ride into the runs UI and would survive any future replay):
   // steps (recursive — covers step.output/step.error), trigger_event,
@@ -277,6 +283,7 @@ function toPersistedExecutionValues(execution: AutomationExecution): {
     triggerEventJsonb,
     ruleSnapshotJsonb,
     error: execution.error != null ? redactString(execution.error) : null,
+    integrationReadJsonb: integrationRead === undefined ? null : toJsonValue(integrationRead) as unknown as Record<string, unknown>,
   }
 }
 
@@ -313,6 +320,7 @@ function toExecution(row: Record<string, unknown>): AutomationExecution {
     // A5 retry provenance — null-safe for non-retry / pre-A5 rows.
     rerunOfExecutionId: (row.rerun_of_execution_id as string) ?? undefined,
     initiatedBy: (row.initiated_by as string) ?? undefined,
+    integrationRead: closedIntegrationRead(parseJsonColumn(row.integration_read)),
   }
 }
 
@@ -320,6 +328,23 @@ function toExecution(row: Record<string, unknown>): AutomationExecution {
 function parseJsonColumn(value: unknown): unknown {
   if (value == null) return undefined
   return typeof value === 'string' ? JSON.parse(value) : value
+}
+
+/** Never pass caller/driver free-form fields through the public read reference. */
+export function closedIntegrationRead(value: unknown): AutomationExecution['integrationRead'] {
+  if (value == null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    || Reflect.ownKeys(value).length !== 2) throw new Error('AUTOMATION_READ_EXECUTION_PROJECTION_INVALID')
+  const request = Object.getOwnPropertyDescriptor(value, 'requestId')
+  const state = Object.getOwnPropertyDescriptor(value, 'status')
+  if (!request?.enumerable || !state?.enumerable || !Object.hasOwn(request, 'value') || !Object.hasOwn(state, 'value')
+    || typeof request.value !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(request.value)
+    || typeof state.value !== 'string'
+    || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'cancelled', 'outcome_unknown'].includes(state.value)) {
+    throw new Error('AUTOMATION_READ_EXECUTION_PROJECTION_INVALID')
+  }
+  return { requestId: request.value, status: state.value as NonNullable<AutomationExecution['integrationRead']>['status'] }
 }
 
 /**
@@ -339,5 +364,6 @@ export function redactAutomationExecutionForResponse(execution: AutomationExecut
     triggerEvent: redactValue(execution.triggerEvent),
     ruleSnapshot: redactValue(execution.ruleSnapshot) as AutomationExecution['ruleSnapshot'],
     error: execution.error !== undefined ? redactString(execution.error) : undefined,
+    integrationRead: closedIntegrationRead(execution.integrationRead),
   }
 }

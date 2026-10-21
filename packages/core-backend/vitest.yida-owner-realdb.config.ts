@@ -17,6 +17,9 @@ export default defineConfig({
       'tests/integration/stock-preparation-yida-owner-http-realdb.test.ts',
       'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
       'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
+      // Separate operator-history suite; not counted as any of the original 71.
+      'tests/integration/yida-automation-http-realdb.test.ts',
+      'tests/integration/yida-reconciliation-http-realdb.test.ts',
     ],
     setupFiles: [],
     globalSetup: [],

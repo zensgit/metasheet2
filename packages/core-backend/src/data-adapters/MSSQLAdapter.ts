@@ -30,12 +30,14 @@ import type {
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
 import { assertSqlWriteAllowed } from './sql-write-arm-binding'
 import { startSchemaDetailBudget } from './schema-detail-budget'
+import { assertDataSourceReadOperationAllowed, isDataSourceReadExecutionError, runDataSourceReadIO } from './data-source-read-execution'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
 interface MssqlRequest {
   input(name: string, value: unknown): MssqlRequest
   query<T = unknown>(sql: string): Promise<{ recordset?: T[]; rowsAffected?: number[] }>
+  cancel?(): void
 }
 interface MssqlConnectionPool {
   connect(): Promise<MssqlConnectionPool>
@@ -218,16 +220,29 @@ export class MSSQLAdapter extends BaseDataAdapter {
     if (!mssql) {
       throw new Error('mssql package is not installed')
     }
+    let connectingPool: MssqlConnectionPool | null = null
     try {
-      this.pool = new mssql.ConnectionPool(this.buildPoolConfig())
-      await this.pool.connect()
-      await this.pool.request().query('SELECT 1 AS ok')
+      const driver = mssql
+      const pool = await runDataSourceReadIO(this, 'connect', async () => {
+        const candidate = new driver.ConnectionPool(this.buildPoolConfig())
+        connectingPool = candidate
+        await candidate.connect()
+        return candidate
+      })
+      let request: MssqlRequest | undefined
+      await runDataSourceReadIO(this, 'query', async () => {
+        request = pool.request()
+        return request.query('SELECT 1 AS ok')
+      }, () => request?.cancel?.())
+      this.pool = pool
       this.connected = true
       await this.onConnect()
     } catch (error) {
       // Close (not just drop) the pool so a failed connect leaks no open ConnectionPool.
-      try { await this.pool?.close() } catch { /* pool may be partially constructed */ }
-      this.pool = null
+      // It is still private to this connect; abort must never close an existing shared pool.
+      try { await (connectingPool as MssqlConnectionPool | null)?.close() } catch { /* pool may be partially constructed */ }
+      if (this.pool === connectingPool) this.pool = null
+      if (isDataSourceReadExecutionError(error)) throw error
       await this.onError(error as Error)
       throw new Error(`Failed to connect to SQL Server: ${error}`)
     }
@@ -253,9 +268,15 @@ export class MSSQLAdapter extends BaseDataAdapter {
   async testConnection(): Promise<boolean> {
     if (!this.pool) return false
     try {
-      const result = await this.pool.request().query<{ ok: number }>('SELECT 1 AS ok')
+      const pool = this.pool
+      let request: MssqlRequest | undefined
+      const result = await runDataSourceReadIO(this, 'query', async () => {
+        request = pool.request()
+        return request.query<{ ok: number }>('SELECT 1 AS ok')
+      }, () => request?.cancel?.())
       return (result.recordset?.length ?? 0) > 0
     } catch (error) {
+      if (isDataSourceReadExecutionError(error)) throw error
       await this.onError(error as Error) // A3: record the redacted cause (else the test failure is silent)
       return false
     }
@@ -331,12 +352,17 @@ export class MSSQLAdapter extends BaseDataAdapter {
       throw new Error('Not connected to database')
     }
     try {
-      const request = this.pool.request()
-      const values = params || []
-      values.forEach((value, i) => request.input(`p${i}`, value))
-      // Framework convention uses $1-style placeholders; translate to mssql @pN.
-      const translated = sql.replace(/\$(\d+)/g, (_m, n) => `@p${parseInt(n, 10) - 1}`)
-      const result = await request.query<T>(translated)
+      const pool = this.pool
+      let request: MssqlRequest | undefined
+      const result = await runDataSourceReadIO(this, 'query', async () => {
+        const currentRequest = pool.request()
+        request = currentRequest
+        const values = params || []
+        values.forEach((value, i) => currentRequest.input(`p${i}`, value))
+        // Framework convention uses $1-style placeholders; translate to mssql @pN.
+        const translated = sql.replace(/\$(\d+)/g, (_m, n) => `@p${parseInt(n, 10) - 1}`)
+        return currentRequest.query<T>(translated)
+      }, () => request?.cancel?.())
       const rows = result.recordset ?? []
       return {
         data: rows as T[],
@@ -345,6 +371,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
         }
       }
     } catch (error) {
+      if (isDataSourceReadExecutionError(error)) throw error
       return { data: [], error: error as Error }
     }
   }
@@ -614,6 +641,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
+    assertDataSourceReadOperationAllowed(this)
     // W-1(c) SQL WRITE GATE (transaction). A transaction hands the caller a raw driver object whose
     // Requests execute SQL OUTSIDE this adapter's query() funnel — the one write path the statement
     // gate cannot see. So vending a transaction is itself treated as a WRITE and requires an armed
@@ -633,14 +661,17 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async commit(transaction: Transaction): Promise<void> {
+    assertDataSourceReadOperationAllowed(this)
     await (transaction as unknown as MssqlTransaction).commit()
   }
 
   async rollback(transaction: Transaction): Promise<void> {
+    assertDataSourceReadOperationAllowed(this)
     await (transaction as unknown as MssqlTransaction).rollback()
   }
 
   async inTransaction<R = unknown>(transaction: Transaction, callback: () => Promise<R>): Promise<R> {
+    assertDataSourceReadOperationAllowed(this)
     try {
       const result = await callback()
       await this.commit(transaction)
@@ -656,6 +687,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
     params?: DbValue[],
     _options?: { highWaterMark?: number; objectMode?: boolean }
   ): AsyncIterableIterator<T> {
+    assertDataSourceReadOperationAllowed(this)
     if (!this.pool) {
       throw new Error('Not connected to database')
     }

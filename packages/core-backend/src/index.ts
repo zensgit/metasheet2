@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';
 import type { Server as HttpServer } from 'http';
+import type { Socket } from 'net'
 import express from 'express'
 import { createServer } from 'http'
 import cors from 'cors'
@@ -74,6 +75,10 @@ import { sendStockPreparationHandoffNotificationToDestinations } from './multita
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
+import { stopSafetyGuardMaintenance } from './guards/SafetyGuard'
+import { stopRateLimiterMaintenance } from './middleware/rate-limiter'
+import { stopTokenBucketMaintenance } from './integration/rate-limiting/token-bucket'
+import { stopIdempotencyMaintenance } from './guards/idempotency'
 import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
@@ -336,7 +341,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, disconnectDataSourcesForShutdown } from './routes/data-sources'
 import {
   createDataSourcePluginFacade,
   createDataSourceSealedSnapshotConnectionFacade,
@@ -459,13 +464,26 @@ import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
 import { isPlmEnabled } from './config/product-mode'
 import { resolvePluginRuntimeConfig } from './plugin-runtime-config'
-
-import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './integration/yida-owner-runtime'
-import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
+import { createAutomationReadRuntime } from './integration/automation-read-runtime'
+import { createAutomationReadDelivery } from './integration/automation-read-delivery'
+import { createAutomationReadRecovery } from './integration/automation-read-recovery'
+import { createAutomationRecordAfterImageRetention } from './multitable/automation-record-after-image-retention'
+import { createAutomationReadManagement } from './integration/automation-read-management'
+import { createIntegrationAutomationReadRouter, automationReadNoStoreMiddleware,
+  automationReadParseErrorHandler } from './routes/integration-automation-read'
+import { createYidaOwnerRuntime } from './integration/yida-owner-runtime'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
+import { createYidaAutomationManagementHost } from './integration/yida-automation-management-host'
+import { YIDA_AUTOMATION_SEND_FLAG } from './integration/yida-automation-execution-authority'
+import { createIntegrationYidaAutomationRouter, YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore,
+  yidaAutomationJsonOnly, yidaAutomationParseError, yidaAutomationBodyLimit } from './routes/integration-yida-automation'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
+import { CURRENT_ROUTING_MANIFEST } from './multitable/automation-routing-manifest'
+import { isDurableDeliveryEnabled } from './multitable/automation-durable-delivery'
+import type { AutomationReadLedgerDependencies } from './integration/automation-read-contracts'
+
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
   error?: string
@@ -578,19 +596,16 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
 }
 
 // Host-owned RC transaction; never the plugin's row-only wrapper or request ALS.
-const yidaOwnerTransaction: YidaOwnerRuntimeDependencies['database']['transaction'] = work =>
+const automationReadTransaction: AutomationReadLedgerDependencies['transaction'] = work =>
   poolManager.get().transaction(async ({ query }) => {
     await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    const transaction: TransactionalQueryable = {
-      isTransaction: true,
-      query: (sql, params) => query(sql, params),
-    }
-    return work(transaction)
+    return work({ isTransaction: true, query: (sql, params) => query(sql, params) })
   })
 
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
+  private readonly httpSockets = new Set<Socket>()
   private logger: Logger
   private eventBus: EventEmitter
   private pluginStatus = new Map<string, PluginRuntimeState>()
@@ -609,6 +624,7 @@ export class MetaSheetServer {
   private host?: string
   private portLocked: boolean
   private stopPromise: Promise<void> | null = null
+  private collabServiceForShutdown?: ICollabService
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
@@ -640,7 +656,7 @@ export class MetaSheetServer {
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
   private pluginRuntimeSecurityService = new PluginRuntimeSecurityService()
   private yidaOwnerRuntime = createYidaOwnerRuntime({
-    database: { transaction: yidaOwnerTransaction },
+    database: { transaction: automationReadTransaction },
     security: this.pluginRuntimeSecurityService,
     fetch: globalThis.fetch.bind(globalThis),
     // Host-owned switch, not a request claim. The actual owner/admin, immutable
@@ -651,8 +667,31 @@ export class MetaSheetServer {
   // an existing target owner check. The immutable server anchor and live ACL
   // are enforced by this host runtime before any private plugin writer.
   private yidaInitializationRuntime = createYidaInitializationRuntime({
-    database: { transaction: yidaOwnerTransaction },
+    database: { transaction: automationReadTransaction },
     security: this.pluginRuntimeSecurityService,
+  })
+  private automationReadRuntime = createAutomationReadRuntime({
+    transaction: automationReadTransaction, manifest: CURRENT_ROUTING_MANIFEST,
+    getManager: getDataSourceManager, enabled: () => isDurableDeliveryEnabled(),
+    onUnavailable: () => this.logger.warn('AUTOMATION_READ_RUNTIME_UNAVAILABLE'),
+    onExecutionDiagnostic: diagnostic => this.logger.info('AUTOMATION_READ_EXECUTION_DIAGNOSTIC', {
+      phase: diagnostic.phase, firstStop: diagnostic.firstStop, outcome: diagnostic.outcome,
+      elapsedMs: diagnostic.elapsedMs, checkpointCount: diagnostic.checkpointCount, cleanupCount: diagnostic.cleanupCount,
+    }),
+  })
+  private yidaAutomationHost = createYidaAutomationManagementHost({
+    database: { transaction: automationReadTransaction }, readRuntime: this.automationReadRuntime,
+    security: this.pluginRuntimeSecurityService, fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env[YIDA_AUTOMATION_SEND_FLAG],
+    deliveryReady: () => this.durableDeliveryLoop !== null,
+  })
+  private automationReadRecovery = createAutomationReadRecovery({
+    transaction: automationReadTransaction,
+    onError: code => this.logger.warn(code),
+  })
+  private automationRecordAfterImageRetention = createAutomationRecordAfterImageRetention({ transaction: automationReadTransaction })
+  private automationReadManagement = createAutomationReadManagement({
+    transaction: automationReadTransaction, manifest: CURRENT_ROUTING_MANIFEST,
   })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -701,6 +740,10 @@ export class MetaSheetServer {
     
     this.app = express()
     this.httpServer = createServer(this.app)
+    this.httpServer.on('connection', socket => {
+      this.httpSockets.add(socket)
+      socket.once('close', () => this.httpSockets.delete(socket))
+    })
     this.eventBus = new EventEmitter()
     this.logger = new Logger('MetaSheetServer')
     this.portLocked = typeof options.port === 'number'
@@ -1854,8 +1897,11 @@ export class MetaSheetServer {
 
     // Body parsing
     // Private owner responses, including parser/JWT refusals, must not be cached.
+    this.app.use('/api/integration/automation-read', automationReadNoStoreMiddleware)
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware, yidaOwnerJsonOnlyMiddleware,
       express.json({ limit: '2mb', strict: true }))
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore, yidaAutomationJsonOnly,
+      express.json({ limit: '16kb', strict: true, verify: yidaAutomationBodyLimit }))
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
 
@@ -2085,8 +2131,28 @@ export class MetaSheetServer {
     // Uses a lazy resolver because AutomationService is initialized later
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
+    // Separate owner-bound surface; never piggyback private preview results on
+    // ordinary Automation logs or Data Factory runs. Global JWT runs above.
+    this.app.use('/api/integration/automation-read', createIntegrationAutomationReadRouter({
+      options: (actor, input) => this.automationReadRuntime.options(actor, input),
+      grant: (actor, input) => this.automationReadRuntime.grant(actor, input),
+      activateRecord: (actor, input) => this.automationReadRuntime.activateRecord(actor, input),
+      activateSchedule: (actor, input) => this.automationReadRuntime.activateSchedule(actor, input),
+      submit: (actor, input) => this.automationReadRuntime.submit(actor, input),
+      retry: (actor, id, input) => this.automationReadRuntime.retry(actor, id, input),
+      retryContext: (actor, id) => this.automationReadManagement.retryContext(actor, id),
+      grantDetail: (actor, id) => this.automationReadManagement.grantDetail(actor, id),
+      listGrants: (actor, input) => this.automationReadManagement.listGrants(actor, input),
+      listRequests: (actor, input) => this.automationReadManagement.listRequests(actor, input),
+      observe: (actor, id) => this.automationReadManagement.observe(actor, id),
+      cancel: (actor, id) => this.automationReadManagement.cancel(actor, id),
+      revoke: (actor, id) => this.automationReadManagement.revoke(actor, id),
+    }))
+    this.app.use('/api/integration/automation-read', automationReadParseErrorHandler)
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, createIntegrationYidaAutomationRouter(this.yidaAutomationHost.port))
+    this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationParseError)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
     //   A1 readiness (GET /ai/readiness, admin-only) +
@@ -2346,6 +2412,7 @@ export class MetaSheetServer {
     const coreApi = this.injector.get(ICoreAPI)
     const manifest = loaded.manifest
     const pluginName = manifest.name
+    const runtimeConfig = resolvePluginRuntimeConfig(manifest.name)
     const pluginHttpApi = coreApi.http
       ? {
           ...coreApi.http,
@@ -3558,6 +3625,9 @@ export class MetaSheetServer {
           manifest.name === 'plugin-integration-core'
             ? createDataSourceSealedSnapshotConnectionFacade(getDataSourceManager)
             : undefined,
+        automationReadRuntime: manifest.name === 'plugin-integration-core'
+          ? this.automationReadRuntime.createPluginCapability(runtimeConfig)
+          : undefined,
         // Registration only: actual user identity reaches this runtime through
         // the host JWT router, never plugin communication or caller claims.
         yidaOwnerRuntime: manifest.name === 'plugin-integration-core'
@@ -3566,10 +3636,13 @@ export class MetaSheetServer {
         yidaInitializationRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaInitializationRuntime.createPluginCapability()
           : undefined,
+        yidaAutomationRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaAutomationHost.createPluginCapability()
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
-      config: resolvePluginRuntimeConfig(manifest.name),
+      config: runtimeConfig,
       communication,
       logger: new Logger(`Plugin:${manifest.name}`),
     }
@@ -3604,7 +3677,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const automationSendDrain = this.yidaAutomationHost.deactivate()
+      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3622,7 +3696,8 @@ export class MetaSheetServer {
       if (name === 'plugin-integration-core') {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
-        const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+        const automationSendDrain = this.yidaAutomationHost.deactivate()
+        const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3645,7 +3720,8 @@ export class MetaSheetServer {
     if (name === 'plugin-integration-core') {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain])
+      const automationSendDrain = this.yidaAutomationHost.deactivate()
+      const drains = await Promise.allSettled([this.automationReadRuntime.stop(), yidaDrain, initializationDrain, automationSendDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3723,7 +3799,7 @@ export class MetaSheetServer {
   }
 
   private closeHttpServerForShutdown(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+    const httpDrain = new Promise<void>((resolve, reject) => {
       try {
         if (!this.httpServer.listening) {
           resolve()
@@ -3737,8 +3813,23 @@ export class MetaSheetServer {
           this.logger.info('HTTP server closed')
           resolve()
         })
+        // Node's idle-HTTP cleanup does not close TCP preconnections that have
+        // sent no bytes. They own no admitted request, but can otherwise hold
+        // this drain open until the header timeout. Never cut a received request.
+        for (const socket of this.httpSockets) {
+          if (socket.bytesRead === 0) socket.destroy()
+        }
       } catch {
         reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+      }
+    })
+    // Stop HTTP admissions synchronously, then close the host-owned Socket.IO
+    // engine as well: upgraded/long-polling connections otherwise keep the HTTP
+    // drain open. Do not resolve a new collaboration service merely to stop it.
+    const collabDrain = Promise.resolve().then(() => this.collabServiceForShutdown?.shutdown())
+    return Promise.allSettled([httpDrain, collabDrain]).then(results => {
+      if (results.some(result => result.status === 'rejected')) {
+        throw new Error('HTTP_SERVER_DRAIN_FAILED')
       }
     })
   }
@@ -3786,8 +3877,14 @@ export class MetaSheetServer {
   private async stopOnce(signal: string): Promise<void> {
     // Latch/abort synchronously, then await below before DB teardown. PluginLoader
     // unloadAll does not await its hooks and is not an adequate draining barrier.
+    const automationReadDrain = this.observeShutdownTask(this.automationReadRuntime.stop())
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
+    const yidaAutomationDrain = this.observeShutdownTask(this.yidaAutomationHost.stop())
+    const automationReadRecordDrain = this.observeShutdownTask(this.automationReadRuntime.stopRecordAdmissions())
+    const automationReadScheduleDrain = this.observeShutdownTask(this.automationReadRuntime.stopScheduleAdmissions())
+    const automationReadRecoveryDrain = this.observeShutdownTask(this.automationReadRecovery.stop())
+    const automationReadManagementDrain = this.observeShutdownTask(this.automationReadManagement.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -3804,6 +3901,9 @@ export class MetaSheetServer {
     if (this.durableDeliveryLoop) {
       approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
     }
+    // The loop no longer admits ticks. Its observers are not awaited by the loop,
+    // so this service owns an explicit single-flight drain before the shared pool closes.
+    const automationRecordAfterImageRetentionDrain = this.observeShutdownTask(this.automationRecordAfterImageRetention.stop())
     if (this.stopDingTalkTodoMirrorWorker) {
       approvalProducerDrains.push(this.observeShutdownTask(this.stopDingTalkTodoMirrorWorker()))
       this.stopDingTalkTodoMirrorWorker = undefined
@@ -3875,7 +3975,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaAutomationDrain, automationReadDrain, automationReadRecordDrain, automationReadScheduleDrain, automationReadRecoveryDrain, automationReadManagementDrain, automationRecordAfterImageRetentionDrain]
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4098,14 +4198,34 @@ export class MetaSheetServer {
       throw new Error('RECOVERY_ARCHIVE_CUSTODY_RELEASE_FAILED')
     }
 
+    // The existing stop contract is terminal for this application runtime (the
+    // shared main pool is closed below; a stopped instance cannot restart).
+    // Maintenance stop must not reset subscriptions, confirmations, or idempotency
+    // state. Failed producer/sink drains above never reach this cleanup.
+    await this.waitForShutdownBarrier(
+      [disconnectDataSourcesForShutdown()],
+      'DATA_SOURCE_SHUTDOWN_FAILED',
+      'Data source shutdown timeout; database pool left open',
+    )
+    try {
+      messageBus.stopMaintenance()
+      stopSafetyGuardMaintenance()
+      stopIdempotencyMaintenance()
+      stopRateLimiterMaintenance()
+      stopTokenBucketMaintenance()
+      poolManager.get().stopMetricsCollection()
+    } catch {
+      throw new Error('RUNTIME_MAINTENANCE_STOP_FAILED')
+    }
+
     try {
       const { pool } = await import('./db/pg')
       if (pool) {
         await pool.end()
         this.logger.info('Database pool closed')
       }
-    } catch (err) {
-      this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
+    } catch {
+      throw new Error('DATABASE_POOL_SHUTDOWN_FAILED')
     }
 
     this.logger.info('Shutdown complete')
@@ -4228,6 +4348,8 @@ export class MetaSheetServer {
         schedulerLeaderOptions,
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
         notificationService,
+        { produce: (occurrence, signal) => this.automationReadRuntime.produceSchedule(occurrence, signal) },
+        { produce: (occurrence, signal) => this.yidaAutomationHost.produceSchedule(occurrence, signal) },
       )
       pendingAutomationService.init()
       await pendingAutomationService.loadAndRegisterAllScheduled()
@@ -4565,6 +4687,7 @@ export class MetaSheetServer {
           })
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
+          automationReadRecord: { produce: (delivery, signal) => this.automationReadRuntime.produceRecord(delivery, signal) },
           projectionService: getApprovalRecordProjectionService(),
           webhookService: new WebhookService(kyselyDbDurable),
           recordApprovalService: recordApprovalSink,
@@ -4576,10 +4699,29 @@ export class MetaSheetServer {
         })
         this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
           onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),
-          onTickError: (err) => this.logger.error('Durable delivery dispatch tick error', err instanceof Error ? err : new Error(String(err))),
+          // Reconcile persisted poison even after a lost callback/restart. The
+          // existing loop owns timing; recovery never executes a source read.
+          onTick: () => {
+            void this.automationReadRecovery.tick()
+            void this.automationRecordAfterImageRetention.tick().catch(() => {
+              try { this.logger.warn('AUTOMATION_RECORD_AFTER_IMAGE_RETENTION_UNAVAILABLE') } catch { /* values-free observer only */ }
+            })
+          },
+          onTickError: (err) => {
+            void this.automationReadRecovery.tick()
+            void this.automationRecordAfterImageRetention.tick().catch(() => {
+              try { this.logger.warn('AUTOMATION_RECORD_AFTER_IMAGE_RETENTION_UNAVAILABLE') } catch { /* values-free observer only */ }
+            })
+            this.logger.error('Durable delivery dispatch tick error', err instanceof Error ? err : new Error(String(err)))
+          },
           onHeartbeatError: (info) => this.logger.warn(`Durable delivery heartbeat renew DB error for ${info.consumerKey} (outbox ${info.outboxId}); row left for reclaim`),
           onClaimTimePoison: (info) => this.logger.warn(`Durable delivery dead-lettered ${info.consumerKey} (outbox ${info.outboxId}) after ${info.attempts} attempts`),
         }, {
+          integrationReadAdapter: createAutomationReadDelivery({
+            transaction: automationReadTransaction,
+            execute: (requestId, signal) => this.automationReadRuntime.execute(requestId, signal),
+          }),
+          integrationYidaAdapter: this.yidaAutomationHost.adapter,
           // Clock alignment (sink audit 2026-07-17): the OUTBOX consumer lease must outlive the SINK leases
           // (EVENT_DELIVERY_LEASE_MS / BRIDGE_COMPLETION_LEASE_MS, both 60s) — with the 30s default, a crash
           // redelivers while the dead worker's sink lease is still live, burning retries on 'busy'. 90s means
@@ -4604,6 +4746,7 @@ export class MetaSheetServer {
         await startedLoop.stop().catch((stopErr: unknown) => {
           this.logger.warn(`Durable delivery dispatch loop rollback stop error: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`)
         })
+        await this.automationRecordAfterImageRetention.stop()
       }
       const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
       if (durableBootFailureDisposition() === 'fail-closed') {
@@ -4771,6 +4914,7 @@ export class MetaSheetServer {
     // Initialize WebSocket Service
     try {
       const collabService = this.injector.get(ICollabService)
+      this.collabServiceForShutdown = collabService
       collabService.setTokenVerifier(async (token: string) => {
         const user = await authService.verifyToken(token)
         return user?.id?.toString() ?? null

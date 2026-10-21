@@ -141,6 +141,10 @@ function canonical(value: unknown): string {
   return text
 }
 
+/** Host-private bounded serialization mechanism shared by manual/delegated
+ * snapshots. Pure data only; this neither creates nor verifies a permit. */
+export function serializeInternalYidaSnapshot(value: unknown): string { return canonical(value) }
+
 export type YidaSendAuthoritySelection = Readonly<{
   tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
   targetRef: string; targetRevision: 'evidence-1'; planRevision: string

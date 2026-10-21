@@ -18,6 +18,8 @@ import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import { withAutomationEventId } from './automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import { AUTOMATION_RECORD_AFTER_IMAGE_LIMITS, AUTOMATION_RECORD_AFTER_IMAGE_RETURNING } from './automation-record-after-image'
+import { captureAutomationRecordSchema } from './automation-record-schema'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
@@ -837,6 +839,13 @@ export class RecordWriteService {
       assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
     }
     const updates = await this.pool.transaction(async ({ query }) => {
+      const producerTrx = asProducerTrx(query)
+      // Private event evidence stays separate from the public update/result DTO and event payload.
+      const afterImagesByRecord = new Map<string, {
+        recordVersion: number; rawJson: unknown; oversized: boolean; unavailableReason?: 'batch_limits'
+      }>()
+      let afterImageRecords = 0
+      let afterImageBytes = 0
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
       // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
@@ -848,6 +857,7 @@ export class RecordWriteService {
       } else {
         await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
       }
+      const recordSchema = await captureAutomationRecordSchema(producerTrx, sheetId)
       // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
       // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
       // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the conversion flag AND the writer fence are both on.
@@ -1069,7 +1079,7 @@ export class RecordWriteService {
               `UPDATE meta_records
                SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE sheet_id = $2 AND id = $3
-               RETURNING version`,
+               RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}`,
               [JSON.stringify(patch), sheetId, recordId, actorId, unsetIds],
             )
           // lock-guarded: ensureRecordNotLocked enforced per record above (set-only path)
@@ -1078,13 +1088,30 @@ export class RecordWriteService {
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE sheet_id = $2 AND id = $3
-               RETURNING version`,
+               RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}`,
               [JSON.stringify(patch), sheetId, recordId, actorId],
             )
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)
         }
         const nextVersion = Number((updateRes.rows[0] as any).version)
+        const savedRow = updateRes.rows[0] as {
+          automation_after_image_json?: unknown; automation_after_image_oversized?: unknown; automation_after_image_bytes?: unknown
+        }
+        afterImageRecords++
+        const savedBytes = Number(savedRow.automation_after_image_bytes)
+        if (Number.isSafeInteger(savedBytes) && savedBytes >= 0) {
+          afterImageBytes = Math.min(AUTOMATION_RECORD_AFTER_IMAGE_LIMITS.batchBytes + 1, afterImageBytes + savedBytes)
+        }
+        const oversized = savedRow.automation_after_image_oversized === true
+        const batchExceeded = afterImageRecords > AUTOMATION_RECORD_AFTER_IMAGE_LIMITS.batchRecords
+          || afterImageBytes > AUTOMATION_RECORD_AFTER_IMAGE_LIMITS.batchBytes
+        afterImagesByRecord.set(recordId, {
+          recordVersion: nextVersion,
+          rawJson: oversized || batchExceeded ? undefined : savedRow.automation_after_image_json,
+          oversized,
+          ...(!oversized && batchExceeded ? { unavailableReason: 'batch_limits' as const } : {}),
+        })
         // After-image MUST drop the removed keys (not just the live row) so a later
         // restore-of-this-revision reproduces the absence; `changedFieldIds` lists the
         // removed ids and the revision `patch` marks each removal with the `null` sentinel.
@@ -1209,7 +1236,17 @@ export class RecordWriteService {
       for (const update of updated) {
         const payload = updatedEventPayloadByRecord.get(update.recordId)
         if (payload) {
-          await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.updated', payload)
+          const afterImage = afterImagesByRecord.get(update.recordId)
+          await enqueueRecordEventIfDurable(producerTrx, 'multitable.record.updated', payload, undefined, {
+            sheetId,
+            recordId: update.recordId,
+            recordVersion: afterImage?.recordVersion ?? Number.NaN,
+            data: undefined,
+            schema: recordSchema,
+            rawJson: afterImage?.rawJson,
+            oversized: afterImage?.oversized,
+            unavailableReason: afterImage?.unavailableReason,
+          })
         }
       }
       return updated

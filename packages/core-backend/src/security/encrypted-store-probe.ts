@@ -257,6 +257,14 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     columns: ['snapshot_encrypted'],
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
+  catalogEntry({
+    store: 'integration_yida_auto_execution_snapshots',
+    field: 'snapshot_encrypted',
+    scheme: 'platform-enc',
+    prefixOn: 'raw',
+    columns: ['snapshot_encrypted'],
+    sql: `SELECT snapshot_encrypted AS value FROM integration_yida_auto_execution_snapshots WHERE snapshot_encrypted <> '' LIMIT $1`,
+  }),
 ])
 
 export type EncryptedStoreProbeStatus = 'ok' | 'table_missing' | 'column_missing' | 'read_failed'

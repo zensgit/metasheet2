@@ -67,7 +67,10 @@
  *
  * Runs only with DATABASE_URL (plugin-tests.yml multitable real-DB job).
  */
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { Kysely, PostgresDialect } from 'kysely'
+import { Pool } from 'pg'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { eventBus } from '../../src/integration/events/event-bus'
@@ -77,6 +80,12 @@ import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor
 import { recordRecordRevision } from '../../src/multitable/record-history-service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { bootstrapOwnedApprovalAfterImageSchema } from '../utils/automation-approval-after-image-schema'
+import { ConsumerAdapterRegistry, runDispatchTick } from '../../src/multitable/automation-durable-dispatch-loop'
+import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
+import { buildConsumerAdapterRegistry } from '../../src/multitable/automation-durable-activation'
+import { createAutomationReadRecordConditions } from '../../src/integration/automation-read-record-conditions'
+import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -138,7 +147,6 @@ const executionIds: string[] = []
 const ruleIds: string[] = []
 const templateIds: string[] = []
 const approvalIds: string[] = []
-let templateSeq = 0
 
 /** The REAL production AutomationService wiring — real `pool.query.bind(pool)` queryFn, the SHARED
  * process-wide `eventBus` (the same singleton `emitApprovalCompletionEvent` publishes to), and `init()`
@@ -307,6 +315,7 @@ async function executeAndApprove(
   templateKey: string,
   resultWriteback: Record<string, string | boolean>,
   title: string,
+  durable?: { registry: ConsumerAdapterRegistry; beforeDispatch?: () => Promise<void> },
 ): Promise<{ executionId: string; approvalInstanceId: string }> {
   const templateId = await createPublishedTemplate(templateKey)
   const ruleId = await createStartApprovalRule(svc, sheetId, templateId, resultWriteback)
@@ -326,14 +335,30 @@ async function executeAndApprove(
   }
   const execution = await svc.executeRule(execRule as never, { sheetId, recordId, data: { title }, actorId: REQUESTER })
   executionIds.push(execution.id)
+  const startDiagnostic = JSON.stringify({ status: execution.status, error: execution.error,
+    steps: execution.steps.map(step => ({ actionType: step.actionType, status: step.status, error: step.error })) })
+  expect(execution.status, `SA06AK real start_approval did not suspend: ${startDiagnostic}`).toBe('running')
   const bridge = await q(
     `SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`,
     [execution.id],
   )
+  expect(bridge.rows, `SA06AK real start_approval has no single durable bridge: ${startDiagnostic}`).toHaveLength(1)
+  expect(typeof bridge.rows[0].approval_instance_id, 'SA06AK real bridge has no approval instance').toBe('string')
   const approvalInstanceId = bridge.rows[0].approval_instance_id as string
   approvalIds.push(approvalInstanceId)
   const approvals = new ApprovalProductService()
   await approvals.dispatchAction(approvalInstanceId, { action: 'approve', comment: 'go' }, { userId: APPROVER, userName: APPROVER })
+  if (durable) {
+    const completion = await q(`SELECT o.id,c.status FROM meta_automation_outbox o
+      JOIN meta_automation_outbox_consumer c ON c.outbox_id=o.id
+      WHERE o.event_type='approval.approved' AND o.payload->'approval'->>'instanceId'=$1
+        AND c.consumer_key='approval-bridge'`, [approvalInstanceId])
+    expect(completion.rows).toHaveLength(1)
+    expect(completion.rows[0].status).toBe('pending')
+    await durable.beforeDispatch?.()
+    expect(await runDispatchTick(poolManager.get(), durable.registry, { batchSize: 1, adapterTimeoutMs: 10000 }))
+      .toMatchObject({ completed: 1, rescheduled: 0 })
+  }
   await waitForExecutionStatus(svc, execution.id, 'success')
   return { executionId: execution.id, approvalInstanceId }
 }
@@ -725,4 +750,265 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
       svc.shutdown()
     }
   })
+})
+
+/** Independent owned-schema acceptance. All transports forward to actual PG; production transaction
+ * control, ApprovalProductService, outbox routing, adapters and dispatch claims remain real.
+ * The original suite above still requires its CI migration baseline and is not silently repaired.
+ */
+describeIfDatabase('SA06AK approval resultWriteback actual RETURNING after-image (owned real PG)', () => {
+  const schema = 'automation_approval_image_' + randomBytes(8).toString('hex')
+  const flag = 'AUTOMATION_DURABLE_DELIVERY_ENABLED'
+  const spies: Array<{ mockRestore(): void }> = []
+  const metricsObservers: Array<{ mock: { results: Array<{ type: string; value: unknown }> }; mockRestore(): void }> = []
+  let ownedPool: Pool, ownedDb: Kysely<unknown>, created = false
+
+  async function drainMetrics(): Promise<void> {
+    // Observe-through spies return the original implementation's unchanged promises. A detached
+    // post-COMMIT metrics transaction may keep querying after dispatchAction itself has returned.
+    let observedCount: number
+    do {
+      const returned = metricsObservers.flatMap(observed => observed.mock.results
+        .filter(result => result.type === 'return' && result.value instanceof Promise)
+        .map(result => result.value as Promise<unknown>))
+      observedCount = returned.length
+      await Promise.allSettled(returned)
+    } while (metricsObservers.reduce((count, observed) => count + observed.mock.results
+      .filter(result => result.type === 'return' && result.value instanceof Promise).length, 0) !== observedCount)
+  }
+
+  beforeAll(async () => {
+    ownedPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 8,
+      options: '-c search_path=' + schema + ' -c statement_timeout=8000' })
+    await ownedPool.query('CREATE SCHEMA "' + schema + '"')
+    created = true
+    ownedDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: ownedPool }) })
+    const infrastructure = poolManager.get()
+    const infrastructurePool = infrastructure.getInternalPool()
+    // Keep ConnectionPool.transaction itself: only its actual client transport is forwarded.
+    spies.push(vi.spyOn(infrastructurePool, 'connect').mockImplementation(ownedPool.connect.bind(ownedPool)))
+    spies.push(vi.spyOn(infrastructurePool, 'query').mockImplementation(ownedPool.query.bind(ownedPool)))
+    spies.push(vi.spyOn(infrastructure, 'query').mockImplementation((statement, params) => ownedPool.query(statement, params)))
+    spies.push(vi.spyOn(infrastructure, 'getInternalPool').mockReturnValue(ownedPool))
+    await bootstrapOwnedApprovalAfterImageSchema({ db: ownedDb, query: (statement, params) => ownedPool.query(statement, params), mode: 'empty' })
+    const { getApprovalMetricsService } = await import('../../src/services/ApprovalMetricsService')
+    const metrics = getApprovalMetricsService()
+    metricsObservers.push(vi.spyOn(metrics, 'recordInstanceStart'), vi.spyOn(metrics, 'recordNodeDecision'),
+      vi.spyOn(metrics, 'recordTerminal'))
+    await seedUsers()
+    await q(`INSERT INTO user_permissions(user_id,permission_code) VALUES($1,'multitable:read')`, [REQUESTER])
+    await makeBase(BASE, 'Synthetic writeback source', REQUESTER)
+    await makeSheet(SHEET, BASE, 'Synthetic source')
+    await makeBase(XB_BASE, 'Synthetic writeback target', REQUESTER)
+    await makeSheet(XB_SHEET, XB_BASE, 'Synthetic target')
+    await makeField(FLD_TITLE, SHEET, 'Untouched', 'string', {}, 1)
+    await seedWritebackFields(SHEET, FLD_STATUS, FLD_APPROVER, FLD_COMPLETED)
+    await makeField(FLD_XB_SRC_TITLE, XB_SHEET, 'Untouched', 'string', {}, 1)
+    await makeField(FLD_XB_STATUS, XB_SHEET, 'Status', 'select', { options: [{ value: 'approved' }, { value: 'rejected' }] }, 2)
+    await makeField(FLD_XB_APPROVER, XB_SHEET, 'Approver', 'string', {}, 3)
+  }, 30000)
+  beforeEach(() => { vi.stubEnv(flag, 'true') })
+  afterEach(async () => {
+    try { await drainMetrics() } finally { vi.unstubAllEnvs() }
+  })
+  afterAll(async () => {
+    try {
+      await drainMetrics()
+      if (created) {
+        expect(schema).toMatch(/^automation_approval_image_[a-f0-9]{16}$/u)
+        expect((await ownedPool.query('SELECT current_schema() AS schema')).rows).toEqual([{ schema }])
+        await ownedPool.query('DROP SCHEMA "' + schema + '" CASCADE')
+      }
+    } finally {
+      for (const observed of metricsObservers.reverse()) observed.mockRestore()
+      for (const spy of spies.reverse()) spy.mockRestore()
+      if (ownedDb) await ownedDb.destroy()
+      else await ownedPool?.end()
+    }
+  })
+
+  function bridgeRegistry(svc: AutomationService): ConsumerAdapterRegistry {
+    const unused = async (): Promise<never> => { throw new Error('SA06AK_UNEXPECTED_CONSUMER') }
+    const handlers = buildDurableConsumerHandlers({ automationService: svc,
+      automationReadRecord: { produce: unused }, projectionService: { reconcile: unused },
+      webhookService: { deliverEvent: unused }, recordApprovalService: { handleApprovalCompletion: unused },
+      todoMirrorService: { handleApprovalTaskCreated: unused, handleApprovalCompletion: unused } })
+    const all = buildConsumerAdapterRegistry(handlers, { key: 'integration-read-preview', handle: unused })
+    const selected = new ConsumerAdapterRegistry()
+    selected.register(all.get('approval-bridge')!)
+    return selected
+  }
+  async function imageFor(recordId: string) {
+    return (await q(`SELECT i.*,o.event_id AS receipt_event_id,o.event_type AS receipt_event_type,o.payload,
+      octet_length(i.after_image::text) AS pg_bytes FROM meta_automation_record_after_images i
+      JOIN meta_automation_outbox o ON o.id=i.outbox_id WHERE i.record_id=$1`, [recordId])).rows
+  }
+  async function replay(svc: AutomationService, approvalInstanceId: string) {
+    const receipt = await q(`SELECT id FROM meta_automation_outbox
+      WHERE event_type='approval.approved' AND payload->'approval'->>'instanceId'=$1`, [approvalInstanceId])
+    expect(receipt.rows).toHaveLength(1)
+    await q(`UPDATE meta_automation_outbox_consumer SET status='pending',lease_expires_at=NULL
+      WHERE outbox_id=$1 AND consumer_key='approval-bridge'`, [receipt.rows[0].id])
+    expect(await runDispatchTick(poolManager.get(), bridgeRegistry(svc), { batchSize: 1 }))
+      .toMatchObject({ completed: 1, rescheduled: 0 })
+  }
+  async function conditionOnImage(recordId: string, sheetId: string, baseId: string, fieldId: string, value: string) {
+    const image = (await imageFor(recordId))[0]
+    const ruleId = 'sa06ak_condition_' + randomUUID()
+    await q(`INSERT INTO automation_rules(id,sheet_id,name,trigger_type,action_type,created_by,conditions)
+      VALUES($1,$2,'Synthetic read condition','record.updated','send_webhook',$3,$4::jsonb)`,
+    [ruleId, sheetId, REQUESTER, JSON.stringify({ logic: 'and', conditions: [{ fieldId, operator: 'equals', value }] })])
+    const conditions = createAutomationReadRecordConditions({ businessTimeZone: 'Asia/Shanghai' })
+    return poolManager.get().transaction(async actual => {
+      const trx: TransactionalQueryable = { isTransaction: true, query: async (statement, params) => actual.query(statement, params) }
+      const locked = await conditions.lock(trx, { actorId: REQUESTER, ruleId, sheetId, baseId })
+      return conditions.evaluate(trx, locked, { outboxId: String(image.outbox_id), eventId: String(image.event_id), eventType: 'multitable.record.updated' })
+    })
+  }
+
+  test.each([false, true])('real completion and bridge capture PG RETURNING full image, exact receipt bytes/version and schema before DML (cross-base=%s)', async crossBase => {
+    const svc = realService(), registry = bridgeRegistry(svc), emitSpy = vi.spyOn(eventBus, 'emit')
+    const source = 'sa06ak_source_' + randomUUID(), target = crossBase ? 'sa06ak_target_' + randomUUID() : source
+    const sheetId = crossBase ? XB_SHEET : SHEET, baseId = crossBase ? XB_BASE : BASE
+    const titleField = crossBase ? FLD_XB_SRC_TITLE : FLD_TITLE
+    const statusField = crossBase ? FLD_XB_STATUS : FLD_STATUS
+    const trigger = 'sa06ak_returning_' + randomBytes(6).toString('hex')
+    try {
+      await seedRecordWithCreateRevision(source, SHEET, { [FLD_TITLE]: 'synthetic untouched source' })
+      if (crossBase) await seedRecordWithCreateRevision(target, sheetId, { [titleField]: 'synthetic untouched target' })
+      // Real PG BEFORE UPDATE sees the capture's held schema locks BEFORE any record DML. It changes
+      // an untouched field so patch reconstruction or hydration from the pre-write row cannot pass.
+      await q(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND relation='meta_fields'::regclass
+            AND mode='ShareLock' AND granted) THEN RAISE EXCEPTION 'SA06AK_SCHEMA_NOT_BEFORE_DML'; END IF;
+          NEW.data := NEW.data || jsonb_build_object('${titleField}','synthetic PG returned',
+            'synthetic_capture_xid',pg_current_xact_id()::text);
+          RETURN NEW;
+        END $fn$`)
+      await q(`CREATE TRIGGER ${trigger}_trg BEFORE UPDATE ON meta_records FOR EACH ROW
+        WHEN(NEW.id='${target}') EXECUTE FUNCTION ${trigger}()`)
+      const rw = crossBase ? { statusField, approverField: FLD_XB_APPROVER, targetBaseId: baseId, targetSheetId: sheetId, targetRecordId: target }
+        : { statusField, approverField: FLD_APPROVER, completedAtField: FLD_COMPLETED }
+      const run = await executeAndApprove(svc, SHEET, source, 'sa06ak_return_' + randomUUID(), rw,
+        'synthetic untouched source', { registry })
+      const row = (await recordRow(target))!, images = await imageFor(target)
+      expect(images).toHaveLength(1)
+      expect(images[0]).toMatchObject({ sheet_id: sheetId, record_id: target, record_version: '2', status: 'captured',
+        reason: null, event_type: 'multitable.record.updated', receipt_event_type: 'multitable.record.updated', after_image: row.data,
+        capture_xid: row.data.synthetic_capture_xid })
+      expect(images[0].event_id).toBe(images[0].receipt_event_id)
+      expect(images[0].captured_bytes).toBe(images[0].pg_bytes)
+      expect(images[0].captured_bytes).toBeGreaterThan(0)
+      const nonce = (await q(`SELECT revision::text FROM automation_read_material_epochs
+        WHERE kind='sheet' AND scope=jsonb_build_object('id',$1::text)`, [sheetId])).rows[0].revision
+      expect(images[0].schema_revision).toBe(nonce)
+      expect(row.version).toBe(2)
+      expect(row.data[titleField]).toBe('synthetic PG returned')
+      expect(images[0].payload.changes).not.toHaveProperty(titleField)
+      expect(images[0].payload).not.toHaveProperty('synthetic_capture_xid')
+      expect(await conditionOnImage(target, sheetId, baseId, titleField, 'synthetic PG returned')).toEqual({ kind: 'match' })
+      expect((await revisionsOf(target)).find(revision => revision.action === 'update'))
+        .toMatchObject({ version: 2, actor_id: crossBase ? REQUESTER : APPROVER, snapshot: row.data })
+      if (crossBase) expect(await revisionsOf(source)).toHaveLength(1)
+      expect(await recordUpdatedPublications(emitSpy, target)).toBe(1)
+      const beforeReplay = await recordRow(target)
+      await replay(svc, run.approvalInstanceId)
+      expect(await recordRow(target)).toEqual(beforeReplay)
+      expect(await imageFor(target)).toHaveLength(1)
+      expect(await revisionsOf(target)).toHaveLength(2)
+      expect(await recordUpdatedPublications(emitSpy, target)).toBe(1)
+    } finally { await dropTrigger(trigger, 'meta_records'); emitSpy.mockRestore(); await svc.shutdown() }
+  }, 20000)
+
+  test('schema NOWAIT conflict preserves actual ordinary write but supplies no condition evidence', async () => {
+    const svc = realService(), holder = await ownedPool.connect(), record = 'sa06ak_nowait_' + randomUUID()
+    try {
+      await seedRecordWithCreateRevision(record, SHEET, { [FLD_TITLE]: 'synthetic untouched' })
+      await executeAndApprove(svc, SHEET, record, 'sa06ak_nowait_' + randomUUID(), { statusField: FLD_STATUS },
+        'synthetic untouched', { registry: bridgeRegistry(svc), beforeDispatch: async () => {
+          await holder.query('BEGIN'); await holder.query('LOCK TABLE meta_fields IN ROW EXCLUSIVE MODE')
+        } })
+      await holder.query('ROLLBACK')
+      expect(await recordRow(record)).toMatchObject({ version: 2, data: { [FLD_TITLE]: 'synthetic untouched', [FLD_STATUS]: 'approved' } })
+      expect((await imageFor(record))[0]).toMatchObject({ status: 'captured', schema_revision: null })
+      expect(await conditionOnImage(record, SHEET, BASE, FLD_TITLE, 'synthetic untouched'))
+        .toEqual({ kind: 'unreadable', reason: 'AFTER_IMAGE_UNAVAILABLE' })
+    } finally { await holder.query('ROLLBACK').catch(() => {}); holder.release(); await svc.shutdown() }
+  }, 15000)
+
+  test('private image INSERT failure rolls back UPDATE/revision/outbox; acknowledged bridge replay does not silently repair backwriteSkipped', async () => {
+    const svc = realService(), emitSpy = vi.spyOn(eventBus, 'emit'), record = 'sa06ak_fail_' + randomUUID()
+    const trigger = 'sa06ak_image_failure_' + randomBytes(6).toString('hex')
+    try {
+      await seedRecordWithCreateRevision(record, SHEET, { [FLD_TITLE]: 'synthetic unchanged' })
+      await injectTrigger(trigger, { table: 'meta_automation_record_after_images', timing: 'INSERT',
+        when: `NEW.record_id='${record}'`, errcode: 'P0001', message: 'SA06AK_IMAGE_INSERT_FAILURE' })
+      const run = await executeAndApprove(svc, SHEET, record, 'sa06ak_fail_' + randomUUID(), { statusField: FLD_STATUS },
+        'synthetic unchanged', { registry: bridgeRegistry(svc) })
+      const output = (await svc.logs.getById(run.executionId))!.steps.find(step => step.actionType === 'start_approval')?.output
+      expect(output).toMatchObject({ backwriteSkipped: expect.stringContaining('SA06AK_IMAGE_INSERT_FAILURE') })
+      expect(await recordRow(record)).toMatchObject({ version: 1, data: { [FLD_TITLE]: 'synthetic unchanged' } })
+      expect(await revisionsOf(record)).toHaveLength(1)
+      expect(await imageFor(record)).toEqual([])
+      expect(await recordUpdatedPublications(emitSpy, record)).toBe(0)
+      await dropTrigger(trigger, 'meta_automation_record_after_images')
+      await replay(svc, run.approvalInstanceId)
+      expect(await recordRow(record)).toMatchObject({ version: 1 })
+      expect(await imageFor(record)).toEqual([])
+      expect(await revisionsOf(record)).toHaveLength(1)
+      expect((await svc.logs.getById(run.executionId))!.steps.find(step => step.actionType === 'start_approval')?.output).toEqual(output)
+    } finally { await dropTrigger(trigger, 'meta_automation_record_after_images'); emitSpy.mockRestore(); await svc.shutdown() }
+  }, 15000)
+
+  test('durable zero-row race commits no update revision/event/image and preserves success with missing marker', async () => {
+    const svc = realService(), emitSpy = vi.spyOn(eventBus, 'emit'), holder = await ownedPool.connect()
+    const record = 'sa06ak_zero_' + randomUUID()
+    let pending: Promise<unknown> | undefined
+    let settled: Promise<{ value: unknown } | { error: unknown }> | undefined
+    try {
+      await seedRecordWithCreateRevision(record, SHEET, { [FLD_TITLE]: 'synthetic raced' })
+      await holder.query('BEGIN')
+      await holder.query('DELETE FROM meta_records WHERE id=$1', [record])
+      const pid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      pending = executeAndApprove(svc, SHEET, record, 'sa06ak_zero_' + randomUUID(), { statusField: FLD_STATUS },
+        'synthetic raced', { registry: bridgeRegistry(svc) })
+      // Attach rejection handling synchronously. A missing runtime prerequisite must surface its
+      // original PG error immediately, rather than masquerading as a lock-barrier timeout.
+      settled = pending.then(value => ({ value }), error => ({ error }))
+      await Promise.race([
+        waitUntilBlockedOnRecordLock(pid, '%UPDATE meta_records%'),
+        settled.then(result => {
+          if ('error' in result) throw result.error
+          throw new Error('SA06AK_WRITEBACK_COMPLETED_BEFORE_LOCK_BARRIER')
+        }),
+      ])
+      await holder.query('COMMIT')
+      const run = await pending as { executionId: string }
+      expect((await svc.logs.getById(run.executionId))!.steps.find(step => step.actionType === 'start_approval')?.output)
+        .toMatchObject({ backwriteSkipped: 'target_record_missing' })
+      expect(await recordRow(record)).toBeUndefined()
+      expect(await revisionsOf(record)).toHaveLength(1)
+      expect(await imageFor(record)).toEqual([])
+      expect(await recordUpdatedPublications(emitSpy, record)).toBe(0)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {}); holder.release()
+      await settled
+      emitSpy.mockRestore(); await svc.shutdown()
+    }
+  }, 20000)
+
+  test('OFF preserves legacy writeback/revision/publication without private image or durable completion', async () => {
+    vi.stubEnv(flag, 'false')
+    const svc = realService(), emitSpy = vi.spyOn(eventBus, 'emit'), record = 'sa06ak_off_' + randomUUID()
+    try {
+      await seedRecordWithCreateRevision(record, SHEET, { [FLD_TITLE]: 'synthetic OFF' })
+      const run = await executeAndApprove(svc, SHEET, record, 'sa06ak_off_' + randomUUID(), { statusField: FLD_STATUS }, 'synthetic OFF')
+      expect(await recordRow(record)).toMatchObject({ version: 2, data: { [FLD_TITLE]: 'synthetic OFF', [FLD_STATUS]: 'approved' } })
+      expect(await revisionsOf(record)).toHaveLength(2)
+      expect(await imageFor(record)).toEqual([])
+      expect(await recordUpdatedPublications(emitSpy, record)).toBe(1)
+      expect((await q(`SELECT id FROM meta_automation_outbox WHERE payload->'approval'->>'instanceId'=$1`, [run.approvalInstanceId])).rows).toEqual([])
+    } finally { emitSpy.mockRestore(); await svc.shutdown() }
+  }, 15000)
 })

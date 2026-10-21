@@ -143,6 +143,7 @@ const YIDA_FIELDS = [
   ['integration_yida_draft_operations', 'snapshot_encrypted'],
   ['integration_yida_approved_target', 'evidence_encrypted'],
   ['integration_yida_send_approvals', 'snapshot_encrypted'],
+  ['integration_yida_auto_execution_snapshots', 'snapshot_encrypted'],
 ] as const
 
 const EXPECTED_STORE_FIELDS = [
@@ -265,7 +266,9 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
       },
     })
     await service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey, confirmationId: 'synthetic-probe-confirmation' })
-    return Object.fromEntries(YIDA_FIELDS.map(([store, field]) => {
+    // The automatic execution anchor is covered by its real-PG admission suite;
+    // this helper remains the original five actual memory-backed writers.
+    return Object.fromEntries(YIDA_FIELDS.filter(([store]) => store !== 'integration_yida_auto_execution_snapshots').map(([store, field]) => {
       expect(rows(store)).toHaveLength(1)
       const value = rows(store)[0][field]
       expect(typeof value).toBe('string')
@@ -309,6 +312,9 @@ beforeAll(async () => {
     'system_configs.value (is_encrypted)': [sysPrefixed, sysBare, '"plain-config-value"', { nested: true }, 'short'],
   }
   const yida = await yidaWriterFixtures()
+  // Probe format coverage only. Do not describe this as the automatic writer;
+  // actual core prepare/admission/encrypt/INSERT is independently real-PG tested.
+  yida['integration_yida_auto_execution_snapshots.snapshot_encrypted'] = await p('auto-execution-anchor')
   for (const [field, value] of Object.entries(yida)) {
     const plain = M(field)
     fixture.plaintexts.push(plain)
@@ -347,7 +353,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     }
   }
 
-  it('the five YiDa durable fields have exact raw host-envelope catalog entries and bounded single-column SQL', () => {
+  it('manual and automatic YiDa fields have exact raw host-envelope catalog entries and bounded single-column SQL', () => {
     assertYidaCatalog(ENCRYPTED_STORE_CATALOG)
   })
 
@@ -384,7 +390,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     expect(report.material).toEqual({ status: 'ok', issues: [] })
     expect(report.decryptChecked).toBe(true)
     expect(table(report)).toEqual(EXPECTED_UNDER_A)
-    expect(report.totals).toEqual({ encrypted: 17, undecryptable: 0, plaintext: 12, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+    expect(report.totals).toEqual({ encrypted: 18, undecryptable: 0, plaintext: 13, legacyNotChecked: 1, unreadable: 0, missing: 0 })
   })
 
   it('material B (the key changed): every encrypted value is undecryptable; plaintext and legacy counts unchanged', async () => {
@@ -395,7 +401,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
       copy[4] = row[3] // undecryptable = encrypted
       return copy
     }))
-    expect(report.totals).toMatchObject({ encrypted: 17, undecryptable: 17, plaintext: 12, legacyNotChecked: 1 })
+    expect(report.totals).toMatchObject({ encrypted: 18, undecryptable: 18, plaintext: 13, legacyNotChecked: 1 })
   })
 
   it('mixed material: only the values sealed under the OTHER material count as undecryptable', async () => {
@@ -800,7 +806,7 @@ describe('probeEncryptedStores: material and key derivation', () => {
       expect(pbkdf2).not.toHaveBeenCalled()
       expect(pbkdf2Sync).not.toHaveBeenCalled()
       expect(decipher).not.toHaveBeenCalled()
-      expect(report.totals).toMatchObject({ encrypted: 17, undecryptable: 0, plaintext: 12 })
+      expect(report.totals).toMatchObject({ encrypted: 18, undecryptable: 0, plaintext: 13 })
       vi.restoreAllMocks()
     }
   })
@@ -821,7 +827,7 @@ describe('probeEncryptedStores: material and key derivation', () => {
     expect(pbkdf2).toHaveBeenCalledTimes(1)
     expect(pbkdf2Sync).not.toHaveBeenCalled()
     expect(decipher).toHaveBeenCalledTimes(report.totals.encrypted)
-    expect(report.totals.encrypted).toBe(17)
+    expect(report.totals.encrypted).toBe(18)
   })
 
   it('the async derivation yields the byte-identical key the writers derive synchronously', async () => {
@@ -889,9 +895,9 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
   it('key changed: one info summary + one warn per store field with undecryptable values, each with the fixed re-enter hint', async () => {
     const logger = captureLogger()
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger })
-    expect(report?.totals.undecryptable).toBe(17)
+    expect(report?.totals.undecryptable).toBe(18)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 16 store field\(s\); 17 undecryptable/)
+    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 18 encrypted value\(s\) across 17 store field\(s\); 18 undecryptable/)
     const broken = EXPECTED_UNDER_A.filter((row) => (row[3] as number) > 0).map((row) => row[0])
     expect(logger.warn).toHaveBeenCalledTimes(broken.length)
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)

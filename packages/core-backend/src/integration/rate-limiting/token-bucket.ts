@@ -61,6 +61,8 @@ export interface RateLimitResult {
   key: string
 }
 
+const activeTokenBucketMaintenance = new Set<TokenBucketRateLimiter>()
+
 /**
  * Token Bucket Rate Limiter with per-key buckets
  */
@@ -304,13 +306,21 @@ export class TokenBucketRateLimiter {
   }
 
   /**
-   * Shutdown the rate limiter
+   * Stop periodic cleanup without resetting buckets, counters or configuration.
    */
-  shutdown(): void {
+  stopMaintenance(): void {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval)
       this.cleanupInterval = null
     }
+    activeTokenBucketMaintenance.delete(this)
+  }
+
+  /**
+   * Shutdown the rate limiter
+   */
+  shutdown(): void {
+    this.stopMaintenance()
     this.buckets.clear()
     logger.info('TokenBucketRateLimiter shutdown complete')
   }
@@ -376,6 +386,7 @@ export class TokenBucketRateLimiter {
 
     // Don't prevent process exit
     this.cleanupInterval.unref()
+    activeTokenBucketMaintenance.add(this)
   }
 
   /**
@@ -400,6 +411,11 @@ export class TokenBucketRateLimiter {
       }
     }
   }
+}
+
+/** Stop maintenance on existing instances without creating the default limiter. */
+export function stopTokenBucketMaintenance(): void {
+  for (const limiter of activeTokenBucketMaintenance) limiter.stopMaintenance()
 }
 
 /**

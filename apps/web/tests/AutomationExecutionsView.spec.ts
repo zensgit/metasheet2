@@ -4,6 +4,10 @@ import { createApp, h, nextTick } from 'vue'
 import AutomationExecutionsView from '../src/views/AutomationExecutionsView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRunView } from '../src/multitable/types'
+import type { AutomationReadRequestStatus } from '../src/services/integration/automationRead'
+import { MultitableApiClient } from '../src/multitable/api/client'
+import { normalizeAutomationRunReadReference } from '../src/multitable/automationReadExecution'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 let mockIsAdmin = true
 vi.mock('../src/composables/useAuth', () => ({
@@ -302,6 +306,260 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
       useLocale().setLocale('en')
     })
   }
+})
+
+describe('AutomationExecutionsView — closed integration read audits', () => {
+  const requestId = '12345678-1234-1234-1234-123456789abc'
+  const statuses = {
+    queued: ['已排队，未完成', 'Queued, not complete'], running: ['正在运行', 'Running'],
+    succeeded: ['只读预览完成', 'Read-only preview complete'], blocked: ['已阻止执行', 'Execution blocked'],
+    failed: ['执行失败', 'Execution failed'], cancelled: ['已取消', 'Cancelled'],
+    outcome_unknown: ['结果未知，不会自动重做', 'Outcome unknown; no automatic rerun'],
+  } as const
+  function readRun(status: AutomationReadRequestStatus): AutomationRunView {
+    const legacy = status === 'succeeded' ? 'success' : ['blocked', 'cancelled'].includes(status) ? 'skipped'
+      : ['failed', 'outcome_unknown'].includes(status) ? 'failed' : 'running'
+    return {
+      ...RUN_LIST, id: 'axe_read', status: legacy === 'success' ? 'resolved' : legacy,
+      statusLegacy: legacy, triggeredBy: 'integration-read-owner', steps: [],
+      triggerEvent: null, ruleSnapshot: null, integrationRead: { requestId, status },
+    }
+  }
+  function getClient(list: unknown[], detail: unknown) {
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method && init.method !== 'GET') throw new Error('Unexpected mutation transport')
+      return new Response(JSON.stringify(url.includes('/axe_read') ? detail : { executions: list }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    return { client: new MultitableApiClient({ fetchFn }), fetchFn }
+  }
+
+  it('clears loaded read metadata immediately on a principal switch', async () => {
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([readRun('failed')]) }))
+    await settle()
+    expect(mounted.container.querySelector('[data-run-id="axe_read"]')).not.toBeNull()
+    notifyAuthPrincipalChange()
+    await settle()
+    expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+  })
+
+  it.each(['principal', 'storage', 'focus'] as const)('drops a late read list after a %s session change', async mode => {
+    const prior = localStorage.getItem('auth_token')
+    localStorage.setItem('auth_token', 'synthetic.owner.session')
+    let release!: (rows: AutomationRunView[]) => void
+    const pending = new Promise<AutomationRunView[]>(resolve => { release = resolve })
+    try {
+      mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockReturnValue(pending) }))
+      await settle()
+      if (mode === 'principal') notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'synthetic.other.session')
+      if (mode === 'storage') window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+      if (mode === 'focus') window.dispatchEvent(new Event('focus'))
+      release([readRun('succeeded')])
+      await settle()
+      expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+      expect(mounted.container.querySelector('[data-field="integration-read-status"]')).toBeNull()
+    } finally {
+      if (prior === null) localStorage.removeItem('auth_token')
+      else localStorage.setItem('auth_token', prior)
+    }
+  })
+
+  it('discards a late read list after session A → B → A', async () => {
+    let release!: (rows: AutomationRunView[]) => void
+    const pending = new Promise<AutomationRunView[]>(resolve => { release = resolve })
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockReturnValue(pending) }))
+    await settle()
+    notifyAuthPrincipalChange()
+    notifyAuthPrincipalChange()
+    release([readRun('succeeded')])
+    await settle()
+    expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+  })
+
+  it('rejects an ordinary retry handler for a read action in a historical snapshot', async () => {
+    const row = { ...RUN_LIST, status: 'failed' as const, ruleSnapshot: {
+      actionType: 'integration_read_preview', actionConfig: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: true },
+    } }
+    const retry = vi.fn()
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([row]),
+      getAutomationRun: vi.fn().mockResolvedValue({ ...row, ruleSnapshot: null, triggerEvent: { recordId: 'rec1' } }), retryAutomationExecution: retry }))
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_1"]') as HTMLElement).click()
+    await settle()
+    const button = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    button.dispatchEvent(new Event('click', { bubbles: true }))
+    await settle()
+    expect(retry).not.toHaveBeenCalled()
+  })
+  for (const [status, labels] of Object.entries(statuses)) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`${status} (${locale}): real GET list/detail show exact read state and never generic rerun`, async () => {
+        useLocale().setLocale(locale)
+        const row = readRun(status as AutomationReadRequestStatus)
+        const { client, fetchFn } = getClient([row], row)
+        const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+        try {
+          mounted = mount(client)
+          await settle()
+          const expected = labels[locale === 'zh-CN' ? 0 : 1]
+          expect(mounted.container.querySelector('[data-field="integration-read-status"]')?.textContent?.trim()).toBe(expected)
+          expect(mounted.container.querySelector('[data-status="failed"]')).toBeNull()
+          ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+          await settle()
+          expect(mounted.container.querySelector('[data-field="integration-read-detail"] [data-read-status]')?.textContent?.trim()).toBe(expected)
+          expect(mounted.container.querySelector('[data-field="integration-read-request-id"]')?.textContent).toBe(requestId)
+          expect(mounted.container.querySelector('[data-field="step-output"]')).toBeNull()
+          const rerun = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement | null
+          if (row.status === 'failed' || row.status === 'skipped') {
+            expect(rerun?.disabled).toBe(true)
+            expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')?.textContent).toContain(locale === 'zh-CN' ? '备料面板' : 'preparation panel')
+            // Native dispatch bypasses disabled.click(), pinning the handler too.
+            rerun?.dispatchEvent(new Event('click', { bubbles: true }))
+            await settle()
+          } else expect(rerun).toBeNull()
+          expect(confirm).not.toHaveBeenCalled()
+          expect(fetchFn).toHaveBeenCalledTimes(2)
+          expect(fetchFn.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+        } finally { confirm.mockRestore() }
+      })
+    }
+  }
+
+  for (const invalidRef of [
+    { requestId, status: 'future_state' },
+    { requestId, status: 'failed', result: { private: 'must-not-render' } },
+    { requestId: 'bad-id', status: 'failed' },
+    null,
+  ]) {
+    it(`real GET rejects illegal optional reference ${JSON.stringify(invalidRef)} in list and detail`, async () => {
+      const invalidRun = { ...readRun('failed'), integrationRead: invalidRef }
+      const { client, fetchFn } = getClient([invalidRun], invalidRun)
+      await expect(client.listAutomationRuns()).rejects.toThrow('Invalid read-preview execution response')
+      await expect(client.getAutomationRun('axe_read')).rejects.toThrow('Invalid read-preview execution response')
+      mounted = mount(client)
+      await settle()
+      expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+      expect(mounted.container.textContent).not.toContain('must-not-render')
+      expect(mounted.container.querySelector('[data-action="rerun"]')).toBeNull()
+      expect(fetchFn.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+    })
+  }
+
+  it('own outer, own status and inherited getters are refused without being invoked at the view boundary', async () => {
+    const getter = vi.fn(() => ({ requestId, status: 'failed' }))
+    const outer = { ...readRun('failed') }
+    Object.defineProperty(outer, 'integrationRead', { enumerable: true, get: getter })
+    const statusGetter = vi.fn(() => 'failed')
+    const inner = { requestId }
+    Object.defineProperty(inner, 'status', { enumerable: true, get: statusGetter })
+    const inherited = { ...RUN_LIST, id: 'axe_read' }
+    Object.setPrototypeOf(inherited, Object.defineProperty({}, 'integrationRead', { enumerable: true, get: getter }))
+    for (const row of [outer, { ...readRun('failed'), integrationRead: inner }, inherited]) {
+      expect(() => normalizeAutomationRunReadReference(row as AutomationRunView)).toThrow('Invalid read-preview execution response')
+    }
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([outer]) }))
+    await settle()
+    expect(mounted.container.querySelector('[data-run-id]')).toBeNull()
+    expect(getter).not.toHaveBeenCalled()
+    expect(statusGetter).not.toHaveBeenCalled()
+  })
+
+  it('an invalid detail reference collapses without painting private fields or offering retry', async () => {
+    const retry = vi.fn()
+    mounted = mount(makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([readRun('failed')]),
+      getAutomationRun: vi.fn().mockResolvedValue({ ...readRun('failed'), integrationRead: { requestId, status: 'failed', selector: 'must-not-render' } }),
+      retryAutomationExecution: retry,
+    }))
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+    await settle()
+    expect(mounted.container.querySelector('[data-detail="true"]')).toBeNull()
+    expect(mounted.container.textContent).not.toContain('must-not-render')
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('fixed owner origin blocks a legacy missing-reference/missing-snapshot shell even with a usable trigger', async () => {
+    const row = { ...readRun('failed'), integrationRead: undefined, triggerEvent: { _triggeredBy: 'schedule' }, ruleSnapshot: null }
+    const retry = vi.fn()
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([row]), getAutomationRun: vi.fn().mockResolvedValue(row), retryAutomationExecution: retry }))
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+    await settle()
+    const button = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')?.textContent).toContain('preparation panel')
+    button.dispatchEvent(new Event('click', { bubbles: true }))
+    await settle()
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  for (const source of ['list', 'detail'] as const) {
+    it(`a ${source}-only read reference blocks rerun independently of origin or missing trigger`, async () => {
+      const base = { ...readRun('failed'), triggeredBy: 'event', triggerEvent: { recordId: 'rec1' }, integrationRead: undefined }
+      const withRef = { ...base, integrationRead: { requestId, status: 'failed' as const } }
+      const retry = vi.fn()
+      mounted = mount(makeClient({
+        listAutomationRuns: vi.fn().mockResolvedValue([source === 'list' ? withRef : base]),
+        getAutomationRun: vi.fn().mockResolvedValue(source === 'detail' ? withRef : base),
+        retryAutomationExecution: retry,
+      }))
+      await settle()
+      ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+      await settle()
+      const button = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')?.textContent).toContain('preparation panel')
+      button.dispatchEvent(new Event('click', { bubbles: true }))
+      await settle()
+      expect(retry).not.toHaveBeenCalled()
+    })
+  }
+
+  it('a detail reference accessor is rejected without invocation or rendering a retry action', async () => {
+    const getter = vi.fn(() => ({ requestId, status: 'failed' }))
+    const bad = { ...readRun('failed') }
+    Object.defineProperty(bad, 'integrationRead', { enumerable: true, get: getter })
+    const retry = vi.fn()
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([readRun('failed')]), getAutomationRun: vi.fn().mockResolvedValue(bad), retryAutomationExecution: retry }))
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+    await settle()
+    expect(getter).not.toHaveBeenCalled()
+    expect(mounted.container.querySelector('[data-detail="true"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-action="rerun"]')).toBeNull()
+    expect(retry).not.toHaveBeenCalled()
+  })
+
+  it('linked read renders no generic snapshots or business step output', async () => {
+    const row = {
+      ...readRun('outcome_unknown'), triggerEvent: { project: 'must-not-render' },
+      ruleSnapshot: { result: 'must-not-render' }, steps: [{ ...RUN_LIST.steps[1], result: { project: 'must-not-render' } }],
+    }
+    mounted = mount(makeClient({ listAutomationRuns: vi.fn().mockResolvedValue([row]), getAutomationRun: vi.fn().mockResolvedValue(row) }))
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_read"]') as HTMLElement).click()
+    await settle()
+    expect(mounted.container.textContent).toContain('Outcome unknown; no automatic rerun')
+    expect(mounted.container.textContent).not.toContain('must-not-render')
+    expect(mounted.container.querySelector('[data-field="trigger-event"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-field="rule-snapshot"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-field="step-output"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-status="failed"]')).toBeNull()
+  })
+
+  it('ordinary real GET run fields and generic resolved display remain unchanged', async () => {
+    const { client } = getClient([RUN_LIST], RUN_DETAIL)
+    expect(await client.listAutomationRuns()).toEqual([RUN_LIST])
+    expect(normalizeAutomationRunReadReference(RUN_LIST)).toBe(RUN_LIST)
+    mounted = mount(client)
+    await settle()
+    expect(mounted.container.querySelector('[data-status="resolved"]')).not.toBeNull()
+    expect(mounted.container.querySelector('[data-field="integration-read-status"]')).toBeNull()
+  })
 })
 
 // 客户反馈 2026-09-24 #3 final review F1 — the step result used to be rendered as raw one-line JSON, so a zh

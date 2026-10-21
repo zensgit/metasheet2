@@ -186,12 +186,14 @@ automation-condition-value-input
 automation-condition-values
 automation-log-redact
 automation-log-support-packet
+automation-read-authoring
 automation-recipes
 automation-rerun-execution
 automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+automationRead
 builtinCatalogPresentation
 cancelRoundEntryApproverList
 cancelRoundEntryAttendancePanel
@@ -284,6 +286,7 @@ multitable-attachment-editor
 multitable-attachment-list
 multitable-automation-manager
 multitable-automation-manager-roundtrip
+multitable-automation-read-editor
 multitable-automation-rule-editor
 multitable-automation-trigger-time
 multitable-b4-field-always-readonly
@@ -492,6 +495,7 @@ serverFormDraft
 SessionOrgSwitcher.spec.ts
 shared-comments-stub-client
 statusTag
+StockPreparationAutomationReadPanel
 StockPreparationCodeHelp
 stockPreparationConfirmationQueue
 StockPreparationDashboardView
@@ -609,6 +613,8 @@ tests/network-unavailable-copy.spec.ts
 tests/useAttendanceSessionGuard.spec.ts
 tests/useAuth.spec.ts
 tests/useSessionOrg.spec.ts
+tests/YidaAutomation.spec.ts
+tests/YidaReconciliation.spec.ts
 todoApi
 TodoCenterView
 todoCountsRealtime

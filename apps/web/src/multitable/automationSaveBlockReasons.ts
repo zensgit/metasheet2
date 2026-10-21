@@ -19,6 +19,7 @@
 
 import { automationActionTypeLabel } from './utils/meta-automation-labels'
 import type { AutomationActionType, AutomationRule } from './types'
+import { automationReadProblemMessage, type AutomationReadAuthoringProblem } from './automationReadAuthoring'
 
 export interface SaveBlockReason {
   key: string
@@ -189,6 +190,7 @@ export function storedRuleHasDeletedTriggerSelfMutation(
 }
 
 export interface SaveBlockReasonsInput {
+  automationReadProblems?: AutomationReadAuthoringProblem[]
   isZh: boolean
   name: string
   actionsCount: number
@@ -229,6 +231,14 @@ export interface SaveBlockReasonsInput {
 export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlockReason[] {
   const zh = input.isZh
   const reasons: SaveBlockReason[] = []
+  for (const problem of input.automationReadProblems ?? []) {
+    reasons.push({
+      key: `automationRead-${problem}`,
+      message: automationReadProblemMessage(problem, zh),
+      anchor: problem === 'mode' ? '[data-field="executionModeToggle"]'
+        : problem === 'trigger' ? '[data-field="triggerType"]' : '[data-field="automationReadPolicy"]',
+    })
+  }
 
   if (!input.name.trim()) {
     reasons.push({ key: 'name', message: zh ? '请填写规则名称。' : 'Enter a rule name.', anchor: '[data-field="name"]' })

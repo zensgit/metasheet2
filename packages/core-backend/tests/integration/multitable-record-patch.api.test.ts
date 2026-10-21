@@ -1,4 +1,6 @@
 import express from 'express'
+import { once } from 'node:events'
+import type { Server } from 'node:http'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
@@ -9,6 +11,7 @@ type QueryResult = {
 }
 
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
+const ownServers = new Set<Server>()
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -73,7 +76,10 @@ async function createApp(args: {
   })
   app.use('/api/multitable', univerMetaModule.univerMetaRouter())
 
-  return { app, publishSpy, emitSpy, realtimePublishSpy, mockPool }
+  const server = app.listen(0, '127.0.0.1')
+  ownServers.add(server)
+  await once(server, 'listening')
+  return { app: server, publishSpy, emitSpy, realtimePublishSpy, mockPool }
 }
 
 /**
@@ -86,6 +92,14 @@ async function createApp(args: {
  */
 describe('Multitable PATCH /records/:recordId (record-service extraction)', () => {
   afterEach(async () => {
+    for (const server of ownServers) {
+      if (server.listening) {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve())
+        })
+      }
+      ownServers.delete(server)
+    }
     // Clear the module-level yjs invalidator before other tests in the
     // process reset it too.
     const univerMetaModule = await import('../../src/routes/univer-meta')
@@ -113,7 +127,9 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.startsWith('SELECT id, version, data, created_by, locked, locked_by')
+          && sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+          expect(sql).toContain('CASE WHEN octet_length(data::text)<=262144 THEN data::text ELSE NULL END AS automation_after_image_json')
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return {
             rows: [{ id: 'rec_1', version: 7, data: { fld_title: 'Original title' }, created_by: 'user_patch_1', locked: false, locked_by: null }],
@@ -324,7 +340,9 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.startsWith('SELECT id, version, data, created_by, locked, locked_by')
+          && sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+          expect(sql).toContain('CASE WHEN octet_length(data::text)<=262144 THEN data::text ELSE NULL END AS automation_after_image_json')
           return { rows: [{ id: 'rec_1', version: 11, data: { fld_title: 'Current' }, created_by: 'user_patch_1' }] }
         }
         // A: approval-projection read-guard lookup — no projection sheet in this test
@@ -379,7 +397,9 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
           expect(params).toEqual(['sheet_customer', ['rec_c2', 'rec_c3']])
           return { rows: [{ id: 'rec_c2' }, { id: 'rec_c3' }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.startsWith('SELECT id, version, data, created_by, locked, locked_by')
+          && sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+          expect(sql).toContain('CASE WHEN octet_length(data::text)<=262144 THEN data::text ELSE NULL END AS automation_after_image_json')
           return {
             rows: [{ id: 'rec_1', version: 2, data: { fld_customer: ['rec_c1', 'rec_c2'] }, created_by: 'user_patch_1' }],
           }
@@ -494,7 +514,9 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('FROM multitable_attachments') && sql.includes('id = ANY')) {
           return { rows: [{ id: 'att_new_1', field_id: 'fld_files' }] }
         }
-        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.startsWith('SELECT id, version, data, created_by, locked, locked_by')
+          && sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+          expect(sql).toContain('CASE WHEN octet_length(data::text)<=262144 THEN data::text ELSE NULL END AS automation_after_image_json')
           return {
             rows: [{
               id: 'rec_1',

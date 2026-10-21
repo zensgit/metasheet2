@@ -53,6 +53,7 @@
  * Pure data + assertions — no DB, no side effects, flag-independent (nothing reads it until S4 enqueues).
  */
 import type { ConsumerAdapterRegistry } from './automation-durable-dispatch-loop'
+import { AUTOMATION_READ_CONSUMER, AUTOMATION_READ_EVENT } from '../integration/automation-read-contracts'
 
 export interface RoutingManifest {
   readonly version: number
@@ -190,12 +191,28 @@ export const ROUTING_MANIFEST_V3: RoutingManifest = deepFreezeManifest({
   },
 })
 
-export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V3
+/**
+ * v4 adds exactly one private, request-reference-only read-preview route. Older
+ * manifests and their frozen fan-outs remain unchanged, including in-flight rows.
+ * Registration is unconditional: plugin availability affects the read adapter's
+ * outcome, never routing, and an unavailable executor must never become an ACK.
+ */
+export const ROUTING_MANIFEST_V4: RoutingManifest = deepFreezeManifest({
+  version: 4,
+  routes: {
+    ...ROUTING_MANIFEST_V3.routes,
+    [AUTOMATION_READ_EVENT]: [AUTOMATION_READ_CONSUMER],
+  },
+})
+
+export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V4
 
 /** Versions this build can dispatch. A row stamped with an unknown version must be left alone (older/newer
  *  worker's job), mirroring the unknown-consumer_key rule. v1 stays supported for in-flight rows enqueued
  *  before this deploy — they keep their v1 fan-out forever. */
-export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3])
+// v5 is dispatched only when the explicit private YiDa adapter is registered;
+// CURRENT and all ordinary producer fan-outs remain v4.
+export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3, 4, 5])
 
 /**
  * Expand an event type to its consumer_keys under the given manifest. Returns undefined for an event type

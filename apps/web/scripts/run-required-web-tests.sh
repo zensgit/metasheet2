@@ -482,6 +482,9 @@
 # exactly one, its own (src/views/RoleDelegationView.vue is not collectable and differs in case).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# SA06D: actual finite-authorization UI/client contracts, one isolated process.
+# No live vendor IO. This supplements, not replaces, the existing YiDa canaries.
+npx vitest run tests/YidaAutomation.spec.ts tests/YidaReconciliation.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Explicit organization sessions: a separate small process, retaining existing
 # API/approval and attendance suite ownership below.
 npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
@@ -1647,12 +1650,14 @@ exec npx vitest run \
   automation-condition-values \
   automation-log-redact \
   automation-log-support-packet \
+  automation-read-authoring \
   automation-recipes \
   automation-rerun-execution \
   automation-rule-concurrent-merge \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  automationRead \
   builtinCatalogPresentation \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
@@ -1740,6 +1745,7 @@ exec npx vitest run \
   multitable-attachment-list \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
+  multitable-automation-read-editor \
   multitable-automation-rule-editor \
   multitable-automation-trigger-time \
   multitable-b4-field-always-readonly \
@@ -1939,6 +1945,7 @@ exec npx vitest run \
   SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
+  StockPreparationAutomationReadPanel \
   StockPreparationCodeHelp \
   stockPreparationConfirmationQueue \
   StockPreparationDashboardView \
