@@ -147,8 +147,8 @@ async function controlScenario(): Promise<number> {
   const pid = Number(rows[0].pid)
   write(`CONTROL_BORROWED pid=${pid}`)
   // Printed BEFORE the terminate is issued: once the server closes the idle connection the bare pool
-  // has no listener, and this process may stop while the admin query is still in flight, so no line
-  // written after the terminate is guaranteed to exist. No wait is needed in this leg.
+  // has no listener, and this process may not get past the admin query, so no line written after the
+  // terminate is guaranteed to exist. No wait is needed in this leg.
   write(`CONTROL_TERMINATING pid=${pid}`)
   await withAdmin((admin) => admin.query('SELECT pg_terminate_backend($1)', [pid]))
   await sleep(3000)

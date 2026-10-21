@@ -10,8 +10,8 @@
  *      statements; the caller gets an error, the child keeps running, the pool has discarded the
  *      connection (total 0, one remove), and the next query succeeds on a different backend.
  *  (c) control: the same harness around a bare pg Pool with no listener does NOT reach its last line
- *      and exits non-zero — the proof that this harness can observe a process that does not survive,
- *      so the two legs above are not green by construction.
+ *      (and its exit status is not 0) — the proof that this harness tells a child that stops early
+ *      from one that runs to its end, so the two legs above are not green by construction.
  *
  * Shared-database safe: the child only terminates backends it opened itself (identified by pid, read
  * through the connection itself), and the parent only reads `pg_stat_activity`.
