@@ -318,6 +318,53 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       .toEqual([{first_in_at:new Date('2026-02-03T08:30:00Z')}])
     expect(await companions()).toEqual([])
   })
+  // Refusals that must hold on their own guards (zone check, multi-timezone ON) run while the posture is still legacy;
+  // under a non-legacy posture the posture gate alone would refuse and hide a regression in those guards.
+  async function expectLegacyPosture() {
+    const rows=(await fixture.pool.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows
+    expect(rows.every((row: { state: string })=>row.state==='legacy')).toBe(true)
+  }
+  it('an incomplete historical absence record refuses current-zone target and request reinterpretation',async()=>{
+    await expectLegacyPosture()
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query("INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,status,is_workday) VALUES($1,$2,$3,'2026-02-02','America/New_York','absent',true)",
+      [id,fixture.orgId,actor.userId])
+    const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+    await expect(targetContext(actor,'2026-02-02')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+    const refused=await fixture.request('/api/attendance/requests',actor.token,{
+      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-02',operationId:randomUUID(),
+      requestedInAt:'2026-02-02T09:00:00Z',
+    })
+    expect({status:refused.status,body:refused.body}).toEqual({status:409,body:{ok:false,error:{
+      code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',message:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
+    }}})
+    expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
+    expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
+  })
+  it('ON still refuses a same-zone pre-companion record with zero DML',async()=>{
+    await expectLegacyPosture()
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-04','UTC','2026-02-04T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
+    await policy(true)
+    try {
+      const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+      await expect(targetContext(actor,'2026-02-04')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      const refused=await punch(actor,'check_out','2026-02-04T18:00:00Z')
+      expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
+      expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
+    } finally {
+      await resetSources()
+      await fixture.pool.query("UPDATE attendance_records SET last_out_at='2026-02-04T18:00:00Z' WHERE id=$1",[id])
+    }
+  })
   async function preCompanionRefusal(date: string, posture: 'shadow' | 'authoritative') {
     await resetSources()
     const actor=await fixture.user()
@@ -1111,45 +1158,6 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       .toEqual([{context_fingerprint:target.contextFingerprint}])
   })
 
-  it('an incomplete historical absence record refuses current-zone target and request reinterpretation',async()=>{
-    await resetSources()
-    const actor=await fixture.user()
-    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
-    const id=randomUUID()
-    await fixture.pool.query("INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,status,is_workday) VALUES($1,$2,$3,'2026-02-02','America/New_York','absent',true)",
-      [id,fixture.orgId,actor.userId])
-    const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
-    await expect(targetContext(actor,'2026-02-02')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
-    const refused=await fixture.request('/api/attendance/requests',actor.token,{
-      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-02',operationId:randomUUID(),
-      requestedInAt:'2026-02-02T09:00:00Z',
-    })
-    expect({status:refused.status,body:refused.body}).toEqual({status:409,body:{ok:false,error:{
-      code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',message:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
-    }}})
-    expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
-    expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
-  })
-  it('ON still refuses a same-zone pre-companion record with zero DML',async()=>{
-    await resetSources()
-    const actor=await fixture.user()
-    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
-    const id=randomUUID()
-    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
-      VALUES($1,$2,$3,'2026-02-04','UTC','2026-02-04T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
-    await policy(true)
-    try {
-      const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
-      await expect(targetContext(actor,'2026-02-04')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
-      const refused=await punch(actor,'check_out','2026-02-04T18:00:00Z')
-      expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
-      expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
-      expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
-    } finally {
-      await resetSources()
-      await fixture.pool.query("UPDATE attendance_records SET last_out_at='2026-02-04T18:00:00Z' WHERE id=$1",[id])
-    }
-  })
   it('a real holiday published punch freezes one calculation definition in identity and persisted issuance',async()=>{
     await resetSources()
     const prior = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
