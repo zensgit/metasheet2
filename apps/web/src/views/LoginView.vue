@@ -82,6 +82,13 @@ import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
 import { ensureDingTalkJsApi, isDingTalkContainer, requestContainerAuthCode } from '../utils/dingtalkContainer'
+import {
+  DINGTALK_REDIRECT_URI_REQUIREMENT,
+  formatDingTalkLoginEnvList,
+  readDingTalkMissingEnv,
+  requirementForDingTalkReason,
+  type DingTalkLoginEnvRequirement,
+} from '../utils/dingtalkLoginConfig'
 
 interface AuthUserPayload {
   role?: unknown
@@ -109,6 +116,7 @@ interface DingTalkRuntimeStatus {
   autoLinkEmail?: unknown
   autoProvision?: unknown
   unavailableReason?: unknown
+  missingEnv?: unknown
 }
 
 const router = useRouter()
@@ -182,9 +190,30 @@ const dingtalkStatusMessage = computed(() => (
   dingtalkAvailable.value ? '' : readDingTalkStatusMessage(dingtalkStatus.value)
 ))
 
+// #6467: when the server reports more than one missing login variable, name all of them so the
+// operator can set everything before a single backend restart. One missing item keeps the
+// per-reason sentence below; only names from the closed list in dingtalkLoginConfig render.
+function describeMissingDingTalkEnv(missingEnv: readonly DingTalkLoginEnvRequirement[]): string {
+  const zh = isZh.value
+  const list = formatDingTalkLoginEnvList(missingEnv, zh)
+  const needsRedirect = missingEnv.includes(DINGTALK_REDIRECT_URI_REQUIREMENT)
+  if (zh) {
+    return needsRedirect
+      ? `缺少服务端配置 ${list}，请联系管理员配置钉钉登录；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。`
+      : `缺少服务端配置 ${list}，请联系管理员配置钉钉登录。`
+  }
+  return needsRedirect
+    ? `Ask an administrator to configure ${list} for DingTalk login; DINGTALK_REDIRECT_URI must match the login callback URL in DingTalk.`
+    : `Ask an administrator to configure ${list} for DingTalk login.`
+}
+
 function readDingTalkStatusMessage(status: DingTalkRuntimeStatus | null): string {
   const reason = typeof status?.unavailableReason === 'string' ? status.unavailableReason : null
   if (reason === 'corp_not_allowed') return text.value.dingtalkCorpBlocked
+  const missingEnv = readDingTalkMissingEnv(status?.missingEnv)
+  if (requirementForDingTalkReason(reason) && missingEnv.length > 1) {
+    return describeMissingDingTalkEnv(missingEnv)
+  }
   if (reason === 'missing_client_id') return text.value.dingtalkClientIdMissing
   if (reason === 'missing_client_secret') return text.value.dingtalkClientSecretMissing
   if (reason === 'missing_redirect_uri') return text.value.dingtalkRedirectUriMissing

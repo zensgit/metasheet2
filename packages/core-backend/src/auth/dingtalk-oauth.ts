@@ -103,6 +103,20 @@ export type DingTalkRuntimeUnavailableReason =
   | 'corp_not_allowed'
   | null
 
+/**
+ * #6467: the login env requirements, as documented variable NAMES only. An entry with `|`
+ * means "either name satisfies it" (primary first, alias second), mirroring readStringEnv's
+ * fallback order. These are public names (docker/app.env.example,
+ * docs/deployment/dingtalk-login-configuration.md) — never a value or part of one.
+ */
+export const DINGTALK_LOGIN_ENV_REQUIREMENTS = [
+  'DINGTALK_CLIENT_ID|DINGTALK_APP_KEY',
+  'DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET',
+  'DINGTALK_REDIRECT_URI',
+] as const
+
+export type DingTalkLoginEnvRequirement = typeof DINGTALK_LOGIN_ENV_REQUIREMENTS[number]
+
 export interface DingTalkRuntimeStatus {
   configured: boolean
   available: boolean
@@ -112,6 +126,29 @@ export interface DingTalkRuntimeStatus {
   autoLinkEmail: boolean
   autoProvision: boolean
   unavailableReason: DingTalkRuntimeUnavailableReason
+  /**
+   * Every login env requirement that is unset or blank — the full list, whereas
+   * `unavailableReason` reports only the first blocker — so an operator can fix all of them
+   * before one backend restart. Names only; empty when all three are present (including
+   * the `corp_not_allowed` case).
+   */
+  missingEnv: DingTalkLoginEnvRequirement[]
+}
+
+/**
+ * Pure presence -> names mapping behind `missingEnv`. It takes booleans, not values, so no
+ * configured value (or fragment of one) can reach the result.
+ */
+export function listMissingDingTalkLoginEnv(present: {
+  clientId: boolean
+  clientSecret: boolean
+  redirectUri: boolean
+}): DingTalkLoginEnvRequirement[] {
+  const missing: DingTalkLoginEnvRequirement[] = []
+  if (!present.clientId) missing.push(DINGTALK_LOGIN_ENV_REQUIREMENTS[0])
+  if (!present.clientSecret) missing.push(DINGTALK_LOGIN_ENV_REQUIREMENTS[1])
+  if (!present.redirectUri) missing.push(DINGTALK_LOGIN_ENV_REQUIREMENTS[2])
+  return missing
 }
 
 export class DingTalkLoginPolicyError extends Error {
@@ -1108,6 +1145,11 @@ export function getDingTalkRuntimeStatus(): DingTalkRuntimeStatus {
     autoLinkEmail: shouldAutoLinkEmail(),
     autoProvision: shouldAutoProvision(),
     unavailableReason,
+    missingEnv: listMissingDingTalkLoginEnv({
+      clientId: clientId.length > 0,
+      clientSecret: clientSecret.length > 0,
+      redirectUri: redirectUri.length > 0,
+    }),
   }
 }
 
