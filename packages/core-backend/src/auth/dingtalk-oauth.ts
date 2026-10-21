@@ -25,6 +25,7 @@ import {
 } from './login-alias-service'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
+import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
@@ -511,10 +512,13 @@ function isValidStateRecord(record: StateRecord): boolean {
  */
 type GrantReadState = 'enabled' | 'disabled' | 'absent'
 
-async function readGrantState(localUserId: string): Promise<GrantReadState> {
-  let result: { rows: Array<{ enabled: boolean }> }
+async function readGrantState(
+  localUserId: string,
+  runner: AccessGraphTransactionClient = { query },
+): Promise<GrantReadState> {
+  let result: { rows: Array<Record<string, unknown>> }
   try {
-    result = await query<{ enabled: boolean }>(
+    result = await runner.query(
       `SELECT enabled
        FROM user_external_auth_grants
        WHERE provider = $1 AND local_user_id = $2
@@ -553,15 +557,7 @@ async function ensureGrant(localUserId: string): Promise<void> {
         code: 'local_user_disabled',
       })
     }
-    const grant = await client.query(
-      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-       VALUES ($1, $2, TRUE, $3, NOW(), NOW())
-       ON CONFLICT (provider, local_user_id)
-       DO NOTHING
-       RETURNING local_user_id`,
-      [PROVIDER, localUserId, localUserId],
-    )
-    if (grant.rows.length > 0) {
+    if (await insertGrantIfAbsent(client, localUserId, localUserId)) {
       await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
         userIds: [localUserId],
         actorId: localUserId,
@@ -569,6 +565,119 @@ async function ensureGrant(localUserId: string): Promise<void> {
       })
     }
   })
+}
+
+/** Creation-only grant write; callers hold the users mutex and supersede evidence on change. */
+async function insertGrantIfAbsent(
+  client: AccessGraphTransactionClient,
+  localUserId: string,
+  grantedBy: string,
+): Promise<boolean> {
+  const grant = await client.query(
+    `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+     VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+     ON CONFLICT (provider, local_user_id)
+     DO NOTHING
+     RETURNING local_user_id`,
+    [PROVIDER, localUserId, grantedBy],
+  )
+  return grant.rows.length > 0
+}
+
+/** Recheck account and grant state through the transaction that holds the users mutex. */
+async function recheckLocalUserAuthorization(
+  client: AccessGraphTransactionClient,
+  localUserId: string,
+  requireGrant: boolean,
+): Promise<GrantReadState> {
+  const result = await client.query(
+    `SELECT COALESCE(role, 'user') AS role,
+            COALESCE(is_active, TRUE) AS is_active,
+            activation_status
+       FROM users
+      WHERE id = $1::text
+      LIMIT 1`,
+    [localUserId],
+  )
+  const row = result.rows[0]
+  if (!row) {
+    throw createPolicyError('Local user no longer exists', {
+      statusCode: 403,
+      code: 'local_user_disabled',
+    })
+  }
+  assertLocalUserLoginAllowed({
+    role: String(row.role ?? 'user'),
+    is_active: row.is_active === true,
+    activation_status:
+      row.activation_status === null || row.activation_status === undefined
+        ? null
+        : String(row.activation_status),
+  })
+  const grantState = await readGrantState(localUserId, client)
+  if (requireGrant && grantState !== 'enabled') {
+    throw createPolicyError('DingTalk login is not enabled for this user', {
+      statusCode: 403,
+      code: 'grant_required',
+    })
+  }
+  if (grantState === 'disabled') {
+    throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+      statusCode: 403,
+      code: 'grant_disabled',
+    })
+  }
+  return grantState
+}
+
+/** Directory-managed users accept associations only through the admin directory flow. */
+async function assertNotDirectoryManaged(
+  client: AccessGraphTransactionClient,
+  localUserId: string,
+): Promise<void> {
+  const managedLink = await client.query(
+    `SELECT 1
+       FROM directory_account_links link
+       JOIN directory_accounts account
+         ON account.id = link.directory_account_id
+      WHERE link.local_user_id = $1::text
+        AND link.link_status = 'linked'
+        AND account.provider = $2::text
+      LIMIT 1`,
+    [localUserId, PROVIDER],
+  )
+  if (managedLink.rows.length > 0) {
+    throw createPolicyError(
+      'Local user is directory-managed for DingTalk. Please contact an administrator.',
+      {
+        statusCode: 409,
+        code: 'directory_managed_identity',
+      },
+    )
+  }
+}
+
+/** Known UnionID is authoritative; a match permits same-corp OpenID enrichment. */
+function describesSameDingTalkPerson(
+  existing: Record<string, unknown>,
+  dtUser: DingTalkUserInfo,
+  corpId: string | null | undefined,
+): boolean {
+  const existingCorpId = String(existing.corp_id ?? '').trim()
+  const configuredCorpId = String(corpId ?? '').trim()
+  const existingKey = String(existing.external_key ?? '').trim()
+  const existingUnionId = String(existing.provider_union_id ?? '').trim()
+  const existingOpenId = String(existing.provider_open_id ?? '').trim()
+  // Legacy rows may lack corp_id while their canonical key already proves the same scope.
+  if (existingCorpId !== configuredCorpId && !(
+    !existingCorpId && configuredCorpId
+    && [existingUnionId, existingOpenId].some(id => id && existingKey === `${configuredCorpId}:${id}`)
+  )) return false
+  const unionId = String(dtUser.unionId ?? '').trim()
+  if (unionId && existingUnionId) return unionId === existingUnionId
+  const openId = String(dtUser.openId ?? '').trim()
+  if (openId && existingOpenId) return openId === existingOpenId
+  return existingKey === buildExternalKey(dtUser)
 }
 
 type BackfillTransactionClient = {
@@ -635,7 +744,19 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   }
 }
 
-async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
+type ImplicitIdentityWriteOptions = {
+  resolvedBy: 'identity' | 'association'
+  requireGrant: boolean
+  /** Non-strict first association: create the user's grant in this transaction (creation-only). */
+  createGrantIfAbsent: boolean
+}
+
+/** Recheck lookup results after acquiring the users mutex before any implicit identity write. */
+async function upsertExternalIdentity(
+  localUserId: string,
+  dtUser: DingTalkUserInfo,
+  options: ImplicitIdentityWriteOptions,
+): Promise<void> {
   const config = readDingTalkOauthConfig()
   const externalKey = buildExternalKey(dtUser)
   const profile = JSON.stringify(dtUser)
@@ -648,6 +769,7 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
         code: 'local_user_disabled',
       })
     }
+    const grantState = await recheckLocalUserAuthorization(client, localUserId, options.requireGrant)
     const existingByUser = await client.query(
       `SELECT id,
               external_key,
@@ -663,6 +785,12 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
 
     let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
+      if (!describesSameDingTalkPerson(existingByUser.rows[0], dtUser, config.corpId)) {
+        throw createPolicyError('Local user is bound to a different DingTalk identity', {
+          statusCode: 409,
+          code: 'identity_mismatch',
+        })
+      }
       // E1 (container-login design-lock §2): the container surface carries no
       // sns openId, so a container login must never clobber the openId-derived
       // external_key/provider_open_id written by web-OAuth — those columns only
@@ -700,6 +828,14 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
         [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, profile, hasOpenId],
       )
     } else {
+      if (options.resolvedBy === 'identity') {
+        // A concurrent unbind must not be undone by this stale lookup.
+        throw createPolicyError('DingTalk identity binding changed; please sign in again', {
+          statusCode: 409,
+          code: 'identity_mismatch',
+        })
+      }
+      await assertNotDirectoryManaged(client, localUserId)
       const inserted = await client.query(
         `INSERT INTO user_external_identities (
            provider,
@@ -726,6 +862,9 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
         })
       }
       accessGraphChanged = true
+      if (options.createGrantIfAbsent && grantState === 'absent') {
+        await insertGrantIfAbsent(client, localUserId, localUserId)
+      }
     }
 
     if (accessGraphChanged) {
@@ -862,7 +1001,9 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
   }
 }
 
-function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
+function assertLocalUserLoginAllowed(
+  localUser: Pick<LocalUserRow, 'is_active' | 'role' | 'activation_status'>,
+): void {
   // Shared closed-set gate (PR #4559): only exact pending_activation | activated.
   const denial = evaluateUserAuthenticationGate({
     is_active: localUser.is_active,
@@ -1019,7 +1160,11 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
         code: 'grant_disabled',
       })
     }
-    await upsertExternalIdentity(identityUser.id, dtUser)
+    await upsertExternalIdentity(identityUser.id, dtUser, {
+      resolvedBy: 'identity',
+      requireGrant,
+      createGrantIfAbsent: false,
+    })
     return { localUser: identityUser, isNewUser: false }
   }
 
@@ -1040,10 +1185,13 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
           code: 'grant_disabled',
         })
       }
-      if (!requireGrant) {
-        await ensureGrant(emailUser.id)
-      }
-      await upsertExternalIdentity(emailUser.id, dtUser)
+      // The non-strict creation-only grant is written inside the identity transaction, after its
+      // authorization and association rechecks — never ahead of them in a separate transaction.
+      await upsertExternalIdentity(emailUser.id, dtUser, {
+        resolvedBy: 'association',
+        requireGrant,
+        createGrantIfAbsent: !requireGrant,
+      })
       return { localUser: emailUser, isNewUser: false }
     }
   }
@@ -1099,7 +1247,11 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 
   const provisionedUser = await createProvisionedUser(dtUser)
   await ensureGrant(provisionedUser.id)
-  await upsertExternalIdentity(provisionedUser.id, dtUser)
+  await upsertExternalIdentity(provisionedUser.id, dtUser, {
+    resolvedBy: 'association',
+    requireGrant,
+    createGrantIfAbsent: false,
+  })
   return { localUser: provisionedUser, isNewUser: true }
 }
 
@@ -1381,6 +1533,7 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
 // (self-replacement is allowed by design — the user is opting in via callback).
 // A different user owning this identity always returns 409; cross-user
 // takeover must go through the admin directory flow, not self-service.
+// Recheck account, grant and directory ownership after the external exchange, under the mutex.
 export async function bindDingTalkIdentityToUser(input: {
   localUserId: string
   dtUser: DingTalkUserInfo
@@ -1409,6 +1562,10 @@ export async function bindDingTalkIdentityToUser(input: {
         code: 'local_user_disabled',
       })
     }
+    // Self-bind never requires a grant row (first binding creates it), but an explicit
+    // disabled row rejects regardless of DINGTALK_AUTH_REQUIRE_GRANT.
+    const grantState = await recheckLocalUserAuthorization(client, localUserId, false)
+    await assertNotDirectoryManaged(client, localUserId)
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
@@ -1490,20 +1647,9 @@ export async function bindDingTalkIdentityToUser(input: {
       accessGraphChanged = true
     }
 
-    if (enableGrant) {
-      const grant = await client.query(
-        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-         VALUES ($1, $2, TRUE, $3, NOW(), NOW())
-         ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET
-           enabled = TRUE,
-           granted_by = EXCLUDED.granted_by,
-           updated_at = NOW()
-         WHERE user_external_auth_grants.enabled IS DISTINCT FROM TRUE
-         RETURNING local_user_id`,
-        [PROVIDER, localUserId, boundBy],
-      )
-      accessGraphChanged ||= grant.rows.length > 0
+    if (enableGrant && grantState === 'absent') {
+      const grantCreated = await insertGrantIfAbsent(client, localUserId, boundBy)
+      accessGraphChanged ||= grantCreated
     }
     if (accessGraphChanged) {
       await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {

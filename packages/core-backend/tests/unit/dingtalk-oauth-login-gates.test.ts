@@ -53,7 +53,7 @@ import {
 
 const defaultTransactionStatements: string[] = []
 
-function createDefaultTransactionQuery() {
+function createDefaultTransactionQuery(options: { grant?: boolean | null; identity?: Record<string, unknown> } = {}) {
   const aliasOwners = new Map<string, string>()
   return vi.fn(async (sql: string, params: unknown[] = []) => {
     const statement = String(sql)
@@ -91,6 +91,15 @@ function createDefaultTransactionQuery() {
           access_generation: 0,
         }],
       }
+    }
+    if (/SELECT COALESCE\(role[\s\S]*FROM users/i.test(statement)) {
+      return { rows: [{ role: 'user', is_active: true, activation_status: 'activated' }] }
+    }
+    if (/SELECT enabled[\s\S]*FROM user_external_auth_grants/i.test(statement)) {
+      return { rows: options.grant === null ? [] : [{ enabled: options.grant ?? true }] }
+    }
+    if (/SELECT id,[\s\S]*FROM user_external_identities/i.test(statement)) {
+      return { rows: options.identity ? [options.identity] : [] }
     }
     if (/INSERT INTO user_external_identities/i.test(statement)) {
       return { rows: [{ id: 'identity-new' }] }
@@ -319,9 +328,12 @@ describe('dingtalk oauth login gates', () => {
       }) // findUserByEmail
       .mockResolvedValueOnce({ rows: [] }) // grant read → ABSENT (must NOT be treated as denial)
 
+    pgMocks.transaction.mockImplementation(async callback => callback({
+      query: createDefaultTransactionQuery({ grant: null }),
+    }))
     const result = await exchangeCodeForUser('code-grant-absent')
     expect(result).toMatchObject({ localUserId: 'user-1', isNewUser: false })
-    // Absent under non-strict mode auto-grants (ensureGrant runs in the transaction).
+    // Absent under non-strict mode creates the grant in the identity transaction.
     expect(defaultTransactionStatements.some((sql) =>
       /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(true)
   })
@@ -859,6 +871,12 @@ describe('dingtalk oauth login gates', () => {
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
+      pgMocks.transaction.mockImplementation(async callback => callback({
+        query: createDefaultTransactionQuery({ identity: {
+          id: 'identity-9', external_key: 'ding-corp:union-9',
+          provider_union_id: 'union-9', provider_open_id: null, corp_id: 'ding-corp',
+        } }),
+      }))
       const result = await exchangeEnterpriseAuthCodeForUser('auth-code-3')
       expect(result.dingtalkUser.unionId).toBe('union-9')
       expect(result.dingtalkUser.nick).toBe('dingtalk-emp-2')
