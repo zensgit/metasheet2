@@ -682,6 +682,8 @@ export function useMultitableGrid(opts: {
   // source of truth; `groupFieldId` (level-1, legacy single-field reader) and `groupField` are derived.
   const MAX_GROUP_LEVELS = 3
   const groupFieldIds = ref<string[]>([])
+  // The grouping of the most recent setGroupFields call — what every overlapping edit re-asserts once it settles.
+  let newestGroupEdit: string[] = []
   const groupFieldId = computed<string | null>(() => groupFieldIds.value[0] ?? null)
   // Ordered, de-referenced group fields (drops ids that no longer resolve to a loaded field).
   const groupFields = computed(() =>
@@ -717,7 +719,9 @@ export function useMultitableGrid(opts: {
 
   // --- Data loading ---
 
-  async function loadViewData(offset = 0) {
+  // `size` (setPageSize): read at that page size and adopt it only when the read lands — a failed or superseded
+  // read leaves the size, page and rows as they were (never page-N rows labelled with the new size's page math).
+  async function loadViewData(offset = 0, size?: number) {
     const sid = opts.sheetId.value
     const vid = opts.viewId.value
     if (!sid) return
@@ -731,6 +735,7 @@ export function useMultitableGrid(opts: {
         offset = 0
       }
     }
+    const limit = size ?? pageSize.value
     loading.value = true
     error.value = null
     try {
@@ -757,7 +762,7 @@ export function useMultitableGrid(opts: {
       const data = await client.loadView({
         sheetId: sid,
         viewId: vid || undefined,
-        limit: pageSize.value,
+        limit,
         offset,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
@@ -766,12 +771,13 @@ export function useMultitableGrid(opts: {
       const serverPage = data.page
       const serverRows = data.rows ?? []
       if (serverPage && !serverRows.length && offset > 0 && offset >= serverPage.total) {
-        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize.value) * pageSize.value)
+        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / limit) * limit)
         if (fallbackOffset !== offset) {
-          await loadViewData(fallbackOffset)
+          await loadViewData(fallbackOffset, size)
           return
         }
       }
+      if (limit !== pageSize.value) pageSize.value = limit
       fields.value = data.fields ?? []
       rows.value = serverRows
       // A1: this is the RESET/REPLACE path (filter/sort/search/view/sheet change, pagination, mutation
@@ -1152,27 +1158,42 @@ export function useMultitableGrid(opts: {
   // appends mixed pages; grouping a flat grid that had scrolled in 154 rows grouped all 154 under "1 / 4". So
   // unless the grid already holds exactly page 1, the change reloads page 1 — AFTER the write, so the read sees
   // the new grouping (a read that overtakes it would sync the old grouping back).
+  //
+  // Edits overlap (PR #6479 review): the toolbar's add-level emits a placeholder level and the field pick emits
+  // again at once, so an edit's page-1 reload can land AFTER a newer edit was made — and its syncFromView then
+  // puts the grouping stored at read time (the older edit's) over the newer local one, while the newer edit sees
+  // page 1 already held and sends no read of its own. So every edit, after its write and after any reload of its
+  // own, re-asserts the NEWEST edit's grouping (newestGroupEdit), whichever of them settles last. The same keeps
+  // a refused write's grouping local, as it was before this reset (the reload syncs the stored grouping back).
   async function setGroupFields(fieldIds: string[]) {
     const next = normalizeGroupFieldIds(fieldIds)
     const changed = next.length !== groupFieldIds.value.length || next.some((id, i) => id !== groupFieldIds.value[i])
+    newestGroupEdit = next
     groupFieldIds.value = next
+    // A scroll-append in flight was fetched for the flat grid's next rows; landing after a grouping change it
+    // would put a second page under grouped "1 / N" (and Next would show it again). Supersede it — loadMore drops
+    // its page when the request id moved on — and clear its in-flight flag, which only its own request clears.
+    if (changed && loadingMore.value) {
+      latestLoadRequestId++
+      loadingMore.value = false
+    }
     const vid = opts.viewId.value
     if (!vid) return
     // Only into the view this grouping was loaded from (#6075 round 2): while the view's load is in flight or has
     // failed, `next` is built on the reset (or another view's) levels and would replace the view's own grouping.
     if (viewStateLoadedFor !== vid) return
-    let stored = true
+    const contextId = rangeContextId
     try {
       await persistViewConfig(vid, {
         groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : emptyGroupInfo(),
       })
-    } catch { stored = false /* silent */ }
-    if (!changed || opts.viewId.value !== vid) return
-    if (page.value.offset === 0 && rows.value.length <= pageSize.value) return
-    await loadViewData(0)
-    // The write failed (e.g. the server refused this viewer a view change): the reload synced the view's stored
-    // grouping back, but the new grouping stays local exactly as it did before this reset — only the page moves.
-    if (!stored && opts.viewId.value === vid) groupFieldIds.value = next
+    } catch { /* silent */ }
+    if (contextId !== rangeContextId) return
+    if (changed && !(page.value.offset === 0 && rows.value.length <= pageSize.value)) {
+      await loadViewData(0)
+      if (contextId !== rangeContextId) return
+    }
+    groupFieldIds.value = newestGroupEdit
   }
 
   // The viewer picked a rows-per-page option (客户反馈 2026-10-21). Snapped into GRID_PAGE_SIZE_OPTIONS; a new size
@@ -1180,9 +1201,7 @@ export function useMultitableGrid(opts: {
   async function setPageSize(size: unknown) {
     const next = clampGridPageSize(size)
     if (next === pageSize.value) return
-    pageSize.value = next
-    page.value = { ...page.value, offset: 0, limit: next }
-    await loadViewData(0)
+    await loadViewData(0, next)
   }
 
   // Back-compat single-field setter (level-1 only) kept for callers that still group by one field.
