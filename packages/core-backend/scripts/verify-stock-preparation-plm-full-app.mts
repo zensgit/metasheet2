@@ -28,6 +28,7 @@ import { createYidaMainSyntheticVendor, verifyYidaAutomationMainSyntheticExecuti
 import { beginYidaMainInFlightStop } from '../tests/utils/yida-automation-main-inflight-stop.ts'
 import { observeUnknownLedger } from '../tests/utils/yida-automation-main-fresh-consent-fence.ts'
 import { verifyYidaMainRemainingUnknown } from '../tests/utils/yida-automation-main-remaining-unknown.ts'
+import { checkedReconciliationRecord } from '../src/integration/yida-reconciliation-contracts.ts'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 interface NamespaceScopeAuthority {
@@ -738,6 +739,21 @@ try {
       { operationId: initialized.draft!.operationId, rowKeys: initialized.draft!.rows.map(row => row.rowKey), rule: automaticBrowser.rule })
       stage('yida-automation-authorized-browser-verified', { evidence: result.authorization.evidence,
         counts: result.authorization.counts, session: result.evidence, browserAndPreviewServerClosed: true })
+      const history = result.authorization.reconciliation
+      const saved = await query(`SELECT o.*, a.action FROM integration_yida_reconciliation_observations o
+        JOIN integration_yida_reconciliation_audit a ON a.observation_id=o.id
+        WHERE o.grant_id=$1 AND o.owner_id=$2 AND o.tenant_id=$3 ORDER BY o.sequence`,
+      [result.authorization.grantId, owner, tenantId])
+      assert.equal(saved.rows.length, 2, 'APP_RECONCILIATION_DURABLE_ROWS_REQUIRED')
+      assert.deepEqual(saved.rows.map(row => {
+        assert.equal(row.action, 'OPERATOR_OBSERVATION_APPENDED')
+        return checkedReconciliationRecord({ ...row.content as Record<string, unknown>, id: row.id, sequence: row.sequence,
+          authorId: row.owner_id, recordedAt: (row.recorded_at as Date).toISOString(), evidenceOrigin: 'operator-supplied',
+          evidenceVerified: false, canSend: false, canRetry: false })
+      }), history.records, 'APP_RECONCILIATION_BROWSER_DATABASE_MISMATCH')
+      stage('yida-reconciliation-browser-verified', { ...history.evidence, counts: history.counts,
+        actualMain: true, realPasswordJwt: true, persistedRecords: 2, persistedAudits: 2,
+        originalGrantObservationUnchanged: true, browserAndPreviewServerClosed: true })
       return { grantId: result.authorization.grantId }
     } })
   assert([undefined, 'false'].includes(process.env.INTEGRATION_YIDA_AUTOMATION_SEND_ENABLED))

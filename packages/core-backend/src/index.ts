@@ -476,7 +476,7 @@ import { createYidaInitializationRuntime } from './integration/yida-initializati
 import { createYidaAutomationManagementHost } from './integration/yida-automation-management-host'
 import { YIDA_AUTOMATION_SEND_FLAG } from './integration/yida-automation-execution-authority'
 import { createIntegrationYidaAutomationRouter, YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore,
-  yidaAutomationJsonOnly, yidaAutomationParseError } from './routes/integration-yida-automation'
+  yidaAutomationJsonOnly, yidaAutomationParseError, yidaAutomationBodyLimit } from './routes/integration-yida-automation'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -1901,7 +1901,7 @@ export class MetaSheetServer {
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware, yidaOwnerJsonOnlyMiddleware,
       express.json({ limit: '2mb', strict: true }))
     this.app.use(YIDA_AUTOMATION_HTTP_PREFIX, yidaAutomationNoStore, yidaAutomationJsonOnly,
-      express.json({ limit: '16kb', strict: true }))
+      express.json({ limit: '16kb', strict: true, verify: yidaAutomationBodyLimit }))
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
 

@@ -484,7 +484,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # SA06D: actual finite-authorization UI/client contracts, one isolated process.
 # No live vendor IO. This supplements, not replaces, the existing YiDa canaries.
-npx vitest run tests/YidaAutomation.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+npx vitest run tests/YidaAutomation.spec.ts tests/YidaReconciliation.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Explicit organization sessions: a separate small process, retaining existing
 # API/approval and attendance suite ownership below.
 npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot

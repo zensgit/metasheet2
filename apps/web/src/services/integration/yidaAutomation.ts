@@ -1,5 +1,7 @@
 import { onAuthPrincipalChange, readAuthSessionSignature, readStoredToken, TOKEN_KEYS } from '../../composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../../utils/explicitSessionOrg'
+import { parseYidaReconciliationInput, parseYidaReconciliationRecord, parseYidaReconciliationPage,
+  type YidaReconciliationInput } from './yidaReconciliation'
 
 export type YidaAutomationRule = Readonly<{ id: string; sheetId: string; name: string; slot: string;
   revision: string; intervalMs: number; enabled: boolean }>
@@ -25,6 +27,8 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = {
   YIDA_AUTOMATION_HTTP_DENIED: [403], YIDA_AUTOMATION_HTTP_UNAVAILABLE: [503],
   YIDA_AUTOMATION_MANAGEMENT_INPUT: [400], YIDA_AUTOMATION_MANAGEMENT_DENIED: [403],
   YIDA_AUTOMATION_MANAGEMENT_CONFLICT: [409], YIDA_AUTOMATION_MANAGEMENT_CLOSED: [503],
+  YIDA_RECONCILIATION_INPUT: [400], YIDA_RECONCILIATION_DENIED: [403],
+  YIDA_RECONCILIATION_CONFLICT: [409], YIDA_RECONCILIATION_UNAVAILABLE: [503],
   VALIDATION_ERROR: [400], YIDA_AUTOMATION_AUTHORING_INVALID: [400], SERVICE_UNAVAILABLE: [503], DB_NOT_READY: [503],
   FORBIDDEN: [403], SHEET_DELETED: [409], INTERNAL_ERROR: [500],
 }
@@ -192,6 +196,21 @@ export function createYidaAutomationClient(options: { onInvalidated?: () => void
         return saved
       }, { name: '宜搭有限授权', enabled: true, triggerType: 'schedule.interval', triggerConfig: { intervalMs },
         actionType, actionConfig: { authorizationSlot }, actions: null, conditions: null, executionMode: 'legacy' })
+    },
+    async appendObservation(grant: string, entry: string, input: YidaReconciliationInput) {
+      const grantId = checked(() => uuid(grant)), requestId = checked(() => uuid(entry))
+      const body = checked(() => parseYidaReconciliationInput(input))
+      return request(`${prefix}/${grantId}/requests/${requestId}/observations`, 'POST', [200,201], (value,status) => {
+        const row = exact(value, ['record','reused']), record = parseYidaReconciliationRecord(row.record)
+        if (typeof row.reused !== 'boolean' || status !== (row.reused ? 200 : 201)
+          || Object.keys(body).some(key => record[key as keyof YidaReconciliationInput] !== body[key as keyof YidaReconciliationInput])) invalid()
+        return Object.freeze({ record, reused: row.reused })
+      }, body)
+    },
+    async listObservations(grant: string, entry: string, after: string | null = null) {
+      const grantId = checked(() => uuid(grant)), requestId = checked(() => uuid(entry))
+      const suffix = after === null ? '' : '/' + checked(() => uuid(after))
+      return request(`${prefix}/${grantId}/requests/${requestId}/observations${suffix}`, 'GET', [200], parseYidaReconciliationPage)
     },
     async createApproval(input: YidaAutomationConsent) {
       const body = checked(() => consent(input))

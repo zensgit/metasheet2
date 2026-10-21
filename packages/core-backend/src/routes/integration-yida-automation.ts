@@ -1,11 +1,15 @@
 import { types } from 'node:util'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Router, type Request, type Response, type RequestHandler, type ErrorRequestHandler } from 'express'
 import { checkedYidaAutomationAuthorization, checkedYidaAutomationRequest,
   type YidaAutomationAuthorizationInput } from '../integration/yida-automation-authorization-contracts'
 import { yidaAutomationManagementErrorCode } from '../integration/yida-automation-authorization-service'
 import type { AutomationIntegrationActor } from '../integration/automation-live-authority'
+import { checkedReconciliationInput, checkedReconciliationPage, checkedReconciliationRecord,
+  reconciliationErrorCode } from '../integration/yida-reconciliation-contracts'
 
-// GOV-08 SA-06D: four separate owner operations, never an alias for the manual
+// GOV-08 SA-06D: four authorization operations plus append/list operator facts,
+// never an alias for the manual
 // send port. Mount only AFTER real JWT and the corresponding installed host.
 // This module does not install a worker, accept a binding, or change auth gates.
 export { YIDA_AUTOMATION_HTTP_PREFIX } from '../integration/yida-owner-http-observation'
@@ -16,6 +20,8 @@ export type YidaAutomationHttpPort = Readonly<{
   inspect(actor: AutomationIntegrationActor, grantId: string, options: Options): Promise<unknown>
   revoke(actor: AutomationIntegrationActor, grantId: string, options: Options): Promise<unknown>
   requestManual(actor: AutomationIntegrationActor, grantId: string, input: Readonly<{ requestKey: string }>, options: Options): Promise<unknown>
+  appendObservation(actor: AutomationIntegrationActor, grantId: string, requestId: string, input: unknown, options: Options): Promise<unknown>
+  listObservations(actor: AutomationIntegrationActor, grantId: string, requestId: string, afterId: string | null, options: Options): Promise<unknown>
 }>
 type Data = Record<string, unknown>
 type Code = 'INPUT' | 'UNAUTHORIZED' | 'DENIED' | 'UNAVAILABLE'
@@ -113,12 +119,15 @@ function acceptance(value: unknown) {
 function dto<T>(read: () => T): T { try { return read() } catch { return fail('UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
   const own = ownErrors.get(error as object), management = yidaAutomationManagementErrorCode(error)
-  const code = own ? 'YIDA_AUTOMATION_HTTP_' + own : management ?? 'YIDA_AUTOMATION_HTTP_UNAVAILABLE'
+  const reconciliation = reconciliationErrorCode(error)
+  const code = own ? 'YIDA_AUTOMATION_HTTP_' + own : management ?? (reconciliation ? 'YIDA_RECONCILIATION_' + reconciliation : 'YIDA_AUTOMATION_HTTP_UNAVAILABLE')
   const statuses: Readonly<Record<string, number>> = {
     YIDA_AUTOMATION_HTTP_INPUT: 400, YIDA_AUTOMATION_HTTP_UNAUTHORIZED: 401,
     YIDA_AUTOMATION_HTTP_DENIED: 403, YIDA_AUTOMATION_HTTP_UNAVAILABLE: 503,
     YIDA_AUTOMATION_MANAGEMENT_INPUT: 400, YIDA_AUTOMATION_MANAGEMENT_DENIED: 403,
     YIDA_AUTOMATION_MANAGEMENT_CONFLICT: 409, YIDA_AUTOMATION_MANAGEMENT_CLOSED: 503,
+    YIDA_RECONCILIATION_INPUT: 400, YIDA_RECONCILIATION_DENIED: 403,
+    YIDA_RECONCILIATION_CONFLICT: 409, YIDA_RECONCILIATION_UNAVAILABLE: 503,
   }
   // An exported JS error constructor can be called with a value outside its
   // TypeScript union. Even an owned WeakMap entry is not a wire-code allowlist.
@@ -133,6 +142,12 @@ export const yidaAutomationJsonOnly: RequestHandler = (req, res, next) => {
     res.status(415).json({ ok: false, error: { code: 'YIDA_AUTOMATION_HTTP_INPUT' } }); return
   }
   next()
+}
+export function yidaAutomationBodyLimit(req: IncomingMessage, _res: ServerResponse, body: Buffer) {
+  // Match Express's case-insensitive route semantics, including trailing slash.
+  if (body.length > 4096 && /\/observations(?:[/?]|$)/iu.test(req.url ?? '')) {
+    throw Object.assign(new Error('YIDA_RECONCILIATION_INPUT'), { type: 'entity.too.large' })
+  }
 }
 export const yidaAutomationParseError: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
   if (res.destroyed || res.writableEnded) return
@@ -153,6 +168,7 @@ export function createIntegrationYidaAutomationRouter(port: YidaAutomationHttpPo
     return descriptor.value.bind(port)
   }
   const create = take('create'), inspect = take('inspect'), revoke = take('revoke'), request = take('requestManual')
+  const appendObservation = take('appendObservation'), listObservations = take('listObservations')
   const router = Router()
   const route = (operation: (req: Request, grantor: AutomationIntegrationActor, options: Options) => Promise<{ status: number; data: unknown }>) =>
     async (req: Request, res: Response) => {
@@ -195,6 +211,24 @@ export function createIntegrationYidaAutomationRouter(port: YidaAutomationHttpPo
     const saved = await request(grantor, uuid(req.params.grantId), input, options)
     const result = dto(() => acceptance(saved))
     return { status: result.reused ? 200 : 202, data: result }
+  }))
+  router.post('/:grantId/requests/:requestId/observations', route(async (req, grantor, options) => {
+    const saved = await appendObservation(grantor, uuid(req.params.grantId), uuid(req.params.requestId),
+      checkedReconciliationInput(req.body), options)
+    const result = dto(() => {
+      const row = data(saved, ['record', 'reused'])
+      if (typeof row.reused !== 'boolean') fail()
+      return { record: checkedReconciliationRecord(row.record), reused: row.reused }
+    })
+    return { status: result.reused ? 200 : 201, data: result }
+  }))
+  // Path cursor is an observation ID, resolved under the SAME authenticated
+  // ledger. No tenant, owner, workspace, arbitrary query or offset controls.
+  router.get('/:grantId/requests/:requestId/observations/:afterId?', route(async (req, grantor, options) => {
+    empty(req.body)
+    const saved = await listObservations(grantor, uuid(req.params.grantId), uuid(req.params.requestId),
+      req.params.afterId === undefined ? null : uuid(req.params.afterId), options)
+    return { status: 200, data: dto(() => checkedReconciliationPage(saved)) }
   }))
   return router
 }

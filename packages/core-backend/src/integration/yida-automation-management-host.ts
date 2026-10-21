@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { types } from 'node:util'
-import { assertAutomationIntegrationActor, type AutomationIntegrationActor } from './automation-live-authority'
+import { assertAutomationIntegrationActor, AutomationActorAuthorityError, type AutomationIntegrationActor } from './automation-live-authority'
 import { createYidaAutomationAuthorizationService, YidaAutomationManagementError } from './yida-automation-authorization-service'
 import { createYidaAutomationAuthorizationStore } from './yida-automation-authorization-store'
 import { checkedYidaAutomationAuthorization, checkedYidaAutomationRequest } from './yida-automation-authorization-contracts'
@@ -14,6 +14,8 @@ import { YIDA_AUTOMATION_CONSUMER } from './yida-automation-outbox'
 import type { ConsumerAdapter, AdapterOutcome } from '../multitable/automation-durable-dispatch-loop'
 import { checkedYidaIntervalOccurrence } from './yida-automation-authoring-policy'
 import type { createYidaAutomationInstalledBindingSource } from './yida-automation-installed-binding'
+import { createYidaReconciliationStore } from './yida-reconciliation-store'
+import { checkedReconciliationInput, reconciliationErrorCode, reconciliationFail } from './yida-reconciliation-contracts'
 
 type Primitives = Parameters<typeof createYidaAutomationAuthorizationService>[0]['primitives']
 type SendDependencies = Parameters<typeof createYidaAutomationSendRuntime>[0]
@@ -63,7 +65,7 @@ function requestSignal(options: unknown): AbortSignal {
   return signal as AbortSignal
 }
 
-/** Host-owned four-operation and shared-consumer composition. No scheduler or
+/** Host-owned management/history operations and shared-consumer composition. No scheduler or
  * standalone dispatch loop. Only the actual boot registry may publish readiness.
  * Both the entire transaction and its COMMIT response join the real producer's
  * lifetime for create/request; inspection/revocation remain available without
@@ -121,7 +123,7 @@ export function createYidaAutomationManagementHost(dependencies: Dependencies) {
   function execute<T>(input: unknown, options: unknown, installed: boolean,
     work: (trx: Queryable, grantor: Readonly<AutomationIntegrationActor>, state?: State,
       source?: InstalledSource) => Promise<T>,
-    afterCommit?: (result: T, grantor: Readonly<AutomationIntegrationActor>) => void): Promise<T> {
+    afterCommit?: (result: T, grantor: Readonly<AutomationIntegrationActor>) => void, reconciliation = false): Promise<T> {
     let grantor: Readonly<AutomationIntegrationActor>, signal: AbortSignal, state: State | undefined
     try {
       grantor = actor(input); signal = requestSignal(options); state = installed ? active : undefined
@@ -138,7 +140,13 @@ export function createYidaAutomationManagementHost(dependencies: Dependencies) {
           current(); const result = await raw.query(sql, values); current(); return result
         } })
         await trx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        await assertAutomationIntegrationActor(trx, grantor)
+        try { await assertAutomationIntegrationActor(trx, grantor) } catch (error) {
+          if (!reconciliation) throw error
+          const denied = error && typeof error === 'object' && !types.isProxy(error)
+            && Object.getPrototypeOf(error) === AutomationActorAuthorityError.prototype
+            && Object.getOwnPropertyDescriptor(error, 'code')?.value === 'AUTOMATION_ACTOR_AUTHORITY_DENIED'
+          reconciliationFail(denied ? 'DENIED' : 'UNAVAILABLE')
+        }
         const result = await work(trx, grantor, state, source)
         current() // Final synchronous check before the provider issues COMMIT.
         return result
@@ -149,7 +157,11 @@ export function createYidaAutomationManagementHost(dependencies: Dependencies) {
       afterCommit?.(result, grantor)
       check(signal, state)
       return result
-    }).catch(() => fail('DENIED')).finally(() => { runs.delete(run); state?.runs.delete(run) })
+    }).catch(error => {
+      if (reconciliationErrorCode(error)) throw error
+      if (reconciliation) reconciliationFail('UNAVAILABLE') // Includes an unknown COMMIT response; never pretend it was a denial.
+      return fail('DENIED')
+    }).finally(() => { runs.delete(run); state?.runs.delete(run) })
     runs.add(run); state?.runs.add(run)
     return run
   }
@@ -166,6 +178,16 @@ export function createYidaAutomationManagementHost(dependencies: Dependencies) {
     try { return await work(manager) } finally { manager.close(); state.managers.delete(manager) }
   }
   const port: YidaAutomationHttpPort = Object.freeze({
+    appendObservation(input, grantId, requestId, supplied, options) {
+      let captured: ReturnType<typeof checkedReconciliationInput>
+      try { captured = checkedReconciliationInput(supplied) } catch (error) { return Promise.reject(error) }
+      return execute(input, options, false, (trx, grantor) =>
+        createYidaReconciliationStore(grantor).append(trx, grantId, requestId, captured), undefined, true)
+    },
+    listObservations(input, grantId, requestId, afterId, options) {
+      return execute(input, options, false, (trx, grantor) =>
+        createYidaReconciliationStore(grantor).list(trx, grantId, requestId, afterId), undefined, true)
+    },
     create(input, consent, options) {
       let captured: ReturnType<typeof checkedYidaAutomationAuthorization>
       try { captured = checkedYidaAutomationAuthorization(consent) } catch { return Promise.reject(new YidaAutomationManagementError('INPUT')) }

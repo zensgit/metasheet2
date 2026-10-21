@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { isDeepStrictEqual } from 'node:util'
 import type { Page, Request, Response } from '@playwright/test'
+import { createYidaReconciliationBrowserWindow, runYidaReconciliationBrowser } from './yida-reconciliation-browser'
 
 type Data = Record<string, unknown>
 function data(value: unknown): Data {
@@ -21,6 +22,7 @@ const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u
 /** Test-only closed browser window. Every request continues to the actual app;
  * no response, JWT, storage, DB result or production sender is substituted. */
 export function createYidaAuthorizedBrowserWindow(origin: string, token: () => string, input: YidaAuthorizedBrowserInput) {
+  const reconciliation = createYidaReconciliationBrowserWindow(origin, token)
   const rules = '/api/multitable/sheets/' + encodeURIComponent(input.rule.sheetId) + '/automations'
   const armed: Expected[] = [], pending = new Map<Request, Expected>()
   const counts = { requests: 0, responses: 0, previews: 0, approvals: 0, submissions: 0, inspections: 0, revocations: 0 }
@@ -28,11 +30,11 @@ export function createYidaAuthorizedBrowserWindow(origin: string, token: () => s
   const requestKeys = new Set<string>()
   const candidate = (request: Pick<Request, 'url'>) => {
     const url = new URL(request.url())
-    return [rules, initialization, preview, prefix].includes(url.pathname)
+    return reconciliation.candidate(request) || [rules, initialization, preview, prefix].includes(url.pathname)
       || !!grantId && [prefix + '/' + grantId, prefix + '/' + grantId + '/requests', prefix + '/' + grantId + '/revoke'].includes(url.pathname)
   }
   return {
-    counts, candidate,
+    counts, candidate, reconciliation,
     arm(kind: Expected['kind'], ordinal?: number) {
       assert(!armed.length && !pending.size, 'APP_YIDA_AUTH_BROWSER_UNFINISHED_REQUEST')
       const path = kind === 'rules' ? rules : kind === 'draft' ? initialization : kind === 'preview' ? preview
@@ -44,6 +46,7 @@ export function createYidaAuthorizedBrowserWindow(origin: string, token: () => s
       if (kind === 'preview' && ordinal === 0) armed.push({ kind, path, ordinal: 1, method: 'POST', status: 200 })
     },
     accept(request: Request) {
+      if (reconciliation.candidate(request)) { reconciliation.accept(request); return }
       const expected = armed.shift(), url = new URL(request.url()), headers = request.headers()
       assert(expected && url.origin === origin && url.pathname === expected.path && !url.search && !url.hash
         && !url.username && !url.password && request.method() === expected.method)
@@ -69,7 +72,7 @@ export function createYidaAuthorizedBrowserWindow(origin: string, token: () => s
       }
       pending.set(request, expected); counts.requests++
     },
-    matched(request: Request) { return pending.has(request) },
+    matched(request: Request) { return pending.has(request) || reconciliation.matched(request) },
     matches(request: Request, kind: Expected['kind'], ordinal?: number) {
       const expected = pending.get(request)
       return expected?.kind === kind && (ordinal === undefined || expected.ordinal === ordinal)
@@ -118,7 +121,7 @@ export function createYidaAuthorizedBrowserWindow(origin: string, token: () => s
 }
 
 export async function runYidaAuthorizedBrowser(page: Page, window: ReturnType<typeof createYidaAuthorizedBrowserWindow>,
-  input: YidaAuthorizedBrowserInput, origin: string, settled: () => Promise<void>) {
+  input: YidaAuthorizedBrowserInput, origin: string, settled: () => Promise<void>, reloadSession: () => Promise<void>) {
   let phase: 'OPEN' | 'LOAD' | 'PREVIEW' | 'APPROVE' | 'REQUEST' | 'ACK' | 'UNKNOWN' | 'REVOKE' = 'OPEN'
   const click = async (kind: Expected['kind'], testId: string, ordinal?: number) => {
     window.arm(kind, ordinal)
@@ -187,7 +190,32 @@ export async function runYidaAuthorizedBrowser(page: Page, window: ReturnType<ty
     assert.equal(revoked.revoked, true); assert.equal(revoked.usedExecutions, 2); assert.equal(revoked.serialBlocked, true)
     assert(await panel.getByTestId('sp-yida-auto-request').isDisabled())
     assert.equal(await panel.getByTestId('sp-yida-auto-error').count(), 0)
-    return { ...window.verify(), evidence: { realPageApproval: true, realPageRequests: 2, actualServerPreviews: 2,
+    assert(Array.isArray(revoked.requests))
+    const unknown = revoked.requests.map(data).filter(row => row.ledgerStatus === 'outcome_unknown')
+    assert.equal(unknown.length, 1); assert.equal(typeof unknown[0].requestId, 'string')
+    const grantId = window.verify().grantId
+    window.reconciliation.scope(grantId, unknown[0].requestId as string)
+    let restorations = 0
+    const reconciliation = await runYidaReconciliationBrowser(page, window.reconciliation, settled, async () => {
+      if (restorations++ === 0) {
+        await reloadSession()
+        // Re-open through the ordinary UI; do not inject stores or revive the
+        // old Vue instance. The pending command must come from tab storage.
+        await page.getByTestId('stock-prep-project-board-yida').click()
+        await page.getByTestId('sp-yida-preview-mode').selectOption('protocol')
+        await page.getByTestId('sp-yida-protocol-example-primary').click()
+        await page.getByTestId('sp-yida-run').click()
+        await page.getByTestId('sp-yida-auto-open').click()
+        await panel.waitFor()
+      } else await panel.getByRole('button', { name: '清除本页状态（不删除授权历史）', exact: true }).click()
+      await settled()
+      assert.equal(await panel.getByTestId('sp-yida-reconciliation').count(), 0)
+      await panel.getByTestId('sp-yida-auto-restore-id').fill(grantId)
+      const restored = data(await click('inspect', 'sp-yida-auto-restore'))
+      assert.deepEqual(restored, revoked)
+    })
+    assert.equal(restorations, 2)
+    return { ...window.verify(), reconciliation, evidence: { realPageApproval: true, realPageRequests: 2, actualServerPreviews: 2,
       manualOnly: true, acknowledged: 1, outcomeUnknown: 1, unknownBlocksNextCreate: true, revokedWithoutRefund: true,
       businessVerified: false, responseStubs: 0, storageInjections: 0 } }
   } catch {

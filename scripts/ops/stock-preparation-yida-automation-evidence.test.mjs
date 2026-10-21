@@ -67,7 +67,13 @@ function evidence(scenario) {
       revokedWithoutRefund: true, businessVerified: false, responseStubs: 0, storageInjections: 0 },
     counts: { requests: 12, responses: 12, previews: 2, approvals: 1, submissions: 2, inspections: 4, revocations: 1 },
     session: { realPasswordLogin: true, freshBrowserContext: true, productionBundle: true,
-      servedBundleBytesVerified: true, matchingProjectBoard: true }, browserAndPreviewServerClosed: true },
+      servedBundleBytesVerified: true, matchingProjectBoard: true, realPageReloadSamePrincipal: true }, browserAndPreviewServerClosed: true },
+    { stage: 'yida-reconciliation-browser-verified', realUiAppend: true, realUiCorrection: true, realUiLostReceiptRecovery: true,
+      realUiRemountRead: true, originalUnknownVisible: true, evidenceUnverified: true, responseStubs: 0,
+      storageInjections: 0, externalSend: false, counts: { requests: 8, responses: 7, reads: 5, appends: 2,
+        droppedReceipts: 1, idempotentReplays: 1, expectedNetworkFailures: 1 },
+      actualMain: true, realPasswordJwt: true, persistedRecords: 2, persistedAudits: 2,
+      originalGrantObservationUnchanged: true, browserAndPreviewServerClosed: true },
     { stage: 'yida-automation-fresh-consent-fence-verified', actualMain: true, realPasswordJwt: true, freshConsentCreated: true,
       freshRequestQueued: true, realWorkerClaimed: true, metadataAttempts: 1, nativeUnknownLookupAttempts: 1,
       nativeUnknownLookupCompletions: 1, nativeUnknownRowsRead: 1, nativeUnknownLookupErrors: 0, nativeQueryPositiveControl: true,
@@ -100,6 +106,23 @@ function evidence(scenario) {
       syntheticTokenCalls: 2, syntheticFormCalls: 2, businessVerified: false, externalSend: false, originalSendFlagsRestored: true }, verified]
 }
 const rejected = /PLM_FULL_APP_YIDA_AUTO_/u
+test('lost-receipt recovery requires real page reload and the same authenticated principal', () => {
+  for (const value of [undefined, false, 'true', 1]) {
+    const records = evidence('manual')
+    records.find(row => row.stage === 'yida-automation-authorized-browser-verified').session.realPageReloadSamePrincipal = value
+    assert.throws(() => validateYidaAutomationEvidence(records, 'manual'), rejected)
+  }
+})
+for (const field of Object.keys(evidence('manual').find(row => row.stage === 'yida-reconciliation-browser-verified')).filter(key => key !== 'stage')) {
+  test(`reconciliation evidence rejects missing or changed ${field}`, () => {
+    for (const replacement of [undefined, null, false, 0, true, 'true']) {
+      const records = evidence('manual'), frame = records.find(row => row.stage === 'yida-reconciliation-browser-verified')
+      if (frame[field] === replacement) continue
+      frame[field] = replacement
+      assert.throws(() => validateYidaAutomationEvidence(records, 'manual'), rejected)
+    }
+  })
+}
 for (const scenario of ['manual', 'interval']) {
   test(`SA06D evidence accepts only its complete ${scenario} scenario without mutation`, () => {
     const records = evidence(scenario), before = structuredClone(records)

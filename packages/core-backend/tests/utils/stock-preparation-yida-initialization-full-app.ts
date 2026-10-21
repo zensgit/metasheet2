@@ -267,6 +267,7 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
         assert(url.origin === uiOrigin && !url.username && !url.password, 'APP_BROWSER_YIDA_INIT_ORIGIN_DENIED')
         if (automaticOn?.candidate(request)) {
           automaticOn.accept(request)
+          if (await automaticOn.reconciliation.dropCommittedResponse(route)) return
         } else if (automaticOff.candidate(request)) {
           automaticOff.accept(request)
         } else if (membersOff.isCandidate(request)) {
@@ -329,7 +330,10 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
       }
       socket.connectToServer()
     })
-    context.on('requestfailed', () => note('REQUEST_FAILED'))
+    context.on('requestfailed', request => {
+      try { if (automaticOn?.reconciliation.expectedFailure(request)) return } catch { note('RECONCILIATION_FAULT_MISMATCH') }
+      note('REQUEST_FAILED')
+    })
     context.on('response', response => {
       const task = (async () => {
         const url = new URL(response.url())
@@ -371,6 +375,8 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
     const page = await context.newPage()
     page.on('pageerror', () => note('PAGE_ERROR')); page.on('console', event => {
       if (event.type() !== 'error') return
+      try { if (automaticOn?.reconciliation.consoleFailure(event.location().url, event.text())) return }
+      catch { note('RECONCILIATION_CONSOLE_MISMATCH') }
       try { if (automaticOff.consoleRefusal(event.location().url, event.text())) return }
       catch { note('AUTOMATION_OFF_CONSOLE_INVALID'); return }
       try { if (membersOff.consoleRefusal(event.location().url, event.text())) return }
@@ -417,12 +423,28 @@ async function runYidaBrowser(input: Omit<YidaInitializationBrowserInput, 'proje
     await page.locator('[data-testid="stock-prep-panel"][data-active="project-board"]').waitFor()
     if (authorized && automaticOn) {
       assert.equal(data(boardData.fillTarget).sheetId, authorized.rule.sheetId)
-      const authorization = await runYidaAuthorizedBrowser(page, automaticOn, authorized, uiOrigin, settled)
+      const authorization = await runYidaAuthorizedBrowser(page, automaticOn, authorized, uiOrigin, settled, async () => {
+        assert.equal(counts.reloads, 0)
+        failureScope.enter('RELOAD'); projectProbePhase = 'RELOAD'
+        const sessionAfterReload = wait('/api/auth/me'), boardAfterReload = wait(boardPath)
+        await page.reload(); counts.reloads++
+        const restoredSession = data(await (await sessionAfterReload).json())
+        const restoredUser = data(data(restoredSession.data).user)
+        assert(restoredUser.id === input.ownerId && restoredUser.tenantId === input.tenantId,
+          'APP_BROWSER_YIDA_AUTH_RELOAD_PRINCIPAL_CHANGED')
+        const restoredBoard = data(await body(await boardAfterReload))
+        assert(restoredBoard.projectNo === input.projectNo && restoredBoard.tenantId === input.tenantId
+          && data(restoredBoard.fillTarget).sheetId === authorized.rule.sheetId,
+        'APP_BROWSER_YIDA_AUTH_RELOAD_BOARD_CHANGED')
+        await page.getByTestId('stock-prep-project-board-title').filter({ hasText: input.projectNo }).waitFor()
+        await settled()
+      })
       projectSheetsOff.verify(); membersOff.verify(); dryRunStatus.verify(); await settled()
-      assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.bundleDocuments === 1
-        && counts.initializationGets === 0 && counts.initializationPosts === 0 && counts.reloads === 0)
+      assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.bundleDocuments === 2
+        && counts.initializationGets === 0 && counts.initializationPosts === 0 && counts.reloads === 1)
       return { kind: 'authorized' as const, status: 'passed' as const, authorization, counts, evidence: { realPasswordLogin: true,
-        freshBrowserContext: true, productionBundle: true, servedBundleBytesVerified: true, matchingProjectBoard: true } }
+        freshBrowserContext: true, productionBundle: true, servedBundleBytesVerified: true, matchingProjectBoard: true,
+        realPageReloadSamePrincipal: true } }
     }
     const openPanel = async () => {
       await page.getByTestId('stock-prep-project-board-title').filter({ hasText: input.projectNo }).waitFor()

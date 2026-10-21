@@ -10,8 +10,9 @@ import express, { type RequestHandler } from 'express'
 import { Pool } from 'pg'
 import { Kysely, PostgresDialect } from 'kysely'
 import { createYidaAutomationAuthorizationService, YidaAutomationManagementError } from '../../src/integration/yida-automation-authorization-service'
+import { createYidaAutomationManagementHost } from '../../src/integration/yida-automation-management-host'
 import { createIntegrationYidaAutomationRouter, YIDA_AUTOMATION_HTTP_PREFIX as prefix,
-  yidaAutomationNoStore, yidaAutomationJsonOnly, yidaAutomationParseError,
+  yidaAutomationNoStore, yidaAutomationJsonOnly, yidaAutomationParseError, yidaAutomationBodyLimit,
   type YidaAutomationHttpPort } from '../../src/routes/integration-yida-automation'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import type { YidaSendAuthorityPrimitives } from '../../src/integration/yida-send-approval-service'
@@ -32,6 +33,19 @@ export async function createYidaAutomationHttpFixture() {
   process.env.LOG_LEVEL = 'error'
   const owner = await createYidaOwnerHttpRealdbFixture()
   let pool: Pool | undefined, server: Server | undefined
+  let historyHost: ReturnType<typeof createYidaAutomationManagementHost> | undefined
+  let lostCommit = false, historySourceCalls = 0, historyFetchCalls = 0
+  async function transaction<T>(work: (trx: Queryable) => Promise<T>) {
+    const client = await pool!.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      const result = await work(client)
+      await client.query('COMMIT')
+      if (lostCommit) { lostCommit = false; throw new Error('SYNTHETIC_COMMIT_RECEIPT_LOST') }
+      return result
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
   let calls = 0, foreignReads = 0, failure: 'NONE' | 'FOREIGN' | 'EXTRA_DTO' | 'OWNED_BAD_CODE' = 'NONE'
   let authenticatedTenantPresent = false, legacyHeaderFallback = false
   const services = new Set<ReturnType<typeof createYidaAutomationAuthorizationService>>()
@@ -39,6 +53,7 @@ export async function createYidaAutomationHttpFixture() {
     const current = server; server = undefined
     if (current) await new Promise<void>((resolve, reject) => current.close(error => error ? reject(error) : resolve()))
     services.forEach(service => service.close()); services.clear()
+    await historyHost?.stop(); historyHost = undefined
     if (pool) { const currentPool = pool; pool = undefined; await currentPool.end() }
   }
   async function cleanup() {
@@ -60,7 +75,8 @@ export async function createYidaAutomationHttpFixture() {
     pool = new Pool({ connectionString: endpoint.href, max: 4 })
     await migrateOutbox(new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) }))
     for (const name of ['097_create_integration_yida_automation_authorizations.sql',
-      'zzzz20261019121000_link_integration_yida_automation_outbox.sql', '099_create_integration_yida_automation_execution_snapshots.sql']) {
+      'zzzz20261019121000_link_integration_yida_automation_outbox.sql', '099_create_integration_yida_automation_execution_snapshots.sql',
+      'zzzz20261021120000_create_yida_reconciliation_observations.sql']) {
       await pool.query(readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8'))
     }
     await pool.query(`CREATE TABLE meta_bases(id text PRIMARY KEY,deleted_at timestamptz);
@@ -77,6 +93,11 @@ export async function createYidaAutomationHttpFixture() {
     const securityModule = await load('packages/core-backend/src/security/plugin-runtime-security-service.ts')
     const SecurityClass = securityModule.PluginRuntimeSecurityService as new () => Security
     const security = new SecurityClass()
+    historySourceCalls = 0; historyFetchCalls = 0; lostCommit = false
+    historyHost = createYidaAutomationManagementHost({ database: { transaction }, security,
+      readRuntime: { async withInstalledBindingSourceForYida() { historySourceCalls++; throw new Error('SYNTHETIC_HISTORY_MUST_NOT_RESOLVE_SOURCE') } },
+      fetch: async () => { historyFetchCalls++; throw new Error('SYNTHETIC_HISTORY_MUST_NOT_FETCH') },
+      deliveryReady: () => false, readEnablement: () => 'false' })
     const native = await load('plugins/plugin-integration-core/lib/yida-send-authority-primitives.mjs')
     const createPrimitives = native.createYidaSendAuthorityPrimitives as (options: { security: Security;
       context: { tenantId: string; workspaceId: null; ownerId: string } }) => YidaSendAuthorityPrimitives
@@ -109,6 +130,8 @@ export async function createYidaAutomationHttpFixture() {
       try { return await run(service) } finally { service.close(); services.delete(service) }
     }
     const port: YidaAutomationHttpPort = Object.freeze({
+      appendObservation: historyHost.port.appendObservation,
+      listObservations: historyHost.port.listObservations,
       async create(actor, consent, options) {
         const saved = await invoke(actor, options, service => service.create(consent))
         return failure === 'EXTRA_DTO' ? { ...saved, token: 'synthetic-forbidden-token' } : saved
@@ -118,7 +141,7 @@ export async function createYidaAutomationHttpFixture() {
       requestManual: (actor, grantId, input, options) => invoke(actor, options, service => service.requestManual(grantId, input)),
     })
     const app = express()
-    app.use(prefix, yidaAutomationNoStore, yidaAutomationJsonOnly, express.json({ limit: '16kb', strict: true }), yidaAutomationParseError)
+    app.use(prefix, yidaAutomationNoStore, yidaAutomationJsonOnly, express.json({ limit: '16kb', strict: true, verify: yidaAutomationBodyLimit }), yidaAutomationParseError)
     app.use(jwt)
     app.use((_req, _res, next) => {
       authenticatedTenantPresent = Boolean(_req.authenticatedTenantId)
@@ -157,7 +180,10 @@ export async function createYidaAutomationHttpFixture() {
       client.end(raw)
     })
   }
-  return { owner, reset, cleanup, http,
+  return { owner, reset, cleanup, http, transaction,
+    stopHistoryHost: () => historyHost!.stop(),
+    loseNextCommitResponse() { lostCommit = true },
+    get historySourceCalls() { return historySourceCalls }, get historyFetchCalls() { return historyFetchCalls },
     consent: () => ({ confirmationId: 'synthetic-http-confirmation', ruleId: 'synthetic-http-rule', expectedRuleRevision: revision,
       actionId: 'synthetic-slot', projectNo: 'SYN-P1', operationId: owner.seedDraft.operationId,
       rowKeys: [owner.seedDraft.rows[0].rowKey], allowedTriggers: ['manual', 'schedule.interval'], maxExecutions: 1, ttlMs: 900000 }),

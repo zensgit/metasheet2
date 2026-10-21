@@ -51,6 +51,10 @@
       <p v-if="requestAccepted">请求已持久排队；并不代表已发送或业务创建成功，请手动刷新核对。</p>
       <ul v-if="observed"><li v-for="entry in observed.requests" :key="entry.requestId" :data-testid="`sp-yida-auto-result-${entry.rowOrdinal}`">第 {{ entry.rowOrdinal + 1 }} 行：{{ resultLabel(entry.status, entry.ledgerStatus) }}</li></ul>
       <p>发送中、结果未知或未确认的记录禁止重试 CREATE；协议 ACK 也不是业务成功。</p>
+      <template v-for="entry in observed?.requests ?? []" :key="entry.requestId">
+        <StockPreparationYidaReconciliationPanel v-if="entry.admissionId" :grant-id="grant.grantId" :request-id="entry.requestId"
+          :ledger-status="entry.ledgerStatus" :scope-key="scopeKey" :disabled="disabled" />
+      </template>
     </section>
     <p v-if="errorCode" role="alert" data-testid="sp-yida-auto-error">{{ errorCode }}</p>
   </section>
@@ -59,6 +63,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { randomUuid } from '../../../utils/uuid'
+import StockPreparationYidaReconciliationPanel from './StockPreparationYidaReconciliationPanel.vue'
 import { createYidaAutomationClient, YidaAutomationClientError, type YidaAutomationRule,
   type YidaAutomationConsent, type YidaAutomationSummary, type YidaAutomationObservation } from '../../../services/integration/yidaAutomation'
 import { createYidaInitializationClient, YidaInitializationClientError } from '../../../services/integration/yidaInitialization'

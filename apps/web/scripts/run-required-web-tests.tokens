@@ -614,6 +614,7 @@ tests/useAttendanceSessionGuard.spec.ts
 tests/useAuth.spec.ts
 tests/useSessionOrg.spec.ts
 tests/YidaAutomation.spec.ts
+tests/YidaReconciliation.spec.ts
 todoApi
 TodoCenterView
 todoCountsRealtime

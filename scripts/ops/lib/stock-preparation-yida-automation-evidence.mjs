@@ -41,6 +41,7 @@ export function validateYidaAutomationEvidence(records, scenario = 'manual', yid
     grants: 1, requests: 1, admissions: 0, ledgers: 0, externalSend: false, newSa06dBrowserProof: false,
   }, 'PLM_FULL_APP_YIDA_AUTO_OFF_MAIN_INVALID')
   if (yidaCase === 'remaining-unknown') {
+    absent('yida-reconciliation-browser-verified')
     for (const stage of ['yida-automation-natural-interval-verified','yida-automation-inflight-ready',
       'yida-automation-inflight-stop-verified','yida-automation-authorized-browser-verified',
       'yida-automation-fresh-consent-fence-verified','yida-automation-synthetic-execution-verified']) absent(stage)
@@ -59,6 +60,14 @@ export function validateYidaAutomationEvidence(records, scenario = 'manual', yid
     absent('yida-automation-natural-interval-verified')
     absent('yida-automation-inflight-ready'); absent('yida-automation-inflight-stop-verified')
     const browser = one('yida-automation-authorized-browser-verified')
+    const reconciliation = one('yida-reconciliation-browser-verified')
+    assert.deepEqual(reconciliation.record, { stage: 'yida-reconciliation-browser-verified', realUiAppend: true,
+      realUiCorrection: true, realUiRemountRead: true, realUiLostReceiptRecovery: true, originalUnknownVisible: true, evidenceUnverified: true,
+      responseStubs: 0, storageInjections: 0, externalSend: false,
+      counts: { requests: 8, responses: 7, reads: 5, appends: 2, droppedReceipts: 1, idempotentReplays: 1,
+        expectedNetworkFailures: 1 }, actualMain: true, realPasswordJwt: true,
+      persistedRecords: 2, persistedAudits: 2, originalGrantObservationUnchanged: true,
+      browserAndPreviewServerClosed: true }, 'PLM_FULL_APP_YIDA_AUTO_RECONCILIATION_INVALID')
     const freshFence = one('yida-automation-fresh-consent-fence-verified')
     const execution = one('yida-automation-synthetic-execution-verified')
     const inspections = browser.record.counts?.inspections
@@ -71,7 +80,7 @@ export function validateYidaAutomationEvidence(records, scenario = 'manual', yid
       counts: { requests: 8 + inspections, responses: 8 + inspections, previews: 2, approvals: 1, submissions: 2,
         inspections, revocations: 1 },
       session: { realPasswordLogin: true, freshBrowserContext: true, productionBundle: true,
-        servedBundleBytesVerified: true, matchingProjectBoard: true }, browserAndPreviewServerClosed: true,
+        servedBundleBytesVerified: true, matchingProjectBoard: true, realPageReloadSamePrincipal: true }, browserAndPreviewServerClosed: true,
     }, 'PLM_FULL_APP_YIDA_AUTO_AUTH_BROWSER_INVALID')
     const fresh = freshFence.record
     const freshCounts = ['metadataAttempts', 'nativeUnknownLookupAttempts', 'nativeUnknownLookupCompletions', 'nativeUnknownRowsRead']
@@ -99,8 +108,9 @@ export function validateYidaAutomationEvidence(records, scenario = 'manual', yid
       businessVerified: false, externalSend: false, browserApproved: true, browserRequested: true,
       inFlightStopProven: false, originalSendFlagsRestored: true, originalBusinessSnapshotUnchanged: true,
     }, 'PLM_FULL_APP_YIDA_AUTO_EXECUTION_INVALID')
-    order(initialized, offBrowser, offMain, browser, freshFence, execution, positive, stopped, verified)
+    order(initialized, offBrowser, offMain, browser, reconciliation, freshFence, execution, positive, stopped, verified)
   } else {
+    absent('yida-reconciliation-browser-verified')
     absent('yida-automation-remaining-unknown-verified')
     absent('yida-automation-authorized-browser-verified'); absent('yida-automation-synthetic-execution-verified')
     absent('yida-automation-fresh-consent-fence-verified')

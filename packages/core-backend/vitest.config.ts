@@ -39,6 +39,7 @@ export default defineConfig({
       'tests/integration/yida-automation-send-realdb.test.ts',
       'tests/integration/yida-automation-runtime-realdb.test.ts',
         'tests/integration/yida-automation-http-realdb.test.ts',
+        'tests/integration/yida-reconciliation-http-realdb.test.ts',
         'tests/integration/yida-automation-installed-binding-realdb.test.ts',
         'tests/integration/yida-automation-management-host-realdb.test.ts',
       '**/node_modules/**',
