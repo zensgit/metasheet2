@@ -5,10 +5,10 @@
  *    once; an idle-connection error event is recorded (counter + metric) and nothing is thrown or
  *    re-emitted.
  *  - borrow level: `transaction()` listens on the checked-out connection for exactly the time it holds
- *    it — attached once after checkout, removed before release — on the success path, the handler-failure
- *    path and the BEGIN-failure path; a connection that reported an error while held is released with
- *    that error (the first one it reported), so the pool destroys it; repeated transactions leave no
- *    listener behind.
+ *    it — attached once after checkout, removed before release (the fake records the listener count at
+ *    the moment of release) — on the success path, the handler-failure path, the BEGIN-failure path and
+ *    the COMMIT-failure path; a connection that reported an error while held is released with that error
+ *    (the first one it reported), so the pool destroys it; repeated transactions leave no listener behind.
  *
  * The pool points at a closed port (pattern of `settlement-coordination-main-pool-hook.test.ts`), so no
  * connection is ever made; the borrow-level cases hand `transaction()` a fake client through the pool's
@@ -38,6 +38,8 @@ function serverError(code: string, severity: string): Error {
 class FakeClient extends EventEmitter {
   readonly statements: string[] = []
   readonly releases: Array<Error | undefined> = []
+  /** How many 'error' listeners the connection had at the moment of each release. */
+  readonly listenersAtRelease: number[] = []
   /** Statement text that rejects; `'*'` rejects every statement from then on. */
   failOn: string | null = null
   failWith: Error = new Error('fake statement failure')
@@ -50,6 +52,7 @@ class FakeClient extends EventEmitter {
   }
 
   release = (error?: Error): void => {
+    this.listenersAtRelease.push(this.listenerCount('error'))
     this.releases.push(error)
   }
 }
@@ -121,6 +124,7 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.listenerCount('error')).toBe(0)
     expect(client.statements).toEqual(['BEGIN', 'SELECT 1', 'COMMIT'])
     expect(client.releases).toEqual([undefined])
+    expect(client.listenersAtRelease).toEqual([0])
   })
 
   it('handler-failure path: the caller gets the handler error, ROLLBACK is sent, the listener comes off, the connection goes back without an error', async () => {
@@ -137,6 +141,7 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.listenerCount('error')).toBe(0)
     expect(client.statements).toEqual(['BEGIN', 'ROLLBACK'])
     expect(client.releases).toEqual([undefined])
+    expect(client.listenersAtRelease).toEqual([0])
   })
 
   it('BEGIN-failure path: the listener attached at checkout still comes off before release', async () => {
@@ -148,6 +153,19 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.listenerCount('error')).toBe(0)
     expect(client.releases).toHaveLength(1)
     expect(client.releases[0]).toBeUndefined()
+    expect(client.listenersAtRelease).toEqual([0])
+  })
+
+  it('COMMIT-failure path: the caller gets the COMMIT error, ROLLBACK is sent, the listener comes off before release, the connection goes back without an error', async () => {
+    const pool = open('d2-borrow-commit-fails')
+    const client = new FakeClient()
+    client.failOn = 'COMMIT'
+    lend(pool, client)
+    await expect(pool.transaction(async () => 'handler done')).rejects.toBe(client.failWith)
+    expect(client.statements).toEqual(['BEGIN', 'COMMIT', 'ROLLBACK'])
+    expect(client.listenerCount('error')).toBe(0)
+    expect(client.releases).toEqual([undefined])
+    expect(client.listenersAtRelease).toEqual([0])
   })
 
   it('a connection that reports an error while held: the caller gets an error, the listener comes off, and the connection is released with the first error it reported', async () => {
@@ -176,6 +194,7 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     // ROLLBACK was attempted (and refused by the fake, as pg would); what matters here is the release.
     expect(client.statements).toEqual(['BEGIN', 'SELECT 1', 'SELECT 2', 'ROLLBACK'])
     expect(client.releases).toEqual([first])
+    expect(client.listenersAtRelease).toEqual([0])
   })
 
   it('a connection that reported an error while held is released with it even when the handler and COMMIT went through', async () => {
@@ -191,6 +210,7 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.statements).toEqual(['BEGIN', 'COMMIT'])
     expect(client.releases).toEqual([heard])
     expect(client.listenerCount('error')).toBe(0)
+    expect(client.listenersAtRelease).toEqual([0])
   })
 
   it('an error reported while held never goes unhandled: emitting on the held connection does not throw', async () => {
@@ -215,11 +235,15 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     process.on('warning', onWarning)
     try {
       for (let i = 0; i < 25; i += 1) {
-        await pool.transaction(async () => {
+        const run = pool.transaction(async () => {
           expect(client.listenerCount('error')).toBe(1)
           if (i % 2 === 1) throw new Error(`odd ${i}`)
           return i
-        }).catch(() => undefined)
+        })
+        // Each outcome is checked exactly: a failed assertion inside the handler surfaces as a different
+        // rejection (or as a rejection where a result is expected), never as a silently ignored one.
+        if (i % 2 === 1) await expect(run).rejects.toThrow(`odd ${i}`)
+        else await expect(run).resolves.toBe(i)
         expect(client.listenerCount('error')).toBe(0)
       }
       await new Promise((resolve) => setImmediate(resolve))
@@ -229,6 +253,7 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.listenerCount('error')).toBe(0)
     expect(client.releases).toHaveLength(25)
     expect(client.releases.every((error) => error === undefined)).toBe(true)
+    expect(client.listenersAtRelease.every((count) => count === 0)).toBe(true)
     expect(warnings).toEqual([])
   })
 })

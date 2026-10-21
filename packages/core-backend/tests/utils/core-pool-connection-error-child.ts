@@ -2,12 +2,10 @@
  * Child-process scenarios for `tests/integration/core-pool-connection-error-listener.db.test.ts` (no
  * test runner here). One scenario per invocation (`argv[2]`); each prints `D2 <STAGE> key=value …`
  * lines and lets the process end on its own when the scenario ran to its end, so the parent reads the
- * exit code and the lines. Nothing in this file listens for 'error' on the connection under test: what
- * keeps the process running in the `idle` and `borrowed` scenarios is the code under test alone, and
- * the `control` scenario uses a bare pg Pool with no listener at all.
+ * exit code and the lines. Nothing in this file listens for 'error' on the connection under test, so in
+ * the `idle` and `borrowed` scenarios only the code under test handles it.
  *
- * Backends are terminated with `pg_terminate_backend` from a SEPARATE admin connection (same role),
- * never from the connection under test.
+ * Server-side closes are issued from a second connection, and only for backends this process opened.
  */
 import { Client, Pool } from 'pg'
 
@@ -140,15 +138,14 @@ async function borrowedScenario(): Promise<number> {
   return rejected ? 0 : 3
 }
 
-/** Negative control for the harness: a bare pg Pool with no listener; the parent expects this process NOT to reach its last line. */
+/** Control for the harness: the parent expects this scenario not to reach its last line, which shows the harness tells an unfinished child from a finished one. */
 async function controlScenario(): Promise<number> {
   const pool = new Pool({ connectionString: url, max: 1, min: 0, idleTimeoutMillis: 60000, application_name: 'd2-control' })
   const { rows } = await pool.query('SELECT pg_backend_pid() AS pid')
   const pid = Number(rows[0].pid)
   write(`CONTROL_BORROWED pid=${pid}`)
-  // Printed BEFORE the terminate is issued: once the server closes the idle connection the bare pool
-  // has no listener, and this process may not get past the admin query, so no line written after the
-  // terminate is guaranteed to exist. No wait is needed in this leg.
+  // Printed before the close is issued; no line after it is guaranteed to be written in this scenario.
+  // No wait is needed in this leg.
   write(`CONTROL_TERMINATING pid=${pid}`)
   await withAdmin((admin) => admin.query('SELECT pg_terminate_backend($1)', [pid]))
   await sleep(3000)

@@ -3,15 +3,16 @@
  * test: each scenario runs in a child process (`tests/utils/core-pool-connection-error-child.ts`), so
  * "the process keeps running" is the child's exit code, not an in-process assertion.
  *
- *  (a) idle: a pooled connection that is idle in the pool is terminated from a separate admin
- *      connection; the child keeps running, the pool records one connection error, discards that
- *      connection, and the next query on the pool succeeds on a different backend.
- *  (b) borrowed: the connection is terminated while `ConnectionPool.transaction()` holds it, between
- *      statements; the caller gets an error, the child keeps running, the pool has discarded the
- *      connection (total 0, one remove), and the next query succeeds on a different backend.
- *  (c) control: the same harness around a bare pg Pool with no listener does NOT reach its last line
- *      (and its exit status is not 0) — the proof that this harness tells a child that stops early
- *      from one that runs to its end, so the two legs above are not green by construction.
+ *  (a) idle: the server closes a pooled connection while it is idle in the pool; the child keeps
+ *      running, the pool records one connection error, discards that connection, and the next query on
+ *      the pool succeeds on a different backend.
+ *  (b) borrowed: the server closes the connection while `ConnectionPool.transaction()` holds it,
+ *      between statements; the next statement fails for the caller, the child keeps running, the pool
+ *      has discarded the connection (total 0, one remove), and the next query succeeds on a different
+ *      backend.
+ *  (c) control: a scenario that does NOT reach its last line — the proof that this harness tells a
+ *      child that stops early from one that runs to its end, so the two legs above are not green by
+ *      construction.
  *
  * Shared-database safe: the child only terminates backends it opened itself (identified by pid, read
  * through the connection itself), and the parent only reads `pg_stat_activity`.
@@ -153,10 +154,10 @@ describeIfDatabase('core pool connection-error listeners (real DB, child process
     expect(await backendAlive(held)).toBe(false)
   }, 90_000)
 
-  it('(c) negative control: the harness observes that a bare pool with no listener does not reach its last line', async () => {
+  it('(c) control: the harness tells a child that does not reach its last line from one that does', async () => {
     const run = runChild('control')
-    // Anchors are the lines printed BEFORE the terminate is issued; nothing after it is guaranteed to
-    // be written by a process that does not survive the server closing its connection.
+    // Anchors are the lines printed before the close is issued; nothing after it is guaranteed to be
+    // written in this scenario.
     const borrowed = line(run, 'CONTROL_BORROWED')
     const pid = Number(field(borrowed, 'pid'))
     expect(Number(field(line(run, 'CONTROL_TERMINATING'), 'pid'))).toBe(pid)
