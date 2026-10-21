@@ -283,6 +283,86 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations')
   })
 
+  it('#6467 names the separate OAuth env variables in the directory credential note', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse({ ok: true, data: { items: [] } }))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const hint = container!.querySelector('[data-testid="dingtalk-login-config-hint"]')!
+    const text = hint.textContent!.replace(/\s+/g, ' ')
+    expect(text).toContain('目录集成（通讯录拉取）的凭据')
+    expect(text).toContain('DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET / DINGTALK_REDIRECT_URI')
+    expect(text).toContain('两者互不相通')
+    expect(hint.querySelector('[data-testid="dingtalk-login-probe-status"]')).toBeNull()
+    // Opening the page does not probe; only the integrations list is fetched.
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [
+      'available',
+      { success: true, data: { available: true, unavailableReason: null, missingEnv: [] } },
+      '当前钉钉登录：可用。',
+    ],
+    [
+      'several missing',
+      {
+        success: true,
+        data: {
+          available: false,
+          unavailableReason: 'missing_client_id',
+          missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'private-secret-value', 'DINGTALK_REDIRECT_URI'],
+        },
+      },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_REDIRECT_URI；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+    ],
+    [
+      'older backend without missingEnv',
+      { success: true, data: { available: false, unavailableReason: 'missing_client_secret' } },
+      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）。',
+    ],
+    [
+      'corp not allowed',
+      { success: true, data: { available: false, unavailableReason: 'corp_not_allowed', missingEnv: [], corpId: 'private-corp-value' } },
+      '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+    ],
+    [
+      'unknown reason',
+      { success: true, data: { available: false, unavailableReason: 'unexpected-private-value' } },
+      '当前钉钉登录：不可用。',
+    ],
+    [
+      'probe failure',
+      { success: false, error: 'private-error-value' },
+      '当前钉钉登录：无法获取状态，请稍后重试。',
+    ],
+  ])('#6467 login probe button reports %s', async (_label, probePayload, expected) => {
+    apiFetchMock.mockImplementation(async (url: string) => (
+      url === '/api/auth/dingtalk/launch?probe=1'
+        ? createJsonResponse(probePayload)
+        : createJsonResponse({ ok: true, data: { items: [] } })
+    ))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!.click()
+    await flushUi()
+
+    const statusNode = container!.querySelector('[data-testid="dingtalk-login-probe-status"]')
+    expect(statusNode?.textContent).toBe(expected)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    for (const value of ['private-secret-value', 'private-corp-value', 'private-error-value', 'unexpected-private-value']) {
+      expect(container!.textContent).not.toContain(value)
+    }
+  })
+
   it('renders the linked OAuth help without fetching or editing credentials', async () => {
     app = createApp(AttendanceDingTalkMicroappHelpView)
     registerRouterLink(app, true)

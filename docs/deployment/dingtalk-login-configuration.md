@@ -12,6 +12,8 @@
 
 保存目录集成不会更新 OAuth 登录环境变量。管理员可从目录配置区的「查看钉钉登录配置」
 进入帮助页的服务端配置说明。该入口提供说明，不保存或回显 OAuth 密钥。
+目录配置区的「检测钉钉登录状态」按钮调用与登录页相同的探测接口，显示当前登录是否可用及缺少哪些变量名；
+打开页面时不会自动探测。
 
 ## 登录必需项与提示
 
@@ -25,8 +27,21 @@
 每组别名配置一种即可。若同时配置，非空的 `DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET`
 优先于对应别名。不要把实际凭据填入仓库示例文件、截图、问题单或日志。
 
-后端按 ID → Secret → 回调地址 → 企业白名单的顺序返回**首个阻断原因**，并非完整缺项清单。
-修复后刷新，可能显示下一项。提示只展示变量名和原因，不展示实际配置值。
+`unavailableReason` 按 ID → Secret → 回调地址 → 企业白名单的顺序只给出**首个阻断原因**；
+同一探测响应中的 `missingEnv` 给出**全部**缺失项（#6467 补充），因此可以一次补齐后只重建一次后端：
+
+| 当前环境 | `unavailableReason` | `missingEnv` |
+| --- | --- | --- |
+| 三项都没配 | `missing_client_id` | `DINGTALK_CLIENT_ID\|DINGTALK_APP_KEY`、`DINGTALK_CLIENT_SECRET\|DINGTALK_APP_SECRET`、`DINGTALK_REDIRECT_URI` |
+| 只缺 Secret 与回调地址 | `missing_client_secret` | `DINGTALK_CLIENT_SECRET\|DINGTALK_APP_SECRET`、`DINGTALK_REDIRECT_URI` |
+| 只缺回调地址 | `missing_redirect_uri` | `DINGTALK_REDIRECT_URI` |
+| 三项齐全但企业未放行 | `corp_not_allowed` | 空 |
+| 全部可用 | `null` | 空 |
+
+`missingEnv` 中带 `|` 的条目表示「任一名称配置即可」（主名在前、别名在后）。登录页缺两项及以上时列出全部变量名，
+只缺一项时沿用该项的专门提示。`missingEnv` 只含上述固定变量名，从不包含配置值或值的片段；
+探测接口本身无需登录（登录页要用），而它此前已对匿名调用方返回 `unavailableReason`、`corpId`、`allowedCorpIds`，
+变量名是公开文档中的固定名称，不构成新的敏感信息。
 
 ## 部署与验证
 
@@ -37,7 +52,7 @@
    非容器部署应按其进程管理方式重新加载环境并重启后端。
 3. 在普通浏览器中刷新登录页，检查提示是否消失。只读
    `GET /api/auth/dingtalk/launch?probe=1` 返回的 `configured`、`available`、
-   `unavailableReason` 可用于排查；记录这三个字段即可，不要复制整个响应中的企业信息。
+   `unavailableReason`、`missingEnv` 可用于排查；记录这四个字段即可，不要复制整个响应中的企业信息。
 4. `available=true` 仅说明服务端配置和当前静态白名单检查通过，不能替代真实 OAuth
    登录、用户授权或回调验收。真实 UAT 仍需另行安排。
 
