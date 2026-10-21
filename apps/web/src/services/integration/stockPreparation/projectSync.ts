@@ -41,6 +41,9 @@
 // reports as SKIP. When it genuinely fails, the step reports FAIL — visibly, with its status — but
 // `report.imported` and the verdict are computed from step 3 alone, because the BOM is already in the
 // sheet by then and telling the operator otherwise would be a lie that costs them a re-run.
+// Being a separate consumer, it re-resolves the source on its own — WITHOUT the workspace hint steps 1
+// and 3 carry — so step 3's `sourceScopeDigest` rides along and the server refuses (409
+// STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT) rather than keep another source's rows as this batch.
 //
 // VALUES-FREE. A step result carries a REASON CODE from the closed vocabulary below plus a detail map
 // of counts, HTTP statuses and clamped server tokens. No server message and no cell content is ever
@@ -126,16 +129,19 @@ export type StockPreparationProjectSyncReason =
   | 'BATCH_ARCHIVE_NOT_ATTEMPTED'
   | 'BATCH_ARCHIVE_NOT_PERMITTED'
   | 'BATCH_ARCHIVE_FAILED'
-  // #6475 — the archive's own refusals, each with its own next step (classifyArchiveFailure). The
-  // first three are NOT failures of anything the operator did: the snapshot tables were never built,
-  // or this batch identity already holds a copy the server will not overwrite.
+  // #6475 — the archive's own refusals, each with its own next step (classifyArchiveFailure). Only
+  // the first is a SKIP (the snapshot tables were never built — a deployment state, like the flag
+  // being off); every other one means this sync's batch is missing from 批次与差异, and says so.
   | 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED'
-  | 'BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT'
+  | 'BATCH_ARCHIVE_LEDGER_CONFLICT'
   | 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE'
   | 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE'
   | 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE'
   | 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE'
   | 'BATCH_ARCHIVE_TENANT_REQUIRED'
+  | 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT'
+  | 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND'
+  | 'BATCH_ARCHIVE_PLAN_NOT_READY'
 
 export interface StockPreparationProjectSyncStepDescriptor {
   id: StockPreparationProjectSyncStepId
@@ -218,6 +224,17 @@ export function clampToken(value: unknown, vocabulary: readonly string[]): strin
  */
 export function clampErrorCode(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : null
+}
+
+/**
+ * #6475 review round 1 — a server error's `details.target` / `details.reason`, clamped the same way:
+ * the persist layer's are closed lower_snake vocabularies (`project` / `duplicate_key`,
+ * `snapshot_batch` / `content_mismatch`, `run` / `missing`, …), and the same code covers states an
+ * administrator handles differently, so the pair is worth carrying to the step's technical detail.
+ * Anything that is not lower_snake-shaped is dropped, never carried.
+ */
+export function clampErrorDetailToken(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(value) ? value : null
 }
 
 export interface StockPreparationProjectSyncStepResult {
@@ -705,6 +722,26 @@ export interface StockPreparationProjectSyncPlan {
 export interface StockPreparationProjectSyncApplyResult {
   status?: string
   apply?: { counts?: Record<string, number>; written?: number }
+  /**
+   * #6475 — the values-free digest of the (tenant, action, source) this apply read
+   * (http-routes.cjs `stockPreparationSourceScopeDigest`). Handed back to step ④ verbatim, which
+   * refuses rather than archive a source other than this one. Untyped at the boundary: read through
+   * `sourceScopeDigestOf`.
+   */
+  sourceScopeDigest?: unknown
+}
+
+/** The digest's one wire shape; anything else is treated as absent, never forwarded. */
+export const STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+
+export function sourceScopeDigestOf(value: unknown): string | null {
+  return typeof value === 'string' && STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value) ? value : null
+}
+
+/** What step ④ hands the archive call besides the project number. */
+export interface StockPreparationProjectSyncArchiveOptions {
+  /** Step ③'s `sourceScopeDigest`, when it answered one. */
+  sourceScopeDigest?: string
 }
 
 export interface StockPreparationProjectSyncArchiveResult {
@@ -778,7 +815,11 @@ export interface StockPreparationProjectSyncApi {
   dryRunJobStatus?(projectNo: string): Promise<StockPreparationDryRunJobSnapshot | null>
   reconcile(projectNo: string): Promise<{ counts?: Record<string, number> }>
   apply(projectNo: string, dryRunToken: string): Promise<StockPreparationProjectSyncApplyResult>
-  archive(projectNo: string): Promise<StockPreparationProjectSyncArchiveResult>
+  /**
+   * `options` is passed ONLY when step ③ answered a digest, so a double written against the old
+   * one-argument shape sees exactly the call it always did.
+   */
+  archive(projectNo: string, options?: StockPreparationProjectSyncArchiveOptions): Promise<StockPreparationProjectSyncArchiveResult>
 }
 
 /** HTTP status + clamped error code of a failed call. Never carries a server message. */
@@ -788,14 +829,25 @@ export class StockPreparationProjectSyncCallError extends Error {
   /** The server's own error code, when it is identifier-shaped. Null otherwise. */
   code: string | null
 
+  /** The server's `details.target` / `details.reason`, when lower_snake-shaped (`clampErrorDetailToken`). */
+  detailTarget: string | null
+
+  detailReason: string | null
+
   /** True when the transport succeeded and the payload was not this API's envelope. */
   malformed: boolean
 
-  constructor(status: number, route: string, options: { code?: string | null; malformed?: boolean } = {}) {
+  constructor(
+    status: number,
+    route: string,
+    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null } = {},
+  ) {
     super(`stock-preparation project sync call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectSyncCallError'
     this.status = status
     this.code = options.code ?? null
+    this.detailTarget = clampErrorDetailToken(options.detailTarget)
+    this.detailReason = clampErrorDetailToken(options.detailReason)
     this.malformed = options.malformed === true
   }
 }
@@ -817,23 +869,51 @@ export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_P
 
 /**
  * #6475 — THE ARCHIVE'S OWN REFUSALS, BY SERVER CODE. Before this every one of them rendered as the
- * same 「存档没成功,再同步一次通常就补上了」, which is false for all seven: re-syncing builds no
- * snapshot table, adds no missing column, re-activates no source and gives an account no tenant.
- * The server codes are unchanged; what changes is the step's status and the sentence it points at.
+ * same 「存档没成功,再同步一次通常就补上了」, which is false for most of them: re-syncing builds no
+ * snapshot table, adds no missing column, re-activates no source, gives an account no tenant, rewrites
+ * no kept record and completes no half-written one. The server codes are unchanged except the one
+ * #6475 added (SOURCE_BINDING_SPLIT); what changes is the step's status and the sentence it points at.
+ *
+ * ONE SKIP, AND ONLY ONE. A SKIP says "nothing is wrong, this sync just has no batch". That is true of
+ * exactly one refusal here; every other one leaves this sync's batch missing from 批次与差异 for a
+ * reason somebody has to act on, so it is a FAIL — non-fatal, the import still reads as done.
  *
  *   PERSIST_TARGET_NOT_PROVISIONED (409)      the four snapshot tables were never built for this
  *       tenant (only `POST …/stock-preparation/mvp/ensure` builds them; a customer-pack install and
  *       a project-sheet create do not). SKIP — a deployment state, like the flag being off.
- *   PERSIST_IDEMPOTENCY_CONFLICT (409)        this batch identity already holds a copy whose content
- *       differs (under the hour rule: material changed within the hour). The server never overwrites
- *       a kept batch. SKIP — a copy exists; nothing failed.
+ *   PERSIST_IDEMPOTENCY_CONFLICT (409)        the snapshot ledger already holds rows that do not match
+ *       this persist. FAIL. The code alone covers states that are NOT "a copy was kept": a project
+ *       ledger with two rows for one project (`project`/`duplicate_key` — checked on EVERY persist,
+ *       permanent, no repair path), and under the opt-in creation-hour batch rule a corrected BOM that
+ *       adds no newer material landing on the batch id already kept (`snapshot_batch`/
+ *       `content_mismatch` — the id is the newest material CREATION hour, not the wall clock, so "the
+ *       next hour" never comes). Nothing was stored in either; the details ride to the step detail.
  *   PERSIST_EXISTING_BATCH_INCOMPLETE (409)   a copy under this batch identity was left half-written
- *       before; the server never patches it. SKIP — the next batch identity stores normally.
+ *       (a pre-P4 crash or an external delete). FAIL. The server never patches it on its own, and an
+ *       unchanged BOM keeps the same batch id, so it repeats until an administrator runs the one-shot,
+ *       owner-controlled repair (stock-preparation-sync-run-repair-once.cjs — not an HTTP route).
  *   TARGET_SCHEMA_INCOMPLETE (422)            a snapshot table lacks template columns → mvp/repair.
  *   TARGET_SCHEMA_UNAVAILABLE (503)           the column read itself failed → retry / check the host.
- *   TABLE_ACTION_SOURCE_NOT_ACTIVE (409)      the archive re-reads the source and requires it active.
- *   TENANT_REQUIRED (400)                     the archive takes its tenant from the signed-in account
- *       only (never from the page); an account with no tenant of its own cannot archive.
+ *   TABLE_ACTION_SOURCE_NOT_ACTIVE (409)      the archive requires the bound source to be active (the
+ *       trial and the write do not). Since #6475 round 1 the split check below runs FIRST, so this
+ *       now names the source step ③ itself read — and whether to re-enable it or rebind away from it
+ *       is an administrator's call, which is what the copy says.
+ *   TENANT_REQUIRED (400)                     the request reached the archive with no tenant at all.
+ *       The archive's tenant is the principal's `user.tenantId` (http-routes.cjs
+ *       `resolveAuthUserTenantId`): the verified claim when the token carries one, and — while the
+ *       tenant-claim door (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED) is off, which is the default —
+ *       the `x-tenant-id` header `apiFetch` attaches when it does not (utils/api.ts `authHeaders`: the
+ *       session org, the page's stored tenant hint, or the URL's `?tenantId=`). So it is NOT "the
+ *       signed-in account only, never the page": this answer means neither was present.
+ *   STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT (409)  the archive would have read a different source
+ *       than the one step ③ wrote from (the action is bound differently per workspace) — or would have
+ *       been credited to a different tenant than ③'s write — so it read and stored nothing. FAIL →
+ *       make the bindings agree; if they already do, the tenant is the administrator's to look at.
+ *   STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND (404)  the archive's re-read of the SAME source no
+ *       longer finds the project. FAIL → sync again; if step ① agrees, the source no longer has it.
+ *   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY (409)  the archive's own recomputed plan still
+ *       holds rows (it does not reuse the trial's confirmed decisions or stored rules — see
+ *       stock-preparation-mvp-persist-duplicate-hold-gate.test.cjs). FAIL.
  *
  * Every other refusal keeps BATCH_ARCHIVE_FAILED. The flag-off code and 401/403 are classified by
  * the caller before this table is consulted, exactly as before.
@@ -843,12 +923,15 @@ export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
   reason: StockPreparationProjectSyncReason
 }>> = Object.freeze({
   PERSIST_TARGET_NOT_PROVISIONED: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED' as const }),
-  PERSIST_IDEMPOTENCY_CONFLICT: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT' as const }),
-  PERSIST_EXISTING_BATCH_INCOMPLETE: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE' as const }),
+  PERSIST_IDEMPOTENCY_CONFLICT: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_LEDGER_CONFLICT' as const }),
+  PERSIST_EXISTING_BATCH_INCOMPLETE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE' as const }),
   TARGET_SCHEMA_INCOMPLETE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE' as const }),
   TARGET_SCHEMA_UNAVAILABLE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE' as const }),
   TABLE_ACTION_SOURCE_NOT_ACTIVE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE' as const }),
   TENANT_REQUIRED: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_TENANT_REQUIRED' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND' as const }),
+  STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PLAN_NOT_READY' as const }),
 })
 
 /**
@@ -1041,8 +1124,12 @@ export async function runStockPreparationProjectSync(
   }
 
   let writeOk = false
+  // #6475: which source ③ read, as the server's values-free digest — handed to ④ untouched so the
+  // archive refuses rather than keep a different source's rows as this sync's batch.
+  let sourceScopeDigest: string | null = null
   try {
     const applied = await api.apply(projectNo, token)
+    sourceScopeDigest = sourceScopeDigestOf(applied?.sourceScopeDigest)
     written = writtenCountsOf(applied?.apply?.counts)
     const applyStatus = clampToken(applied?.status, STOCK_PREPARATION_APPLY_STATUSES)
     const detail: Record<string, string | number> = {
@@ -1084,7 +1171,7 @@ export async function runStockPreparationProjectSync(
     return done()
   }
   try {
-    const archived = await api.archive(projectNo)
+    const archived = await (sourceScopeDigest ? api.archive(projectNo, { sourceScopeDigest }) : api.archive(projectNo))
     const created = archived?.created && typeof archived.created === 'object' ? archived.created : {}
     const detail: Record<string, string | number> = {
       batch: intOf(created.batch),
@@ -1104,6 +1191,13 @@ export async function runStockPreparationProjectSync(
     const code = codeOf(error)
     const detail: Record<string, string | number> = { status: statusOf(error) }
     if (code) detail.code = code
+    // The server's closed `details.target` / `details.reason` pair, when it sent one: one code covers
+    // states an administrator handles differently (a duplicated project ledger row vs. a batch id
+    // already kept), and the technical detail is where they read which.
+    if (error instanceof StockPreparationProjectSyncCallError) {
+      if (error.detailTarget) detail.target = error.detailTarget
+      if (error.detailReason) detail.reason = error.detailReason
+    }
     // `classifyArchiveFailure` keeps the two rules this step always had, in the same order:
     //   * the flag being off is the deployment saying "this deployment does not keep snapshot
     //     batches", which is a setting, not a fault (SKIP, BATCH_ARCHIVE_DISABLED);
@@ -1140,8 +1234,17 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
     ? payload as IntegrationApiEnvelope<T>
     : null
   if (!response?.ok || envelope?.ok === false) {
+    const details = envelope?.error && typeof envelope.error === 'object'
+      ? (envelope.error as { details?: unknown }).details
+      : undefined
+    const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
+      ? details as { target?: unknown; reason?: unknown }
+      : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
+      // Clamped to lower_snake tokens inside the constructor; anything else is dropped.
+      detailTarget: typeof detailRecord.target === 'string' ? detailRecord.target : null,
+      detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
     })
   }
   if (!envelope || envelope.ok !== true) {
@@ -1361,16 +1464,23 @@ export function createStockPreparationProjectSyncApi(
       return readEnvelope<StockPreparationProjectSyncApplyResult>(response, route)
     },
 
-    async archive(projectNo: string) {
+    async archive(projectNo: string, options: StockPreparationProjectSyncArchiveOptions = {}) {
       const route = `${base}/mvp-persist`
       // NO QUERY STRING. mvp-persist refuses a request carrying any query at all
       // (assertStockPreparationTableActionMvpPersistNoSteering): with auto-persist on, the route
       // gains a write side-effect, so an explicit tenant/workspace on any carrier is a steering
-      // vector and is rejected fail-closed. The tenant comes from the authenticated principal.
+      // vector and is rejected fail-closed. Its tenant is the principal's (`user.tenantId` — the
+      // verified claim, or on a claimless token the `x-tenant-id` header apiFetch attaches; see
+      // STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES' TENANT_REQUIRED line), and it resolves the source with
+      // NO workspace hint — which is why this run hands back step ③'s `sourceScopeDigest`: it names
+      // the source ③ read without selecting anything, so mvp-persist can only refuse a mismatch.
+      const digest = sourceScopeDigestOf(options.sourceScopeDigest)
       const response = await apiFetch(route, {
         method: 'POST',
         headers: json,
-        body: JSON.stringify({ parameters: { projectNo } }),
+        body: JSON.stringify(digest
+          ? { parameters: { projectNo }, sourceScopeDigest: digest }
+          : { parameters: { projectNo } }),
       })
       return readEnvelope<StockPreparationProjectSyncArchiveResult>(response, route)
     },

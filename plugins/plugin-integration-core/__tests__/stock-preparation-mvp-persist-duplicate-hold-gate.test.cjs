@@ -44,6 +44,18 @@
 //   MG2 thread the stored table-scope policies into the archive's plan         => D2 red (422)
 //   MG3 thread the confirmation-ledger resolver into the archive's plan        => D3 red (422)
 //   MG4 key the snapshot line by the idempotency key + sort line instead       => D1 red
+//
+// THE HARNESS IS THE PRODUCTION WIRING (#6475 review round 1, blocker 4). It wires the REAL
+// source-binding store (index.cjs `createStockPreparationSourceBindingStore({ db })`, here over an
+// in-memory db) holding the workbench picker's row under the page's workspace hint, and it drives
+// every step with the shape its real caller sends: dry-run, reconcile, the policy save and apply carry
+// the page scope `?tenantId&workspaceId` (projectSync.ts / the workbench), mvp-persist carries NO
+// query and hands back the apply's `sourceScopeDigest`. So the "not ready" these cases pin is reached
+// AFTER the archive's source check has passed — it is the plan gate answering, not a scope split; the
+// split itself is stock-preparation-mvp-persist-source-parity.test.cjs's subject. The deploy-time
+// default the action config names resolves to NO system, so the store is load-bearing here:
+//   H1 stop wiring the binding store                                           => D2 and D3 red
+//      (the dry-run falls back to the deploy-time default: 422 TABLE_ACTION_SOURCE_INVALID)
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -64,12 +76,24 @@ const {
   PROJECT_OBJECT_ID,
 } = require(path.join(LIB, 'stock-preparation-sync-run-persist.cjs'))
 const { OBJECT_ID: LEDGER_OBJECT_ID, STATUSES, RESOLUTION_ACTIONS } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
+const {
+  BINDING_TABLE,
+  createStockPreparationSourceBindingStore,
+} = require(path.join(LIB, 'stock-preparation-source-binding-store.cjs'))
 
 const MVP_PERSIST_GATE = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
 const TENANT_ID = 'tenant_1'
+const WS_PAGE = 'workspace_page'
+// The page scope the panel and the workbench put on every request but mvp-persist's.
+const PAGE_QUERY = Object.freeze({ tenantId: TENANT_ID, workspaceId: WS_PAGE })
+const DIGEST_SHAPE = /^[0-9a-f]{32}$/
 const CANONICAL_OBJECT_ID = 'stockPreparationMain'
 const CANONICAL_SHEET_ID = `sheet_${CANONICAL_OBJECT_ID}`
+// The source the workbench BOUND (and the only one the registry below can load), and the deploy-time
+// default the action config names — which resolves to NO system here, so any step that stopped
+// resolving through the binding store fails loudly instead of quietly reading the same data.
 const SOURCE_SYSTEM_ID = 'plm_sql_source'
+const DEPLOY_DEFAULT_SYSTEM_ID = 'plm_sql_source_deploy_default'
 const TEMPLATE_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
 const PROJECT_NO = 'P-001'
 const MVP_SHEET_IDS = Object.freeze([BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID, PROJECT_OBJECT_ID].map((id) => `sheet_${id}`))
@@ -201,8 +225,41 @@ function inertService(methods) {
   return service
 }
 
-function services(sourceAdapter) {
-  const system = (input = {}) => ({
+// The binding store's db, in memory (pg result shape, bare array off select). The workbench picker's
+// row is seeded straight into the table — exactly what its hinted POST leaves behind.
+function createBindingDb() {
+  const rows = []
+  const matches = (row, where) => Object.entries(where || {}).every(([column, value]) => (row[column] ?? null) === (value ?? null))
+  const handle = {
+    rows,
+    async selectOne(table, where) {
+      return rows.find((row) => row.__table === table && matches(row, where)) || null
+    },
+    async select(table, options = {}) {
+      const found = rows.filter((row) => row.__table === table && matches(row, options.where))
+      return Number.isInteger(options.limit) ? found.slice(0, options.limit) : found
+    },
+    async insertOne() { throw new Error('the binding table is seeded directly in this suite') },
+    async updateRow() { throw new Error('the binding table is seeded directly in this suite') },
+    async selectOneForKeyShare() { throw new Error('the binding table is seeded directly in this suite') },
+    async transaction(callback) { return callback(handle) },
+  }
+  rows.push({
+    __table: BINDING_TABLE,
+    id: 'binding_workbench',
+    tenant_id: TENANT_ID,
+    workspace_id: WS_PAGE,
+    action_id: PLM_STOCK_PREPARATION_ACTION_ID,
+    external_system_id: SOURCE_SYSTEM_ID,
+    updated_by: null,
+    created_at: 't0',
+    updated_at: 't0',
+  })
+  return handle
+}
+
+function services(sourceAdapter, bindingStore) {
+  const system = (input = {}) => (input.id !== SOURCE_SYSTEM_ID ? null : {
     id: input.id,
     tenantId: input.tenantId,
     name: 'Readonly PLM SQL',
@@ -215,7 +272,10 @@ function services(sourceAdapter) {
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
-      async getExternalSystemForAdapter(input = {}) { return { ...system(input), credentials: {} } },
+      async getExternalSystemForAdapter(input = {}) {
+        const found = system(input)
+        return found ? { ...found, credentials: {} } : null
+      },
     },
     adapterRegistry: {
       createAdapter() { return sourceAdapter },
@@ -236,13 +296,14 @@ function services(sourceAdapter) {
       async renew() { return { held: true } },
     },
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+    stockPreparationSourceBindingStore: bindingStore,
   }
 }
 
 function actionConfig() {
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-    source: { externalSystemId: SOURCE_SYSTEM_ID, kind: 'data-source:sql-readonly' },
+    source: { externalSystemId: DEPLOY_DEFAULT_SYSTEM_ID, kind: 'data-source:sql-readonly' },
     target: {
       sheetId: CANONICAL_SHEET_ID,
       objectId: CANONICAL_OBJECT_ID,
@@ -271,10 +332,13 @@ function mount() {
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: services(createSourceAdapter(duplicateSourceData())),
+    services: services(
+      createSourceAdapter(duplicateSourceData()),
+      createStockPreparationSourceBindingStore({ db: createBindingDb() }),
+    ),
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, records }
+  return { routes, records, lastApplyDigest: null }
 }
 
 function createResponse() {
@@ -286,12 +350,12 @@ function createResponse() {
   }
 }
 
-async function call(routes, method, routePath, { body = {}, params = ACTION_PARAMS } = {}) {
+async function call(routes, method, routePath, { body = {}, params = ACTION_PARAMS, query = PAGE_QUERY } = {}) {
   const handler = routes.get(`${method} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
   try {
-    await handler({ user: ADMIN_USER, authenticatedTenantId: TENANT_ID, body, query: {}, params }, res)
+    await handler({ user: ADMIN_USER, authenticatedTenantId: TENANT_ID, body, query, params }, res)
   } catch (error) {
     res.statusCode = error && error.status ? error.status : 500
     res.body = { ok: false, error: { code: error && error.code ? error.code : 'THREW', message: error && error.message } }
@@ -314,6 +378,8 @@ async function applyAcknowledged(h, token) {
   })
   assert.equal(res.statusCode, 200, `apply: ${JSON.stringify(res.body)}`)
   assert.equal(res.body.data.status, 'succeeded')
+  assert.match(res.body.data.sourceScopeDigest, DIGEST_SHAPE, 'apply answers the digest of the source it read')
+  h.lastApplyDigest = res.body.data.sourceScopeDigest
   return res.body.data
 }
 
@@ -324,6 +390,7 @@ async function reconcileAndConfirm(h) {
   assert.equal(pending.length, 1, 'exactly one pending decision is queued')
   const confirmed = await call(h.routes, 'POST', ROUTE.confirm, {
     params: {},
+    query: {},
     body: {
       decisionId: pending[0].data.decisionId,
       inputFingerprint: pending[0].data.inputFingerprint,
@@ -338,7 +405,11 @@ function snapshotRowCount(h) {
 }
 
 async function assertArchiveRefusesNotReady(h, label) {
-  const res = await call(h.routes, 'POST', ROUTE.mvpPersist, { body: pull() })
+  // The panel's step-④ shape: NO query (the route refuses one), the apply's digest handed back.
+  const res = await call(h.routes, 'POST', ROUTE.mvpPersist, {
+    body: { ...pull(), sourceScopeDigest: h.lastApplyDigest },
+    query: {},
+  })
   assert.equal(res.statusCode, 409, `${label}: the archive answers 409 (got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)})`)
   assert.equal(res.body.error.code, NOT_READY, `${label}: with the typed "not ready" code — never the snapshot's 422 line-key ambiguity`)
   assert.equal(snapshotRowCount(h), 0, `${label}: and not one snapshot row was written`)

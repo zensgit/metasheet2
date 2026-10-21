@@ -1728,6 +1728,8 @@ function assertStockPreparationPlmAutoPersistNoSteering(req) {
 // deployed action config. Reject all request carriers that could otherwise influence tenant,
 // workspace, or project selection before action lookup, source-system lookup, adapter creation, or
 // source I/O. The route parameter `actionId` and body `parameters.projectNo` are its only selectors.
+// The optional body `sourceScopeDigest` (#6475, see `readMvpPersistSourceScopeDigest`) is NOT one: it
+// is compared against what the route resolved on its own and can only make the route refuse.
 function assertStockPreparationTableActionMvpPersistNoSteering(req) {
   const steeringKeys = [
     'tenantId', 'workspaceId', 'projectId', 'targetProjectId', 'baseId', 'sheetId', 'objectId',
@@ -1745,6 +1747,52 @@ function assertStockPreparationTableActionMvpPersistNoSteering(req) {
       'tenantId, workspaceId, and projectId are derived from the authenticated principal and deployed action config',
     )
   }
+}
+
+// #6475 fix round 1 — WHICH SOURCE A WRITE READ, AS A VALUES-FREE TOKEN.
+//
+// The project-sync panel's dry-run (①) and apply (③) resolve the action's source through `scopedInput`
+// — WITH the page's workspace hint — while mvp-persist (④) resolves it with none (its steering guard
+// refuses every query carrier). The binding store answers a hint and a missing hint differently on
+// purpose (`stock-preparation-source-binding-store.cjs` `get()`: exact row, then the tenant's null row,
+// then — hint-less only — a single sibling, else the deploy-time default), so ③ and ④ can resolve two
+// different sources, and ④ used to archive the OTHER one as this sync's batch.
+//
+// The apply answers this digest of the source it read; the panel hands it back to ④, which recomputes
+// it for the source IT resolved and refuses on any difference. The digest selects nothing: ④'s tenant,
+// workspace and source are derived exactly as before, so a request can use it only to make ④ refuse —
+// never to make it read or write anything it would not have. One-way and truncated over three handles
+// (tenant id, frozen action id, external-system row id): no host, no credential, no business value.
+// The tenant is IN it on purpose: the apply credits its write to `resolveTenantId` and mvp-persist to
+// `resolveAuthUserTenantId`, so a write credited to one tenant cannot vouch for an archive into another.
+const STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+const STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT_CODE = 'STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT'
+
+function stockPreparationSourceScopeDigest({ tenantId, actionId, externalSystemId }) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(['stock-preparation/source-scope/v1', tenantId, actionId, externalSystemId]))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+// Absent → null (a caller that cannot say which source its write read — see the route for what that
+// caller gets instead). Present → exactly the shape the apply answers, or a 400 before any I/O.
+function readMvpPersistSourceScopeDigest(body) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'sourceScopeDigest')) return null
+  const value = body.sourceScopeDigest
+  if (typeof value !== 'string' || !STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value)) {
+    throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'sourceScopeDigest must be the digest the apply answered', { field: 'sourceScopeDigest' })
+  }
+  return value
+}
+
+function mvpPersistSourceBindingSplit(reason) {
+  return new HttpRouteError(
+    409,
+    STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT_CODE,
+    'the archive cannot prove it reads the source this sync wrote from; nothing was read or stored',
+    { reason },
+  )
 }
 
 function requestBody(req) {
@@ -1870,7 +1918,8 @@ const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPol
 // Confirmation-decision reconcile accepts EXACTLY the dry-run inputs MINUS the value-bearing opt-in:
 // the plan/revision the ledger binds to are recomputed server-side and can never be request-supplied.
 const VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
-const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
+// `sourceScopeDigest` (#6475): a refusal-only cross-check, never a selector — see readMvpPersistSourceScopeDigest.
+const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters', 'sourceScopeDigest'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
@@ -5794,6 +5843,45 @@ function requireStockPreparationAudit() {
   }
 
   /**
+   * #6475 fix round 1 — STEP ④ ARCHIVES THE SOURCE STEP ③ WROTE FROM, OR NOTHING.
+   *
+   * `action` is what mvp-persist resolved on its own (no workspace hint — its steering guard refuses
+   * every carrier). Runs BEFORE the B2a claim, the source-system load and any source read, so a refusal
+   * spends nothing and an inactive stale source can no longer answer TABLE_ACTION_SOURCE_NOT_ACTIVE in
+   * place of the real problem. Never widens anything: the source, tenant and workspace ④ reads are
+   * unchanged, this only decides whether ④ may go on reading them.
+   *
+   *   * WITH the apply's digest (the project-sync panel): ④ goes on only if the digest of what IT
+   *     resolved equals what ③ answered. Exact, whatever hint ① and ③ carried.
+   *   * WITHOUT one (a caller that cannot say what its write read — a direct API call, a page loaded
+   *     before this change): ④ goes on only if EVERY binding row of this (tenant, action), in every
+   *     workspace and the null row, names the source ④ resolved — i.e. no binding disagrees with it.
+   *     That refuses both shapes #6475's round-1 review executed: a null row and a workspace row naming
+   *     different sources, and two workspace rows with no null row (where ④ falls to the deploy-time
+   *     default). No store wired means no binding exists anywhere, so every caller resolves the same
+   *     deploy-time default and there is nothing to disagree with. A store that cannot enumerate its
+   *     rows, or a tenant with more rows than one page, cannot be vouched for and is refused.
+   *     What this cannot see is a caller whose hint names a workspace with no row of its own while the
+   *     only row sits under another workspace — only the digest can, which is why the panel sends it.
+   */
+  async function assertMvpPersistReadsTheWrittenSource(action, tenantId, expectedDigest) {
+    const resolvedSystemId = action.source.externalSystemId
+    if (expectedDigest !== null) {
+      const actual = stockPreparationSourceScopeDigest({ tenantId, actionId: action.actionId, externalSystemId: resolvedSystemId })
+      if (actual !== expectedDigest) throw mvpPersistSourceBindingSplit('not_the_written_source')
+      return
+    }
+    if (!stockPreparationSourceBinding) return
+    if (typeof stockPreparationSourceBinding.listForAction !== 'function') throw mvpPersistSourceBindingSplit('bindings_unverifiable')
+    const listed = await stockPreparationSourceBinding.listForAction({ tenantId, actionId: action.actionId })
+    const bindings = listed && Array.isArray(listed.bindings) ? listed.bindings : null
+    if (!bindings || listed.complete !== true) throw mvpPersistSourceBindingSplit('bindings_unverifiable')
+    if (bindings.some((binding) => !binding || binding.externalSystemId !== resolvedSystemId)) {
+      throw mvpPersistSourceBindingSplit('bindings_disagree')
+    }
+  }
+
+  /**
    * F3 — the scope-fallback's real consumer.
    *
    * `stock-preparation-source-binding-store.cjs`'s `get()` can resolve `action.source.externalSystemId`
@@ -7551,6 +7639,7 @@ function requireStockPreparationAudit() {
       const tenantId = resolveAuthUserTenantId(req)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
       const parameters = normalizeActionParameters(body.parameters)
+      const expectedSourceScopeDigest = readMvpPersistSourceScopeDigest(body)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       // S1: the validated project number rides into the lookup (the overlay keys on it).
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
@@ -7561,6 +7650,9 @@ function requireStockPreparationAudit() {
       }))
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, tenantId)
+      // #6475: the source resolved above must be the one this sync's apply wrote from — before the B2a
+      // claim, the source-system load (requireActive) and any source read. See the helper.
+      await assertMvpPersistReadsTheWrittenSource(action, tenantId, expectedSourceScopeDigest)
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
@@ -7759,7 +7851,17 @@ function requireStockPreparationAudit() {
       const applyOutcome = projectPullOutcomeForApply(applyResult)
       await stampProjectPullOutcome(action, applyTenantId, { outcome: applyOutcome.outcome, code: applyOutcome.code, missingComponentsCount: distinctMissingComponentCount(applyResult) })
       if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, { recount: true })
-      return sendOk(res, applyResult)
+      // #6475: WHICH source this write read — the tenant and source `action` was resolved under here,
+      // with this request's workspace hint — as the values-free token mvp-persist checks itself
+      // against. The panel hands it straight back to step ④; it selects nothing there.
+      return sendOk(res, {
+        ...applyResult,
+        sourceScopeDigest: stockPreparationSourceScopeDigest({
+          tenantId: applyTenantId,
+          actionId: action.actionId,
+          externalSystemId: action.source.externalSystemId,
+        }),
+      })
     },
 
     async tableActionLargeBomExpansionJobStart(req, res) {
