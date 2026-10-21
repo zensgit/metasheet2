@@ -48,6 +48,18 @@ it('reason remains a string enum without coercing arrays or invoking user conver
   }
   expect(toString).not.toHaveBeenCalled()
 })
+it.each(['constructor', 'toString', '__proto__'])('rejects inherited conclusion %s with the closed validation error', conclusion => {
+  expect(() => parseYidaReconciliationInput({ ...input(), conclusion }))
+    .toThrowError(new Error('YIDA_RECONCILIATION_INVALID'))
+})
+it('accepts each own conclusion enum under the existing evidence rules', () => {
+  for (const [conclusion, reason] of [['observed_match', 'OPERATOR_RECORDED_MATCH'],
+    ['observed_mismatch', 'FIELD_MISMATCH'], ['inconclusive', 'NO_OBSERVATION']]) {
+    const candidate = { ...input(), conclusion, reason, evidenceKind: 'operator_receipt',
+      evidenceSha256: 'a'.repeat(64), evidenceRef: 'SYN-RECEIPT' }
+    expect(parseYidaReconciliationInput(candidate)).toEqual(candidate)
+  }
+})
 it('actual client sends only the fixed history endpoint with JWT and validates the exact replayed body', async () => {
   fetchSpy.mockResolvedValue(json({ record: record(), reused: false }, 201))
   const client = createYidaAutomationClient()

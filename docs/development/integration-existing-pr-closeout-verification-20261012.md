@@ -1,5 +1,66 @@
 # 既有 #6337 收口验证
 
+## 2026-10-21 接手核对（Claude 窗口，本地续记；提交前待 owner 授权）
+
+Owner 把本工作树交给 Claude 窗口收尾，范围只有「核对三文件与本 MD 的未提交差异及证据，不重复开发、不新增切片」。核对时间 2026-10-21 12:00–14:10Z，全部只读；本节之外对候选的唯一改动是修正下一节里一处写错的哈希（见下）。
+
+- 候选形状：工作树 HEAD 仍为 `b6ca6d476bcdf10fbb88458190d70fd50797c2f1`，暂存区空，`git diff` 只含四个文件（+52/−1 行）；GOV-08 文档副本与 #6471 的 `210432a4a` blob 换行归一后逐字节一致，不进本次提交；`node_modules` 与 `packages/core-backend/node_modules` 是指向 WSL 副本的未跟踪符号链接（未被忽略），因此只能按精确路径 `git add`，绝不 `-A`。工作树 `core.autocrlf=true`，四个文件索引均为 LF，提交 blob 为 LF。
+- 字节一致性：三文件原始 SHA256 与下一节所记相同；Linux 隔离副本里 29 个改动文件中 28 个与 Windows 候选逐字节一致（换行归一后），只有本 MD 在副本里是更早版本——MD 不是任何 receipt 或 pin 的输入，不影响任何验证结论。
+- 回执复核：baseline / fixed / mutations 三份 `receipt.json` 存在于 Linux 副本 `tmp/`（不在候选检出里），SHA256 与下一节一致，内容逐项核对（baseline：类型检查 exit 2 仅 TS2550 @ :25，接线 6 项 5 过 1 失败且缺失恰为两条路径；fixed：类型检查 exit 0、接线 6/6、前端 14/14；mutations：四组各按精确判据致红，`sourcesUnchanged=true`）；驱动 SHA256 一致。
+- 串行复跑（Linux 副本，2026-10-21 12:23–12:25Z，非 root，源码哈希前后一致）：`node --test scripts/ops/stock-prep-browser-ci-wiring.test.mjs` 6/6；`tests/YidaReconciliation.spec.ts` 14/14（四条新增用例按名执行）；`vue-tsc --noEmit -p tsconfig.verification-stock-prep.json`（正式 CI 失败的那个子项目）exit 0、0 诊断；根 `pnpm type-check` exit 0、0 诊断。
+- 正式 CI 事实复核：同 head 53 项 check-runs = 50 成功 / 2 失败 / 1 跳过；`test (20.x)` 失败签名 = `yidaReconciliation.ts(25,54)` TS2550（`type-check:verification-stock-prep` 子项目；`vue-tsc -b` 与 verification-approval 已过），Browser Verify 失败签名 = 接线断言缺两条精确路径。两条修复与两处失败一一对应。
+- 修正一处记录错误：下一节「Browser Verify=」后的 SHA256 原文为 65 位十六进制（前 32 位正确、后半段抄错）。按 `gh run view --job 119104617459 --log` 全文重算（该文本与 `--log-failed` 逐字节相同）为 `9c6e38d7398250192f98599530c06d7d368523141c394337216f62d8a4875c56`，已原位替换；Plugin 一侧的值复核无误。
+- 独立对抗核验（4 个只读镜头 + 终审，工作流 wf_8e21716a）：三处代码改动零阻断、零 major；终审 FIX_FIRST 的两项都是本 MD 的文字问题——上述哈希，以及下方各节「不提交推送 / 未 stage/commit/push / 不再次推送」在它们随提交发布后会变成历史事实——本节即为处理。
+
+已知限制（提交前如实披露，不在本次授权内修）：
+- 本叠层 PR 的 base 不是 main，没有任何能触发或能派发的 CI 车道执行 `apps/web/tests/YidaReconciliation.spec.ts`（`web-tests.yml` 只对 main/develop 触发且无 `workflow_dispatch`；`run-required-web-tests.sh:487` 是唯一调用点），四条回归钉在正式 CI 上仍只有 Linux 副本的本地证据；新 head 的正式 CI 只能证明类型门与模块求值。
+- 新增负例钉住的是闭合错误身份，抓不住把第 26 行改成可选链、从而接受被污染继承键的重构；「移除守卫后恰为三条原型负例失败」来自计数（11 过 3 失败）加静态推导，receipt 未记录用例名。
+- 驱动 SHA256 只与 fixed / mutations 两份 receipt 的时间线相符，baseline 可能跑的是驱动更早的一版；`.env` 存在性检查只覆盖仓库根与 `apps/web`。
+- main 的 13 项必跑里 5 项（contracts×3、stock-prep PowerShell 5.1、web-tests）不会在本叠层 head 上出现，「新 head 全绿」不等于 main 的合并门。
+
+本窗口的一次操作事故（已处置，不影响候选）：一条后台哈希比对命令在 WSL 侧参数展开出错，以本工作树为当前目录把文件清单逐行当命令执行，`apps/web/scripts/run-required-web-tests.sh` 实际运行约 7 分钟，工作树根多出一个 0 字节空文件；进程已终止、空文件已删除，四个文件内容按 SHA256 复核未变，`git status` 与事故前一致。
+
+本节写作时尚未获得提交 / 推送 / 派发授权；下方各节里的「不提交推送」「未 stage/commit/push」「不再次推送」均为其写作时刻的事实。获得授权后只在本节末尾追加一行记录授权时间与范围，然后把上述四个路径作为一个普通追加提交推至现有草稿 #6337（base 不变、不强推），并派发一次 `plugin-tests.yml`；不合并、不 ready、不部署、不读客户数据、不真实发送；新 head 的 CI 结果记入 PR 正文或未推送的本地续记，不为填 run 编号再推一次。
+
+授权记录：owner 于 2026-10-21T14:54:02Z 在本窗口回复「批准」，范围 = 上述四路径一个普通追加提交、一次普通推送至现有草稿 #6337（base 不变、不强推）、一次 plugin-tests.yml 派发、PR 正文追加当前候选段；不合并、不 ready、不部署、不读客户数据、不真实发送。本行是本节获授权后唯一追加的内容。
+
+## 2026-10-21 两处 CI 前置阻断的本地最小修复
+
+Owner批准仅在既有 #6337 内本地修复、补齐原入口检查/变异和MD；不提交推送、不重跑CI、不新增切片、不合并部署、不读取客户数据或真实发送。HEAD保持 `b6ca6d476bcdf10fbb88458190d70fd50797c2f1`，远端失败仍是正式事实。
+
+改动限三文件加本MD：`yidaReconciliation.ts`把 `Object.hasOwn` 改成 `Object.prototype.hasOwnProperty.call`；`.github/workflows/stock-prep-browser-verify.yml`只登记两个精确服务路径；`YidaReconciliation.spec.ts`增加constructor/toString/__proto__三条闭合拒绝错误断言及合法三结论正控制（四个新增用例，整文件14项）。不提升lib/target，不增加全局默认、通配或触发事件，不改原依赖闭包断言及原安全校验顺序。此workflow不在sealed-export provenance实际pin清单，本轮不改pin。
+
+隔离验证使用既有本地Linux副本、Node20.20.2、PNPM10.16.1、runner非root，独立仅loopback网络命名空间、白名单环境及不存在.env的检查；无DB启动或客户网络访问。原始 `pnpm type-check`（根workspace递归命令）及 `node --test scripts/ops/stock-prep-browser-ci-wiring.test.mjs` 均实际执行，不替换为缩小的临时类型配置或文本断言。输出只保留脱敏计数/类型标签/源码哈希，原日志留在本地tmp。
+
+- 修前复现：根类型检查exit2，仅TS2550、`yidaReconciliation.ts:25`；浏览器接线6项5过1失败，实际依赖闭包缺失恰为两个新服务文件。receipt=`tmp/reconciliation-ci-blockers-baseline-f8ef9522-c528-44c4-9ea5-3fd78b847d18/receipt.json`，SHA256=`e3a4001bdcce0ee677a68b4057e112b7535bbe9160be6ade9aa358490b3f5551`。保留原CI失败，不改判为资源/时钟问题。
+- 修后第一次：根类型检查exit0、零诊断；浏览器接线整文件6/6，fail/cancelled/skipped0；真实生产parser与Vue组件的前端整文件14/14，零失败/跳过。receipt=`tmp/reconciliation-ci-blockers-fixed-d262ae1c-7eec-4de4-b1f4-a89f3832422c/receipt.json`，SHA256=`be16979a45a335653929cd294e3718dfe8712817988876bd9d3f18b103144dde`。类型stdout SHA256=`fbe4e7c2280a17f13a633a18fcefbc8cead9238c5579e03e6836ec09403abe56`。
+- 四组隔离变异4/4被精确检查杀死，不只检查非零退出：恢复ES2022调用使原根类型检查再报唯一TS2550；移除自身属性守卫后14项中仅三条原型属性闭合错误负例失败（11过3失败），不是超时/依赖缺失；分别删两条classifier路径后原整文件各5过1失败，缺失列表各恰为对应的一条路径。每次在finally恢复原始字节，全部8个列举源码/配置输入末态哈希与运行前一致。receipt=`tmp/reconciliation-ci-blockers-mutations-c6f26991-e6da-49b1-a2c7-167e7c44c7f2/receipt.json`，SHA256=`9b5807b84d7661a2b309177a39e076d8c50732f2649205bf28d58a0246c75a77`；驱动SHA256=`cd771996ca47755bcb82bd67cb4b3aa8ff9a08807e717abc57c9cb933659b967`。该驱动为本地tmp证据，不加入提交候选。
+- 三个本轮文件在Windows候选和Linux验证副本逐字节一致：workflow=`2adc8234177d3fb3a2cd4f7e5f65d37d28808c18d0a698f8f8b47a93c53547c9`，service=`f1a8f6b294f5ecfab8928026144918dfbf62eb0146e0724cc6c0bc8240543af8`，test=`879ee6812e41215973bbc8ea1b4cebbb9aebf87f5fc091ed30ec8aa5a26c26fd`。workflow工作副本仍CRLF，类型/测试为LF；这是本地原始字节证据，不冒充未来Git LF提交的哈希。
+- 第一次从Windows发起的变量式复制命令被shell参数转义破坏，cp拒绝复制目录`/`且exit1；未执行修后测试、未递归复制或删除。改用三条显式完整源/目标路径复制后逐字节核对一致，再开始上述修后验证。该驱动错误不当作产品失败或通过。
+
+本轮局部验证不重跑或重标原71＋新增15、PLM实际停止/PG清理，也不把Playwright真实`--list`收集当成浏览器UI验收。只有后续经授权发布的新head完整CI实际通过这些步骤后，才能宣布本轮正式合成验收通过。历史及当前失败证据继续保留。
+
+收口结论：本地两处已知阻断已修复并通过上述验证，可进入授权发布前检查；无全局类型目标或安全守卫降级。有限变异只证明这些明确退化会被抓住，不覆盖任意动态import、同进程恶意篡改或真实宜搭可用性。原型负例还钉住闭合的验证错误，而非接受意外TypeError作为同等证据。最终Git差异仅3个实现/清单/测试文件加本MD，未stage/commit/push，未触发或重跑CI，未改其它三支PR。
+
+## 2026-10-21 本轮正式 CI 终结：两处前置阻断，71＋15未执行
+
+只读核对 #6337 当前head仍为 `b6ca6d476bcdf10fbb88458190d70fd50797c2f1`，OPEN/DRAFT。Plugin System Tests [39564909711](https://github.com/zensgit/metasheet2/actions/runs/39564909711) attempt1 已failure；精确 `test (20.x)` job=`119104768498` 于08:04:12Z结束。全分页同head check-runs共53项：50 success、2 failure、1 skipped，全部终结；不是全绿。另一个failure为 [Stock-prep Browser Verify 39564866847](https://github.com/zensgit/metasheet2/actions/runs/39564866847)，job=`119104617459`。没有自动重跑、取消或推送。
+
+1. Plugin在第81步 `Run type checking` 失败。公开日志只有一条TS诊断：`apps/web/src/services/integration/yidaReconciliation.ts:25:54`，TS2550，`Object.hasOwn`需要ES2022类型库。当前前端配置继承原Vue DOM配置，新增调用未兼容既有类型目标。建议改为保持自身属性检查语义的 `Object.prototype.hasOwnProperty.call(reasons, row.conclusion)`，不提升全局lib/target、不移除原型属性拒绝守卫。此为静态定位与修复建议，当前未实施；此前本地定向类型/构建通过不能代签本轮原始 `pnpm type-check`。
+2. Browser Verify在第13步 `Verify stock-prep browser CI ownership and collection` 失败，整文件6项中5过1失败、零跳过。`scripts/ops/stock-prep-browser-ci-wiring.test.mjs:333` 的实际依赖闭包覆盖断言发现 `apps/web/src/services/integration/yidaReconciliation.ts` 和 `apps/web/src/services/integration/yidaReconciliationPending.ts` 未登记在 `.github/workflows/stock-prep-browser-verify.yml` 的classifier case清单。建议只补两条精确路径，不扩大通配、不移除闭包断言；该workflow修复尚未执行。
+
+目标证据缺口：core-backend、checkpoint、固定Chromium、锁协议real-DB、PLM manual/interval、remaining-UNKNOWN、owner YiDa HTTP/browser（原71＋新增15）、后置SQL及晚期attendance均skipped。闭合公开帧解析结果transport.frames=0、POST202三层BODY完成各0、actual-stop-resolved/failed及production-stop-verified/failed各0，宜搭及PLM结果数组为空。此时ABORTED计数0仅表示未执行，不是ABORTED问题已消失；常规always `Stop core backend`成功也不能替代实际PLM host.stop和临时PG移除证明。本地71＋15仍仅属于此前候选/字节范围。
+
+日志仅内存解析，未读取私有artifact、凭据或客户数据。`gh run view --job --log`文本SHA256：Plugin=`6bc6dd9b240ff23278cb3fb8fde83ce87ff28def61919dc7ad591655b76c0484`，Browser Verify=`9c6e38d7398250192f98599530c06d7d368523141c394337216f62d8a4875c56`；不是artifact zip原始哈希。首个 `gh api .../logs`读取被CLI终端转义保护拒绝，后改用上述标准公开日志读取，仅输出封闭诊断标签、已知仓库路径/行号和哈希，不输出原响应或业务值。
+
+验收结论：当前不能正式验收本次增量。下一步需要本地最小兼容修复与classifier补齐、原入口类型/闭包测试及反向变异验证，再经授权发布新head并跑完整既有CI；只有同head原71、新15、真实浏览器正文完成与实际停止清理齐备，才评估合成验收。此前已完成Chrome试用不重复启动，真实发送和生产交付仍另行授权。本轮及既有历史失败不删除；当前跟踪已终结，不再对同一终态重复轮询。此段仅本地续记，未提交推送。
+
+## 2026-10-21 发布后只读确认（本段为本地续记）
+
+普通追加提交 `b6ca6d476bcdf10fbb88458190d70fd50797c2f1` 已推至现有 #6337，父提交仍为 `f6a9847f5e877138a5e2ad24bf7c4a6766496183`；PR仍draft、base不变，没有强推。独立文档 #6471 已先创建并附于当前任务。
+
+既有 `plugin-tests.yml` 对本叠层base不自动触发完整链，因此按本轮授权仅dispatch一次：[run 39564909711](https://github.com/zensgit/metasheet2/actions/runs/39564909711)，attempt1，已核head为上述新提交。首个快照精确 `test (20.x)` job=`119104768498`，queued；不是通过。自动 Integration Guard run=`39564867140`，须独立核验，不能代签完整Plugin链。PR正文已追加当前候选与新run，历史正文保留。此发布后续记不再次推送，避免仅为填run编号生成另一轮候选和CI。
+
 ## 2026-10-21 发布授权与独立 GOV-08 文档 PR
 
 Owner 本轮明确批准：先独立提交、推送 GOV-08 文档并开文档 PR，再将已验证补丁及验证 MD 普通追加至现有草稿 #6337，运行既有合成 CI。此前“尚未授权”段落保留为当时事实，不代表当前权限；不强推、不新增功能切片、不合并、不部署、不读取客户数据、不真实发送的边界不变。

@@ -22,7 +22,7 @@ export function parseYidaReconciliationInput(value: unknown): YidaReconciliation
     inconclusive: ['INSTANCE_UNRESOLVED','NO_OBSERVATION','CORRECTION'] }
   if (!uuid(row.commandKey) || typeof row.expectedHeadSequence !== 'number' || !Number.isSafeInteger(row.expectedHeadSequence)
     || row.expectedHeadSequence < 0 || row.expectedHeadSequence >= 2147483647
-    || typeof row.conclusion !== 'string' || !Object.hasOwn(reasons, row.conclusion)
+    || typeof row.conclusion !== 'string' || !Object.prototype.hasOwnProperty.call(reasons, row.conclusion)
     || typeof row.reason !== 'string' || !reasons[row.conclusion].includes(row.reason)) fail()
   if (row.evidenceKind === null) {
     if (row.evidenceRef !== null || row.evidenceSha256 !== null || row.conclusion !== 'inconclusive') fail()

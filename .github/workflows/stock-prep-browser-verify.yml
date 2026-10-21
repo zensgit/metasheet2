@@ -94,6 +94,8 @@ jobs:
                 apps/web/src/services/integration/workbench.ts|\
                 apps/web/src/services/integration/automationRead.ts|\
                 apps/web/src/services/integration/yidaAutomation.ts|\
+                apps/web/src/services/integration/yidaReconciliation.ts|\
+                apps/web/src/services/integration/yidaReconciliationPending.ts|\
                 apps/web/src/services/integration/yidaInitialization.ts|\
                 apps/web/src/services/integration/yidaOwner.ts|\
                 apps/web/src/components/layout/PageShell.vue|\
