@@ -1,5 +1,173 @@
 # 既有 #6337 收口验证
 
+## 2026-10-21 本轮发布已获授权
+
+Owner明确授权：父层独立验证通过后，将新增宿主夹具/浏览器辅助文件与membership测试修复及MD一并普通追加至#6324，由#6337继承并运行既有合成CI。父层23/23、子层两轮39/39、真实路径三组变异、Guard接线65/65、provenance完整脚本通过均已完成。保留全部历史失败；以下“尚无发布授权”是此前快照，由本段更新。#6315/#6323不改，不强推、不新增PR/切片、不合并PR、不部署、不访问客户数据、不真实发送。新head正式CI尚未形成，不能预签宜搭71项或停止清理。
+
+## 2026-10-21 宿主四失败本地确认与最小修复（未发布）
+
+后续发布前本地核对：在同一已恢复变异的Linux隔离副本运行原 `integration-guard-required-wiring-contract.test.mjs`，65/65；原 `sealed-export-package-provenance.test.cjs` 完整脚本退出0，无stderr，stdout SHA256 `f100c276587a34f70f4ea13506812da8b9ad5788bdb3ca0c655dc4f92f088a04`。后者非TAP计数，不将解析出的0误报为0条测试。两文件已在既有Guard路径表登记，无需改workflow。此项不替代完整Guard或正式CI。
+
+Owner 已授权本地定位、最小修复和合成验证；本节新增的宿主测试/浏览器辅助文件补丁没有发布授权。此前 membership 测试的条件发布授权不延伸到这两文件。以下历史快照保留，不代表当前修复状态。
+
+### 已确认的原因与修复边界
+
+在冻结子层 `bc4af3a3d9ec1abb27b5d678ec9c8285ecb73f2a` 的隔离副本中，使用真实 Vue 页面、JWT、服务器、浏览器和新建 owner-bound PG 复现：页面挂载按 true/false 查询既有 dry-run job；旧验收未登记两个 GET，累计两个请求拒绝观测和两个404观测，requestFailed=0。主流程提前终止，未留下 generation=4 和下载材料，随后两条锁等待及复用前置连带失败。只修主流程时38/39，实际进入复用页面后又发现同类漏登记；两条浏览器路径共享精确观察器后39/39。没有改变生产锁或网络授权边界。
+
+额外的空库对照发现宿主夹具没有在其独立 schema 内建立062/063存储表，真实JWT正控制返回500；CI已有public表掩盖了这个依赖。测试夹具现在加载两份既有迁移，不新增迁移、不触碰真实数据库。
+
+观察器只接纳既有精确路径的GET：校验完整查询键/值、合成项目和租户、true/false序列、当前JWT及其租户提示、无workspace提示、无请求体；响应必须完成body、404、ok=false、精确JOB_NOT_FOUND且无data。POST仍不获准。异步响应检查在request事件登记，完成前后核对固定请求数量，防止晚到响应逃过Promise快照。原90秒浏览器用例和30秒清理预算、管理口和业务不写入断言保留。
+
+### 真实路径本地证据
+
+Linux非root、独立network/PID namespace仅loopback、新建临时PG，发送及自动发送强制OFF；未使用客户环境或凭据。只读复核代理检查请求登记时机、精确方法/作用域与双路径接线，修正异步登记问题后未发现新的阻断项。
+
+| 运行 | 整文件结果 | 精确观察 | 停止清理 |
+| --- | --- | --- | --- |
+| 修复正控制 | 39/39，0 pending | 原用例全保留 | 成功、owned PG移除、运行间源文件未变 |
+| 真实前端项目参数变异 | 35通过/4失败 | 主失败JOB_STATUS_SCOPE=2；其余为共享前置连带失败 | 成功 |
+| 真实后端404业务码变异 | 35通过/4失败 | 主失败JOB_STATUS_RESPONSE=2，并非笼统放行404 | 成功 |
+| 真实前端GET→POST变异 | 35通过/4失败 | 主失败BROWSER_JOB_STATUS_FLAG_SEQUENCE，方法未获豁免 | 成功 |
+
+三组变异只发生在隔离副本，逐项恢复。正控制source-set SHA256 `61415f2a6b9858a0c0b5ae6f28e22d2e694151bddb8649b754a8262b8a5ca95b`；stdout哈希依次为：正控制 `457b4db876d6539a292ee4b5cbf5c990ed97e4a84e5bac27f78bce7fa02ded29`，错项目 `9812e5cd0460cbab7d1d6d8b01d7d42e3b53731aefd35fa001c0ae7e703a09e9`，错业务码 `5874c480c0884dd732c4b526e5e93b8820a184df430c4b055545758ef62820d6`，错方法 `ca22c581d1053d9d92bb30cc5512f5bd90cc6f97f64beb3f08cf4b6a98c0ffc2`。不将四条红描述为四个独立守卫命中。
+
+变异全部还原后，子层第二轮整文件再次39/39，0 pending、无超时、清理成功、source-set与第一轮一致；stdout SHA256 `5196ae9877cf9a16ca9d954d5c60669e19fb6f3de7f4af9cbed119f9bbb07444`。
+
+补丁也已仅本地应用于冻结父层 `9c9a0c90134a3459a5e6b57bf09927043afd2e54` 的独立工作树；只应用同两文件的窄diff，未复制子层额外JWT用例。另从该父层冻结commit建立独立隔离副本，13864个源文件逐一核Git blob，离线安装依赖；父层原整文件23/23，0 pending、无超时、清理成功、运行期间源文件未变。父层source-set SHA256 `0821a4e4b808531fd29b5a946853c282dbb40a48def27f3e4b63c7ca68c0b6d0`，stdout SHA256 `172b34d2c86991f657daa481e5e6a75bb1a0ab06a1969d7cfe5d9871d6f2664d`。生产文件、workflow、pin及预算未改，未提交/推送/重跑CI。
+
+### 同轮CI新证据（与本地修复严格分开）
+
+#6323 run39524971648/job118977362342已success且head匹配。公开闭合结果为宜搭70=65业务+5哨兵，晚期family4为10条成功；日志SHA256 `093799d05ece314e39ba6cb8961399fe62682ff687caa721ff304b0aebfe3f4d`。全分页当前33checks：30success、1skipped、2cancelled，不能写成33/33绿。父层没有子层PLM完整应用帧，零帧不能代签停止证据。
+
+#6315随后已success，head匹配，宜搭70=65+5、family4的10条正式通过，公开日志SHA256 `72b6942081beb7abd531de57194e8f785a9c404923a7ff08594d7fbce6ca76a3`；63checks中62success、1skipped。#6324/#6337本轮旧head的Guard/宿主失败与后续skipped保持。子层本地39/39只是宿主整文件，不是正式宜搭71项、ABORTED或完整应用停止清理证明。已请求把新增两文件与既有membership修复一并发布的授权；未将旧测试发布许可扩大为新补丁许可。
+
+收尾全分页复核：四支当前PR头均匹配，全部检查已终结；#6324为87success/3failure/2cancelled/1skipped，#6337为95success/3failure/2cancelled/1skipped。一次只读GitHub查询失败后仅重试读取#6337，未重跑任何CI。按原跟踪终止条件停用6337-ci旧轮次监视；后续正式证据必须另绑定新head/run。
+
+### 2026-10-21 条件授权执行检查（尚未发布）
+
+父层发布准备：旧 PLM 发布工作树存在未提交改动，未切换或覆盖；通过受管工作树工具从冻结 #6324 head 新建 `membership-publish-20261021/metasheet`。只应用本 membership 补丁和精简验证 MD；测试 LF 字节与本工作树及既有哈希完全一致，直接在父层独立工作树运行原整文件仍71/71，零取消/跳过。尚未提交、推送；子层继承时须保留本文件全部历史，不以父层精简 MD 覆盖。
+
+后续直接轮询 job `118977200764` / `118977362342`：两者第108步 multitable real-DB 均已 completed/success，第109步 in_progress，第121步 attendance pending，无新增 failure 步骤。这里属于已确认存活的正式 CI 等待，不是本地测试代签，也未满足完整证据收齐条件。
+
+再次全分页核验当前 PR/run head：#6315/#6323/#6324 均匹配冻结头。#6323 的第108步 multitable real-DB 已 completed/success，Plugin 主 job 仍 in_progress，晚期 attendance 尚 pending；#6315 本次快照第108步仍 in_progress。父层第102步宜搭均 success，但整 job 未终结，仍未签署公开计数及清理摘要。#6324 已终结 failure，其四条宿主测试失败及宜搭 skipped 保留。不能以父层步骤绿抵消子层缺失的71项证明。
+
+本地发布准备仅作只读检查：tracked 改动仍只有 membership 测试和本 MD，两个依赖链接不纳入提交；`git diff --check` 通过，公开证据提取器自测通过。#6324 对应本地对齐分支未被其它工作树占用，但本次未切换、创建工作树、提交或推送。继续遵守“本轮证据收齐后追加”的条件，尚未触发新的 CI。
+
+## 2026-10-21 本轮新增正式阻断：PLM 宿主浏览器断言及共享前置未闭合
+
+#6324 run `39524984250` / job `118977402390` 第101步失败；#6337 run `39524996615` / job `118977443291` 第102步失败。两者均为真实数据库批次，不是已知 Guard 的 membership 旧预期。四条真正 FAIL 全在 `stock-preparation-read-plan-host-realdb.test.ts`，标题哈希逐项一致，未把预期负例日志计作失败。
+
+| 断言 | #6324 冻结行 | #6337 冻结行 | 当前证据 |
+| --- | ---: | ---: | --- |
+| 浏览器配置/混合预览 | 759 | 849 | 辅助文件第517行 `BROWSER_POPULATED_NO_APPLY_ARCHIVE_RECONCILE_JOB`，即 `unexpected.length` 非零；尚无分类计数，不能仅凭该名字断定真的发生 apply/archive/job 写入，也不能猜成 ABORTED |
+| 来源编辑的锁等待 | 925 | 1015 | `expect(blocked).toBe(true)` 失败；该用例依赖浏览器链留下 generation=4 的状态，可能受前序失败影响，尚未本地确认 |
+| Binding 重指向锁等待 | 987 | 1077 | `expect(blocked, operation).toBe(true)` 失败；保留锁序守卫，未把它直接归为时序偶发 |
+| 第二 owner/物理布局复用 | 1048 | 1138 | 下载材料 `portableReviewJson` 为空的前置失败；不能宣称本轮复用验收通过 |
+
+第一条辅助文件的 `unexpected` 会累积请求失败、来源/会话/参数异常、未登记API和HTTP拒绝等多种事件，而第517行仅断言数量。它在浏览器最终 deactivate、回读与返回材料之前失败；因此后续共享状态需要单独验证。没有读取私有产物、凭据或原始请求值，没有修改该辅助文件或宿主测试。
+
+#6324 公开断言计数已精确提取为 **4 !== 0**，含义是4条 unexpected 观测，不是4次请求或4次外部写。状态查询实现会按 includeMissingComponents=true/false 探测，404时尝试另一种；两个未登记GET加两个HTTP拒绝观测可以解释4这一数量，但当前日志没有分类明细，仍仅为待复现的假设。
+
+只读调用链排查点（尚非运行时根因确认）：辅助HTML实际挂载 `StockPreparationProjectSyncPanel.vue` 并传非空合成项目号；该组件第1006–1033行在可运行用户的 onMounted 调用 `dryRunJobStatus`，`projectSync.ts:1210`–`:1223`/`:1328` 以GET查询既有 dry-run-jobs。旧辅助文件第238–258行只登记预览POST、绑定GET与配置管理口，其余API记 `UNEXPECTED_API_REQUEST`，响应非成功还可能记 `UNEXPECTED_API_STATUS`。这些三个文件在 #6324 与 #6337 之间完全相同。需要复现并捕获封闭类别/次数/状态，才能判定此GET是否就是本次失败；此刻没有扩白名单、忽略失败、放开POST或改生产网络边界。
+
+服务端静态补证（冻结 `bc4af3a3`）：`http-routes.cjs:7408` 的既有 GET 先检查读取权限、允许的查询键和值，再按 tenant/principal 调用 `readDryRunJob`；`stock-preparation-dry-run-jobs.cjs:276` 在没有匹配任务时明确返回404及 `STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND`。因此若后续实测确认是预期空状态，测试应校验精确请求和业务码，不能笼统豁免404、任意GET或POST。该读取在其它状态可能处理过期/中断记录，不能概括为任何情况下都无存储副作用；本合成场景是否确为无任务仍须运行时证据。
+
+公开日志仅内存解析：#6324 SHA256 `78442883bd569305adeb51d9a637e8f9d60280e4f0909143b948a2e69901a239`；#6337 SHA256 `86d12a14ccbbeb176d7551d22f9a96d2cb8ce551b7fa53a6512c860839b8430f`。解析时同时剥除真实ANSI和日志中的可见 `^[[` 序列，否则会漏掉真正 FAIL 标题；已修正本地只读提取器。#6337 日志中的 relation-missing 关键词不等于新增测试失败，本段结论只根据四个正式 FAIL 块及源文件断言。
+
+正式后果：#6324 宜搭步骤102为 skipped；#6337 manual/interval（103）、remaining UNKNOWN（104）、宜搭71项（105）和后续合同（106）均 skipped。本 head 没有这些应用链的 ABORTED/实际停止/PG清理成功证据，零诊断帧绝不能写成 ABORTED=0 或停止通过。
+
+已向 owner 请求仅本地补脱敏分类、复现及最小修复的追加许可，保持原预算/安全断言；新补丁发布另行确认。此前授权的 membership 测试修复仍未提交/推送，前三项本地验证保留；继续收齐尚未终结的 #6315/#6323 证据，不重跑或取消任何 CI。
+
+## 2026-10-21 条件发布授权后：checkpoint 通过，目标链仍待验
+
+#6323 正式目标步骤进展：同 head run `39524971648` / job `118977362342` 的第102步 `Run owner YiDa JWT HTTP and browser real-DB proof` 已 completed/success，前置锁协议与固定浏览器步骤亦 success；后置测试仍运行。这里尚未读取已完成 job 的公开计数/清理摘要，不以步骤绿代替70=65+5逐项证据，更不将父层合同代签 #6337 的71=66+5。#6337 第102步仍 in_progress。
+
+正式停止证据读取口径：本候选 `publicBrowserFailure` 公开实际 `actual-stop-resolved/failed` 和失败证明分类，但不公开完整 `production-stop-verified` 成功帧；后者由原 CLI `validateProductionStopEvidence`（第998行调用）校验，并与 Automation/宜搭证据一起决定最终 `PLM_FULL_APP_RESULT`，finally 再确认临时PG移除。正式审阅需绑定本 head 的 CLI 字节、实际 stop 标记及最终 passed/cleanup，不能因公开成功帧计数为0推断失败，也不能仅凭没有 ABORTED 或 job 绿代替此链。宜搭独立 launcher 的71/66/5公开结果是在其私有回执 cleanup=`stopped-owned-pg-removed` 校验后才输出；本次仅核代码合同，运行结果仍待当前CI。
+
+步骤标签勘误：再次读取 job 的原始 name 并对照 workflow，确认第101步是 `PLM full-app acceptance isolation and CI contracts`，不是 manual 完整应用验收；第103步才是 `Run synthetic PLM full-app manual and interval acceptance`，第104步是宜搭 remaining-budget UNKNOWN，第106步是 PLM source-revision 单测合同。此前提取脚本的泛化 PLM 标签及聊天中的“manual 已通过”措辞不准确，撤回该声明；脚本现按上述精确名称分类。本次正式观察仍为第102步 in_progress、第103–106步 pending，尚无本轮完整 manual/interval 成功证据。
+
+本地只读提取辅助脚本 `tmp/read-stack-public-proof-20261021.cjs` 已备好（不纳入提交）：锁定四支当前 head/run/job，读取日志前重验 PR/run/job 关联且仅在 job 完成时读取公开日志；只输出封闭计数、布尔及哈希。合成自测确认 `REQUEST_FINISHED` 不冒充 `BODY_DONE`，实际停止失败单独计数，注入的原始值不进入摘要。对 #6337 的本次真实调用确认 coverageValid=true、jobCompleted=false，未提前读日志或签署目标结果。该工具自测不是产品验收证据。
+
+后续同 head 实时核验（已纠正第101步标签）：#6337 第99步 Chromium 安装、第100步固定候选核验及第101步 PLM 隔离/CI合同均 completed/success；第102步锁协议 in_progress，第103–106步后续 PLM/宜搭与第113/126步后置 SQL/attendance 仍 pending。这里只记录正式步骤结论，尚未读取闭合日志帧，故不据此宣称 ABORTED=0、实际 host.stop/清理通过或宜搭71项通过。四支 Plugin 仍运行，当前 PR heads 全部匹配；继续等待本轮证据收齐，尚未发布修复。
+
+本次只读全分页快照确认四支当前 PR head 与既有 run 的预期 head 全部匹配。#6315 的 root Web Tests、Integration Guard、Stock-prep Browser Verify 均 success；#6323 的 Guard 与 Browser Verify success。#6324/#6337 已报告的 Guard 失败保留，本地测试修复尚未发布。
+
+#6337 run `39524996615` attempt 1、job `118977443291`：第91步 checkpoint 已 completed/success，第99步固定 Chromium 安装 in_progress；第100步候选核验及后续 PLM、锁协议、宜搭、SQL、attendance 尚 pending。因此本 head 的宜搭71项、ABORTED 和实际停止清理仍不能签为通过。四支 Plugin 均 in_progress，本轮证据尚未收齐。
+
+Owner 已授权证据收齐后普通追加发布测试修复及 MD 至 #6324，再由 #6337 继承；#6315/#6323 本轮不改。本次仍仅核验和本地续记，未提交、推送、重跑或取消 CI。以下进度段落保留为先前观察，不代表本次最新状态。
+
+## 2026-10-21 已授权本地修复：来源归属测试 71/71、完整插件链 287/287
+
+后续授权已收到：owner 允许**先收齐本轮CI证据**，再将本测试修复及MD普通追加至既有 #6324，由 #6337 继承对齐，再运行既有合成CI；#6315/#6323本轮不改，不强推、不新增PR/切片、不合并或部署、不读取客户数据或真实发送。当前 #6337 的 checkpoint 仍 in_progress，条件尚未满足，因此没有提前提交/推送或取消当前CI。发布前须再次核当前PR头和本地内容，旧head的失败/跳过证据保留。
+
+正式CI后续进展：只读核对 #6337 同 head job `118977443291`，第82步 core-backend tests 与第86步 B3-07 canaries 均 completed/success；第91步 checkpoint 及第101–105步 PLM/锁协议/宜搭仍 pending。四支 Plugin 仍未终结。独立 Guard 失败及其未发布的本地修复状态不变，不能将前置成功写成宜搭或停止清理通过。
+
+Owner 已明确允许仅本地修正夹具/精确断言、变异验证及 MD；不推送、不重跑 CI、不新增切片。实现位于当前 #6337 对齐工作树，仅修改 `plugins/plugin-integration-core/__tests__/stock-preparation-source-membership.test.cjs` 和本 MD，未提交。未改生产 `read_row_mismatch`、超时预算、test-chain 登记、provenance pin 或 CI workflow。#6324/#6337 的历史 Guard 失败保留；它们仍在未含本修复的远端 head 上。
+
+### 最小设计与覆盖
+
+- 既有 false/true/absent 矩阵分别签合法未过滤源的过滤结果、已过滤/缺失声明的精确拒绝；拒绝断言检查 `valid=false`、`status=failed`、完整 `{type, object, field, page}`，而非仅检查任意错误。
+- 递归及子树用例在拒绝断言之前证明已调用真实子件/根发现读取，防止被错误的前置失败替代。未过滤正例继续验证数量、父子关系和深层展开。
+- 改名/大小写/数字/空格字段矩阵补齐三种声明；版本严格相等、真实循环、缺失子 BOM、叶子深度、缺失版本角色等原断言保留，以明确声明未过滤的夹具进入对应真实生产路径。
+- 分页补齐 true/absent 首次错误后不取第二页的负例；false 正例仍取两页，并验证原始读取计数 `[1,1]`、游标和 diagnostics。没有把全部成功用例机械改成失败。
+
+### 本地验证（不是宜搭 71 项，也不是远端 CI）
+
+父层适用性补证：带只读 preloader 重跑来源归属原整文件，仍71/71、零失败/取消/跳过。退出时遍历真实 expander 已加载的生产依赖图，5个生产模块逐文件以 LF 字节比较 `git show 9c9a0c90134a3459a5e6b57bf09927043afd2e54:<path>`，全部相同；有差异即非零退出。该实际加载依赖集合 SHA256 `1e6bf32ce9eb8b55ea03118dea896142539579d1fa6471db3c9b59e809c79268`。这证明本测试修复不依赖 #6337 独有的生产模块变化，不代表 #6324 完整 CI 已通过。辅助脚本仅在本机 `tmp/verify-membership-parent-preload.cjs`，未纳入发布。
+
+补充 Guard web 腿：在上述同一隔离候选执行原命令 `bash scripts/ops/integration-guard-run-web-specs.sh`，没有改 worker 数、过滤列表、参数或超时，**85整文件3498/3498**，exit0/signal=null。14077源文件前后不变，sourceSet仍 `b401ca5f1093fa7fea959b56ac506aa608d029cc2020e284d0867cd9aef12255`；stdout SHA256 `6446814c8a210b5d2d9fe489adae5e0a62f6882b5b011743fe10e0d3434b2fd9`，stderr SHA256 `6b570c199ab1d88389267ead80816c82484aebf09b04f9ed8173aa319bf97631`。两条真实测试腿现在均有本地结果，但未将其冒充正式 GitHub Guard 成功；分类/终态工作流仍以远端执行为准。#6337 正式 Plugin 主链已进入第91步 isolated manual checkpoint acceptance，后续目标步骤未完成。
+
+1. 来源归属原整文件由59条扩展为 **71/71**，零失败/取消/跳过；LF规范化测试 SHA256 `3375f566cbdbfbe462e61ede4c37820a0a319da99ce06e232ef62af366c86da3`。运行 `node --test plugins/plugin-integration-core/__tests__/stock-preparation-source-membership.test.cjs`。
+2. 六组独立进程、内存替换真实生产模块的变异，needle均唯一且确认实际加载，源字节不变；运行 `node tmp/verify-membership-mutations.cjs`，每组仍执行71条且零取消/跳过：
+
+| 变异 | 致红条数 |
+| --- | ---: |
+| 删除 mismatch 拒绝分支 | 34 |
+| 放行缺失过滤声明 | 17 |
+| 放行声明已过滤的越界响应 | 17 |
+| 错误拒绝合法未过滤源 | 25 |
+| 将版本强转字符串比较 | 2 |
+| 隐藏原始读取计数、改计过滤后行数 | 1 |
+
+3. **原插件链 287/287 套完整通过**，未跳过前248套或后39套，exit0/signal=null。独立非root Linux 副本基于发布 head `bc4af3a3d9ec1abb27b5d678ec9c8285ecb73f2a`，14077个文件先逐Git blob核验，仅替换本测试为与工作树LF归一后完全相同的字节，再从原 `scripts/test-chain.cjs` 执行。没有复制 `.env`，依赖离线安装且禁lifecycle，真实发送及自动发送标志均false。源文件运行前后全部一致，候选目录下活动进程0；旧207ced合成应用证据目录未修改。
+4. 完整链回执：sourceSet SHA256 `b401ca5f1093fa7fea959b56ac506aa608d029cc2020e284d0867cd9aef12255`；stdout SHA256 `2cbd00b708806a0eb3166b02b08a450bc070efe9d925d90b1b454fad901403d8`；stderr SHA256 `73edaa5c9400d773fdf417104f815e0dd1066b9facdd9cfe51bf60ebefbf2864`。回执位于本机隔离目录 `/home/runner/metasheet-membership-20261021-1xTdep/chain.receipt.json`；日志仅保存在本机私有文件，未上传。
+5. `git diff --check` 通过；tracked diff 仅本测试与本MD。准备时误用不存在的 `/usr/local/bin/node` 首次未启动，确认实际 `/usr/bin/node` 后才执行上述验收，不把启动失败记成测试通过。
+
+边界：本修复没有改变宜搭代码，因此本段71条属于BOM测试，不是正式宜搭66业务+5哨兵。完整本地插件链通过也不等于完整 Integration Guard（含web腿）或 Plugin System Tests 通过。正式四支 CI 继续只读跟踪；#6337 最新观察仍在第82步后端前置，目标宜搭/实际停止/清理尚待执行。推送、CI重跑、合并、部署、客户读取和真实发送均未进行；Mac mini 接班条件尚未满足。
+
+## 2026-10-21 Guard 失败只读定位：36 条旧预期与 fail-closed 合同冲突
+
+链路覆盖补充：当前真实 `loadChain()` 共287套，membership 是第248套；`scripts/test-chain.cjs` 在第一个非零退出即停止，因此其后39套不能由本轮 Guard 签为通过。修复后需完整重验，不能仅凭该单文件转绿宣称 Guard 或整条集成线完成。#6337 test(20.x) 已越过 lint/type-check，进入第82步 core-backend tests；宜搭与停止阶段仍未到达，当前只能确认主链存活，不能证明后置通过。
+
+后续正式证据：#6337 同 head Guard `39524925318` 已 failure，job `118977204477` 的公开日志 SHA256 `3be28a3f9aab8af1593071d880fa34678bb84cb02bcae5b205029353db08bec2`。原整文件同为59条、23通过、36失败、0取消/跳过；36个失败编号与 #6324 及本地复现逐项一致。terminal 仍明确 relevant=true/plugin=failure/web=skipped。因此这里已不只是继承代码后的推测，而是 #6337 同 head 正式 Guard 阻断。Plugin System Tests 主链仍运行，最近一次直接 job 状态为第81步 type checking；不能把 Guard 失败混成宜搭、ABORTED 或实际 host.stop 失败。测试修复授权已请求，未收到确认前仅只读跟踪。
+
+#6324 两个同 head Guard `39524922796` / `39524923360` 均已 failure，不是取消，也不能归为仅旧基线误报。较新 run 的公开日志 SHA256 `032d4026082d1ccfee99975e4da4ce51f94d24da04ad050954cacce73ac85181`：`stock-preparation-source-membership.test.cjs` 共59条，23通过、36失败、0取消/跳过。未改文件的本地原整文件执行得到完全相同的失败编号，exit1、stdout/stderr合计 SHA256 `120a4e901f36534f39d99dcdf651a7c1362c8fdb71ffe0bdac7b900ca2ddd25a`。此前434合同、830前端和应用验收未覆盖这个整文件，不可签成全部插件链通过。
+
+生产 `stock-preparation-bom-expansion.cjs:789`–`:802` 的读取守卫只允许 `metadata.filtersApplied === false` 的整表结果在本地过滤；声明已过滤或省略声明却返回越界行时，抛 `read_row_mismatch`。测试在 `stock-preparation-source-membership.test.cjs:68` 起对 false/true/absent 三种情况都预期过滤后成功；后续递归、改名、深度/循环、显式版本、分页等用例也有同类旧预期。额外只读内存观测包装仍调用真实 expander、执行原断言，确认36条失败均在真实路径得到 `read_row_mismatch` 后与旧断言冲突；未篡改返回值、未修改生产代码或测试源字节。第51条含多次展开，前两次成功、第三次被该守卫拒绝，不能把整条描述为从未成功。
+
+末尾 scope assertion 不是第二个独立根因：日志明确 `relevant=true`、plugin outcome=failure、web outcome=skipped；`scripts/ops/integration-guard-assert-branch.mjs:36` 起要求两个真实测试步骤均成功，因此按设计再次拒绝。不是 scope 未分类，也没有放松该守卫的理由。
+
+#6324 发布 head 与 #6337 当前 head 的上述测试及生产模块 diff 为空，故 #6337 同样包含这个不一致；不把本地可复现当作 #6337 正式 Guard 已失败。当前 #6337 test(20.x) 仍在执行前置，锁协议/PLM/宜搭71项/后置SQL均 pending；本 head 的 ABORTED、实际停止及PG清理尚无正式验收结论。#6315/#6323 的 Guard 和独立 Browser Verify 已有 success，Plugin 仍未终结。
+
+建议最小修复方向：保留生产 `read_row_mismatch`，将声明未过滤的正例与声明已过滤/缺失声明的拒绝负例分开；深层版本/循环/分页等断言用符合其读取合同的夹具继续走真实路径，不能只批量改成 valid=false 或删用例。应补防关闭 mismatch 守卫、错误放开 true/absent 的变异验证。本次仅定位及本地诊断，未实施修复、未推送或重跑CI。已有只读 heartbeat 保持 ACTIVE，Mac mini 暂不接班，满足稳定基线条件后通知 owner。
+
+## 2026-10-21 已授权普通追加发布：正式 CI 待验
+
+本次 owner 授权后，四支既有分支通过一次 `git push --atomic` 普通追加成功，未强推、未新增 PR、未合并或部署。发布前再次核对七份本地回执、14077 个源文件及本次活动进程为零；Automation 发布 head 与本地验收代码仅差本验证 MD。以下为新的正式验证基线，不能用此前本地结果代签：
+
+| PR | 发布 head | Plugin System Tests run（attempt 1） |
+| --- | --- | --- |
+| #6315 | `1d37957705c6a16fb6885173e6645c2c068738a8` | `39524923397` |
+| #6323 | `1370b2d96f1e9edf0c36c322ac1156de0f02410f` | `39524971648` |
+| #6324 | `9c9a0c90134a3459a5e6b57bf09927043afd2e54` | `39524984250` |
+| #6337 | `bc4af3a3d9ec1abb27b5d678ec9c8285ecb73f2a` | `39524996615` |
+
+#6315 自动触发；其余三支在确认同 head 尚无对应运行后，各启动一次既有工作流。未自动重跑失败任务。当前正式验收仍在执行/排队；前置锁协议、ABORTED、实际停止清理及宜搭 71 项未闭合，不宣称全绿。#6315 同 head Integration Guard 与 Stock-prep Browser Verify 已成功，但不能替代 Plugin 全链。
+
+#6324 较早自动 Integration Guard `39524922796` 已失败：失败步骤为插件 CJS test chain 与末尾 scope classification safety net；同 head 较新 Guard `39524923360` 尚待核对最终结果。公开日志仅在内存读取并作封闭摘要，日志 SHA256 `585d63b089a416da998ceb3dd13e4f0d49a0affa4d27e5dde72aff4ab0dc506f`。根因尚未确定，不能将较早失败直接归因于基分支更新，也不能用取消或后续成功抹掉它。
+
+本条是发布后的本地脱敏续记，不再提交/推送以避免触发额外 CI。既有 heartbeat 已绑定四个新 head/run，仅在有意义变化时报告；不自动修复、重跑、合并或部署。Mac mini 暂不迁移：本轮建立可复核基线后再准备日常开发迁移，Linux 合成验收在兼容环境验证之前保留本机。
+
 ## 2026-10-21 本地 blocked 收尾结论：验证通过，远端尚未更新
 
 本轮验证冻结 `207ced018a714a8179df542e89fa7689a2f9ab31`，不是旧 CI head。四层已按冻结 main `8a89e8352f399340f5e17935edd3c13814eaf355` 在独立工作树完成追加式对齐，各原 PR head 仍为本地候选祖先；没有强推或覆盖旧 dirty 工作树。修复包括对齐冲突、保留 BOM 并发/版本及失配拒绝语义、补齐既有返回类型，以及将主浏览器与独立初始化浏览器遗漏的精确只读状态查询纳入原验收观察器。未新增生产端点或功能切片，原预算和安全断言保留。
