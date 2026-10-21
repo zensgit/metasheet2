@@ -2301,8 +2301,27 @@ export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   project_overview_refresh: Object.freeze({ zh: '刷新了项目总览表', en: 'Refreshed the project overview sheet' }),
 })
 
-export function stockPrepAuditActionPlain(action: string): StockPrepPlainText | null {
-  return lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
+// R68 (#6414 / #6454 follow-up): ONE action, two meanings. The options-sync REPAIR leg
+// (`POST …/options/sync` with `projectNo`, http-routes.cjs `repairProjectSheetContractOptions`) writes its
+// row under 088's `project_target_create` — a new action would need a new CHECK-constraint migration — with
+// the closed mode `contract_options_synced` (STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE); the
+// same row carries the #6454 PLM-column lock counts, there is no separate lock mode. Read by action alone it
+// said 「为一个项目建了备料表」 for a repair. So a row's sentence is chosen by (action, mode): an entry here
+// wins, anything else — the create modes `sheet_created` / `sheet_adopted` / `customer_pack_installed`, a
+// null or unknown mode, the action-only filter list — keeps the action's line above. Keyed by action, so
+// the 词表 mirror (`STOCK_PREP_AUDIT_ACTION_PLAIN` keys = the store's actions) is untouched.
+export const STOCK_PREP_AUDIT_ACTION_MODE_PLAIN: Record<string, Record<string, StockPrepPlainText>> = Object.freeze({
+  project_target_create: Object.freeze({
+    contract_options_synced: Object.freeze({
+      zh: '修补了一个项目的备料表（补齐选项 / 加锁 PLM 列）',
+      en: "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)",
+    }),
+  }),
+})
+
+export function stockPrepAuditActionPlain(action: string, mode?: string | null): StockPrepPlainText | null {
+  const byMode = lookup(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN, action)
+  return (byMode ? lookup(byMode, mode) : null) ?? lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
 }
 
 // ---------------------------------------------------------------------------
