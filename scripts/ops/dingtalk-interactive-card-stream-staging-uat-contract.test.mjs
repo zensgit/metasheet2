@@ -125,6 +125,7 @@ function runObserveFixture(observe, {
   injectAfterArm = true,
   containerChanges = false,
   delayedLines = [],
+  finalSleepLines = [],
 }) {
   const output = join(dir, 'output')
   const historicalLogs = join(dir, 'historical.log')
@@ -156,6 +157,14 @@ function runObserveFixture(observe, {
       'require_log_level_info_or_debug() { :; }',
       'register_ephemeral() { :; }',
       'read_flag_from_container() { printf true; }',
+      'sleep_count=0',
+      'sleep() {',
+      '  sleep_count=$((sleep_count + 1))',
+      '  if [[ "$sleep_count" == "2" && -n "$FINAL_SLEEP_LINES" ]]; then',
+      '    printf "%s\\n" "$FINAL_SLEEP_LINES" >> "$WINDOW_LOG_FIXTURE"',
+      '  fi',
+      '  command sleep "$@"',
+      '}',
       'docker() {',
       '  if [[ "$1" == "inspect" ]]; then',
       '    local count',
@@ -199,6 +208,7 @@ function runObserveFixture(observe, {
       INJECT_LINES: windowLines.join('\n'),
       MOCK_CONTAINER_CHANGES: String(containerChanges),
       DELAYED_LINES: delayedLines.join('\n'),
+      FINAL_SLEEP_LINES: finalSleepLines.join('\n'),
       OUTPUT_DIR: output,
       STREAM_UAT_PERSIST_DIR: dir,
     },
@@ -603,6 +613,12 @@ test('observe rejects split, duplicate, unknown, and container-replaced evidence
       lines: [valid.replace('"executed"', '"unexpected"')],
       reason: /callback outcome outside the closed set/,
     },
+    {
+      name: 'duplicate during final observation sleep',
+      lines: [valid],
+      finalSleepLines: [valid],
+      reason: /requires exactly one completed callback/,
+    },
     { name: 'container replacement', lines: [valid], containerChanges: true, reason: /container changed/ },
   ]
   for (const entry of cases) {
@@ -613,6 +629,7 @@ test('observe rejects split, duplicate, unknown, and container-replaced evidence
         expected,
         windowLines: entry.lines,
         delayedLines: entry.delayedLines ?? [],
+        finalSleepLines: entry.finalSleepLines ?? [],
         containerChanges: entry.containerChanges ?? false,
       })
       assert.notEqual(result.status, 0, `${entry.name} must fail`)

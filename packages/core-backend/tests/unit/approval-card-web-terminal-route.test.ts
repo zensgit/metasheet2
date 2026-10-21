@@ -3,6 +3,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
+import { approvalsRouter } from '../../src/routes/approvals'
 
 const state = vi.hoisted(() => ({
   actionOutcome: {
@@ -70,15 +71,13 @@ const pinned = usePinnedServer()
 describe('approval-card web terminal route seam', () => {
   let app: Express
 
-  beforeEach(async () => {
-    vi.resetModules()
+  beforeEach(() => {
     state.execute.mockReset().mockResolvedValue(state.actionOutcome)
     state.update.mockReset().mockResolvedValue({
       status: 'failed',
       outTrackId: state.actionOutcome.summary.deliveryId,
       reason: 'Error',
     })
-    const { approvalsRouter } = await import('../../src/routes/approvals')
     app = express()
     app.use(express.json())
     app.use(approvalsRouter())

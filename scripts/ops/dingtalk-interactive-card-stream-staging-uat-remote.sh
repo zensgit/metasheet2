@@ -1758,6 +1758,8 @@ action_observe() {
 
   log "observer_armed=true; perform exactly one callback now; observation remains open for the full five-minute window"
   for attempt in $(seq 1 300); do
+    # Read after every wait, including the final second, so late duplicates cannot escape.
+    sleep 1
     current_container_id="$(docker inspect --format '{{.Id}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
     [[ "$current_container_id" == "$container_id" ]] \
       || fail "action=observe backend container changed during the observation window"
@@ -1766,7 +1768,6 @@ action_observe() {
     evidence_count="$(grep -F 'DingTalk interactive-card callback completed evidence' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
     [[ "$evidence_count" -le 1 ]] \
       || fail "action=observe requires exactly one completed callback in the fresh window (callback_evidence_count=${evidence_count})"
-    sleep 1
   done
   [[ "$evidence_count" -ge 1 ]] \
     || fail "action=observe timed out without one completed callback in the fresh window (callback_evidence_count=${evidence_count})"
