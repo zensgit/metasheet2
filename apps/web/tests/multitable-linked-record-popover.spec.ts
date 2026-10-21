@@ -28,6 +28,8 @@ async function flushPromises() {
   await nextTick()
 }
 
+// The popover teleports to <body> (full-screen fixed overlay rendered from inside the isolated grid), so
+// its DOM is queried on the document; each test unmounts its app, which removes the teleported nodes.
 function mountPopover(props: Record<string, unknown>) {
   const container = document.createElement('div')
   document.body.appendChild(container)
@@ -55,17 +57,17 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     await flushPromises()
 
     // Loading state visible while the promise is pending.
-    expect(container.querySelector('.meta-linked-record-popover__loading')).not.toBeNull()
+    expect(document.querySelector('.meta-linked-record-popover__loading')).not.toBeNull()
 
     resolveFetch(baseContext())
     await flushPromises()
 
-    const labels = Array.from(container.querySelectorAll('.meta-linked-record-popover__label')).map(
+    const labels = Array.from(document.querySelectorAll('.meta-linked-record-popover__label')).map(
       (el) => el.textContent,
     )
     // Foreign field NAMES — not the host field labels.
     expect(labels).toEqual(['Vendor Name', 'Contact'])
-    expect(container.querySelector('.meta-linked-record-popover__loading')).toBeNull()
+    expect(document.querySelector('.meta-linked-record-popover__loading')).toBeNull()
 
     app.unmount()
     container.remove()
@@ -82,7 +84,7 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     })
     await flushPromises()
 
-    const errorEl = container.querySelector('.meta-linked-record-popover__error')
+    const errorEl = document.querySelector('.meta-linked-record-popover__error')
     expect(errorEl).not.toBeNull()
     // Backend message wins over the localized fallback.
     expect(errorEl!.textContent).toContain('Record not found')
@@ -106,7 +108,7 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     })
     await flushPromises()
 
-    const labels = Array.from(container.querySelectorAll('.meta-linked-record-popover__label')).map(
+    const labels = Array.from(document.querySelectorAll('.meta-linked-record-popover__label')).map(
       (el) => el.textContent,
     )
     expect(labels).toEqual(['Vendor Name'])
@@ -132,8 +134,8 @@ describe('MetaLinkedRecordPopover (A3)', () => {
 
     // The inner renderer shows the foreign link as a plain chip, never a
     // clickable one (the popover does NOT forward fetchRecord to it).
-    expect(container.querySelector('[data-test="link-chip"]')).toBeNull()
-    expect(container.querySelector('.meta-cell-renderer__link')).not.toBeNull()
+    expect(document.querySelector('[data-test="link-chip"]')).toBeNull()
+    expect(document.querySelector('.meta-cell-renderer__link')).not.toBeNull()
     // Only the initial fetch fired — no nested expansion.
     expect(fetchRecord).toHaveBeenCalledTimes(1)
 
@@ -160,12 +162,12 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     })
     await flushPromises()
 
-    const name = container.querySelector('.meta-cell-renderer__person-name')
+    const name = document.querySelector('.meta-cell-renderer__person-name')
     expect(name).not.toBeNull()
     // Resolved display is shown…
     expect(name!.textContent).toContain('Alice')
     // …and the raw userId never leaks into the rendered cell.
-    const value = container.querySelector('.meta-linked-record-popover__value')
+    const value = document.querySelector('.meta-linked-record-popover__value')
     expect(value!.textContent).not.toContain('u1')
 
     app.unmount()
@@ -182,7 +184,7 @@ describe('MetaLinkedRecordPopover (A3)', () => {
     await flushPromises()
     expect(fetchRecord).not.toHaveBeenCalled()
     // Dialog not rendered while hidden.
-    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
 
     app.unmount()
     container.remove()
