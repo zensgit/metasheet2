@@ -481,7 +481,7 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('搜索并添加用户或成员组')
     expect(container.textContent).toContain('模板令牌')
     expect((container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement).placeholder)
-      .toBe('按用户、成员组、邮箱或主体 ID 搜索')
+      .toBe('按姓名、登录名、邮箱、成员组或主体 ID 搜索')
     expect((container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement).placeholder)
       .toBe('例如：record.assigneeUserIds, record.reviewerUserId')
     expect((container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).placeholder)
@@ -1385,7 +1385,7 @@ describe('MetaAutomationManager', () => {
 
     const emptyState = container.querySelector('[data-automation-field="dingtalkDestinationEmpty"]')
     expect(emptyState?.textContent).toContain('No DingTalk groups are available for this table yet')
-    expect(emptyState?.textContent).toContain('API Tokens & Webhooks')
+    expect(emptyState?.textContent).toContain('API & Webhooks > DingTalk Groups')
     expect(emptyState?.textContent).toContain('record group field path')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -2799,6 +2799,129 @@ describe('MetaAutomationManager', () => {
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('测试运行成功 (32 ms)。')
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
+  })
+
+  // 客户反馈 2026-10-21 (a): a DingTalk person message that reached nobody must not read as success.
+  describe('DingTalk person message test-run outcome (customer feedback 2026-10-21)', () => {
+    const personRule = () => fakeRule({
+      name: 'DingTalk person notify',
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: { userIds: ['user_fake_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: { userIds: ['user_fake_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      }],
+    })
+    async function runTest(testExecution: Record<string, unknown>) {
+      vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const { client } = mockClient([personRule()], { testExecution })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+      await flushPromises()
+      return container
+    }
+    const skippedStep = {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)',
+      output: {
+        reason: 'dingtalk_recipients_unreachable',
+        notifiedUsers: 0,
+        skippedRecipientCount: 1,
+        skippedUserIds: ['user_fake_1'],
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      },
+    }
+
+    it('all recipients skipped -> a warning "0 received: N not linked" with the link hint, no ids, never "succeeded"', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'skipped', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12, steps: [skippedStep],
+      })
+      const banner = container.querySelector('[data-automation-test-status="rule_1"]')
+      expect(banner?.getAttribute('data-status')).toBe('warning')
+      expect(banner?.textContent).toContain('0 received: 1 not linked to DingTalk.')
+      expect(banner?.textContent).toContain('must be linked to DingTalk in the directory and sign in with DingTalk once')
+      expect(banner?.textContent).not.toContain('succeeded')
+      expect(banner?.textContent).not.toContain('user_fake_1')
+      expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('warning')
+    })
+
+    it('zh: 「0 人收到：N 人未绑定钉钉」', async () => {
+      useLocale().setLocale('zh-CN')
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'skipped', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12, steps: [skippedStep],
+      })
+      const text = container.querySelector('[data-automation-test-status="rule_1"]')?.textContent ?? ''
+      expect(text).toContain('0 人收到：1 人未绑定钉钉。')
+      expect(text).toContain('成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+      expect(text).not.toContain('测试运行成功')
+    })
+
+    it('a partial delivery inside a successful run is still a warning with the counts', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'success', triggeredBy: 'test',
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 12,
+        steps: [{
+          actionType: 'send_dingtalk_person_message',
+          status: 'success',
+          output: { notifiedUsers: 2, skippedRecipientCount: 1, skippedUserIds: ['user_fake_1'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } },
+        }],
+      })
+      const banner = container.querySelector('[data-automation-test-status="rule_1"]')
+      expect(banner?.getAttribute('data-status')).toBe('warning')
+      expect(banner?.textContent).toContain('2 received: 1 not linked to DingTalk.')
+    })
+
+    it('a simulated person message says it neither sent nor checked DingTalk links', async () => {
+      const container = await runTest({
+        id: 'exec_1', ruleId: 'rule_1', status: 'success', triggeredBy: 'test', dryRun: true,
+        triggeredAt: '2026-10-21T00:00:00.000Z', duration: 3,
+        steps: [{ actionType: 'send_dingtalk_person_message', status: 'success', simulated: true, output: { dryRun: true, dispatched: false } }],
+      })
+      const text = container.querySelector('[data-automation-test-status="rule_1"]')?.textContent ?? ''
+      expect(text).toContain('Test run succeeded (3 ms).')
+      expect(text).toContain('This was a simulated run: no DingTalk person message was sent and recipients were not checked for a DingTalk link.')
+    })
+  })
+
+  // 客户反馈 2026-10-21 (c): the empty group list links straight to API & Webhooks > DingTalk Groups.
+  it('quick form: empty DingTalk group list offers "open API & Webhooks > DingTalk Groups" and a reload', async () => {
+    const onOpenDingtalkGroups = vi.fn()
+    const { client, fetchFn } = mockClient([], { dingTalkGroups: [] })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, canOpenDingTalkGroupSettings: true, onOpenDingtalkGroups })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+
+    const open = container.querySelector('[data-automation-field="dingtalkOpenGroupSettings"]') as HTMLButtonElement
+    expect(open?.textContent).toContain('Open API & Webhooks > DingTalk Groups')
+    open.click()
+    expect(onOpenDingtalkGroups).toHaveBeenCalledTimes(1)
+
+    const groupReads = () => fetchFn.mock.calls.filter(([url, init]) => String(url).includes('/dingtalk-groups') && (init?.method ?? 'GET') === 'GET').length
+    const before = groupReads()
+    ;(container.querySelector('[data-automation-field="dingtalkReloadGroups"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(groupReads()).toBe(before + 1)
+  })
+
+  it('quick form: without a host that can open the settings, the empty state shows text + reload only', async () => {
+    const { client } = mockClient([], { dingTalkGroups: [] })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_group_message')
+    await flushPromises()
+    expect(container.querySelector('[data-automation-field="dingtalkOpenGroupSettings"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="dingtalkReloadGroups"]')).not.toBeNull()
   })
 
   it('localizes a zh-CN automation test run request failure by its code, not the English backend message', async () => {

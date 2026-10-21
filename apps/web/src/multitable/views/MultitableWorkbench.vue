@@ -50,7 +50,7 @@
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="openApiTokenManager(null)"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
@@ -702,7 +702,9 @@
       :fields="grid.fields.value"
       :client="workbench.client"
       :views="workbench.views.value"
+      :can-open-ding-talk-group-settings="true"
       @close="showAutomationManager = false"
+      @open-dingtalk-groups="openApiTokenManager('dingtalk-groups')"
     />
     <MetaFormShareManager
       v-if="showFormShareManager || workbench.activeSheetId.value"
@@ -718,6 +720,7 @@
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       :can-manage-automation="caps.canManageAutomation.value"
+      :initial-tab="apiTokenManagerInitialTab"
       @close="showApiTokenManager = false"
     />
 
@@ -1531,6 +1534,12 @@ const templateCenterHref = computed<string | undefined>(() => {
 })
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
+// 客户反馈 2026-10-21 (c): the automation rule editor opens this dialog directly on its DingTalk Groups tab.
+const apiTokenManagerInitialTab = ref<'dingtalk-groups' | null>(null)
+function openApiTokenManager(tab: 'dingtalk-groups' | null) {
+  apiTokenManagerInitialTab.value = tab
+  showApiTokenManager.value = true
+}
 const showTrash = ref(false)
 const showHistory = ref(false)
 // W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
