@@ -36,6 +36,7 @@ import {
   STOCK_PREPARATION_DRY_RUN_POLL_STOPPED_CODE,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   StockPreparationProjectSyncCallError,
+  classifyArchiveFailure,
   classifyPlanReadFailureReason,
   classifyPlanStep,
   clampErrorCode,
@@ -290,6 +291,65 @@ describe('項目接入 — the four-step import run', () => {
     const report = await runStockPreparationProjectSync(api, PROJECT_NO)
     expect(stepOf(report, 'archive')).toMatchObject({ status: 'ok', reason: 'BATCH_ALREADY_ARCHIVED' })
     expect(report.imported).toBe(true)
+  })
+
+  // ---- G-2 (#6475): the archive's own refusals, each with its own outcome --------------------
+  // Every one of these used to render BATCH_ARCHIVE_FAILED's 「再同步一次通常就补上了」, which is false
+  // for all of them. Unmapping any code from STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES turns its row red.
+  it.each([
+    ['PERSIST_TARGET_NOT_PROVISIONED', 409, 'skip', 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED'],
+    ['PERSIST_IDEMPOTENCY_CONFLICT', 409, 'skip', 'BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT'],
+    ['PERSIST_EXISTING_BATCH_INCOMPLETE', 409, 'skip', 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE'],
+    ['TARGET_SCHEMA_INCOMPLETE', 422, 'fail', 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE'],
+    ['TARGET_SCHEMA_UNAVAILABLE', 503, 'fail', 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE'],
+    ['TABLE_ACTION_SOURCE_NOT_ACTIVE', 409, 'fail', 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE'],
+    ['TENANT_REQUIRED', 400, 'fail', 'BATCH_ARCHIVE_TENANT_REQUIRED'],
+  ] as const)('G-2 #6475: archive refusal %s (%i) reports %s with its own reason, and the import still reads as done', async (code, status, expectedStatus, reason) => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/mvp-persist', { code })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: expectedStatus, reason })
+    expect(stepOf(report, 'archive').detail).toMatchObject({ status, code })
+    expect(classifyArchiveFailure(status, code)).toEqual({ status: expectedStatus, reason })
+    // NON-FATAL either way: the rows are in the sheet and the first sentence says so.
+    expect(report.imported).toBe(true)
+    expect(report.verdict).toBe('imported')
+    expect(report.failCount).toBe(expectedStatus === 'fail' ? 1 : 0)
+    // Its own prose, in both languages, and not the generic 「再同步一次通常就补上了」.
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
+    expect(plain).toBeDefined()
+    expect(plain.zh.length * plain.en.length * (plain.zhNext ?? '').length * (plain.enNext ?? '').length).toBeGreaterThan(0)
+    expect(plain.zhNext).not.toBe(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_FAILED.zhNext)
+    expect(plain.zh.startsWith('数据已经写进去了')).toBe(true)
+    assertValuesFree(report)
+  })
+
+  it('G-2 #6475: each refusal names the administrator action that unblocks it', () => {
+    const plainOf = (reason: string) => STOCK_PREP_SYNC_REASON_PLAIN[reason]!
+    expect(plainOf('BATCH_ARCHIVE_TABLES_NOT_PROVISIONED').zhNext).toContain('mvp/ensure')
+    expect(plainOf('BATCH_ARCHIVE_TABLES_NOT_PROVISIONED').enNext).toContain('mvp/ensure')
+    expect(plainOf('BATCH_ARCHIVE_SCHEMA_INCOMPLETE').zhNext).toContain('mvp/repair')
+    expect(plainOf('BATCH_ARCHIVE_SCHEMA_INCOMPLETE').enNext).toContain('mvp/repair')
+    expect(plainOf('BATCH_ARCHIVE_SOURCE_NOT_ACTIVE').zhNext).toContain('重新启用')
+    expect(plainOf('BATCH_ARCHIVE_SOURCE_NOT_ACTIVE').enNext).toContain('re-enable')
+    expect(plainOf('BATCH_ARCHIVE_TENANT_REQUIRED').zhNext).toContain('所属租户')
+    expect(plainOf('BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT').zhNext).toContain('这一小时已存过一份')
+    expect(plainOf('BATCH_ARCHIVE_PREVIOUS_INCOMPLETE').zhNext).toContain('稍后再同步')
+  })
+
+  it('G-2 #6475: the old precedence is kept — flag-off and 401/403 first; an unmapped code stays the generic failure', () => {
+    // A refusal by the flag or by the tier is classified BEFORE the per-code table, whatever the code.
+    expect(classifyArchiveFailure(403, BATCH_ARCHIVE_DISABLED_CODE)).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_DISABLED' })
+    expect(classifyArchiveFailure(403, 'PERSIST_TARGET_NOT_PROVISIONED')).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
+    expect(classifyArchiveFailure(401, null)).toEqual({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
+    // Not in the table: still the visible, non-fatal FAIL it always was.
+    expect(classifyArchiveFailure(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(500, 'PERSIST_PLAN_TOO_LARGE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(0, null)).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    // Own-property lookup: an inherited key is not in the table (the wire clamp would never pass this
+    // lowercase token, but the classifier must not depend on that).
+    expect(classifyArchiveFailure(409, 'constructor')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
   })
 
   // ---- G-3 ---------------------------------------------------------------------------------

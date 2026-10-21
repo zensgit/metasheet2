@@ -126,6 +126,16 @@ export type StockPreparationProjectSyncReason =
   | 'BATCH_ARCHIVE_NOT_ATTEMPTED'
   | 'BATCH_ARCHIVE_NOT_PERMITTED'
   | 'BATCH_ARCHIVE_FAILED'
+  // #6475 — the archive's own refusals, each with its own next step (classifyArchiveFailure). The
+  // first three are NOT failures of anything the operator did: the snapshot tables were never built,
+  // or this batch identity already holds a copy the server will not overwrite.
+  | 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED'
+  | 'BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT'
+  | 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE'
+  | 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE'
+  | 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE'
+  | 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE'
+  | 'BATCH_ARCHIVE_TENANT_REQUIRED'
 
 export interface StockPreparationProjectSyncStepDescriptor {
   id: StockPreparationProjectSyncStepId
@@ -805,6 +815,60 @@ function isMalformed(error: unknown): boolean {
 /** The flag-off answer from mvp-persist. A correct deployment state, not a fault. */
 export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED'
 
+/**
+ * #6475 — THE ARCHIVE'S OWN REFUSALS, BY SERVER CODE. Before this every one of them rendered as the
+ * same 「存档没成功,再同步一次通常就补上了」, which is false for all seven: re-syncing builds no
+ * snapshot table, adds no missing column, re-activates no source and gives an account no tenant.
+ * The server codes are unchanged; what changes is the step's status and the sentence it points at.
+ *
+ *   PERSIST_TARGET_NOT_PROVISIONED (409)      the four snapshot tables were never built for this
+ *       tenant (only `POST …/stock-preparation/mvp/ensure` builds them; a customer-pack install and
+ *       a project-sheet create do not). SKIP — a deployment state, like the flag being off.
+ *   PERSIST_IDEMPOTENCY_CONFLICT (409)        this batch identity already holds a copy whose content
+ *       differs (under the hour rule: material changed within the hour). The server never overwrites
+ *       a kept batch. SKIP — a copy exists; nothing failed.
+ *   PERSIST_EXISTING_BATCH_INCOMPLETE (409)   a copy under this batch identity was left half-written
+ *       before; the server never patches it. SKIP — the next batch identity stores normally.
+ *   TARGET_SCHEMA_INCOMPLETE (422)            a snapshot table lacks template columns → mvp/repair.
+ *   TARGET_SCHEMA_UNAVAILABLE (503)           the column read itself failed → retry / check the host.
+ *   TABLE_ACTION_SOURCE_NOT_ACTIVE (409)      the archive re-reads the source and requires it active.
+ *   TENANT_REQUIRED (400)                     the archive takes its tenant from the signed-in account
+ *       only (never from the page); an account with no tenant of its own cannot archive.
+ *
+ * Every other refusal keeps BATCH_ARCHIVE_FAILED. The flag-off code and 401/403 are classified by
+ * the caller before this table is consulted, exactly as before.
+ */
+export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
+  status: Exclude<StockPreparationProjectSyncStepStatus, 'pending' | 'ok'>
+  reason: StockPreparationProjectSyncReason
+}>> = Object.freeze({
+  PERSIST_TARGET_NOT_PROVISIONED: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_TABLES_NOT_PROVISIONED' as const }),
+  PERSIST_IDEMPOTENCY_CONFLICT: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT' as const }),
+  PERSIST_EXISTING_BATCH_INCOMPLETE: Object.freeze({ status: 'skip' as const, reason: 'BATCH_ARCHIVE_PREVIOUS_INCOMPLETE' as const }),
+  TARGET_SCHEMA_INCOMPLETE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_INCOMPLETE' as const }),
+  TARGET_SCHEMA_UNAVAILABLE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SCHEMA_UNAVAILABLE' as const }),
+  TABLE_ACTION_SOURCE_NOT_ACTIVE: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_NOT_ACTIVE' as const }),
+  TENANT_REQUIRED: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_TENANT_REQUIRED' as const }),
+})
+
+/**
+ * Step ④'s outcome for a refused archive call. Same precedence the run always had — the flag-off code
+ * first, then 401/403 — and only then the per-code table above; anything else is the generic FAIL.
+ * Own-property lookup only, so a code that happens to name an Object.prototype key falls through.
+ */
+export function classifyArchiveFailure(
+  status: number,
+  code: string | null,
+): { status: Exclude<StockPreparationProjectSyncStepStatus, 'pending' | 'ok'>; reason: StockPreparationProjectSyncReason } {
+  if (code === BATCH_ARCHIVE_DISABLED_CODE) return { status: 'skip', reason: 'BATCH_ARCHIVE_DISABLED' }
+  if (status === 401 || status === 403) return { status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' }
+  if (code && Object.prototype.hasOwnProperty.call(STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES, code)) {
+    const outcome = STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES[code]
+    return { status: outcome.status, reason: outcome.reason }
+  }
+  return { status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' }
+}
+
 /** The exact 400 code `normalizeTableActionBody` answers for an unrecognized dry-run body key (http-routes.cjs:1743-1753). */
 export const MISSING_COMPONENTS_UNSUPPORTED_CODE = 'TABLE_ACTION_REQUEST_INVALID'
 
@@ -1040,22 +1104,17 @@ export async function runStockPreparationProjectSync(
     const code = codeOf(error)
     const detail: Record<string, string | number> = { status: statusOf(error) }
     if (code) detail.code = code
-    // The flag being off is the deployment saying "this deployment does not keep snapshot batches",
-    // which is a setting, not a fault.
-    if (code === BATCH_ARCHIVE_DISABLED_CODE) {
-      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_DISABLED', detail))
-    } else if (statusOf(error) === 401 || statusOf(error) === 403) {
-      // 一线自己拉数据: this step stayed platform-admin, so for a stock-prep operator a refusal here
-      // is the deployment working as ruled — the rows they came for are already in the sheet
-      // (`report.imported` is true and stays true) and what is missing is a housekeeping copy
-      // somebody else keeps. A red FAIL on the last line of an otherwise successful import would
-      // read as "the import broke", which is the opposite of what happened. SKIP, with the reason.
-      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_PERMITTED', detail))
-    } else {
-      // VISIBLE, and NON-FATAL. `report.imported` is already true and stays true: the rows are in the
-      // sheet. What is missing is this run's entry in 批次与差异, and that is what the step says.
-      record(result(4, 'archive', 'fail', 'BATCH_ARCHIVE_FAILED', detail))
-    }
+    // `classifyArchiveFailure` keeps the two rules this step always had, in the same order:
+    //   * the flag being off is the deployment saying "this deployment does not keep snapshot
+    //     batches", which is a setting, not a fault (SKIP, BATCH_ARCHIVE_DISABLED);
+    //   * 一线自己拉数据: this step stayed platform-admin, so for a stock-prep operator a 401/403 here
+    //     is the deployment working as ruled — the rows they came for are already in the sheet and
+    //     what is missing is a housekeeping copy somebody else keeps (SKIP, BATCH_ARCHIVE_NOT_PERMITTED).
+    // and then (#6475) names the archive's own refusals by code, each with its own next step.
+    // Whatever it decides is NON-FATAL: `report.imported` is already true and stays true, because the
+    // rows are in the sheet. A FAIL is still visible — it is this run's entry in 批次与差异 missing.
+    const outcome = classifyArchiveFailure(statusOf(error), code)
+    record(result(4, 'archive', outcome.status, outcome.reason, detail))
   }
   return done()
 }

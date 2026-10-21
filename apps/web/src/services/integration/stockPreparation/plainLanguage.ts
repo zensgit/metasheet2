@@ -2082,6 +2082,54 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '导入本身不受影响,可以照常用。差异对比会少这一批,再同步一次通常就补上了。',
     enNext: 'The import itself is fine and usable. The diff view will be missing this batch; syncing again usually adds it.',
   }),
+  /**
+   * #6475 — the archive's own refusals (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES). Every one
+   * of them opens with the same first clause as BATCH_ARCHIVE_FAILED — the rows are in — because that
+   * is what the operator most needs to hear; the second line is the step that actually unblocks the
+   * archive, which 「再同步一次」 does for none of them.
+   */
+  BATCH_ARCHIVE_TABLES_NOT_PROVISIONED: Object.freeze({
+    zh: '数据已经写进去了;快照表还没建,这次没有存档',
+    en: 'The data is in; the snapshot tables have not been built yet, so nothing was kept',
+    zhNext: '请平台管理员先执行一次「建快照表」(mvp/ensure,每个租户一次即可),之后再同步就会存档。少这一批只影响「差异对比」。',
+    enNext: 'Ask a platform administrator to build the snapshot tables once (mvp/ensure, once per tenant); syncs after that keep their batch. Missing this one only affects the diff view.',
+  }),
+  BATCH_ARCHIVE_ALREADY_KEPT_DIFFERENT: Object.freeze({
+    zh: '数据已经写进去了;这一批之前已存过一份(内容有变化),没有覆盖',
+    en: 'The data is in; a copy of this batch was already kept (with different content) and was not overwritten',
+    zhNext: '按小时分批时,同一小时内物料有变化就会这样:这一小时已存过一份,下一个小时再同步会存成新的一批。已存的批次不会被改写;没有按小时分批却一直这样,请把错误码交给平台管理员。',
+    enNext: 'When batches are split by the hour, a change within the same hour does this: this hour already has a copy, and a sync in the next hour keeps a new batch. A kept batch is never rewritten; if batches are not split by the hour and this keeps happening, give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_PREVIOUS_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;这一批上次的存档没写完整,这次没有接着写',
+    en: 'The data is in; an earlier copy of this batch was left incomplete, so this sync did not add to it',
+    zhNext: '系统不会补写或改写已有的存档。稍后再同步(下一个小时,或物料有变化时)会存成新的一批;一直这样请把错误码交给平台管理员。',
+    enNext: 'Kept copies are never patched or rewritten. Sync again later (the next hour, or once the material changes) to keep a new batch; if it keeps happening, give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_SCHEMA_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;快照表缺了列,这次的存档没成功',
+    en: 'The data is in; a snapshot table is missing columns, so keeping a copy did not work',
+    zhNext: '请平台管理员执行一次「修复快照表」(mvp/repair,只补缺的列,不动数据),再同步一次。',
+    enNext: 'Ask a platform administrator to repair the snapshot tables once (mvp/repair adds only the missing columns and touches no data), then sync again.',
+  }),
+  BATCH_ARCHIVE_SCHEMA_UNAVAILABLE: Object.freeze({
+    zh: '数据已经写进去了;暂时读不到快照表的结构,这次的存档没成功',
+    en: 'The data is in; the snapshot tables’ structure could not be read just now, so keeping a copy did not work',
+    zhNext: '稍后再同步一次;一直这样请平台管理员检查服务器的元数据连接。',
+    enNext: 'Sync again a little later; if it keeps happening, ask a platform administrator to check the server’s metadata connection.',
+  }),
+  BATCH_ARCHIVE_SOURCE_NOT_ACTIVE: Object.freeze({
+    zh: '数据已经写进去了;数据来源现在是停用状态,这次的存档没成功',
+    en: 'The data is in; the data source is currently disabled, so keeping a copy did not work',
+    zhNext: '存档要再读一次数据来源,而它只读启用中的来源。请管理员在「数据来源」里把它重新启用,再同步一次。',
+    enNext: 'Keeping a copy reads the data source again, and only an enabled source is read. Ask an administrator to re-enable it under data sources, then sync again.',
+  }),
+  BATCH_ARCHIVE_TENANT_REQUIRED: Object.freeze({
+    zh: '数据已经写进去了;当前账号没有所属租户,存档这一步跑不了',
+    en: 'The data is in; this account has no tenant of its own, so the archive step cannot run',
+    zhNext: '存档只认登录账号自己所属的租户,不接受页面上选的租户。请用归属这个租户的管理员账号来同步,或请管理员给当前账号设置所属租户。',
+    enNext: 'The archive uses only the signed-in account’s own tenant, never one chosen on the page. Sync with an administrator account that belongs to this tenant, or have an administrator give this account its tenant.',
+  }),
 })
 
 export function stockPrepSyncReasonPlain(reason: string): StockPrepPlainEntry | null {
