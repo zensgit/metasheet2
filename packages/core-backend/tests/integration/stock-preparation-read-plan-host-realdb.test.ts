@@ -227,7 +227,11 @@ describe.sequential('SA-02L real MetaSheetServer composition: metadata-only read
     setEnv('REDIS_URL')
     fixturePool = new Pool({ connectionString: scopedUrl.toString() })
     fixtureDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: fixturePool }) })
-    for (const migration of ['057_create_integration_core_tables.sql', '066_create_integration_stock_prep_audit.sql',
+    // Self-service positive controls must reach real stores in this owned schema,
+    // not accidentally borrow the CI database's already-migrated public tables.
+    for (const migration of ['057_create_integration_core_tables.sql',
+      '062_create_integration_read_source_configs.sql', '063_create_integration_read_source_composition_configs.sql',
+      '066_create_integration_stock_prep_audit.sql',
       '076_create_integration_stock_prep_pack_installs.sql', '079_create_integration_stock_prep_source_binding.sql',
       '080_extend_stock_prep_audit_source_binding_action.sql', '089_create_integration_stock_prep_read_plan_versions.sql']) {
       await fixturePool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))

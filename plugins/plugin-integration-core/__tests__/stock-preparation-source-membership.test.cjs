@@ -65,10 +65,30 @@ function source(data, guard, filtersApplied = false, { parent = 'PART-A', bom = 
   }
 }
 
+const MISMATCH_READS = {
+  'order-path': [OBJECTS.order, 'path_id'],
+  'order-owner': [OBJECTS.orderLine, 'order_id'],
+  'head-parent': [OBJECTS.head, 'part_id'],
+  'head-version': [OBJECTS.head, 'SysVer'],
+  'detail-parent': [OBJECTS.detail, 'bom_pid'],
+}
+function assertReadMismatch(result, guard, expected = MISMATCH_READS[guard]) {
+  assert.equal(result.valid, false)
+  assert.equal(result.status, 'failed')
+  assert.deepEqual(result.errors, [{ type: 'read_row_mismatch', object: expected[0], field: expected[1], page: 0 }])
+  assert.deepEqual(result.rowErrors, [])
+  assert.equal(result.rows.some((row) => row.componentSourceId === 'PART-FOREIGN'), false)
+}
+
 for (const metadata of [false, true, 'absent']) for (const guard of ['none', 'order-path', 'order-owner', 'head-parent', 'head-version', 'detail-parent']) {
   test(`one-predicate ${guard}, metadata=${metadata}: no foreign row enters actual recursive expansion`, async () => {
     const fake = source(fixture(guard), guard, metadata)
     const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', rootSelection: { enabled: false } })
+    if (metadata !== false && guard !== 'none') {
+      assertReadMismatch(result, guard)
+      assert.ok(fake.calls.some((call) => call.object === MISMATCH_READS[guard][0]))
+      return
+    }
     assert.equal(result.valid, true)
     assert.deepEqual(result.errors, [])
     assert.deepEqual(result.rowErrors, [])
@@ -88,6 +108,11 @@ for (const metadata of [false, true, 'absent']) for (const guard of ['head-paren
     data[OBJECTS.detail].push({ bom_pid: 'BOM-FOREIGN', part_id: 'PART-FOREIGN', Bom_ExAttr1: '5', sort_id: 2 })
     const fake = source(data, guard, metadata, { parent: 'PART-B', bom: 'BOM-B' })
     const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', rootSelection: { enabled: false } })
+    assert.ok(fake.calls.some((call) => call.object === OBJECTS.head && call.filters.part_id === 'PART-B'))
+    if (metadata !== false) {
+      assertReadMismatch(result, guard)
+      return
+    }
     assert.equal(result.valid, true)
     assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B', 'PART-C'])
     assert.deepEqual(result.rows.map((row) => row.totalQuantity), [2, 6, 24])
@@ -103,6 +128,12 @@ for (const metadata of [false, true, 'absent']) for (const guard of ['head-paren
     } }
     const fake = source(data, guard, metadata)
     const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', readPlan: plan })
+    assert.ok(fake.calls.some((call) => call.object === OBJECTS.head && call.filters.path_id === 'PATH-A'))
+    assert.ok(fake.calls.some((call) => call.object === OBJECTS.head && call.filters.part_id === 'PART-A'))
+    if (metadata !== false) {
+      assertReadMismatch(result, guard)
+      return
+    }
     assert.equal(result.valid, true)
     assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B'])
     assert.deepEqual(result.rows.map((row) => row.totalQuantity), [1, 3])
@@ -111,8 +142,8 @@ for (const metadata of [false, true, 'absent']) for (const guard of ['head-paren
   })
 }
 
-for (const guard of ['order-path', 'order-owner', 'head-parent', 'head-version', 'detail-parent']) {
-  test(`renamed case-variant numeric/whitespace keys preserve matchesByField semantics: ${guard}`, async () => {
+for (const metadata of [false, true, 'absent']) for (const guard of ['order-path', 'order-owner', 'head-parent', 'head-version', 'detail-parent']) {
+  test(`renamed case-variant numeric/whitespace keys preserve membership contract: ${guard}, metadata=${metadata}`, async () => {
     const plan = JSON.parse(JSON.stringify(PLM_STOCK_PREPARATION_BOM_READ_PLAN))
     const data = fixture(guard)
     const identities = { 'PATH-A': 0, 'PATH-FOREIGN': 9, 'ORDER-A': 10, 'ORDER-FOREIGN': 19,
@@ -131,7 +162,7 @@ for (const guard of ['order-path', 'order-owner', 'head-parent', 'head-version',
     data[OBJECTS.head][0][plan.bomHead.parentPartField.toUpperCase()] = ' 100 '
     data[OBJECTS.head][0][plan.bomHead.versionField.toUpperCase()] = ' 0 '
     data[OBJECTS.detail][0][plan.bomDetail.bomParentField.toUpperCase()] = ' 300 '
-    const fake = source(data, guard, true, { widen(input) {
+    const fake = source(data, guard, metadata, { widen(input) {
       if (guard === 'order-path' && input.object === OBJECTS.order) return plan.orderHead.pathIdField
       if (guard === 'order-owner' && input.object === OBJECTS.orderLine) return plan.orderDetail.orderIdField
       if ((guard === 'head-parent' || guard === 'head-version') && input.object === OBJECTS.head && equalKey(input.filters[plan.bomHead.parentPartField], 100)) return guard === 'head-parent' ? plan.bomHead.parentPartField : plan.bomHead.versionField
@@ -139,6 +170,18 @@ for (const guard of ['order-path', 'order-owner', 'head-parent', 'head-version',
       return undefined
     } })
     const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', readPlan: plan, rootSelection: { enabled: false } })
+    if (metadata !== false) {
+      const read = {
+        'order-path': [OBJECTS.order, plan.orderHead.pathIdField],
+        'order-owner': [OBJECTS.orderLine, plan.orderDetail.orderIdField],
+        'head-parent': [OBJECTS.head, plan.bomHead.parentPartField],
+        'head-version': [OBJECTS.head, plan.bomHead.versionField],
+        'detail-parent': [OBJECTS.detail, plan.bomDetail.bomParentField],
+      }[guard]
+      assertReadMismatch(result, guard, read)
+      assert.equal(result.rows.some((row) => row.componentSourceId === '900'), false)
+      return
+    }
     assert.equal(result.valid, true)
     assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['100', '200'])
     assert.deepEqual(result.rows.map((row) => row.totalQuantity), [2, 6])
@@ -149,7 +192,7 @@ for (const guard of ['head-parent', 'head-version']) {
   test(`foreign ${guard} cannot create a phantom maxDepth failure at a real leaf`, async () => {
     const data = fixture('none')
     data[OBJECTS.head].push({ part_id: guard === 'head-parent' ? 'PART-OTHER' : 'PART-B', bom_id: 'BOM-FOREIGN', SysVer: guard === 'head-version' ? 'V2' : 'V1', bom_able: true })
-    const fake = source(data, guard, true, { parent: 'PART-B' })
+    const fake = source(data, guard, false, { parent: 'PART-B' })
     const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', maxDepth: 1 })
     assert.equal(result.valid, true)
     assert.deepEqual(result.errors, [])
@@ -161,7 +204,7 @@ for (const guard of ['head-parent', 'head-version']) {
 test('foreign detail pointing at an ancestor cannot create a phantom cycle; real same-BOM cycle still refuses', async () => {
   const data = fixture('none')
   data[OBJECTS.detail].push({ bom_pid: 'BOM-FOREIGN', part_id: 'PART-A', Bom_ExAttr1: '1', sort_id: 2 })
-  const result = await expandPlmProjectBom({ sourceAdapter: source(data, 'detail-parent', true).adapter, projectNo: 'SYN-PROJECT' })
+  const result = await expandPlmProjectBom({ sourceAdapter: source(data, 'detail-parent', false).adapter, projectNo: 'SYN-PROJECT' })
   assert.equal(result.valid, true)
   assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B'])
   data[OBJECTS.detail][1].bom_pid = 'BOM-A'
@@ -195,7 +238,7 @@ for (const wide of [false, true]) test(`legacy absent version role does not coll
   plan.bomHead.parentPartField = 'undefined'
   delete plan.bomHead.versionField
   for (const head of data[OBJECTS.head]) { head.undefined = head.part_id; delete head.part_id }
-  const fake = source(data, 'none', true, { widen(input) {
+  const fake = source(data, 'none', false, { widen(input) {
     return wide && input.object === OBJECTS.head && input.filters.undefined === 'PART-A' ? 'undefined' : undefined
   } })
   const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT', readPlan: plan })
@@ -209,7 +252,7 @@ test('explicit requested version remains type-strict while string transport spac
     const data = fixture('head-version')
     data[OBJECTS.orderLine][0].RequestedVersion = requested
     data[OBJECTS.head][0].SysVer = matching; data[OBJECTS.head][1].SysVer = foreign
-    const result = await expandPlmProjectBom({ sourceAdapter: source(data, 'head-version', true).adapter, projectNo: 'SYN-PROJECT', readPlan: requestedPlan() })
+    const result = await expandPlmProjectBom({ sourceAdapter: source(data, 'head-version', false).adapter, projectNo: 'SYN-PROJECT', readPlan: requestedPlan() })
     assert.equal(result.valid, true)
     assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B'])
     assert.equal(result.rows[0].orderBomVersion, typeof requested === 'string' ? requested.trim() : requested)
@@ -233,13 +276,13 @@ for (const guard of ['order-path', 'order-owner']) {
   test(`foreign ${guard} is excluded before inspecting its absent requested version`, async () => {
     const data = fixture(guard)
     data[OBJECTS.orderLine][0].RequestedVersion = 'V1'
-    const result = await expandPlmProjectBom({ sourceAdapter: source(data, guard, true).adapter, projectNo: 'SYN-PROJECT', readPlan: requestedPlan() })
+    const result = await expandPlmProjectBom({ sourceAdapter: source(data, guard, false).adapter, projectNo: 'SYN-PROJECT', readPlan: requestedPlan() })
     assert.equal(result.valid, true)
     assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B'])
   })
 }
 
-test('wide foreign first page does not suppress a later matching page or hide raw read counts', async () => {
+for (const metadata of [false, true, 'absent']) test(`wide foreign first page: continue only for an explicitly unfiltered source, metadata=${metadata}`, async () => {
   const data = fixture('detail-parent')
   const fake = source(data, 'none')
   const pageCursors = []
@@ -247,11 +290,17 @@ test('wide foreign first page does not suppress a later matching page or hide ra
     if (input.object !== OBJECTS.detail || input.filters.bom_pid !== 'BOM-A') return fake.adapter.read(input)
     pageCursors.push(input.cursor ?? null)
     assert.equal(input.limit, 1)
-    if (!input.cursor) return { records: [data[OBJECTS.detail][1]], done: false, nextCursor: 'synthetic-page-2', metadata: { filtersApplied: true } }
+    const declaration = metadata === 'absent' ? {} : { metadata: { filtersApplied: metadata } }
+    if (!input.cursor) return { records: [data[OBJECTS.detail][1]], done: false, nextCursor: 'synthetic-page-2', ...declaration }
     assert.equal(input.cursor, 'synthetic-page-2')
-    return { records: [data[OBJECTS.detail][0]], done: true, nextCursor: null, metadata: { filtersApplied: true } }
+    return { records: [data[OBJECTS.detail][0]], done: true, nextCursor: null, ...declaration }
   } }
   const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'SYN-PROJECT', pageLimit: 1, requireCompleteBatch: true })
+  if (metadata !== false) {
+    assertReadMismatch(result, 'detail-parent')
+    assert.deepEqual(pageCursors, [null], 'a misanswered filtered page must fail before fetching the next page')
+    return
+  }
   assert.equal(result.valid, true)
   assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B'])
   assert.deepEqual(result.rows.map((row) => row.totalQuantity), [2, 6])
@@ -259,13 +308,13 @@ test('wide foreign first page does not suppress a later matching page or hide ra
   const diagnostics = result.summary.readDiagnostics.filter((entry) => entry.object === OBJECTS.detail)
   assert.deepEqual(diagnostics.map((entry) => entry.count), [1, 1], 'both raw source rows remain counted, including the rejected foreign row')
   assert.deepEqual(diagnostics.map((entry) => entry.cursor), pageCursors)
-  assert.ok(diagnostics.every((entry) => entry.filtersApplied === true && entry.status === 'ok'))
+  assert.ok(diagnostics.every((entry) => entry.filtersApplied === false && entry.status === 'ok'))
 })
 
 test('matched active head with only foreign details retains missing_child_bom failure', async () => {
   const data = fixture('detail-parent')
   data[OBJECTS.detail] = data[OBJECTS.detail].filter((detail) => detail.bom_pid === 'BOM-FOREIGN')
-  const fake = source(data, 'detail-parent', true)
+  const fake = source(data, 'detail-parent', false)
   const result = await expandPlmProjectBom({ sourceAdapter: fake.adapter, projectNo: 'SYN-PROJECT' })
   assert.equal(result.valid, false)
   assert.equal(result.status, 'failed')

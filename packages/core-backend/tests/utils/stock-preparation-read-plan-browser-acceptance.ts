@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 
-import type { Browser, BrowserContext, Page, Response as BrowserResponse } from '@playwright/test'
+import type { Browser, BrowserContext, Page, Request as BrowserRequest, Response as BrowserResponse } from '@playwright/test'
 // Vite belongs to the web workspace; resolve its types there as well as runtime.
 import type { Plugin, ViteDevServer } from '../../../../apps/web/node_modules/vite'
 import type { SourcePlanReadPlan } from '../../../../apps/web/src/services/integration/stockPreparation/sourcePlanDraft'
@@ -89,8 +89,59 @@ const bindingPath = '/api/integration/stock-preparation/source-binding'
 const plansPath = '/api/integration/stock-preparation/read-plan-configs'
 const actionId = 'plm.stock-preparation.pull-bom.v1'
 const previewPath = `/api/integration/table-actions/${actionId}/dry-run`
+const jobStatusPath = `${previewPath}-jobs`
 const repositoryRoot = fileURLToPath(new URL('../../../../', import.meta.url))
 const webRoot = path.join(repositoryRoot, 'apps', 'web')
+
+// Observe real mount-time reads; never fulfill a route or synthesize a response.
+// Register the body check at request time so a late response cannot escape an
+// earlier Promise.all snapshot. Both browser acceptance paths use this contract.
+function createEmptyJobStatusObserver(tenantId: string, projectNo: string, unexpected: string[]) {
+  const counts = { gets: 0, responses404: 0, otherResponses: 0 }
+  const flags: Array<string | null> = []
+  const checks: Promise<void>[] = []
+  const isResponse = (response: BrowserResponse) => new URL(response.url()).pathname === jobStatusPath
+    && response.request().method() === 'GET'
+  return {
+    counts,
+    isResponse,
+    request(request: BrowserRequest, token: string) {
+      const target = new URL(request.url())
+      if (target.pathname !== jobStatusPath || request.method() !== 'GET') return false
+      counts.gets += 1
+      const headers = request.headers()
+      const flag = target.searchParams.get('includeMissingComponents')
+      flags.push(flag)
+      const expected = [['tenantId', tenantId], ['projectNo', projectNo], ['includeMissingComponents', flag]]
+      if (!['true', 'false'].includes(flag ?? '') || !isDeepStrictEqual([...target.searchParams.entries()].sort(), expected.sort())) unexpected.push('JOB_STATUS_SCOPE')
+      // Ordinary apiFetch reads carry the JWT-derived hint; management reads
+      // intentionally omit it and retain their separate assertions below.
+      if (headers.authorization !== `Bearer ${token}` || headers['x-tenant-id'] !== tenantId || 'x-workspace-id' in headers) unexpected.push('JOB_STATUS_SESSION')
+      if (request.postData() !== null) unexpected.push('JOB_STATUS_BODY')
+      checks.push((async () => {
+        const response = await request.response()
+        assert(response, 'BROWSER_JOB_STATUS_RESPONSE_REQUIRED')
+        assert.equal(await response.finished(), null, 'BROWSER_JOB_STATUS_BODY_COMPLETE')
+        if (response.status() === 404) counts.responses404 += 1
+        else counts.otherResponses += 1
+        assert.equal(response.status(), 404)
+        const envelope = await response.json() as { ok?: unknown; error?: { code?: unknown }; data?: unknown }
+        assert.equal(envelope.ok, false)
+        assert.equal(envelope.error?.code, 'STOCK_PREPARATION_DRY_RUN_JOB_NOT_FOUND')
+        assert.equal(envelope.data, undefined)
+      })().catch(() => { unexpected.push('JOB_STATUS_RESPONSE') }))
+      return true
+    },
+    async complete(mounts: number) {
+      const expectedFlags = Array.from({ length: mounts }, () => ['true', 'false']).flat()
+      assert.deepEqual(flags, expectedFlags, 'BROWSER_JOB_STATUS_FLAG_SEQUENCE')
+      assert.equal(checks.length, mounts * 2, 'BROWSER_JOB_STATUS_CHECK_REGISTRATION')
+      await Promise.all([...checks])
+      assert.equal(checks.length, mounts * 2, 'BROWSER_JOB_STATUS_LATE_REQUEST')
+      assert.deepEqual(counts, { gets: mounts * 2, responses404: mounts * 2, otherResponses: 0 }, 'BROWSER_JOB_STATUS_COMPLETE_COUNTS')
+    },
+  }
+}
 
 function ownedArtifactPath(value: string): string {
   const resolved = path.resolve(value)
@@ -134,6 +185,18 @@ export async function runStockPreparationReadPlanBrowserAcceptance(
   let vite: ViteDevServer | undefined
   let browser: Browser | undefined
   const unexpected: string[] = []
+  const statusProbes = createEmptyJobStatusObserver(input.tenantId, 'SYN-VALIDATION', unexpected)
+  const unexpectedSummary = () => ({
+    apiRequest: unexpected.filter(code => code === 'UNEXPECTED_API_REQUEST').length,
+    apiStatus: unexpected.filter(code => code === 'UNEXPECTED_API_STATUS').length,
+    requestFailed: unexpected.filter(code => code === 'REQUEST_FAILED').length,
+    jobScope: unexpected.filter(code => code === 'JOB_STATUS_SCOPE').length,
+    jobSession: unexpected.filter(code => code === 'JOB_STATUS_SESSION').length,
+    jobBody: unexpected.filter(code => code === 'JOB_STATUS_BODY').length,
+    jobResponse: unexpected.filter(code => code === 'JOB_STATUS_RESPONSE').length,
+    other: unexpected.filter(code => !['UNEXPECTED_API_REQUEST', 'UNEXPECTED_API_STATUS', 'REQUEST_FAILED'].includes(code)).length,
+    ...statusProbes.counts,
+  })
   let pageErrors = 0
   let sourceBindingGets = 0
   let managementGets = 0
@@ -235,6 +298,7 @@ export async function runStockPreparationReadPlanBrowserAcceptance(
         if (target.origin !== uiOrigin) unexpected.push('UNEXPECTED_ORIGIN')
         if (!target.pathname.startsWith('/api/')) return
         const method = request.method()
+        if (statusProbes.request(request, token)) return
         if (target.pathname === previewPath && method === 'POST') {
           businessPreviewPosts += 1
           if (nonOwner) unexpected.push('NONOWNER_PREVIEW_NOT_REQUESTED')
@@ -271,6 +335,7 @@ export async function runStockPreparationReadPlanBrowserAcceptance(
       })
       context.on('response', (response) => {
         const pathname = new URL(response.url()).pathname
+        if (statusProbes.isResponse(response)) return
         if (!pathname.startsWith('/api/')) {
           if (response.status() >= 400) unexpected.push('UI_HTTP_STATUS')
           return
@@ -514,7 +579,8 @@ export async function runStockPreparationReadPlanBrowserAcceptance(
       assert(!(await page.locator('body').innerText()).includes(measuredPreview.dryRunToken), 'BROWSER_POPULATED_TOKEN_NOT_RENDERED')
       assert.equal(posts.length, postsBefore, 'BROWSER_POPULATED_NO_MANAGEMENT_POST')
       assert.equal(businessPreviewPosts, 2, 'BROWSER_POPULATED_EXPLICIT_SINGLE_CALL')
-      assert.equal(unexpected.length, 0, 'BROWSER_POPULATED_NO_APPLY_ARCHIVE_RECONCILE_JOB')
+      await statusProbes.complete(1)
+      assert.equal(unexpected.length, 0, `BROWSER_POPULATED_NO_APPLY_ARCHIVE_RECONCILE_JOB ${JSON.stringify(unexpectedSummary())}`)
       await populatedTarget.assertUnchanged(measuredPreview.dryRunToken)
       if (artifactDir) await previewPanel.screenshot({ path: path.join(artifactDir, 'stock-preparation-populated-target-preview.png') })
       populatedPreview = { token: measuredPreview.dryRunToken, counts: measuredPreview.counts }
@@ -591,6 +657,7 @@ export async function runStockPreparationReadPlanBrowserAcceptance(
     assert.equal(posts.filter((row) => row.nonOwner).length, 0, 'BROWSER_NONOWNER_POST')
     assert.equal(deniedManagementGets, 1, 'BROWSER_NONOWNER_REFUSAL_COUNT')
     assert.equal(pageErrors, 0, 'BROWSER_PAGE_ERRORS')
+    await statusProbes.complete(3)
     assert.equal(unexpected.length, 0, `BROWSER_UNEXPECTED_NETWORK_${unexpected[0] ?? 'NONE'}`)
     assert(apiResponses.every((status) => [200, 201, 403].includes(status)), 'BROWSER_UNEXPECTED_HTTP_STATUS')
     assert.equal(sourceBindingGets, 3, 'BROWSER_METADATA_GET_COUNT')
@@ -639,6 +706,7 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
   let vite: ViteDevServer | undefined
   const unexpected: string[] = []
   const posted: Array<{ path: string; body: Record<string, unknown> }> = []
+  const statusProbes = createEmptyJobStatusObserver(input.tenantId, 'SYN-REUSE', unexpected)
   const htmlPath = '/__stock-preparation-reuse-acceptance'
   const scopeJson = JSON.stringify({ tenantId: input.tenantId, workspaceId: null }).replaceAll('<', '\\u003c')
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"></head><body><div id="app"></div><script type="module">
@@ -684,6 +752,7 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
       if (!url.pathname.startsWith('/api/')) return
       const headers = request.headers()
       if (headers.authorization !== `Bearer ${input.ownerToken}`) unexpected.push('WRONG_SESSION')
+      if (statusProbes.request(request, input.ownerToken)) return
       if (url.pathname === bindingPath && request.method() === 'GET') return
       if (url.pathname === previewPath && request.method() === 'POST') {
         if (url.search !== `?${new URLSearchParams({ tenantId: input.tenantId })}`) unexpected.push('PREVIEW_SCOPE')
@@ -696,7 +765,10 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
       if (request.method() === 'POST') posted.push({ path: url.pathname, body: request.postDataJSON() })
       else if (request.method() !== 'GET' || url.searchParams.get('systemId') !== input.systemId) unexpected.push('MANAGEMENT_QUERY')
     })
-    context.on('response', response => { if (response.status() >= 400) unexpected.push('HTTP_REFUSAL') })
+    context.on('response', response => {
+      if (statusProbes.isResponse(response)) return
+      if (response.status() >= 400) unexpected.push('HTTP_REFUSAL')
+    })
     const page = await context.newPage()
     page.setDefaultTimeout(15000)
     page.on('pageerror', () => unexpected.push('PAGE_ERROR'))
@@ -803,6 +875,7 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
     assert.deepEqual(preview.counts, { add: 2, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
     await page.getByTestId('stock-prep-project-preview').filter({ hasText: '计划新增 2' }).waitFor()
     assert.equal(await page.getByTestId('stock-prep-project-sync-verdict').count(), 0)
+    await statusProbes.complete(1)
     assert.equal(unexpected.length, 0, `BROWSER_REUSE_UNEXPECTED_${unexpected[0] ?? 'NONE'}`)
     assert.equal(posted.length, 6)
     assert.deepEqual(posted.slice(1, 4).map(row => row.body), [
