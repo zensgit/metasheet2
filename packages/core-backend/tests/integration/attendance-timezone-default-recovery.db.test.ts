@@ -93,7 +93,7 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
     expect(current.body.data).toMatchObject({timezone:'Asia/Tokyo',frozen:false})
   })
 
-  it.each(['shift','rotation'])('rejects a near-date %s without its own frozen parent and writes no rule',async kind => {
+  it.each(['shift','rotation'])('restores with a near-date %s that has no frozen parent, leaving schedules and history unchanged',async kind => {
     const actor = await live.user()
     const scheduled = await shift(actor,workDate)
     if (kind === 'rotation') {
@@ -105,17 +105,22 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
         VALUES($1,$2,$3,$4,$5,$5,true,'published')`,[randomUUID(),live.orgId,actor.userId,id,workDate])
     }
     await hideDefault()
-    const before = await rows('attendance_rules')
-    expect(await save()).toMatchObject({status:409,body:{ok:false,error:{code:'ATTENDANCE_TIMEZONE_DEFAULT_RECOVERY_SOURCE_AMBIGUOUS'}}})
-    expect(await rows('attendance_rules')).toEqual(before)
+    const before = await history()
+    const schedules = await Promise.all(['attendance_shift_assignments','attendance_rotation_assignments'].map(table => rows(table)))
+    const saved = await save()
+    expect(saved.status,saved.body.error?.code).toBe(200)
+    expect((await live.pool.query('SELECT count(*)::int AS n FROM attendance_rules WHERE org_id=$1 AND is_default=true',[live.orgId])).rows).toEqual([{n:1}])
+    expect(await history()).toEqual(before)
+    expect(await Promise.all(['attendance_shift_assignments','attendance_rotation_assignments'].map(table => rows(table)))).toEqual(schedules)
   })
 
-  it.each(['2026-08-10','2026-08-13'])('retains the conservative nearby-date protection for %s',async date => {
+  it.each(['2026-08-10','2026-08-13'])('a nearby unfrozen date (%s) no longer blocks recovery',async date => {
     await shift(await live.user(),date)
     await hideDefault()
-    const before = await rows('attendance_rules')
-    expect(await save()).toMatchObject({status:409,body:{ok:false,error:{code:'ATTENDANCE_TIMEZONE_DEFAULT_RECOVERY_SOURCE_AMBIGUOUS'}}})
-    expect(await rows('attendance_rules')).toEqual(before)
+    const before = await history()
+    const saved = await save()
+    expect(saved.status,saved.body.error?.code).toBe(200)
+    expect(await history()).toEqual(before)
   })
 
   it('permits a matching overnight frozen assignment and closes the original date without rewriting its freeze',async () => {
@@ -150,7 +155,7 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
     expect(await history()).toEqual(frozen)
   })
 
-  it('requires controlled evidence for an old open record even when its user is no longer an active member',async () => {
+  it('a pre-companion open record (here of a departed member) no longer blocks recovery and is left unfrozen',async () => {
     const actor = await live.user()
     const id = randomUUID()
     await live.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at)
@@ -158,10 +163,11 @@ describe('authorized missing organization default recovery (actual HTTP/PostgreS
     await live.pool.query('UPDATE user_orgs SET is_active=false WHERE org_id=$1 AND user_id=$2',[live.orgId,actor.userId])
     try {
       await hideDefault()
-      const before = await rows('attendance_rules'), frozen = await history()
-      expect(await save()).toMatchObject({status:409,body:{ok:false,error:{code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'}}})
-      expect(await rows('attendance_rules')).toEqual(before)
+      const frozen = await history()
+      const saved = await save()
+      expect(saved.status,saved.body.error?.code).toBe(200)
       expect(await history()).toEqual(frozen)
+      expect((await live.pool.query('SELECT count(*)::int AS n FROM attendance_timezone_context_companions WHERE record_id=$1',[id])).rows).toEqual([{n:0}])
     } finally {
       await live.pool.query("UPDATE attendance_records SET last_out_at='2026-08-01T18:00:00Z' WHERE id=$1",[id])
     }
