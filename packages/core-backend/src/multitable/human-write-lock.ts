@@ -91,6 +91,27 @@ export function isFieldHumanWriteLocked(field: { property?: unknown } | null | u
   return fieldHumanWriteLockKind(field) !== null
 }
 
+/**
+ * Does the sheet carry a column that is BOTH human-write-locked AND required by its own validation rules
+ * (`property.validation` holds a `{ type: 'required' }` rule — the shape record-service.ts
+ * `buildDirectValidationFields` / `validateRecord` enforce on every person record create)?
+ *
+ * If so, no person can ever create a record on the sheet: leaving the column empty fails the required
+ * rule (422), and filling it is a write to a locked column (403). `GET /context` reports this as
+ * `capabilities.recordCreateBlockedByLock` so the web hides its "+ row" / add-record / duplicate / new
+ * form entries instead of offering actions that always fail. Display-only — every create path keeps its
+ * own server refusal. Only the explicit rule counts: the type defaults (getDefaultValidationRules) never
+ * contain `required`, and a conditional `requiredWhen` can be satisfied, so neither blocks.
+ */
+export function hasHumanWriteLockedRequiredField(fields: ReadonlyArray<{ property?: unknown }>): boolean {
+  return fields.some((field) => {
+    if (!isFieldHumanWriteLocked(field)) return false
+    const rules = asPropertyObject(field.property)?.validation
+    return Array.isArray(rules) && rules.some((rule) =>
+      Boolean(rule) && typeof rule === 'object' && (rule as { type?: unknown }).type === 'required')
+  })
+}
+
 export function humanWriteLockRefusalCode(kind: FieldHumanWriteLockKind): string {
   return REFUSAL_CODE_BY_KIND[kind]
 }
