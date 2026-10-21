@@ -19,6 +19,7 @@ import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-per
 import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { DEFAULT_GRID_PAGE_SIZE, clampGridPageSize } from '../utils/grid-page-size'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
 // --- Sort / Filter types ---
@@ -345,7 +346,7 @@ export function effectiveFilterTypeKey(field: { type: string; property?: unknown
 
 // --- Main composable ---
 
-const DEFAULT_PAGE_SIZE = 50
+const DEFAULT_PAGE_SIZE: number = DEFAULT_GRID_PAGE_SIZE
 const SEARCH_DEBOUNCE_MS = 150
 
 // #6075 round 3 (S1): the longest a load waits for sort/filter writes to its view that it did not send itself — an
@@ -520,7 +521,12 @@ export function useMultitableGrid(opts: {
   sheetId: Ref<string>
   viewId: Ref<string>
   client?: MultitableApiClient
+  // Initial rows per server page. Taken as given (specs drive small/large pages through it); a viewer's own choice
+  // goes through setPageSize / resolvePageSize, which only ever apply GRID_PAGE_SIZE_OPTIONS.
   pageSize?: number
+  // Rows-per-page the viewer stored for a sheet (客户反馈 2026-10-21), read when a load starts on a sheet other than
+  // the one the current size was resolved for. null/undefined => the default. Snapped into GRID_PAGE_SIZE_OPTIONS.
+  resolvePageSize?: (sheetId: string) => number | null | undefined
   // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §3 P2 / G-FE-2):
   // a single toggle-driven write-routing switch. When it returns true for the CURRENT viewId, the in-place
   // config edits below (filter/sort/group/hidden) route to `putPersonalViewConfig` instead of the shared
@@ -538,7 +544,10 @@ export function useMultitableGrid(opts: {
   onSortFilterWriteFailed?: (viewId: string) => void
 }) {
   const client = opts.client ?? multitableClient
-  const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
+  const initialPageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
+  const pageSize = ref<number>(initialPageSize)
+  // The sheet the current pageSize was resolved for (resolvePageSize); a load on another sheet re-resolves it.
+  let pageSizeResolvedFor: string | null = null
   const { isZh } = useLocale()
   const fallback = (key: Parameters<typeof metaCoreLabel>[0]) => metaCoreLabel(key, isZh.value)
 
@@ -582,9 +591,9 @@ export function useMultitableGrid(opts: {
   watch([opts.sheetId, opts.viewId], () => { rangeContextId++ }, { flush: 'sync' })
 
   // Pagination
-  const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
-  const currentPage = computed(() => Math.floor(page.value.offset / pageSize) + 1)
-  const totalPages = computed(() => Math.max(1, Math.ceil(page.value.total / pageSize)))
+  const page = ref<MetaPage>({ offset: 0, limit: initialPageSize, total: 0, hasMore: false })
+  const currentPage = computed(() => Math.floor(page.value.offset / pageSize.value) + 1)
+  const totalPages = computed(() => Math.max(1, Math.ceil(page.value.total / pageSize.value)))
 
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
@@ -714,6 +723,14 @@ export function useMultitableGrid(opts: {
     if (!sid) return
     const requestId = ++latestLoadRequestId
     const contextId = rangeContextId
+    if (opts.resolvePageSize && pageSizeResolvedFor !== sid) {
+      pageSizeResolvedFor = sid
+      const resolved = clampGridPageSize(opts.resolvePageSize(sid) ?? DEFAULT_PAGE_SIZE)
+      if (resolved !== pageSize.value) {
+        pageSize.value = resolved
+        offset = 0
+      }
+    }
     loading.value = true
     error.value = null
     try {
@@ -740,7 +757,7 @@ export function useMultitableGrid(opts: {
       const data = await client.loadView({
         sheetId: sid,
         viewId: vid || undefined,
-        limit: pageSize,
+        limit: pageSize.value,
         offset,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
@@ -749,7 +766,7 @@ export function useMultitableGrid(opts: {
       const serverPage = data.page
       const serverRows = data.rows ?? []
       if (serverPage && !serverRows.length && offset > 0 && offset >= serverPage.total) {
-        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize) * pageSize)
+        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize.value) * pageSize.value)
         if (fallbackOffset !== offset) {
           await loadViewData(fallbackOffset)
           return
@@ -792,7 +809,13 @@ export function useMultitableGrid(opts: {
   // rows server-side and we haven't hit the in-memory ceiling. The grid (MetaGridTable) additionally
   // gates the scroll trigger on the FLAT path (not grouped / not expanded / not printing) — those modes
   // keep the classic footer pager — so this stays a pure "is there a next page" predicate.
-  const canLoadMore = computed(() => page.value.hasMore && !accumulationCapped.value)
+  //
+  // Only from the top of the set (offset 0, where loadMore pins it): loadMore appends at `rows.length`, which is the
+  // next unread row ONLY when the held rows start at row 0. A grid holding a later page (page 4 of a grouped view
+  // whose grouping was just removed, or one a reload brought back) would append rows it already holds or skip
+  // some (客户反馈 2026-10-21: 100 rows on page 3, 4 rows and no way on from page 4). Such a grid pages with the
+  // classic pager instead — MetaGridTable keeps it visible past page 1 even on the flat path.
+  const canLoadMore = computed(() => page.value.hasMore && !accumulationCapped.value && page.value.offset === 0)
 
   // A1: shallow-merge a per-record summary map (recordId → fieldMap) onto the accumulated one. APPEND
   // must MERGE, never replace: a replace would drop every earlier page's link/person/attachment chips
@@ -826,7 +849,7 @@ export function useMultitableGrid(opts: {
       const data = await client.loadView({
         sheetId: sid,
         viewId: opts.viewId.value || undefined,
-        limit: pageSize,
+        limit: pageSize.value,
         offset: startCount,
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
@@ -859,10 +882,10 @@ export function useMultitableGrid(opts: {
       // Pin offset at 0 (infinite path) so row numbers + mutation reloads behave; carry the server total
       // and hasMore forward. End-of-data backstop: a short page (< pageSize) means no more rows even if
       // the server's hasMore lagged.
-      const nextHasMore = serverPage ? serverPage.hasMore && serverRows.length >= pageSize : false
+      const nextHasMore = serverPage ? serverPage.hasMore && serverRows.length >= pageSize.value : false
       page.value = {
         offset: 0,
-        limit: pageSize,
+        limit: pageSize.value,
         total: serverPage?.total ?? rows.value.length,
         hasMore: nextHasMore,
       }
@@ -1089,7 +1112,7 @@ export function useMultitableGrid(opts: {
 
   function goToPage(p: number) {
     const safePage = Math.min(Math.max(1, p), totalPages.value)
-    const offset = Math.max(0, (safePage - 1) * pageSize)
+    const offset = Math.max(0, (safePage - 1) * pageSize.value)
     if (offset === page.value.offset) return
     loadViewData(offset)
   }
@@ -1122,19 +1145,44 @@ export function useMultitableGrid(opts: {
   // (`{}`), never `undefined` (#6084: `undefined` is dropped by JSON.stringify, the PATCH then carries no
   // groupInfo key, and the server KEPT the stored grouping — clearing was never saved). Same fix shape as
   // #6075's emptySortInfo()/emptyFilterInfo(): a changed facet always goes out with an explicit value.
+  //
+  // A changed grouping goes back to page 1 (客户反馈 2026-10-21). The grouped grid pages with the footer pager over
+  // one server page; the flat grid scrolls, appending from the top of the set. Switching modes on page N kept the
+  // page-N rows and offset: un-grouping on page 4 showed its 4 rows with the pager hidden, on pages 2-3 the
+  // appends mixed pages; grouping a flat grid that had scrolled in 154 rows grouped all 154 under "1 / 4". So
+  // unless the grid already holds exactly page 1, the change reloads page 1 — AFTER the write, so the read sees
+  // the new grouping (a read that overtakes it would sync the old grouping back).
   async function setGroupFields(fieldIds: string[]) {
     const next = normalizeGroupFieldIds(fieldIds)
+    const changed = next.length !== groupFieldIds.value.length || next.some((id, i) => id !== groupFieldIds.value[i])
     groupFieldIds.value = next
     const vid = opts.viewId.value
     if (!vid) return
     // Only into the view this grouping was loaded from (#6075 round 2): while the view's load is in flight or has
     // failed, `next` is built on the reset (or another view's) levels and would replace the view's own grouping.
     if (viewStateLoadedFor !== vid) return
+    let stored = true
     try {
       await persistViewConfig(vid, {
         groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : emptyGroupInfo(),
       })
-    } catch { /* silent */ }
+    } catch { stored = false /* silent */ }
+    if (!changed || opts.viewId.value !== vid) return
+    if (page.value.offset === 0 && rows.value.length <= pageSize.value) return
+    await loadViewData(0)
+    // The write failed (e.g. the server refused this viewer a view change): the reload synced the view's stored
+    // grouping back, but the new grouping stays local exactly as it did before this reset — only the page moves.
+    if (!stored && opts.viewId.value === vid) groupFieldIds.value = next
+  }
+
+  // The viewer picked a rows-per-page option (客户反馈 2026-10-21). Snapped into GRID_PAGE_SIZE_OPTIONS; a new size
+  // reloads page 1 — the old offset is a multiple of the old size and would land mid-page.
+  async function setPageSize(size: unknown) {
+    const next = clampGridPageSize(size)
+    if (next === pageSize.value) return
+    pageSize.value = next
+    page.value = { ...page.value, offset: 0, limit: next }
+    await loadViewData(0)
   }
 
   // Back-compat single-field setter (level-1 only) kept for callers that still group by one field.
@@ -1845,7 +1893,7 @@ export function useMultitableGrid(opts: {
     editHistory, historyIndex, canUndo, canRedo,
     searchQuery,
     // Computed
-    currentPage, totalPages, canLoadMore,
+    currentPage, totalPages, canLoadMore, pageSize,
     // Methods
     loadViewData, loadMore, syncFromView, reloadCurrentPage, goToPage,
     discardUnappliedSortFilterEdits, isViewStateLoadedFor,
@@ -1860,7 +1908,7 @@ export function useMultitableGrid(opts: {
     applyPatchResult,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
-    setGroupField, setGroupFields,
+    setGroupField, setGroupFields, setPageSize,
     setSearchQuery, resolveRowActions,
   }
 }
