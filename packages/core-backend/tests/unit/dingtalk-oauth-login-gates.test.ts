@@ -197,7 +197,10 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
-      const fallback = createDefaultTransactionQuery()
+      const fallback = createDefaultTransactionQuery({ identity: {
+        id: 'identity-1', external_key: 'ding-corp:union-1',
+        provider_union_id: 'union-1', provider_open_id: null, corp_id: 'ding-corp',
+      } })
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) return { rows: [] }
@@ -245,7 +248,10 @@ describe('dingtalk oauth login gates', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     const txCalls: Array<{ sql: string; params: unknown[] }> = []
     pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
-      const fallback = createDefaultTransactionQuery()
+      const fallback = createDefaultTransactionQuery({ identity: {
+        id: 'identity-1', external_key: 'ding-corp:union-1',
+        provider_union_id: 'union-1', provider_open_id: null, corp_id: 'ding-corp',
+      } })
       const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
         txCalls.push({ sql: String(sql), params })
         if (String(sql).includes('SELECT local_user_id')) {

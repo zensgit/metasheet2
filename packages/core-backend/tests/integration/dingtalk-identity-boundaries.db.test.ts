@@ -374,4 +374,75 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     expect((await state(id)).identity).toEqual([{ corp_id: CORP, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }])
   })
 
+  it.each([false, true])('an unset configured corp preserves an established identity scope (known OpenID=%s)', async knownOpenId => {
+    const { id, email } = await seed({ identity: true, grant: true })
+    if (!knownOpenId) await q(`UPDATE user_external_identities SET provider_open_id=NULL, external_key=$2
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-A`])
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-B`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
+    expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
+    expect((await q(`SELECT corp_id, external_key, provider_union_id, provider_open_id FROM user_external_identities
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows).toEqual([{
+      corp_id: CORP, external_key: `${CORP}:${id}-open-B`, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-B`,
+    }])
+  })
+
+  it.each([undefined, false])('rejected login cannot overwrite a concurrently replaced union-only identity (grant=%s)', async grant => {
+    const { id, email } = await seed({ identity: true, grant })
+    await q(`UPDATE user_external_identities SET provider_open_id=NULL, external_key=$2
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-A`])
+    const account = await directorySource(id)
+    await q(`INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status)
+      VALUES ($1, $2, 'linked')`, [account, id])
+    const before = await state(id)
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-A`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
+    const result = await committedRace(id, async holder => {
+      await holder.query(`UPDATE user_external_identities SET external_key=$2, provider_union_id=$3, provider_open_id=NULL
+        WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-B`, `${id}-union-B`])
+      await holder.query('UPDATE directory_accounts SET union_id=$2, open_id=NULL WHERE id=$1', [account, `${id}-union-B`])
+    }, () => exchangeCodeForUser('synthetic-code'))
+    expect(result.error).toMatchObject({ statusCode: 403, code: 'grant_required' })
+    expect(await state(id)).toEqual({ ...before, identity: [{ corp_id: CORP, provider_union_id: `${id}-union-B`, provider_open_id: null }] })
+    expect((await q('SELECT union_id, open_id FROM directory_accounts WHERE id=$1', [account])).rows)
+      .toEqual([{ union_id: `${id}-union-B`, open_id: null }])
+  })
+
+  it.each([undefined, false])('rejected same-person login can enrich OpenID without configured corp or admission (grant=%s)', async grant => {
+    const { id, email } = await seed({ identity: true, grant })
+    const account = await directorySource(id)
+    await q('UPDATE directory_accounts SET open_id=NULL WHERE id=$1', [account])
+    await q(`UPDATE user_external_identities SET provider_open_id=NULL, external_key=$2
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-A`])
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-A`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
+    const before = await state(id)
+    await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'grant_required' })
+    expect(await state(id)).toEqual({ ...before, identity: [{ corp_id: CORP, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }] })
+    expect((await q(`SELECT external_key FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows)
+      .toEqual([{ external_key: `${CORP}:${id}-open-A` }])
+    expect((await q('SELECT open_id FROM directory_accounts WHERE id=$1', [account])).rows).toEqual([{ open_id: `${id}-open-A` }])
+  })
+
+  it.each([[true, 'union'], [false, 'union'], [true, 'open']] as const)('an unset configured corp preserves legacy key-only scope during enrichment (grant=%s, key=%s)', async (grant, keyKind) => {
+    const { id, email } = await seed({ identity: true, grant })
+    const legacyKey = `${CORP}:${id}-${keyKind}-A`
+    await q(`UPDATE user_external_identities SET corp_id=NULL, provider_open_id=$3, external_key=$2
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id, legacyKey, keyKind === 'open' ? `${id}-open-A` : null])
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-B`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
+    if (grant) expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
+    else await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'grant_required' })
+    expect((await q(`SELECT corp_id, external_key, provider_union_id, provider_open_id FROM user_external_identities
+      WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows).toEqual([{
+      corp_id: null, external_key: `${CORP}:${id}-open-B`, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-B`,
+    }])
+    expect((await state(id)).grant).toEqual([{ enabled: grant, granted_by: id }])
+    // Restoring the configured corp must still recognize the canonical legacy proof.
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: CORP })
+    if (!grant) await q(`UPDATE user_external_auth_grants SET enabled=TRUE WHERE provider='dingtalk' AND local_user_id=$1`, [id])
+    expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
+    expect((await q(`SELECT corp_id, external_key FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows)
+      .toEqual([{ corp_id: CORP, external_key: `${CORP}:${id}-open-B` }])
+  })
+
 })

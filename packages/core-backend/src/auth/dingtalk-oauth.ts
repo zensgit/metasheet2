@@ -253,13 +253,12 @@ function stateRedisKey(state: string): string {
   return `${STATE_REDIS_KEY_PREFIX}${state}`
 }
 
-function buildExternalKey(dtUser: DingTalkUserInfo): string {
-  const config = readDingTalkOauthConfig()
+function buildExternalKey(dtUser: DingTalkUserInfo, corpId = readDingTalkOauthConfig().corpId): string {
   // openId when present (web-OAuth, unchanged); unionId fallback for the E1
   // container surface (e1-container-login design-lock §2).
   const primaryId = dtUser.openId || dtUser.unionId
-  if (config.corpId) {
-    return `${config.corpId}:${primaryId}`
+  if (corpId) {
+    return `${corpId}:${primaryId}`
   }
   return dtUser.unionId || dtUser.openId || ''
 }
@@ -669,7 +668,7 @@ function describesSameDingTalkPerson(
   const existingUnionId = String(existing.provider_union_id ?? '').trim()
   const existingOpenId = String(existing.provider_open_id ?? '').trim()
   // Legacy rows may lack corp_id while their canonical key already proves the same scope.
-  if (existingCorpId !== configuredCorpId && !(
+  if (configuredCorpId && existingCorpId !== configuredCorpId && !(
     !existingCorpId && configuredCorpId
     && [existingUnionId, existingOpenId].some(id => id && existingKey === `${configuredCorpId}:${id}`)
   )) return false
@@ -678,6 +677,21 @@ function describesSameDingTalkPerson(
   const openId = String(dtUser.openId ?? '').trim()
   if (openId && existingOpenId) return openId === existingOpenId
   return existingKey === buildExternalKey(dtUser)
+}
+
+/** Keep legacy key scope when corp_id is absent; only strip a proven stored ID suffix. */
+function buildEnrichmentExternalKey(
+  existing: Record<string, unknown>,
+  dtUser: DingTalkUserInfo,
+  corpId: string | null | undefined,
+): string {
+  if (corpId) return buildExternalKey(dtUser, corpId)
+  const existingKey = String(existing.external_key ?? '').trim()
+  const previousId = [existing.provider_open_id, existing.provider_union_id]
+    .map(value => String(value ?? '').trim())
+    .find(id => id && existingKey.length > id.length + 1 && existingKey.endsWith(`:${id}`))
+  if (previousId) return `${existingKey.slice(0, -previousId.length)}${dtUser.openId || dtUser.unionId}`
+  return existingKey || buildExternalKey(dtUser, corpId)
 }
 
 type BackfillTransactionClient = {
@@ -783,6 +797,7 @@ async function upsertExternalIdentity(
       [PROVIDER, localUserId],
     )
 
+    let identityCorpId = config.corpId
     let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
       if (!describesSameDingTalkPerson(existingByUser.rows[0], dtUser, config.corpId)) {
@@ -798,16 +813,19 @@ async function upsertExternalIdentity(
       // enrichment; alternating logins stay stable).
       const hasOpenId = Boolean(dtUser.openId)
       const existing = existingByUser.rows[0]
+      // An optional OAuth corp must not erase the established identity namespace.
+      identityCorpId = config.corpId || String(existing.corp_id ?? '').trim() || null
+      const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
       const nextExternalKey = hasOpenId
-        ? externalKey
-        : String(existing.external_key ?? '').trim() || externalKey
+        ? identityExternalKey
+        : String(existing.external_key ?? '').trim() || identityExternalKey
       const nextUnionId =
         dtUser.unionId || existing.provider_union_id || null
       const nextOpenId = hasOpenId
         ? dtUser.openId || null
         : existing.provider_open_id || null
       const nextCorpId = hasOpenId
-        ? config.corpId || null
+        ? identityCorpId
         : existing.corp_id ?? config.corpId ?? null
       accessGraphChanged =
         (existing.external_key || '') !== nextExternalKey
@@ -825,7 +843,7 @@ async function upsertExternalIdentity(
              last_login_at = NOW(),
              updated_at = NOW()
          WHERE provider = $1 AND local_user_id = $2`,
-        [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, profile, hasOpenId],
+        [PROVIDER, localUserId, identityExternalKey, dtUser.unionId || null, dtUser.openId ?? null, identityCorpId, profile, hasOpenId],
       )
     } else {
       if (options.resolvedBy === 'identity') {
@@ -875,7 +893,7 @@ async function upsertExternalIdentity(
       })
     }
 
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId)
   })
 }
 
@@ -885,7 +903,6 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
   if (!dtUser.openId) return
 
   const config = readDingTalkOauthConfig()
-  const externalKey = buildExternalKey(dtUser)
   const openId = dtUser.openId
   const unionId = dtUser.unionId || ''
   const profile = JSON.stringify(dtUser)
@@ -893,6 +910,19 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
   await transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) return
+    const currentIdentity = await client.query(
+      `SELECT id, external_key, provider_union_id, provider_open_id, corp_id
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       FOR UPDATE
+       LIMIT 1`,
+      [PROVIDER, localUserId],
+    )
+    const existing = currentIdentity.rows[0]
+    // Rejected logins may enrich the same person, but cannot undo a concurrent admin rebind.
+    if (!existing || !describesSameDingTalkPerson(existing, dtUser, config.corpId)) return
+    const identityCorpId = config.corpId || String(existing.corp_id ?? '').trim() || null
+    const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
@@ -904,7 +934,7 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
            OR ($5 <> '' AND provider_union_id = $5 AND corp_id IS NOT DISTINCT FROM $6)
          )
        LIMIT 1`,
-      [PROVIDER, localUserId, externalKey, openId, unionId, config.corpId || null],
+      [PROVIDER, localUserId, externalKey, openId, unionId, identityCorpId],
     )
     if (conflictResult.rows.length > 0) {
       throw createPolicyError('DingTalk identity is already bound to another local user', {
@@ -924,12 +954,12 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
        WHERE provider = $1
          AND local_user_id = $2
          AND COALESCE(provider_open_id, '') = ''`,
-      [PROVIDER, localUserId, externalKey, dtUser.unionId || null, openId, config.corpId || null, profile],
+      [PROVIDER, localUserId, externalKey, dtUser.unionId || null, openId, identityCorpId, profile],
     )
 
     // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
     // what the directory page needs before an admin can turn the grant on.
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, config.corpId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId)
   })
 }
 
