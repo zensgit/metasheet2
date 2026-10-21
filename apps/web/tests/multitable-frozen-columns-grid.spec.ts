@@ -278,4 +278,16 @@ describe('MetaGridTable header corner stacking tier', () => {
     // ...and a frozen header still sits above a plain (scrolling) header cell.
     expect(Number(frozenHeader.style.zIndex)).toBeGreaterThan(Number(plainHeader.style.zIndex))
   })
+
+  // These tiers must stay LOCAL to the grid: corner 5 would otherwise tie MultitableWorkbench's narrow-width
+  // rail drawer (position:absolute; z-index:5, same parent stacking context) and, being later in the DOM,
+  // paint over it. The real click check is verification/rail-drawer.spec.ts ('drawer controls stay on top').
+  it('the grid root isolates its own stacking context', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/multitable/components/MetaGridTable.vue'), 'utf8').replace(/\r\n/g, '\n')
+    const match = source.match(/\n\.meta-grid \{([^}]*)\}/)
+    expect(match).not.toBeNull()
+    const body = match![1].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body).toMatch(/(^|[\s;])position: relative;/)
+    expect(body).toMatch(/(^|[\s;])isolation: isolate;/)
+  })
 })

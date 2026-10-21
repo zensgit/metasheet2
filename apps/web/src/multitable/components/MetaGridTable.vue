@@ -2002,6 +2002,11 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__fill-handle { position: absolute; right: 0; bottom: 0; width: 9px; height: 9px; padding: 0; border: 1px solid white; background: #3567c9; cursor: crosshair; z-index: 3; }
 .meta-grid {
   position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;
+  /* The grid is its own stacking context, so its sticky z-index tiers (header corner 5, frozen header 4,
+     ... see `thead .meta-grid__check-col` below) stay LOCAL: without this they compete with the host page
+     (e.g. MultitableWorkbench's narrow-width rail drawer, z-index 5 in the same parent context, which the
+     later-in-DOM grid corner would tie and paint over). */
+  isolation: isolate;
   border: 1px solid var(--ms-border-light, #e7e8ec);
   border-radius: var(--ms-radius-lg, 12px);
   background: var(--ms-bg-card, #fff);
@@ -2026,7 +2031,9 @@ function onKeydown(e: KeyboardEvent) {
         frozen-row x frozen-column body cells (cellStyle)
      2  frozen body cell (cellStyle)
      1  body check-col / row-num
-   The corner must stay strictly above 4 and 3, never tie with them. */
+   The corner must stay strictly above 4 and 3, never tie with them. These tiers
+   are local to `.meta-grid` (isolation: isolate), never compared with the
+   host page's overlays. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
