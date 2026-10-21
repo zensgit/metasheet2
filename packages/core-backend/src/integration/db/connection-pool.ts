@@ -246,6 +246,10 @@ export class ConnectionPool {
       connectionErrorHeard = error instanceof Error ? error : new Error('connection reported an error while checked out')
     }
     rawClient.on('error', onConnectionError)
+    // Set when the wrapper's ROLLBACK did not complete (its promise rejected). The connection is then
+    // released with this error, so the pool destroys it instead of handing it out again; the ROLLBACK is
+    // not retried on the same connection.
+    let rollbackFailure: Error | undefined
     const depthContext: TransactionDepthContext = {
       active: true,
       parent: this.transactionDepth.getStore(),
@@ -271,13 +275,26 @@ export class ConnectionPool {
         try {
           await rawClient.query('ROLLBACK')
         } catch (rollbackErr) {
-          this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
+          rollbackFailure = rollbackErr instanceof Error ? rollbackErr : new Error('ROLLBACK did not complete')
+          this.logger.error(
+            `ROLLBACK did not complete on pool "${this.name}"; the connection is destroyed instead of being returned to the pool`,
+            rollbackFailure,
+          )
         }
         throw e
       } finally {
         depthContext.active = false
         rawClient.removeListener('error', onConnectionError)
-        rawClient.release(connectionErrorHeard)
+        // Released exactly once. A connection that reported an error while held, or whose ROLLBACK did
+        // not complete, is released with that error (the connection error first), and the pool destroys it.
+        const destroyWith = connectionErrorHeard ?? rollbackFailure
+        rawClient.release(destroyWith)
+        if (destroyWith !== undefined) {
+          coreMetrics.increment('db_pool_connection_destroyed_total', {
+            pool: this.name,
+            reason: connectionErrorHeard !== undefined ? 'connection_error' : 'rollback_failed',
+          })
+        }
       }
     })
   }

@@ -181,6 +181,12 @@ export default defineConfig({
       // no-DB job cannot skip-green it; wired as a WHOLE FILE into the same plugin-tests.yml real-DB
       // step that carries auth-register-atomicity above (EXPECT_DB sentinel armed there).
       'tests/integration/core-pool-connection-error-listener.db.test.ts',
+      // Core pool connection release when the transaction wrapper's ROLLBACK does not complete (real
+      // DB, in-process): the connection is destroyed instead of returned, the caller gets the
+      // handler's error, and the next transaction runs on a different backend with no server notice.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired as a WHOLE
+      // FILE into the same plugin-tests.yml real-DB step as the connection-error listener suite above.
+      'tests/integration/core-pool-rollback-release.db.test.ts',
       // P2-1 (post-#3972 review): proves the create-time email existence check is
       // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
       // eligibility (no duplicate `users` row for a differently-cased email; no silent
