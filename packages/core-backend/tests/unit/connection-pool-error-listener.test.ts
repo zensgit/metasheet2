@@ -8,7 +8,8 @@
  *    it — attached once after checkout, removed before release (the fake records the listener count at
  *    the moment of release) — on the success path, the handler-failure path, the BEGIN-failure path and
  *    the COMMIT-failure path; a connection that reported an error while held is released with that error
- *    (the first one it reported), so the pool destroys it; repeated transactions leave no listener behind.
+ *    (the first one it reported), so the pool destroys it — also when the error is reported after COMMIT
+ *    has resolved and before the wrapper resumes; repeated transactions leave no listener behind.
  *
  * The pool points at a closed port (pattern of `settlement-coordination-main-pool-hook.test.ts`), so no
  * connection is ever made; the borrow-level cases hand `transaction()` a fake client through the pool's
@@ -43,15 +44,29 @@ class FakeClient extends EventEmitter {
   /** Statement text that rejects; `'*'` rejects every statement from then on. */
   failOn: string | null = null
   failWith: Error = new Error('fake statement failure')
+  /** When set, reported as a connection error right after COMMIT resolves, before the caller resumes. */
+  errorAfterCommit: Error | null = null
+  /** Order of connection errors reported by the fake and releases. */
+  readonly events: string[] = []
 
   query = async (config: string | { text: string }): Promise<{ rows: unknown[]; rowCount: number }> => {
     const text = typeof config === 'string' ? config : config.text
     this.statements.push(text)
     if (this.failOn !== null && (this.failOn === '*' || this.failOn === text)) throw this.failWith
+    if (text === 'COMMIT' && this.errorAfterCommit !== null) {
+      const heard = this.errorAfterCommit
+      // Queued before this call's promise settles, so it runs after COMMIT has resolved and before the
+      // code awaiting COMMIT resumes.
+      queueMicrotask(() => {
+        this.events.push('error-after-commit')
+        this.emit('error', heard)
+      })
+    }
     return { rows: [], rowCount: 0 }
   }
 
   release = (error?: Error): void => {
+    this.events.push('release')
     this.listenersAtRelease.push(this.listenerCount('error'))
     this.releases.push(error)
   }
@@ -210,6 +225,20 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     expect(client.statements).toEqual(['BEGIN', 'COMMIT'])
     expect(client.releases).toEqual([heard])
     expect(client.listenerCount('error')).toBe(0)
+    expect(client.listenersAtRelease).toEqual([0])
+  })
+
+  it('a connection error reported after COMMIT has resolved, before the wrapper resumes: the result is returned and the connection is released with that error', async () => {
+    const pool = open('d2-borrow-error-after-commit')
+    const client = new FakeClient()
+    const heard = serverError('57P01', 'FATAL')
+    client.errorAfterCommit = heard
+    lend(pool, client)
+    const result = await pool.transaction(async () => 'committed')
+    expect(result).toBe('committed')
+    expect(client.statements).toEqual(['BEGIN', 'COMMIT'])
+    expect(client.events).toEqual(['error-after-commit', 'release'])
+    expect(client.releases).toEqual([heard])
     expect(client.listenersAtRelease).toEqual([0])
   })
 

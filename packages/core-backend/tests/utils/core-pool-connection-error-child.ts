@@ -5,7 +5,7 @@
  * exit code and the lines. Nothing in this file listens for 'error' on the connection under test, so in
  * the `idle` and `borrowed` scenarios only the code under test handles it.
  *
- * Server-side closes are issued from a second connection, and only for backends this process opened.
+ * Every scenario only affects connections this process opened.
  */
 import { Client, Pool } from 'pg'
 
@@ -48,7 +48,7 @@ async function backendAlive(admin: Client, pid: number): Promise<boolean> {
   return Number(rows[0].n) > 0
 }
 
-/** Terminates `pid` from the admin connection and waits until the server no longer lists it. */
+/** Ends backend `pid` (opened by this process) and waits until the server no longer lists it. */
 async function terminateAndWait(pid: number, timeoutMs = 5000): Promise<boolean> {
   return withAdmin(async (admin) => {
     await admin.query('SELECT pg_terminate_backend($1)', [pid])
@@ -99,7 +99,7 @@ async function idleScenario(): Promise<number> {
   return 0
 }
 
-/** (b) the connection is terminated while the transaction wrapper holds it, between statements. */
+/** (b) a connection lost while the transaction wrapper holds it: the failure reaches the caller, the pool discards the connection, the next query succeeds. */
 async function borrowedScenario(): Promise<number> {
   const pool = appPool('d2-borrowed')
   const raw = pool.getInternalPool()
@@ -116,9 +116,8 @@ async function borrowedScenario(): Promise<number> {
       write(`BORROWED_IN_TXN pid=${pid} total=${raw.totalCount}`)
       const gone = await terminateAndWait(pid)
       write(`BORROWED_TERMINATED pid=${pid} gone=${gone}`)
-      // The driver marks the held client not queryable the moment it processes the server's close;
-      // waiting on that (a driver field, read only) makes the next statement deterministically the
-      // first one after the termination. No listener is added here.
+      // Waits until the driver reports the held client unusable (a driver field, read only; no
+      // listener is added here), so the outcome of the next statement is deterministic.
       const client = trx.__rawClient as unknown as { _queryable?: boolean }
       const heard = await waitFor(() => client._queryable === false, 5000)
       write(`BORROWED_CLIENT_STATE heard=${heard}`)
@@ -144,8 +143,7 @@ async function controlScenario(): Promise<number> {
   const { rows } = await pool.query('SELECT pg_backend_pid() AS pid')
   const pid = Number(rows[0].pid)
   write(`CONTROL_BORROWED pid=${pid}`)
-  // Printed before the close is issued; no line after it is guaranteed to be written in this scenario.
-  // No wait is needed in this leg.
+  // The start marker: the parent checks that it exists and that the end marker does not.
   write(`CONTROL_TERMINATING pid=${pid}`)
   await withAdmin((admin) => admin.query('SELECT pg_terminate_backend($1)', [pid]))
   await sleep(3000)

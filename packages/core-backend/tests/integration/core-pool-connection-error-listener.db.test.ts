@@ -6,16 +6,15 @@
  *  (a) idle: the server closes a pooled connection while it is idle in the pool; the child keeps
  *      running, the pool records one connection error, discards that connection, and the next query on
  *      the pool succeeds on a different backend.
- *  (b) borrowed: the server closes the connection while `ConnectionPool.transaction()` holds it,
- *      between statements; the next statement fails for the caller, the child keeps running, the pool
- *      has discarded the connection (total 0, one remove), and the next query succeeds on a different
- *      backend.
+ *  (b) borrowed: a connection lost while `ConnectionPool.transaction()` holds it; the failure reaches
+ *      the caller, the child keeps running, the pool has discarded the connection (total 0, one
+ *      remove), and the next query succeeds on a different backend.
  *  (c) control: a scenario that does NOT reach its last line — the proof that this harness tells a
  *      child that stops early from one that runs to its end, so the two legs above are not green by
  *      construction.
  *
- * Shared-database safe: the child only terminates backends it opened itself (identified by pid, read
- * through the connection itself), and the parent only reads `pg_stat_activity`.
+ * Shared-database safe: the child only affects connections it opened itself, and the parent only reads
+ * `pg_stat_activity`.
  */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -156,8 +155,7 @@ describeIfDatabase('core pool connection-error listeners (real DB, child process
 
   it('(c) control: the harness tells a child that does not reach its last line from one that does', async () => {
     const run = runChild('control')
-    // Anchors are the lines printed before the close is issued; nothing after it is guaranteed to be
-    // written in this scenario.
+    // Anchors: the start markers must exist and the end marker must not.
     const borrowed = line(run, 'CONTROL_BORROWED')
     const pid = Number(field(borrowed, 'pid'))
     expect(Number(field(line(run, 'CONTROL_TERMINATING'), 'pid'))).toBe(pid)
