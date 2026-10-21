@@ -236,11 +236,10 @@ export class ConnectionPool {
 
   async transaction<T>(handler: (client: { query: TransactionQuery; __rawClient: PoolClient }) => Promise<T>): Promise<T> {
     const rawClient = await this.pool.connect()
-    // While this connection is checked out, this listener records any connection error reported on it
-    // (the server closed the connection between statements, the socket broke): it keeps the first error
-    // only and sends nothing. The listener comes off in `finally`, before the connection goes back, and
-    // a connection that reported an error while held is released with that error, so the pool destroys
-    // it instead of handing it out again.
+    // While this connection is checked out, this listener records any connection error reported on it:
+    // it keeps the first error only and sends nothing. The listener comes off in `finally`, before the
+    // connection goes back, and a connection that reported an error while held is released with that
+    // error, so the pool destroys it instead of handing it out again.
     let connectionErrorHeard: Error | undefined
     const onConnectionError = (error: unknown): void => {
       if (connectionErrorHeard !== undefined) return

@@ -195,8 +195,8 @@ describe('ConnectionPool.transaction: borrow-time connection-error listener', ()
     await expect(
       pool.transaction(async (trx) => {
         await trx.query('SELECT 1')
-        // The server closed the connection between statements: pg reports it on the client (possibly
-        // more than once) and every later statement is refused.
+        // A connection error is reported on the held client (possibly more than once); later statements
+        // are refused.
         client.emit('error', first)
         client.emit('error', second)
         client.failOn = '*'
