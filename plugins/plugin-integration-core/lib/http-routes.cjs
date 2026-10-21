@@ -485,6 +485,8 @@ const {
   largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
+  STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN,
+  stockPreparationSourceContentDigest,
   normalizeActionParameters,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
@@ -766,6 +768,7 @@ const { persistStockPreparationErpMaterialSync } = require('./stock-preparation-
 // project row filter). Persists nothing, no external / PLM / K3 write path.
 const {
   listSnapshotBatches,
+  readNewestSnapshotBatchIdentity,
   getSnapshotDiff,
   listSnapshotDiffRows,
 } = require('./stock-preparation-snapshot-reads.cjs')
@@ -1729,7 +1732,8 @@ function assertStockPreparationPlmAutoPersistNoSteering(req) {
 // workspace, or project selection before action lookup, source-system lookup, adapter creation, or
 // source I/O. The route parameter `actionId` and body `parameters.projectNo` are its only selectors.
 // The optional body `sourceScopeDigest` (#6475, see `readMvpPersistSourceScopeDigest`) is NOT one: it
-// is compared against what the route resolved on its own and can only make the route refuse.
+// is compared against what the route resolved on its own and can only make the route refuse. Nor is
+// `sourceContentDigest` (#6475 round 2, see `readMvpPersistSourceContentDigest`), for the same reason.
 function assertStockPreparationTableActionMvpPersistNoSteering(req) {
   const steeringKeys = [
     'tenantId', 'workspaceId', 'projectId', 'targetProjectId', 'baseId', 'sheetId', 'objectId',
@@ -1784,6 +1788,84 @@ function readMvpPersistSourceScopeDigest(body) {
     throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'sourceScopeDigest must be the digest the apply answered', { field: 'sourceScopeDigest' })
   }
   return value
+}
+
+// #6475 fix round 2 — WHAT THE WRITE READ, AS CONTENT. The apply answers `sourceContentDigest`
+// (table-actions `stockPreparationSourceContentDigest`); the panel hands it back to ④ beside the scope
+// digest. Present, mvp-persist archives only if the source still says what ③ read AND the sheet holds
+// all of it (`prepareStockPreparationMvpSnapshot`). Like the scope digest it selects nothing — absent
+// is the direct-call route it always was, present can only add a refusal. Same 400-before-any-I/O rule.
+function readMvpPersistSourceContentDigest(body) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'sourceContentDigest')) return null
+  const value = body.sourceContentDigest
+  if (typeof value !== 'string' || !STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN.test(value)) {
+    throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'sourceContentDigest must be the digest the apply answered', { field: 'sourceContentDigest' })
+  }
+  return value
+}
+
+// #6475 fix round 2 — A SHEET EDIT DOES NOT MAKE A KEPT BATCH UNKEEPABLE.
+//
+// mvp-persist mints `syncRunId` (and, under the default rule, the batch id itself) from a revision of
+// its dry run, and the dry-run `revision` hashes the target sheet as it stands plus the plan computed
+// against it. The review executed two consequences:
+//   * one human edit (备注 and the other columns people own) moved both ids. The mint now hashes the
+//     sheet WITHOUT those columns (`archiveRevision`, stock-preparation-table-actions.cjs). For a sheet
+//     nobody has typed into that is byte-identical to the old revision, so this re-keys nothing kept.
+//   * under the creation-hour rule the batch id (the newest material's creation hour) never moves with
+//     the sheet, so ANY sheet-side difference that still reaches the mint — a sync that rewrote cells
+//     (a partial write completed later, a hand edit of a PLM cell put back), or a batch kept before
+//     this change from a sheet with human values — lands on the kept batch under a different run id.
+//     The persist refused that 409 PERSIST_IDEMPOTENCY_CONFLICT snapshot_batch/content_mismatch on
+//     every later archive, permanently, for lines it had already kept.
+//
+// So AFTER the persist refuses exactly that way, this asks it once more — under its own lock, with its
+// complete exact-replay check (batch row, run row, every line, the project row, the live pointer) —
+// whether this sync's content IS the kept batch under this batch id, replayed under the run id that
+// batch was kept with. Only when that batch is the project's NEWEST: replaying an older one would pass
+// against a pointer that has moved on, so content that went back to an older hour while a newer batch
+// is kept stays refused. Equal: nothing is written, and the archive answers what it answers for any
+// batch already kept (200, persisted:false). Anything else — the identity read failed, the newest batch
+// is another one, the replay is not exact — and the ORIGINAL refusal stands, unchanged. The replay names
+// a batch id the persist has just found (batch rows are never deleted), so it takes the persist's
+// replay branch and cannot create. Under the default rule the batch id and run id share one digest, so
+// the kept run id is the one just refused and the replay can only refuse again: inert there.
+const MVP_PERSIST_REPLAY_FAMILY_CODES = new Set([
+  'PERSIST_IDEMPOTENCY_CONFLICT',
+  'PERSIST_EXISTING_BATCH_INCOMPLETE',
+  'PERSIST_EXISTING_BATCH_READ_UNPROVABLE',
+  'PERSIST_PROJECT_POINTER_STALE',
+  'PERSIST_VERSION_NOT_MONOTONIC',
+])
+
+function isKeptBatchRunConflict(error) {
+  return Boolean(error)
+    && error.code === 'PERSIST_IDEMPOTENCY_CONFLICT'
+    && isPlainObject(error.details)
+    && error.details.target === 'snapshot_batch'
+    && error.details.reason === 'content_mismatch'
+}
+
+async function replayKeptBatchUnderItsOwnRun(persistInput, refusal) {
+  let newest = null
+  try {
+    newest = await readNewestSnapshotBatchIdentity({
+      recordsApi: persistInput.recordsApi,
+      provisioning: persistInput.provisioning,
+      targetProjectId: persistInput.targetProjectId,
+      businessProjectId: persistInput.projectId,
+      permission: persistInput.permission,
+    })
+  } catch (_error) {
+    throw refusal
+  }
+  if (!newest || newest.snapshotBatchId !== persistInput.snapshotBatchId) throw refusal
+  try {
+    return await persistStockPreparationSyncRun({ ...persistInput, syncRunId: newest.syncRunId })
+  } catch (error) {
+    if (error && MVP_PERSIST_REPLAY_FAMILY_CODES.has(error.code)) throw refusal
+    throw error
+  }
 }
 
 function mvpPersistSourceBindingSplit(reason) {
@@ -1918,8 +2000,9 @@ const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPol
 // Confirmation-decision reconcile accepts EXACTLY the dry-run inputs MINUS the value-bearing opt-in:
 // the plan/revision the ledger binds to are recomputed server-side and can never be request-supplied.
 const VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
-// `sourceScopeDigest` (#6475): a refusal-only cross-check, never a selector — see readMvpPersistSourceScopeDigest.
-const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters', 'sourceScopeDigest'])
+// `sourceScopeDigest` (#6475) and `sourceContentDigest` (#6475 round 2): refusal-only cross-checks,
+// never selectors — see readMvpPersistSourceScopeDigest / readMvpPersistSourceContentDigest.
+const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters', 'sourceScopeDigest', 'sourceContentDigest'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
@@ -7640,6 +7723,7 @@ function requireStockPreparationAudit() {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
       const parameters = normalizeActionParameters(body.parameters)
       const expectedSourceScopeDigest = readMvpPersistSourceScopeDigest(body)
+      const writtenSourceContentDigest = readMvpPersistSourceContentDigest(body)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       // S1: the validated project number rides into the lookup (the overlay keys on it).
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
@@ -7687,11 +7771,16 @@ function requireStockPreparationAudit() {
         b2aSourceObjects: mvpPersistB2aSourceObjects,
         tenantId,
         now: Date.now(),
+        // #6475 round 2: refusal-only — see prepareStockPreparationMvpSnapshot.
+        writtenSourceContentDigest,
       })
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
-      const batchScope = `${stableScope}\n${prepared.revision}`
+      // #6475 round 2: the ARCHIVE revision — the dry-run revision with the columns people own taken
+      // out of the sheet it hashes (see prepareStockPreparationMvpSnapshot). Unchanged for a sheet
+      // nobody has typed into, so no batch already kept is re-keyed.
+      const batchScope = `${stableScope}\n${prepared.archiveRevision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
       // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
       // project's batches; shipped code separated them by this content-revision digest plus the
@@ -7705,7 +7794,8 @@ function requireStockPreparationAudit() {
       // `syncRunId` stays revision-derived on purpose: under the hour rule a second pull in the same
       // hour with CHANGED content then lands on the same batch id with a different run, which the
       // persist replay check refuses with a coded idempotency conflict — fail closed, never a silent
-      // overwrite of a batch the operator believes is that hour's.
+      // overwrite of a batch the operator believes is that hour's. #6475 round 2: a different run id
+      // over UNCHANGED content is not that case; `replayKeptBatchUnderItsOwnRun` tells them apart.
       //
       // An UNKNOWN declared mode is a deploy-time typo. It refuses with a coded 422 rather than
       // quietly meaning "legacy", because a deployment that believes it turned the rule on and did
@@ -7730,7 +7820,7 @@ function requireStockPreparationAudit() {
         rows: prepared.expansionResult,
         legacyBatchId: `snapshot_${batchDigest}`,
       })
-      const result = await persistStockPreparationSyncRun({
+      const persistInput = {
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
@@ -7745,7 +7835,17 @@ function requireStockPreparationAudit() {
         sourceProjectNo: prepared.parameters.projectNo,
         expansionResult: prepared.expansionResult,
         readPlan: action.source.readPlan,
-      })
+      }
+      let result
+      let replayedUnderKeptRun = false
+      try {
+        result = await persistStockPreparationSyncRun(persistInput)
+      } catch (error) {
+        // #6475 round 2: the kept batch's own run id, for unchanged content only — see the helper.
+        if (!isKeptBatchRunConflict(error)) throw error
+        result = await replayKeptBatchUnderItsOwnRun(persistInput, error)
+        replayedUnderKeptRun = true
+      }
       return sendOk(res, {
         status: result.persisted ? 'created' : 'skipped_existing',
         persisted: result.persisted === true,
@@ -7754,6 +7854,9 @@ function requireStockPreparationAudit() {
         // Values-free: counts, the effective mode and a coded reason. A deployment that asked for
         // the hour rule and silently got the legacy id would be exactly the failure this reports.
         batchIdentity: batchIdentity.evidence,
+        // Values-free boolean, present only on the round-2 path: this sync's content was proven to
+        // be the project's newest kept batch under the run id it was kept with; nothing was written.
+        ...(replayedUnderKeptRun && result.persisted === false ? { replayedUnderKeptRun: true } : {}),
         evidence: result.evidence,
       }, result.persisted ? 201 : 200)
     },
@@ -7854,13 +7957,16 @@ function requireStockPreparationAudit() {
       // #6475: WHICH source this write read — the tenant and source `action` was resolved under here,
       // with this request's workspace hint — as the values-free token mvp-persist checks itself
       // against. The panel hands it straight back to step ④; it selects nothing there.
+      // #6475 round 2: and WHAT it read, as the content digest (the raw revision is not answered).
+      const { sourceContentRevision: appliedSourceContentRevision, ...applyAnswer } = applyResult
       return sendOk(res, {
-        ...applyResult,
+        ...applyAnswer,
         sourceScopeDigest: stockPreparationSourceScopeDigest({
           tenantId: applyTenantId,
           actionId: action.actionId,
           externalSystemId: action.source.externalSystemId,
         }),
+        sourceContentDigest: stockPreparationSourceContentDigest(appliedSourceContentRevision),
       })
     },
 

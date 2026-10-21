@@ -44,6 +44,7 @@ import {
   createStockPreparationProjectSyncApi,
   plannedCountsOf,
   runStockPreparationProjectSync,
+  sourceContentDigestOf,
   sourceScopeDigestOf,
   summarizeProjectSync,
   writtenCountsOf,
@@ -63,6 +64,8 @@ const FORBIDDEN = [PLANTED_DRAWING, PLANTED_MATERIAL, PLANTED_NAME, PLANTED_SECR
 
 // The shape the apply answers for `sourceScopeDigest` (#6475): 32 lowercase hex. Synthetic.
 const SOURCE_DIGEST = '0123456789abcdef0123456789abcdef'
+// …and for `sourceContentDigest` (#6475 round 2). Synthetic, distinct from the scope digest.
+const CONTENT_DIGEST = 'fedcba9876543210fedcba9876543210'
 
 function plan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -314,6 +317,7 @@ describe('項目接入 — the four-step import run', () => {
     ['STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT', 409, 'fail', 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT'],
     ['STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 404, 'fail', 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND'],
     ['STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 409, 'fail', 'BATCH_ARCHIVE_PLAN_NOT_READY'],
+    ['STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH', 409, 'fail', 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH'],
   ] as const)('G-2 #6475: archive refusal %s (%i) reports %s with its own reason, and the import still reads as done', async (code, status, expectedStatus, reason) => {
     const api = makeApi({
       archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/mvp-persist', { code })),
@@ -409,6 +413,49 @@ describe('項目接入 — the four-step import run', () => {
     expect(api.archive).toHaveBeenCalledWith(PROJECT_NO, { sourceScopeDigest: SOURCE_DIGEST })
     // The digest is a server handle, not a business value — but it is still not a step detail.
     expect(JSON.stringify(report.steps)).not.toContain(SOURCE_DIGEST)
+  })
+
+  // ---- review round 2: step ④ carries step ③'s content digest; a partial ③ is not archived ------
+  it('round 2: the apply\'s content digest is handed to the archive verbatim, beside the scope digest', async () => {
+    const api = makeApi({ apply: vi.fn().mockResolvedValue(applied({ sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest: CONTENT_DIGEST })) })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'ok', reason: 'BATCH_ARCHIVED' })
+    expect(api.archive).toHaveBeenCalledWith(PROJECT_NO, { sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest: CONTENT_DIGEST })
+    expect(JSON.stringify(report.steps)).not.toContain(CONTENT_DIGEST)
+    // Each digest stands on its own: a malformed content digest is dropped, the scope digest still rides.
+    const malformed = makeApi({ apply: vi.fn().mockResolvedValue(applied({ sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest: CONTENT_DIGEST.toUpperCase() })) })
+    await runStockPreparationProjectSync(malformed, PROJECT_NO)
+    expect(malformed.archive).toHaveBeenCalledWith(PROJECT_NO, { sourceScopeDigest: SOURCE_DIGEST })
+    expect(sourceContentDigestOf(CONTENT_DIGEST)).toBe(CONTENT_DIGEST)
+    expect(sourceContentDigestOf(`${CONTENT_DIGEST}0`)).toBeNull()
+    expect(sourceContentDigestOf(PLANTED_SECRET)).toBeNull()
+  })
+
+  it('round 2: the parity refusal names both causes and the one next step, with its reason in the detail', async () => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/mvp-persist', {
+        code: 'STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH', detailReason: 'sheet_not_settled',
+      })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'fail', reason: 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH' })
+    expect(stepOf(report, 'archive').detail).toEqual({ status: 409, code: 'STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH', reason: 'sheet_not_settled' })
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SYNC_PARITY_MISMATCH
+    for (const token of ['source_changed_since_write', 'sheet_not_settled']) {
+      expect(plain.zhNext).toContain(token)
+      expect(plain.enNext).toContain(token)
+    }
+    expect(plain.en).not.toMatch(/already kept|was kept \(/)
+  })
+
+  it('round 2 (review blocker 3): the ledger-conflict copy no longer blames only a corrected BOM, and clears a notes edit', () => {
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_LEDGER_CONFLICT
+    // The other creation-hour cause the copy owes the operator: a BOM back to an older batch's hour.
+    expect(plain.zhNext).toContain('更早一个批次')
+    expect(plain.enNext).toContain('changed back to an earlier batch')
+    // And a 备注 edit — the review's P2 — no longer ends here, so the copy must not leave that open.
+    expect(plain.zhNext).toContain('备注')
+    expect(plain.enNext).toContain('such as notes, does not end here')
   })
 
   it('round 1: no digest, or one of the wrong shape, keeps the one-argument archive call', async () => {
@@ -611,8 +658,18 @@ describe('項目接入 — the four-step import run', () => {
     // what DID land has to be readable for the headline to be truthful.
     expect(report.imported).toBe(false)
     expect(report.written).toMatchObject({ created: 2, failed: 1 })
-    // The archive still runs: rows landed, so this run has a batch worth keeping.
-    expect(api.archive).toHaveBeenCalled()
+    // #6475 round 2 (review blocker 2): the archive is NOT attempted. It would keep the whole source as
+    // this sync's batch while the sheet holds only part of it — the review executed exactly that (③
+    // created 1 / failed 1, ④ answered 201 and kept the row ③ failed to write).
+    expect(api.archive).not.toHaveBeenCalled()
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_WRITE_INCOMPLETE', detail: { failed: 1 } })
+    // Its own sentence — not BATCH_ARCHIVE_NOT_ATTEMPTED's, which says nothing was written.
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_WRITE_INCOMPLETE
+    expect(plain).toBeDefined()
+    expect(plain.zh).not.toBe(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_NOT_ATTEMPTED.zh)
+    expect(plain.zhNext).toContain('再同步一次')
+    expect(plain.enNext).toContain('sync again')
+    assertValuesFree(report)
   })
 
   it('G-4: "blocked" is reserved for runs where nothing was written', async () => {
@@ -958,6 +1015,21 @@ describe('#6475 round 1 — the archive call on the wire', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe(ARCHIVE_ROUTE)
     expect(calls[0].body).toEqual({ parameters: { projectNo: PROJECT_NO }, sourceScopeDigest: SOURCE_DIGEST })
+  })
+
+  it('W-3 (round 2): the content digest rides in the body beside the scope digest; a malformed one is dropped alone', async () => {
+    const calls = capture(() => new Response(JSON.stringify({ ok: true, data: archived() }), { status: 201 }))
+    await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).archive(PROJECT_NO, { sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest: CONTENT_DIGEST })
+    expect(calls[0].url).toBe(ARCHIVE_ROUTE)
+    expect(calls[0].body).toEqual({ parameters: { projectNo: PROJECT_NO }, sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest: CONTENT_DIGEST })
+    for (const sourceContentDigest of [CONTENT_DIGEST.toUpperCase(), PLANTED_SECRET, '']) {
+      const again = capture(() => new Response(JSON.stringify({ ok: true, data: archived() }), { status: 201 }))
+      await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).archive(PROJECT_NO, { sourceScopeDigest: SOURCE_DIGEST, sourceContentDigest })
+      expect(again[0].body).toEqual({ parameters: { projectNo: PROJECT_NO }, sourceScopeDigest: SOURCE_DIGEST })
+    }
+    const contentOnly = capture(() => new Response(JSON.stringify({ ok: true, data: archived() }), { status: 201 }))
+    await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).archive(PROJECT_NO, { sourceContentDigest: CONTENT_DIGEST })
+    expect(contentOnly[0].body).toEqual({ parameters: { projectNo: PROJECT_NO }, sourceContentDigest: CONTENT_DIGEST })
   })
 
   it('W-2: without a digest — or with one of the wrong shape — the body is exactly what it always was', async () => {

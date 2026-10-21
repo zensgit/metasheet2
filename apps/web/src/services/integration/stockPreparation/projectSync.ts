@@ -44,6 +44,10 @@
 // Being a separate consumer, it re-resolves the source on its own — WITHOUT the workspace hint steps 1
 // and 3 carry — so step 3's `sourceScopeDigest` rides along and the server refuses (409
 // STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT) rather than keep another source's rows as this batch.
+// It also re-READS that source, after the write: step 3's `sourceContentDigest` rides along too, and the
+// server refuses (409 STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH) when the source changed since step 3
+// or the sheet does not hold everything step 3 read (#6475 round 2). And a PARTIAL write is never
+// archived at all: step 4 is not attempted, because the batch would hold rows the sheet does not.
 //
 // VALUES-FREE. A step result carries a REASON CODE from the closed vocabulary below plus a detail map
 // of counts, HTTP statuses and clamped server tokens. No server message and no cell content is ever
@@ -142,6 +146,13 @@ export type StockPreparationProjectSyncReason =
   | 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT'
   | 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND'
   | 'BATCH_ARCHIVE_PLAN_NOT_READY'
+  // #6475 round 2 — the archive is not what this sync wrote: the source changed after step ③, or the
+  // sheet does not hold all of it. A FAIL, like the refusals above.
+  | 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH'
+  // #6475 round 2 — step ③ was partial, so step ④ is NOT attempted (a SKIP: nothing was asked of the
+  // archive). Its own reason because BATCH_ARCHIVE_NOT_ATTEMPTED says nothing was written, and here
+  // some rows were.
+  | 'BATCH_ARCHIVE_WRITE_INCOMPLETE'
 
 export interface StockPreparationProjectSyncStepDescriptor {
   id: StockPreparationProjectSyncStepId
@@ -729,6 +740,13 @@ export interface StockPreparationProjectSyncApplyResult {
    * `sourceScopeDigestOf`.
    */
   sourceScopeDigest?: unknown
+  /**
+   * #6475 round 2 — the values-free digest of WHAT this apply read (stock-preparation-table-actions.cjs
+   * `stockPreparationSourceContentDigest`). Handed back to step ④ verbatim, which refuses rather than
+   * archive content the source no longer has or the sheet does not hold. Read through
+   * `sourceContentDigestOf`.
+   */
+  sourceContentDigest?: unknown
 }
 
 /** The digest's one wire shape; anything else is treated as absent, never forwarded. */
@@ -738,10 +756,17 @@ export function sourceScopeDigestOf(value: unknown): string | null {
   return typeof value === 'string' && STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value) ? value : null
 }
 
+/** The content digest has the same one wire shape (32 lowercase hex); anything else is absent. */
+export function sourceContentDigestOf(value: unknown): string | null {
+  return typeof value === 'string' && STOCK_PREPARATION_SOURCE_SCOPE_DIGEST_PATTERN.test(value) ? value : null
+}
+
 /** What step ④ hands the archive call besides the project number. */
 export interface StockPreparationProjectSyncArchiveOptions {
   /** Step ③'s `sourceScopeDigest`, when it answered one. */
   sourceScopeDigest?: string
+  /** Step ③'s `sourceContentDigest`, when it answered one. */
+  sourceContentDigest?: string
 }
 
 export interface StockPreparationProjectSyncArchiveResult {
@@ -884,10 +909,14 @@ export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_P
  *   PERSIST_IDEMPOTENCY_CONFLICT (409)        the snapshot ledger already holds rows that do not match
  *       this persist. FAIL. The code alone covers states that are NOT "a copy was kept": a project
  *       ledger with two rows for one project (`project`/`duplicate_key` — checked on EVERY persist,
- *       permanent, no repair path), and under the opt-in creation-hour batch rule a corrected BOM that
- *       adds no newer material landing on the batch id already kept (`snapshot_batch`/
- *       `content_mismatch` — the id is the newest material CREATION hour, not the wall clock, so "the
- *       next hour" never comes). Nothing was stored in either; the details ride to the step detail.
+ *       permanent, no repair path), and, under the opt-in creation-hour batch rule, a batch id that is
+ *       already kept with DIFFERENT lines (`snapshot_batch`/`content_mismatch`): a corrected BOM that
+ *       adds no newer material, or a BOM that went back to an older batch's hour while a newer batch
+ *       is kept. The batch id is the newest material's CREATION hour, not the wall clock, so "the next
+ *       hour" never comes. #6475 round 2: a sheet edit (备注 and the other columns people own) or a
+ *       sync that only rewrote sheet cells no longer lands here — the archive recognises the batch it
+ *       already kept and answers BATCH_ALREADY_ARCHIVED. Nothing was stored in either case above; the
+ *       details ride to the step detail.
  *   PERSIST_EXISTING_BATCH_INCOMPLETE (409)   a copy under this batch identity was left half-written
  *       (a pre-P4 crash or an external delete). FAIL. The server never patches it on its own, and an
  *       unchanged BOM keeps the same batch id, so it repeats until an administrator runs the one-shot,
@@ -914,6 +943,11 @@ export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_P
  *   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY (409)  the archive's own recomputed plan still
  *       holds rows (it does not reuse the trial's confirmed decisions or stored rules — see
  *       stock-preparation-mvp-persist-duplicate-hold-gate.test.cjs). FAIL.
+ *   STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH (409)  #6475 round 2: what the archive would keep is
+ *       not what step ③ wrote — `source_changed_since_write` (the source changed after the write) or
+ *       `sheet_not_settled` (the sheet does not hold everything step ③ read: rows ③ could not write,
+ *       or a PLM cell edited by hand since). Nothing was stored. FAIL → sync again; a row ③ keeps
+ *       failing is fixed first.
  *
  * Every other refusal keeps BATCH_ARCHIVE_FAILED. The flag-off code and 401/403 are classified by
  * the caller before this table is consulted, exactly as before.
@@ -932,6 +966,7 @@ export const STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES: Readonly<Record<string, {
   STOCK_PREPARATION_MVP_SOURCE_BINDING_SPLIT: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_BINDING_SPLIT' as const }),
   STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND' as const }),
   STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_PLAN_NOT_READY' as const }),
+  STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH: Object.freeze({ status: 'fail' as const, reason: 'BATCH_ARCHIVE_SYNC_PARITY_MISMATCH' as const }),
 })
 
 /**
@@ -1124,12 +1159,17 @@ export async function runStockPreparationProjectSync(
   }
 
   let writeOk = false
+  // #6475 round 2: a partial write is an import, but not one the archive may keep (see step ④).
+  let writePartial = false
   // #6475: which source ③ read, as the server's values-free digest — handed to ④ untouched so the
   // archive refuses rather than keep a different source's rows as this sync's batch.
   let sourceScopeDigest: string | null = null
+  // #6475 round 2: and WHAT it read, likewise handed to ④ untouched.
+  let sourceContentDigest: string | null = null
   try {
     const applied = await api.apply(projectNo, token)
     sourceScopeDigest = sourceScopeDigestOf(applied?.sourceScopeDigest)
+    sourceContentDigest = sourceContentDigestOf(applied?.sourceContentDigest)
     written = writtenCountsOf(applied?.apply?.counts)
     const applyStatus = clampToken(applied?.status, STOCK_PREPARATION_APPLY_STATUSES)
     const detail: Record<string, string | number> = {
@@ -1155,6 +1195,7 @@ export async function runStockPreparationProjectSync(
       // Some rows landed and some did not. It IS an import, and it is also unfinished work.
       record(result(3, 'apply', 'skip', 'WRITE_PARTIAL', detail))
       writeOk = true
+      writePartial = true
     } else {
       record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
     }
@@ -1170,8 +1211,19 @@ export async function runStockPreparationProjectSync(
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
   }
+  // #6475 round 2: the archive keeps the WHOLE source as this sync's batch; after a partial write the
+  // sheet holds only part of it, so keeping it would put rows in 批次与差异 that are not in the sheet.
+  // Not attempted (the server refuses it too, with the content digest). The next sync that writes the
+  // rest archives as usual.
+  if (writePartial) {
+    record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_WRITE_INCOMPLETE', { failed: written ? written.failed : 0 }))
+    return done()
+  }
+  const archiveOptions: StockPreparationProjectSyncArchiveOptions = {}
+  if (sourceScopeDigest) archiveOptions.sourceScopeDigest = sourceScopeDigest
+  if (sourceContentDigest) archiveOptions.sourceContentDigest = sourceContentDigest
   try {
-    const archived = await (sourceScopeDigest ? api.archive(projectNo, { sourceScopeDigest }) : api.archive(projectNo))
+    const archived = await (Object.keys(archiveOptions).length > 0 ? api.archive(projectNo, archiveOptions) : api.archive(projectNo))
     const created = archived?.created && typeof archived.created === 'object' ? archived.created : {}
     const detail: Record<string, string | number> = {
       batch: intOf(created.batch),
@@ -1473,14 +1525,17 @@ export function createStockPreparationProjectSyncApi(
       // verified claim, or on a claimless token the `x-tenant-id` header apiFetch attaches; see
       // STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES' TENANT_REQUIRED line), and it resolves the source with
       // NO workspace hint — which is why this run hands back step ③'s `sourceScopeDigest`: it names
-      // the source ③ read without selecting anything, so mvp-persist can only refuse a mismatch.
-      const digest = sourceScopeDigestOf(options.sourceScopeDigest)
+      // the source ③ read without selecting anything, so mvp-persist can only refuse a mismatch. Same
+      // for `sourceContentDigest` (#6475 round 2): it names what ③ read, and can only make ④ refuse.
+      const body: Record<string, unknown> = { parameters: { projectNo } }
+      const scopeDigest = sourceScopeDigestOf(options.sourceScopeDigest)
+      if (scopeDigest) body.sourceScopeDigest = scopeDigest
+      const contentDigest = sourceContentDigestOf(options.sourceContentDigest)
+      if (contentDigest) body.sourceContentDigest = contentDigest
       const response = await apiFetch(route, {
         method: 'POST',
         headers: json,
-        body: JSON.stringify(digest
-          ? { parameters: { projectNo }, sourceScopeDigest: digest }
-          : { parameters: { projectNo } }),
+        body: JSON.stringify(body),
       })
       return readEnvelope<StockPreparationProjectSyncArchiveResult>(response, route)
     },

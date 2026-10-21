@@ -2100,8 +2100,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_LEDGER_CONFLICT: Object.freeze({
     zh: '数据已经写进去了;快照账本里已有的记录和这次要存的对不上,这次没有存档',
     en: 'The data is in; records already in the snapshot ledger do not match what this sync would keep, so nothing was kept',
-    zhNext: '已存的记录不会被改写;在平台管理员处理之前,再同步通常也会停在这里。请把错误码和技术详情里的 target/reason 交给平台管理员。按物料创建时间分批时,没有新增物料的更正会落到已经存过的同一批次上,也会这样。',
-    enNext: 'Kept records are never rewritten; until a platform administrator looks at it, syncing again usually stops here too. Give the error code and the target/reason from the technical details to a platform administrator. When batches are split by material creation time, a correction that adds no newer material lands on a batch already kept and ends here as well.',
+    zhNext: '已存的记录不会被改写;在平台管理员处理之前,再同步通常也会停在这里。请把错误码和技术详情里的 target/reason 交给平台管理员。按物料创建时间分批时,同一个批次号下已经存过不同的内容也会这样:没有新增物料的更正,或者物料改回了更早一个批次的样子、而更新的批次已经存过。只改了备注这类人工填写的列,不会停在这里。',
+    enNext: 'Kept records are never rewritten; until a platform administrator looks at it, syncing again usually stops here too. Give the error code and the target/reason from the technical details to a platform administrator. When batches are split by material creation time, it also ends here when that batch is already kept with different lines: a correction that adds no newer material, or a BOM changed back to an earlier batch while a newer one is kept. Editing only the columns people fill in, such as notes, does not end here.',
   }),
   BATCH_ARCHIVE_PREVIOUS_INCOMPLETE: Object.freeze({
     zh: '数据已经写进去了;这一批之前的存档没写完整,这次没有存档',
@@ -2162,6 +2162,27 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'The data is in; when the archive recomputed this batch it still had unresolved conflict rows, which a snapshot cannot hold, so nothing was kept',
     zhNext: '存档会自己重新算一遍,不沿用已经确认过的决定(比如保留多行的重复件),这样的行快照存不下。再同步一次;如果第①步也提示要确认,先去「确认队列」处理;一直这样请把错误码交给平台管理员。',
     enNext: 'The archive recomputes on its own and does not reuse decisions already confirmed (such as keeping several rows of a duplicated part), and a snapshot cannot hold such rows. Sync again; if step 1 also asks for confirmation, work through the confirmation queue first; if it keeps happening, give the error code to a platform administrator.',
+  }),
+  /**
+   * #6475 round 2 — the archive re-reads the source after the write and refuses to keep anything that is
+   * not what step ③ wrote. The technical detail's `reason` says which half failed; the copy names both,
+   * because the next step is the same: one more sync, with any row step ③ keeps failing fixed first.
+   */
+  BATCH_ARCHIVE_SYNC_PARITY_MISMATCH: Object.freeze({
+    zh: '数据已经写进去了;这次要存档的内容和第③步写进表里的对不上,为了不存错,这次没有存档',
+    en: 'The data is in; what the archive would keep does not match what step 3 wrote to the sheet, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '要么写入之后数据来源那边又改了(技术详情 reason=source_changed_since_write),要么表里没有第③步读到的全部内容(reason=sheet_not_settled:有的行没写进去,或者写入之后有人手改了从 PLM 带过来的列)。再同步一次,让试算、写入和存档读到同一份数据;如果第③步一直有写不进去的行,先把那些行处理好。',
+    enNext: 'Either the data source changed after the write (technical detail reason=source_changed_since_write), or the sheet does not hold everything step 3 read (reason=sheet_not_settled: rows that could not be written, or a column that comes from PLM edited by hand since). Sync again so the plan, the write and the archive read the same data; if step 3 keeps reporting rows it could not write, fix those first.',
+  }),
+  /**
+   * #6475 round 2 — step ③ was partial, so step ④ was not attempted. A SKIP, and deliberately NOT
+   * BATCH_ARCHIVE_NOT_ATTEMPTED, whose sentence says nothing was written.
+   */
+  BATCH_ARCHIVE_WRITE_INCOMPLETE: Object.freeze({
+    zh: '有的行没写进去,所以这次没有存档',
+    en: 'Some rows could not be written, so this sync was not kept as a batch',
+    zhNext: '存档会把这次读到的整份数据存成一个批次,而表里现在只有其中一部分,存下来会和表对不上。先按第③步的提示把没写进去的行处理好,再同步一次:全部写进去以后,存档会照常留下。',
+    enNext: 'The archive keeps everything this sync read as one batch, and the sheet holds only part of it, so the batch would not match the sheet. Deal with the rows step 3 could not write, then sync again: once everything is written, the archive is kept as usual.',
   }),
 })
 
