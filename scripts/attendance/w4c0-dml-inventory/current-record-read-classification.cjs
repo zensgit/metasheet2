@@ -35,7 +35,7 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'bindFirst', 1, 'frozen_binding_write_precondition'),
   entry('plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs', 'readFrozenTimezoneWindows', 1, 'frozen_source_change_precondition'),
   entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'target', 1, 'frozen_target_precondition'),
-  entry('plugins/plugin-attendance/lib/attendance-business-trip.cjs', 'dateKey', 1, 'trip_work_date_conflict_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-business-trip.cjs', 'assertWholeShifts', 1, 'trip_work_date_conflict_precondition'),
   // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),

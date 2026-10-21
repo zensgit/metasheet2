@@ -1112,6 +1112,15 @@ export interface DatabaseModel {
 export interface DatabaseAPI {
   query(sql: string, params?: unknown[]): Promise<DatabaseQueryResult>
   transaction<T>(callback: (trx: DatabaseTransaction) => Promise<T>): Promise<T>
+  /**
+   * SERIALIZABLE work after the org rollout session lock is held. Missing on stubs;
+   * payroll settlement refuses to run without it.
+   */
+  transactionWithRolloutLock?<T>(
+    orgId: string,
+    mode: 'shared' | 'exclusive',
+    callback: (trx: DatabaseTransaction) => Promise<T>,
+  ): Promise<T>
   model(name: string): DatabaseModel
 }
 

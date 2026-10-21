@@ -131,14 +131,9 @@ function createBusinessTripService({ HttpError, readWindows, readFrozenWindows }
     if (frozen.some(item => item.startAt < end && start < item.endAt)) fail('FROZEN_CONTEXT_CONFLICT',409)
     // Any prior first-in owns that work date's source identity, even after out.
     // An expired missed checkout on another date is not an ongoing shift.
-    function dateKey(instant) {
-      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone:row.destination_timezone,
-        year:'numeric',month:'2-digit',day:'2-digit' }).formatToParts(instant).map(part => [part.type,part.value]))
-      return parts.year+'-'+parts.month+'-'+parts.day
-    }
     const existing = await trx.query(`SELECT id FROM attendance_records WHERE org_id=$1 AND user_id=$2
       AND visibility_state='active' AND first_in_at IS NOT NULL AND work_date >= $3::date AND work_date <= $4::date LIMIT 1`,
-    [row.org_id,row.user_id,dateKey(start),dateKey(new Date(end.getTime()-1))])
+    [row.org_id,row.user_id,dateKey(row,start),dateKey(row,new Date(end.getTime()-1))])
     if (existing.length) fail('WORK_DATE_CONTEXT_CONFLICT',409)
   }
   async function publish(trx, request, actorId, now = new Date()) {
@@ -160,6 +155,9 @@ function createBusinessTripService({ HttpError, readWindows, readFrozenWindows }
     const row = await detail(trx, request.org_id, request.id)
     if (!row.published_at || row.cancelled_at) fail('ARRANGEMENT_STATE', 409)
     const start = new Date(row.start_at), end = new Date(row.effective_end_at)
+    // AFTER the arrangement has ended there is nothing left to truncate. Do not
+    // stamp cancelled_at over a finished trip.
+    if (now >= end) fail('EVENT_ENDED', 409)
     let cutoff = new Date(Math.max(start.getTime(),Math.min(now.getTime(),end.getTime())))
     if (start <= now && now < end) {
       // Project the post-cancellation base authority without mutating the source
@@ -212,7 +210,34 @@ function createBusinessTripService({ HttpError, readWindows, readFrozenWindows }
       }
     }
   }
-  return { parse, member, detail, map, assertWholeShifts, publish, cancel, prepareSourceChange, fail }
+  function dateKey(row, instant) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone:row.destination_timezone,
+      year:'numeric',month:'2-digit',day:'2-digit' }).formatToParts(instant).map(part => [part.type,part.value]))
+    return parts.year+'-'+parts.month+'-'+parts.day
+  }
+  // Destination dates that overlap [cutoff, effective end). An ended trip has an
+  // empty span. Hour steps keep a DST day from being skipped. The date key is the
+  // same formatter assertWholeShifts already uses.
+  function settlementWorkDates(row, now = new Date()) {
+    const start = new Date(row.start_at)
+    const end = new Date(row.effective_end_at ?? row.end_at)
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) fail('INVALID_INTERVAL')
+    if (typeof row.destination_timezone !== 'string' || !row.destination_timezone) fail('INVALID_ZONE')
+    if (now >= end) return []
+    const cutoff = Math.max(start.getTime(), Math.min(now.getTime(), end.getTime()))
+    const keys = []
+    let cursor = cutoff
+    let steps = 0
+    while (cursor < end.getTime()) {
+      const key = dateKey(row, new Date(cursor))
+      if (keys[keys.length - 1] !== key) keys.push(key)
+      cursor += 60 * 60 * 1000
+      steps += 1
+      if (steps > 40000) fail('SETTLEMENT_SPAN_TOO_LONG', 409)
+    }
+    return keys
+  }
+  return { parse, member, detail, map, assertWholeShifts, publish, cancel, prepareSourceChange, settlementWorkDates, fail }
 }
 
 async function readApprovedTrips({ query, orgId, userId, occurredAt }) {

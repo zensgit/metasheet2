@@ -223,5 +223,18 @@ describe('business trip strict inputs and whole shift policy',() => {
     await expect(f.service.cancel({query:f.query},{id:'trip',org_id:'org-a'},now)).rejects.toMatchObject({code:'ATTENDANCE_TRIP_CANCELLATION_BOUNDARY_CONFLICT',status:409})
     expect(f.query).toHaveBeenCalledTimes(1)
   })
+  it('an ended trip is refused and the arrangement is not stamped cancelled',async()=>{
+    const now=new Date('2026-11-03T00:00:00Z'),f=setup()
+    f.query.mockResolvedValueOnce([{...row,request_id:'trip',published_at:row.start_at,effective_end_at:row.end_at,cancelled_at:null}])
+    await expect(f.service.cancel({query:f.query},{id:'trip',org_id:'org-a'},now)).rejects.toMatchObject({code:'ATTENDANCE_TRIP_EVENT_ENDED',status:409})
+    expect(f.query).toHaveBeenCalledTimes(1)
+  })
+  it('settlement dates cover the destination days from now until the effective end',()=>{
+    const dates=setup().service.settlementWorkDates({
+      ...row, effective_end_at:row.end_at,
+    }, new Date('2026-11-02T15:00:00Z'))
+    expect(dates).toEqual(['2026-11-03'])
+    expect(setup().service.settlementWorkDates({...row, effective_end_at:row.end_at}, new Date('2026-11-03T00:00:00Z'))).toEqual([])
+  })
 
 })

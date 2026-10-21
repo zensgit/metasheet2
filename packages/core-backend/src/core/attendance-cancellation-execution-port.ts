@@ -350,10 +350,22 @@ export const CANCEL_ROUND_CLOSE_REASON_MAX_LENGTH = 256
  * deliberately NOT whitelisted: its value is uncontrolled text, and the bounded token already
  * answers the user-facing question 「为什么没成」.
  */
+/** Exact `block_reason` / close-reason tokens besides `round_expired` and `business_blocked:<code>`. */
+export const CANCEL_ROUND_CLOSE_REASON_EXACT_TOKENS_V1 = Object.freeze([
+  'event_started',
+  'superseded_by_revision',
+  'admin_closed',
+] as const)
+
+const CANCEL_ROUND_CLOSE_REASON_EXACT = new Set<string>([
+  CANCEL_ROUND_CLOSE_REASON_EXPIRED,
+  ...CANCEL_ROUND_CLOSE_REASON_EXACT_TOKENS_V1,
+])
+
 export function projectCancelRoundCloseReasonForReadV1(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   if (raw.length > CANCEL_ROUND_CLOSE_REASON_MAX_LENGTH) return null
-  if (raw === CANCEL_ROUND_CLOSE_REASON_EXPIRED) return raw
+  if (CANCEL_ROUND_CLOSE_REASON_EXACT.has(raw)) return raw
   if (
     raw.startsWith(CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX)
     && raw.length > CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX.length
@@ -432,7 +444,20 @@ export async function readCancelRoundDurableProjectionV1(
   const cancellationOutcome = projectCancelRoundCancellationOutcomeForReadV1(row.cancel_round_outcome_raw)
   if (cancellationOutcome) projection.cancellationOutcome = cancellationOutcome
   const cancelRoundCloseReason = projectCancelRoundCloseReasonForReadV1(row.cancel_round_close_reason_raw)
-  if (cancelRoundCloseReason !== null) projection.cancelRoundCloseReason = cancelRoundCloseReason
+  if (cancelRoundCloseReason !== null) {
+    projection.cancelRoundCloseReason = cancelRoundCloseReason
+    return projection
+  }
+  const roundReason = await query(
+    `SELECT block_reason
+       FROM approval_rounds
+      WHERE engine_instance_id = $1
+      ORDER BY started_at DESC
+      LIMIT 1`,
+    [instanceId],
+  )
+  const fromBlockReason = projectCancelRoundCloseReasonForReadV1(roundReason.rows[0]?.block_reason)
+  if (fromBlockReason !== null) projection.cancelRoundCloseReason = fromBlockReason
   return projection
 }
 

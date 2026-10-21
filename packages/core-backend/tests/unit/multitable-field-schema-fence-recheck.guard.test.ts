@@ -244,6 +244,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER(`attendance/w4c3a-sync-import-host.ts :: commitSyncImportPlanV1 :: ${W4C0}`, '32', W4C0_REASON),
   NONWRITER(`attendance/w4c3b-request-operation-boundary.ts :: execute :: ${W4C0}`, '32', W4C0_REASON),
   NONWRITER(`attendance/w4c3c-record-operation-boundary.ts :: execute :: ${W4C0}`, '32', `${W4C0_REASON} THIS is the caller that passes attendanceCleaningSheetIds (session-level fence).`),
+  NONWRITER(`index.ts :: transactionWithRolloutLock :: ${W4C0}`, '32', `${W4C0_REASON} Plugin payroll and admin-correction wrapper. It passes rolloutSnapshotLock only, never attendanceCleaningSheetIds, and the callback writes attendance tables rather than meta_records.data.`),
   NONWRITER('attendance/w4c3a-import-rollback.ts :: rollbackAttendanceImportV1 :: <no in-tree call>', '32', `${W4C0_REASON} Host entry with no in-tree caller.`),
   NONWRITER('attendance/w4c3a-rollout-control.ts :: closeLegacyRollbackWindowV1 :: <no in-tree call>', '32', `${W4C0_REASON} Host entry with no in-tree caller.`),
   NONWRITER('attendance/w4c3a-rollout-control.ts :: transitionAttendanceCalculationRolloutV1 :: <no in-tree call>', '32', `${W4C0_REASON} Host entry with no in-tree caller.`),
