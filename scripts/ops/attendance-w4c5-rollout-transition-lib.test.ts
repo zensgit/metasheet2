@@ -925,8 +925,9 @@ test('ACP connection uncertainty keeps its inherited registry name and internal-
 
 test('a thrown primitive marked as leaving its connection uncertain keeps the internal-error exit', () => {
   // AttendanceW4ConnectionUncertainPrimitiveError (w4c0-operation-registry.ts) sets its own name and
-  // carries the thrown non-object as `cause`. An uncertain connection is not a confirmed boundary
-  // refusal or success.
+  // carries the thrown non-object as `cause`. This primitive wrapper is not a confirmed boundary
+  // refusal or success; a boundary error that is only marked uncertain keeps its own class and maps
+  // by that class.
   const code = 'W4C0_CONNECTION_UNCERTAIN'
   const error = Object.assign(new Error(code), {
     name: 'AttendanceW4ConnectionUncertainPrimitiveError',
@@ -980,8 +981,8 @@ const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
   'AttendanceW4RegistryError',
   // Inherits registry name; uncertain commit/connection remains INTERNAL_ERROR, never refusal.
   'AttendanceCleaningConnectionUncertainError',
-  // Sets its own name and carries a thrown non-object as `cause`; an uncertain connection is
-  // INTERNAL_ERROR, never refusal.
+  // Sets its own name and carries a thrown non-object as `cause`. This primitive wrapper is
+  // INTERNAL_ERROR, never refusal; a marked boundary error keeps its own class and exit code.
   'AttendanceW4ConnectionUncertainPrimitiveError',
 ]
 // The base-class alternation is load-bearing, not defensive breadth. With `extends Error` alone,

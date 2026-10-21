@@ -50,8 +50,9 @@ const ALLOWED_RELATIVE_FILES = new Set([
   // Seeds synthetic legacy/shadow posture; no production caller or writer is admitted.
   'packages/core-backend/tests/utils/attendance-canonical-http-contract-cases.ts',
   // P1-1 inertness harness, used only by real-DB integration specs. Its one match is a
-  // trace-assertion regex (the boundary's own INSERT must sit inside its own transaction);
-  // the harness writes no rollout rows.
+  // trace-assertion regex (the boundary's own INSERT must sit inside its own transaction).
+  // The harness is not a direct or competing rollout writer: it calls the authorized boundary
+  // and asserts that boundary's writes.
   'packages/core-backend/tests/helpers/settlement-coordination-inertness-harness.ts',
 ])
 
