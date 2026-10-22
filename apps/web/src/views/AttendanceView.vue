@@ -58,6 +58,7 @@
             id="attendance-from-date"
             name="fromDate"
             v-model="fromDate"
+            @update:model-value="reportRangeCalendarBasis = 'manual'"
             :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
             :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
@@ -68,6 +69,7 @@
             id="attendance-to-date"
             name="toDate"
             v-model="toDate"
+            @update:model-value="reportRangeCalendarBasis = 'manual'"
             :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
             :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
@@ -80,12 +82,17 @@
             :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
             type="button"
             :data-report-filter-value="preset.id"
+            :disabled="reportRangePresetDisabled"
             @click="applyReportRangePreset(preset.id)"
           >
             {{ preset.label }}
           </button>
         </div>
         <small class="attendance__field-hint" data-report-period-label>{{ reportRangeLabel }}</small>
+        <small class="attendance__field-hint" data-report-calendar-basis>{{ reportRangeCalendarBasisLabel }}</small>
+        <small v-if="!resolvedAttendanceTimezone" class="attendance__field-hint" data-report-calendar-unavailable>
+          {{ tr('Choose dates manually. Shortcuts require one valid timezone across the loaded records.', '请手动选择日期。快捷区间需要已加载记录具有唯一有效时区。') }}
+        </small>
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
@@ -10749,6 +10756,7 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import { buildAttendanceReportCalendarRange, type AttendanceReportRangePreset } from './attendance/attendanceReportCalendar'
 import {
   applyAdminPageContentSearch,
   clearAdminPageContentSearch,
@@ -10760,7 +10768,6 @@ import { attendanceDayTimezoneLabel, parseAttendanceDayTimeContext, type Attenda
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
-type AttendanceReportRangePreset = 'this-week' | 'this-month' | 'last-month' | 'this-quarter'
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
   anomalies: 'attendance-overview-anomalies',
@@ -12886,66 +12893,30 @@ const reportsExportBlocked = computed(() =>
   reportsUnavailable.value || reportsDataStale.value
 )
 
-function startOfWeek(date: Date): Date {
-  const next = new Date(date)
-  const day = next.getDay()
-  const delta = day === 0 ? -6 : 1 - day
-  next.setDate(next.getDate() + delta)
-  next.setHours(0, 0, 0, 0)
-  return next
-}
-
-function endOfWeek(date: Date): Date {
-  const next = startOfWeek(date)
-  next.setDate(next.getDate() + 6)
-  next.setHours(23, 59, 59, 999)
-  return next
-}
-
-function firstDayOfQuarter(date: Date): Date {
-  const month = Math.floor(date.getMonth() / 3) * 3
-  return new Date(date.getFullYear(), month, 1)
-}
-
-function lastDayOfQuarter(date: Date): Date {
-  const start = firstDayOfQuarter(date)
-  return new Date(start.getFullYear(), start.getMonth() + 3, 0)
-}
-
-function buildReportRangePreset(preset: AttendanceReportRangePreset): { from: string; to: string } {
-  if (preset === 'this-week') {
-    const now = new Date()
-    return {
-      from: toDateInput(startOfWeek(now)),
-      to: toDateInput(endOfWeek(now)),
-    }
+const reportRangeCalendarBasis = ref('browser')
+const reportRangeCalendarBasisLabel = computed(() => {
+  if (reportRangeCalendarBasis.value === 'browser') {
+    return tr('Initial range uses the browser calendar until a record timezone is available.', '初始区间暂按浏览器日历，获得记录时区后对齐。')
   }
-  if (preset === 'this-month') {
-    const now = new Date()
-    return {
-      from: toDateInput(firstDayOfMonth(now)),
-      to: toDateInput(lastDayOfMonth(now)),
-    }
-  }
-  if (preset === 'last-month') {
-    const now = new Date()
-    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    return {
-      from: toDateInput(firstDayOfMonth(previousMonth)),
-      to: toDateInput(lastDayOfMonth(previousMonth)),
-    }
-  }
-  const now = new Date()
-  return {
-    from: toDateInput(firstDayOfQuarter(now)),
-    to: toDateInput(lastDayOfQuarter(now)),
-  }
+  if (reportRangeCalendarBasis.value === 'manual') return tr('Manually selected dates', '手动选择的日期')
+  return tr(`Range selected using record timezone: ${reportRangeCalendarBasis.value}`, `区间按记录时区选择：${reportRangeCalendarBasis.value}`)
+})
+const reportsRecordTargetStale = computed(() => {
+  const loaded = new URLSearchParams(loadedReportsQueryKey.value)
+  const current = new URLSearchParams(currentReportsQueryKey.value)
+  return ['orgId', 'userId'].some(key => loaded.get(key) !== current.get(key))
+})
+const reportRangePresetDisabled = computed(() => loading.value || reportLoading.value
+  || reportsUnavailable.value || reportsRecordTargetStale.value || !resolvedAttendanceTimezone.value)
+function buildReportRangePreset(preset: AttendanceReportRangePreset) {
+  return buildAttendanceReportCalendarRange(preset, new Date(), resolvedAttendanceTimezone.value)
 }
 
 function formatShortDate(value: string): string {
-  const date = new Date(`${value}T00:00:00`)
+  const date = new Date(`${value}T00:00:00Z`)
   if (Number.isNaN(date.getTime())) return value
   return new Intl.DateTimeFormat(locale.value, {
+    timeZone: 'UTC',
     month: 'short',
     day: 'numeric',
   }).format(date)
@@ -12961,7 +12932,7 @@ const reportRangePresetOptions = computed<Array<{ id: AttendanceReportRangePrese
 const activeReportRangePreset = computed<AttendanceReportRangePreset | ''>(() => {
   for (const preset of reportRangePresetOptions.value) {
     const range = buildReportRangePreset(preset.id)
-    if (range.from === fromDate.value && range.to === toDate.value) {
+    if (range && range.from === fromDate.value && range.to === toDate.value) {
       return preset.id
     }
   }
@@ -14116,9 +14087,9 @@ function beginReportsDatasetRefresh(): void {
   clearReportsDataset()
 }
 
-function markReportsDatasetLoaded(): void {
+function markReportsDatasetLoaded(queryKey: string): void {
   reportsUnavailable.value = false
-  loadedReportsQueryKey.value = currentReportsQueryKey.value
+  loadedReportsQueryKey.value = queryKey
 }
 
 function markReportsDatasetUnavailable(): void {
@@ -14128,7 +14099,10 @@ function markReportsDatasetUnavailable(): void {
 }
 
 async function applyReportRangePreset(preset: AttendanceReportRangePreset): Promise<void> {
+  if (reportRangePresetDisabled.value) return
   const range = buildReportRangePreset(preset)
+  if (!range) return
+  reportRangeCalendarBasis.value = resolvedAttendanceTimezone.value!
   fromDate.value = range.from
   toDate.value = range.to
   recordsPage.value = 1
@@ -23703,6 +23677,19 @@ function validateReportDateRange(): boolean {
 
 function consumeDefaultHistoryRangeAlignment(): boolean {
   if (defaultHistoryRangeAligned) return false
+  if (showReports.value) {
+    const zone = resolvedAttendanceTimezone.value
+    const range = buildAttendanceReportCalendarRange('recent', new Date(), zone)
+    if (!range) return false
+    defaultHistoryRangeAligned = true
+    if (reportRangeCalendarBasis.value !== 'browser'
+      || fromDate.value !== initialHistoryFromDate || toDate.value !== initialHistoryToDate) return false
+    const changed = range.from !== fromDate.value || range.to !== toDate.value
+    fromDate.value = range.from
+    toDate.value = range.to
+    reportRangeCalendarBasis.value = zone!
+    return changed
+  }
   const todayKey = todayWorkDateKey.value
   if (!todayKey) return false
   defaultHistoryRangeAligned = true
@@ -23725,6 +23712,7 @@ function consumeDefaultHistoryRangeAlignment(): boolean {
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
   const refreshStartedAt = heroClockNow.value
+  let reportsQueryKey = currentReportsQueryKey.value
   loading.value = true
   todayRecordLoadVersion += 1
   todayRecordState.value = 'loading'
@@ -23754,7 +23742,8 @@ async function refreshAll(): Promise<boolean> {
     const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
-    if (consumeDefaultHistoryRangeAlignment()) {
+    if ((!showReports.value || reportsQueryKey === currentReportsQueryKey.value) && consumeDefaultHistoryRangeAlignment()) {
+      reportsQueryKey = currentReportsQueryKey.value
       calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
       const reloaded = await Promise.allSettled([
         loadSummary(),
@@ -23767,7 +23756,7 @@ async function refreshAll(): Promise<boolean> {
       if (reloadFailed) throw reloadFailed.reason
     }
     if (showReports.value) {
-      markReportsDatasetLoaded()
+      markReportsDatasetLoaded(reportsQueryKey)
     }
     if (lastCalendarEffectiveRange.value) {
       void loadEffectiveCalendarForOverview(lastCalendarEffectiveRange.value, { force: true })
@@ -23796,6 +23785,7 @@ async function refreshOverviewWithStatus() {
 
 async function reloadReportsWithStatus() {
   if (!validateReportDateRange()) return
+  let reportsQueryKey = currentReportsQueryKey.value
 
   loading.value = true
   recordsPage.value = 1
@@ -23804,7 +23794,13 @@ async function reloadReportsWithStatus() {
     const results = await Promise.allSettled([loadSummary(), loadRequestReport(), loadRecords()])
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
-    markReportsDatasetLoaded()
+    if ((!showReports.value || reportsQueryKey === currentReportsQueryKey.value) && consumeDefaultHistoryRangeAlignment()) {
+      reportsQueryKey = currentReportsQueryKey.value
+      const reloaded = await Promise.allSettled([loadSummary(), loadRequestReport(), loadRecords()])
+      const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (reloadFailed) throw reloadFailed.reason
+    }
+    markReportsDatasetLoaded(reportsQueryKey)
     setStatus(
       appendStatusContext(
         tr(

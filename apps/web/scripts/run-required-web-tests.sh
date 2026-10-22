@@ -1609,6 +1609,9 @@ exec npx vitest run \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
   attendance-record-timeline \
+  attendance-reports-analytics \
+  attendance-report-calendar-view.spec.ts \
+  attendanceReportCalendar.spec.ts \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \

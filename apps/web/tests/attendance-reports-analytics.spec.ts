@@ -98,6 +98,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'normal',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             },
             {
               id: 'record-late',
@@ -109,6 +110,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'late',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             },
             {
               id: 'record-adjusted',
@@ -120,6 +122,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'adjusted',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             },
           ],
           total: 3,
