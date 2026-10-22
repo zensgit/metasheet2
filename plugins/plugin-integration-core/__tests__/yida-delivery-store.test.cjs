@@ -16,10 +16,21 @@ const AUDIT = 'integration_yida_delivery_audit'
 const UNIQUE_SCOPE_ROW = 'uniq_integration_yida_delivery_scope_row'
 const UNIQUE_CREATE_BUSINESS = 'uniq_integration_yida_delivery_create_business'
 
-test('both ledger suites are registered in their real execution lanes without filtered DB cases', () => {
+test('the YiDa real-PG suites are registered in their real execution lane without filtered DB cases', () => {
   const root = path.resolve(__dirname, '..', '..', '..')
   const specs = ['tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
-    'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts']
+    'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
+    'tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',
+    'tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts',
+    'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
+    'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts']
+  // The step's whole file list: a dropped file, or an unexpected positional filter, is red.
+  const lane = ['tests/integration/external-system-delete-bind-lock-protocol.db.test.ts', ...specs,
+    'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
+    'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts',
+    'tests/integration/automation-live-authority-realdb.test.ts',
+    'tests/integration/yida-host-boundaries-realdb.test.ts',
+    'tests/integration/yida-host-initialization-barrier-realdb.test.ts']
   const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8'))
   const step = workflow.jobs.test.steps.find((entry) => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
   assert.equal(step.env.EXPECT_DB, '1')
@@ -28,7 +39,10 @@ test('both ledger suites are registered in their real execution lanes without fi
   const command = step.run.replace(/\\\r?\n/g, ' ')
   assert.match(command, /vitest --config vitest\.integration\.config\.ts run /)
   for (const spec of specs) assert.equal(command.split(/\s+/).filter((token) => token === spec).length, 1)
-  assert.doesNotMatch(command, /(?:^|\s)(?:-t|--testNamePattern|--passWithNoTests)(?:\s|=|$)/)
+  const tokens = command.split(/\s+/)
+  assert.ok(tokens.indexOf('run') > 0)
+  assert.deepEqual(tokens.slice(tokens.indexOf('run') + 1).filter((token) => token && !token.startsWith('-')).sort(), [...lane].sort())
+  assert.doesNotMatch(command, /(?:^|\s)(?:-t|--testNamePattern|--passWithNoTests|--exclude|--shard|--changed|--related|--bail)(?:\s|=|$)/)
   const config = ts.createSourceFile('vitest.config.ts', fs.readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const excluded = new Set()
   const visit = (node) => {
