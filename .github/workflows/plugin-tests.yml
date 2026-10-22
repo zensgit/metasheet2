@@ -1375,6 +1375,8 @@ jobs:
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
       # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
       # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      # #6315 host boundaries (yida-host-*-realdb) boot the actual MetaSheetServer against this
+      # migrated database; each file stops its own server, so each needs its own fork (the default).
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
         if: matrix.node-version == '20.x'
@@ -1394,6 +1396,8 @@ jobs:
             tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts \
             tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \
             tests/integration/automation-live-authority-realdb.test.ts \
+            tests/integration/yida-host-boundaries-realdb.test.ts \
+            tests/integration/yida-host-initialization-barrier-realdb.test.ts \
             --reporter=verbose
 
       # These files each import the real native AuthService/JWT and scoped pool.

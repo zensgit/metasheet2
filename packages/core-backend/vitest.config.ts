@@ -75,6 +75,10 @@ export default defineConfig({
       'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
       'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
       'tests/integration/automation-live-authority-realdb.test.ts',
+      // #6315 host boundaries boot the actual MetaSheetServer on the migrated CI database; whole
+      // files in the same EXPECT_DB plugin-tests step as the YiDa real-DB proofs above.
+      'tests/integration/yida-host-boundaries-realdb.test.ts',
+      'tests/integration/yida-host-initialization-barrier-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
