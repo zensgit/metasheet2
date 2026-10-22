@@ -24,7 +24,8 @@
  *     entry's SELECT is issued; the SQLSTATE classification remains only as the fallback for a race.
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
  *     An entry with `maxRows` (the YiDa stores: large snapshots that are never deleted) reads at
- *     most min(rowLimit, maxRows) + 1 rows, so one run cannot buffer and decrypt gigabytes.
+ *     most min(rowLimit, maxRows) + 1 rows, so one run cannot buffer and decrypt gigabytes. A
+ *     truncated entry's warning says it sampled only the first N rows.
  *   - `plaintext` is narrow on purpose: non-encrypted values in the catalogued field each reader uses,
  *     not every plaintext secret in the database (see EncryptedStoreProbeResult.plaintext).
  *   - Classified the way each store's runtime READER sees the value: the `enc:` / `v1:` prefix is tested
@@ -115,6 +116,8 @@ const DEFAULT_ROW_LIMIT = 10_000
  * material do not decrypt. It is not a census of every row.
  */
 const YIDA_MAX_ROWS = 50
+/** The two snapshot stores (draft operations, send approvals) hold the largest rows: a smaller sample. */
+const YIDA_SNAPSHOT_MAX_ROWS = 20
 
 /**
  * Freeze ONE entry: the array is frozen too, so nothing at runtime can retarget the probe's SQL or
@@ -255,7 +258,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['snapshot_encrypted'],
-    maxRows: YIDA_MAX_ROWS,
+    maxRows: YIDA_SNAPSHOT_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_draft_operations WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -273,7 +276,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['snapshot_encrypted'],
-    maxRows: YIDA_MAX_ROWS,
+    maxRows: YIDA_SNAPSHOT_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
 ])
@@ -308,6 +311,8 @@ export interface EncryptedStoreProbeResult {
   legacyNotChecked?: number
   /** More rows matched than were read (rowLimit, or the entry's smaller maxRows); the counts cover those read. */
   truncated?: true
+  /** With `truncated`: the rows read (the limit that applied), i.e. the counts sample the first N rows. */
+  sampled?: number
   /** The PostgreSQL SQLSTATE of a failed read, when the error carried one. */
   sqlState?: string
 }
@@ -478,7 +483,10 @@ async function probeOne(
     const response = await query(entry.sql, [limit + 1])
     if (!response || !Array.isArray(response.rows)) throw new TypeError('query returned no rows array')
     const rows = response.rows
-    if (rows.length > limit) result.truncated = true
+    if (rows.length > limit) {
+      result.truncated = true
+      result.sampled = limit
+    }
     const examined = rows.length > limit ? rows.slice(0, limit) : rows
     for (const row of examined) {
       const raw = row !== null && typeof row === 'object' ? (row as { value?: unknown }).value : undefined
@@ -642,9 +650,11 @@ function logReport(logger: EncryptedStoreProbeLogger, report: EncryptedStoreProb
   }
   for (const store of report.stores) {
     if (store.undecryptable <= 0) continue
+    // A row count only, never a value: rows past the sample were not read.
+    const sample = store.truncated ? ` Sampled the first ${store.sampled} row(s) only; later rows were not checked.` : ''
     logger.warn(
       `Encrypted store probe: ${label(store)} has ${store.undecryptable} of ${store.encrypted} encrypted value(s) ` +
-        `the current material cannot decrypt. ${ENCRYPTED_STORE_REENTER_HINT}`,
+        `the current material cannot decrypt.${sample} ${ENCRYPTED_STORE_REENTER_HINT}`,
       { store: store.store, field: store.field, encrypted: store.encrypted, undecryptable: store.undecryptable },
     )
   }

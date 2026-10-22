@@ -255,7 +255,7 @@ test('actual Git sparse checkout preserves all fixture sources and still rejects
 // The adapter answers the contract call with a node --test style summary (default: the exact
 // expected count) so the caller's count check is exercised without running the contracts.
 function withProbe(callback, pgConfigMode = 'wrong-directory',
-  { summary = `# tests ${expectedContractTests}\n# pass ${expectedContractTests}\n# fail 0\n`, exitCode = 0 } = {}) {
+  { summary = `# tests ${expectedContractTests}\n# pass ${expectedContractTests}\n# fail 0\n# skipped 0\n# todo 0\n`, exitCode = 0 } = {}) {
   const temporaryRoot = path.join(root, 'tmp')
   const fixture = path.join(temporaryRoot, 'yida-workflow-caller-' + randomUUID())
   const bin = path.join(fixture, 'bin')
@@ -344,8 +344,13 @@ test('required owner step resolves Node and PG before two clean-environment call
 test('required owner step checks the exact contract subtest count before the launcher', () => {
   assert.equal((step.run.match(/^EXPECTED_YIDA_CONTRACT_TESTS=/gmu) ?? []).length, 1)
   assert.ok(Number.isInteger(expectedContractTests) && expectedContractTests > 1)
-  const check = step.run.indexOf('if [ "$yida_contract_tests" -ne "$EXPECTED_YIDA_CONTRACT_TESTS" ]; then')
+  const check = step.run.indexOf('[ "$yida_contract_tests" -eq "$EXPECTED_YIDA_CONTRACT_TESTS" ] || {')
   assert.ok(check > 0 && check < step.run.indexOf(runner), 'count check must precede the launcher')
+  const zero = step.run.indexOf('for yida_contract_key in skipped todo; do')
+  assert.ok(zero > check && zero < step.run.indexOf(runner), 'skipped/todo check must precede the launcher')
+  assert.ok(step.run.includes('[ "$yida_contract_value" -eq 0 ] || {'))
+  // Positive form only: a negative test whose `[` errors would skip the refusal.
+  assert.doesNotMatch(step.run, /\[ "\$yida_contract_\w+" -ne /u)
 })
 
 for (const [name, contract, refusal] of [
@@ -354,6 +359,11 @@ for (const [name, contract, refusal] of [
   ['a file that exits 0 early (one passing test)', { summary: '# tests 1\n# pass 1\n' }, /^YIDA_CALLER_CONTRACT_COUNT: 1 subtests ran, expected exactly \d+$/mu],
   ['no summary line', { summary: '' }, /^YIDA_CALLER_CONTRACT_COUNT: no 'tests <N>' summary line found$/mu],
   ['a non-zero contract exit', { exitCode: 1 }, /^YIDA_CALLER_CONTRACT: node --test exited non-zero \(output above\)$/mu],
+  ['an out-of-range count', { summary: '# tests 99999999999999999999\n# skipped 0\n# todo 0\n' }, /^YIDA_CALLER_CONTRACT_COUNT: 99999999999999999999 subtests ran, expected exactly \d+$/mu],
+  ['a skipped subtest', { summary: `# tests ${expectedContractTests}\n# skipped 1\n# todo 0\n` }, /^YIDA_CALLER_CONTRACT_COUNT: 1 subtests skipped, expected 0$/mu],
+  ['a todo subtest', { summary: `# tests ${expectedContractTests}\n# skipped 0\n# todo 1\n` }, /^YIDA_CALLER_CONTRACT_COUNT: 1 subtests todo, expected 0$/mu],
+  ['no skipped summary line', { summary: `# tests ${expectedContractTests}\n# todo 0\n` }, /^YIDA_CALLER_CONTRACT_COUNT: no 'skipped <N>' summary line found$/mu],
+  ['no todo summary line', { summary: `# tests ${expectedContractTests}\n# skipped 0\n` }, /^YIDA_CALLER_CONTRACT_COUNT: no 'todo <N>' summary line found$/mu],
 ]) {
   test(`actual workflow bash refuses ${name} before the launcher`, linuxShell, () => {
     withProbe(({ execute }) => {
