@@ -23,6 +23,8 @@
  *     pg_attribute, ENCRYPTED_STORE_COLUMNS_SQL) decides table_missing / column_missing before the
  *     entry's SELECT is issued; the SQLSTATE classification remains only as the fallback for a race.
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
+ *     An entry with `maxRows` (the YiDa stores: large snapshots that are never deleted) reads at
+ *     most min(rowLimit, maxRows) + 1 rows, so one run cannot buffer and decrypt gigabytes.
  *   - `plaintext` is narrow on purpose: non-encrypted values in the catalogued field each reader uses,
  *     not every plaintext secret in the database (see EncryptedStoreProbeResult.plaintext).
  *   - Classified the way each store's runtime READER sees the value: the `enc:` / `v1:` prefix is tested
@@ -85,6 +87,11 @@ export interface EncryptedStoreCatalogEntry {
   readonly columns: readonly string[]
   /** ONE static SELECT returning a single column `value`, bounded by `LIMIT $1`. */
   readonly sql: string
+  /**
+   * Rows read for this entry when fewer than the run's rowLimit: LIMIT min(rowLimit, maxRows) + 1.
+   * For stores whose rows are large; the counts are then a sample and `truncated` says so.
+   */
+  readonly maxRows?: number
 }
 
 /**
@@ -101,6 +108,13 @@ const LEGACY_INTEGRATION_PREFIX = 'v1:'
 /** iv (16) + authTag (16): the smallest payload SecretManager.encrypt() can produce (empty plaintext). */
 const MIN_SEALED_PAYLOAD_BYTES = 32
 const DEFAULT_ROW_LIMIT = 10_000
+/**
+ * maxRows of the YiDa entries. A send approval seals the whole draft source and plan (hundreds of
+ * KB per row) and the rows are immutable, so a 10,000-row read grows into gigabytes on every boot
+ * and admin read. A sample still shows a material change: values sealed under the previous
+ * material do not decrypt. It is not a census of every row.
+ */
+const YIDA_MAX_ROWS = 50
 
 /**
  * Freeze ONE entry: the array is frozen too, so nothing at runtime can retarget the probe's SQL or
@@ -223,6 +237,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['material_encrypted'],
+    maxRows: YIDA_MAX_ROWS,
     sql: `SELECT material_encrypted AS value FROM integration_yida_credential_materials WHERE material_encrypted <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -231,6 +246,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['target_encrypted'],
+    maxRows: YIDA_MAX_ROWS,
     sql: `SELECT target_encrypted AS value FROM integration_yida_draft_targets WHERE target_encrypted <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -239,6 +255,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['snapshot_encrypted'],
+    maxRows: YIDA_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_draft_operations WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -247,6 +264,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['evidence_encrypted'],
+    maxRows: YIDA_MAX_ROWS,
     sql: `SELECT evidence_encrypted AS value FROM integration_yida_approved_target WHERE evidence_encrypted <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -255,6 +273,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     scheme: 'platform-enc',
     prefixOn: 'raw',
     columns: ['snapshot_encrypted'],
+    maxRows: YIDA_MAX_ROWS,
     sql: `SELECT snapshot_encrypted AS value FROM integration_yida_send_approvals WHERE snapshot_encrypted <> '' LIMIT $1`,
   }),
 ])
@@ -268,7 +287,8 @@ export interface EncryptedStoreProbeResult {
   status: EncryptedStoreProbeStatus
   /**
    * Values examined: rows = encrypted + plaintext + legacyNotChecked. A NULL or whitespace-only value
-   * is not a stored secret and is not counted anywhere (at most rowLimit rows are read).
+   * is not a stored secret and is not counted anywhere (at most rowLimit rows are read, or the
+   * entry's maxRows when smaller).
    */
   rows: number
   /** Values sealed under platform material (decrypted when material is available). */
@@ -286,7 +306,7 @@ export interface EncryptedStoreProbeResult {
   plaintext: number
   /** integration-credential only: `v1:` values under the plugin's own key — counted, not decrypted. */
   legacyNotChecked?: number
-  /** More than rowLimit rows matched; the counts cover the first rowLimit. */
+  /** More rows matched than were read (rowLimit, or the entry's smaller maxRows); the counts cover those read. */
   truncated?: true
   /** The PostgreSQL SQLSTATE of a failed read, when the error carried one. */
   sqlState?: string
@@ -452,12 +472,14 @@ async function probeOne(
     result.status = 'column_missing'
     return result
   }
+  // An entry's own cap (large YiDa snapshots) only ever lowers the run's rowLimit.
+  const limit = Math.min(rowLimit, entry.maxRows ?? rowLimit)
   try {
-    const response = await query(entry.sql, [rowLimit + 1])
+    const response = await query(entry.sql, [limit + 1])
     if (!response || !Array.isArray(response.rows)) throw new TypeError('query returned no rows array')
     const rows = response.rows
-    if (rows.length > rowLimit) result.truncated = true
-    const examined = rows.length > rowLimit ? rows.slice(0, rowLimit) : rows
+    if (rows.length > limit) result.truncated = true
+    const examined = rows.length > limit ? rows.slice(0, limit) : rows
     for (const row of examined) {
       const raw = row !== null && typeof row === 'object' ? (row as { value?: unknown }).value : undefined
       const classified = classify(entry, raw)
