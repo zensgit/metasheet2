@@ -79,6 +79,19 @@ function noteSettlementCoordinationNestingOnConnect(pool: Pool, name: string): v
   }
 }
 
+/**
+ * The two fields a pool connection error is logged with: the SQLSTATE and the severity when the
+ * server reported them, `'none'` otherwise. Nothing else from the error (message, stack, the
+ * connection's parameters) is logged.
+ */
+function connectionErrorFields(error: unknown): { code: string; severity: string } {
+  const fields = error as { code?: unknown; severity?: unknown } | null | undefined
+  return {
+    code: typeof fields?.code === 'string' ? fields.code : 'none',
+    severity: typeof fields?.severity === 'string' ? fields.severity : 'none',
+  }
+}
+
 export class ConnectionPool {
   private pool: Pool
   private slowMs: number
@@ -87,6 +100,7 @@ export class ConnectionPool {
   private readonly transactionDepth = new AsyncLocalStorage<TransactionDepthContext>()
   private queryCount = 0
   private queryErrorCount = 0
+  private poolConnectionErrorCount = 0
   readonly name: string
   readonly transactionDepthProbe: RecoveryArchiveTransactionDepthProbe = Object.freeze({
     currentTransactionDepth: () => {
@@ -107,8 +121,28 @@ export class ConnectionPool {
     this.name = opts.name || 'main'
     this.logger = new Logger(`ConnectionPool:${this.name}`)
 
+    // An idle pooled connection that the server closes, or whose socket breaks, is reported by pg as
+    // an 'error' event on the pool after the pool has already discarded that connection. This
+    // listener records the event — one log line with the pool name, SQLSTATE and severity, and one
+    // counter — and does nothing else: the error is not re-emitted, the pool keeps serving, and the
+    // process keeps running. Every pool this class builds (the main pool and any `createPool` pool)
+    // listens from construction, so no connection is ever idle without it.
+    this.pool.on('error', (error: unknown) => {
+      this.poolConnectionErrorCount += 1
+      coreMetrics.increment('db_pool_connection_errors_total', { pool: this.name })
+      const { code, severity } = connectionErrorFields(error)
+      this.logger.error(
+        `Idle connection error on pool "${this.name}" (code=${code}, severity=${severity}); the connection was discarded and the pool keeps serving`,
+      )
+    })
+
     // Start metrics collection
     this.startMetricsCollection()
+  }
+
+  /** How many idle-connection errors this pool has recorded since construction. */
+  get connectionErrorCount(): number {
+    return this.poolConnectionErrorCount
   }
 
   /**
@@ -202,6 +236,20 @@ export class ConnectionPool {
 
   async transaction<T>(handler: (client: { query: TransactionQuery; __rawClient: PoolClient }) => Promise<T>): Promise<T> {
     const rawClient = await this.pool.connect()
+    // While this connection is checked out, this listener records any connection error reported on it:
+    // it keeps the first error only and sends nothing. The listener comes off in `finally`, before the
+    // connection goes back, and a connection that reported an error while held is released with that
+    // error, so the pool destroys it instead of handing it out again.
+    let connectionErrorHeard: Error | undefined
+    const onConnectionError = (error: unknown): void => {
+      if (connectionErrorHeard !== undefined) return
+      connectionErrorHeard = error instanceof Error ? error : new Error('connection reported an error while checked out')
+    }
+    rawClient.on('error', onConnectionError)
+    // Set when the wrapper's ROLLBACK did not complete (its promise rejected). The connection is then
+    // released with this error, so the pool destroys it instead of handing it out again; the ROLLBACK is
+    // not retried on the same connection.
+    let rollbackFailure: Error | undefined
     const depthContext: TransactionDepthContext = {
       active: true,
       parent: this.transactionDepth.getStore(),
@@ -227,12 +275,26 @@ export class ConnectionPool {
         try {
           await rawClient.query('ROLLBACK')
         } catch (rollbackErr) {
-          this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
+          rollbackFailure = rollbackErr instanceof Error ? rollbackErr : new Error('ROLLBACK did not complete')
+          this.logger.error(
+            `ROLLBACK did not complete on pool "${this.name}"; the connection is destroyed instead of being returned to the pool`,
+            rollbackFailure,
+          )
         }
         throw e
       } finally {
         depthContext.active = false
-        rawClient.release()
+        rawClient.removeListener('error', onConnectionError)
+        // Released exactly once. A connection that reported an error while held, or whose ROLLBACK did
+        // not complete, is released with that error (the connection error first), and the pool destroys it.
+        const destroyWith = connectionErrorHeard ?? rollbackFailure
+        rawClient.release(destroyWith)
+        if (destroyWith !== undefined) {
+          coreMetrics.increment('db_pool_connection_destroyed_total', {
+            pool: this.name,
+            reason: connectionErrorHeard !== undefined ? 'connection_error' : 'rollback_failed',
+          })
+        }
       }
     })
   }

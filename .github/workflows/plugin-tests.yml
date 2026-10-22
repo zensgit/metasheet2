@@ -1840,6 +1840,8 @@ jobs:
             tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
             tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
             tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
+            tests/integration/core-pool-connection-error-listener.db.test.ts \
+            tests/integration/core-pool-rollback-release.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

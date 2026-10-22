@@ -15,6 +15,7 @@ vi.mock('pg', () => ({
       release: vi.fn()
     }),
     end: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
     totalCount: 5,
     idleCount: 3,
     waitingCount: 1
