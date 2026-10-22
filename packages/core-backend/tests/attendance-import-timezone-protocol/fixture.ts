@@ -27,9 +27,11 @@ import { up as m23 } from '../../src/db/migrations/zzzz20261013090000_create_att
 import { up as m24 } from '../../src/db/migrations/zzzz20260520020000_add_origin_to_attendance_holidays'
 import { up as m25 } from '../../src/db/migrations/zzzz20260522100000_create_attendance_schedule_groups'
 import { up as m26 } from '../../src/db/migrations/zzzz20260202093000_create_attendance_integrations'
+import { up as m27 } from '../../src/db/migrations/zzzz20260208100000_create_roles_table'
 export async function migrate(pool: Pool) {
   await pool.query(`CREATE TABLE users (
     id text PRIMARY KEY, name text, email text, username text, mobile text, employee_no text,
+    role text NOT NULL DEFAULT 'user',
     department text, position text, hire_date date, is_active boolean NOT NULL DEFAULT true,
     activation_status text NOT NULL DEFAULT 'activated', permissions jsonb NOT NULL DEFAULT '[]'::jsonb,
     created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`)
@@ -41,5 +43,5 @@ export async function migrate(pool: Pool) {
   await pool.query(`CREATE TABLE system_configs (key text PRIMARY KEY, value jsonb, is_encrypted boolean DEFAULT false, updated_at timestamptz DEFAULT now())`)
   await pool.query(`CREATE TABLE approval_instances (id text PRIMARY KEY)` )
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-  for (const migration of [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20, m21, m22, m23, m24, m25, m26]) await migration(db)
+  for (const migration of [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20, m21, m22, m23, m24, m25, m26, m27]) await migration(db)
 }

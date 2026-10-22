@@ -18,7 +18,7 @@ async function normalizeImportCalendarRows({ db, orgId, payload, rows, coalesce,
     loadDefaultRule, loadAttendanceGroupRuleSetMap, loadRuleSetConfigById,
     resolveAttendanceGroupKey, normalizeRuleOverride, toWorkDate, normalizeDateOnly,
     resolveRowUserId, resolveImportRowUserReference, loadAttendanceImportUserIdentifierIndex,
-    resolveWorkContext, addDaysToDateKey, HttpError,
+    loadRotationAssignment, loadShiftAssignment, addDaysToDateKey, HttpError,
   } = helpers
   let baseRule
   let groupRules
@@ -69,7 +69,14 @@ async function normalizeImportCalendarRows({ db, orgId, payload, rows, coalesce,
           const date = addDaysToDateKey(utcDay, offset)
           const key = JSON.stringify([userId, ruleSetId ?? null, date])
           if (!contexts.has(key)) {
-            contexts.set(key, await resolveWorkContext({ db, orgId, userId, workDate: date, defaultRule }))
+            // Calendar selection reads source/timezone only. The authorized calculation
+            // still runs resolveWorkContext and its segment gate for the selected date.
+            const rotation = await loadRotationAssignment(db, orgId, userId, date)
+            const assignment = rotation ? null : await loadShiftAssignment(db, orgId, userId, date)
+            contexts.set(key, {
+              rule: rotation?.shift ?? assignment?.shift ?? defaultRule,
+              source: rotation ? 'rotation' : assignment ? 'shift' : 'rule',
+            })
           }
           const context = contexts.get(key)
           if (toWorkDate(instant, context.rule.timezone) === date) {

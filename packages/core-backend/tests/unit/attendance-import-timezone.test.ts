@@ -8,7 +8,7 @@ const routes = new Map<string, (req: unknown, res: unknown) => Promise<void>>()
 let timezone = 'Asia/Shanghai'
 let overrideTimezone: string | null = null
 let groupRule = false
-let published: 'shift' | 'rotation' | 'ambiguous' | 'single-day' | null = null
+let published: 'shift' | 'rotation' | 'ambiguous' | 'single-day' | 'both' | 'neighbor-multi' | 'matching-multi' | null = null
 const SHIFT = '00000000-0000-4000-8000-000000006035'
 const RULE_SET = '00000000-0000-4000-8000-000000006034'
 const errors: unknown[] = []
@@ -19,16 +19,17 @@ const db = {
       timezone, work_start_time: '00:00', work_end_time: '23:59',
       working_days: [0, 1, 2, 3, 4, 5, 6], is_default: true, org_id: ORG,
     }]
-    if (sql.includes('FROM attendance_shift_assignments a')) return (published === 'shift' || published === 'ambiguous' || (published === 'single-day' && params[2] === '2026-09-22')) ? [{
+    if (sql.includes('FROM attendance_shift_assignments a')) return (published === 'shift' || published === 'ambiguous' || published === 'both' || (published === 'neighbor-multi' && ['2026-09-22', '2026-09-24'].includes(String(params[2]))) || published === 'matching-multi' || (published === 'single-day' && params[2] === '2026-09-22')) ? [{
       id: SHIFT, org_id: ORG, user_id: USER, shift_id: SHIFT, start_date: '2026-09-21', is_active: true,
-      shift_segment_count: 0, shift_name: 'synthetic shift', shift_timezone: published === 'ambiguous' && params[2] !== '2026-09-22' ? 'Asia/Shanghai' : 'America/Los_Angeles',
+      shift_segment_count: published === 'matching-multi' || (published === 'neighbor-multi' && params[2] === '2026-09-24') ? 2 : 0,
+      shift_name: 'synthetic shift', shift_timezone: published === 'both' || (published === 'ambiguous' && params[2] !== '2026-09-22') || (published === 'neighbor-multi' && params[2] !== '2026-09-22') ? 'Asia/Shanghai' : 'America/Los_Angeles',
       shift_work_start_time: '00:00', shift_work_end_time: '23:59', shift_working_days: [0,1,2,3,4,5,6],
     }] : []
-    if (sql.includes('FROM attendance_rotation_assignments a')) return published === 'rotation' ? [{
+    if (sql.includes('FROM attendance_rotation_assignments a')) return (published === 'rotation' || published === 'both') ? [{
       id: SHIFT, org_id: ORG, user_id: USER, rotation_rule_id: SHIFT, start_date: '2026-09-21', is_active: true,
       rotation_name: 'synthetic rotation', rotation_timezone: 'UTC', rotation_is_active: true, rotation_shift_sequence: [SHIFT],
     }] : []
-    if (sql.includes('FROM attendance_shifts s')) return published === 'rotation' ? [{
+    if (sql.includes('FROM attendance_shifts s')) return (published === 'rotation' || published === 'both') ? [{
       id: SHIFT, org_id: ORG, segment_count: 0, name: 'synthetic shift', timezone: 'America/Los_Angeles',
       work_start_time: '00:00', work_end_time: '23:59', working_days: [0,1,2,3,4,5,6],
     }] : []
@@ -263,4 +264,34 @@ describe('#6032 adjacent calendar source boundaries', () => {
     } })
     expect(errors).toEqual([])
   })
+})
+
+
+describe('#6032 calendar selection without calculation admission', () => {
+  const instant = '2026-09-23T02:30:00.000Z'
+  it('keeps rotation timezone ahead of a conflicting published assignment', async () => {
+    published = 'both'
+    const [row] = await preview({ entries: [{ occurredAt: instant, field: 'firstInAt' }] })
+    expect(row).toMatchObject({ workDate: '2026-09-22', firstInAt: instant })
+  })
+  for (const kind of ['JSON10', 'JSON13', 'entries']) {
+    const payload = () => kind === 'entries'
+      ? { entries: [{ occurredAt: instant, field: 'firstInAt' }] }
+      : { rows: [{ workDate: String(Date.parse(instant) / (kind === 'JSON10' ? 1000 : 1)), fields: { firstInAt: instant } }] }
+    it(`${kind}: ignores the calculation gate on a nonmatching neighboring calendar`, async () => {
+      published = 'neighbor-multi'
+      const [row] = await preview(payload())
+      expect(row).toMatchObject({ workDate: '2026-09-22', firstInAt: instant })
+    })
+    it(`${kind}: retains the exact calculation gate for the selected multi-segment shift`, async () => {
+      published = 'matching-multi'
+      const response = await invokePreview(payload())
+      expect({ status: response.statusCode, body: response.body }).toEqual({ status: 422, body: { ok: false, error: {
+        code: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED',
+        message: 'Shift has 2 segments; authoritative segment calculation is disabled for this org, so attendance calculation cannot use a multi-segment shift',
+        details: [{ field: 'shiftId', message: 'Multi-segment shift is authoring preview-only while segment calculation is disabled' }],
+      } } })
+      expect(errors).toEqual([])
+    })
+  }
 })

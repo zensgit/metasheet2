@@ -28334,7 +28334,7 @@ module.exports = {
         loadDefaultRule, loadAttendanceGroupRuleSetMap, loadRuleSetConfigById,
         resolveAttendanceGroupKey, normalizeRuleOverride, toWorkDate, normalizeDateOnly,
         resolveRowUserId, resolveImportRowUserReference, loadAttendanceImportUserIdentifierIndex,
-        resolveWorkContext, addDaysToDateKey, HttpError,
+        loadRotationAssignment, loadShiftAssignment, addDaysToDateKey, HttpError,
       })
       if (deferCalendarErrors) return result
       if (result.calendarError) throw result.calendarError
