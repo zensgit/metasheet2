@@ -204,14 +204,16 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     expect(ui!.requests).toEqual([])
   }
-  async function observeReady(commandId: string) {
+  async function observeReady(commandId: string, sendEnabled = false) {
     const response = ui!.waitApi('GET', '/initialization')
     await ui!.page.getByTestId('sp-yida-init-refresh').click()
     expect(await realBrowserData(await response, 200)).toEqual({ commandId, status: 'ready', draft: null,
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: false })
-    expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
+    if (!sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     await ui!.page.getByTestId('sp-yida-init-ready').waitFor()
     await ui!.settled()
+    // ON shows the CREATE entry, enabled until an initialization request locks it.
+    if (sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
     expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
     await noSend()
   }
@@ -342,7 +344,9 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
 
   it('withholding an actual committed 201 freezes POST, then only explicit same-command GET recovers initialized', async () => {
     const commandId = await startParent()
-    await observeReady(commandId); await fillPrivate()
+    // Switch ON: the CREATE entry renders, so only its initialization lock can keep it closed.
+    host.setEnablement('true')
+    await observeReady(commandId, true); await fillPrivate()
     const held = ui!.delayNext('POST', '/initialization'), response = ui!.waitApi('POST', '/initialization')
     expectedAborts = 1
     try {
@@ -354,6 +358,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       expect((await host.initializationProof()).counts).toEqual(initializedCounts)
       await noSend(); await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
       expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
+      expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
       // Keep the original real SDK's existing 15-second logical deadline. Do
       // not install fake timers, alter its reader, resolve its promise or retry.
       await ui!.page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_INITIALIZATION_CANCELLED' }).waitFor({ timeout: 20000 })
@@ -365,13 +370,14 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       expect(await ui!.page.getByTestId('sp-yida-init-uncertain').count()).toBe(1)
       expect(await ui!.page.getByTestId('sp-yida-init-initialized').count()).toBe(0)
       expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
-      expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+      expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
       await checkInitializationRequest(commandId)
       await noPrivatePersistence()
     } finally { held.release() }
     await ui!.settled()
     const before = await host.initializationProof()
-    await inspectRecovery(commandId)
+    await inspectRecovery(commandId, true)
+    expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
     expect(await host.initializationProof()).toEqual(before)
     expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(false)
     expect(ui!.requests.map(request => [request.method, request.path])).toEqual([

@@ -1695,9 +1695,16 @@ describe('项目备料页 — the operator project board', () => {
       const panel = root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')
       expect(panel).not.toBeNull()
       expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
-      expect(root.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
       yida.click(); await flush()
       expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBe(panel)
+      // A protocol preview builds the owner section; with no owner-authorized ON reply its CREATE entry stays absent.
+      const mode = panel!.querySelector('[data-testid="sp-yida-preview-mode"]') as HTMLSelectElement
+      mode.value = 'protocol'
+      mode.dispatchEvent(new Event('change')); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-protocol-example-primary"]') as HTMLButtonElement).click(); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click(); await flush()
+      expect(panel!.querySelector('[data-testid="sp-yida-initialization-open"]')).not.toBeNull()
+      expect(panel!.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
       expect(fetchSpy).not.toHaveBeenCalled()
       expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
       expect(setSpy).not.toHaveBeenCalled()
@@ -1852,6 +1859,22 @@ describe('项目备料页 — the operator project board', () => {
       window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
       await flush()
       await expectBlankOnReopen(root)
+    })
+
+    it('re-reads YiDa entry visibility when the session snapshot drops to operate tier', async () => {
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      const root = await mountBoard()
+      await populate(root)
+      h.permissions = ['stock-prep:read', 'stock-prep:operate']
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
+      await flush()
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')).toBeNull()
+      const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+      expect(yida.disabled).toBe(true)
+      expect(yida.classList.contains('sp-board__button--placeholder')).toBe(true)
+      expect(yida.textContent?.trim()).toBe('推送宜搭(暂未接入)')
     })
 
     it('unmounts when focus discovers a changed permission snapshot', async () => {
