@@ -103,7 +103,8 @@ export function isOapiWriteAllowlistRequest(
   authHeader: string | undefined,
 ): boolean {
   if (!isApiTokenBearer(authHeader)) return false
-  if (method === 'POST' && path === '/api/multitable/plm-record-ingress') return isPlmRecordIngressEnabled()
+  // Unlike `$` alone, the final assertion also rejects a trailing line terminator.
+  if (method === 'POST' && /^\/api\/multitable\/plm-record-ingress$(?![\s\S])/.test(path)) return isPlmRecordIngressEnabled()
   return OAPI_WRITE_ROUTES.some((route) => route.method === method && route.pattern.test(path))
 }
 

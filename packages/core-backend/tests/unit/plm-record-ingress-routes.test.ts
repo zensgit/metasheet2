@@ -129,6 +129,12 @@ describe('actual Express ingress registration and existing token middleware', ()
     for (const path of [
       '/api/multitable/plm-record-ingress/x',
       '/api/multitable/plm-record-ingress/',
+      '/api/multitable/plm-record-ingress\n',
+      '/api/multitable/plm-record-ingress\r\n',
+      '/api/multitable/plm-record-ingress\u2028',
+      '/api/multitable/plm-record-ingress\u2029',
+      '/API/multitable/plm-record-ingress',
+      '/api/multitable/plm-record-ingress?extra=1',
     ])
       expect(isOapiAllowlistRequest('POST', path, 'Bearer mst_ok')).toBe(false)
     expect(
