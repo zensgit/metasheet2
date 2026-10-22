@@ -3,14 +3,16 @@
 // Batch-refresh phase 0 step 1 — the PROJECT WRITE LOCK module (lib/stock-preparation-project-write-lock.cjs)
 // against a faithful fake of the scoped db helper (support/stock-preparation-project-write-lock-kit.cjs):
 //
-//   L1  scope key: deterministic golden literal, values-free, (sheet, project) only — tenant is not identity
+//   L1  scope key: deterministic golden literal, values-free, the target sheet only (R-52) — project and
+//       tenant are not identity
 //   L2  acquire / busy / release; the generation survives; the row is never deleted
 //   L3  bump: free row, live lease (refused), abandoned lease (cleared + bumped + interruption recorded)
 //   L4  a holder whose lease was taken over gets LEASE_LOST; a token-only change gets PLAN_SUPERSEDED
 //   L5  every store failure is 503 STORE_FAILED — never a busy 409, never "proceed"
 //   L6  takeover exactly at expiry + grace (1 ms before: still busy)
 //   L7  a takeover CAS is pinned to the observed seq: a holder that renewed in between keeps its lease
-//   L8  two concurrent bumps both land (+2), each with its own token
+//   L8  two concurrent bumps both land (+2), each with its own token; exhausted contention is "busy", not
+//       "another run is writing"
 //   L9  acquire vs bump: no bump ever commits while the lease is live
 //   L10 the heartbeat keeps a long run's lease alive, and never overlaps the pre-write CAS
 //   L11 the constants are pinned
@@ -23,6 +25,7 @@ const path = require('node:path')
 
 const lockModule = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 const {
+  PROJECT_WRITE_BUMP_BACKOFF_MS,
   PROJECT_WRITE_BUMP_MAX_ATTEMPTS,
   PROJECT_WRITE_ERROR_CODES,
   PROJECT_WRITE_GENERATION_REASONS,
@@ -32,7 +35,7 @@ const {
   PROJECT_WRITE_LOCK_TABLE,
   PROJECT_WRITE_PURPOSES,
   assertWriteBindingMatchesGuard,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
   writeBindingFromGeneration,
 } = lockModule
 const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
@@ -48,7 +51,7 @@ const GRACE = PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS
 function setup(options = {}) {
   const clock = kit.createClock()
   const env = kit.createInMemoryProjectWriteLock({ clock, ...options })
-  const scope = projectWriteScopeKey(SHEET, PROJECT)
+  const scope = sheetWriteScopeKey(SHEET)
   const row = () => env.db.rows(PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === scope) || null
   return { ...env, clock, scope, row }
 }
@@ -62,21 +65,19 @@ function rejectsWith(code, status) {
 }
 
 // ── L1 ────────────────────────────────────────────────────────────────────────────────────────────
-test('L1 scope key: golden literal, values-free, depends on sheet and project only', () => {
-  const key = projectWriteScopeKey('sheet_swl_golden', 'SYN-SWL-0001')
-  assert.equal(key, 'spw1:45e4ea1873f903f78cd7e3c4bf5167903f913293571c09b3a44f6139e13f10fa')
-  assert.equal(key, `spw1:${crypto.createHash('sha256').update(JSON.stringify(['stock-prep/project-write/v1', 'sheet_swl_golden', 'SYN-SWL-0001'])).digest('hex')}`)
-  assert.equal(key.includes('SYN-SWL'), false, 'no project number in the key')
+test('L1 scope key: golden literal, values-free, the target sheet only (R-52)', () => {
+  const key = sheetWriteScopeKey('sheet_swl_golden')
+  assert.equal(key, 'spw2:d26fdc5170bf78a4749246cbaf60ec3619d0a9b636c57cdd712f5f267a3d9746')
+  assert.equal(key, `spw2:${crypto.createHash('sha256').update(JSON.stringify(['stock-prep/sheet-write/v2', 'sheet_swl_golden'])).digest('hex')}`)
   assert.equal(key.includes('sheet_swl'), false, 'no sheet id in the key')
-  assert.equal(projectWriteScopeKey(' sheet_swl_golden ', ' SYN-SWL-0001 '), key, 'trimmed')
-  assert.notEqual(projectWriteScopeKey('sheet_swl_other', 'SYN-SWL-0001'), key, 'another sheet is another scope')
-  assert.notEqual(projectWriteScopeKey('sheet_swl_golden', 'SYN-SWL-0009'), key, 'another project is another scope')
-  assert.equal(projectWriteScopeKey.length, 2, 'the identity takes exactly (sheet, project) — no tenant, no action')
-  assert.throws(() => projectWriteScopeKey('', 'SYN-SWL-0001'), rejectsWith(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
-  assert.throws(() => projectWriteScopeKey('sheet_swl_golden', '  '), rejectsWith(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
+  assert.equal(sheetWriteScopeKey(' sheet_swl_golden '), key, 'trimmed')
+  assert.notEqual(sheetWriteScopeKey('sheet_swl_other'), key, 'another sheet is another scope')
+  assert.equal(sheetWriteScopeKey.length, 1, 'the identity takes exactly the sheet — no project, no tenant, no action')
+  assert.throws(() => sheetWriteScopeKey(''), rejectsWith(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
+  assert.throws(() => sheetWriteScopeKey('  '), rejectsWith(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
 })
 
-test('L1 two tenants naming one sheet + project share one row (tenant is audit-only)', async () => {
+test('L1 two tenants naming one sheet share one row (tenant is audit-only)', async () => {
   const { lock, scope, db } = setup()
   await lock.bumpGeneration(scope, { reason: 'small_preview', tenantId: 'tenant-swl-a' })
   await lock.bumpGeneration(scope, { reason: 'small_preview', tenantId: 'tenant-swl-b' })
@@ -277,6 +278,19 @@ test('L5 every store failure is 503 STORE_FAILED (never busy, never proceed)', a
   }
 })
 
+test('L5 (review round 1) bump: a PRIMARY KEY conflict followed by a re-read that finds no row is STORE_FAILED row_vanished, never busy', async () => {
+  const { lock, scope, db } = setup({ bumpBackoffMs: 0 })
+  db.faults.insertOne = () => kit.uniqueViolation()
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'small_preview' }), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+    assert.equal(error.status, 503)
+    assert.equal(error.details.operation, 'bump')
+    assert.equal(error.details.reason, 'row_vanished')
+    return true
+  })
+  assert.equal(db.log.filter(([m]) => m === 'insertOne').length, 1, 'one insert, then the store fault — no retry loop ending in busy')
+})
+
 // ── L6 ────────────────────────────────────────────────────────────────────────────────────────────
 test('L6 takeover: 1 ms before expiry + grace is still busy; at expiry + grace it is taken over', async () => {
   const { lock, scope, clock, row } = setup()
@@ -332,6 +346,40 @@ test('L8 two concurrent bumps both land (+2), each with its own token', async ()
   assert.deepEqual([x.generation, y.generation].sort(), [2, 3])
   assert.notEqual(x.generationToken, y.generationToken)
   assert.equal(row().generation, 3)
+})
+
+test('L8 (review round 1) bumps that lose every CAS race on a FREE row give up as contention: no writer claimed, with backoff between attempts', async () => {
+  const slept = []
+  const { lock, scope, db, row } = setup({ sleep: async (ms) => { slept.push(ms) } })
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  // Before each of this bump's CASes another bump lands first (the token moves), so every CAS misses.
+  db.pauses.updateRow = async (args) => {
+    if (args.set && args.set.generation !== undefined && args.where && args.where.lease_id === null) {
+      const table = db.tables.get(PROJECT_WRITE_LOCK_TABLE)
+      const current = table.get(scope)
+      table.set(scope, { ...current, generation: current.generation + 1, generation_token: `swl-other-${current.generation + 1}` })
+    }
+  }
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'small_preview' }), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 'still a retryable 409')
+    assert.equal(error.status, 409)
+    assert.equal(error.details.reason, 'contention')
+    assert.equal('holderPurpose' in error.details, false, 'no holder is named — none exists')
+    assert.doesNotMatch(error.message, /another run is writing/)
+    return true
+  })
+  assert.equal(row().lease_id, null, 'calibration: no lease was ever held')
+  assert.deepEqual(slept, [1, 2, 3, 4].map((n) => n * PROJECT_WRITE_BUMP_BACKOFF_MS), 'a growing backoff between the five attempts')
+})
+
+test('L8 (review round 1) acquire that loses both CAS races to a LIVE holder still names the writer', async () => {
+  const { lock, scope } = setup()
+  await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-holder' })
+  await assert.rejects(() => lock.acquire(scope, { purpose: 'small_apply' }), (error) => {
+    assert.equal(error.details.holderPurpose, 'small_apply')
+    assert.notEqual(error.details.reason, 'contention')
+    return true
+  })
 })
 
 // ── L9 ────────────────────────────────────────────────────────────────────────────────────────────
@@ -402,6 +450,7 @@ test('L11 constants and vocabularies are pinned', () => {
   assert.equal(PROJECT_WRITE_LEASE_HEARTBEAT_MS, 30000)
   assert.equal(PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS, 120000)
   assert.equal(PROJECT_WRITE_BUMP_MAX_ATTEMPTS, 5)
+  assert.equal(PROJECT_WRITE_BUMP_BACKOFF_MS, 10)
   assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk'])
   assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {

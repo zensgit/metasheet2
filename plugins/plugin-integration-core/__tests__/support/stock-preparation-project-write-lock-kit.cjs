@@ -22,7 +22,7 @@ const {
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
   createStockPreparationProjectWriteLock,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
   writeBindingFromGeneration,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 
@@ -286,11 +286,13 @@ function createInMemoryProjectWriteLock({ db, clock, timers, ...options } = {}) 
   return { db: lockDb, clock: lockClock, timers: lockTimers, lock }
 }
 
-// The write scope a table-action input addresses, or null when the input cannot name one (the lib then
-// refuses with its own error before it ever asks for the guard).
+// The write scope a table-action input addresses (its target sheet, R-52; the project number is validated
+// the way the routes validate it), or null when the input cannot name one (the lib then refuses with its own
+// error before it ever asks for the guard).
 function writeScopeOfInput(input = {}) {
   try {
-    return projectWriteScopeKey(input.action && input.action.target && input.action.target.sheetId, normalizeActionParameters(input.parameters).projectNo)
+    normalizeActionParameters(input.parameters)
+    return sheetWriteScopeKey(input.action && input.action.target && input.action.target.sheetId)
   } catch {
     return null
   }
@@ -334,7 +336,7 @@ function createLibWriteLockHarness(options = {}) {
         const source = await largeBomJobs.loadLargeBomBackgroundExpansionJob({
           storage: input.storage, tenantId: input.tenantId, workspaceId: input.workspaceId, actionId: input.actionId, jobId: input.jobId,
         })
-        scope = projectWriteScopeKey(source.actionSnapshot.target.sheetId, source.parameters.projectNo)
+        scope = sheetWriteScopeKey(source.actionSnapshot.target.sheetId)
       } catch {
         scope = null
       }

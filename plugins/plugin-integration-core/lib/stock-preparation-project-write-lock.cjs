@@ -1,35 +1,44 @@
 'use strict'
 
 // ---------------------------------------------------------------------------------------------------
-// 备料 PROJECT WRITE LOCK — one write scope, one writer, one current plan.
+// 备料 SHEET WRITE LOCK — one canonical sheet, one writer, one current plan.
 //
 // Batch-refresh phase 0, step 1 (docs/development/takeover-beiliao-20260821/batch-refresh-merge-plan-20261022.md
 // §5.1 / §7 G5 / §9.2 E01–E04, E07, E08). Two conditions that are NOT the same thing:
 //
-//   * MUTUAL EXCLUSION — of two runs writing the SAME project on the SAME canonical sheet, only one may
-//     write at a time, across processes (an in-process lock is not a guarantee: two PM2 forks, a
-//     restart, a second host each hold their own memory). That is the LEASE below.
+//   * MUTUAL EXCLUSION — of two runs writing the SAME canonical 备料 sheet, only one may write at a
+//     time, across processes (an in-process lock is not a guarantee: two PM2 forks, a restart, a second
+//     host each hold their own memory). That is the LEASE below.
 //   * PLAN GENERATION — a run that was planned BEFORE a newer plan was made must not write afterwards,
-//     even sequentially, even when nobody else is writing. Exclusion cannot stop that: the old run
-//     simply waits its turn and then writes the stale plan. That is the GENERATION below. Every
-//     applicable small preview and every large approval BUMPS it; every artifact that can later write
-//     (a small dry-run token, a large checkpoint job) is BOUND to the generation it was planned under;
-//     a run compares its binding with the generation it observes AFTER it holds the lease, and
-//     re-asserts both in the same single-statement CAS before every write.
+//     even when nobody else is writing. Exclusion cannot stop that: the old run simply waits its turn
+//     and then writes the stale plan. That is the GENERATION below. Every applicable small preview made
+//     by a caller who may apply, and every large approval, BUMPS it; every artifact that can later write
+//     (a small dry-run token, a large checkpoint job) is BOUND to the generation it was planned or
+//     approved under; a run compares its binding with the generation it observes AFTER it holds the
+//     lease, and re-asserts both in the same single-statement CAS before every write.
+//     LARGE LANE LIMIT (R4, deferred): the large plan is built UNBOUND before approval and every chunk
+//     writes that frozen plan, so for the large lane the generation only orders APPROVALS against
+//     previews — a plan computed before a newer preview but approved after it is approved as the
+//     newest. "Even sequentially" holds for the small lane only. Pilot projects are to be kept off the
+//     large lane, and today that is CONFIGURATION (the production policy's allowedRoute, see
+//     stock-preparation-table-actions.cjs assertStockPrepApplyAllowed), not code: the pilot-marker
+//     change must refuse the large lane for pilot projects in code.
 //
 // Both live in ONE row per scope in integration_stock_prep_project_write_lock (migration 100), so one
 // UPDATE checks lease and generation together and a bump conflicts with a holder's CAS on the same
 // PostgreSQL row lock.
 //
-// SCOPE IDENTITY = (target sheetId, normalized projectNo), SHA-256 hashed — values-free. The tenant is
-// recorded for audit only and is NOT part of the identity: sheet ids are globally unique and the writer
-// selects existing rows by projectNo alone on that sheet, so two tenants naming one sheet+project are
-// the same write target and must exclude each other.
+// SCOPE IDENTITY = the target sheetId alone ('spw2:' + SHA-256, values-free; decision register R-52).
+// The foreign-project guard (assertTargetSheetHoldsNoForeignActiveRows) runs on every dry-run, apply and
+// large route, so a sheet holds at most ONE active project: a per-sheet lease costs no parallelism, and
+// it closes the check-then-write race in which two different project numbers applied to one EMPTY sheet
+// at the same moment both pass that guard and both write. The project number is still validated by the
+// routes; the tenant is recorded for audit only (sheet ids are globally unique).
 //
 // THE ORDERING CONTRACT (each invariant is a test, see __tests__/stock-preparation-project-write-lock.test.cjs
 // and stock-preparation-project-write-guard-apply.test.cjs):
-//   I1  every machine write to the canonical sheet for scope S is issued only immediately after a
-//       successful holder CAS on row(S) that pins lease_id, fencing_epoch, lease_seq and generation_token;
+//   I1  every machine write to the canonical sheet S is issued only immediately after a successful holder
+//       CAS on row(S) that pins lease_id, fencing_epoch, lease_seq and generation_token;
 //   I2  a bump commits only through an UPDATE requiring lease_id IS NULL, or through the abandoned-lease
 //       clear pinned to the exact (lease_id, fencing_epoch, lease_seq) observed at least TTL + GRACE after
 //       that lease's last renewal — never while a live holder holds the lease;
@@ -50,21 +59,41 @@
 //
 // Every operation is ONE statement through the scoped db helper (lib/db.cjs) — no transaction is held
 // open across host writes (that would pin one of the host pool's connections for a whole apply and a
-// killed backend would take the server down, see the design notes). Timestamps are this process's clock;
-// GRACE absorbs clock skew between processes.
+// killed backend would take the server down, see the design notes).
+//
+// KNOWN LIMITS (documented, not fixed here):
+//   * CLOCKS. Lease times come from each PROCESS's clock (the scoped db helper takes parameter values,
+//     not SQL expressions). GRACE (120 s) absorbs ordinary skew; an instance whose clock runs more than
+//     TTL + GRACE ahead of the holder's can take over a live lease early. That is still bounded: the
+//     holder's next CAS fails LEASE_LOST, so at most the accepted residual write (R1) lands. There is a
+//     single host today.
+//   * `interrupted` (WRITE_LOCKED details) is STICKY: it reports that last_interrupted_at was ever set
+//     for this sheet, not that the CURRENT holder took over from someone. It is an audit hint only.
+//   * `retryAfterMs` is the time until the CURRENT lease could be taken over if its holder stopped
+//     renewing (expiry + GRACE - now), not a prediction of when the holder will finish: a live holder
+//     keeps renewing, so a retry at that moment can be refused again.
+//   * NO MAXIMUM HOLD. A holder whose callback hangs while its process keeps running keeps heartbeating
+//     and keeps the sheet; only a stopped process (crash, kill, a stalled event loop) lets the lease
+//     lapse. The host's own request timeouts bound the ordinary paths.
+//   * BUMP CONTENTION. Concurrent bumps retry with a short backoff; after PROJECT_WRITE_BUMP_MAX_ATTEMPTS
+//     the refusal is WRITE_LOCKED with details.reason 'contention' and no holder details — it does NOT
+//     claim that a writer exists.
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
 
 const PROJECT_WRITE_LOCK_TABLE = 'integration_stock_prep_project_write_lock'
-const PROJECT_WRITE_SCOPE_NAMESPACE = 'stock-prep/project-write/v1'
-const PROJECT_WRITE_SCOPE_PREFIX = 'spw1:'
+// v2 (R-52): the scope is the target sheet alone. v1 ('spw1:', sheet + project) was never deployed.
+const PROJECT_WRITE_SCOPE_NAMESPACE = 'stock-prep/sheet-write/v2'
+const PROJECT_WRITE_SCOPE_PREFIX = 'spw2:'
 
 // Pinned by the unit suite (L11). Constructor overrides exist for tests only.
 const PROJECT_WRITE_LEASE_TTL_MS = 120_000
 const PROJECT_WRITE_LEASE_HEARTBEAT_MS = 30_000
 const PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS = 120_000
 const PROJECT_WRITE_BUMP_MAX_ATTEMPTS = 5
+// Backoff between bump attempts: attempt n (1-based) waits n * this before retrying (10+20+30+40 ms max).
+const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 
 // Closed vocabularies. A later increment adds its own tokens WITH its feature (e.g. a content-change
 // review confirm), never ahead of it.
@@ -99,15 +128,13 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
-// The ONE scope identity. Inputs are the target sheet id and the NORMALIZED project number (the caller
-// normalizes with normalizeActionParameters, the same function the writer's row selection uses).
-function projectWriteScopeKey(sheetId, projectNo) {
+// The ONE scope identity: the target sheet id (R-52). Values-free (a hash), deterministic, tenant-free.
+function sheetWriteScopeKey(sheetId) {
   const sheet = nonEmptyString(sheetId)
-  const project = nonEmptyString(projectNo)
-  if (!sheet || !project) {
-    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'project write scope needs a target sheet and a project number', { reason: 'scope_incomplete' })
+  if (!sheet) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'sheet write scope needs a target sheet', { reason: 'scope_incomplete' })
   }
-  const digest = crypto.createHash('sha256').update(JSON.stringify([PROJECT_WRITE_SCOPE_NAMESPACE, sheet, project])).digest('hex')
+  const digest = crypto.createHash('sha256').update(JSON.stringify([PROJECT_WRITE_SCOPE_NAMESPACE, sheet])).digest('hex')
   return `${PROJECT_WRITE_SCOPE_PREFIX}${digest}`
 }
 
@@ -148,7 +175,7 @@ function storeFailed(operation, error, { fence = false, extra = {} } = {}) {
   return new StockPreparationProjectWriteLockError(
     503,
     PROJECT_WRITE_ERROR_CODES.STORE_FAILED,
-    'the project write lock store could not be read or written; nothing was written under it',
+    'the sheet write lock store could not be read or written; nothing was written under it',
     { operation, ...(sqlState ? { sqlState } : {}), ...extra },
     { fence },
   )
@@ -156,14 +183,14 @@ function storeFailed(operation, error, { fence = false, extra = {} } = {}) {
 
 function assertPurpose(purpose) {
   if (!PROJECT_WRITE_PURPOSES.includes(purpose)) {
-    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'unknown project write purpose', { reason: 'purpose_unknown' })
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'unknown sheet write purpose', { reason: 'purpose_unknown' })
   }
   return purpose
 }
 
 function assertReason(reason) {
   if (!PROJECT_WRITE_GENERATION_REASONS.includes(reason)) {
-    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'unknown project write generation reason', { reason: 'generation_reason_unknown' })
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'unknown sheet write generation reason', { reason: 'generation_reason_unknown' })
   }
   return reason
 }
@@ -181,7 +208,7 @@ function planSuperseded(reason, details = {}, { fence = false } = {}) {
   return new StockPreparationProjectWriteLockError(
     409,
     PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED,
-    'a newer preview of this project exists; preview again before writing',
+    'a newer preview or approval for this stock-prep sheet exists; preview again before writing',
     { reason, ...details },
     { fence },
   )
@@ -216,6 +243,8 @@ function createStockPreparationProjectWriteLock({
   heartbeatMs,
   takeoverGraceMs,
   bumpMaxAttempts,
+  bumpBackoffMs,
+  sleep,
   idGenerator,
   timers,
   logger,
@@ -227,6 +256,8 @@ function createStockPreparationProjectWriteLock({
   const heartbeatEvery = Number.isInteger(heartbeatMs) && heartbeatMs > 0 ? heartbeatMs : PROJECT_WRITE_LEASE_HEARTBEAT_MS
   const grace = Number.isInteger(takeoverGraceMs) && takeoverGraceMs >= 0 ? takeoverGraceMs : PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS
   const maxBumpAttempts = Number.isInteger(bumpMaxAttempts) && bumpMaxAttempts > 0 ? bumpMaxAttempts : PROJECT_WRITE_BUMP_MAX_ATTEMPTS
+  const backoffMs = Number.isInteger(bumpBackoffMs) && bumpBackoffMs >= 0 ? bumpBackoffMs : PROJECT_WRITE_BUMP_BACKOFF_MS
+  const pause = typeof sleep === 'function' ? sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   const clock = typeof now === 'function' ? now : () => new Date()
   const newId = typeof idGenerator === 'function' ? idGenerator : () => crypto.randomUUID()
   const timerApi = timers && typeof timers.setInterval === 'function' ? timers : { setInterval, clearInterval }
@@ -263,6 +294,17 @@ function createStockPreparationProjectWriteLock({
     return atMs < expires + grace
   }
 
+  // Lost every CAS race on a row that NO live holder owns (concurrent bumps / acquires): busy, not
+  // "another run is writing". Same code (a retryable 409), its own reason and message, no holder details.
+  function contentionRefusal() {
+    return new StockPreparationProjectWriteLockError(
+      409,
+      PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED,
+      'the sheet write lock is contended right now; retry shortly',
+      { reason: 'contention', retryAfterMs: backoffMs * maxBumpAttempts },
+    )
+  }
+
   function writeLocked(row, atMs, extra = {}) {
     const expires = row ? timeMs(row.lease_expires_at) : null
     const details = {
@@ -275,7 +317,7 @@ function createStockPreparationProjectWriteLock({
     return new StockPreparationProjectWriteLockError(
       409,
       PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED,
-      'another run is writing this project; retry after it finishes',
+      'another run is writing this stock-prep sheet; retry after it finishes',
       details,
     )
   }
@@ -380,13 +422,23 @@ function createStockPreparationProjectWriteLock({
       // Lost a race on the row: read it once more and decide again.
       row = await readRow(scopeKey, 'acquire')
     }
-    throw writeLocked(row, nowMs(), { reason: 'contention' })
+    // Two lost CAS races. A live holder is a writer; anything else is contention, not a writer.
+    const finalAtMs = nowMs()
+    if (leaseIsLive(row, finalAtMs)) throw writeLocked(row, finalAtMs)
+    throw contentionRefusal()
   }
 
   async function bumpGeneration(scopeKey, { reason, tenantId } = {}) {
     assertReason(reason)
+    let insertConflicted = false
     for (let attempt = 0; attempt < maxBumpAttempts; attempt += 1) {
+      if (attempt > 0 && backoffMs > 0) await pause(attempt * backoffMs)
       const row = await readRow(scopeKey, 'bump')
+      if (!row && insertConflicted) {
+        // A PRIMARY KEY conflict says the row exists; a read that then finds none is a store fault —
+        // the same answer acquire gives, never a busy refusal.
+        throw storeFailed('bump', null, { extra: { reason: 'row_vanished' } })
+      }
       const atMs = nowMs()
       const at = new Date(atMs).toISOString()
       const token = newId()
@@ -415,6 +467,7 @@ function createStockPreparationProjectWriteLock({
         } catch (error) {
           if (error instanceof StockPreparationProjectWriteLockError) throw error
           if (!isUniqueViolation(error)) throw storeFailed('bump', error)
+          insertConflicted = true
           continue
         }
       }
@@ -465,7 +518,7 @@ function createStockPreparationProjectWriteLock({
       }
       // Zero rows: someone moved the row between the read and the CAS. Read again and decide again.
     }
-    throw writeLocked(null, nowMs(), { reason: 'contention' })
+    throw contentionRefusal()
   }
 
   async function readState(scopeKey) {
@@ -532,7 +585,7 @@ function createStockPreparationProjectWriteLock({
       throw new StockPreparationProjectWriteLockError(
         409,
         PROJECT_WRITE_ERROR_CODES.LEASE_LOST,
-        'this run lost its write lease on the project (it lapsed and was taken over); it stopped before the next write',
+        'this run lost its write lease on the sheet (it lapsed and was taken over); it stopped before the next write',
         {},
         { fence: true },
       )
@@ -562,7 +615,7 @@ function createStockPreparationProjectWriteLock({
       if (released || lost || inFlight > 0) return Promise.resolve()
       return serialized(() => holderCas('heartbeat')).catch((error) => {
         lost = error
-        if (log) log.warn('[plugin-integration-core] stock-prep project write lease heartbeat failed', { code: error && error.code })
+        if (log) log.warn('[plugin-integration-core] stock-prep sheet write lease heartbeat failed', { code: error && error.code })
       })
     }
 
@@ -602,7 +655,7 @@ function createStockPreparationProjectWriteLock({
         })
       } catch (error) {
         // Best-effort: an unreleased lease expires (TTL + GRACE) and is taken over.
-        if (log) log.warn('[plugin-integration-core] stock-prep project write lease release failed; it will expire', { sqlState: sqlStateOf(error) })
+        if (log) log.warn('[plugin-integration-core] stock-prep sheet write lease release failed; it will expire', { sqlState: sqlStateOf(error) })
       }
     }
 
@@ -635,7 +688,7 @@ function createStockPreparationProjectWriteLock({
   }
 
   return Object.freeze({
-    scopeKeyFor: projectWriteScopeKey,
+    scopeKeyFor: sheetWriteScopeKey,
     readState,
     assertNoLiveWriter,
     bumpGeneration,
@@ -647,6 +700,7 @@ function createStockPreparationProjectWriteLock({
 
 module.exports = {
   PLAN_SUPERSEDED_REASONS,
+  PROJECT_WRITE_BUMP_BACKOFF_MS,
   PROJECT_WRITE_BUMP_MAX_ATTEMPTS,
   PROJECT_WRITE_ERROR_CODES,
   PROJECT_WRITE_GENERATION_REASONS,
@@ -659,6 +713,6 @@ module.exports = {
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
   createStockPreparationProjectWriteLock,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
   writeBindingFromGeneration,
 }

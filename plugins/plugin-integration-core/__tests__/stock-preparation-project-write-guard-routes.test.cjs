@@ -10,6 +10,12 @@
 //   R3  no lock service: apply 501 with zero IO; the dry-run still answers, with an UNBOUND token.
 //   R4  the status / code table, and the pull-outcome stamp (`refused`, or `failed` once rows landed).
 //   R5  the lease is released after success and after every error path.
+//   R7  (review round 1) only a caller who may APPLY binds a preview: a read-tier trial gets an unbound token
+//       and supersedes nothing; a puller's preview binds and supersedes.
+//   R8  (review round 1) lock refusals before the work starts are stamped `refused`, except WRITE_LOCKED,
+//       which is deliberately not stamped (it describes another run that stamps its own outcome).
+//   R9  (R-52) the scope is the SHEET: with two projects on one sheet (the env sheet, switch off), a
+//       second project's preview is refused while the first project writes that sheet.
 //
 // Every value here is synthetic.
 
@@ -25,7 +31,7 @@ const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-prepar
 const {
   PROJECT_WRITE_ERROR_CODES,
   PROJECT_WRITE_LOCK_TABLE,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
 } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 
 const tests = []
@@ -37,10 +43,12 @@ const DRY_RUN_PATH = '/api/integration/table-actions/:actionId/dry-run'
 const JOBS_PATH = '/api/integration/table-actions/:actionId/dry-run-jobs'
 const APPLY_PATH = '/api/integration/table-actions/:actionId/apply'
 const PULLER = Object.freeze({ id: 'u_swl_pull', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
+// The legacy read tier: admitted to the dry-run route, refused by the apply gate.
+const READER = Object.freeze({ id: 'u_swl_reader', tenantId: TENANT, permissions: ['integration:read'] })
 
 // The project-sheet mount with (a) an inspectable lock (or none) and (b) counters on the two
 // identity-bearing source steps, so "before the adapter load" is observable.
-function mount({ lock = 'memory' } = {}) {
+function mount({ lock = 'memory', switchOn = true } = {}) {
   const env = lock === 'memory' ? kit.createInMemoryProjectWriteLock({ timers: 'real' }) : null
   const loads = []
   const system = (input = {}) => ({
@@ -57,7 +65,7 @@ function mount({ lock = 'memory' } = {}) {
   const h = harness.mountProjectSheetRoutes({
     tenantId: TENANT,
     projectNo: PROJECT,
-    switchOn: true,
+    switchOn,
     serviceExtras: {
       stockPreparationProjectWriteLock: env ? env.lock : null,
       externalSystemRegistry: {
@@ -82,9 +90,9 @@ function mount({ lock = 'memory' } = {}) {
   return h
 }
 
-const call = (h, method, routePath, { body, query = { tenantId: TENANT } } = {}) =>
-  harness.call(h.routes, method, routePath, { user: PULLER, params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID }, body, query })
-const dryRun = (h) => call(h, 'POST', DRY_RUN_PATH, { body: { parameters: { projectNo: PROJECT } } })
+const call = (h, method, routePath, { body, query = { tenantId: TENANT }, user = PULLER } = {}) =>
+  harness.call(h.routes, method, routePath, { user, params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID }, body, query })
+const dryRun = (h, user = PULLER) => call(h, 'POST', DRY_RUN_PATH, { body: { parameters: { projectNo: PROJECT } }, user })
 const startJob = (h) => call(h, 'POST', JOBS_PATH, { body: { parameters: { projectNo: PROJECT } } })
 const apply = (h, token) => call(h, 'POST', APPLY_PATH, { body: { parameters: { projectNo: PROJECT }, confirm: { dryRunToken: token } } })
 const lockRow = (h, scope) => h.env.db.rows(PROJECT_WRITE_LOCK_TABLE).find((row) => row.scope_key === scope) || null
@@ -93,7 +101,7 @@ const writes = (h) => h.records.calls.filter((c) => c[0] === 'createRecord' || c
 
 function seeded(h) {
   const { sheetId } = h.seedRegistryRow(PROJECT)
-  return projectWriteScopeKey(sheetId, PROJECT)
+  return sheetWriteScopeKey(sheetId)
 }
 
 function errorOf(res) {
@@ -257,6 +265,106 @@ test('R4/R5 status-code table + outcome stamps; the lease is released after succ
       assert.equal(lockRow(h, scope).lease_id, null, 'released after a lib refusal')
     } finally { h.restore() }
   }
+})
+
+// ── R7 ────────────────────────────────────────────────────────────────────────────────────────────
+test('R7 a read-tier trial gets an unbound token and supersedes nothing; a puller binds and supersedes', async () => {
+  const h = mount()
+  try {
+    const scope = seeded(h)
+    const pulled = await dryRun(h)
+    assert.equal(pulled.statusCode, 200, JSON.stringify(pulled.body))
+    assert.equal(lockRow(h, scope).generation, 1, 'the puller\'s applicable preview bumped')
+    const records = () => Array.from(h.context.storage.values()).filter((value) => value && value.revision)
+    assert.equal(records().length, 1)
+    assert.equal(records()[0].writeScope, scope, 'the puller\'s token is bound')
+    const read = await dryRun(h, READER)
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.equal(typeof read.body.data.dryRunToken, 'string', 'same response shape: a token is still answered')
+    assert.deepEqual(Object.keys(read.body.data).sort(), Object.keys(pulled.body.data).sort())
+    assert.equal(lockRow(h, scope).generation, 1, 'the read-tier trial did NOT bump')
+    const readRecord = records().find((record) => !record.writeScope)
+    assert.ok(readRecord, 'the read-tier token is unbound')
+    // The puller's pending token survives the reader's trial…
+    const applied = await apply(h, pulled.body.data.dryRunToken)
+    assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+    // …and the reader's unbound token can never write.
+    await dryRun(h, READER)
+    const readToken = (await dryRun(h, READER)).body.data.dryRunToken
+    const refused = await apply(h, readToken)
+    assert.equal(refused.statusCode, 409)
+    assert.equal(errorOf(refused).code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+    assert.equal(errorOf(refused).details.reason, 'token_unbound')
+  } finally { h.restore() }
+})
+
+// ── R8 ────────────────────────────────────────────────────────────────────────────────────────────
+test('R8 pre-work lock refusals are stamped refused (store failure on apply and on the dry-run precheck); WRITE_LOCKED is deliberately not', async () => {
+  {
+    const h = mount()
+    try {
+      const scope = seeded(h)
+      const dry = await dryRun(h)
+      const before = registryRow(h).last_pull_outcome
+      const holder = await h.env.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-other-run' })
+      const busyApply = await apply(h, dry.body.data.dryRunToken)
+      assert.equal(busyApply.statusCode, 409)
+      const busyPreview = await dryRun(h)
+      assert.equal(busyPreview.statusCode, 409)
+      assert.equal(registryRow(h).last_pull_outcome, before, 'WRITE_LOCKED refusals are not stamped')
+      await h.env.lock.createGuard(holder).release()
+    } finally { h.restore() }
+  }
+  {
+    const h = mount()
+    try {
+      seeded(h)
+      const dry = await dryRun(h)
+      h.env.db.faults.selectOne = Object.assign(new Error('relation missing'), { code: '42P01' })
+      const refused = await apply(h, dry.body.data.dryRunToken)
+      assert.equal(refused.statusCode, 503)
+      assert.equal(registryRow(h).last_pull_outcome, 'refused', 'an apply refused by the lock store is stamped')
+      assert.equal(registryRow(h).last_pull_code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+    } finally { h.restore() }
+  }
+  {
+    const h = mount()
+    try {
+      seeded(h)
+      h.env.db.faults.selectOne = Object.assign(new Error('relation missing'), { code: '42P01' })
+      const refused = await dryRun(h)
+      assert.equal(refused.statusCode, 503)
+      assert.equal(h.source.calls.length, 0, 'refused before the source read')
+      assert.equal(registryRow(h).last_pull_outcome, 'refused', 'a preview refused by the lock store is stamped')
+      assert.equal(registryRow(h).last_pull_code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+    } finally { h.restore() }
+  }
+})
+
+// ── R9 ────────────────────────────────────────────────────────────────────────────────────────────
+test('R9 (R-52) one sheet, two projects: while project 1 writes the env sheet, project 2\'s preview is refused 409 before any source read', async () => {
+  const h = mount({ switchOn: false })
+  try {
+    const envSheetId = h.context.config.stockPreparationTableActions[0].target.sheetId
+    const scope = sheetWriteScopeKey(envSheetId)
+    const dry = await dryRun(h)
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+    const gate = kit.deferred()
+    const entered = kit.deferred()
+    const createRecord = h.records.createRecord.bind(h.records)
+    h.records.createRecord = async (input) => { entered.resolve(); await gate.promise; return createRecord(input) }
+    const running = apply(h, dry.body.data.dryRunToken)
+    await entered.promise
+    assert.ok(lockRow(h, scope).lease_id, 'calibration: project 1 holds the env sheet')
+    const reads = h.source.calls.length
+    const other = await call(h, 'POST', DRY_RUN_PATH, { body: { parameters: { projectNo: 'SYN-SWL-0008' } } })
+    assert.equal(other.statusCode, 409, JSON.stringify(other.body))
+    assert.equal(errorOf(other).code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(h.source.calls.length, reads, 'refused before any source read')
+    gate.resolve()
+    const done = await running
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+  } finally { h.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-guard-routes.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-guard-routes' })

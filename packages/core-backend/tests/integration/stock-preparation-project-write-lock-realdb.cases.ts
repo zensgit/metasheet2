@@ -23,8 +23,11 @@
  *       the plan's ADD count and the lease is free.
  *   D4  two sessions consume the same plugin_kv token at once: exactly one gets the record.
  *   D5  lapse with injected clocks: a takeover from another session, and the stalled holder's next CAS is LEASE_LOST.
- *   D6  cross-PROCESS: three node children. A heartbeating holder of S keeps S busy past its TTL while unrelated
- *       scopes proceed; after SIGKILL the scope stays busy until expiry + grace, then is taken over.
+ *   D6  cross-PROCESS: three node children. A heartbeating holder of sheet S keeps S busy past its TTL while other
+ *       sheets proceed; after SIGKILL the sheet stays busy until expiry + grace, then is taken over.
+ *   D7  (R-52) two project numbers applied at the same moment to one EMPTY sheet: exactly one project lands; the
+ *       other is refused (WRITE_LOCKED / PLAN_SUPERSEDED / the foreign-project 409) — never both, which the
+ *       per-(sheet, project) scope allowed through the foreign-project check-then-write race.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -60,7 +63,7 @@ const {
   PROJECT_WRITE_LEASE_TTL_MS,
   PROJECT_WRITE_LOCK_TABLE,
   createStockPreparationProjectWriteLock,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
   writeBindingFromGeneration,
 } = lockModule
 
@@ -117,8 +120,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
   const TOKEN = `${process.pid}_${Date.now().toString(36)}`
   const SHEET = `sheet_swl_rdb_${TOKEN}`
   const scopes: string[] = []
-  const scope = (label: string, sheet = SHEET) => {
-    const key = projectWriteScopeKey(sheet, `SYN-SWL-${label}`)
+  // R-52: the scope is the sheet, so every label is its own synthetic sheet.
+  const scope = (label: string) => {
+    const key = sheetWriteScopeKey(`${SHEET}_${label}`)
     scopes.push(key)
     return key
   }
@@ -264,7 +268,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       // The sheet's contract select options (the decision column etc.), as the project-sheet create leg seeds them.
       await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
       const sheetId: string = ensured.target.sheetId
-      const key = projectWriteScopeKey(sheetId, projectNo)
+      const key = sheetWriteScopeKey(sheetId)
       scopes.push(key)
       try {
         const lockA = createStockPreparationProjectWriteLock({ db: createDb({ database: pluginContext.api.database }) })
@@ -435,7 +439,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         }
         const keyS = scope('D6-S')
         const keyS2 = scope('D6-S2')
-        const keyS3 = scope('D6-S3', `${SHEET}_other`)
+        const keyS3 = scope('D6-S3')
         const holder = spawn(process.execPath, [script, 'hold', keyS], { env, stdio: ['ignore', 'pipe', 'inherit'] })
         children.push(holder)
         await new Promise<void>((resolve, reject) => {
@@ -466,6 +470,106 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       } finally {
         for (const child of children) { try { child.kill('SIGKILL') } catch { /* gone */ } }
         await rm(dir, { recursive: true, force: true })
+      }
+    }, 60000)
+
+    test('D7 (R-52) two project numbers applied at once to one EMPTY sheet: exactly one project lands; the other is refused (WRITE_LOCKED / PLAN_SUPERSEDED / the foreign-project 409)', async () => {
+      const pluginContext = createProductionPluginContext()
+      const multitable = pluginContext.api.multitable
+      if (!multitable) throw new Error('production plugin context is missing multitable APIs')
+      const projectId = `tenant_swl_d7_${TOKEN}:integration-core`
+      const objectId = `plm_stock_preparation_sandbox_swl_d7_${TOKEN}`
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+      const sheetId: string = ensured.target.sheetId
+      const key = sheetWriteScopeKey(sheetId)
+      const projectField: string = (ensured.target.fieldIdMap && ensured.target.fieldIdMap.projectNo) || 'projectNo'
+      scopes.push(key)
+      try {
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB) })
+        const action = {
+          actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID,
+          source: { externalSystemId: 'swl_source_rdb_d7', kind: 'data-source:sql-readonly' },
+          target: ensured.target,
+        }
+        const sourceFor = (projectNo: string) => {
+          const data: Record<string, Array<Record<string, unknown>>> = {
+            DN_PDM_PathExAttrInfo: [{ FileCode: projectNo, Parent_OBJ_ID: `PATH-${projectNo}` }],
+            DN_PDM_PathInfo: [{ OBJ_ID: `PATH-${projectNo}` }],
+            DN_PDM_OrderHeadInfo: [{ OBJ_ID: `ORDER-${projectNo}`, path_id: `PATH-${projectNo}` }],
+            DN_PDM_OrderDetailInfo: [{ order_id: `ORDER-${projectNo}`, part_id: `PART-${projectNo}`, quantity: '2' }],
+            DN_PDM_PartLibraryInfo: [{ OBJ_ID: `PART-${projectNo}`, IdentityNo: `ID-${projectNo}`, IdentityName: 'Synthetic part', Material: 'Synthetic', SysVer: 'V1' }],
+            DN_PDM_BomHeadInfo: [],
+            DN_PDM_BomDetailsInfo: [],
+          }
+          return {
+            async read(input: any = {}) {
+              const rows = Array.isArray(data[input.object]) ? data[input.object] : []
+              const found = rows.filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
+              return { records: found.map((row) => ({ ...row })), done: true, nextCursor: null }
+            },
+          }
+        }
+        // A barrier at the first host write: an apply that got that far waits for the other to get there
+        // too (or to be refused), so two applies that BOTH passed the foreign-project check would both write.
+        let entered = 0
+        let releaseBarrier: () => void = () => {}
+        const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve })
+        const recordsWithBarrier: any = {
+          ...multitable.records,
+          async createRecord(input: any) {
+            entered += 1
+            if (entered >= 2) releaseBarrier()
+            await Promise.race([barrier, new Promise((resolve) => setTimeout(resolve, 5000))])
+            return (multitable.records as any).createRecord(input)
+          },
+        }
+        const plan = async (lock: any, projectNo: string) => tableActions.dryRunStockPreparationAction({
+          action, parameters: { projectNo }, sourceAdapter: sourceFor(projectNo), recordsApi: multitable.records,
+          tokenStore: pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d7_${projectNo}`,
+          projectWriteGenerationBinder: async () => writeBindingFromGeneration(await lock.bumpGeneration(key, { reason: 'small_preview' })),
+        })
+        const applyWith = (lock: any, projectNo: string, token: string) => lock.withProjectWriteLease(key, { purpose: 'small_apply', runId: `swl-d7-${projectNo}` }, (guard: any) =>
+          tableActions.applyStockPreparationAction({
+            action, parameters: { projectNo }, sourceAdapter: sourceFor(projectNo), recordsApi: recordsWithBarrier,
+            tokenStore: pluginContext.storage, plannedAt: '2026-10-22T08:00:00.000Z', runId: `swl_d7_${projectNo}`,
+            dryRunToken: token, permission: 'write', sandboxPolicy: { enabled: true, allowedTargetObjectIds: [objectId] }, projectWriteGuard: guard,
+          }))
+        const P1 = 'SYN-SWL-D7A'
+        const P2 = 'SYN-SWL-D7B'
+        const t1 = (await plan(lockA, P1)).dryRunToken
+        const t2 = (await plan(lockB, P2)).dryRunToken
+        expect(typeof t1).toBe('string')
+        expect(typeof t2).toBe('string')
+        const runs = [applyWith(lockA, P1, t1), applyWith(lockB, P2, t2)].map((p) => p.finally(() => releaseBarrier()))
+        const [r1, r2] = await Promise.all(runs.map((p) => settle(p)))
+        const allowed = [PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'TARGET_SHEET_FOREIGN_PROJECT']
+        for (const outcome of [r1, r2]) {
+          if (!outcome.ok) expect(allowed, String(outcome.error && outcome.error.code)).toContain(outcome.error.code)
+        }
+        expect([r1, r2].filter((outcome) => outcome.ok).length).toBeLessThanOrEqual(1)
+        const projects = await q(
+          `SELECT DISTINCT data->>$2 AS p FROM meta_records WHERE sheet_id = $1`,
+          [sheetId, projectField],
+        )
+        expect(projects.rows.length, 'one project on the sheet at most').toBeLessThanOrEqual(1)
+        // A busy refusal kept its token (I4): the newest plan can still land, and then the sheet holds
+        // exactly one project — and a later preview of the other project meets the foreign-project 409.
+        if (!r2.ok && r2.error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED) {
+          const retried = await applyWith(lockB, P2, t2)
+          expect(retried.status).toBe('succeeded')
+        }
+        const finalProjects = await q(`SELECT DISTINCT data->>$2 AS p FROM meta_records WHERE sheet_id = $1`, [sheetId, projectField])
+        expect(finalProjects.rows.length).toBe(1)
+        await expect(plan(lockA, P1)).rejects.toMatchObject({ code: 'TARGET_SHEET_FOREIGN_PROJECT' })
+      } finally {
+        await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
       }
     }, 60000)
   })

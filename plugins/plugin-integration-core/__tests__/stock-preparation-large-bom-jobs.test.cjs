@@ -2481,7 +2481,7 @@ async function swlApprovedLargeJob(harness, { storage = swlKit.createConsumableS
     ...(binder === undefined ? {} : { writeGenerationBinder: binder }),
     ...(binder === null ? { writeGenerationBinder: undefined } : {}),
   })
-  const scope = swlLock.projectWriteScopeKey(action.target.sheetId, parameters.projectNo)
+  const scope = swlLock.sheetWriteScopeKey(action.target.sheetId)
   return { storage, action, parameters, ran, planned, job, scope, applyJobId }
 }
 

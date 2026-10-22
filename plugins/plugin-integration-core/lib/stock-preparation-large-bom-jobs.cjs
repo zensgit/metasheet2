@@ -1181,7 +1181,7 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   // PLAN GENERATION (batch-refresh phase 0 step 1): approving a checkpoint job SUPERSEDES every earlier
   // plan of this write scope (small tokens and earlier approved jobs alike). The route's binder bumps
-  // (refused 409 while a live writer holds the project — then no job is created) and the job records
+  // (refused 409 while a live writer holds the sheet — then no job is created) and the job records
   // the generation it was approved under, ALONGSIDE planRevision / targetRevision, never inside them.
   // No binder (the lock service is not wired) creates an UNBOUND job, which no chunk will run.
   const writeBinding = typeof input.writeGenerationBinder === 'function'
@@ -1354,7 +1354,7 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     }
     const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
     const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
-    // PROJECT WRITE GUARD (batch-refresh phase 0 step 1): the route holds the project write lease around
+    // PROJECT WRITE GUARD (batch-refresh phase 0 step 1): the route holds the sheet write lease around
     // this chunk. Required (501), and BEFORE any job write the job's approval binding must be the
     // generation the lease grant observed — a newer preview or approval of this project since then
     // refuses 409 PLAN_SUPERSEDED and leaves the job exactly as it was; a job approved before bindings

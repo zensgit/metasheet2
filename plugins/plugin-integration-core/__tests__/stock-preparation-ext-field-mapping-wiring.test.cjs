@@ -384,7 +384,7 @@ async function absentConfigIsInertAndUnchanged() {
     records,
   })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, ADMIN_USER) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.equal('extFieldMapping' in res.body.data.evidence, false, 'evidence gains no key when no mapping is configured')
@@ -443,7 +443,7 @@ async function configuredMappingReachesTheWrittenRecord() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   assert.equal(dry.body.data.status, 'ready')
 
@@ -647,7 +647,7 @@ async function oneUnparseableCellDoesNotCostTheRow() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   // The refusal reaches the values-free summary as a frozen type token, never as the cell.
   assert.ok(dry.body.data.evidence.expansion.errorTypes.includes('SOURCE_VALUE_NOT_A_NUMBER'))

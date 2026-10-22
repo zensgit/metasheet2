@@ -857,12 +857,12 @@ test('R-13 board, switch ON: an unregistered project renders with no bound targe
 // superseded (job untouched), and fails closed 501 with no lock service.
 test('R6 large lane: approval bumps + binds; the chunk route takes the project lease, refuses a superseded job untouched, and 501s without the lock', async () => {
   const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
-  const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_LOCK_TABLE, projectWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+  const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_LOCK_TABLE, sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
   const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
   const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationProjectWriteLock: env.lock } })
   try {
     const { sheetId, objectId } = registerActive(h)
-    const scope = projectWriteScopeKey(sheetId, PROJECT)
+    const scope = sheetWriteScopeKey(sheetId)
     const jobId = 'job-swl-r6'
     await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
     assert.equal((await plan(h.routes, jobId)).statusCode, 200)
@@ -873,7 +873,7 @@ test('R6 large lane: approval bumps + binds; the chunk route takes the project l
     const row = () => env.db.rows(PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === scope)
     assert.equal(row().generation, 1, 'the approval bumped the generation')
     const bound = await storedJob(applyJobId)
-    assert.equal(bound.writeScope, scope, 'the job is bound to (project sheet, project)')
+    assert.equal(bound.writeScope, scope, 'the job is bound to its project sheet (R-52)')
     assert.equal(bound.writeGenerationToken, row().generation_token)
     assert.equal(JSON.stringify(approved.body).includes(bound.writeGenerationToken), false, 'the binding is never answered')
 

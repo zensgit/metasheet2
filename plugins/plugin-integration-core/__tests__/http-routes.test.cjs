@@ -5469,6 +5469,14 @@ async function testTableActionRoutes() {
   assert.equal(records.calls[0][1].sheetId, 'sheet_stock_configured', 'existing-row read is scoped to configured target sheet')
   assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read is project-scoped')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'dry-run evidence is values-free')
+  // Batch-refresh phase 0 step 1, review round 1: a READ-tier preview is answered in full but its token is
+  // UNBOUND (it supersedes nothing, and apply refuses it). The apply sequence below plans as the write tier.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
   const dryRunToken = res.body.data.dryRunToken
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
@@ -6554,7 +6562,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('user_admin'), false, 'policy response hides approver identity')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: an applied token must come from a caller who may apply (read-tier tokens are unbound)
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: { parameters: { projectNo: 'P-001' } },
   })
@@ -6578,7 +6586,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.error.code, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups need explicit apply acknowledgement')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: see above
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: {
       parameters: { projectNo: 'P-001' },

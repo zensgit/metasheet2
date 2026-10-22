@@ -1049,7 +1049,7 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
   const LOCK_CODES = [
     ['STOCK_PREP_PROJECT_WRITE_LOCKED', 409, 'WRITE_PROJECT_LOCKED'],
     ['STOCK_PREP_PROJECT_PLAN_SUPERSEDED', 409, 'WRITE_PLAN_SUPERSEDED'],
-    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 409, 'WRITE_INTERRUPTED'],
+    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 409, 'WRITE_TAKEN_OVER'],
     ['STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', 503, 'WRITE_LOCK_UNAVAILABLE'],
     ['STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE', 501, 'WRITE_LOCK_UNAVAILABLE'],
   ] as const
@@ -1095,6 +1095,61 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
       const plain = stockPrepErrorPlain(code)
       expect(plain.zh).not.toBe(generic.zh)
       expect(`${plain.zh}${plain.en}`).not.toContain(code)
+    }
+  })
+
+  // Review round 1 (item 9): what the server says actually happened decides the sentence.
+  it('WL-5: a lock-store failure AFTER rows landed (503, details.partial) says rows may already be written', async () => {
+    const api = makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/apply', { code: 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', detailPartial: true })) })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_LOCK_FAILED_MIDWAY' })
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_LOCK_FAILED_MIDWAY
+    expect(plain.zh).toContain('可能已写进一部分')
+    expect(plain.en).toContain('may already have landed')
+    expect(`${plain.zh}${plain.zhNext}`).not.toContain('没有写入')
+    expect(classifyWriteLockFailure('STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', { partial: false })).toBe('WRITE_LOCK_UNAVAILABLE')
+  })
+
+  it('WL-6: LEASE_LOST with nothing written (decision index 0) never says rows may have landed; with rows written it does', async () => {
+    const none = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/apply', { code: 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', detailPartial: false })) }), PROJECT_NO)
+    expect(stepOf(none, 'apply')).toMatchObject({ reason: 'WRITE_TAKEN_OVER' })
+    const taken = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_TAKEN_OVER
+    expect(`${taken.zh}${taken.zhNext}`).not.toContain('可能已写')
+    expect(`${taken.en} ${taken.enNext}`.toLowerCase()).not.toContain('may already')
+    const some = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/apply', { code: 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', detailPartial: true })) }), PROJECT_NO)
+    expect(stepOf(some, 'apply')).toMatchObject({ reason: 'WRITE_INTERRUPTED' })
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_INTERRUPTED.zh).toContain('可能已写进一部分')
+  })
+
+  it('WL-7: a lost lock race with no writer (details.reason contention) says "busy", never that another run is writing', async () => {
+    const write = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/apply', { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', detailReason: 'contention' })) }), PROJECT_NO)
+    expect(stepOf(write, 'apply')).toMatchObject({ reason: 'WRITE_LOCK_BUSY' })
+    const plan = await runStockPreparationProjectSync(makeApi({ dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', detailReason: 'contention' })) }), PROJECT_NO)
+    expect(stepOf(plan, 'dry-run')).toMatchObject({ reason: 'PLAN_WRITE_LOCK_BUSY' })
+    for (const reason of ['WRITE_LOCK_BUSY', 'PLAN_WRITE_LOCK_BUSY']) {
+      const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
+      expect(plain.zh).toContain('系统正忙')
+      expect(`${plain.zh}${plain.zhNext}`).not.toContain('另一次同步')
+      expect(plain.en.toLowerCase()).not.toContain('another run')
+    }
+    // a real holder still reads as "someone is writing"
+    expect(classifyWriteLockFailure('STOCK_PREP_PROJECT_WRITE_LOCKED', { detailReason: null })).toBe('WRITE_PROJECT_LOCKED')
+    expect(classifyPlanReadFailureReason(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED')).toBe('PLAN_PROJECT_WRITE_LOCKED')
+  })
+
+  it('WL-8: details.partial is carried only as the literal boolean true', () => {
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: true }).detailPartial).toBe(true)
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: 'true' }).detailPartial).toBe(false)
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', {}).detailPartial).toBe(false)
+  })
+
+  it('WL-9: the code-only sentences (large-BOM panel) claim neither a writer nor landed rows', () => {
+    const locked = stockPrepErrorPlain('STOCK_PREP_PROJECT_WRITE_LOCKED')
+    expect(locked.zh).toContain('或系统一时繁忙')
+    for (const code of ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED']) {
+      const plain = stockPrepErrorPlain(code)
+      expect(`${plain.zh}${plain.zhNext}`).not.toContain('可能已写')
+      expect(plain.zhNext).toContain('如果已写进一部分行')
     }
   })
 })

@@ -358,7 +358,7 @@ module.exports = {
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
     // Batch-refresh phase 0 step 1 (migration 100): the cross-process project write lease + plan
-    // generation, one row per (target sheet, project). Every small apply and large chunk takes it and
+    // generation, one row per target sheet (R-52). Every small apply and large chunk takes it and
     // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
     stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so

@@ -367,8 +367,16 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
     ? payload as IntegrationApiEnvelope<T>
     : null
   if (!response?.ok || envelope?.ok === false) {
+    const details = envelope?.error && typeof envelope.error === 'object'
+      ? (envelope.error as { details?: unknown }).details
+      : undefined
+    const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
+      ? details as { reason?: unknown; partial?: unknown }
+      : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
+      detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
+      detailPartial: detailRecord.partial === true,
     })
   }
   if (!envelope || envelope.ok !== true) {

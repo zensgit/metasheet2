@@ -126,7 +126,7 @@ const {
   PROJECT_WRITE_ERROR_CODES,
   StockPreparationProjectWriteLockError,
   assertWriteBindingMatchesGuard,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
 } = require('./stock-preparation-project-write-lock.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -1959,16 +1959,16 @@ function normalizeWriteBinding(binding) {
 
 function requireProjectWriteGuard(guard) {
   if (!guard || typeof guard.beforeWrite !== 'function' || typeof guard.scopeKey !== 'string' || typeof guard.generationToken !== 'string') {
-    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep apply requires the project write lock; nothing is written without it')
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep apply requires the sheet write lock; nothing is written without it')
   }
   return guard
 }
 
-// S5: the guard the route acquired must be for exactly (target sheet, normalized project number). A
-// mismatch is a programming error in the caller, never a client error.
-function assertProjectWriteGuardScope(guard, action, parameters) {
-  if (guard.scopeKey !== projectWriteScopeKey(action.target.sheetId, parameters.projectNo)) {
-    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the project write guard does not cover this write scope')
+// S5: the guard the route acquired must be for exactly this target sheet (the write scope, R-52; the project
+// number was validated just above). A mismatch is a programming error in the caller, never a client error.
+function assertProjectWriteGuardScope(guard, action) {
+  if (guard.scopeKey !== sheetWriteScopeKey(action.target.sheetId)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the sheet write guard does not cover this target sheet')
   }
 }
 
@@ -2508,7 +2508,7 @@ async function dryRunStockPreparationAction(input = {}) {
   if (dryRun.canApply) {
     // PLAN GENERATION (batch-refresh phase 0 step 1): an applicable preview SUPERSEDES every earlier
     // plan of this write scope. The route's binder bumps the generation (refused 409 while a live
-    // writer holds the project — then no token is minted) and the token records the generation it was
+    // writer holds the sheet — then no token is minted) and the token records the generation it was
     // planned under, ALONGSIDE its existing fields: never hashed, never answered, so the revision,
     // the evidence and the response are byte-identical with or without it. No binder (the lock
     // service is not wired) mints an UNBOUND token, which apply refuses (token_unbound).
@@ -2877,10 +2877,10 @@ async function applyStockPreparationAction(input = {}) {
   })
   const parameters = normalizeActionParameters(input.parameters)
   // PROJECT WRITE GUARD (S5): held by the route around this whole call. Required — no guard, no write
-  // (501) — and for exactly this (sheet, project) scope (500 otherwise). Both refusals come before
+  // (501) — and for exactly this target sheet (500 otherwise). Both refusals come before
   // the B2a claim, the reads and the token claim, so neither burns the token.
   const projectWriteGuard = requireProjectWriteGuard(input.projectWriteGuard)
-  assertProjectWriteGuardScope(projectWriteGuard, action, parameters)
+  assertProjectWriteGuardScope(projectWriteGuard, action)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.

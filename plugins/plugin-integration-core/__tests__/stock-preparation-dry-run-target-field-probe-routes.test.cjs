@@ -371,7 +371,7 @@ async function r2CompleteHostAndOldHostAnswerIdentically() {
 
 async function r3ApplyIsRefusedWhenColumnsVanishAfterTheDryRun() {
   const harness = mount()
-  const planned = await dryRun(harness.routes)
+  const planned = await dryRun(harness.routes, { user: ADMIN_USER }) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
   assert.ok(planned.body.data.dryRunToken)
   for (const id of MISSING_FIVE) harness.host.missing.add(id)

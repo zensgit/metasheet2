@@ -561,7 +561,7 @@ async function unsetEnvIsDormantAndByteIdentical() {
   const records = createRecordsApi()
   const { routes } = mount({ records, source })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.ok(source.reads.length > 0, 'a dormant deployment reads its source exactly as before')
@@ -633,7 +633,7 @@ async function armedWithAMatchingRegistrationPasses() {
   const records = createRecordsApi()
   const { routes } = mount({ registrations: [registration()], records, source })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.ok(source.reads.length > 0, 'an authorized read reaches the source')
@@ -740,7 +740,7 @@ async function M78_theAuthorityIsTheSqlRowAndTheKvRecordIsAProjection() {
     operationClaim: createB2aOperationClaim({ db: claimDb }),
   })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(claimDb.rows.size, 1, 'the armed read left exactly ONE claim row in the database')
   const [row] = [...claimDb.rows.values()]
@@ -3060,7 +3060,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
     const { routes, context } = mount({
       registrations: applyRegistrations(), source, records, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
     })
-    const planned = await routeDryRun(routes)
+    const planned = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
     assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
     assert.equal(planned.body.data.evidence.b2aTrialRegistration.registrationId, 'b2a-factory-a-plm')
     const pinnedRecord = context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)

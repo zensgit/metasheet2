@@ -16,8 +16,9 @@
 //       (>= TTL + GRACE) the preview supersedes, the stalled writer's one in-flight write is the
 //       accepted residual, and its next write is fenced (LEASE_LOST, partial counts).
 //   T7  a lock store failure mid-run stops the writer: 503 with the partial counts.
-//   T9  E02: different projects (same sheet) and the same project on different sheets proceed in
-//       parallel; one sheet + project under two tenant strings is ONE scope.
+//   T9  E02 / R-52: the scope is the SHEET. Another project on the same sheet is excluded (the race in
+//       which two projects both pass the foreign-row guard of one empty sheet); the same project on
+//       another sheet proceeds; one sheet under two tenant strings is ONE scope.
 //
 // Every value here is synthetic (support/stock-preparation-project-write-lock-kit.cjs).
 
@@ -36,7 +37,7 @@ const {
   PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS,
   PROJECT_WRITE_LEASE_TTL_MS,
   PROJECT_WRITE_LOCK_TABLE,
-  projectWriteScopeKey,
+  sheetWriteScopeKey,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
@@ -76,7 +77,7 @@ function scenario({ harness, sheetId = kit.GOLDEN_SHEET_ID, projectNo = kit.GOLD
     source,
     records: rec,
     storage: store,
-    scope: projectWriteScopeKey(sheetId, projectNo),
+    scope: sheetWriteScopeKey(sheetId),
     dryRun: (extra = {}) => harness.wrapDryRun(dryRunStockPreparationAction)({ ...common, tokenStore: store, ...extra }),
     apply: (token, extra = {}) => harness.wrapApply(applyStockPreparationAction)({
       ...common, dryRunToken: token, permission: 'write', tokenStore: store, sandboxPolicy: kit.SANDBOX_POLICY, ...extra,
@@ -258,7 +259,7 @@ test('T5 no guard -> 501, a guard for another scope -> 500; the token is NOT con
   const dry = await s.dryRun()
   const reads = s.source.calls.length
   await assert.rejects(() => s.apply(dry.dryRunToken, { projectWriteGuard: undefined }), expectCode(PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 501))
-  const otherScope = projectWriteScopeKey(kit.GOLDEN_SHEET_ID, 'SYN-SWL-0099')
+  const otherScope = sheetWriteScopeKey('sheet_swl_other_t5')
   await harness.lock.withProjectWriteLease(otherScope, { purpose: 'small_apply' }, async (wrongGuard) => {
     await assert.rejects(() => s.apply(dry.dryRunToken, { projectWriteGuard: wrongGuard }), expectCode(PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 500))
   })
@@ -363,7 +364,7 @@ test('T7 the lock store fails mid-run: the writer stops, 503 STORE_FAILED with t
 })
 
 // ── T9 ────────────────────────────────────────────────────────────────────────────────────────────
-test('T9 (E02) scope isolation: another project on the same sheet and the same project on another sheet proceed; two tenant strings are one scope', async () => {
+test('T9 (E02, R-52) the scope is the sheet: another project on the same sheet is excluded; the same project on another sheet proceeds; two tenant strings are one scope', async () => {
   const harness = kit.createLibWriteLockHarness()
   const gate = kit.deferred()
   const entered = kit.deferred()
@@ -372,13 +373,33 @@ test('T9 (E02) scope isolation: another project on the same sheet and the same p
   const running = a.apply((await a.dryRun()).dryRunToken)
   await entered.promise
   const otherProject = scenario({ harness, projectNo: 'SYN-SWL-0004' })
-  assert.equal((await otherProject.apply((await otherProject.dryRun()).dryRunToken)).status, 'succeeded', 'another project, same sheet')
+  await assert.rejects(() => otherProject.dryRun(), expectCode(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409), 'another project on the SAME sheet is the same scope')
+  assert.equal(otherProject.storage.map.size, 0, 'no token for it')
   const otherSheet = scenario({ harness, sheetId: 'sheet_swl_golden_b' })
-  assert.equal((await otherSheet.apply((await otherSheet.dryRun()).dryRunToken)).status, 'succeeded', 'same project, another sheet')
+  assert.equal((await otherSheet.apply((await otherSheet.dryRun()).dryRunToken)).status, 'succeeded', 'same project, another sheet: independent')
   const otherTenant = scenario({ harness, tenantId: 'tenant-swl-b' })
-  await assert.rejects(() => otherTenant.dryRun(), expectCode(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409), 'same sheet + project under another tenant string is the SAME scope')
+  await assert.rejects(() => otherTenant.dryRun(), expectCode(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409), 'same sheet under another tenant string is the SAME scope')
   gate.resolve()
   assert.equal((await running).status, 'succeeded')
+})
+
+test('T9b (R-52) two projects planned on one EMPTY sheet: only the newest plan can write, so the sheet never ends with both', async () => {
+  const harness = kit.createLibWriteLockHarness()
+  const records = kit.createRecordsApi()
+  const p1 = scenario({ harness, records, projectNo: 'SYN-SWL-0006' })
+  const p2 = scenario({ harness, records, projectNo: 'SYN-SWL-0007' })
+  const t1 = (await p1.dryRun()).dryRunToken
+  const t2 = (await p2.dryRun()).dryRunToken
+  const [r1, r2] = await Promise.allSettled([p1.apply(t1), p2.apply(t2)])
+  assert.equal(r1.status, 'rejected', 'the older plan (project 1) never writes')
+  assert.ok(['STOCK_PREP_PROJECT_PLAN_SUPERSEDED', 'STOCK_PREP_PROJECT_WRITE_LOCKED'].includes(r1.reason.code), r1.reason.code)
+  if (r2.status === 'rejected') {
+    // The stale apply held the sheet for a moment; the newest plan was refused BUSY and kept its token (I4).
+    assert.equal(r2.reason.code, 'STOCK_PREP_PROJECT_WRITE_LOCKED')
+    assert.equal((await p2.apply(t2)).status, 'succeeded', 'the busy apply of the newest plan succeeds on retry')
+  }
+  const projects = new Set(records.rows.map((row) => row.data.projectNo))
+  assert.equal(projects.size, 1, 'one project on the sheet')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-guard-apply.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-guard-apply' })
