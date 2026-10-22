@@ -244,6 +244,7 @@ describe('automation delivery viewers i18n', () => {
     select.value = ''
     select.dispatchEvent(new Event('change'))
     await flushPromises()
-    expect(list).toHaveBeenLastCalledWith('sheet_1', 'rule_1', 50, {})
+    // unfiltered: the original 3-argument call
+    expect(list.mock.calls.at(-1)).toEqual(['sheet_1', 'rule_1', 50])
   })
 })

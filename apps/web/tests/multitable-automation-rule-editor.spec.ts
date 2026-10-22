@@ -198,12 +198,22 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   }
 }
 
-function mount(props: Record<string, unknown>) {
+// Every mounted editor is unmounted after its test (review round 2 CI fix). They used to stay alive for the
+// rest of the file: each later useLocale().setLocale(...) then re-rendered every editor mounted so far, so a
+// zh test late in the file paid for ~200 leaked editors and overran the 5 s timeout on a slower CI runner.
+const mountedApps: Array<{ unmount: () => void }> = []
+
+function mountRender(render: () => ReturnType<typeof h>) {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp({ render: () => h(MetaAutomationRuleEditor, props) })
+  const app = createApp({ render })
   app.mount(container)
+  mountedApps.push(app)
   return { container, app }
+}
+
+function mount(props: Record<string, unknown>) {
+  return mountRender(() => h(MetaAutomationRuleEditor, props))
 }
 
 describe('MetaAutomationRuleEditor', () => {
@@ -219,6 +229,7 @@ describe('MetaAutomationRuleEditor', () => {
   })
 
   afterEach(() => {
+    for (const app of mountedApps.splice(0)) app.unmount()
     document.body.innerHTML = ''
     vi.restoreAllMocks()
     Object.defineProperty(navigator, 'clipboard', {
@@ -4376,9 +4387,7 @@ describe('MetaAutomationRuleEditor', () => {
       actions: [{ type: 'send_dingtalk_person_message', config }],
     })
     const visible = ref(true)
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    createApp({ render: () => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }) }).mount(container)
+    const { container } = mountRender(() => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }))
     await flushPromises()
     visible.value = false
     await flushPromises()
@@ -4441,9 +4450,7 @@ describe('MetaAutomationRuleEditor', () => {
       actions: [{ type: 'send_dingtalk_person_message', config }],
     })
     const visible = ref(true)
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    createApp({ render: () => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }) }).mount(container)
+    const { container } = mountRender(() => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }))
     await flushPromises()
     expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeTruthy()
 

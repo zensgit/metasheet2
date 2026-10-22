@@ -163,7 +163,10 @@ async function loadData() {
   errorMessage.value = ''
   try {
     const status = isServerStatusFilter(statusFilter.value) ? statusFilter.value : undefined
-    const loaded = await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50, status ? { status } : {})
+    // Unfiltered loads keep the original 3-argument call; the options argument only carries a status.
+    const loaded = status
+      ? await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50, { status })
+      : await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50)
     if (requestId !== loadRequestId) return
     deliveries.value = loaded
   } catch (error) {
