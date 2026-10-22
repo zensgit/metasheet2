@@ -109,4 +109,30 @@ async function normalizeImportCalendarRows({ db, orgId, payload, rows, coalesce,
   return { rows: normalized, calendarError, scopeRows: calendarError ? [...normalized, ...unresolvedScopeRows] : undefined }
 }
 
-module.exports = { parseImportAbsoluteDate, normalizeImportCalendarRows }
+// Keep uploaded-file iteration bounded while resolving subjects/calendars in batches.
+async function iterateImportCalendarRows({ iterateRows, normalizeRows, onRow }) {
+  let buffer = []
+  let rowCount = 0
+  let stopped = false
+  const flush = async () => {
+    if (!buffer.length || stopped) return
+    const rows = await normalizeRows(buffer)
+    buffer = []
+    for (const row of rows) {
+      const index = rowCount++
+      if (typeof onRow === 'function' && await onRow(row, index) === false) {
+        stopped = true
+        break
+      }
+    }
+  }
+  const result = await iterateRows(async (row) => {
+    buffer.push(row)
+    if (buffer.length === 500) await flush()
+    return !stopped
+  })
+  await flush()
+  return { ...result, rowCount }
+}
+
+module.exports = { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows }
