@@ -12,10 +12,13 @@
 // are not re-derived here: a literal that has to move is a behaviour change of the old flow and
 // needs its own reviewed reason, not a re-capture.
 //
-// THE MATRIX. The same scenarios are replayed with the expander's demand-evidence capture OFF and
-// ON (the harness adds `demandEvidence` to the expander input without wiring any production
-// caller). Both legs must reproduce GOLDEN exactly. If ON moves a digest, some hash reads the
-// expansion object as a whole, or the evidence leaked into rows / summary / dry-run evidence.
+// THE MATRIX. The same scenarios are replayed with the expander's demand-evidence capture OFF, ON,
+// and ON with a recorder that throws from every hook (the harness adds `demandEvidence` to the
+// expander input without wiring any production caller). All three legs must reproduce GOLDEN
+// exactly, and the ON legs must show the recorder really ran (or really faulted and said so). If ON
+// moves a digest, some hash reads the expansion object as a whole, or the evidence leaked into rows
+// / summary / dry-run evidence; if THROWING moves one, a recorder fault reached the walk. (The
+// "throwing store" leg belongs to step 2c, which adds the store.)
 //
 // What each digest covers (per scenario, where the scenario reaches it):
 //   dryRun     revision, the stored token subset {actionId, parametersHash, revision, review},
@@ -40,6 +43,8 @@ const {
   observeAll,
   stripHarnessKeys,
 } = require('./support/stock-preparation-demand-evidence-golden-harness.cjs')
+
+const { DEMAND_EVIDENCE_SCHEME } = require('../lib/stock-preparation-demand-evidence.cjs')
 
 const GOLDEN_BASE_SHA = 'fae8946d19efaadc615b50758cd6f4a50d43a14e'
 
@@ -420,6 +425,26 @@ async function main() {
             `[${mode}] the expander input ${mode === 'off' ? 'must not' : 'must'} carry demandEvidence`)
         }
       })
+      // The ON legs are only a byte-identity proof if the recorder really ran (or really faulted).
+      await run(`[${mode}] ${name}: the expansion ${mode === 'off' ? 'carries no' : 'carries the'} demand evidence`, () => {
+        for (const call of observed[name].__calls) {
+          const evidence = call.result.demandEvidence
+          if (mode === 'off') {
+            assert.equal(Object.prototype.hasOwnProperty.call(call.result, 'demandEvidence'), false, 'capture off adds no key')
+            continue
+          }
+          assert.equal(evidence.scheme, DEMAND_EVIDENCE_SCHEME)
+          if (mode === 'on') {
+            assert.ok(['complete', 'incomplete', 'project_not_found'].includes(evidence.completeness.status))
+            assert.match(evidence.fingerprint, /^[0-9a-f]{64}$/)
+          } else {
+            assert.equal(evidence.completeness.status, 'capture_error', 'an injected fault is reported, never hidden')
+            assert.equal(evidence.completeness.reasons.length, 1)
+            assert.ok(['recorder_fault', 'finalize_fault'].includes(evidence.completeness.reasons[0]))
+            assert.equal(Object.prototype.hasOwnProperty.call(evidence, 'observations'), false)
+          }
+        }
+      })
     }
 
     await run(`[${mode}] structural parities the golden relies on`, () => {
@@ -439,10 +464,7 @@ async function main() {
   }
 
   console.log(`stock-preparation-demand-evidence-golden: ${passed} passed, ${failed} failed`)
-  if (failed > 0) process.exit(1)
+  if (failed > 0) throw new Error(`${failed} check(s) failed`)
 }
 
-main().catch((error) => {
-  console.error(error && error.stack ? error.stack : error)
-  process.exit(1)
-})
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-demand-evidence-golden.test.cjs', main)

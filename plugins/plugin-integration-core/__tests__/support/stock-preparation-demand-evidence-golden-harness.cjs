@@ -15,6 +15,9 @@
 // expansion object as a whole (or the evidence leaked into rows / summary / evidence) — exactly the
 // regression batch-refresh plan §12.2 item 2 forbids.
 //
+// The capture switch was written and the GOLDEN literals captured on origin/main fae8946d1, where
+// `demandEvidence` was an input the expander ignored; the throwing leg was added with the recorder.
+//
 // HOW "ON" IS REACHED WITHOUT WIRING ANY CALLER. The table-action and large-BOM modules destructure
 // `expandPlmProjectBom` at require time. This harness replaces that export on the expander module
 // BEFORE either consumer is first required, with a pass-through that — only in the ON modes — adds
@@ -36,7 +39,24 @@ const CONSUMER_PATHS = Object.freeze([
   require.resolve(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs')),
 ])
 
-const MODES = Object.freeze(['off', 'on'])
+const DEMAND_EVIDENCE_PATH = require.resolve(path.join(LIB, 'stock-preparation-demand-evidence.cjs'))
+
+// off       no `demandEvidence` on the expander input — the walk every caller runs today.
+// on        `demandEvidence: true` — the recorder runs and the expansion carries its result.
+// throwing  as `on`, but the raw recorder throws from every hook and from finalize (the seam is the
+//           demand-evidence module's own `createDemandEvidenceRecorder` export). The walk must not
+//           notice; the evidence must say `capture_error`.
+const MODES = Object.freeze(['off', 'on', 'throwing'])
+
+function throwingRecorderFactory() {
+  return new Proxy({}, {
+    get() {
+      return () => {
+        throw new Error('golden harness: injected recorder fault')
+      }
+    },
+  })
+}
 
 function stableStringify(value) {
   if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`
@@ -75,8 +95,11 @@ function installExpansionCaptureSwitch() {
   }
   const tableActions = require(CONSUMER_PATHS[0])
   const largeBomJobs = require(CONSUMER_PATHS[1])
+  const demandEvidenceModule = require(DEMAND_EVIDENCE_PATH)
+  const realRecorderFactory = demandEvidenceModule.createDemandEvidenceRecorder
   return {
     expansionModule,
+    demandEvidenceModule,
     tableActions,
     largeBomJobs,
     original,
@@ -85,6 +108,7 @@ function installExpansionCaptureSwitch() {
       state.mode = mode
       state.options = options
       state.calls = []
+      demandEvidenceModule.createDemandEvidenceRecorder = mode === 'throwing' ? throwingRecorderFactory : realRecorderFactory
     },
     get calls() {
       return state.calls
