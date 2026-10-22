@@ -1813,6 +1813,133 @@ type ManagedBomReadInput = {
   partId: string
 }
 
+type FrozenBomRead = {
+  sessionId: string
+  userId: string
+  dataSourceId: string
+  partId: string
+  delegationId: string
+  generation: number
+  nativeSubject: string
+  nativeTenantId: string
+  nativeOrgId: string
+  clientOrigin: string
+  issuer: string
+  clientId: string
+  linkId: string
+}
+
+/**
+ * Publish only after the native response. Lock order matches renewal:
+ * link, binding, frozen session, renewal operation, then the delegation
+ * advisory. The classified link id is locked before any session read so a
+ * waiter does not hold a session lock while blocked on the link. The source
+ * row is locked after those so provision's link-then-source order stays
+ * intact. Membership and expiry are read again after that source lock.
+ * Expiry uses clock_timestamp, the wall clock, because now() stays at
+ * transaction start during the waits. Source owner, config origin, and
+ * scope fingerprint go through loadSource. Network stays outside this
+ * transaction. A native revocation that has not been written to the frozen
+ * session, link, or revoke outbox can still arrive after nativeStatus; this
+ * path does not open a second native read under the lock. A missing link id
+ * refuses in every environment. This function does not publish when the
+ * transaction callback does not run.
+ */
+async function admitManagedBomRead(client: SqlClient, frozen: FrozenBomRead): Promise<void> {
+  if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
+  const store = currentManagedRequest()
+  if (!store || store.conflict || store.sessionId !== frozen.sessionId || store.userId !== frozen.userId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+  }
+  const linkId = frozen.linkId
+  if (!linkId) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  const locked = await lockRenewal(client, linkId, frozen.dataSourceId, frozen.sessionId)
+  if (!locked) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  if (text(locked.session.id) !== frozen.sessionId || text(locked.session.delegation_id) !== frozen.delegationId
+    || text(locked.session.data_source_id) !== frozen.dataSourceId || text(locked.session.link_id) !== linkId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  }
+  await lockRenewalDelegation(client, frozen.delegationId)
+  if (text(locked.link.status) !== 'active' || Number(locked.link.generation) !== frozen.generation
+    || Number(locked.session.generation) !== frozen.generation) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (text(locked.binding.status) !== 'active' || text(locked.binding.link_id) !== text(locked.link.id)
+    || Number(locked.binding.generation) !== Number(locked.link.generation)
+    || text(locked.binding.source_fingerprint) !== text(locked.link.source_fingerprint)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
+  if (locked.session.revoked_at) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+  if (text(locked.link.meta_user_id) !== frozen.userId || text(locked.link.owner_user_id) !== frozen.userId
+    || text(locked.session.meta_user_id) !== frozen.userId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (store.metaTenantId && store.metaTenantId !== text(locked.session.meta_tenant_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  if (text(locked.session.scope) !== MANAGED_COMPANION_SCOPE
+    || text(locked.session.native_subject) !== frozen.nativeSubject
+    || text(locked.session.native_tenant_id) !== frozen.nativeTenantId
+    || text(locked.session.native_org_id) !== frozen.nativeOrgId
+    || text(locked.session.root_part_id) !== frozen.partId
+    || text(locked.session.client_origin) !== frozen.clientOrigin
+    || text(locked.session.installation_issuer) !== frozen.issuer
+    || text(locked.session.client_id) !== frozen.clientId
+    || text(locked.session.meta_tenant_id) !== text(locked.link.meta_tenant_id)
+    || text(locked.session.meta_org_id) !== text(locked.link.meta_org_id)
+    || text(locked.link.native_auth_user_id) !== frozen.nativeSubject
+    || text(locked.link.native_tenant_id) !== frozen.nativeTenantId
+    || text(locked.link.native_org_id) !== frozen.nativeOrgId
+    || text(locked.link.root_part_id) !== frozen.partId
+    || text(locked.link.client_origin) !== frozen.clientOrigin
+    || text(locked.link.client_id) !== frozen.clientId
+    || text(locked.link.installation_issuer) !== frozen.issuer) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_IDENTITY_REFUSED')
+  }
+  const registration = registrationFor({
+    issuer: text(locked.link.installation_issuer),
+    nativeTenantId: text(locked.link.native_tenant_id),
+    nativeOrgId: text(locked.link.native_org_id),
+  })
+  if (!registrationMatches(registration, locked.link) || registration.clientId !== text(locked.session.client_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+  }
+  const origin = registeredPlmOrigin(registration)
+  if (text(locked.binding.frozen_origin) !== origin || text(locked.binding.frozen_root_part_id) !== frozen.partId) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_REFUSED')
+  }
+  await client.query('SELECT id FROM data_sources WHERE id = $1 FOR UPDATE', [frozen.dataSourceId])
+  const fingerprint = await loadSource(client, frozen.dataSourceId, frozen.userId, origin, frozen.partId)
+  if (fingerprint !== text(locked.link.source_fingerprint) || fingerprint !== text(locked.binding.source_fingerprint)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  }
+  const sourceTenant = persistentScopeValue((await client.query(
+    'SELECT tenant_id FROM data_sources WHERE id = $1',
+    [frozen.dataSourceId],
+  )).rows[0]?.tenant_id)
+  if (sourceTenant !== null && sourceTenant !== text(locked.session.meta_tenant_id)) {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+  }
+  await loadUser(client, frozen.userId)
+  await requireMembership(client, frozen.userId, text(locked.session.meta_tenant_id))
+  await requireMembership(client, frozen.userId, text(locked.session.meta_org_id))
+  const fresh = await client.query(
+    `SELECT id FROM plm_managed_sessions
+     WHERE id = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
+    [frozen.sessionId],
+  )
+  if (!fresh.rows[0]) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SESSION_REQUIRED')
+}
+
+async function publishManagedBomRead(frozen: FrozenBomRead): Promise<void> {
+  let published = false
+  await transaction(async (client) => {
+    await admitManagedBomRead(client, frozen)
+    published = true
+  })
+  if (!published) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_READ_REFUSED')
+}
+
 // Server-only projection envelope; it carries no persistent-sharing authority.
 export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promise<
   | { kind: 'legacy' }
@@ -1873,6 +2000,26 @@ export async function relayManagedBomSnapshot(input: ManagedBomReadInput): Promi
       tenant_id: text(session.native_tenant_id),
       org_id: text(session.native_org_id),
       auth_user_id: text(session.native_subject),
+    })
+    const generation = integerOf(row.generation)
+    const seenGeneration = integerOf(session.generation)
+    if (generation === null || seenGeneration === null || seenGeneration !== generation) {
+      return { kind: 'refusal', status: 403, code: 'PLM_MANAGED_READ_REFUSED' }
+    }
+    await publishManagedBomRead({
+      sessionId: store.sessionId,
+      userId: input.userId,
+      dataSourceId: input.dataSourceId,
+      partId: input.partId,
+      delegationId: text(session.delegation_id),
+      generation,
+      nativeSubject: text(session.native_subject),
+      nativeTenantId: text(session.native_tenant_id),
+      nativeOrgId: text(session.native_org_id),
+      clientOrigin: text(session.client_origin),
+      issuer: text(session.installation_issuer),
+      clientId: text(session.client_id),
+      linkId: text(row.link_id),
     })
     return { kind: 'ok', entitled: true, snapshot,
       advisoryCapabilities: (payload as Record<string, unknown>).integration_capabilities }

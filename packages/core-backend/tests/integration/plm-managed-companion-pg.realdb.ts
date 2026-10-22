@@ -20,6 +20,7 @@ import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
 import { secretManager } from '../../src/security/SecretManager'
 import { up, down } from '../../src/db/migrations/zzzz20261018010000_create_plm_managed_companion'
 import { up as continuousUp } from '../../src/db/migrations/zzzz20261022010000_plm_managed_continuous_completion'
+import { down as renewalDown, up as renewalUp } from '../../src/db/migrations/zzzz20261022020000_plm_managed_renewal_recovery'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { query } from '../../src/db/pg'
 import { authRouter } from '../../src/routes/auth'
@@ -282,6 +283,11 @@ function provisionBody(overrides: Record<string, unknown> = {}) {
 }
 
 async function resetRows() {
+  try {
+    await query('DELETE FROM plm_managed_renewal_operations')
+  } catch (error) {
+    if ((error as { code?: string }).code !== '42P01') throw error
+  }
   await query('DELETE FROM plm_managed_revoke_outbox')
   await query('DELETE FROM plm_managed_sessions')
   await query('DELETE FROM plm_managed_browser_intents')
@@ -369,7 +375,10 @@ beforeAll(async () => {
   const pool = new Pool({ connectionString: pgUrl, max: 2 })
   const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
   await pool.query(`
+    DROP TABLE IF EXISTS plm_managed_renewal_operations CASCADE;
     DROP TABLE IF EXISTS plm_managed_revoke_outbox, plm_managed_sessions, plm_managed_browser_intents, plm_managed_source_bindings, plm_managed_identity_links CASCADE;
+    DROP FUNCTION IF EXISTS plm_managed_renewal_operations_guard();
+    DROP FUNCTION IF EXISTS plm_managed_renewal_commit_guard();
     DROP FUNCTION IF EXISTS plm_managed_identity_links_guard();
     DROP FUNCTION IF EXISTS plm_managed_browser_intents_guard();
     DROP FUNCTION IF EXISTS plm_managed_sessions_guard();
@@ -431,6 +440,7 @@ beforeAll(async () => {
   `)
   await up(db)
   await continuousUp(db)
+  await renewalUp(db)
   await pool.end()
   const config = JSON.stringify({ connection: { url: `${ORIGIN}/plm` } })
   for (const [id, role] of [[OWNER, 'user'], [OTHER, 'user'], [ADMIN, 'admin']] as const) {
@@ -471,6 +481,7 @@ afterAll(async () => {
   await resetRows()
   const pool = new Pool({ connectionString: pgUrl, max: 1 })
   const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
+  await renewalDown(db)
   await down(db)
   await pool.end()
 })
@@ -481,6 +492,7 @@ describe('managed companion postgresql', () => {
     const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
     try {
       await resetRows()
+      await renewalDown(db)
       await down(db)
       await expect(provisionManagedLink({ id: OWNER, authenticatedTenantId: TENANT }, provisionBody())).rejects.toMatchObject({ code: 'PLM_MANAGED_SCHEMA_MISSING' })
       await expect(classifyManagedSource(SOURCE)).resolves.toEqual({ kind: 'schema-missing' })
@@ -499,6 +511,7 @@ describe('managed companion postgresql', () => {
 
       await up(db)
       await continuousUp(db)
+      await renewalUp(db)
       process.env.PLM_MANAGED_COMPANION_ENABLED = 'false'
       resetSharedTransportAudit()
       await expect(classifyManagedSource(SOURCE)).resolves.toEqual({ kind: 'unbound' })
@@ -510,6 +523,8 @@ describe('managed companion postgresql', () => {
         await up(db)
         await continuousUp(db)
       }
+      const renewal = await query('SELECT to_regclass($1) AS name', ['public.plm_managed_renewal_operations'])
+      if (!renewal.rows[0]?.name) await renewalUp(db)
       await pool.end()
       enable()
     }
@@ -2453,6 +2468,454 @@ describe('live advisory through real persistent managed sessions', () => {
       () => relayManagedBomContext({ userId: OWNER, dataSourceId: SOURCE, partId: 'part' }))
     expect(context).toMatchObject({ kind: 'ok', entitled: true })
     expect(readSharedTransportAudit().calls).toBe(0)
+  })
+})
+
+function nativeHold() {
+  let signal!: () => void
+  let resume!: () => void
+  const arrived = new Promise<void>((resolve) => { signal = resolve })
+  const held = new Promise<void>((resolve) => { resume = resolve })
+  let opened = false
+  return {
+    arrived,
+    beforeContext: async () => {
+      signal()
+      await held
+    },
+    release() {
+      if (opened) return
+      opened = true
+      resume()
+    },
+  }
+}
+
+async function loggedBomRead(beforeContext?: () => Promise<void>) {
+  installNative(undefined, beforeContext)
+  const started = await beginLogin()
+  const done = responseDouble()
+  await completeManagedCallback(callbackRequest(started.res, started.state) as never, done as never)
+  expect(done.statusCode).toBe(302)
+  const sessions = await countSessions()
+  expect(sessions).toHaveLength(1)
+  const sessionId = String(sessions[0].id)
+  const read = () => managedRequestContext.run(
+    { userId: OWNER, sessionId, metaTenantId: TENANT, conflict: false },
+    () => relayManagedBomContext({ userId: OWNER, dataSourceId: SOURCE, partId: 'part' }),
+  )
+  return { sessionId, read }
+}
+
+async function sourceSnapshot() {
+  const row = (await query(
+    'SELECT owner_id, config, tenant_id, workspace_id, scope_kind FROM data_sources WHERE id = $1',
+    [SOURCE],
+  )).rows[0]
+  return row
+}
+
+async function restoreSource(row: Record<string, unknown>) {
+  await query(
+    `UPDATE data_sources
+     SET owner_id = $2, config = $3::jsonb, tenant_id = $4, workspace_id = $5, scope_kind = $6
+     WHERE id = $1`,
+    [SOURCE, row.owner_id, JSON.stringify(row.config), row.tenant_id, row.workspace_id, row.scope_kind],
+  )
+}
+
+async function insertClone(table: 'plm_managed_browser_intents' | 'plm_managed_sessions', row: Record<string, unknown>, overrides: Record<string, unknown>) {
+  const columns = Object.keys(row).filter((column) => /^[a-z_]+$/.test(column))
+  const values = columns.map((column) => (Object.hasOwn(overrides, column) ? overrides[column] : row[column]))
+  await query(
+    `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map((_, index) => `$${index + 1}`).join(', ')})`,
+    values,
+  )
+}
+
+async function holdActiveLink() {
+  const client = new Client({ connectionString: pgUrl })
+  await client.connect()
+  await client.query('BEGIN')
+  const locked = await client.query(
+    `SELECT id FROM plm_managed_identity_links WHERE data_source_id = $1 AND status = 'active' FOR UPDATE`,
+    [SOURCE],
+  )
+  if (locked.rowCount !== 1) {
+    await client.query('ROLLBACK')
+    await client.end()
+    throw new Error(`expected one active link, got ${locked.rowCount}`)
+  }
+  const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+  let closed = false
+  return {
+    client,
+    pid,
+    async commit() {
+      if (closed) return
+      closed = true
+      await client.query('COMMIT')
+      await client.end()
+    },
+    async rollback() {
+      if (closed) return
+      closed = true
+      await client.query('ROLLBACK').catch(() => undefined)
+      await client.end().catch(() => undefined)
+    },
+  }
+}
+
+describe('direct managed BOM publication', () => {
+  async function held(mutate: () => Promise<void>) {
+    const hold = nativeHold()
+    const { read } = await loggedBomRead(hold.beforeContext)
+    const pending = read()
+    try {
+      await hold.arrived
+      await mutate()
+      hold.release()
+      const result = await pending
+      expect(result.kind).not.toBe('legacy')
+      expect(readSharedTransportAudit().calls).toBe(0)
+      return result
+    } finally {
+      hold.release()
+      await pending.catch(() => undefined)
+    }
+  }
+
+  async function heldLock(mutate: (client: Client) => Promise<void>) {
+    const hold = nativeHold()
+    const { read } = await loggedBomRead(hold.beforeContext)
+    const pending = read()
+    let holder: Awaited<ReturnType<typeof holdActiveLink>> | null = null
+    try {
+      await hold.arrived
+      holder = await holdActiveLink()
+      hold.release()
+      expect(await blockedBy(holder.pid)).toBe(true)
+      await mutate(holder.client)
+      await holder.commit()
+      holder = null
+      const result = await pending
+      expect(result.kind).not.toBe('legacy')
+      expect(readSharedTransportAudit().calls).toBe(0)
+      return result
+    } finally {
+      hold.release()
+      await holder?.rollback()
+      await pending.catch(() => undefined)
+    }
+  }
+
+  it('publishes the unchanged frozen context', async () => {
+    const { read } = await loggedBomRead()
+    const result = await read()
+    expect(result).toMatchObject({ kind: 'ok', entitled: true })
+    if (result.kind !== 'ok') throw new Error('unchanged context missing')
+    expect((result.context as { lines: Array<{ bom_line_id: string }> }).lines[0].bom_line_id).toBe('line')
+    expect(readSharedTransportAudit().calls).toBe(0)
+  })
+
+  it('publishes the same context after the native response and the publication lock wait', async () => {
+    const network = await held(async () => undefined)
+    expect(network).toMatchObject({ kind: 'ok', entitled: true })
+    await resetRows()
+    const locked = await heldLock(async () => undefined)
+    expect(locked).toMatchObject({ kind: 'ok', entitled: true })
+  })
+
+  async function heldSource(mutate: () => Promise<void>) {
+    const hold = nativeHold()
+    const { read } = await loggedBomRead(hold.beforeContext)
+    const pending = read()
+    const client = new Client({ connectionString: pgUrl })
+    let open = false
+    try {
+      await hold.arrived
+      await client.connect()
+      open = true
+      await client.query('BEGIN')
+      await client.query('SELECT id FROM data_sources WHERE id = $1 FOR UPDATE', [SOURCE])
+      const holderPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      hold.release()
+      expect(await blockedBy(holderPid), 'publication must wait on the source row').toBe(true)
+      await mutate()
+      await client.query('COMMIT')
+      open = false
+      const result = await pending
+      expect(result.kind).not.toBe('legacy')
+      expect(readSharedTransportAudit().calls).toBe(0)
+      return result
+    } finally {
+      hold.release()
+      if (open) await client.query('ROLLBACK').catch(() => undefined)
+      await client.end().catch(() => undefined)
+      await pending.catch(() => undefined)
+    }
+  }
+
+  it('publishes when the source lock clears and the source is unchanged', async () => {
+    const result = await heldSource(async () => undefined)
+    expect(result).toMatchObject({ kind: 'ok', entitled: true })
+    if (result.kind !== 'ok') throw new Error('unchanged source wait missing')
+    expect((result.context as { lines: Array<{ bom_line_id: string }> }).lines[0].bom_line_id).toBe('line')
+  })
+
+  it('refuses membership removed while publication waits on the source row', async () => {
+    try {
+      const result = await heldSource(async () => {
+        const changed = await query(
+          'UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2',
+          [OWNER, ORG],
+        )
+        expect(changed.rowCount).toBe(1)
+      })
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_META_MEMBERSHIP_REFUSED' })
+    } finally {
+      await query('UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2', [OWNER, ORG])
+    }
+  })
+
+  it('refuses an owner transfer committed by another Node process during the native response', async () => {
+    const original = await sourceSnapshot()
+    const hold = nativeHold()
+    const { read } = await loggedBomRead(hold.beforeContext)
+    const pool = new Pool({ connectionString: pgUrl, max: 1 })
+    const pending = read()
+    try {
+      await hold.arrived
+      const parentBackend = Number((await pool.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const child = String.raw`const {Client}=require('pg');(async()=>{
+        const raw=process.env.PLM_MANAGED_COMPANION_TEST_PG_URL;
+        if(!raw||!new URL(raw).searchParams.get('host')?.startsWith('/tmp/plm-managed-consumer-pg-'))throw Error('owned_socket_required');
+        const c=new Client({connectionString:raw});await c.connect();try{
+          const backend=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+          const changed=await c.query('UPDATE data_sources SET owner_id=$1 WHERE id=$2',[process.argv[1],process.argv[2]]);
+          console.log(JSON.stringify({pid:process.pid,backend,rowCount:changed.rowCount}));
+        }finally{await c.end()}
+      })().catch(()=>{process.stderr.write('owned_mutator_failed');process.exitCode=1})`
+      const changed = JSON.parse(execFileSync(process.execPath, ['-e', child, OTHER, SOURCE], {
+        encoding: 'utf8', env: { ...process.env }, timeout: 10000,
+      })) as { pid: number; backend: number; rowCount: number }
+      expect(changed.pid).not.toBe(process.pid)
+      expect(changed.backend).not.toBe(parentBackend)
+      expect(changed.rowCount).toBe(1)
+      hold.release()
+      await expect(pending).resolves.toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SOURCE_REFUSED' })
+      expect(readSharedTransportAudit().calls).toBe(0)
+    } finally {
+      hold.release()
+      await pending.catch(() => undefined)
+      await restoreSource(original)
+      await pool.end()
+    }
+  })
+
+  it.each([
+    ['config', `UPDATE data_sources SET config = $2::jsonb WHERE id = $1`, JSON.stringify({ connection: { url: 'http://127.0.0.1:8/plm' } }), 'PLM_MANAGED_SOURCE_REFUSED'],
+    ['scope_kind', `UPDATE data_sources SET scope_kind = $2 WHERE id = $1`, 'workspace', 'PLM_MANAGED_SOURCE_CHANGED'],
+    ['tenant_id', `UPDATE data_sources SET tenant_id = $2 WHERE id = $1`, 'moved-tenant', 'PLM_MANAGED_SOURCE_CHANGED'],
+    ['workspace_id', `UPDATE data_sources SET workspace_id = $2 WHERE id = $1`, 'moved-workspace', 'PLM_MANAGED_SOURCE_CHANGED'],
+  ] as const)('refuses a %s change committed during the native response', async (_name, sql, value, code) => {
+    const original = await sourceSnapshot()
+    try {
+      const result = await held(() => query(sql, [SOURCE, value]))
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code })
+    } finally {
+      await restoreSource(original)
+    }
+  })
+
+  it.each([
+    ['config', `UPDATE data_sources SET config = $2::jsonb WHERE id = $1`, JSON.stringify({ connection: { url: 'http://127.0.0.1:8/plm' } }), 'PLM_MANAGED_SOURCE_REFUSED'],
+    ['scope_kind', `UPDATE data_sources SET scope_kind = $2 WHERE id = $1`, 'workspace', 'PLM_MANAGED_SOURCE_CHANGED'],
+    ['tenant_id', `UPDATE data_sources SET tenant_id = $2 WHERE id = $1`, 'moved-tenant', 'PLM_MANAGED_SOURCE_CHANGED'],
+    ['workspace_id', `UPDATE data_sources SET workspace_id = $2 WHERE id = $1`, 'moved-workspace', 'PLM_MANAGED_SOURCE_CHANGED'],
+  ] as const)('refuses a %s change committed while the publication lock is held', async (_name, sql, value, code) => {
+    const original = await sourceSnapshot()
+    try {
+      const result = await heldLock((client) => client.query(sql, [SOURCE, value]).then(() => undefined))
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code })
+    } finally {
+      await restoreSource(original)
+    }
+  })
+
+  it('refuses an owner change committed while the publication lock is held', async () => {
+    const original = await sourceSnapshot()
+    try {
+      const result = await heldLock(async (client) => {
+        const changed = await client.query('UPDATE data_sources SET owner_id = $1 WHERE id = $2', [OTHER, SOURCE])
+        expect(changed.rowCount).toBe(1)
+      })
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SOURCE_REFUSED' })
+    } finally {
+      await restoreSource(original)
+    }
+  })
+
+  async function stopLockedLink(client: Client) {
+    const stopped = await client.query(
+      `UPDATE plm_managed_identity_links
+       SET status = 'revoked', stopped_at = clock_timestamp(), stop_reason = 'revoked', updated_at = clock_timestamp()
+       WHERE data_source_id = $1 AND status = 'active'`,
+      [SOURCE],
+    )
+    expect(stopped.rowCount).toBe(1)
+    await client.query(
+      `UPDATE plm_managed_source_bindings
+       SET status = 'blocked', updated_at = clock_timestamp()
+       WHERE data_source_id = $1 AND status = 'active'`,
+      [SOURCE],
+    )
+    await client.query(
+      `UPDATE plm_managed_sessions SET revoked_at = clock_timestamp()
+       WHERE data_source_id = $1 AND revoked_at IS NULL`,
+      [SOURCE],
+    )
+  }
+
+  it('refuses unlink during the native response without becoming legacy', async () => {
+    const result = await held(() => unlinkManagedSource(
+      { id: OWNER, authenticatedTenantId: TENANT },
+      { dataSourceId: SOURCE },
+    ).then(() => undefined))
+    expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_LINK_STOPPED' })
+  })
+
+  it('refuses unlink committed while the publication lock is held', async () => {
+    const result = await heldLock(stopLockedLink)
+    expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_LINK_STOPPED' })
+  })
+
+  it('refuses a deleted binding during the native response without becoming legacy', async () => {
+    const result = await held(async () => {
+      const removed = await query('DELETE FROM plm_managed_source_bindings WHERE data_source_id = $1', [SOURCE])
+      expect(removed.rowCount).toBe(1)
+    })
+    expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_READ_REFUSED' })
+  })
+
+  it('refuses session revoke during the native response and while the publication lock is held', async () => {
+    const duringNetwork = await held(() => query(
+      'UPDATE plm_managed_sessions SET revoked_at = clock_timestamp() WHERE revoked_at IS NULL',
+    ).then(() => undefined))
+    expect(duringNetwork).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' })
+    await resetRows()
+    const duringLock = await heldLock(async (client) => {
+      const revoked = await client.query(
+        'UPDATE plm_managed_sessions SET revoked_at = clock_timestamp() WHERE data_source_id = $1 AND revoked_at IS NULL',
+        [SOURCE],
+      )
+      expect(revoked.rowCount).toBe(1)
+    })
+    expect(duringLock).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' })
+  })
+
+  async function expireFrozenSession(client: { query: (sql: string, params?: unknown[]) => Promise<{ rowCount: number | null }> }, sessionId?: string) {
+    await client.query('ALTER TABLE plm_managed_sessions DISABLE TRIGGER plm_managed_sessions_guard')
+    try {
+      const expired = await client.query(
+        `UPDATE plm_managed_sessions
+         SET created_at = clock_timestamp() - interval '2 minutes',
+             expires_at = clock_timestamp() - interval '1 second'
+         WHERE revoked_at IS NULL ${sessionId ? 'AND id = $1' : ''}`,
+        sessionId ? [sessionId] : [],
+      )
+      expect(expired.rowCount).toBe(1)
+    } finally {
+      await client.query('SET CONSTRAINTS plm_managed_sessions_successor_commit IMMEDIATE')
+      await client.query('ALTER TABLE plm_managed_sessions ENABLE TRIGGER plm_managed_sessions_guard')
+    }
+  }
+
+  it('refuses session expiry committed during the native response', async () => {
+    try {
+      const result = await held(() => expireFrozenSession({ query }))
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' })
+    } finally {
+      await query('ALTER TABLE plm_managed_sessions ENABLE TRIGGER plm_managed_sessions_guard')
+    }
+  })
+
+  it('refuses session expiry committed while the publication lock is held', async () => {
+    try {
+      const result = await heldLock((client) => expireFrozenSession(client))
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' })
+    } finally {
+      await query('ALTER TABLE plm_managed_sessions ENABLE TRIGGER plm_managed_sessions_guard')
+    }
+  })
+
+  it('refuses a native tenant swapped for the Meta tenant during the native response', async () => {
+    const result = await held(() => query(
+      `UPDATE plm_managed_sessions SET native_tenant_id = $1 WHERE native_tenant_id = 'default'`,
+      [TENANT],
+    ).then(() => undefined))
+    expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_IDENTITY_REFUSED' })
+  })
+
+  it('refuses a membership removed during the native response', async () => {
+    try {
+      const result = await held(() => query(
+        'UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2',
+        [OWNER, TENANT],
+      ).then(() => undefined))
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_META_MEMBERSHIP_REFUSED' })
+    } finally {
+      await query('UPDATE user_orgs SET is_active = true WHERE user_id = $1', [OWNER])
+    }
+  })
+
+  it.each(['false', 'TRUE', '0', '', 'unset'])('does not publish or use shared transport when the flag becomes %s during the native response', async (flag) => {
+    try {
+      const result = await held(async () => {
+        if (flag === 'unset') delete process.env.PLM_MANAGED_COMPANION_ENABLED
+        else process.env.PLM_MANAGED_COMPANION_ENABLED = flag
+      })
+      expect(result).toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_DISABLED' })
+    } finally {
+      enable()
+    }
+  })
+
+  it('does not substitute a later live session after the frozen session is revoked', async () => {
+    const hold = nativeHold()
+    const { read, sessionId } = await loggedBomRead(hold.beforeContext)
+    const intent = (await query('SELECT * FROM plm_managed_browser_intents')).rows[0]
+    const session = (await query('SELECT * FROM plm_managed_sessions WHERE id = $1', [sessionId])).rows[0]
+    await insertClone('plm_managed_browser_intents', intent, {
+      id: 'intent-later-read',
+      state_hash: 'e'.repeat(64),
+      nonce_hash: 'a'.repeat(64),
+      code_challenge: 'b'.repeat(43),
+      delegation_id: null,
+      credential_ciphertext: null,
+    })
+    await insertClone('plm_managed_sessions', session, {
+      id: 'session-later-read',
+      intent_id: 'intent-later-read',
+      delegation_id: 'del-later-read',
+      revoked_at: null,
+    })
+    const pending = read()
+    try {
+      await hold.arrived
+      const revoked = await query(
+        'UPDATE plm_managed_sessions SET revoked_at = clock_timestamp() WHERE id = $1 AND revoked_at IS NULL',
+        [sessionId],
+      )
+      expect(revoked.rowCount).toBe(1)
+      hold.release()
+      await expect(pending).resolves.toMatchObject({ kind: 'refusal', status: 403, code: 'PLM_MANAGED_SESSION_REQUIRED' })
+      expect((await query('SELECT revoked_at FROM plm_managed_sessions WHERE id = $1', ['session-later-read'])).rows[0].revoked_at).toBeNull()
+      expect(readSharedTransportAudit().calls).toBe(0)
+    } finally {
+      hold.release()
+      await pending.catch(() => undefined)
+    }
   })
 })
 
