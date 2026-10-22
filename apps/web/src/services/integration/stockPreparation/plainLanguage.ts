@@ -2082,6 +2082,108 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '导入本身不受影响,可以照常用。差异对比会少这一批,再同步一次通常就补上了。',
     enNext: 'The import itself is fine and usable. The diff view will be missing this batch; syncing again usually adds it.',
   }),
+  /**
+   * #6475 — the archive's own refusals (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES). Every one
+   * of them opens with the same first clause as BATCH_ARCHIVE_FAILED — the rows are in — because that
+   * is what the operator most needs to hear; the second line is the step that actually unblocks the
+   * archive. Only TABLES_NOT_PROVISIONED is a SKIP; every other entry here is a FAIL and its first
+   * line says this sync was not kept. None of them promises that time alone fixes it: under the
+   * creation-hour batch rule the batch id is the newest material's CREATION hour, not the clock, so
+   * "wait for the next hour" is never a remedy this table may offer (#6475 review round 1).
+   */
+  BATCH_ARCHIVE_TABLES_NOT_PROVISIONED: Object.freeze({
+    zh: '数据已经写进去了;快照表还没建,这次没有存档',
+    en: 'The data is in; the snapshot tables have not been built yet, so nothing was kept',
+    zhNext: '请平台管理员先执行一次「建快照表」(mvp/ensure,每个租户一次即可),之后再同步就会存档。少这一批只影响「差异对比」。',
+    enNext: 'Ask a platform administrator to build the snapshot tables once (mvp/ensure, once per tenant); syncs after that keep their batch. Missing this one only affects the diff view.',
+  }),
+  BATCH_ARCHIVE_LEDGER_CONFLICT: Object.freeze({
+    zh: '数据已经写进去了;快照账本里已有的记录和这次要存的对不上,这次没有存档',
+    en: 'The data is in; records already in the snapshot ledger do not match what this sync would keep, so nothing was kept',
+    zhNext: '已存的记录不会被改写;在平台管理员处理之前,再同步通常也会停在这里。请把错误码和技术详情里的 target/reason 交给平台管理员。按物料创建时间分批时,同一个批次号下已经存过不同的内容也会这样:没有新增物料的更正,或者物料改回了更早一个批次的样子、而更新的批次已经存过。只改了备注这类人工填写的列,不会停在这里。',
+    enNext: 'Kept records are never rewritten; until a platform administrator looks at it, syncing again usually stops here too. Give the error code and the target/reason from the technical details to a platform administrator. When batches are split by material creation time, it also ends here when that batch is already kept with different lines: a correction that adds no newer material, or a BOM changed back to an earlier batch while a newer one is kept. Editing only the columns people fill in, such as notes, does not end here.',
+  }),
+  BATCH_ARCHIVE_PREVIOUS_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;这一批之前的存档没写完整,这次没有存档',
+    en: 'The data is in; an earlier copy of this batch was left incomplete, so nothing was kept this time',
+    zhNext: '系统不会自己补写已有的存档;物料没变时这一批的批次号也不变,所以再同步会一直停在这里。请把错误码交给平台管理员,由管理员按修复流程补全一次(不是页面上的操作)。',
+    enNext: 'The system never completes a kept copy on its own, and while the material is unchanged the batch stays the same, so syncing again keeps stopping here. Give the error code to a platform administrator, who completes it once through the repair procedure (not a page action).',
+  }),
+  BATCH_ARCHIVE_SCHEMA_INCOMPLETE: Object.freeze({
+    zh: '数据已经写进去了;快照表缺了列,这次的存档没成功',
+    en: 'The data is in; a snapshot table is missing columns, so keeping a copy did not work',
+    zhNext: '请平台管理员执行一次「修复快照表」(mvp/repair,只补缺的列,不动数据),再同步一次。',
+    enNext: 'Ask a platform administrator to repair the snapshot tables once (mvp/repair adds only the missing columns and touches no data), then sync again.',
+  }),
+  BATCH_ARCHIVE_SCHEMA_UNAVAILABLE: Object.freeze({
+    zh: '数据已经写进去了;暂时读不到快照表的结构,这次的存档没成功',
+    en: 'The data is in; the snapshot tables’ structure could not be read just now, so keeping a copy did not work',
+    zhNext: '稍后再同步一次;一直这样请平台管理员检查服务器的元数据连接。',
+    enNext: 'Sync again a little later; if it keeps happening, ask a platform administrator to check the server’s metadata connection.',
+  }),
+  /**
+   * Since #6475 round 1 the archive refuses a source split BEFORE it loads the source, so this answer
+   * is about the source step ③ itself read — which the trial and the write read even while disabled.
+   * Whether that source should be re-enabled or the binding moved off it is an administrator's call;
+   * the copy names both and refuses to tell anyone to revive a retired source just to get a batch.
+   */
+  BATCH_ARCHIVE_SOURCE_NOT_ACTIVE: Object.freeze({
+    zh: '数据已经写进去了;这个项目绑定的数据来源现在是停用状态,存档不读停用的来源',
+    en: 'The data is in; the data source this project is bound to is disabled, and the archive does not read a disabled source',
+    zhNext: '试算和写入照样读了它,只有存档要求来源是启用的。请管理员先确认它还该不该用:是误停的就重新启用;是已经换掉的旧来源,就在「数据从哪里来」把绑定改到现在用的来源 —— 不要为了存档把旧来源重新启用。之后再同步一次。',
+    enNext: 'The trial and the write still read it; only the archive requires an enabled source. Ask an administrator whether it should still be in use: if it was disabled by mistake, re-enable it; if it is a retired source, point the binding at the current one under “Where the data comes from” — do not re-enable a retired source just to get the archive to run. Then sync again.',
+  }),
+  /**
+   * The archive's tenant is the principal's `user.tenantId`: the verified claim, or — on a token with
+   * no tenant claim while the tenant-claim door is off (the default) — the `x-tenant-id` header the
+   * browser sends from its stored tenant hint. This answer means the request carried neither. It does
+   * NOT mean the page cannot influence the tenant, and the copy no longer says so.
+   */
+  BATCH_ARCHIVE_TENANT_REQUIRED: Object.freeze({
+    zh: '数据已经写进去了;存档这一步没拿到租户,跑不了',
+    en: 'The data is in; the archive step received no tenant, so it cannot run',
+    zhNext: '存档认的是这次请求的租户:账号自带所属租户就用它;账号没有所属租户时,在没开启「租户声明强制」的部署上会用浏览器随请求带上的租户 —— 这次两样都没有。请用归属这个租户的管理员账号来同步,或请管理员给当前账号设置所属租户。',
+    enNext: 'The archive uses the tenant this request is credited with: the account’s own tenant when it has one; for an account without one, on a deployment that does not enforce tenant claims, the tenant the browser sends along with the request — and this time there was neither. Sync with an administrator account that belongs to this tenant, or have an administrator give this account its tenant.',
+  }),
+  BATCH_ARCHIVE_SOURCE_BINDING_SPLIT: Object.freeze({
+    zh: '数据已经写进去了;存档会读到另一个数据来源,为了不存错,这次没有存档',
+    en: 'The data is in; the archive would have read a different data source, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '这个动作在不同工作区绑定的数据来源不一致(或一处绑了、另一处没绑),写入读的和存档读的不是同一个。请平台管理员把它们统一到同一个来源:「数据从哪里来」改的是当前工作区的绑定;交付时用脚本写的租户级绑定要用同一个脚本改。改好后再同步一次。绑定都一致却还这样,就是写入和存档认定的租户不同,请把错误码交给平台管理员。',
+    enNext: 'This action is bound to different data sources in different workspaces (or bound in one place and not another), so the write and the archive do not read the same one. Ask a platform administrator to point them all at the same source: “Where the data comes from” changes the current workspace’s binding; a tenant-wide binding written by the delivery script is changed with the same script. Then sync again. If every binding already agrees, the write and the archive were credited to different tenants; give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND: Object.freeze({
+    zh: '数据已经写进去了;存档再读数据来源时没找到这个项目号,这次没有存档',
+    en: 'The data is in; when the archive read the data source again it did not find this project number, so nothing was kept',
+    zhNext: '写入时还读得到,说明这期间数据来源那边有变化。稍后再同步一次;如果第①步也说找不到这个项目号,就是来源里已经没有它了。一直这样请把错误码交给平台管理员核对数据来源。',
+    enNext: 'The write could still read it, so something changed in the data source in between. Sync again a little later; if step 1 also says the project number is not found, the source no longer has it. If it keeps happening, give the error code to a platform administrator to check the data source.',
+  }),
+  BATCH_ARCHIVE_PLAN_NOT_READY: Object.freeze({
+    zh: '数据已经写进去了;存档时重新算出的这批物料里还有没解决的冲突行,快照存不下,这次没有存档',
+    en: 'The data is in; when the archive recomputed this batch it still had unresolved conflict rows, which a snapshot cannot hold, so nothing was kept',
+    zhNext: '存档会自己重新算一遍,不沿用已经确认过的决定(比如保留多行的重复件),这样的行快照存不下。再同步一次;如果第①步也提示要确认,先去「确认队列」处理;一直这样请把错误码交给平台管理员。',
+    enNext: 'The archive recomputes on its own and does not reuse decisions already confirmed (such as keeping several rows of a duplicated part), and a snapshot cannot hold such rows. Sync again; if step 1 also asks for confirmation, work through the confirmation queue first; if it keeps happening, give the error code to a platform administrator.',
+  }),
+  /**
+   * #6475 round 2 — the archive re-reads the source after the write and refuses to keep anything that is
+   * not what step ③ wrote. The technical detail's `reason` says which half failed; the copy names both,
+   * because the next step is the same: one more sync, with any row step ③ keeps failing fixed first.
+   */
+  BATCH_ARCHIVE_SYNC_PARITY_MISMATCH: Object.freeze({
+    zh: '数据已经写进去了;这次要存档的内容和第③步写进表里的对不上,为了不存错,这次没有存档',
+    en: 'The data is in; what the archive would keep does not match what step 3 wrote to the sheet, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '要么写入之后数据来源那边又改了(技术详情 reason=source_changed_since_write),要么表里没有第③步读到的全部内容(reason=sheet_not_settled:有的行没写进去,或者写入之后有人手改了从 PLM 带过来的列)。再同步一次,让试算、写入和存档读到同一份数据;如果第③步一直有写不进去的行,先把那些行处理好。',
+    enNext: 'Either the data source changed after the write (technical detail reason=source_changed_since_write), or the sheet does not hold everything step 3 read (reason=sheet_not_settled: rows that could not be written, or a column that comes from PLM edited by hand since). Sync again so the plan, the write and the archive read the same data; if step 3 keeps reporting rows it could not write, fix those first.',
+  }),
+  /**
+   * #6475 round 2 — step ③ was partial, so step ④ was not attempted. A SKIP, and deliberately NOT
+   * BATCH_ARCHIVE_NOT_ATTEMPTED, whose sentence says nothing was written.
+   */
+  BATCH_ARCHIVE_WRITE_INCOMPLETE: Object.freeze({
+    zh: '有的行没写进去,所以这次没有存档',
+    en: 'Some rows could not be written, so this sync was not kept as a batch',
+    zhNext: '存档会把这次读到的整份数据存成一个批次,而表里现在只有其中一部分,存下来会和表对不上。先按第③步的提示把没写进去的行处理好,再同步一次:全部写进去以后,存档会照常留下。',
+    enNext: 'The archive keeps everything this sync read as one batch, and the sheet holds only part of it, so the batch would not match the sheet. Deal with the rows step 3 could not write, then sync again: once everything is written, the archive is kept as usual.',
+  }),
 })
 
 export function stockPrepSyncReasonPlain(reason: string): StockPrepPlainEntry | null {
