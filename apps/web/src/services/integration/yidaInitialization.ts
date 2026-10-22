@@ -21,6 +21,8 @@ export interface YidaInitializationState {
   readonly canSend: false
   readonly tokenIssued: false
   readonly externalWriteAttempted: false
+  /** Server's exact send switch, only on an owner-authorized reply; display only, never authority. */
+  readonly sendEnabled: boolean
 }
 
 const endpoint = '/api/integration/yida-owner-send/initialization'
@@ -64,13 +66,13 @@ function draft(value: unknown): YidaOwnerDraft {
     canSend: false, canApply: false, tokenIssued: false, externalWriteAttempted: false, rowCount: rows.length, rows: Object.freeze(rows), reused: row.reused })
 }
 function state(value: unknown, expectedCommand: string | null): YidaInitializationState {
-  const row = object(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
+  const row = object(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted', 'sendEnabled'])
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
-  if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false
+  if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
-    canSend: false, tokenIssued: false, externalWriteAttempted: false })
+    canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled })
 }
 function input(value: unknown): YidaInitializationInput {
   try {
@@ -99,7 +101,7 @@ function input(value: unknown): YidaInitializationInput {
 /** Independent local management path, not a sending capability. Captured-session
  * and bounded original-reader guards mirror yidaOwner; no retries or persisted
  * payload/command keys. Each POST consumes a successful explicit ready GET. */
-export function createYidaInitializationClient(options: { onInvalidated?: () => void } = {}) {
+export function createYidaInitializationClient(options: { onInvalidated?: (code?: string) => void } = {}) {
   const token = readStoredToken(), signature = readAuthSessionSignature()
   if (!token || token.length > 16384 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(token)
     || signature === 'invalid' || token !== readStoredToken()) throw new YidaInitializationClientError('UNAUTHORIZED')
@@ -115,13 +117,14 @@ export function createYidaInitializationClient(options: { onInvalidated?: () => 
     for (const controller of controllers) controller.abort()
     controllers.clear()
   }
-  const invalidate = () => { if (disposed) return; dispose(); options.onInvalidated?.() }
+  // A server refusal passes its own code; session/storage/principal changes pass none.
+  const invalidate = (code?: string) => { if (disposed) return; dispose(); options.onInvalidated?.(code) }
   const checkSession = () => { if (readAuthSessionSignature() !== signature || readStoredToken() !== token || scopeHint() !== startedScope) invalidate() }
   const onStorage = (event: StorageEvent) => {
     if (event.key === null || event.key === EXPLICIT_SESSION_ORG_KEY || event.key === 'tenantId' || event.key === 'workspaceId'
       || TOKEN_KEYS.some(key => key === event.key)) invalidate()
   }
-  unsubscribe = onAuthPrincipalChange(invalidate)
+  unsubscribe = onAuthPrincipalChange(() => invalidate())
   window.addEventListener('storage', onStorage); window.addEventListener('focus', checkSession)
   const assertCurrentSession = () => { checkSession(); if (disposed) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED') }
   async function request(method: 'GET' | 'POST', expectedCommand: string | null, body?: YidaInitializationInput, signal?: AbortSignal): Promise<YidaInitializationState> {
@@ -169,7 +172,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: () => 
       if (!response.ok) {
         const error = object(envelope.error, ['code'])
         if (typeof error.code !== 'string' || !Object.prototype.hasOwnProperty.call(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
-        if (error.code === 'YIDA_OWNER_HTTP_DENIED' || error.code === 'YIDA_INITIALIZATION_DENIED') invalidate()
+        if (error.code === 'YIDA_OWNER_HTTP_DENIED' || error.code === 'YIDA_INITIALIZATION_DENIED') invalidate(error.code)
         throw new YidaInitializationClientError(error.code)
       }
       if (response.status !== (method === 'GET' ? 200 : 201)) invalid()

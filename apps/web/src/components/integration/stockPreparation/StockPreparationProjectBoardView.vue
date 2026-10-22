@@ -535,8 +535,8 @@
       </section>
 
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
-           从PLM拉取 / 通知下一步 / 导出Excel / 宜搭准备入口. Server actions retain their caller
-           gates (R-11); the Yida entry only opens local preparation. -->
+           从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
+           server answers for this caller (R-11); the ones that do not render say why in words. -->
       <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
         <!-- 从PLM拉取 lives ABOVE, outside `v-if="board"` — see the section that renders it. It is
              ONE instance either way: mounting a second copy here would give the operator two panels
@@ -567,26 +567,41 @@
             {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
           </button>
 
-          <!-- This entry opens preparation only. The preview owns the separate explicit owner
-               confirmation entry; opening either screen does not approve or send anything. -->
+          <!-- 宜搭 — the two preparation entries render only for the literal platform admin the server's
+               live gate admits (`canOpenStockPrepYidaEntries`). Opening either screen approves and sends
+               nothing; the 单行 CREATE entry inside the preview appears only once the server reported its
+               send switch ON. Everyone else keeps main's PLACEHOLDER below, unchanged: it says「还没接入」
+               in a factory's words, and it is not a permission gate, so it is not an R-11 decoy. -->
+          <template v-if="yidaEntriesVisible">
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida"
+              :title="bi('仅打开本地预演和准备界面；本入口不发送', 'Open local preview and preparation only; this entry does not send')"
+              @click="openYidaPreparation"
+            >
+              {{ bi('打开宜搭准备（不发送）', 'Open Yida preparation (no sending)') }}
+            </button>
+            <button
+              type="button"
+              class="sp-board__button"
+              data-testid="stock-prep-project-board-yida-preview-toggle"
+              @click="toggleYidaPreview"
+            >宜搭静态预演（不发送）</button>
+          </template>
           <button
+            v-else
             type="button"
-            class="sp-board__button"
+            class="sp-board__button sp-board__button--placeholder"
             data-testid="stock-prep-project-board-yida"
-            :title="bi('仅打开本地预演和准备界面；发送需另行确认并由服务器启用', 'Open local preview and preparation; sending requires separate confirmation and server enablement')"
-            @click="openYidaPreparation"
+            disabled
+            :title="bi('宜搭推送暂未接入', 'Pushing to Yida is not connected yet')"
           >
-            {{ bi('打开宜搭单行确认（默认关闭）', 'Open Yida single-row confirmation (off by default)') }}
+            {{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}
           </button>
-          <button
-            type="button"
-            class="sp-board__button"
-            data-testid="stock-prep-project-board-yida-preview-toggle"
-            @click="toggleYidaPreview"
-          >宜搭静态预演（不发送）</button>
         </div>
 
-        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen" />
+        <StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen && yidaEntriesVisible" />
 
         <p v-if="handoffNotice" class="sp-board__notice" data-testid="stock-prep-project-board-handoff-notice" role="status">
           {{ handoffNotice }}
@@ -734,7 +749,11 @@ import {
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync, grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  canOpenStockPrepYidaEntries,
+  canRunStockPrepProjectSync,
+  grantedStockPrepCapabilities,
+} from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -850,23 +869,26 @@ function yidaPreviewSessionSignature(): string {
 }
 
 let yidaPreviewSession = yidaPreviewSessionSignature()
+/** R-11: the 宜搭 entries follow the same session snapshot, re-read whenever that snapshot changes. */
+const yidaEntriesVisible = ref<boolean>(canOpenStockPrepYidaEntries(auth.getAccessSnapshot()))
 function checkYidaPreviewSession(): boolean {
   const current = yidaPreviewSessionSignature()
   if (current === yidaPreviewSession) return false
   yidaPreviewSession = current
   yidaPreviewOpen.value = false
+  yidaEntriesVisible.value = canOpenStockPrepYidaEntries(auth.getAccessSnapshot())
   return true
 }
 
 function toggleYidaPreview(): void {
   // A missed cross-tab event must first unmount the old editor. Reopening in this same
   // tick could let Vue batch false -> true and retain the previous account's inputs.
-  if (checkYidaPreviewSession()) return
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
   yidaPreviewOpen.value = !yidaPreviewOpen.value
 }
 
 function openYidaPreparation(): void {
-  if (checkYidaPreviewSession()) return
+  if (checkYidaPreviewSession() || !yidaEntriesVisible.value) return
   yidaPreviewOpen.value = true
 }
 

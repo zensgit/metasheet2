@@ -144,6 +144,30 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await f.runtime.stop()
   })
 
+  it.each([['true', true], [undefined, false], [null, false], [false, false], [true, false], [1, false], ['TRUE', false],
+    ['true ', false], [new String('true'), false]])('sendEnabled() display bit is exact-literal for %s and admits nothing', async (value, expected) => {
+    const f = await active({ enablement: value })
+    expect(f.runtime.sendEnabled()).toBe(expected)
+    expect(f.coreFactory).not.toHaveBeenCalled(); expect(f.database.transaction).not.toHaveBeenCalled()
+    expect(f.createSendPort).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled()
+    await f.runtime.stop()
+  })
+
+  it('sendEnabled() defaults OFF, never throws and observes a rejected switch promise', async () => {
+    const errors: unknown[] = [], listener = (error: unknown) => errors.push(error)
+    process.on('unhandledRejection', listener)
+    try {
+      const f = fixture()
+      expect(f.module.createYidaOwnerRuntime({ database: f.database, security: f.security, fetch: f.fetcher }).sendEnabled()).toBe(false)
+      const thrown = fixture({ readEnablement: () => { throw new Error('synthetic-private-switch') } })
+      expect(thrown.runtime.sendEnabled()).toBe(false)
+      const rejected = fixture({ readEnablement: () => Promise.reject(new Error('synthetic-private-switch')) })
+      expect(rejected.runtime.sendEnabled()).toBe(false)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(errors).toEqual([])
+    } finally { process.off('unhandledRejection', listener) }
+  })
+
   it('observes rejected native switch promises without admitting or leaking unhandled rejection', async () => {
     const errors: unknown[] = [], listener = (error: unknown) => errors.push(error)
     process.on('unhandledRejection', listener)
@@ -448,6 +472,14 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         const f = await active({ source, enablement: true })
         try { await expect(f.runtime.submit(actor, submission)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }
         finally { await f.runtime.stop() }
+      } },
+      { name: 'display/exact-literal', from: "if (value === 'true') return true", to: 'if (value) return true', test: async source => {
+        const f = fixture({ source, enablement: true })
+        expect(f.runtime.sendEnabled()).toBe(false)
+      } },
+      { name: 'display/never-throws', from: 'try { value = readEnablement() } catch { return false }', to: 'value = readEnablement()', test: async source => {
+        const f = fixture({ source, readEnablement: () => { throw new Error('synthetic-private-switch') } })
+        expect(f.runtime.sendEnabled()).toBe(false)
       } },
       { name: 'switch/default-OFF', from: "dependencies.readEnablement ?? (() => 'false')", to: "dependencies.readEnablement ?? (() => 'true')", test: async source => {
         const f = fixture({ source })

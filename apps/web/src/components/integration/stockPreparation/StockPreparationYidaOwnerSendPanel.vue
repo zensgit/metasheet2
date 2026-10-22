@@ -120,7 +120,7 @@ watch(selectedRowKey, () => { preview.value = null; acknowledged.value = false; 
 onBeforeUnmount(reset)
 
 function sessionClient(): YidaOwnerClient {
-  if (!client) client = createYidaOwnerClient({ onInvalidated: () => { reset(); errorCode.value = 'YIDA_OWNER_SESSION_CHANGED' } })
+  if (!client) client = createYidaOwnerClient({ onInvalidated: code => { reset(); errorCode.value = code ?? 'YIDA_OWNER_SESSION_CHANGED' } })
   return client
 }
 async function perform<T>(action: (current: YidaOwnerClient) => Promise<T>, apply: (result: T) => void): Promise<void> {

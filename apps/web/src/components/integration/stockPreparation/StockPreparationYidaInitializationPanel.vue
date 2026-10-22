@@ -32,7 +32,7 @@ import { createYidaInitializationClient, YidaInitializationClientError, type Yid
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 const props = defineProps<{ draftInput: YidaOwnerDraftInput | null }>()
-const emit = defineEmits<{ 'locked-change': [locked: boolean] }>()
+const emit = defineEmits<{ 'locked-change': [locked: boolean]; 'send-enabled-change': [enabled: boolean] }>()
 const materialFields = ['appKey', 'appSecret', 'systemToken', 'userId'] as const
 const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
 const reviewRef = ref(''), organizationId = ref(''), acknowledged = ref(false)
@@ -43,6 +43,8 @@ let generation = 0
 let client: ReturnType<typeof createYidaInitializationClient> | null = null
 const locked = computed(() => busy.value || uncertain.value)
 watch(locked, value => emit('locked-change', value), { immediate: true, flush: 'sync' })
+// Only an owner-authorized reply carries the server's send switch; any cleared state reads OFF.
+watch(() => state.value?.sendEnabled === true, value => emit('send-enabled-change', value), { immediate: true, flush: 'sync' })
 const mayInitialize = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
   && !!props.draftInput && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
   && reviewRef.value.length > 0 && organizationId.value.length > 0)
@@ -50,10 +52,11 @@ function clearPrivate(): void {
   for (const field of materialFields) material[field] = ''
   reviewRef.value = ''; organizationId.value = ''; acknowledged.value = false
 }
-function invalidateSession(): void {
+function invalidateSession(code?: string): void {
   generation += 1; client?.dispose(); client = null
   clearPrivate(); state.value = null; commandId.value = null; selectedRowKey.value = ''
-  busy.value = false; uncertain.value = false; invalidated.value = true; errorCode.value = 'YIDA_INITIALIZATION_SESSION_CHANGED'
+  // A server DENIED keeps its own code: not owner/admin, or a token without a tenant, is not a session change.
+  busy.value = false; uncertain.value = false; invalidated.value = true; errorCode.value = code ?? 'YIDA_INITIALIZATION_SESSION_CHANGED'
 }
 function sessionClient(): ReturnType<typeof createYidaInitializationClient> {
   if (invalidated.value) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED')

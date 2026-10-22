@@ -360,6 +360,16 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
         return submitView(response, parsed.grantId)
       }))
     },
+    // Values-free display bit for a response the caller already authorized
+    // (owner + live admin). Same exact-literal source as enabled(); never
+    // throws and is never authority: every send action rechecks enabled().
+    sendEnabled(): boolean {
+      let value: unknown
+      try { value = readEnablement() } catch { return false }
+      if (value === 'true') return true
+      consumeRejection(value)
+      return false
+    },
     deactivate(): Promise<void> {
       ++capabilityGeneration
       return active ? drain(active) : Promise.resolve()

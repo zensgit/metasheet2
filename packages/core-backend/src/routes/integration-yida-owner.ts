@@ -8,7 +8,7 @@ import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http
 /** Dedicated host owner boundary, after actual JWT. Never a communication API.
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
-  'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit'>
+  'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
@@ -175,13 +175,13 @@ function initializationInput(value: unknown) {
   if (attestation.executionIdentity !== material.userId) fail()
   return { commandId: id(parsed.commandId), material, draft: candidate, attestation }
 }
-function initialization(value: unknown) {
+function initialization(value: unknown, sendEnabled: boolean) {
   const row = record(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
     || (row.status === 'ready') !== (row.draft === null)) fail()
   return { commandId: id(row.commandId), status: row.status,
-    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false }
+    draft: row.draft === null ? null : draft(row.draft), canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled }
 }
 function dto(project: () => unknown) { try { return project() } catch { fail('YIDA_OWNER_HTTP_UNAVAILABLE') } }
 function sendError(res: Response, error: unknown) {
@@ -272,17 +272,20 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     const result = await port.submit(owner, { grantId: id(input.grantId), submissionId: id(input.submissionId) }, { signal })
     return dto(() => submission(result))
   }))
+  // Read only after the initialization port authorized this owner + live admin,
+  // so the UI may show the send entry; a display bit, never send authority.
+  const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.status(owner, { signal })
-    return dto(() => initialization(result))
+    return dto(() => initialization(result, sendEnabled()))
   }))
   router.post('/initialization', route(201, async (req, owner, signal) => {
     const input = initializationInput(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.initialize(owner, input, { signal })
-    return dto(() => initialization(result))
+    return dto(() => initialization(result, sendEnabled()))
   }))
   router.use((_req, res) => { res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } }) })
   return router
