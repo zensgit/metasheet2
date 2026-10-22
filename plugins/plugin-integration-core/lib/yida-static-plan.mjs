@@ -14,6 +14,8 @@ const CATALOG_KEYS = new Set(['id', 'control', 'required', 'options'])
 const TYPES = new Set(['string', 'number', 'boolean'])
 const CONTROLS = new Set(['text', 'number', 'select', 'radio'])
 const JSON_NUMBER = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
+// Same C0/DEL/C1 range the form transport refuses in every identifier it sends.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u
 
 export class YidaStaticPlanError extends Error {
   constructor(code) {
@@ -58,8 +60,11 @@ function validIdentifier(value) {
   return typeof value === 'string' && IDENTIFIER.test(value) && !FORBIDDEN_IDENTIFIER.test(value)
 }
 
+// Targets are sent trimmed; the trimmed value must pass the transport's own
+// identifier check, or an approved row would only fail after its claim.
 function validTargetId(value) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 128
+    && !CONTROL.test(value.trim())
 }
 
 function configIssue(code, field) { return { code, field } }
@@ -470,7 +475,8 @@ export function buildYidaStaticPlan(input) {
     let instanceId
     if (config.intent === 'update') {
       const supplied = ownValue(row, config.instanceIdField)
-      if (typeof supplied !== 'string' || !validTargetId(supplied)) {
+      // Instance IDs are sent untrimmed, so padding is refused like the transport does.
+      if (typeof supplied !== 'string' || !validTargetId(supplied) || supplied.trim() !== supplied) {
         issues.push(rowIssue(index, 'INSTANCE_ID_MISSING'))
       } else instanceId = supplied
     }
