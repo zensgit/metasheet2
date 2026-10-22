@@ -252,13 +252,47 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(link.textContent).toContain('打开备料多维表')
   })
 
-  it('with NO handle it promises only the workbench — the destination the parent really has', async () => {
+  it('with NO handle it promises only the multitable home — the destination the parent really has', async () => {
     const root = mountPanel({ api: api() })
     await runSync(root)
     const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
     expect(link.getAttribute('data-fill-target')).toBe('none')
-    expect(link.textContent).toContain('打开多维表工作台')
+    // 客户反馈 2026-10-21 9a: `/multitable` is the HOME page (新建 Base + template cards), not a workbench.
+    expect(link.textContent).toContain('打开多维表首页')
+    expect(link.textContent).not.toContain('工作台')
     expect(link.textContent).not.toContain('打开备料多维表')
+  })
+
+  it('9a: with NO handle a sentence beside the button says where it lands and that no template is to be chosen', async () => {
+    const root = mountPanel({ api: api() })
+    await runSync(root)
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    expect(hint.textContent).toContain('多维表首页')
+    expect(hint.textContent).toContain('固定模板自动建')
+    expect(hint.textContent).toContain('不用在首页选模板')
+    expect(hint.textContent).toContain('不要在那里新建 Base')
+    expect(hint.textContent).toContain('「项目备料」')
+    // It sits in the same next-step row as the button it explains.
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLElement
+    expect(hint.parentElement).toBe(link.parentElement)
+
+    h.locale = 'en'
+    app?.unmount()
+    app = null
+    container!.innerHTML = ''
+    const en = mountPanel({ api: api() })
+    await runSync(en)
+    const enHint = en.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(enHint.textContent).toContain('multitable home')
+    expect(enHint.textContent).toContain('do not pick a template or create a Base')
+  })
+
+  it('9a: WITH a handle there is no such sentence — the button lands on the sheet itself', async () => {
+    const root = mountPanel({ api: api(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]')).toBeNull()
   })
   // ---- P-04 --------------------------------------------------------------------------------
   it('P-04: the plan counts read as a sentence, with the zero clauses dropped', async () => {
@@ -327,6 +361,27 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(archive.textContent).toContain('存档没成功')
     // ...and it says, in the same breath, that the import itself is fine.
     expect(archive.textContent).toContain('导入本身不受影响')
+    // 客户反馈 2026-10-21 9b: and it no longer promises that a re-sync fixes what it cannot name.
+    expect(archive.textContent).not.toContain('通常就补上了')
+  })
+
+  it('9b: a code-less 404 on the archive names the missing PLM source, and 技术详情 carries the HTTP status', async () => {
+    const double = api({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(404, '/mvp-persist', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const verdict = root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement
+    expect(verdict.getAttribute('data-verdict')).toBe('imported')
+    const archive = root.querySelector('[data-step="archive"]') as HTMLElement
+    expect(archive.getAttribute('data-status')).toBe('fail')
+    expect(archive.textContent).toContain('没找到这个项目的 PLM 数据源')
+    expect(archive.textContent).not.toContain('通常就补上了')
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND')
+    const details = Array.from(tech.querySelectorAll('[data-testid="stock-prep-project-sync-step-detail"]')).map((el) => el.textContent)
+    expect(details).toContain('status=404')
+    expect(details.some((text) => (text ?? '').startsWith('code='))).toBe(false)
   })
 
   it('P-03: the archive being off for this deployment renders as a setting, not a fault', async () => {

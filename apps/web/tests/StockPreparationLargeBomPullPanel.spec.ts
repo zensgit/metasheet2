@@ -140,7 +140,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
   })
 
-  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the workbench when it does not', async () => {
+  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the multitable home when it does not', async () => {
     // The panel routes nothing and invents no destination — it is told. What it must not do is
     // promise the 备料主表 on a deployment where the parent can only open the chooser.
     const bound = mountPanel({ api: doneApi(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
@@ -148,6 +148,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     const boundLink = bound.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(boundLink.getAttribute('data-fill-target')).toBe('bound')
     expect(boundLink.textContent).toContain('打开备料多维表')
+    expect(bound.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')).toBeNull()
     app?.unmount()
     app = null
     container!.innerHTML = ''
@@ -156,7 +157,8 @@ describe('StockPreparationLargeBomPullPanel', () => {
     await flushUi()
     const plainLink = plain.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(plainLink.getAttribute('data-fill-target')).toBe('none')
-    expect(plainLink.textContent).toContain('打开多维表工作台')
+    expect(plainLink.textContent).toContain('打开多维表首页')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('不用在首页选模板')
   })
   it('D-02: no open-multitable link renders before done', async () => {
     const api = doneApi({

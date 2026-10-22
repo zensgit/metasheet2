@@ -1376,6 +1376,19 @@ export const STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT: StockPrepPlainText = Obj
   en: 'Once it is fixed: go back up and press 同步一次 — the system finds it on its own; there is no "mark done" button here.',
 })
 
+/**
+ * 客户反馈 2026-10-21 9a — the sentence beside the 项目接入 panel's (and the large-BOM channel's)
+ * open-the-multitable button when the parent holds NO sheet handle. Without a handle the shell pushes
+ * the plain `/multitable` route, which is the multitable HOME page: a 「新建 Base」 form and template
+ * cards. A customer reading those cards asked whether they had to choose a template for the project.
+ * They do not — one project, one sheet, built from a fixed template — so this says where the button
+ * lands, that nothing there is theirs to choose, and where the project's sheet is reached instead.
+ */
+export const STOCK_PREP_NO_SHEET_LINK_HINT: StockPrepPlainText = Object.freeze({
+  zh: '这个项目的备料表链接现在还拿不到,所以这个按钮只会打开多维表首页。备料表是系统按固定模板自动建的:不用在首页选模板,也不要在那里新建 Base。请到「项目备料」页打开这个项目、再拉取一次 —— 那一页能直接跳到备料表,或者说明它为什么还没建好。',
+  en: 'This project’s stock-preparation sheet link is not available yet, so this button only opens the multitable home. The stock-preparation sheet is created automatically from a fixed template — do not pick a template or create a Base there. Open this project on the Project Board page and pull again: that page either jumps straight to the sheet or says why it is not there yet.',
+})
+
 // ---------------------------------------------------------------------------
 // I-20 — field-level tooltips (native `title`, the existing 最近变更(来自 PLM) pattern)
 // ---------------------------------------------------------------------------
@@ -2076,11 +2089,17 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '导入本身已经完成,可以照常用。留快照这一步由平台管理员来跑,少这一批只影响「差异对比」。',
     enNext: 'The import itself is done and usable. A platform administrator keeps the snapshot; missing this batch only affects the diff view.',
   }),
+  /**
+   * THE BUCKET FOR WHAT THE PAGE DOES NOT RECOGNISE. It used to end 「再同步一次通常就补上了」, which
+   * was false for most of what landed here (客户反馈 2026-10-21 9b): the page cannot know whether a
+   * reason it does not recognise clears on its own, so it no longer says so, and it points at the two
+   * tokens an administrator needs — the HTTP status is in the technical detail even when no code is.
+   */
   BATCH_ARCHIVE_FAILED: Object.freeze({
     zh: '数据已经写进去了,但这次的存档没成功',
     en: 'The data is in, but keeping a copy of this sync did not work',
-    zhNext: '导入本身不受影响,可以照常用。差异对比会少这一批,再同步一次通常就补上了。',
-    enNext: 'The import itself is fine and usable. The diff view will be missing this batch; syncing again usually adds it.',
+    zhNext: '导入本身不受影响,可以照常用,只是差异对比会少这一批。这个原因页面认不出来,再同步一次不一定能补上:请把技术详情里第④步的 HTTP 状态码(status)和错误码(code,有的话)交给平台管理员。',
+    enNext: 'The import itself is fine and usable; the diff view will just be missing this batch. The page does not recognise this reason, so syncing again may not add it: give step 4’s HTTP status (status) and error code (code, if there is one) from the technical details to a platform administrator.',
   }),
   /**
    * #6475 — the archive's own refusals (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES). Every one
@@ -2094,8 +2113,9 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_TABLES_NOT_PROVISIONED: Object.freeze({
     zh: '数据已经写进去了;快照表还没建,这次没有存档',
     en: 'The data is in; the snapshot tables have not been built yet, so nothing was kept',
-    zhNext: '请平台管理员先执行一次「建快照表」(mvp/ensure,每个租户一次即可),之后再同步就会存档。少这一批只影响「差异对比」。',
-    enNext: 'Ask a platform administrator to build the snapshot tables once (mvp/ensure, once per tenant); syncs after that keep their batch. Missing this one only affects the diff view.',
+    // 9b: there is no 「建快照表」 button anywhere in the UI — the old quotes made it read like one.
+    zhNext: '页面上没有建表的按钮:要由平台管理员在服务器上调用一次建快照表的接口(mvp/ensure,每个租户一次即可),之后再同步就会存档。这套部署如果用不到批次存档,也可以请平台管理员把批次存档的部署开关关掉,这一步以后就显示「这套部署没有开启批次存档」。少这一批只影响「差异对比」。',
+    enNext: 'There is no button for this on the page: a platform administrator calls the snapshot-table build once on the server (mvp/ensure, once per tenant), and syncs after that keep their batch. A deployment that does not use batch archiving can instead have a platform administrator switch the batch-archive deployment flag off; this step then reads “This deployment does not keep snapshot batches”. Missing this one only affects the diff view.',
   }),
   BATCH_ARCHIVE_LEDGER_CONFLICT: Object.freeze({
     zh: '数据已经写进去了;快照账本里已有的记录和这次要存的对不上,这次没有存档',
@@ -2173,6 +2193,41 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'The data is in; what the archive would keep does not match what step 3 wrote to the sheet, so to avoid keeping the wrong data nothing was kept',
     zhNext: '要么写入之后数据来源那边又改了(技术详情 reason=source_changed_since_write),要么表里没有第③步读到的全部内容(reason=sheet_not_settled:有的行没写进去,或者写入之后有人手改了从 PLM 带过来的列)。再同步一次,让试算、写入和存档读到同一份数据;如果第③步一直有写不进去的行,先把那些行处理好。',
     enNext: 'Either the data source changed after the write (technical detail reason=source_changed_since_write), or the sheet does not hold everything step 3 read (reason=sheet_not_settled: rows that could not be written, or a column that comes from PLM edited by hand since). Sync again so the plan, the write and the archive read the same data; if step 3 keeps reporting rows it could not write, fix those first.',
+  }),
+  /**
+   * 客户反馈 2026-10-21 9b — the refusals that used to fall through to BATCH_ARCHIVE_FAILED's re-sync
+   * promise (projectSync.ts STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES / classifyArchiveFailure). Each says
+   * what happened and who acts; none promises that a re-sync alone clears it.
+   */
+  BATCH_ARCHIVE_LARGE_BOM_BOUNDED: Object.freeze({
+    zh: '数据已经写进去了;这个项目的 BOM 太大,存档这一步当场展开不完,这次没有存档',
+    en: 'The data is in; this project’s BOM is too large for the archive step to expand on the spot, so nothing was kept',
+    zhNext: '存档会自己把 BOM 重新展开一遍,只能存当场展开得完的 BOM;同一份 BOM 再同步还会停在这里。导入本身不受影响,少这一批只影响「差异对比」。这个项目需要留历史批次的话,请把错误码交给平台管理员。',
+    enNext: 'The archive expands the BOM again on its own and can only keep a BOM it can expand on the spot; syncing the same BOM again stops here too. The import itself is unaffected; missing this batch only affects the diff view. If this project needs its batch history kept, give the error code to a platform administrator.',
+  }),
+  BATCH_ARCHIVE_POINTER_STALE: Object.freeze({
+    zh: '数据已经写进去了;快照账本里这个项目的「最新批次」记录和已存的批次对不上,为了不存错,这次没有存档',
+    en: 'The data is in; the snapshot ledger’s “latest batch” entry for this project does not agree with the batches kept, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '系统不会自己去改这条记录;物料没变时这一批的批次号也不变,所以再同步会一直停在这里。请把错误码和技术详情里的 reason 交给平台管理员,由管理员按修复流程处理一次(不是页面上的操作)。',
+    enNext: 'The system never corrects that entry on its own, and while the material is unchanged the batch stays the same, so syncing again keeps stopping here. Give the error code and the reason from the technical details to a platform administrator, who handles it once through the repair procedure (not a page action).',
+  }),
+  BATCH_ARCHIVE_VERSION_HISTORY: Object.freeze({
+    zh: '数据已经写进去了;这个项目已存批次的版本顺序核对不了,为了不存错,这次没有存档',
+    en: 'The data is in; the version order of this project’s kept batches could not be verified, so to avoid keeping the wrong data nothing was kept',
+    zhNext: '存档要给新批次排一个比以前都大的版本号,这次以前的批次读不清或对不上(技术详情 reason=history_unprovable 或 not_monotonic)。再同步不会改动已存的记录。请把错误码和 reason 交给平台管理员核对快照账本。',
+    enNext: 'The archive gives a new batch a version above every earlier one, and this time the earlier batches could not be read or did not line up (technical detail reason=history_unprovable or not_monotonic). Syncing again does not change the kept records. Give the error code and the reason to a platform administrator to check the snapshot ledger.',
+  }),
+  BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND: Object.freeze({
+    zh: '数据已经写进去了;存档这一步没找到这个项目的 PLM 数据源,这次没有存档',
+    en: 'The data is in; the archive step could not find this project’s PLM data source, so nothing was kept',
+    zhNext: '服务器只回了「找不到」(技术详情 status=404),没有给错误码。最常见的原因是:试算和写入带着当前工作区去找数据源,存档不带工作区,只找得到租户级(不属于某个工作区)的数据源。这是部署配置的问题,再同步不会改变:请平台管理员检查这个动作绑定的 PLM 数据源是不是只建在某个工作区里,绑定还在不在。',
+    enNext: 'The server answered only “not found” (technical detail status=404) and sent no error code. The most common cause: the trial and the write look the data source up with the current workspace, while the archive looks it up with none and so only finds a tenant-wide one (not inside a workspace). That is deployment configuration and syncing again does not change it: ask a platform administrator to check whether the PLM data source bound to this action exists only inside a workspace, and whether the binding is still there.',
+  }),
+  BATCH_ARCHIVE_SERVICE_UNAVAILABLE: Object.freeze({
+    zh: '数据已经写进去了;存档时服务器回答「暂时不可用」,这次没有存档',
+    en: 'The data is in; the server answered “unavailable” at the archive step, so nothing was kept',
+    zhNext: '可以过一会儿再同步一次;如果每次都这样,多半是服务器缺少存档要用的功能或连接,等也等不好,请把技术详情里的 status 和错误码(有的话)交给平台管理员。少这一批只影响「差异对比」。',
+    enNext: 'You can sync again after a while; if it happens every time, the server is most likely missing a feature or connection the archive needs and waiting will not fix it — give the status and error code (if any) from the technical details to a platform administrator. Missing this batch only affects the diff view.',
   }),
   /**
    * #6475 round 2 — step ③ was partial, so step ④ was not attempted. A SKIP, and deliberately NOT
