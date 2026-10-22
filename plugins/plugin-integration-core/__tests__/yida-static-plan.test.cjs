@@ -238,7 +238,7 @@ async function transportVerdict(intent, data) {
   return error?.code
 }
 
-test('target and instance IDs are refused exactly where the form transport would refuse them', async () => {
+test('never accepts a target/instance ID the transport refuses', async () => {
   const { validateYidaStaticConfig, buildYidaStaticPlan } = await modulePromise
   const updateRow = { 项目号: 'P-1', 明细标识: 'L-1', 物料编号: 'B-17', 件数: 3, 启用: true }
   for (const control of ['\u0000', '\u0009', '\u001f', '\u007f', '\u0080', '\u0085', '\u009f']) {
@@ -264,6 +264,7 @@ test('target and instance IDs are refused exactly where the form transport would
   // Targets are sent trimmed: padding normalizes away and the sent IDs pass the transport.
   const padded = validateYidaStaticConfig(protocolConfig(protocolSources,
     { target: { appType: ' synthetic-app\t', formUuid: '\nsynthetic-form ' } }))
+  assert.equal(padded.valid, true)
   assert.deepEqual(padded.normalized.target, { appType: 'synthetic-app', formUuid: 'synthetic-form' })
   const created = buildYidaStaticPlan({ config: padded.normalized, rows: [protocolRow()] }).rows[0]
   assert.equal(created.status, 'planned_create')
