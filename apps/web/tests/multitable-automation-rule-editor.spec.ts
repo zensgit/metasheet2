@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 
 function flushPromises() {
@@ -166,7 +166,18 @@ function mockClient() {
       limit: 8,
       query: '',
     })),
+    // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side preflight. `user_fake_synced` is the field
+    // case — a directory-synced user the roster search never lists (no multitable role), not linked.
+    getDingTalkPersonRecipientStatus: vi.fn(async (_sheetId: string, userIds: string[]) =>
+      userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false })),
   }
+}
+
+const RECIPIENT_STATUS: Record<string, { userId: string; exists: boolean; active: boolean; dingtalkLinked: boolean }> = {
+  user_1: { userId: 'user_1', exists: true, active: true, dingtalkLinked: true },
+  user_2: { userId: 'user_2', exists: true, active: true, dingtalkLinked: false },
+  user_fake_synced: { userId: 'user_fake_synced', exists: true, active: true, dingtalkLinked: false },
+  user_fake_inactive: { userId: 'user_fake_inactive', exists: true, active: false, dingtalkLinked: true },
 }
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
@@ -4344,14 +4355,43 @@ describe('MetaAutomationRuleEditor', () => {
       }),
     })
     await flushPromises()
-    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    // review round 1: the sender-side preflight, not the roster lookup
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledWith('sheet_1', ['user_2'])
+    expect(client.listFormShareCandidates).not.toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
     expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
       .toContain('1 selected user is not linked to DingTalk')
   })
 
+  it('re-checks saved recipients on every open (a binding fixed since the last open is not served from cache)', async () => {
+    const client = mockClient()
+    const config = { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' }
+    const rule = fakeRule({
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: config,
+      actions: [{ type: 'send_dingtalk_person_message', config }],
+    })
+    const visible = ref(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    createApp({ render: () => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }) }).mount(container)
+    await flushPromises()
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeTruthy()
+
+    // the admin links the user in the directory, then reopens the rule
+    client.getDingTalkPersonRecipientStatus.mockImplementation(async (_sheetId: string, userIds: string[]) =>
+      userIds.map((userId) => ({ userId, exists: true, active: true, dingtalkLinked: true })))
+    visible.value = false
+    await flushPromises()
+    visible.value = true
+    await flushPromises()
+
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+  })
+
   // 客户反馈 2026-10-21 item 1 follow-up: the field typed the user into 本地用户 ID instead of picking it; the
   // typed id never got a link check, so the "not linked" warning stayed hidden until the real run reached 0 people.
-  it('looks up ids TYPED into the local user id box on blur: an unlinked id shows the count warning, an unknown id is never shown as linked', async () => {
+  it('looks up ids TYPED into the local user id box on blur with the sender-side preflight — including a user the roster never lists', async () => {
     const client = mockClient()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
@@ -4359,26 +4399,137 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
-    idsInput.value = 'user_2, user_fake_unknown'
+    idsInput.value = 'user_1, user_fake_synced, user_fake_inactive, user_fake_unknown, user_fake_synced'
     idsInput.dispatchEvent(new Event('input'))
     await flushPromises()
     expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+    expect(client.getDingTalkPersonRecipientStatus).not.toHaveBeenCalled()
 
     idsInput.dispatchEvent(new FocusEvent('blur'))
     await flushPromises()
 
-    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
-    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_fake_unknown', limit: 50 })
-    const summary = container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')
-    expect(summary?.textContent).toContain('1 selected user is not linked to DingTalk and will not receive the message when the rule fires.')
-    for (const value of ['user_2', 'Zhao Ming', 'user_fake_unknown']) expect(summary?.textContent).not.toContain(value)
+    // ONE batched request, deduped; the roster search is not used for typed ids any more
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(1)
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledWith('sheet_1', ['user_1', 'user_fake_synced', 'user_fake_inactive', 'user_fake_unknown'])
+    expect(client.listFormShareCandidates).not.toHaveBeenCalled()
 
-    const unlinkedChip = container.querySelector('[data-person-recipient="user_2"]') as HTMLElement
-    expect(unlinkedChip.textContent).toContain('No DingTalk delivery link')
-    const unknownChip = container.querySelector('[data-person-recipient="user_fake_unknown"]') as HTMLElement
-    expect(unknownChip.querySelector('[data-field="dingtalkPersonUnresolved"]')?.textContent).toBe('No matching user for this ID')
-    expect(unknownChip.textContent).not.toContain('ready')
-    expect(unknownChip.textContent).not.toContain('bound')
+    const summary = container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')
+    expect(summary?.textContent).toContain('Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user — they will not receive the message when the rule fires.')
+    for (const value of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) expect(summary?.textContent).not.toContain(value)
+
+    const stateOf = (id: string) => container.querySelector(`[data-person-recipient="${id}"] [data-field="dingtalkPersonRecipientState"]`)
+    expect(stateOf('user_fake_synced')?.textContent).toBe('Not linked to DingTalk')
+    expect(stateOf('user_fake_inactive')?.textContent).toBe('Inactive')
+    expect(stateOf('user_fake_unknown')?.textContent).toBe('No user with this ID')
+    expect(stateOf('user_1')).toBeNull()
+    // one chip per id even when typed twice
+    expect(container.querySelectorAll('[data-person-recipient="user_fake_synced"]')).toHaveLength(1)
+
+    // a second blur with nothing new sends nothing
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('more typed ids than the server cap go out in sequential batches of at most 200', async () => {
+    const client = mockClient()
+    let inFlight = 0
+    let maxInFlight = 0
+    client.getDingTalkPersonRecipientStatus.mockImplementation(async (_sheetId: string, userIds: string[]) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await Promise.resolve()
+      inFlight -= 1
+      return userIds.map((userId) => ({ userId, exists: true, active: true, dingtalkLinked: true }))
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = Array.from({ length: 201 }, (_, i) => `user_fake_${i}`).join(', ')
+    idsInput.dispatchEvent(new Event('input'))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+    await flushPromises()
+
+    const sizes = client.getDingTalkPersonRecipientStatus.mock.calls.map((call) => (call[1] as string[]).length)
+    expect(sizes).toEqual([200, 1])
+    expect(maxInFlight).toBe(1)
+  })
+
+  it('zh: typed-id states read 未找到该用户 / 已停用 / 未绑定钉钉', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = mockClient()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_synced, user_fake_inactive, user_fake_unknown'
+    idsInput.dispatchEvent(new Event('input'))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    const states = [...container.querySelectorAll('[data-field="dingtalkPersonRecipientState"]')].map((el) => el.textContent)
+    expect(states).toEqual(['未绑定钉钉', '已停用', '未找到该用户'])
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
+      .toContain('已选收件人中 1 位未绑定钉钉，1 位已停用，1 个 ID 未找到用户，规则触发时他们收不到消息。')
+  })
+
+  it('a failed lookup is not retried on every blur, and never shows the recipient as linked', async () => {
+    const client = mockClient()
+    client.getDingTalkPersonRecipientStatus.mockRejectedValue(new Error('unavailable'))
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_synced'
+    idsInput.dispatchEvent(new Event('input'))
+    for (let i = 0; i < 5; i += 1) {
+      idsInput.dispatchEvent(new FocusEvent('blur'))
+      await flushPromises()
+    }
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(1)
+    const chip = container.querySelector('[data-person-recipient="user_fake_synced"]') as HTMLElement
+    expect(chip.textContent).not.toContain('ready')
+  })
+
+  it('saving with unreachable or still-checking recipients shows a notice but still saves (F7)', async () => {
+    const saved = vi.fn()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const client = mockClient()
+    client.getDingTalkPersonRecipientStatus.mockImplementation(async (_sheetId: string, userIds: string[]) => {
+      await gate
+      return userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false })
+    })
+    const config = { userIds: ['user_fake_synced'], titleTemplate: 'T', bodyTemplate: 'B' }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+      rule: fakeRule({ actionType: 'send_dingtalk_person_message', actionConfig: config, actions: [{ type: 'send_dingtalk_person_message', config }] }),
+    })
+    await flushPromises()
+    expect(container.querySelector('[data-person-recipient="user_fake_synced"] [data-field="dingtalkPersonRecipientState"]')?.textContent)
+      .toBe('Checking DingTalk link…')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).toContain('Saved. Some DingTalk recipients were still being checked')
+
+    release()
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(2)
+    expect(document.body.textContent).toContain('Saved. 1 selected user is not linked to DingTalk')
   })
 
   // 客户反馈 2026-10-21 (c): the empty group list links straight to API & Webhooks > DingTalk Groups.

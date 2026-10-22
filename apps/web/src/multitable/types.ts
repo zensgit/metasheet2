@@ -618,6 +618,17 @@ export interface MetaSheetPermissionEntry {
   isActive: boolean
 }
 
+/**
+ * 客户反馈 2026-10-21 item 1: whether the DingTalk person-message sender would reach a local user id
+ * (POST …/automations/dingtalk-person-recipient-status). Booleans only — the server sends no name.
+ */
+export interface DingTalkPersonRecipientStatus {
+  userId: string
+  exists: boolean
+  active: boolean
+  dingtalkLinked: boolean
+}
+
 export interface MetaSheetPermissionCandidate {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string

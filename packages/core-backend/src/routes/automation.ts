@@ -11,6 +11,7 @@
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/logs
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/stats
  *   POST /api/multitable/sheets/:sheetId/automations/fwb/confirm
+ *   POST /api/multitable/sheets/:sheetId/automations/dingtalk-person-recipient-status
  *
  * Response shapes (match apps/web/src/multitable/api/client.ts):
  *   test  → AutomationExecution (flat object)
@@ -60,6 +61,12 @@ import { canReadApprovalTemplateForAutomation } from '../multitable/automation-a
 import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import {
+  DINGTALK_PERSON_RECIPIENT_STATUS_MAX_ID_LENGTH,
+  DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS,
+  parseDingTalkPersonRecipientIds,
+  readDingTalkPersonRecipientStatuses,
+} from '../multitable/dingtalk-person-recipient-status'
 
 /**
  * DB 未就绪(缺表 42P01 / 缺列 42703)= transient → 503,而不是 500。
@@ -748,6 +755,58 @@ export function createAutomationRoutes(
           message: transient ? 'Service temporarily unavailable' : 'Failed to derive confirmation hash',
         },
       })
+    }
+  })
+
+  // ── DingTalk person-message recipient preflight (客户反馈 2026-10-21 item 1) ──────────
+  //
+  // The rule editor asks, for the local user ids an author TYPED into a 发送钉钉个人消息 action, whether
+  // the sender would reach each one. The roster search (form-share-candidates) only lists users with a
+  // multitable role on the sheet, while the sender has no such filter — so a directory-synced user with
+  // no role got no link check and the real run reached 0 people. This reads the sender's OWN query
+  // (DINGTALK_PERSON_RECIPIENT_STATUS_SQL) and answers booleans only: no name, email, DingTalk userid or
+  // integration. Gate = the test-run gate: canManageAutomation on the PATH sheet (403 first, no liveness
+  // oracle), then a live sheet; a permission-resolution failure fails closed. Read-only.
+
+  router.post('/sheets/:sheetId/automations/dingtalk-person-recipient-status', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'SHEET_ID_REQUIRED', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return sendForbidden(res)
+      }
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
+      }
+    } catch (err) {
+      return sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
+    }
+
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+    const parsed = parseDingTalkPersonRecipientIds(body.userIds)
+    if (parsed.ok === false) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: parsed.code,
+          message: parsed.code === 'TOO_MANY_USER_IDS'
+            ? `At most ${DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS} user ids per request`
+            : `userIds must be a non-empty array of non-empty strings of at most ${DINGTALK_PERSON_RECIPIENT_STATUS_MAX_ID_LENGTH} characters`,
+        },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const items = await readDingTalkPersonRecipientStatuses(pool.query.bind(pool), parsed.userIds)
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      return sendFailClosedResolutionError(res, err, 'RECIPIENT_STATUS_FAILED', 'Failed to read recipient status')
     }
   })
 

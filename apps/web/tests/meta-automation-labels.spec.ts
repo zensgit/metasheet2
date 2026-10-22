@@ -19,6 +19,7 @@ import {
   automationDingTalkPersonStatusLabel,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
+  automationDingTalkSaveNotice,
   automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkTemplateTokenLabel,
   automationLabel,
@@ -405,6 +406,23 @@ describe('automationStepOutputView', () => {
       expect(view.reason).toBeNull()
       expect(view.output).toBe(output)
     }
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 1): inactive and unknown ids count too; save notice.
+  it('selected-recipient summary counts not-linked, inactive and unknown ids; save notice never names anyone', () => {
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 0, inactive: 0, notFound: 0 }, true)).toBe('')
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 2, inactive: 0, notFound: 0 }, true))
+      .toBe(automationDingTalkSelectedNotLinkedSummary(2, true))
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 1, inactive: 2, notFound: 3 }, true))
+      .toBe('已选收件人中 1 位未绑定钉钉，2 位已停用，3 个 ID 未找到用户，规则触发时他们收不到消息。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    // no link hint when nobody is merely unlinked
+    expect(automationDingTalkSelectedNotLinkedSummary({ notLinked: 0, inactive: 1, notFound: 0 }, false))
+      .toBe('Selected recipients: 1 inactive — they will not receive the message when the rule fires.')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 0, checking: 0 }, true)).toBe('')
+    expect(automationDingTalkSaveNotice({ notLinked: 1, inactive: 0, notFound: 0, checking: 2 }, true))
+      .toBe('已保存。部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。')
+    expect(automationDingTalkSaveNotice({ notLinked: 0, inactive: 0, notFound: 1, checking: 0 }, false))
+      .toBe('Saved. Selected recipients: 1 with no matching user — they will not receive the message when the rule fires.')
   })
 
   it('rule editor summary for selected users without a DingTalk link is a count', () => {

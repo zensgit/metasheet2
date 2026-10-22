@@ -1098,8 +1098,8 @@
                 >
                   <strong>{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
-                  <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
-                  <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonUnresolved">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                  <span v-if="recipient.stateLabel" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
+                  <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                   <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
@@ -1130,7 +1130,7 @@
                 :rows="3"
                 :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
-                @blur="void resolveNotificationRecipientIds(parseUserIdsText(action.config.userIdsText))"
+                @blur="void personRecipientStatus.check(parseUserIdsText(action.config.userIdsText))"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
               <el-input
@@ -1775,7 +1775,8 @@
 <script setup lang="ts">
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { useDingTalkPersonRecipientStatus, type DingTalkPersonRecipientState } from '../composables/useDingTalkPersonRecipientStatus'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { getTemplate } from '../../approvals/api'
@@ -1846,6 +1847,8 @@ import {
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
   automationDingTalkPersonStatusLabel,
+  automationDingTalkSaveNotice,
+  type AutomationLabelKey,
   automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
@@ -2169,6 +2172,13 @@ type PersonRecipientDirectoryEntry = {
 }
 
 const personRecipientDirectory = ref<Record<string, PersonRecipientDirectoryEntry>>({})
+// 客户反馈 2026-10-21 item 1 (review round 1): whether the SENDER would reach each local user id of a DingTalk
+// person action — from the server preflight (the sender's own query), not from the sheet roster, which only
+// lists users with a multitable role. Reset on every open so a binding fixed since then is re-checked.
+const personRecipientStatus = useDingTalkPersonRecipientStatus({
+  client: () => props.client,
+  sheetId: () => props.sheetId,
+})
 // send_notification recipient picker state, keyed by picker key (top-level: action.draftId;
 // branch rows: see notificationPickerKey). Search text lives here rather than in the draft so
 // typing a query never dirties the rule. Resolved names/emails are read from
@@ -3621,8 +3631,10 @@ watch(
       // Resolve persisted notification recipient ids to names/emails so an existing rule opens with
       // readable chips; ids the roster does not know get the "unmatched" badge.
       void resolveNotificationRecipientIds(collectDraftNotificationRecipientIds())
-      // 客户反馈 2026-10-21 (a): a saved person-message recipient shows its DingTalk link status on open too.
-      void resolveNotificationRecipientIds(collectDraftPersonRecipientIds())
+      // 客户反馈 2026-10-21 (a): a saved person-message recipient shows its DingTalk link status on open too —
+      // review round 1: from the sender-side preflight, forgetting what an earlier open learned.
+      personRecipientStatus.reset()
+      void personRecipientStatus.check(collectDraftPersonRecipientIds())
       // FWB template source: load active version + form fields for the mapping editor.
       const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
         ? draft.value.triggerConfig.templateId
@@ -4286,31 +4298,62 @@ function rememberPersonRecipientSuggestions(items: MetaSheetPermissionCandidate[
   personRecipientDirectory.value = next
 }
 
-// 客户反馈 2026-10-21 item 1 follow-up: ids typed into the 本地用户 ID box are looked up on blur (same exact-id
-// lookup as send_notification), so they get the same DingTalk link status as picked users. An id the roster
-// does not know keeps a null link status (never shown as linked) and carries the "no matching user" badge.
+// 客户反馈 2026-10-21 item 1 follow-up (review round 1): every local user id — picked, typed or saved — gets the
+// sender-side preflight (on pick, on blur of the 本地用户 ID box, on open). A known answer wins over the roster:
+// 未找到该用户 / 已停用 / 未绑定钉钉 badges, and "linked" only when the sender would really reach the user.
+// Until the answer arrives (or if the lookup fails) the roster's own flags are shown as before.
+const PERSON_RECIPIENT_STATE_LABELS: Partial<Record<DingTalkPersonRecipientState, AutomationLabelKey>> = {
+  missing: 'dingtalk.recipientMissing',
+  inactive: 'dingtalk.recipientInactive',
+  unlinked: 'dingtalk.recipientNotLinked',
+  checking: 'dingtalk.recipientChecking',
+}
+
 function selectedPersonRecipients(action: DraftAction) {
-  return parseUserIdsText(action.config.userIdsText).map((id) => {
+  return Array.from(new Set(parseUserIdsText(action.config.userIdsText))).map((id) => {
     const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    const state = personRecipientStatus.stateOf(id)
+    const stateLabelKey = PERSON_RECIPIENT_STATE_LABELS[state]
+    const known = state === 'missing' || state === 'inactive' || state === 'unlinked' || state === 'ready'
     return {
       id,
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
       dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
-      dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
-      unresolved: !directoryEntry && notificationRecipientMisses.value[id] === true,
+      dingtalkPersonDeliveryAvailable: known ? state === 'ready' : directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      state,
+      stateLabel: stateLabelKey ? automationLabel(stateLabelKey, isZh.value) : '',
     }
   })
 }
 
-// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the roster says have no DingTalk delivery
-// link (the same link the executor requires), as a count.
+function selectedPersonRecipientCounts(action: DraftAction) {
+  const recipients = selectedPersonRecipients(action)
+  const counts = personRecipientStatus.counts(recipients.map((recipient) => recipient.id))
+  // Not answered by the preflight (no client method / lookup failed): the roster's own flag, as before.
+  counts.notLinked += recipients.filter((recipient) => recipient.state === 'unknown' && recipient.dingtalkPersonDeliveryAvailable === false).length
+  return counts
+}
+
+// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the sender will skip, as counts.
 function selectedPersonNotLinkedSummary(action: DraftAction): string {
-  return automationDingTalkSelectedNotLinkedSummary(
-    selectedPersonRecipients(action).filter((recipient) => recipient.dingtalkPersonDeliveryAvailable === false).length,
-    isZh.value,
-  )
+  return automationDingTalkSelectedNotLinkedSummary(selectedPersonRecipientCounts(action), isZh.value)
+}
+
+// Review round 1 F7: saving is never blocked, but a rule saved while recipients are still being checked or
+// are known to be unreachable says so.
+function personRecipientSaveNotice(): string {
+  const total = { notLinked: 0, inactive: 0, notFound: 0, checking: 0 }
+  for (const action of draft.value.actions) {
+    if (action.type !== 'send_dingtalk_person_message') continue
+    const counts = selectedPersonRecipientCounts(action)
+    total.notLinked += counts.notLinked
+    total.inactive += counts.inactive
+    total.notFound += counts.notFound
+    total.checking += counts.checking
+  }
+  return automationDingTalkSaveNotice(total, isZh.value)
 }
 
 function selectedPersonRecipientGroups(action: DraftAction) {
@@ -4382,6 +4425,7 @@ function addPersonRecipient(action: DraftAction, candidate: MetaSheetPermissionC
     const ids = new Set(parseUserIdsText(action.config.userIdsText))
     ids.add(candidate.subjectId)
     action.config.userIdsText = Array.from(ids).join(', ')
+    void personRecipientStatus.check([candidate.subjectId])
   }
   action.config.userIdsSearch = ''
   rememberPersonRecipientSuggestions([candidate])
@@ -5734,7 +5778,10 @@ async function onSave() {
   saving.value = true
   error.value = ''
   try {
-    emit('save', buildPayload())
+    const payload = buildPayload()
+    const notice = personRecipientSaveNotice()
+    if (notice) ElMessage({ type: 'warning', message: notice, duration: 8000, showClose: true })
+    emit('save', payload)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : automationLabel('error.saveFailed', isZh.value)
   } finally {

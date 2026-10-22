@@ -123,6 +123,14 @@
                 class="meta-log-viewer__step-reason"
                 data-field="step-reason"
               >{{ stepOutputView(step).reason }}</div>
+              <!-- 客户反馈 2026-10-21 item 1 (review round 1): the log names no recipient; who was skipped is in the
+                   rule's 钉钉个人消息投递记录 — one click away, opened on 跳过（未绑定）. -->
+              <MtButton
+                v-if="showsPersonDeliveriesLink(step)"
+                class="meta-log-viewer__btn meta-log-viewer__btn--support"
+                data-action="open-person-deliveries"
+                @click.stop="$emit('open-person-deliveries', ruleId)"
+              >{{ automationLabel('log.openPersonDeliveries', isZh) }}</MtButton>
               <div
                 v-if="stepOutputView(step).output"
                 class="meta-log-viewer__step-output"
@@ -149,6 +157,7 @@ import {
   automationStatusLabel,
   automationStepErrorText,
   automationStepOutputView,
+  readDingTalkRecipientOutcome,
   supportCopyFailed,
   supportDownloadFailed,
   type AutomationStepOutputView,
@@ -174,6 +183,7 @@ const props = defineProps<{
 
 defineEmits<{
   (e: 'close'): void
+  (e: 'open-person-deliveries', ruleId: string): void
 }>()
 
 const loading = ref(false)
@@ -202,6 +212,10 @@ function logStatusLabel(status: string): string {
 
 function stepOutputView(step: AutomationStepResult): AutomationStepOutputView {
   return automationStepOutputView(step.output, isZh.value)
+}
+
+function showsPersonDeliveriesLink(step: AutomationStepResult): boolean {
+  return step.actionType === 'send_dingtalk_person_message' && readDingTalkRecipientOutcome(step.output) !== null
 }
 
 function stepErrorText(step: AutomationStepResult): string {

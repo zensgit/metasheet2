@@ -74,6 +74,8 @@ const props = defineProps<{
   sheetId: string
   ruleId: string
   client?: MultitableApiClient
+  /** 客户反馈 2026-10-21 item 1 (review round 1): opened from a run log row → start on 跳过（未绑定）. */
+  initialStatusFilter?: string
 }>()
 
 defineEmits<{
@@ -148,7 +150,7 @@ watch(
   () => props.visible,
   (visible) => {
     if (visible) {
-      statusFilter.value = ''
+      statusFilter.value = props.initialStatusFilter ?? ''
       void loadData()
     }
   },

@@ -52,6 +52,7 @@ import type {
   MetaCommentMentionSuggestion,
   MetaSheetPermissionAccessLevel,
   MetaSheetPermissionCandidate,
+  DingTalkPersonRecipientStatus,
   MetaSheetPermissionEntry,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
@@ -4305,6 +4306,32 @@ export class MultitableApiClient implements CommentsApiClient {
     const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries${qs(sheetId ? { sheetId } : {})}`)
     const data = await this.parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return data.deliveries ?? []
+  }
+
+  /**
+   * 客户反馈 2026-10-21 item 1: the rule editor's DingTalk person-recipient preflight. The server reads the
+   * sender's own query and answers booleans per id (at most 200 ids per request; callers chunk).
+   */
+  async getDingTalkPersonRecipientStatus(sheetId: string, userIds: string[]): Promise<DingTalkPersonRecipientStatus[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/dingtalk-person-recipient-status`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds }),
+      },
+    )
+    const data = await this.parseJson<{ items?: unknown }>(res)
+    const items = Array.isArray(data?.items) ? data.items : []
+    return items
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .filter((item) => typeof item.userId === 'string')
+      .map((item) => ({
+        userId: item.userId as string,
+        exists: item.exists === true,
+        active: item.active === true,
+        dingtalkLinked: item.dingtalkLinked === true,
+      }))
   }
 
   // --- Automation V1: test / logs / stats ---

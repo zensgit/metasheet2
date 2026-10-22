@@ -295,6 +295,13 @@ export type AutomationLabelKey =
   | 'dingtalk.openGroupSettings'
   | 'dingtalk.reloadGroups'
   | 'dingtalk.inactiveUsersCannotBeAdded'
+  | 'dingtalk.recipientMissing'
+  | 'dingtalk.recipientInactive'
+  | 'dingtalk.recipientNotLinked'
+  | 'dingtalk.recipientChecking'
+  | 'dingtalk.saveNoticeChecking'
+  | 'dingtalk.saveNoticeSaved'
+  | 'log.openPersonDeliveries'
   | 'dingtalk.localUserIds'
   | 'dingtalk.localUserIdsPlaceholder'
   | 'dingtalk.memberGroupIds'
@@ -676,6 +683,13 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'dingtalk.openGroupSettings',
   'dingtalk.reloadGroups',
   'dingtalk.inactiveUsersCannotBeAdded',
+  'dingtalk.recipientMissing',
+  'dingtalk.recipientInactive',
+  'dingtalk.recipientNotLinked',
+  'dingtalk.recipientChecking',
+  'dingtalk.saveNoticeChecking',
+  'dingtalk.saveNoticeSaved',
+  'log.openPersonDeliveries',
   'dingtalk.localUserIds',
   'dingtalk.localUserIdsPlaceholder',
   'dingtalk.memberGroupIds',
@@ -1199,6 +1213,17 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   // 客户反馈 2026-10-21 (b): say who the picker lists, so a missing user is explainable rather than a dead end.
   'dingtalk.recipientSearchScopeHint': { en: 'Only active users with access to this table (a multitable read or write role) are listed. Users without access can still be entered under Local user IDs below.', zh: '这里只列出对此表有访问权限（多维表读/写角色）的启用用户；没有访问权限的用户可在下方「本地用户 ID」中直接填写。' },
   'dingtalk.inactiveUsersCannotBeAdded': { en: 'Inactive users cannot be added', zh: '不能添加已停用用户' },
+  // 客户反馈 2026-10-21 item 1 (review round 1): a recipient's state from the sender-side preflight.
+  'dingtalk.recipientMissing': { en: 'No user with this ID', zh: '未找到该用户' },
+  'dingtalk.recipientInactive': { en: 'Inactive', zh: '已停用' },
+  'dingtalk.recipientNotLinked': { en: 'Not linked to DingTalk', zh: '未绑定钉钉' },
+  'dingtalk.recipientChecking': { en: 'Checking DingTalk link…', zh: '正在检查钉钉绑定…' },
+  'dingtalk.saveNoticeChecking': {
+    en: 'Saved. Some DingTalk recipients were still being checked — reopen the rule to see whether they can receive the message.',
+    zh: '已保存。部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。',
+  },
+  'dingtalk.saveNoticeSaved': { en: 'Saved.', zh: '已保存。' },
+  'log.openPersonDeliveries': { en: 'View DingTalk person delivery records', zh: '查看钉钉个人消息投递记录' },
   'dingtalk.localUserIds': { en: 'Local user IDs', zh: '本地用户 ID' },
   'dingtalk.localUserIdsPlaceholder': { en: 'Use comma or newline separated local user IDs', zh: '使用逗号或换行分隔本地 userId' },
   'dingtalk.memberGroupIds': { en: 'Member group IDs (optional)', zh: '成员组 ID（可选）' },
@@ -2265,13 +2290,48 @@ export function automationTestRunDingTalkOutcome(duration: string, outcomeText: 
     : `Test run finished${duration}. DingTalk person message: ${outcomeText}`
 }
 
-/** Rule editor: selected users whose DingTalk delivery link is known to be missing. Count only. */
-export function automationDingTalkSelectedNotLinkedSummary(count: number, isZh: boolean): string {
-  if (count <= 0) return ''
+export interface DingTalkSelectedRecipientCounts {
+  notLinked: number
+  inactive: number
+  notFound: number
+}
+
+/**
+ * Rule editor: selected users the sender will skip — not linked to DingTalk, inactive, or no such user
+ * (review round 1: inactive and unknown ids count too). Counts only; a bare number keeps the original
+ * not-linked-only sentence.
+ */
+export function automationDingTalkSelectedNotLinkedSummary(input: number | DingTalkSelectedRecipientCounts, isZh: boolean): string {
+  const counts = typeof input === 'number' ? { notLinked: input, inactive: 0, notFound: 0 } : input
+  const notLinked = Math.max(0, counts.notLinked)
+  const inactive = Math.max(0, counts.inactive)
+  const notFound = Math.max(0, counts.notFound)
+  if (notLinked + inactive + notFound <= 0) return ''
+  const hint = notLinked > 0 ? `${isZh ? '' : ' '}${automationLabel('log.reason.dingtalkLinkHint', isZh)}` : ''
+  if (inactive === 0 && notFound === 0) {
+    const head = isZh
+      ? `${notLinked} 位已选用户未绑定钉钉，规则触发时他们收不到消息。`
+      : `${notLinked} selected ${notLinked === 1 ? 'user is' : 'users are'} not linked to DingTalk and will not receive the message when the rule fires.`
+    return `${head}${hint}`
+  }
+  const parts: string[] = []
+  if (notLinked > 0) parts.push(isZh ? `${notLinked} 位未绑定钉钉` : `${notLinked} not linked to DingTalk`)
+  if (inactive > 0) parts.push(isZh ? `${inactive} 位已停用` : `${inactive} inactive`)
+  if (notFound > 0) parts.push(isZh ? `${notFound} 个 ID 未找到用户` : `${notFound} with no matching user`)
   const head = isZh
-    ? `${count} 位已选用户未绑定钉钉，规则触发时他们收不到消息。`
-    : `${count} selected ${count === 1 ? 'user is' : 'users are'} not linked to DingTalk and will not receive the message when the rule fires.`
-  return `${head}${isZh ? '' : ' '}${automationLabel('log.reason.dingtalkLinkHint', isZh)}`
+    ? `已选收件人中 ${parts.join('，')}，规则触发时他们收不到消息。`
+    : `Selected recipients: ${parts.join(', ')} — they will not receive the message when the rule fires.`
+  return `${head}${hint}`
+}
+
+/**
+ * Review round 1 F7: the notice shown when a rule with DingTalk person recipients is saved while some are
+ * still being checked or are known to be unreachable. Never blocks the save. '' = no notice.
+ */
+export function automationDingTalkSaveNotice(counts: DingTalkSelectedRecipientCounts & { checking: number }, isZh: boolean): string {
+  if (counts.checking > 0) return automationLabel('dingtalk.saveNoticeChecking', isZh)
+  const summary = automationDingTalkSelectedNotLinkedSummary(counts, isZh)
+  return summary ? `${automationLabel('dingtalk.saveNoticeSaved', isZh)}${isZh ? '' : ' '}${summary}` : ''
 }
 
 export function supportCopyFailed(message: string, isZh: boolean): string {
