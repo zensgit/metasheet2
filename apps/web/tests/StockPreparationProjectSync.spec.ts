@@ -40,6 +40,7 @@ import {
   clampErrorDetailToken,
   classifyPlanReadFailureReason,
   classifyPlanStep,
+  classifyWriteLockFailure,
   clampErrorCode,
   createStockPreparationProjectSyncApi,
   plannedCountsOf,
@@ -51,7 +52,7 @@ import {
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
 } from '../src/services/integration/stockPreparation/projectSync'
-import { STOCK_PREP_SYNC_REASON_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
+import { STOCK_PREP_SYNC_REASON_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
 
 const PROJECT_NO = 'P2026-001'
 
@@ -1038,6 +1039,62 @@ describe('#6475 round 1 — the archive call on the wire', () => {
       await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).archive(PROJECT_NO, options)
       expect(calls[0].url).toBe(ARCHIVE_ROUTE)
       expect(calls[0].body).toEqual({ parameters: { projectNo: PROJECT_NO } })
+    }
+  })
+})
+
+// Batch-refresh phase 0 step 1 — the project write lock, as the panel reads it. Each refusal gets its own
+// plain sentence (never the raw code as the headline, never 「数据没有变化」 when rows may have landed).
+describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
+  const LOCK_CODES = [
+    ['STOCK_PREP_PROJECT_WRITE_LOCKED', 409, 'WRITE_PROJECT_LOCKED'],
+    ['STOCK_PREP_PROJECT_PLAN_SUPERSEDED', 409, 'WRITE_PLAN_SUPERSEDED'],
+    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 409, 'WRITE_INTERRUPTED'],
+    ['STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', 503, 'WRITE_LOCK_UNAVAILABLE'],
+    ['STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE', 501, 'WRITE_LOCK_UNAVAILABLE'],
+  ] as const
+
+  it.each(LOCK_CODES)('WL-1: apply refused %s (%i) reports %s with its own sentence', async (code, status, reason) => {
+    const api = makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code })) })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'apply')).toMatchObject({ status: 'fail', reason, detail: { status, code } })
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_ATTEMPTED' })
+    expect(classifyWriteLockFailure(code)).toBe(reason)
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
+    expect(plain).toBeDefined()
+    expect(plain.zh.length * plain.en.length * (plain.zhNext ?? '').length * (plain.enNext ?? '').length).toBeGreaterThan(0)
+    expect(`${plain.zh}${plain.en}`).not.toContain(code)
+    expect(plain.zh).not.toBe(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_FAILED.zh)
+    assertValuesFree(report)
+  })
+
+  it('WL-2: an interrupted write never claims nothing changed; any other apply failure is still WRITE_FAILED', async () => {
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_INTERRUPTED.zh).not.toContain('没有变化')
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.WRITE_INTERRUPTED.en.toLowerCase()).not.toContain('nothing was changed')
+    expect(classifyWriteLockFailure('TABLE_ACTION_DRY_RUN_TOKEN_INVALID')).toBeNull()
+    expect(classifyWriteLockFailure(null)).toBeNull()
+  })
+
+  it('WL-3: a trial refused while another run writes the project, and a lock store failure, each say so (not the transient read failure)', async () => {
+    const locked = await runStockPreparationProjectSync(makeApi({ dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' })) }), PROJECT_NO)
+    expect(stepOf(locked, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_PROJECT_WRITE_LOCKED' })
+    const down = await runStockPreparationProjectSync(makeApi({ dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED' })) }), PROJECT_NO)
+    expect(stepOf(down, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_WRITE_LOCK_UNAVAILABLE' })
+    expect(classifyPlanReadFailureReason(503, 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED')).toBe('PLAN_WRITE_LOCK_UNAVAILABLE')
+    expect(classifyPlanReadFailureReason(503, null)).toBe('PLAN_READ_FAILED')
+    for (const reason of ['PLAN_PROJECT_WRITE_LOCKED', 'PLAN_WRITE_LOCK_UNAVAILABLE']) {
+      const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
+      expect(plain.zh.length * (plain.zhNext ?? '').length).toBeGreaterThan(0)
+    }
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_WRITE_LOCK_UNAVAILABLE.zhNext).toContain('管理员')
+  })
+
+  it('WL-4: the large-BOM pull panel (stockPrepErrorPlain) has a specific sentence for every lock code', () => {
+    const generic = stockPrepErrorPlain('SOME_CODE_NOBODY_MAPPED')
+    for (const [code] of LOCK_CODES) {
+      const plain = stockPrepErrorPlain(code)
+      expect(plain.zh).not.toBe(generic.zh)
+      expect(`${plain.zh}${plain.en}`).not.toContain(code)
     }
   })
 })

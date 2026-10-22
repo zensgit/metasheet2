@@ -12,18 +12,24 @@ const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
   createLargeBomBackgroundExpansionJob,
-  createLargeBomCheckpointApplyJob,
+  createLargeBomCheckpointApplyJob: rawCreateLargeBomCheckpointApplyJob,
   isAuthoritativeLargeBomExpansion,
   loadLargeBomBackgroundExpansionJob,
   loadLargeBomCheckpointApplyJob,
   planLargeBomBackgroundExpansionJob,
   publicBackgroundExpansionJob,
   publicCheckpointApplyJob,
-  runLargeBomCheckpointApplyJobChunk,
+  runLargeBomCheckpointApplyJobChunk: rawRunLargeBomCheckpointApplyJobChunk,
   runLargeBomBackgroundExpansionJob,
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+// Batch-refresh phase 0 step 1: an approval binds the job to the plan generation and every chunk runs inside the
+// project write lease. These checks predate that, so they drive the lib through the REAL lock module (in memory,
+// support/stock-preparation-project-write-lock-kit.cjs) exactly the way the routes do.
+const projectWriteLockHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs')).createLibWriteLockHarness()
+const createLargeBomCheckpointApplyJob = projectWriteLockHarness.wrapLargeApprove(rawCreateLargeBomCheckpointApplyJob)
+const runLargeBomCheckpointApplyJobChunk = projectWriteLockHarness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)
 // The background lane's caps live with the action config that declares them.
 const {
   LARGE_BOM_BACKGROUND_CAP_CEILINGS,
@@ -2073,6 +2079,8 @@ async function testCheckpointApplySingleFlightRejectsConcurrentQueuedRun() {
   })
   await api.firstCreateEntered
 
+  // Batch-refresh phase 0 step 1: through the route's order (lease first) the second run meets the
+  // cross-process project write lease and is refused before anything else…
   await assert.rejects(
     () => runLargeBomCheckpointApplyJobChunk({
       storage,
@@ -2081,6 +2089,20 @@ async function testCheckpointApplySingleFlightRejectsConcurrentQueuedRun() {
       applyJobId: 'apply-job-single-flight',
       recordsApi: api.recordsApi,
       maxDecisionsPerChunk: 1,
+    }),
+    (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && error.status === 409,
+  )
+  // …and the in-process single-flight set (kept as the same-process fast path) still refuses a second
+  // run that reaches the lib directly, before it so much as looks at a guard.
+  await assert.rejects(
+    () => rawRunLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...TEST_SCOPE,
+      actionId,
+      applyJobId: 'apply-job-single-flight',
+      recordsApi: api.recordsApi,
+      maxDecisionsPerChunk: 1,
+      projectWriteGuard: null,
     }),
     (error) => error instanceof StockPreparationLargeBomJobError &&
       error.code === 'LARGE_BOM_APPLY_RUN_IN_PROGRESS' &&
@@ -2412,13 +2434,225 @@ async function testApplyJobWithoutABandIsShapedExactlyAsBefore() {
       false,
       'a degraded band resolution must not add a key to the stored job',
     )
-    shapes.push(JSON.stringify(job))
+    // The plan-generation binding (batch-refresh phase 0 step 1) is fresh on every approval BY DESIGN — each
+    // approval supersedes the last — so its generation and token are set aside; the scope stays compared.
+    const { writeGeneration, writeGenerationToken, ...comparable } = job
+    assert.ok(Number.isInteger(writeGeneration) && typeof writeGenerationToken === 'string', 'the job is bound')
+    shapes.push(JSON.stringify(comparable))
   }
   assert.equal(shapes[0], shapes[1])
   assert.equal(shapes[0], shapes[2], 'omitted / undefined / null are one stored job, byte for byte')
 }
 
+// ── Batch-refresh phase 0 step 1: the large lane under the project write lock (B1–B5, T8) ─────────────
+//
+// Driven through the REAL lock module over the kit's fake db, on the kit's synthetic golden fixture.
+
+const swlKit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
+const swlLock = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
+const swlTableActions = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const SWL_SCOPE = Object.freeze({ tenantId: 'tenant-swl', workspaceId: 'workspace-swl' })
+// Captured on the CLEAN origin/main (4c78e75a0) with the same fixture and calls (see the guard-apply suite).
+const SWL_LARGE_GOLDEN = Object.freeze({
+  artifactRevision: '495c64d7b9c9d5e24b815ad8276fa227834f10461f56668c7bb501877b5b31b1',
+  planRevision: 'e464bb81b37dc17052d4ee2aab1653ed4197f97324777232b12d30f4256d6175',
+  targetRevision: '4b6f8dd18047600587fda4089cb9d2ba70fa77d4facc6cc215d467f2f39c17f2',
+})
+
+// The golden large flow up to an approved checkpoint job, approval through the harness binder.
+async function swlApprovedLargeJob(harness, { storage = swlKit.createConsumableStorage(), applyJobId = 'swl-apply-1', binder } = {}) {
+  storage.durable = true
+  const action = swlKit.goldenAction()
+  const parameters = { projectNo: swlKit.GOLDEN_PROJECT_NO }
+  const source = swlKit.createSourceAdapter(swlKit.goldenPlmData())
+  await createLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, action, parameters, principal: 'swl-principal', createJobId: () => 'swl-job-1', now: () => '2026-10-22T08:00:00.000Z' })
+  const ran = await runLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: 'swl-job-1', sourceAdapter: source.adapter, now: () => '2026-10-22T08:01:00.000Z' })
+  const planned = await planLargeBomBackgroundExpansionJob({ storage, ...SWL_SCOPE, actionId: action.actionId, jobId: 'swl-job-1', existingRows: [], plannedAt: swlKit.GOLDEN_PLANNED_AT, runId: swlKit.GOLDEN_RUN_ID, now: () => '2026-10-22T08:02:00.000Z' })
+  const approve = harness.wrapLargeApprove(rawCreateLargeBomCheckpointApplyJob)
+  const job = await approve({
+    storage,
+    ...SWL_SCOPE,
+    actionId: action.actionId,
+    jobId: 'swl-job-1',
+    principal: 'swl-principal',
+    permission: 'write',
+    createApplyJobId: () => applyJobId,
+    now: () => '2026-10-22T08:03:00.000Z',
+    ...(binder === undefined ? {} : { writeGenerationBinder: binder }),
+    ...(binder === null ? { writeGenerationBinder: undefined } : {}),
+  })
+  const scope = swlLock.projectWriteScopeKey(action.target.sheetId, parameters.projectNo)
+  return { storage, action, parameters, ran, planned, job, scope, applyJobId }
+}
+
+function swlChunkInput(flow, recordsApi, extra = {}) {
+  return { storage: flow.storage, ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId, recordsApi, ...extra }
+}
+
+function swlHolderCasFault(db, failAt) {
+  let holderCas = 0
+  db.faults.updateRow = (args) => {
+    if (args.set && Object.prototype.hasOwnProperty.call(args.set, 'lease_seq') && !Object.prototype.hasOwnProperty.call(args.set, 'lease_id')) {
+      holderCas += 1
+      if (holderCas === failAt) return new Error('connection lost')
+    }
+    return null
+  }
+}
+
+async function testSwlB1ApprovalBindsWithoutMovingAnyRevision() {
+  const harness = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(harness)
+  assert.equal(flow.ran.artifactRevision, SWL_LARGE_GOLDEN.artifactRevision, 'B1: artifactRevision is the clean-tree literal')
+  assert.equal(flow.planned.planRevision, SWL_LARGE_GOLDEN.planRevision, 'B1: planRevision is the clean-tree literal')
+  assert.equal(flow.job.planRevision, SWL_LARGE_GOLDEN.planRevision)
+  assert.equal(flow.job.targetRevision, SWL_LARGE_GOLDEN.targetRevision, 'B1: targetRevision is the clean-tree literal')
+  assert.equal(flow.job.writeScope, flow.scope)
+  assert.equal(flow.job.writeGeneration, 1)
+  assert.equal(typeof flow.job.writeGenerationToken, 'string')
+  const publicJob = publicCheckpointApplyJob(flow.job)
+  for (const key of ['writeScope', 'writeGeneration', 'writeGenerationToken']) assert.equal(key in publicJob, false, 'B1: the binding is never public: ' + key)
+  assert.equal(JSON.stringify(publicJob).includes(flow.job.writeGenerationToken), false)
+}
+
+async function testSwlB2SupersededJobIsRefusedUntouched() {
+  const harness = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(harness)
+  await harness.lock.bumpGeneration(flow.scope, { reason: 'small_preview' })
+  const key = __internals.checkpointApplyJobKey({ ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })
+  const before = await flow.storage.get(key)
+  const api = createTargetRecordsApi()
+  await assert.rejects(() => harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi)), (error) => {
+    assert.equal(error.code, 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    assert.equal(error.status, 409)
+    assert.equal(error.details.reason, 'newer_plan')
+    assert.equal(error.details.tokenGeneration, 1, 'B2: the job was approved at generation 1')
+    assert.equal(error.details.currentGeneration, 2, 'B2: …and the lease grant saw the preview bump to 2')
+    return true
+  })
+  assert.deepEqual(await flow.storage.get(key), before, 'B2: the job is untouched')
+  assert.equal(api.calls.filter((c) => c[0] === 'createRecord' || c[0] === 'patchRecord').length, 0)
+}
+
+async function testSwlB3UnboundLegacyJobIsRefused() {
+  const harness = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(harness, { binder: null })
+  assert.equal('writeScope' in flow.job, false, 'calibration: approved without the lock service')
+  const api = createTargetRecordsApi()
+  await harness.lock.withProjectWriteLease(flow.scope, { purpose: 'large_apply_chunk' }, async (guard) => {
+    await assert.rejects(() => rawRunLargeBomCheckpointApplyJobChunk(swlChunkInput(flow, api.recordsApi, { projectWriteGuard: guard })), (error) => {
+      assert.equal(error.code, 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+      assert.equal(error.details.reason, 'job_unbound')
+      return true
+    })
+  })
+  assert.equal((await loadLargeBomCheckpointApplyJob({ storage: flow.storage, ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })).status, 'queued')
+  await assert.rejects(
+    () => rawRunLargeBomCheckpointApplyJobChunk(swlChunkInput(flow, api.recordsApi, { projectWriteGuard: undefined })),
+    (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE' && error.status === 501,
+    'B3: a guard-less chunk is refused 501',
+  )
+}
+
+async function testSwlB4FencedStopCheckpointsAndResumes() {
+  const harness = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(harness)
+  assert.equal(flow.job.totalDecisions, 2, 'calibration: two decisions')
+  swlHolderCasFault(harness.db, 2)
+  const api = createTargetRecordsApi()
+  await assert.rejects(() => harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi)), (error) => {
+    assert.equal(error.code, 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', JSON.stringify(error.details))
+    assert.equal(error.status, 503)
+    assert.equal(error.details.partial, true)
+    assert.equal(error.details.abortedAtDecisionIndex, 1)
+    return true
+  })
+  delete harness.db.faults.updateRow
+  const stopped = await loadLargeBomCheckpointApplyJob({ storage: flow.storage, ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })
+  assert.equal(stopped.status, 'failed', 'B4: resumable failed, never a plausible partial')
+  assert.equal(stopped.checkpoint.nextDecisionIndex, 1, 'B4: checkpoint = start + k')
+  assert.equal(stopped.counts.created, 1)
+  assert.ok(stopped.evidence.errorCodes.includes('STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED'))
+  const resumed = await harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi))
+  assert.equal(resumed.status, 'succeeded')
+  assert.equal(resumed.counts.created, 2)
+  assert.equal(resumed.checkpoint.nextDecisionIndex, 2)
+  assert.equal(api.rows.length, 2, 'B4: no row written twice')
+}
+
+async function testSwlB5TwoModuleInstancesOneWriter() {
+  // Two "processes": two fresh copies of the job module (each with its OWN in-process single-flight set)
+  // and two lock instances over ONE shared lock table.
+  const modulePath = require.resolve(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+  const original = require.cache[modulePath]
+  delete require.cache[modulePath]
+  const moduleA = require(modulePath)
+  delete require.cache[modulePath]
+  const moduleB = require(modulePath)
+  require.cache[modulePath] = original
+  assert.notEqual(moduleA.runLargeBomCheckpointApplyJobChunk, moduleB.runLargeBomCheckpointApplyJobChunk, 'calibration: two module instances')
+  const sharedDb = swlKit.createFakeLockDb()
+  const harnessA = swlKit.createLibWriteLockHarness({ db: sharedDb })
+  const harnessB = swlKit.createLibWriteLockHarness({ db: sharedDb })
+  const flow = await swlApprovedLargeJob(harnessA)
+  const api = createBlockingTargetRecordsApi()
+  const runA = harnessA.wrapLargeChunk(moduleA.runLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi))
+  await api.firstCreateEntered
+  await assert.rejects(
+    () => harnessB.wrapLargeChunk(moduleB.runLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi)),
+    (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && error.status === 409,
+  )
+  api.releaseFirstCreate()
+  const done = await runA
+  assert.equal(done.status, 'succeeded')
+  assert.equal(api.calls.filter((c) => c[0] === 'createRecord').length, 2, 'B5: exactly one writer wrote the plan once')
+}
+
+async function testSwlT8CrossLane() {
+  // (a) a small token, then a large approval of the same project: the small apply is superseded.
+  const harness = swlKit.createLibWriteLockHarness()
+  const records = swlKit.createRecordsApi()
+  const storage = swlKit.createConsumableStorage()
+  const action = swlKit.goldenAction()
+  const parameters = { projectNo: swlKit.GOLDEN_PROJECT_NO }
+  const source = swlKit.createSourceAdapter(swlKit.goldenPlmData())
+  const small = { action, parameters, sourceAdapter: source.adapter, recordsApi: records.recordsApi, tokenStore: storage, plannedAt: swlKit.GOLDEN_PLANNED_AT, runId: swlKit.GOLDEN_RUN_ID }
+  const dry = await harness.wrapDryRun(swlTableActions.dryRunStockPreparationAction)(small)
+  await swlApprovedLargeJob(harness)
+  await assert.rejects(
+    () => harness.wrapApply(swlTableActions.applyStockPreparationAction)({ ...small, dryRunToken: dry.dryRunToken, permission: 'write', sandboxPolicy: swlKit.SANDBOX_POLICY }),
+    (error) => error.code === 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED' && error.details.reason === 'newer_plan',
+    'T8: a large approval supersedes an earlier small preview',
+  )
+  assert.equal(records.writes().length, 0)
+  // (b) a small apply in flight excludes a large chunk of the same project (one writer across lanes).
+  const h2 = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(h2)
+  const gate = swlKit.deferred()
+  const entered = swlKit.deferred()
+  const blocking = swlKit.createRecordsApi({ beforeWrite: async () => { entered.resolve(); await gate.promise } })
+  const smallInput = { ...small, recordsApi: blocking.recordsApi, tokenStore: swlKit.createConsumableStorage() }
+  const smallDry = await h2.wrapDryRun(swlTableActions.dryRunStockPreparationAction)(smallInput)
+  const running = h2.wrapApply(swlTableActions.applyStockPreparationAction)({ ...smallInput, dryRunToken: smallDry.dryRunToken, permission: 'write', sandboxPolicy: swlKit.SANDBOX_POLICY })
+  await entered.promise
+  const largeApi = createTargetRecordsApi()
+  await assert.rejects(
+    () => h2.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, largeApi.recordsApi)),
+    (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LOCKED',
+    'T8: one writer per project across lanes',
+  )
+  assert.equal(largeApi.calls.filter((c) => c[0] === 'createRecord').length, 0)
+  gate.resolve()
+  assert.equal((await running).status, 'succeeded')
+}
+
 async function main() {
+  await testSwlB1ApprovalBindsWithoutMovingAnyRevision()
+  await testSwlB2SupersededJobIsRefusedUntouched()
+  await testSwlB3UnboundLegacyJobIsRefused()
+  await testSwlB4FencedStopCheckpointsAndResumes()
+  await testSwlB5TwoModuleInstancesOneWriter()
+  await testSwlT8CrossLane()
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()

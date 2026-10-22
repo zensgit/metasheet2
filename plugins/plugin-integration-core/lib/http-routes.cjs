@@ -8319,6 +8319,12 @@ function requireStockPreparationAudit() {
         snapshotAction.target,
         expansionJob.parameters && expansionJob.parameters.projectNo,
       )
+      // Batch-refresh phase 0 step 1 — PLAN GENERATION: approving supersedes every earlier plan of this
+      // write scope (the snapshot's sheet + the job's own project number); refused 409 while a live writer
+      // holds the project. No lock service wired -> the job is created UNBOUND, and no chunk runs it.
+      const approvalWriteScope = stockPreparationProjectWriteLock
+        ? projectWriteScopeKey(snapshotAction.target.sheetId, expansionJob.parameters && expansionJob.parameters.projectNo)
+        : null
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -8328,6 +8334,9 @@ function requireStockPreparationAudit() {
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
         installedFieldProperties: await resolveInstalledFieldProperties(req, snapshotAction),
+        writeGenerationBinder: approvalWriteScope
+          ? async () => writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(approvalWriteScope, { reason: 'large_approval', tenantId: routeScope.tenantId }))
+          : undefined,
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
@@ -8440,13 +8449,20 @@ function requireStockPreparationAudit() {
       // C4 large-BOM apply: same pre-mapped contract as the small route — the apply writer maps payload
       // keys through the operator-configured target.fieldIdMap, so the scoped API must not remap (#4160).
       const scopedRecordsApi = await createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target, { fieldIdTranslation: 'pre_mapped' })
-      const job = await runLargeBomCheckpointApplyJobChunk({
+      // Batch-refresh phase 0 step 1 — the SAME project write lease the small lane takes, held per chunk,
+      // after every staleness check, the gate and the bound above (a refusal there costs no lock IO):
+      // one writer per (sheet, project) across lanes and processes; busy -> 409, lock store down -> 503,
+      // no lock service -> 501. The chunk refuses a job whose approval binding is no longer current.
+      const chunkWriteLock = requireStockPreparationProjectWriteLock()
+      const chunkWriteScope = projectWriteScopeKey(pendingJob.target && pendingJob.target.sheetId, runExpansionJob.parameters && runExpansionJob.parameters.projectNo)
+      const job = await chunkWriteLock.withProjectWriteLease(chunkWriteScope, { purpose: 'large_apply_chunk', runId: pendingJob.jobId, tenantId: routeScope.tenantId }, (projectWriteGuard) => runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
         ...routeScope,
         actionId,
         applyJobId: pendingJob.jobId,
         recordsApi: scopedRecordsApi,
-      })
+        projectWriteGuard,
+      }))
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
     },
 

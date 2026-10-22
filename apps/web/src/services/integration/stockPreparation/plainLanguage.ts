@@ -588,6 +588,39 @@ export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText
  * — nothing here can break by ADDING a field to an object literal.
  */
 export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // Batch-refresh phase 0 step 1 — the project write lock, as any surface that renders a server code
+  // through `stockPrepErrorPlain` sees it (the large-BOM pull panel among them). Short, and never the raw
+  // code as the headline.
+  STOCK_PREP_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这个项目。',
+    en: 'Another run is writing this project right now.',
+    zhNext: '等它写完再试一次。',
+    enNext: 'Try again once it finishes.',
+  }),
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算或批准,这份计划不再有效。',
+    en: 'A newer preview or approval exists, so this plan is no longer valid.',
+    zhNext: '请重新试算(大BOM请重新批准)后再写入。',
+    enNext: 'Preview again (re-approve, for a large BOM) before writing.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LEASE_LOST: Object.freeze({
+    zh: '写入中途被另一次同步接管,可能已写进一部分。',
+    en: 'Another run took over part-way; some rows may already have landed.',
+    zhNext: '请重新试算;已写入的行不会重复写。',
+    enNext: 'Preview again; rows that landed will not be written twice.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED: Object.freeze({
+    zh: '写入锁服务暂时不可用,没有继续写。',
+    en: 'The write-lock service is unavailable, so writing stopped.',
+    zhNext: '请联系平台管理员检查服务。',
+    enNext: 'Ask the platform admin to check the service.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务没有接通,什么都没有写。',
+    en: 'The write-lock service is not set up, so nothing was written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',
@@ -1862,6 +1895,23 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '再点一次即可;什么都没有改动。',
     enNext: 'Press again; nothing was changed.',
   }),
+  /**
+   * Batch-refresh phase 0 step 1 — the project write lock. A trial is refused while another run is
+   * WRITING this project (a new plan would supersede the one being written); the store refusal is a
+   * server matter, so it names who can fix it instead of promising that a retry will.
+   */
+  PLAN_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这个项目',
+    en: 'Another run is writing this project right now',
+    zhNext: '等它写完再试算一次;什么都没有改动。',
+    enNext: 'Try again once it finishes; nothing was changed.',
+  }),
+  PLAN_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务暂时不可用',
+    en: 'The write-lock service is unavailable',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
   PLAN_NOT_APPLYABLE: Object.freeze({
     zh: '这次试算没能得出可以写入的计划',
     en: 'This plan cannot be written',
@@ -2029,6 +2079,31 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'That did not write; nothing was changed',
     zhNext: '可以再点一次同步;重复同步不会弄乱数据。',
     enNext: 'You can sync again — re-syncing cannot scramble your data.',
+  }),
+  /** Batch-refresh phase 0 step 1 — the write refused or stopped by the project write lock. */
+  WRITE_PROJECT_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这个项目,这次没有写',
+    en: 'Another run is writing this project, so this one did not write',
+    zhNext: '等它写完再同步一次。',
+    enNext: 'Sync again once it finishes.',
+  }),
+  WRITE_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算,这份计划不再有效,没有写入',
+    en: 'A newer preview exists, so this plan was not written',
+    zhNext: '请重新同步(重新试算)后再写入。',
+    enNext: 'Sync again so the newest preview is the one written.',
+  }),
+  WRITE_INTERRUPTED: Object.freeze({
+    zh: '写入中途被另一次同步接管,可能已写进一部分',
+    en: 'Another run took over part-way; some rows may already have landed',
+    zhNext: '请重新同步(重新试算);已写入的行不会重复写。',
+    enNext: 'Sync again; rows that landed will not be written twice.',
+  }),
+  WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务不可用,这次没有继续写',
+    en: 'The write-lock service is unavailable, so writing stopped',
+    zhNext: '请联系平台管理员检查服务后再同步。',
+    enNext: 'Ask the platform admin to check the service, then sync again.',
   }),
   // S2 (R-36, Q4): there is no 「撤销新建」 — the new sheet stays, empty, until somebody pulls into it.
   WRITE_NOT_CONFIRMED: Object.freeze({

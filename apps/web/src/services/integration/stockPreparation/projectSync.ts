@@ -102,6 +102,11 @@ export type StockPreparationProjectSyncReason =
   // second one), or the server restarted under a running trial (just press again).
   | 'PLAN_DRY_RUN_BUSY'
   | 'PLAN_DRY_RUN_INTERRUPTED'
+  // Batch-refresh phase 0 step 1 — the project write lock. WRITE_LOCKED: another run is writing this
+  // project right now (retry later); LOCK_UNAVAILABLE: the server's write-lock store cannot be reached
+  // (a platform-admin matter — retrying alone does not fix it).
+  | 'PLAN_PROJECT_WRITE_LOCKED'
+  | 'PLAN_WRITE_LOCK_UNAVAILABLE'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -122,6 +127,15 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_NO_PLAN'
   | 'WRITE_PARTIAL'
   | 'WRITE_FAILED'
+  // Batch-refresh phase 0 step 1 — the write was refused or stopped by the project write lock. Each has
+  // its own next step, and none of them may read 「数据没有变化,再点一次」 when that is not what happened:
+  // LOCKED (someone else is writing: retry later), SUPERSEDED (a newer preview exists: preview again),
+  // INTERRUPTED (this run lost its write turn part-way: some rows may have landed; preview again),
+  // LOCK_UNAVAILABLE (the write-lock store is down: ask the platform admin).
+  | 'WRITE_PROJECT_LOCKED'
+  | 'WRITE_PLAN_SUPERSEDED'
+  | 'WRITE_INTERRUPTED'
+  | 'WRITE_LOCK_UNAVAILABLE'
   // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
   // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
   | 'WRITE_NOT_CONFIRMED'
@@ -591,6 +605,27 @@ export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<stri
   TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
 })
 
+/**
+ * Batch-refresh phase 0 step 1 — the server's project write lock codes
+ * (plugins/plugin-integration-core/lib/stock-preparation-project-write-lock.cjs PROJECT_WRITE_ERROR_CODES).
+ */
+export const STOCK_PREP_PROJECT_WRITE_LOCKED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCKED'
+export const STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE = 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED'
+export const STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE = 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST'
+export const STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED',
+  'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE',
+])
+
+/** The apply step's write-lock refusals, by code; `null` for every other failure (it stays WRITE_FAILED). */
+export function classifyWriteLockFailure(errorCode: string | null): StockPreparationProjectSyncReason | null {
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) return 'WRITE_PROJECT_LOCKED'
+  if (errorCode === STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE) return 'WRITE_PLAN_SUPERSEDED'
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE) return 'WRITE_INTERRUPTED'
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) return 'WRITE_LOCK_UNAVAILABLE'
+  return null
+}
+
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
@@ -604,6 +639,10 @@ export function classifyPlanReadFailureReason(
     return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  // Batch-refresh phase 0 step 1: BY CODE, ahead of the status rules — the 503 store failure must not
+  // read as the transient PLAN_READ_FAILED, and the 409 must not read as an unknown refusal.
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) return 'PLAN_PROJECT_WRITE_LOCKED'
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_WRITE_LOCK_UNAVAILABLE'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE) return 'PLAN_DRY_RUN_BUSY'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE) return 'PLAN_DRY_RUN_INTERRUPTED'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
@@ -1203,7 +1242,7 @@ export async function runStockPreparationProjectSync(
     const detail: Record<string, string | number> = { status: statusOf(error) }
     const code = codeOf(error)
     if (code) detail.code = code
-    record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
+    record(result(3, 'apply', 'fail', classifyWriteLockFailure(code) ?? 'WRITE_FAILED', detail))
   }
 
   // ---- 4. 批次存档 ---------------------------------------------------------

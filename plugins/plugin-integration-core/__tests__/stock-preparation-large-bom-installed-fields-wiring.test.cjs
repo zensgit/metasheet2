@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const { consumableMap } = require('./support/consumable-storage.cjs')
 
 // THE WIRING, large-BOM side: `installedFieldProperties` through the real HTTP routes.
@@ -260,6 +262,8 @@ function inertService(methods) {
 
 function baseServices(sourceAdapter, ledger) {
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {

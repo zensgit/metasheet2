@@ -322,7 +322,46 @@ function createLibWriteLockHarness(options = {}) {
       return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...input, projectWriteGuard: guard }))
     }
   }
-  return { ...env, wrapDryRun, wrapApply, scopeOf: writeScopeOfInput }
+  // The large lane, the way the routes drive it: approval through the generation binder (scope = the
+  // expansion snapshot's sheet + the job's project number), every chunk inside the lease with the guard
+  // (scope = the job's own binding). Same opt-out rule as above.
+  function wrapLargeApprove(createJob) {
+    return async (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'writeGenerationBinder')) return createJob(input)
+      let scope = null
+      try {
+        const largeBomJobs = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+        const source = await largeBomJobs.loadLargeBomBackgroundExpansionJob({
+          storage: input.storage, tenantId: input.tenantId, workspaceId: input.workspaceId, actionId: input.actionId, jobId: input.jobId,
+        })
+        scope = projectWriteScopeKey(source.actionSnapshot.target.sheetId, source.parameters.projectNo)
+      } catch {
+        scope = null
+      }
+      return createJob({
+        ...input,
+        writeGenerationBinder: scope
+          ? async () => writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'large_approval', tenantId: input.tenantId }))
+          : undefined,
+      })
+    }
+  }
+  function wrapLargeChunk(runChunk) {
+    return async (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return runChunk(input)
+      let job = null
+      try {
+        const largeBomJobs = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+        job = await input.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...input, applyJobId: input.applyJobId || input.jobId }))
+      } catch {
+        job = null
+      }
+      const scope = job && typeof job.writeScope === 'string' ? job.writeScope : null
+      if (!scope) return runChunk(input)
+      return env.lock.withProjectWriteLease(scope, { purpose: 'large_apply_chunk', runId: 'swl-test-chunk', tenantId: input.tenantId }, (guard) => runChunk({ ...input, projectWriteGuard: guard }))
+    }
+  }
+  return { ...env, wrapDryRun, wrapApply, wrapLargeApprove, wrapLargeChunk, scopeOf: writeScopeOfInput }
 }
 
 // ---------------------------------------------------------------------------------------------------

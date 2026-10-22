@@ -25,6 +25,16 @@ const {
   applyStockPreparationPlan,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
+// Batch-refresh phase 0 step 1: the project write lock. An approval BUMPS the plan generation and binds the
+// job to it; every chunk runs inside the project write lease and refuses a job whose binding is not the
+// generation the lease grant observed.
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  assertWriteBindingMatchesGuard,
+} = require('./stock-preparation-project-write-lock.cjs')
+
+const WRITE_BINDING_KEYS = Object.freeze(['writeScope', 'writeGeneration', 'writeGenerationToken'])
 
 const LARGE_BOM_BACKGROUND_EXPANSION_STATUSES = Object.freeze([
   'queued',
@@ -1169,6 +1179,14 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     'applyJobId',
   )
   const now = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+  // PLAN GENERATION (batch-refresh phase 0 step 1): approving a checkpoint job SUPERSEDES every earlier
+  // plan of this write scope (small tokens and earlier approved jobs alike). The route's binder bumps
+  // (refused 409 while a live writer holds the project — then no job is created) and the job records
+  // the generation it was approved under, ALONGSIDE planRevision / targetRevision, never inside them.
+  // No binder (the lock service is not wired) creates an UNBOUND job, which no chunk will run.
+  const writeBinding = typeof input.writeGenerationBinder === 'function'
+    ? normalizeLargeBomWriteBinding(await input.writeGenerationBinder())
+    : null
   const job = {
     jobId: applyJobId,
     ...scope,
@@ -1215,9 +1233,28 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
     },
     createdAt: now,
     updatedAt: now,
+    // Present only when bound, so an unbound (lock-less) job is byte-identical to the pre-lock job.
+    ...(writeBinding || {}),
   }
   await storage.set(checkpointApplyJobKey({ ...scope, actionId: sourceJob.actionId, applyJobId }), job)
   return cloneJson(job)
+}
+
+function normalizeLargeBomWriteBinding(binding) {
+  if (!isPlainObject(binding)
+    || typeof binding.writeScope !== 'string' || !binding.writeScope
+    || typeof binding.writeGenerationToken !== 'string' || !binding.writeGenerationToken
+    || !Number.isInteger(binding.writeGeneration) || binding.writeGeneration < 0) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the project write generation binder returned no usable binding', { reason: 'binding_malformed' })
+  }
+  return Object.fromEntries(WRITE_BINDING_KEYS.map((key) => [key, binding[key]]))
+}
+
+function requireLargeBomProjectWriteGuard(guard) {
+  if (!guard || typeof guard.beforeWrite !== 'function' || typeof guard.scopeKey !== 'string' || typeof guard.generationToken !== 'string') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'large-BOM checkpoint apply requires the project write lock; nothing is written without it')
+  }
+  return guard
 }
 
 async function loadLargeBomCheckpointApplyJob(input = {}) {
@@ -1317,6 +1354,13 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
     }
     const chunkSize = normalizeChunkSize(input.maxDecisionsPerChunk)
     const recordsApi = requireCheckpointRecordsApi(input.recordsApi)
+    // PROJECT WRITE GUARD (batch-refresh phase 0 step 1): the route holds the project write lease around
+    // this chunk. Required (501), and BEFORE any job write the job's approval binding must be the
+    // generation the lease grant observed — a newer preview or approval of this project since then
+    // refuses 409 PLAN_SUPERSEDED and leaves the job exactly as it was; a job approved before bindings
+    // existed is refused `job_unbound` (re-approve it).
+    const projectWriteGuard = requireLargeBomProjectWriteGuard(input.projectWriteGuard)
+    assertWriteBindingMatchesGuard(job, projectWriteGuard, { unboundReason: 'job_unbound' })
     const start = nextDecisionIndex(job)
     const decisions = plan.decisions
     if (start >= decisions.length) {
@@ -1354,10 +1398,42 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         ? job.installedFieldProperties
         : input.installedFieldProperties,
       recordsApi,
+      // I1: one holder CAS (lease + epoch + seq + generation) immediately before every host write.
+      writeFence: projectWriteGuard,
     })
 
     job.counts = mergeCounts(job.counts, applyResult.counts)
     mergeApplyEvidence(job, applyResult)
+    if (applyResult.status === 'aborted') {
+      // FENCED STOP mid-chunk: decisions [start, start + k) ran, k did not. The checkpoint records exactly
+      // that, the job is `failed` (resumable from start + k by a later run that holds the lease and whose
+      // binding is current), and the stop's code joins the values-free evidence.
+      const stoppedAt = start + applyResult.abort.index
+      job.checkpoint = {
+        nextDecisionIndex: stoppedAt,
+        completedChunks: completedChunks(job),
+      }
+      job.evidence = {
+        ...job.evidence,
+        errorCodes: mergeTokenList(job.evidence && job.evidence.errorCodes, [applyResult.abort.code]),
+      }
+      job.status = 'failed'
+      job.updatedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
+      await storage.set(key, job)
+      const source = applyResult.abort.error
+      throw new StockPreparationProjectWriteLockError(
+        source && Number.isInteger(source.status) ? source.status : 409,
+        applyResult.abort.code,
+        source && source.message ? source.message : 'the large-BOM chunk stopped before finishing',
+        {
+          ...(source && isPlainObject(source.details) ? source.details : {}),
+          partial: Number(applyResult.written || 0) > 0,
+          written: Number(applyResult.written || 0),
+          counts: { ...applyResult.counts },
+          abortedAtDecisionIndex: stoppedAt,
+        },
+      )
+    }
     job.checkpoint = {
       nextDecisionIndex: end,
       completedChunks: completedChunks(job) + 1,
