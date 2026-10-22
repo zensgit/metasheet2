@@ -145,7 +145,7 @@ foreach ($m in '090_create_integration_yida_delivery_ledger','091_create_integra
 Remove-Item Env:DATABASE_URL
 ```
 
-退出码：`0` 已执行（打印 `migration "…" is applied`）；`1` 未执行（打印 `is NOT applied (still pending)`）**或命令本身出错**（例如连不上数据库，此时打印错误信息）；`2` 不认识这个名字。退出码为 1 时必须看打印内容区分；打印的是错误时，不能据此认定迁移未执行，请运维排查连接（本片段只读入了 `DATABASE_URL`，没有读入 app.env 里的 `NODE_ENV`、`DB_SSL*`；数据库要求 TLS 时会连不上）。错误输出可能含主机名或端口，不要贴进聊天或 issue。七个都必须是 `0`；至少 `096` 必须是 `0`，否则第 3.2 节的命令会报 `unconfirmed`。也可以用 `--list` 查看待执行项（只读）。
+退出码：`0` 已执行（打印 `migration "…" is applied`）；`1` 未执行（打印 `is NOT applied (still pending)`）**或命令本身出错**（例如连不上数据库，此时打印错误信息）；`2` 不认识这个名字。退出码为 1 时必须看打印内容区分；打印的是错误时，不能据此认定迁移未执行，请运维排查连接（本片段只读入了 `DATABASE_URL`，没有读入 app.env 里的 `NODE_ENV`、`DB_SSL*`；数据库要求 TLS 时会连不上。反过来，若这台主机在系统层面设置了 `NODE_ENV=production`，迁移命令会默认启用 TLS，数据库不支持 TLS 时也会连不上，此时要按 app.env 的写法在本窗口另设 `DB_SSL=false`，不要改系统设置）。错误输出可能含主机名或端口，不要贴进聊天或 issue。七个都必须是 `0`；至少 `096` 必须是 `0`，否则第 3.2 节的命令会报 `unconfirmed`。也可以用 `--list` 查看待执行项（只读）。
 
 **不要手工改这些表。** 部分手工改动会被触发器拒绝；另一些（账本状态推进、凭据轮换或撤销）数据库是允许的，但做了就不可逆，会让本功能永久不可用（第 5.3 节）。
 
@@ -170,7 +170,7 @@ Remove-Item Env:DATABASE_URL
 ```
 
 - 只能有这两个键，都是非空字符串，最长 128 字符，不能有首尾空白或控制字符；
-- 文件不超过 4096 字节，UTF-8 编码；用记事本另存为 UTF-8，不要用 Windows PowerShell 5.1 的 `>` 或 `Out-File` 生成（默认 UTF-16，命令会报 `input`）；
+- 文件不超过 4096 字节，UTF-8 编码（带不带 BOM、换行是 CRLF 还是 LF 都可以）；用记事本另存为 UTF-8，不要用 Windows PowerShell 5.1 的 `>` 或 `Out-File` 生成（默认 UTF-16，命令会报 `input`）；
 - `ownerId` 是 MetaSheet 用户的 ID；`tenantId` 是该用户有效成员关系所在的租户（组织）ID。取值方法待确认（第 8 章），不要在聊天里传递。
 
 **第 2 步：确认部署包含 CLI 修复**。在部署根目录（其下有 `packages\core-backend\dist`）执行：
@@ -181,7 +181,7 @@ Test-Path -LiteralPath '.\packages\core-backend\dist\scripts\bootstrap-yida-init
 
 结果必须是 `True`。如果是 `False`，说明这个版本不含 `825a6fbe8`：**停止**，联系开发。不要改用 `tsx`、不要拷贝源码脚本过来运行。
 
-**第 3 步：只把 `DATABASE_URL` 读进当前窗口**。命令只从环境变量 `DATABASE_URL` 读取数据库连接串，**不读 app.env**，也**不要**把连接串写在命令行上或手工输入（会留在命令历史里）。请开一个新的 PowerShell 窗口，按部署脚本相同的读法从 app.env 读取（去掉首尾空白、去掉一层引号、同名多行取最后一行），不要把值打印出来：
+**第 3 步：只把 `DATABASE_URL` 读进当前窗口**。命令只从环境变量 `DATABASE_URL` 读取数据库连接串，**不读 app.env**，也**不要**把连接串写在命令行上或手工输入（会留在命令历史里）。这个命令**只用连接串本身**连接数据库，不看 `NODE_ENV`、`DB_SSL*`：若客户数据库要求 TLS，TLS 设置必须已写在 `DATABASE_URL` 里（例如连接串参数 `sslmode`，由运维按客户数据库的要求确认），否则命令会报 `unconfirmed`。请开一个新的 PowerShell 窗口，按部署脚本相同的读法从 app.env 读取（去掉首尾空白、去掉一层引号、同名多行取最后一行），不要把值打印出来：
 
 ```powershell
 Set-Location '<部署根目录>'
