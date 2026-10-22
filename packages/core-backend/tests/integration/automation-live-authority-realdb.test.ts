@@ -281,17 +281,19 @@ describeDatabase('Automation live actor authority: real locked evidence', () => 
       '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
       '096_create_integration_yida_initialization.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n'))
     const anchors = async () => (await admin.query('SELECT owner_id, tenant_id FROM integration_yida_initialization_anchor')).rows
-    const directory = await mkdtemp(path.join(tmpdir(), 'yida-bootstrap-'))
     const saved = process.env.DATABASE_URL
-    const url = new URL(saved!)
-    url.searchParams.set('options', `-c search_path=${schema}`)
-    process.env.DATABASE_URL = url.toString()
+    let directory = ''
     const run = async (ownerId: string, tenantId: string) => {
       const file = path.join(directory, `${randomBytes(4).toString('hex')}.json`)
       await writeFile(file, JSON.stringify({ ownerId, tenantId }))
       return runYidaInitializationBootstrapCli(['--input', file, '--apply'])
     }
     try {
+      // Setup inside the try: the finally always restores the URL and removes the directory.
+      directory = await mkdtemp(path.join(tmpdir(), 'yida-bootstrap-'))
+      const url = new URL(saved!)
+      url.searchParams.set('options', `-c search_path=${schema}`)
+      process.env.DATABASE_URL = url.toString()
       for (const [ownerId, tenantId] of [['synthetic-unknown-owner', input.tenantId], [input.actorId, input.tenantId],
         ['synthetic-other-actor', 'synthetic-other-tenant']]) {
         expect(await run(ownerId, tenantId)).toEqual({ ok: false, status: 'denied' })
@@ -303,7 +305,7 @@ describeDatabase('Automation live actor authority: real locked evidence', () => 
       expect(await anchors()).toEqual([{ owner_id: 'synthetic-other-actor', tenant_id: input.tenantId }])
     } finally {
       process.env.DATABASE_URL = saved
-      await rm(directory, { recursive: true, force: true })
+      if (directory) await rm(directory, { recursive: true, force: true })
     }
   })
 })

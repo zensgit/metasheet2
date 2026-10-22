@@ -67,6 +67,8 @@ function input(value: unknown) {
  * same-process authority is not constrained by this code-path separation.
  * The immutable anchor only names a live integration admin member of the tenant:
  * the runtime's own actor check runs first, in the same order (actor, then slot).
+ * Its operator DB role needs SELECT plus UPDATE (row locks) on users, user_roles,
+ * role_permissions, user_permissions, user_orgs and user_namespace_admissions.
  */
 export async function provisionYidaInitializationAnchor(
   { database }: { database: YidaInitializationDatabase },

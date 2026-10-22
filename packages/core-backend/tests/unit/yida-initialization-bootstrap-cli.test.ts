@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { runYidaInitializationBootstrapCli } from '../../scripts/bootstrap-yida-initialization-owner'
@@ -65,6 +67,36 @@ describe('operator-only Yida initializer bootstrap CLI', () => {
       expect(Object.isFrozen(result)).toBe(true)
       expect(JSON.stringify(result)).not.toMatch(/owner|tenant|command|synthetic|YIDA/)
     })
+  it('loading the CLI evaluates no server module; a lazy bootstrap load failure is unconfirmed', async () => {
+    const evaluated: string[] = []
+    vi.resetModules()
+    vi.doMock('../../src/integration/automation-live-authority', () => {
+      evaluated.push('automation-live-authority')
+      throw new Error('synthetic load failure')
+    })
+    const directory = await mkdtemp(path.join(tmpdir(), 'yida-bootstrap-cli-'))
+    const saved = process.env.DATABASE_URL
+    try {
+      const cli = await import('../../scripts/bootstrap-yida-initialization-owner')
+      expect(evaluated).toEqual([])
+      const file = path.join(directory, 'manifest.json')
+      await writeFile(file, input)
+      // Refused before the load: neither provision nor its decoder imports the server modules.
+      delete process.env.DATABASE_URL
+      expect(await cli.runYidaInitializationBootstrapCli(['--input', file, '--apply'])).toEqual({ ok: false, status: 'unconfirmed' })
+      expect(evaluated).toEqual([])
+      // The bootstrap module fails while loading its server imports: no pool, no connection.
+      process.env.DATABASE_URL = 'postgres://synthetic.invalid/none'
+      expect(await cli.runYidaInitializationBootstrapCli(['--input', file, '--apply'])).toEqual({ ok: false, status: 'unconfirmed' })
+      expect(evaluated).toContain('automation-live-authority')
+    } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL
+      else process.env.DATABASE_URL = saved
+      await rm(directory, { recursive: true, force: true })
+      vi.doUnmock('../../src/integration/automation-live-authority')
+      vi.resetModules()
+    }
+  })
   it('a foreign error that only imitates a definite code stays unconfirmed', async () => {
     const forged = Object.assign(new Error('YIDA_INITIALIZATION_CONFLICT'), { code: 'YIDA_INITIALIZATION_CONFLICT' })
     Object.setPrototypeOf(forged, YidaInitializationError.prototype)

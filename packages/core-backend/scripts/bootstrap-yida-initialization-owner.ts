@@ -2,7 +2,6 @@ import { open } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { types } from 'node:util'
-import { provisionYidaInitializationAnchor, yidaInitializationErrorCode } from '../src/integration/yida-initialization-bootstrap'
 
 /** Operator-only local database bootstrap. This is NOT an HTTP role-grant,
  * sender, migration runner, or first-admin-wins fallback. Production execution
@@ -19,6 +18,16 @@ const LIMIT = 4096
 // Only the bootstrap module's own refusals are definite; they happen before any write.
 const definite = new Map<string | undefined, Status>([['YIDA_INITIALIZATION_INPUT', 'input'],
   ['YIDA_INITIALIZATION_CONFLICT', 'conflict'], ['YIDA_INITIALIZATION_DENIED', 'denied']])
+// Refusals raised before the bootstrap module was ever imported: decoding them must not load it.
+const beforeLoad = new WeakSet<object>()
+// WeakSet/WeakMap lookups only, never a property read of a foreign rejection. The bootstrap
+// module (server RBAC, pool and secret modules) is imported lazily, never at CLI load.
+async function ownCode(error: unknown): Promise<string | undefined> {
+  if (beforeLoad.has(error as object)) return undefined
+  try {
+    return (await import('../src/integration/yida-initialization-bootstrap')).yidaInitializationErrorCode(error)
+  } catch { return undefined }
+}
 
 function argumentsFor(argv: string[]): string {
   if (argv.length !== 3 || argv[0] !== '--input' || argv[2] !== '--apply'
@@ -53,7 +62,13 @@ async function readBounded(inputPath: string): Promise<string> {
 }
 async function provisionLocal(manifest: Manifest): Promise<void> {
   const connectionString = process.env.DATABASE_URL
-  if (!connectionString) throw new Error('YIDA_INITIALIZATION_BOOTSTRAP_UNAVAILABLE')
+  if (!connectionString) {
+    const refusal = new Error('YIDA_INITIALIZATION_BOOTSTRAP_UNAVAILABLE')
+    beforeLoad.add(refusal)
+    throw refusal
+  }
+  // Lazy, like pg: loading the CLI has no server side effect, and a load failure here is 'unconfirmed'.
+  const { provisionYidaInitializationAnchor, yidaInitializationErrorCode } = await import('../src/integration/yida-initialization-bootstrap')
   const { Pool } = await import('pg')
   const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 5000, query_timeout: 10000 })
   // A pool background failure is never printed with host/URL/identity values.
@@ -93,7 +108,7 @@ export async function runYidaInitializationBootstrapCli(argv: string[],
   } catch (error) {
     // Includes COMMIT-reply loss. No claim that the database was unchanged,
     // no automatic retry, and no inspection/coercion of a foreign rejection.
-    return Object.freeze({ ok: false, status: definite.get(yidaInitializationErrorCode(error)) ?? 'unconfirmed' })
+    return Object.freeze({ ok: false, status: definite.get(await ownCode(error)) ?? 'unconfirmed' })
   }
 }
 
