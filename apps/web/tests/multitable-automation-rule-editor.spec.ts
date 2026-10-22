@@ -533,7 +533,7 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent)
-      .toContain('测试运行会执行已保存规则')
+      .toContain('测试运行是对已保存规则的模拟：不会发送任何钉钉消息')
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
       .toContain('Running test. DingTalk actions may send real messages.')
 
@@ -541,8 +541,9 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(tested).toHaveBeenCalledWith('rule_1')
+    // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is a simulation — the confirm never claims a real send.
     expect(confirmSpy).toHaveBeenCalledWith(
-      '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。未保存的更改不会包含在内。是否继续？',
+      '测试运行是对已保存规则的模拟：不会发送任何钉钉消息，也不会检查接收人是否已绑定钉钉；实际能否送达只在规则真实触发时才会检查。未保存的更改不会包含在内。是否继续？',
       expect.any(String),
       expect.objectContaining({ type: 'warning' }),
     )
@@ -2186,7 +2187,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('Save this automation before running a test.')
   })
 
-  it('warns that DingTalk Test Run can send real messages and emits the saved rule id', async () => {
+  it('says DingTalk Test Run is a simulation that sends nothing and emits the saved rule id', async () => {
     const tested = vi.fn()
     const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
@@ -2210,7 +2211,10 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+    const warning = container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent ?? ''
+    expect(warning).toContain('Test Run simulates the saved rule: it sends no DingTalk messages')
+    expect(warning).toContain('Real delivery is only checked when the rule actually fires.')
+    expect(warning).not.toContain('can send real')
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
@@ -2218,7 +2222,8 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(tested).toHaveBeenCalledWith('rule_1')
-    expect(confirmSpy.mock.calls[0]?.[0]).toContain('can send real DingTalk messages')
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('it sends no DingTalk messages and does not check whether recipients are linked to DingTalk')
+    expect(confirmSpy.mock.calls[0]?.[0]).not.toContain('can send real')
     expect(confirmSpy.mock.calls[0]?.[0]).toContain('Unsaved changes are not included')
   })
 
@@ -2245,7 +2250,7 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('it sends no DingTalk messages')
 
     ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -4342,6 +4347,38 @@ describe('MetaAutomationRuleEditor', () => {
     expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
     expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
       .toContain('1 selected user is not linked to DingTalk')
+  })
+
+  // 客户反馈 2026-10-21 item 1 follow-up: the field typed the user into 本地用户 ID instead of picking it; the
+  // typed id never got a link check, so the "not linked" warning stayed hidden until the real run reached 0 people.
+  it('looks up ids TYPED into the local user id box on blur: an unlinked id shows the count warning, an unknown id is never shown as linked', async () => {
+    const client = mockClient()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_2, user_fake_unknown'
+    idsInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_fake_unknown', limit: 50 })
+    const summary = container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')
+    expect(summary?.textContent).toContain('1 selected user is not linked to DingTalk and will not receive the message when the rule fires.')
+    for (const value of ['user_2', 'Zhao Ming', 'user_fake_unknown']) expect(summary?.textContent).not.toContain(value)
+
+    const unlinkedChip = container.querySelector('[data-person-recipient="user_2"]') as HTMLElement
+    expect(unlinkedChip.textContent).toContain('No DingTalk delivery link')
+    const unknownChip = container.querySelector('[data-person-recipient="user_fake_unknown"]') as HTMLElement
+    expect(unknownChip.querySelector('[data-field="dingtalkPersonUnresolved"]')?.textContent).toBe('No matching user for this ID')
+    expect(unknownChip.textContent).not.toContain('ready')
+    expect(unknownChip.textContent).not.toContain('bound')
   })
 
   // 客户反馈 2026-10-21 (c): the empty group list links straight to API & Webhooks > DingTalk Groups.

@@ -495,4 +495,76 @@ describe('MetaAutomationLogViewer — DingTalk person message that reached nobod
     expect(item.textContent ?? '').not.toContain('dingtalk_recipients_unreachable')
     expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
   })
+
+  // 客户反馈 2026-10-21 item 1 follow-up: the zh log showed the raw English error line above the Chinese sentence.
+  it('zh: only the Chinese sentence — no English error line, and no skipped user id anywhere in the step', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain('0 人收到：1 人未绑定钉钉')
+    expect(item.querySelector('[data-field="step-error"]')).toBeNull()
+    expect(item.textContent ?? '').not.toContain('No DingTalk recipient was reached')
+    expect(item.textContent ?? '').not.toContain('user_fake_nobody')
+  })
+
+  it('en: the English error line stays (it is the en wording), still without any user id', async () => {
+    useLocale().setLocale('en')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-error"]')?.textContent).toContain('No DingTalk recipient was reached')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain('0 received: 1 not linked to DingTalk')
+    expect(item.textContent ?? '').not.toContain('user_fake_nobody')
+  })
+})
+
+// 客户反馈 2026-10-21 item 1 follow-up: executions written by earlier releases carry
+// `DingTalk account not linked for users: <ids>` — the log never renders those ids.
+const LEGACY_NOT_LINKED_EXECUTION: AutomationExecution = {
+  id: 'exec-legacy',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-10-20T10:00:00Z',
+  duration: 7,
+  steps: [
+    {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      durationMs: 6,
+      error: 'DingTalk account not linked for users: user_fake_old_a, user_fake_old_b',
+      output: {
+        notifiedUsers: 0,
+        skippedRecipientCount: 2,
+        skippedUserIds: ['user_fake_old_a', 'user_fake_old_b'],
+      },
+    },
+  ],
+}
+
+describe('MetaAutomationLogViewer — legacy DingTalk "not linked for users" error (customer feedback 2026-10-21 item 1)', () => {
+  for (const [locale, sentence, countSentence] of [
+    ['zh-CN', '有收件人未绑定钉钉（旧记录，未列出具体用户）。', '0 人收到：2 人未绑定钉钉或已停用'],
+    ['en', 'Some recipients were not linked to DingTalk (older record; the users are not listed).', '0 received: 2 not linked to DingTalk or inactive'],
+  ] as const) {
+    it(`${locale}: renders a values-free sentence instead of the raw ids`, async () => {
+      useLocale().setLocale(locale)
+      const client = makeMockClient({ logs: [LEGACY_NOT_LINKED_EXECUTION], stats: GONE_STATS })
+      mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+      await flushPromises()
+      const item = await expandLog(mounted.container, 'exec-legacy')
+
+      expect(item.querySelector('[data-field="step-error"]')?.textContent).toBe(sentence)
+      expect(item.querySelector('[data-field="step-reason"]')?.textContent).toContain(countSentence)
+      const text = item.textContent ?? ''
+      expect(text).not.toContain('user_fake_old_a')
+      expect(text).not.toContain('user_fake_old_b')
+      expect(text).not.toContain('not linked for users')
+    })
+  }
 })

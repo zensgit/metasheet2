@@ -1099,6 +1099,7 @@
                   <strong>{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
                   <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
+                  <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonUnresolved">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
                   <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
@@ -1129,6 +1130,7 @@
                 :rows="3"
                 :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
+                @blur="void resolveNotificationRecipientIds(parseUserIdsText(action.config.userIdsText))"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
               <el-input
@@ -4284,6 +4286,9 @@ function rememberPersonRecipientSuggestions(items: MetaSheetPermissionCandidate[
   personRecipientDirectory.value = next
 }
 
+// 客户反馈 2026-10-21 item 1 follow-up: ids typed into the 本地用户 ID box are looked up on blur (same exact-id
+// lookup as send_notification), so they get the same DingTalk link status as picked users. An id the roster
+// does not know keeps a null link status (never shown as linked) and carries the "no matching user" badge.
 function selectedPersonRecipients(action: DraftAction) {
   return parseUserIdsText(action.config.userIdsText).map((id) => {
     const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
@@ -4294,6 +4299,7 @@ function selectedPersonRecipients(action: DraftAction) {
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
       dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
       dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+      unresolved: !directoryEntry && notificationRecipientMisses.value[id] === true,
     }
   })
 }

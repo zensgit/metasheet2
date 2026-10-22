@@ -2732,7 +2732,9 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('can send real DingTalk messages')
+    // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is a simulation; the copy no longer claims real sends.
+    expect(container.textContent).toContain('Test Run simulates the saved rule: it sends no DingTalk messages')
+    expect(container.textContent).not.toContain('can send real DingTalk messages')
 
     testBtn.click()
     await flushPromises()
@@ -2775,7 +2777,8 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('可能向已配置的钉钉群或用户发送真实消息')
+    expect(container.textContent).toContain('测试运行是对已保存规则的模拟：不会发送任何钉钉消息')
+    expect(container.textContent).not.toContain('发送真实消息')
 
     testBtn.click()
     // UF-8: the test-run confirm is now async (ElMessageBox) — flush microtasks so the handler
@@ -2784,7 +2787,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('正在运行测试。钉钉动作可能发送真实消息。')
+      .toContain('正在模拟运行测试，不会发送钉钉消息。')
 
     resolveExecution({
       id: 'exec_1',
@@ -2971,7 +2974,7 @@ describe('MetaAutomationManager', () => {
 
     const runningStatus = container.querySelector('[data-field="testRunStatus"]')
     expect(runningStatus?.textContent).toContain('Running test.')
-    expect(runningStatus?.textContent).not.toContain('DingTalk actions may send real messages')
+    expect(runningStatus?.textContent).not.toContain('No DingTalk messages are sent')
 
     resolveExecution({
       id: 'exec_1',

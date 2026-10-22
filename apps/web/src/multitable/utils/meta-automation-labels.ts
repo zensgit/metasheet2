@@ -81,6 +81,7 @@ export type AutomationLabelKey =
   | 'log.reason.targetRecordMissingNoop'
   | 'log.reason.backwriteTargetRecordMissing'
   | 'log.reason.dingtalkLinkHint'
+  | 'log.reason.dingtalkLegacyNotLinked'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -469,6 +470,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.reason.targetRecordMissingNoop',
   'log.reason.backwriteTargetRecordMissing',
   'log.reason.dingtalkLinkHint',
+  'log.reason.dingtalkLegacyNotLinked',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -853,6 +855,11 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Each member must be linked to DingTalk in the directory and sign in with DingTalk once.',
     zh: '成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。',
   },
+  // 客户反馈 2026-10-21 item 1 follow-up: replaces the pre-#6481 step error that listed the raw user ids.
+  'log.reason.dingtalkLegacyNotLinked': {
+    en: 'Some recipients were not linked to DingTalk (older record; the users are not listed).',
+    zh: '有收件人未绑定钉钉（旧记录，未列出具体用户）。',
+  },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
   'support.clipboardUnavailable': { en: 'Clipboard unavailable', zh: '剪贴板不可用' },
@@ -1088,7 +1095,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'parallelBranch.addField': { en: '+ Field', zh: '+ 字段' },
   'parallelBranch.addAction': { en: '+ Action', zh: '+ 动作' },
   'parallelBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
-  'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
+  // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is always a simulation (client.testAutomationRule
+  // posts no mode, so the route runs `simulate`); the copy says so instead of warning about real sends.
+  'testRun.warning': {
+    en: 'Test Run simulates the saved rule: it sends no DingTalk messages and does not check whether recipients are linked to DingTalk. Real delivery is only checked when the rule actually fires.',
+    zh: '测试运行是对已保存规则的模拟：不会发送任何钉钉消息，也不会检查接收人是否已绑定钉钉；实际能否送达只在规则真实触发时才会检查。',
+  },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
@@ -1141,7 +1153,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.cardOpenPublicForm': { en: 'Open public form', zh: '打开公开表单' },
   'manager.cardOpenInternalView': { en: 'Open internal view', zh: '打开内部处理视图' },
   'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
-  'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
+  'manager.testRunningDingTalkWarning': { en: 'Running a simulated test. No DingTalk messages are sent.', zh: '正在模拟运行测试，不会发送钉钉消息。' },
   'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
   // 客户反馈 2026-10-21 (a): a simulated test run never resolves DingTalk recipients (the dry run reads no data).
   'manager.testRunDingTalkSimulatedNote': {
@@ -1442,10 +1454,11 @@ export function automationStepOutputView(output: unknown, isZh: boolean): Automa
   const record = output as Record<string, unknown>
   // 客户反馈 2026-10-21 (a): a DingTalk person message that skipped recipients reads as a count sentence
   // ("0 人收到：N 人未绑定钉钉"), never as ids. The reason code and the per-cause counts are dropped from
-  // the JSON below; the stored ids (skippedUserIds) stay raw like every other id in this panel.
+  // the JSON below. Item 1 follow-up: the stored skipped user ids (skippedUserIds) are dropped too, so the
+  // run log says how many were skipped, never who.
   const dingTalkOutcome = readDingTalkRecipientOutcome(output)
   if (dingTalkOutcome) {
-    const strip = ['skippedReasonCounts', ...(record.reason === DINGTALK_RECIPIENTS_UNREACHABLE_REASON ? ['reason'] : [])]
+    const strip = ['skippedReasonCounts', 'skippedUserIds', ...(record.reason === DINGTALK_RECIPIENTS_UNREACHABLE_REASON ? ['reason'] : [])]
     const rest = Object.fromEntries(Object.entries(record).filter(([k]) => !strip.includes(k)))
     return {
       reason: automationDingTalkRecipientOutcomeText(dingTalkOutcome, isZh),
@@ -2218,6 +2231,31 @@ export function automationDingTalkRecipientOutcomeText(outcome: DingTalkRecipien
     ? `${outcome.notified} 人收到：${parts.join('，')}。`
     : `${outcome.notified} received: ${parts.join(', ')}.`
   return needsLinkHint ? `${head}${isZh ? '' : ' '}${automationLabel('log.reason.dingtalkLinkHint', isZh)}` : head
+}
+
+/** The pre-#6481 executor wrote `DingTalk account not linked for users: <ids>` as the step error. */
+const LEGACY_DINGTALK_NOT_LINKED_ERROR = /^\s*DingTalk account not linked for users\b/i
+
+/**
+ * 客户反馈 2026-10-21 item 1 follow-up: the text of a step's `error` line in the run logs ('' = no line).
+ * - A legacy DingTalk person-message error (it listed the raw user ids) becomes a values-free sentence, any locale.
+ * - zh: a step whose output carries the values-free unreachable reason code already reads as the Chinese
+ *   count sentence (automationStepOutputView), so the English error line is not shown.
+ * - Anything else: the error as stored (callers still pass it through summarizeStepError).
+ */
+export function automationStepErrorText(error: unknown, output: unknown, isZh: boolean): string {
+  if (error === null || error === undefined || error === '') return ''
+  const text = String(error)
+  if (LEGACY_DINGTALK_NOT_LINKED_ERROR.test(text)) return automationLabel('log.reason.dingtalkLegacyNotLinked', isZh)
+  if (
+    isZh
+    && output
+    && typeof output === 'object'
+    && !Array.isArray(output)
+    && (output as Record<string, unknown>).reason === DINGTALK_RECIPIENTS_UNREACHABLE_REASON
+    && readDingTalkRecipientOutcome(output) !== null
+  ) return ''
+  return text
 }
 
 /** Test-run banner when a live DingTalk person message skipped recipients (never a plain "succeeded"). */

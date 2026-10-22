@@ -110,11 +110,13 @@
                 :class="`meta-log-viewer__badge--${step.status}`"
               >{{ logStatusLabel(step.status) }}</span>
               <span v-if="step.durationMs" class="meta-log-viewer__step-dur">{{ step.durationMs }}ms</span>
+              <!-- 客户反馈 2026-10-21 item 1 follow-up: no English error line under a zh DingTalk count sentence,
+                   and a legacy error that listed user ids renders as a values-free sentence. -->
               <div
-                v-if="step.error"
+                v-if="stepErrorText(step)"
                 class="meta-log-viewer__step-error"
                 data-field="step-error"
-              >{{ summarizeStepError(step.error) }}</div>
+              >{{ stepErrorText(step) }}</div>
               <!-- F1: a recognised values-free reason code renders as a sentence, and is dropped from the JSON below. -->
               <div
                 v-if="stepOutputView(step).reason"
@@ -145,6 +147,7 @@ import {
   automationActionTypeLabel,
   automationLabel,
   automationStatusLabel,
+  automationStepErrorText,
   automationStepOutputView,
   supportCopyFailed,
   supportDownloadFailed,
@@ -199,6 +202,10 @@ function logStatusLabel(status: string): string {
 
 function stepOutputView(step: AutomationStepResult): AutomationStepOutputView {
   return automationStepOutputView(step.output, isZh.value)
+}
+
+function stepErrorText(step: AutomationStepResult): string {
+  return summarizeStepError(automationStepErrorText(step.error, step.output, isZh.value))
 }
 
 // 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
