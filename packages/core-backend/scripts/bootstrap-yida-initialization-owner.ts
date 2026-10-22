@@ -2,19 +2,23 @@ import { open } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { types } from 'node:util'
-import { provisionYidaInitializationAnchor } from '../src/integration/yida-initialization-bootstrap'
+import { provisionYidaInitializationAnchor, yidaInitializationErrorCode } from '../src/integration/yida-initialization-bootstrap'
 
 /** Operator-only local database bootstrap. This is NOT an HTTP role-grant,
  * sender, migration runner, or first-admin-wins fallback. Production execution
  * and the real owner/tenant must be separately authorized by the deployment
  * owner. Never pass credentials or database URLs on the command line. */
 type Manifest = Readonly<{ ownerId: string; tenantId: string }>
-type Summary = Readonly<{ ok: boolean; status: 'provisioned' | 'unconfirmed' }>
+type Status = 'provisioned' | 'input' | 'conflict' | 'denied' | 'unconfirmed'
+type Summary = Readonly<{ ok: boolean; status: Status }>
 type Dependencies = Readonly<{
   read(path: string): Promise<string>
   provision(manifest: Manifest): Promise<unknown>
 }>
 const LIMIT = 4096
+// Only the bootstrap module's own refusals are definite; they happen before any write.
+const definite = new Map<string | undefined, Status>([['YIDA_INITIALIZATION_INPUT', 'input'],
+  ['YIDA_INITIALIZATION_CONFLICT', 'conflict'], ['YIDA_INITIALIZATION_DENIED', 'denied']])
 
 function argumentsFor(argv: string[]): string {
   if (argv.length !== 3 || argv[0] !== '--input' || argv[2] !== '--apply'
@@ -63,8 +67,10 @@ async function provisionLocal(manifest: Manifest): Promise<void> {
         const result = await work({ query: (sql, params) => client.query(sql, params) })
         await client.query('COMMIT')
         return result
-      } catch {
+      } catch (error) {
         try { await client.query('ROLLBACK') } catch { /* The result remains unconfirmed. */ }
+        // WeakMap lookup only: a foreign rejection is never read, and stays unconfirmed.
+        if (yidaInitializationErrorCode(error) !== undefined) throw error
         throw new Error('YIDA_INITIALIZATION_BOOTSTRAP_UNCONFIRMED')
       } finally { client.release() }
     } } }, manifest)
@@ -73,15 +79,21 @@ async function provisionLocal(manifest: Manifest): Promise<void> {
 
 export async function runYidaInitializationBootstrapCli(argv: string[],
   dependencies: Dependencies = { read: readBounded, provision: provisionLocal }): Promise<Summary> {
+  let manifest: Manifest
   try {
     const inputPath = argumentsFor(argv)
-    const manifest = manifestFor(await dependencies.read(inputPath))
+    manifest = manifestFor(await dependencies.read(inputPath))
+  } catch {
+    // Argument/manifest phase: nothing reached the database.
+    return Object.freeze({ ok: false, status: 'input' })
+  }
+  try {
     await dependencies.provision(manifest)
     return Object.freeze({ ok: true, status: 'provisioned' })
-  } catch {
+  } catch (error) {
     // Includes COMMIT-reply loss. No claim that the database was unchanged,
     // no automatic retry, and no inspection/coercion of a foreign rejection.
-    return Object.freeze({ ok: false, status: 'unconfirmed' })
+    return Object.freeze({ ok: false, status: definite.get(yidaInitializationErrorCode(error)) ?? 'unconfirmed' })
   }
 }
 

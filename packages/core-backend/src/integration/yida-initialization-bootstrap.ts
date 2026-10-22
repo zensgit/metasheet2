@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { assertInTransaction } from '../multitable/pg-transaction-guard'
+import { assertAutomationIntegrationActor, AutomationActorAuthorityError } from './automation-live-authority'
 
 export type YidaInitializationCode = 'INPUT' | 'DENIED' | 'CONFLICT' | 'INACTIVE' | 'CANCELLED' | 'UNAVAILABLE'
 const codes = new Set<unknown>(['INPUT', 'DENIED', 'CONFLICT', 'INACTIVE', 'CANCELLED', 'UNAVAILABLE'])
@@ -64,6 +65,8 @@ function input(value: unknown) {
  * Server-owned deployment material supplies the identity; this creates no role,
  * membership, grant, target, token or external IO. Database table-owner/hostile
  * same-process authority is not constrained by this code-path separation.
+ * The immutable anchor only names a live integration admin member of the tenant:
+ * the runtime's own actor check runs first, in the same order (actor, then slot).
  */
 export async function provisionYidaInitializationAnchor(
   { database }: { database: YidaInitializationDatabase },
@@ -75,6 +78,13 @@ export async function provisionYidaInitializationAnchor(
       const isolation = await trx.query("SELECT current_setting('transaction_isolation') AS isolation")
       if (isolation.rows.length !== 1 || isolation.rows[0]?.isolation !== 'read committed') throw new YidaInitializationError('UNAVAILABLE')
       await assertInTransaction(trx, 'Yida initialization bootstrap')
+      try { await assertAutomationIntegrationActor(trx, { actorId: fixed.ownerId, tenantId: fixed.tenantId, workspaceId: null }) }
+      catch (error) {
+        if (error && typeof error === 'object' && !types.isProxy(error)
+          && Object.getPrototypeOf(error) === AutomationActorAuthorityError.prototype
+          && Object.getOwnPropertyDescriptor(error, 'code')?.value === 'AUTOMATION_ACTOR_AUTHORITY_DENIED') throw new YidaInitializationError('DENIED')
+        throw new YidaInitializationError('UNAVAILABLE')
+      }
       await lockYidaInitializationSlot(trx)
       const existing = await trx.query('SELECT slot,command_id,owner_id,tenant_id,workspace_id FROM integration_yida_initialization_anchor WHERE slot=1')
       if (existing.rows.length > 1) throw new YidaInitializationError('UNAVAILABLE')
