@@ -60,3 +60,51 @@ Keep Draft. Stream/lifecycle OFF. No merge, deployment, real UAT or 50004.
   15-second limit; member-bar/current-node now pass 36/36 and instance-consistency
   passes 39/39. Full-lane, follow-up quality and exact-head CI remain pending
   until their terminal results are recorded in the PR.
+
+## Route-metadata import follow-up
+
+The full web rerun passed the previous 37-file/789-test member-bar batch, then
+failed the unchanged approval navigation route test at its existing 5-second
+limit. The original four-file batch reproduced 115 passes and that one timeout.
+Instrumenting the real import without an artificial delay observed appRoutes
+still loading at 4,899ms; its 17 statically imported views were inside the test
+budget. Fixed route metadata now loads during collection. App/authPrincipal
+dynamic imports and module-reset/crash-isolation behavior remain unchanged.
+
+All 37 original assertion lines remain. The target file passes 13/13. A transform
+removing only the batch-transfer route's requiresAdmin produces the original
+named assertion failure (12 filtered cases excluded); after restoring the real
+module, the whole four-file batch passes 116/116 with zero excluded. No assertion,
+permission guard, timeout or workflow is weakened. Evidence is under
+artifacts/report-calendar/nav-route-timeout. Follow-up quality, full web and
+exact-head CI must finish on the repaired source before final acceptance.
+
+
+Required registry order correction: the original head added the two report specs and analytics neighbor out of the existing case-insensitive order. The unchanged structural guard reproduced two assertion failures (32 controls passed). Only token order is repaired: all 514 entries and every prior selector remain present, without duplicates; the sorted .tokens manifest was already correct and is unchanged. Final registration/enumeration neighbors pass 456/456 in three backend files and workflow/shape neighbors pass 36/36 in two frontend files.
+
+One initial backend-neighbor collection attempt hit the unchanged PyYAML subprocess 120-second limit (39 cases passed, one suite failed to collect); this is recorded as an environment/runtime failure, not an assertion result. The same Python parser and same Node bridge parsed the original workflow directly in 0.152/0.182 seconds. Repeating the original command, source, assertions and timeout completed 456/456. No parser or timeout was changed. Evidence: artifacts/report-calendar/gate-order/.
+
+The partial local full-web run was explicitly stopped only after this registry defect was confirmed, before editing its source. Its log and prior validate:all exit0 are preserved and the partial run is not counted as passed. Full required-web and new-head required CI remain pending. That quality result predates the following cold-import repair; fresh quality is required for the new test source.
+
+## Lifecycle and permissions cold-import follow-up
+
+The next exact-source full web run completed 19 passing batches, then its final
+592-file batch had 591 passing files and 12,278 passing tests, with one existing
+5-second template-list mount timeout. Original uncached focused execution
+reproduced two initial lifecycle mount timeouts (66/68 passed). After moving the
+four SFC imports from mount helpers into collection, lifecycle passed 68/68; its
+unchanged permissions neighbor then reproduced the same cold-import boundary
+in two initial center mounts. Its five SFC imports were moved identically.
+
+Final focused and restored runs each passed 113/113 (lifecycle 68, permissions
+45), zero skipped. Temporarily removing the two mock adapters' load-observation
+forwarding made exactly the original load assertions fail; real mounts, test
+bodies and assertions remained unchanged, and source bytes were restored.
+This is an assertion-observation control, not a production permission mutation.
+All original hooks, mock factory behavior/order, assertions and timeouts remain
+unchanged. Only module loading moved into collection. Evidence is retained under
+`artifacts/report-calendar/lifecycle-timeout/`, including the original full-gate
+log hash, both failed runs, mutation, restoration and final source hashes.
+
+Fresh quality, complete required web and exact-head required CI remain pending
+for this follow-up. No partial or failed lane is counted as a pass.
