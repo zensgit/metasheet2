@@ -880,9 +880,10 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // F-11 the 宜搭 entries on 项目备料页
   // ---------------------------------------------------------------------------
   //
-  // Every server action behind them runs the core live gate (automation-live-authority.ts): the admin
-  // role, `role:admin`, or the literal `integration:admin` code — the plugin's `holdsPlatformAdmin`
-  // over the flattened principal. The DOM half, per actor, is StockPreparationProjectBoard.spec.ts B-04.
+  // The entries mirror the plugin's `holdsPlatformAdmin` over the flattened principal: the admin role,
+  // `role:admin`, or the literal `integration:admin` code. Every server action behind them runs the
+  // stricter core live gate (automation-live-authority.ts), which also checks namespace admission, active
+  // tenant membership and the anchored owner. The DOM half, per actor, is StockPreparationProjectBoard.spec.ts B-04.
 
   it('F-11: the 宜搭 entries open for exactly the literal platform admin, for EVERY actor', () => {
     for (const actor of ACTORS) {

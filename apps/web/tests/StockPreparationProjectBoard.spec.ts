@@ -1628,7 +1628,8 @@ describe('项目备料页 — the operator project board', () => {
     expect(syncedText.trim().length).toBeGreaterThan(0)
   })
 
-  /** The server's live YiDa gate admits exactly these principals (automation-live-authority.ts). */
+  /** The browser's platform-admin view (holdsPlatformAdmin). The server's live gate is stricter: it also
+   *  checks namespace admission, active tenant membership and the anchored owner (automation-live-authority.ts). */
   function asYidaAdmin(): void {
     h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull', 'integration:admin']
     h.roles = []
@@ -1651,7 +1652,7 @@ describe('项目备料页 — the operator project board', () => {
     expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
   })
 
-  it('B-04: YiDa entries render exactly for the literal platform admin the server admits, never for an expanding grant', async () => {
+  it('B-04: YiDa entries render exactly for the literal platform admin, never for an expanding grant', async () => {
     const cases: Array<[string, string[], string[], boolean]> = [
       ['floor operator', ['stock-prep:read', 'stock-prep:operate'], [], false],
       ['puller', ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], [], false],

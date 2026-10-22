@@ -24,7 +24,8 @@
  *     entry's SELECT is issued; the SQLSTATE classification remains only as the fallback for a race.
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
  *     An entry with `maxRows` (the YiDa stores: large snapshots that are never deleted) reads at
- *     most min(rowLimit, maxRows) + 1 rows, so one run cannot buffer and decrypt gigabytes. A
+ *     most min(rowLimit, maxRows) + 1 rows (21 or 51 per YiDa store; the size of each row is bounded
+ *     only by the table CHECKs). A
  *     truncated entry with undecryptable values warns that only a sample of N rows was checked
  *     (an unordered LIMIT: no ORDER BY, so which rows is unspecified).
  *   - `plaintext` is narrow on purpose: non-encrypted values in the catalogued field each reader uses,

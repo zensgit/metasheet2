@@ -536,7 +536,9 @@
 
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
            从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
-           server answers for this caller (R-11); the ones that do not render say why in words. -->
+           server answers for this caller (R-11); the ones that do not render say why in words.
+           The 宜搭 entries follow the browser's platform-admin view; the server still checks the
+           anchored owner, namespace admission and tenant membership on every action. -->
       <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
         <!-- 从PLM拉取 lives ABOVE, outside `v-if="board"` — see the section that renders it. It is
              ONE instance either way: mounting a second copy here would give the operator two panels
