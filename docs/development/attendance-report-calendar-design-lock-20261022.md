@@ -108,3 +108,44 @@ log hash, both failed runs, mutation, restoration and final source hashes.
 
 Fresh quality, complete required web and exact-head required CI remain pending
 for this follow-up. No partial or failed lane is counted as a pass.
+
+## Shared cold imports and expired test continuations
+
+The next full lane at `1aa419c03d6c8febaed248f072c40e1557be502a` passed
+19 batches, then failed its final batch: 579 files / 12,265 tests passed,
+13 files / 14 tests failed. The original 13-file uncached focused run had
+246 passes and 16 failures. These failed runs remain retained, not accepted.
+
+Twelve observed approval specs now load their SFCs during collection: seven
+static imports and five module-tail preloads after eager mock declarations.
+The five keep every original mount-time await import. A beforeAll attempt
+actually exceeded the unchanged 10-second hook budget: all 49 cases were
+pending, despite the reporter's misleading top-level pass counter. The final
+module-evaluation version passes all 12 complete files plus the unchanged
+lifecycle/permissions neighbors: 14 files, 369/369, zero skipped. Two temporary
+observation controls hit the original five-tabs and load-on-mount assertions
+(47 passed, two named failures); exact restoration then passes center 49/49.
+
+The multitable history field-scope failure was isolated separately. Natural
+cold imports outlived multiple 5-second case budgets; expired continuations
+mounted into a later case's shared container. A preloaded neutral copy passes
+6/6. Holding only the first cached import return reproduces its intentional
+timeout plus the original PR-C chip-null assertion, with four controls passing.
+Trace shows the stale and current bodies mounting the same container and
+clicking the same history button/modal twice, expanding then collapsing it.
+Blocking only that stale continuation before mount leaves the intentional
+first timeout but restores the other five original tests. Both delayed runs
+retain exit 1; the intentional timeout is never counted as passed.
+
+The actual test repair adds only a three-line collection preload after eager
+mock declarations. All original bytes, including three dynamic import/await
+sites, mounts, mocks, assertions and timeouts, remain. Normal configuration
+passes the complete target 6/6 and two existing history neighbors 47/47, zero
+skipped. Production field visibility and record navigation code are unchanged.
+
+Main independently audited the exact source splices, per-case results, trace,
+restoration and finished process handles. Evidence is under
+`artifacts/report-calendar/cold-import-batch/` and
+`artifacts/report-calendar/history-scope-timeout/preloaded/`.
+Fresh quality, complete required web and exact-head CI remain required for
+this new test source; prior-head CI success does not satisfy those gates.

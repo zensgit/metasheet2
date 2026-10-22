@@ -238,6 +238,9 @@ function createGridMock() {
   }
 }
 
+// Preload after eager mock declarations while preserving each case's original import await.
+await import('../src/multitable/views/MultitableWorkbench.vue')
+
 describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
