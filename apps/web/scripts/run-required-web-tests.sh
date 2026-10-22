@@ -1608,6 +1608,7 @@ exec npx vitest run \
   asyncStateBlock \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
+  attendance-daily-calendar-copy \
   attendance-record-timeline \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \

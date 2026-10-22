@@ -18,6 +18,7 @@
           v-model="settingsForm.autoAbsenceRunAt"
           name="autoAbsenceRunAt"
         />
+        <small>{{ tr('Runs in each organization’s default attendance timezone.', '按各组织默认考勤时区执行。') }}</small>
       </label>
       <label class="attendance__field" for="attendance-auto-absence-lookback">
         <span>{{ tr('Lookback days', '回溯天数') }}</span>
