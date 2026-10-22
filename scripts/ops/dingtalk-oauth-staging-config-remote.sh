@@ -186,6 +186,71 @@ compose_current() {
     docker compose "${ACTIVE_COMPOSE_ARGS[@]}" "$@")
 }
 
+# Interpolated config output doubles literal dollars for Compose round-tripping.
+# Decode that representation once before comparing it with actual container bytes.
+compose_json() {
+  compose_current config --format json "$@" \
+    | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().replace("$$", "$"))'
+}
+
+# Compose 2.x discards env_file even with --no-env-resolution unless interpolation
+# is disabled. Recover its source paths with a temporary label probe: Compose itself
+# still performs interpolation using the original project's inputs.
+recover_compose_sources() {
+  local raw="$1" rendered="$2" unresolved probe mapping resolved
+  unresolved="$(mktemp "${PERSIST_DIR}/.compose-unresolved.XXXXXX")"
+  probe="$(mktemp "${PERSIST_DIR}/.compose-probe.XXXXXX")"
+  mapping="$(mktemp "${PERSIST_DIR}/.compose-mapping.XXXXXX")"
+  resolved="$(mktemp "${PERSIST_DIR}/.compose-probed.XXXXXX")"
+  cleanup_files+=("$unresolved" "$probe" "$mapping" "$resolved")
+  compose_current config --no-interpolate --no-env-resolution --no-path-resolution --format json \
+    > "$unresolved" 2>/dev/null || return 1
+  python3 - "$unresolved" "$probe" "$mapping" <<'PY'
+import json, sys
+source, probe, mapping = sys.argv[1:]
+services = {}
+entries = []
+for name, service in json.load(open(source))["services"].items():
+    for field in ("env_file", "label_file"):
+        for entry in service.get(field, []) or []:
+            value = dict(entry) if isinstance(entry, dict) else {"path": entry}
+            if not isinstance(value.get("path"), str):
+                raise SystemExit(1)
+            key = "io.metasheet.oauth-source-" + str(len(entries))
+            services.setdefault(name, {"labels": {}})["labels"][key] = value["path"]
+            entries.append({"service": name, "field": field, "entry": value, "key": key})
+if not entries:
+    raise SystemExit(1)
+with open(probe, "w") as fh:
+    json.dump({"services": services}, fh)
+with open(mapping, "w") as fh:
+    json.dump(entries, fh)
+PY
+  (ACTIVE_COMPOSE_ARGS=("${ACTIVE_COMPOSE_ARGS[@]}" -f "$probe"); compose_json) \
+    > "$resolved" 2>/dev/null || return 1
+  python3 - "$rendered" "$resolved" "$mapping" "$raw" "$STAGING_DIR" <<'PY'
+import json, os, sys
+baseline, probed, mapping, destination, directory = sys.argv[1:]
+model = json.load(open(baseline))
+probe = json.load(open(probed))
+entries = json.load(open(mapping))
+for service in model["services"].values():
+    service.pop("env_file", None)
+    service.pop("label_file", None)
+for item in entries:
+    value = item["entry"]
+    path = probe["services"][item["service"]]["labels"][item["key"]]
+    if not isinstance(path, str):
+        raise SystemExit(1)
+    if path.startswith("~/"):
+        path = os.path.expanduser(path)
+    value["path"] = os.path.abspath(os.path.join(directory, path))
+    model["services"][item["service"]].setdefault(item["field"], []).append(value)
+with open(destination, "w") as fh:
+    json.dump(model, fh)
+PY
+}
+
 resolve_active_env() {
   local working_dir project files env_files file raw live image_env
   working_dir="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$BACKEND_CONTAINER")"
@@ -216,10 +281,18 @@ resolve_active_env() {
   live="$(mktemp "${PERSIST_DIR}/.live-env.XXXXXX")"
   image_env="$(mktemp "${PERSIST_DIR}/.image-env.XXXXXX")"
   cleanup_files+=("$ACTIVE_RENDERED_JSON" "$live" "$image_env")
-  compose_current config --no-env-resolution --format json > "$raw" 2>/dev/null \
+  compose_json --no-env-resolution > "$raw" 2>/dev/null \
     || fail "cannot resolve active Compose env source"
-  compose_current config --format json > "$ACTIVE_RENDERED_JSON" 2>/dev/null \
+  compose_json > "$ACTIVE_RENDERED_JSON" 2>/dev/null \
     || fail "cannot render active Compose environment"
+  if ! python3 - "$raw" <<'PY'
+import json, sys
+raise SystemExit(0 if "env_file" in json.load(open(sys.argv[1]))["services"]["backend"] else 1)
+PY
+  then
+    recover_compose_sources "$raw" "$ACTIVE_RENDERED_JSON" 2>/dev/null \
+      || fail "cannot recover active Compose source metadata"
+  fi
   docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" > "$live"
   docker image inspect -f '{{json .Config.Env}}' "$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")" > "$image_env"
   STAGING_ENV_FILE="$(python3 - "$raw" "$ACTIVE_RENDERED_JSON" "$live" "$image_env" 2>/dev/null <<'PY'
@@ -298,7 +371,7 @@ PY
   if [[ "$explicit_env" == false && "$STAGING_ENV_FILE" -ef "${STAGING_DIR}/.env" ]]; then
     candidate_args+=(--env-file "$env_file")
   fi
-  (ACTIVE_COMPOSE_ARGS=("${candidate_args[@]}" -f "$model"); compose_current config --format json) \
+  (ACTIVE_COMPOSE_ARGS=("${candidate_args[@]}" -f "$model"); compose_json) \
     > "$rendered" 2>/dev/null || return 1
   python3 - "$ACTIVE_RENDERED_JSON" "$rendered" "$OAUTH_CLIENT_ID_FILE" "$OAUTH_CLIENT_SECRET_FILE" \
     "$EXPECTED_CORP_ID" "$EXPECTED_REDIRECT_URI" "$EXPECTED_APP_URL" <<'PY'

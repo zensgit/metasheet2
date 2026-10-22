@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { tmpdir, homedir } from 'node:os'
+import { join, relative, resolve, dirname, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 
@@ -15,15 +15,18 @@ const docker = spawnSync('sh', ['-c', 'command -v docker'], { encoding: 'utf8' }
 const compose = process.env.COMPOSE_TEST_BIN || docker
 const composePrefix = process.env.COMPOSE_TEST_BIN ? [] : ['compose']
 assert.ok(compose, 'real Docker Compose is required; this suite must not skip')
+const version = spawnSync(compose, [...composePrefix, 'version', '--short'], { encoding: 'utf8' })
+assert.equal(version.status, 0, 'Compose version probe must succeed')
+console.log('# Compose parser ' + version.stdout.trim())
 
 function fixture(t, options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'oauth-env-source-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
-  const stack = join(dir, 'stack')
+  const stack = join(dir, ...Array(options.homeRelative ? homedir().split(sep).length : 1).fill('stack'))
   const bin = join(dir, 'bin')
   const privateDir = join(dir, 'private')
   for (const path of [stack, join(stack, 'docker'), bin, privateDir]) mkdirSync(path, { recursive: true })
-  const active = options.activeDotenv ? join(stack, '.env') : join(dir, 'runtime.env')
+  const active = options.activeDotenv ? join(stack, '.env') : join(dir, options.dollarPath ? 'runtime $literal #quoted.env' : 'runtime.env')
   const legacy = join(stack, 'docker', 'app.staging.env')
   const candidate = join(privateDir, 'candidate.env')
   const config = join(stack, 'compose.json')
@@ -34,7 +37,17 @@ function fixture(t, options = {}) {
   writeFileSync(legacy, 'DINGTALK_CLIENT_ID=synthetic-old\nUNRELATED_CONFIG=stale-fixture\n')
   writeFileSync(join(dir, 'client.id'), 'synthetic-client')
   writeFileSync(join(dir, 'client.secret'), 'synthetic-secret')
-  const envFiles = [options.interpolated ? '${APP_ENV_FILE:-./docker/app.staging.env}' : active]
+  const envFiles = [options.interpolated ? '${APP_ENV_FILE:-./docker/app.staging.env}' : active.replaceAll('$', () => '$$')]
+  if (options.homeRelative) {
+    envFiles[0] = '~/' + relative(homedir(), active)
+    if (options.homeShadow) {
+      const shadow = resolve(stack, envFiles[0])
+      assert.ok(shadow.startsWith(dir + sep), 'shadow fixture must remain inside its owned directory')
+      mkdirSync(dirname(shadow), { recursive: true })
+      writeFileSync(shadow, original)
+    }
+  }
+
   if (options.multiple) {
     const extra = join(dir, 'extra.env')
     writeFileSync(extra, 'EXTRA_SETTING=retained\n')
@@ -61,7 +74,8 @@ function fixture(t, options = {}) {
   if (interpolationEnv) composeArgs.push('--env-file', interpolationEnv)
   const parsed = spawnSync(compose, [...composeArgs, 'config', '--format', 'json'], { encoding: 'utf8' })
   assert.equal(parsed.status, 0, 'real Compose fixture must parse: ' + parsed.stderr)
-  const rendered = JSON.parse(parsed.stdout).services.backend.environment
+  const rendered = JSON.parse(parsed.stdout.replaceAll('$$', '$')).services.backend.environment
+  assert.equal(rendered.ACTIVE_ONLY_SETTING, 'keep # and $literal', 'fixture uses actual literal env bytes, not Compose serialization escaping')
   const runtime = { IMAGE_DEFAULT: 'retained', ...rendered, ...options.runtime }
   if (options.runtimeDelete) delete runtime[options.runtimeDelete]
   const labels = {
@@ -72,7 +86,7 @@ function fixture(t, options = {}) {
   }
   const data = {
     image, labels, runtime: Object.entries(runtime).map(([k, v]) => k + '=' + v),
-    imageEnv: ['IMAGE_DEFAULT=retained'], compose, composePrefix, commands: join(dir, 'commands.jsonl'),
+    imageEnv: ['IMAGE_DEFAULT=retained'], compose, composePrefix, legacyMetadata: options.legacyMetadata, commands: join(dir, 'commands.jsonl'),
   }
   const dataFile = join(dir, 'fixture.json')
   writeFileSync(dataFile, JSON.stringify(data))
@@ -84,7 +98,16 @@ const a = process.argv.slice(2)
 fs.appendFileSync(f.commands, JSON.stringify(a) + '\n')
 if (a[0] === 'compose') {
   if (!a.includes('config')) throw new Error('Engine mutation forbidden in fixture')
-  const r = cp.spawnSync(f.compose, [...f.composePrefix, ...a.slice(1)], { stdio: 'inherit' })
+  const legacy = f.legacyMetadata && a.includes('--no-env-resolution') && !a.includes('--no-interpolate')
+  const r = cp.spawnSync(f.compose, [...f.composePrefix, ...a.slice(1)], { stdio: legacy ? 'pipe' : 'inherit', encoding: 'utf8' })
+  if (legacy && r.status === 0) {
+    const model = JSON.parse(r.stdout)
+    for (const service of Object.values(model.services)) delete service.env_file
+    process.stdout.write(JSON.stringify(model))
+  } else if (legacy) {
+    process.stdout.write(r.stdout || '')
+    process.stderr.write(r.stderr || '')
+  }
   process.exit(r.status ?? 1)
 }
 if (a[0] === 'image' && a[1] === 'inspect') {
@@ -109,21 +132,22 @@ if (a[0] === 'image' && a[1] === 'inspect') {
     OAUTH_ENV_FIXTURE: dataFile, ACTION: 'prepare', OUTPUT_DIR: dir, RUN_STAMP: 'synthetic',
     STAGING_DEPLOY_PATH: stack, DEPLOY_PATH: join(dir, 'prod'),
     OAUTH_CLIENT_ID_FILE: join(dir, 'client.id'), OAUTH_CLIENT_SECRET_FILE: join(dir, 'client.secret'),
-    TEST_PRIVATE: privateDir, TEST_CANDIDATE: candidate, TEST_EXPECTED_SOURCE: active,
+    TEST_PRIVATE: privateDir, TEST_CANDIDATE: candidate, TEST_EXPECTED_SOURCE: active, TEST_SOURCE_CAPTURE: join(dir, 'selected-source'),
   }
   function run(extra = '') {
     const body = library + '\numask 077\nPERSIST_DIR="$TEST_PRIVATE"\nresolve_active_env\n' +
-      '[[ "$STAGING_ENV_FILE" == "$TEST_EXPECTED_SOURCE" ]]\nbuild_candidate "$TEST_CANDIDATE"\n' +
+      'printf \'%s\' "$STAGING_ENV_FILE" > "$TEST_SOURCE_CAPTURE"\n[[ "$STAGING_ENV_FILE" == "$TEST_EXPECTED_SOURCE" ]] || exit 97\nbuild_candidate "$TEST_CANDIDATE"\n' +
       extra + '\ncompose_with_env "$TEST_CANDIDATE" config\n'
     return spawnSync('bash', ['-c', body], { env, encoding: 'utf8' })
   }
-  return { run, active, legacy, candidate, original, data }
+  return { run, active, legacy, candidate, original, data, sourceCapture: join(dir, 'selected-source') }
 }
 
 test('literal active env source preserves unrelated settings and never switches to legacy', t => {
   const f = fixture(t)
   const result = f.run()
   assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
   const candidate = readFileSync(f.candidate, 'utf8')
   assert.match(candidate, /UNRELATED_CONFIG=active-fixture/)
   assert.match(candidate, /ACTIVE_ONLY_SETTING='keep # and \$literal'/)
@@ -140,6 +164,7 @@ test('active source follows Compose dotenv interpolation', t => {
   const f = fixture(t, { interpolated: true })
   const result = f.run()
   assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
   assert.match(readFileSync(f.candidate, 'utf8'), /UNRELATED_CONFIG=active-fixture/)
 })
 
@@ -181,6 +206,7 @@ test('active env may also be an explicit interpolation env without losing settin
   const f = fixture(t, { globalEnv: true })
   const result = f.run()
   assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
 })
 
 for (const [name, options] of [
@@ -213,6 +239,35 @@ for (const [name, options] of [
     const result = f.run()
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, /candidate changes unrelated configuration or target values are overridden|active env source/)
+    assert.equal(readFileSync(f.active, 'utf8'), f.original)
+  })
+}
+
+test('recovers missing source metadata with Compose interpolation and original paths', t => {
+  const f = fixture(t, { legacyMetadata: true, interpolated: true })
+  const result = f.run()
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
+  assert.match(readFileSync(f.candidate, 'utf8'), /UNRELATED_CONFIG=active-fixture/)
+  assert.equal(readFileSync(f.active, 'utf8'), f.original)
+})
+
+test('preserves literal dollars and spaces in an env source path through legacy recovery', t => {
+  const f = fixture(t, { legacyMetadata: true, dollarPath: true })
+  const result = f.run()
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
+  assert.match(readFileSync(f.candidate, 'utf8'), /UNRELATED_CONFIG=active-fixture/)
+  assert.equal(readFileSync(f.active, 'utf8'), f.original)
+})
+
+for (const homeShadow of [false, true]) {
+  test('legacy recovery selects the Compose home source' + (homeShadow ? ' despite an identical project shadow' : ''), t => {
+    const f = fixture(t, { legacyMetadata: true, homeRelative: true, homeShadow })
+    const result = f.run()
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(f.sourceCapture, 'utf8'), f.active)
+    assert.match(readFileSync(f.candidate, 'utf8'), /UNRELATED_CONFIG=active-fixture/)
     assert.equal(readFileSync(f.active, 'utf8'), f.original)
   })
 }
