@@ -78,3 +78,10 @@ module, the whole four-file batch passes 116/116 with zero excluded. No assertio
 permission guard, timeout or workflow is weakened. Evidence is under
 artifacts/report-calendar/nav-route-timeout. Follow-up quality, full web and
 exact-head CI must finish on the repaired source before final acceptance.
+
+
+Required registry order correction: the original head added the two report specs and analytics neighbor out of the existing case-insensitive order. The unchanged structural guard reproduced two assertion failures (32 controls passed). Only token order is repaired: all 514 entries and every prior selector remain present, without duplicates; the sorted .tokens manifest was already correct and is unchanged. Final registration/enumeration neighbors pass 456/456 in three backend files and workflow/shape neighbors pass 36/36 in two frontend files.
+
+One initial backend-neighbor collection attempt hit the unchanged PyYAML subprocess 120-second limit (39 cases passed, one suite failed to collect); this is recorded as an environment/runtime failure, not an assertion result. The same Python parser and same Node bridge parsed the original workflow directly in 0.152/0.182 seconds. Repeating the original command, source, assertions and timeout completed 456/456. No parser or timeout was changed. Evidence: artifacts/report-calendar/gate-order/.
+
+The partial local full-web run was explicitly stopped only after this registry defect was confirmed, before editing its source. Its log and prior validate:all exit0 are preserved and the partial run is not counted as passed. Full required-web and new-head required CI remain pending. Product/test TypeScript is unchanged since the successful quality run.
