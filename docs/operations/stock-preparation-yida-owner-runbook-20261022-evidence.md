@@ -272,7 +272,8 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 | 4.6.7 | state_unconfirmed | DR:193-197、DR:326-329 |
 | 4.6.8 | not_started | SPT:113-118 |
 | 4.6.9 | not_sent 当前无代码路径产生 | DLS:316-329（`cancelPrepared` 唯一写 not_sent 处），DLS:339 导出；全仓 grep 无生产调用者 |
-| 4.6.10 | 无「持久记录状态」行 = 未准入 | OP:51（`v-if="deliveryStatus"`）、OP:95-96；AS:435-442（无 admission → `delivery: null`）；提交被拒时 OP:186 不调用 applyObservation |
+| 4.6.10 | 无「持久记录状态」行：只有刷新**成功**且返回 `delivery: null` 时才表示未准入；刷新失败或提交结果丢失时，`observed` 保持为空、状态行同样不显示，此时可能已发出，按结果未知处理 | OP:51（`v-if="deliveryStatus"`）、OP:82、OP:95-96；OP:125-140（`perform` 的 catch 只设 `errorCode`，不调用 apply）；OP:186-192（提交与刷新都只在成功时 `applyObservation`）；AS:435-442（无 admission → `delivery: null`）；授权编号只在页面显示 OP:44 |
+| 3.4.x | 删掉配置行不等于关闭：部署脚本只设置文件中出现的变量，不清除缺失变量；只读确认 = owner 的初始化 GET 成功后是否出现「打开单行 CREATE 确认（服务器已开通）」 | `scripts/ops/multitable-onprem-apply-package.ps1:57-91`（`Import-AppEnvFile` 逐行 `Set-Item Env:`，无清除）；PV:91-99（入口 `v-if="ownerSendEnabled && !ownerSendOpen"`，`ownerSendEnabled` 来自初始化面板）；IP:46-47（只在 GET/POST 成功后发出 `state.sendEnabled === true`）；R:275-288（服务器在授权读取后返回 `sendEnabled`） |
 | 4.6.11 | 未准入的原因：过期、撤销、业务键占用、凭据撤销 | AS:383-384、AS:397（撤销/过期）；AS:385-391、DLS:180-201（业务键）；HRT:256（凭据撤销 → 首次准入被阻止、提交 503） |
 | 4.7.1 | ACK 不是业务核验；无自动回读 | R:150；FT:257-258；OP:52 |
 | 4.7.2 | 界面不显示实例 ID | R:94-98；ack_instance_id 仅在 M090:24 |
