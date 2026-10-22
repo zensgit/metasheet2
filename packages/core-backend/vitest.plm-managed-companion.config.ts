@@ -7,7 +7,10 @@ if (!process.env.PLM_MANAGED_COMPANION_TEST_PG_URL) {
 /** Missing or skipped PostgreSQL execution is a failure. */
 export default defineConfig({
   test: {
-    include: ['tests/integration/plm-managed-companion-pg.realdb.ts'],
+    include: [
+      'tests/integration/plm-managed-companion-pg.realdb.ts',
+      'tests/integration/plm-managed-continuous-completion-pg.realdb.ts',
+    ],
     environment: 'node',
     pool: 'forks',
     fileParallelism: false,

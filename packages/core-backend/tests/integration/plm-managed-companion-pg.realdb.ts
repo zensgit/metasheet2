@@ -19,6 +19,7 @@ import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
 import { secretManager } from '../../src/security/SecretManager'
 import { up, down } from '../../src/db/migrations/zzzz20261018010000_create_plm_managed_companion'
+import { up as continuousUp } from '../../src/db/migrations/zzzz20261022010000_plm_managed_continuous_completion'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { query } from '../../src/db/pg'
 import { authRouter } from '../../src/routes/auth'
@@ -429,6 +430,7 @@ beforeAll(async () => {
     );
   `)
   await up(db)
+  await continuousUp(db)
   await pool.end()
   const config = JSON.stringify({ connection: { url: `${ORIGIN}/plm` } })
   for (const [id, role] of [[OWNER, 'user'], [OTHER, 'user'], [ADMIN, 'admin']] as const) {
@@ -496,6 +498,7 @@ describe('managed companion postgresql', () => {
       await expect(classifyManagedSource(SOURCE)).resolves.toEqual({ kind: 'schema-missing' })
 
       await up(db)
+      await continuousUp(db)
       process.env.PLM_MANAGED_COMPANION_ENABLED = 'false'
       resetSharedTransportAudit()
       await expect(classifyManagedSource(SOURCE)).resolves.toEqual({ kind: 'unbound' })
@@ -503,7 +506,10 @@ describe('managed companion postgresql', () => {
       expect(readSharedTransportAudit().calls).toBe(1)
     } finally {
       const present = await query('SELECT to_regclass($1) AS name', ['public.plm_managed_identity_links'])
-      if (!present.rows[0]?.name) await up(db)
+      if (!present.rows[0]?.name) {
+        await up(db)
+        await continuousUp(db)
+      }
       await pool.end()
       enable()
     }

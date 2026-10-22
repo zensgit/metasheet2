@@ -21,10 +21,14 @@ import { resolvePersistedPlmSource } from './plm-personal-bom-write-wire'
 import { currentManagedRequest } from './plm-managed-request-context'
 import { queueSnapshotShareCancellationOnQuery, drainSnapshotShareCancellation, pendingSnapshotShareCancellations } from './plm-managed-snapshot-share-flow'
 import {
+  decodeBoundYurClaims,
   nativeExchange,
+  nativeExchangeContinuous,
   nativeManagedContext,
   nativeRevoke,
   nativeStatus,
+  ManagedNativeCallRefusal,
+  type NativeContinuousExchange,
   type NativeExchange,
 } from './plm-managed-native-http'
 import {
@@ -279,13 +283,29 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
 }
 
+const PROVISION_KEYS = [
+  'issuer', 'nativeAuthUserId', 'nativeTenantId', 'nativeOrgId', 'metaUserId', 'metaTenantId',
+  'metaOrgId', 'dataSourceId', 'rootPartId', 'ownerOptIn',
+] as const
+
+function provisionRecord(body: unknown): { record: Record<string, unknown>; continuityMode: 'ordinary' | 'continuous' } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+  }
+  const record = body as Record<string, unknown>
+  const keys = Object.keys(record).sort().join()
+  if (keys === [...PROVISION_KEYS].sort().join()) return { record, continuityMode: 'ordinary' }
+  if (keys === [...PROVISION_KEYS, 'continuityMode'].sort().join()) {
+    if (record.continuityMode !== 'hour') throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+    return { record, continuityMode: 'continuous' }
+  }
+  throw new ManagedCompanionRefusal(400, 'PLM_MANAGED_BODY_REFUSED')
+}
+
 export async function provisionManagedLink(actor: ManagedActor, body: unknown): Promise<{ ok: true; linkId: string; generation: number }> {
   if (!isPlmManagedCompanionEnabled()) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_DISABLED')
   await requireTables()
-  const record = exactBody(body, [
-    'issuer', 'nativeAuthUserId', 'nativeTenantId', 'nativeOrgId', 'metaUserId', 'metaTenantId',
-    'metaOrgId', 'dataSourceId', 'rootPartId', 'ownerOptIn',
-  ])
+  const { record, continuityMode } = provisionRecord(body)
   if (record.ownerOptIn !== true) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_OWNER_OPT_IN_REQUIRED')
   const issuer = exactString(record.issuer)
   const nativeAuthUserId = exactString(record.nativeAuthUserId)
@@ -342,14 +362,14 @@ export async function provisionManagedLink(actor: ManagedActor, body: unknown): 
         `INSERT INTO plm_managed_identity_links (
            id, installation_issuer, native_auth_user_id, native_tenant_id, native_org_id, client_id, callback,
            meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id, client_origin, generation,
-           status, owner_user_id, created_by, source_fingerprint
+           status, owner_user_id, created_by, source_fingerprint, continuity_mode
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$8,$15,$16
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'active',$8,$15,$16,$17
          )`,
         [
           linkId, registration.issuer, nativeAuthUserId, nativeTenantId, nativeOrgId, registration.clientId,
           registration.callback, metaUserId, metaTenantId, metaOrgId, dataSourceId, rootPartId,
-          registration.origin, generation, actor.id, fingerprint,
+          registration.origin, generation, actor.id, fingerprint, continuityMode,
         ],
       )
     } catch (error) {
@@ -398,6 +418,7 @@ type PreparedIntent = {
   challenge: string
   intentId: string
   rootPartId: string
+  requestMode: 'ordinary' | 'continuous'
 }
 
 function headerValue(req: Request, name: string): string {
@@ -428,6 +449,7 @@ function navigationFor(prepared: PreparedIntent): string {
     rootPartId: prepared.rootPartId,
     state: prepared.state,
     codeChallenge: prepared.challenge,
+    continuityHint: prepared.requestMode === 'continuous' ? 'hour' : undefined,
   })
 }
 
@@ -459,6 +481,12 @@ async function prepareManagedIntent(
   await requireMembership(client, actor.id, text(link.meta_org_id))
   const fingerprint = await loadSource(client, text(link.data_source_id), actor.id, registeredPlmOrigin(registration), rootPartId)
   if (fingerprint !== text(link.source_fingerprint)) throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+  const requestMode = text(link.continuity_mode) === 'continuous'
+    ? 'continuous'
+    : text(link.continuity_mode) === 'ordinary' ? 'ordinary' : ''
+  if (requestMode !== 'ordinary' && requestMode !== 'continuous') {
+    throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_LINK_STOPPED')
+  }
   const verifier = randomUrlToken(32)
   const state = randomUrlToken(32)
   const nonce = randomUrlToken(32)
@@ -469,18 +497,19 @@ async function prepareManagedIntent(
     `INSERT INTO plm_managed_browser_intents (
        id, link_id, generation, meta_user_id, meta_tenant_id, meta_org_id, data_source_id, root_part_id,
        client_origin, installation_issuer, native_tenant_id, native_org_id, callback, client_id, state_hash,
-       nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at
+       nonce_hash, code_challenge, code_verifier_ciphertext, return_path, status, expires_at, created_at,
+       request_mode
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'pending',$20,$21,$22
      )`,
     [
       intentId, text(link.id), Number(link.generation), actor.id, text(link.meta_tenant_id), text(link.meta_org_id),
       text(link.data_source_id), rootPartId, registration.origin, registration.issuer, registration.nativeTenantId,
       registration.nativeOrgId, registration.callback, registration.clientId, sha256Hex(state), sha256Hex(nonce),
-      challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(),
+      challenge, sealVerifier(verifier), MANAGED_FIXED_RETURN_PATH, expires, new Date(), requestMode,
     ],
   )
-  return { registration, state, nonce, challenge, intentId, rootPartId }
+  return { registration, state, nonce, challenge, intentId, rootPartId, requestMode }
 }
 
 async function assertBrowserIdentity(req: Request, userId: string, tenantId: string): Promise<void> {
@@ -676,6 +705,506 @@ export function handoffManagedCallback(req: Request, res: Response): void {
   res.redirect(302, `${MANAGED_RETURN_PATH}?${params.toString()}`)
 }
 
+type ContinuousLock = {
+  intent: LinkRow
+  link: LinkRow
+  binding: LinkRow | null
+  session: LinkRow | null
+}
+
+type ContinuousStop = {
+  kind: 'stop' | 'refused'
+  code: string
+  status: number
+  clearCookies: boolean
+}
+
+type ContinuousCommit =
+  | { action: 'cookie'; sessionId: string; expiresAt: Date; email: string; role: string }
+  | {
+    action: 'closed'
+    code: string
+    status: number
+    clearCookies: boolean
+    enqueue: boolean
+    delegationId: string | null
+    storedDelegationId: string | null
+  }
+
+function instantSeconds(value: unknown): number | null {
+  const date = value instanceof Date ? value : new Date(String(value ?? ''))
+  if (Number.isNaN(date.getTime())) return null
+  return Math.floor(date.getTime() / 1000)
+}
+
+function registrationMatches(registration: ManagedClientRegistration, row: LinkRow): boolean {
+  return registration.clientId === text(row.client_id)
+    && registration.callback === text(row.callback)
+    && registration.origin === text(row.client_origin)
+    && registration.issuer === text(row.installation_issuer)
+}
+
+function continuousSessionMatches(session: LinkRow, issued: NativeContinuousExchange): boolean {
+  if (session.credential_generation === null || session.credential_generation === undefined) return false
+  if (Number(session.credential_generation) !== 0 || issued.generation_index !== 0) return false
+  if (session.revoked_at) return false
+  if (text(session.delegation_id) !== issued.delegation_id) return false
+  if (text(session.native_subject) !== issued.subject) return false
+  if (text(session.native_tenant_id) !== issued.tenant_id) return false
+  if (text(session.native_org_id) !== issued.org_id) return false
+  if (text(session.root_part_id) !== issued.root_part_id) return false
+  if (text(session.client_origin) !== issued.client_origin) return false
+  if (text(session.scope) !== issued.scope) return false
+  if (instantSeconds(session.expires_at) !== issued.absolute_exp) return false
+  try {
+    const claims = decodeBoundYurClaims(openCredential(text(session.credential_ciphertext)))
+    return !!claims
+      && claims.jti === issued.credential_jti
+      && claims.delegation_id === issued.delegation_id
+      && claims.exp === issued.absolute_exp
+  } catch {
+    return false
+  }
+}
+
+async function lockContinuous(client: SqlClient, intentId: string): Promise<ContinuousLock | null> {
+  const peek = await client.query(
+    'SELECT link_id, data_source_id FROM plm_managed_browser_intents WHERE id = $1',
+    [intentId],
+  )
+  const linkId = text(peek.rows[0]?.link_id)
+  const sourceId = text(peek.rows[0]?.data_source_id)
+  if (!linkId || !sourceId) return null
+  // Link, then binding, then intent, then session. stopLink locks the link first.
+  await client.query('SELECT id FROM plm_managed_identity_links WHERE id = $1 FOR UPDATE', [linkId])
+  await client.query('SELECT data_source_id FROM plm_managed_source_bindings WHERE data_source_id = $1 FOR UPDATE', [sourceId])
+  const intent = (await client.query('SELECT * FROM plm_managed_browser_intents WHERE id = $1 FOR UPDATE', [intentId])).rows[0]
+  const link = (await client.query('SELECT * FROM plm_managed_identity_links WHERE id = $1', [linkId])).rows[0]
+  const binding = (await client.query('SELECT * FROM plm_managed_source_bindings WHERE data_source_id = $1', [sourceId])).rows[0] ?? null
+  const session = (await client.query('SELECT * FROM plm_managed_sessions WHERE intent_id = $1 FOR UPDATE', [intentId])).rows[0] ?? null
+  if (!intent || !link) return null
+  return { intent, link, binding, session }
+}
+
+function linkStillActive(locked: ContinuousLock): boolean {
+  return text(locked.link.status) === 'active'
+    && Number(locked.link.generation) === Number(locked.intent.generation)
+    && !!locked.binding
+    && text(locked.binding.status) === 'active'
+    && text(locked.binding.link_id) === text(locked.link.id)
+    && Number(locked.binding.generation) === Number(locked.link.generation)
+}
+
+async function markContinuousRefused(client: SqlClient, intentId: string): Promise<void> {
+  await client.query(
+    `UPDATE plm_managed_browser_intents
+     SET status = 'refused'
+     WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+       AND delegation_id IS NULL AND credential_ciphertext IS NULL AND consumed_at IS NULL`,
+    [intentId],
+  )
+}
+
+async function freezeContinuousCode(intentId: string, codeHash: string): Promise<ContinuousStop | { kind: 'exchange' }> {
+  return transaction(async (client) => {
+    const locked = await lockContinuous(client, intentId)
+    if (!locked) return { kind: 'stop', code: 'PLM_MANAGED_BROWSER_REQUIRED', status: 401, clearCookies: true }
+    if (text(locked.intent.request_mode) !== 'continuous' || text(locked.link.continuity_mode) !== 'continuous') {
+      return { kind: 'stop', code: 'PLM_MANAGED_EXCHANGE_WRONG_MODE', status: 403, clearCookies: true }
+    }
+    const status = text(locked.intent.status)
+    if (status === 'revoked' || !linkStillActive(locked)) {
+      return { kind: 'stop', code: 'PLM_MANAGED_LINK_STOPPED', status: 403, clearCookies: true }
+    }
+    if (status === 'refused') {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+    }
+    const storedHash = text(locked.intent.completion_code_hash)
+    if (status === 'consumed') {
+      if (!storedHash || !hashesEqual(storedHash, codeHash)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+      }
+      return { kind: 'exchange' }
+    }
+    if (status !== 'pending') {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+    }
+    const expiresAt = instantSeconds(locked.intent.expires_at)
+    if (expiresAt === null || expiresAt * 1000 <= Date.now()) {
+      return { kind: 'stop', code: 'PLM_MANAGED_INTENT_EXPIRED', status: 409, clearCookies: true }
+    }
+    try {
+      await loadUser(client, text(locked.intent.meta_user_id))
+      await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id))
+      await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_org_id))
+      const registration = registrationFor({
+        issuer: text(locked.intent.installation_issuer),
+        nativeTenantId: text(locked.intent.native_tenant_id),
+        nativeOrgId: text(locked.intent.native_org_id),
+      })
+      if (!registrationMatches(registration, locked.intent)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_REGISTRATION_MISMATCH', status: 403, clearCookies: false }
+      }
+      const fingerprint = await loadSource(
+        client,
+        text(locked.intent.data_source_id),
+        text(locked.intent.meta_user_id),
+        registeredPlmOrigin(registration),
+        text(locked.intent.root_part_id),
+      )
+      if (fingerprint !== text(locked.link.source_fingerprint)) {
+        return { kind: 'stop', code: 'PLM_MANAGED_SOURCE_CHANGED', status: 403, clearCookies: false }
+      }
+    } catch (error) {
+      if (error instanceof ManagedCompanionRefusal) {
+        return { kind: 'stop', code: error.code, status: error.status, clearCookies: false }
+      }
+      throw error
+    }
+    if (storedHash) {
+      if (!hashesEqual(storedHash, codeHash)) {
+        await client.query(
+          `UPDATE plm_managed_browser_intents
+           SET status = 'refused'
+           WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+             AND completion_code_hash = $2 AND delegation_id IS NULL AND credential_ciphertext IS NULL`,
+          [intentId, storedHash],
+        )
+        return { kind: 'refused', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+      }
+      return { kind: 'exchange' }
+    }
+    const updated = await client.query(
+      `UPDATE plm_managed_browser_intents
+       SET completion_code_hash = $2
+       WHERE id = $1 AND status = 'pending' AND completion_code_hash IS NULL AND request_mode = 'continuous'
+       RETURNING id`,
+      [intentId, codeHash],
+    )
+    if (updated.rows.length === 1) return { kind: 'exchange' }
+    const again = await client.query(
+      'SELECT status, completion_code_hash FROM plm_managed_browser_intents WHERE id = $1',
+      [intentId],
+    )
+    const nextHash = text(again.rows[0]?.completion_code_hash)
+    if (text(again.rows[0]?.status) === 'pending' && nextHash && hashesEqual(nextHash, codeHash)) {
+      return { kind: 'exchange' }
+    }
+    if (text(again.rows[0]?.status) === 'pending' && nextHash) {
+      await client.query(
+        `UPDATE plm_managed_browser_intents
+         SET status = 'refused'
+         WHERE id = $1 AND status = 'pending' AND completion_code_hash = $2
+           AND delegation_id IS NULL AND credential_ciphertext IS NULL`,
+        [intentId, nextHash],
+      )
+      return { kind: 'refused', code: 'PLM_MANAGED_CALLBACK_REFUSED', status: 401, clearCookies: true }
+    }
+    return { kind: 'stop', code: 'PLM_MANAGED_INTENT_CONSUMED', status: 409, clearCookies: true }
+  })
+}
+
+function closedResult(
+  locked: ContinuousLock,
+  issued: NativeContinuousExchange,
+  code: string,
+  status: number,
+  clearCookies: boolean,
+  enqueueObserved: boolean,
+): ContinuousCommit {
+  const storedDelegationId = locked.session ? text(locked.session.delegation_id) : ''
+  const observed = issued.delegation_id
+  return {
+    action: 'closed',
+    code,
+    status,
+    clearCookies,
+    enqueue: enqueueObserved && observed.length > 0 && observed !== storedDelegationId,
+    delegationId: observed || null,
+    storedDelegationId: storedDelegationId || null,
+  }
+}
+
+async function actorForSession(client: SqlClient, intent: LinkRow): Promise<{ email: string; role: string }> {
+  const user = await loadUser(client, text(intent.meta_user_id))
+  return {
+    email: text(user.email) || `${text(intent.meta_user_id)}@managed.local`,
+    role: text(user.role) || 'user',
+  }
+}
+
+async function commitContinuousExchange(
+  intentId: string,
+  codeHash: string,
+  issued: NativeContinuousExchange,
+): Promise<ContinuousCommit> {
+  return transaction(async (client) => {
+    const locked = await lockContinuous(client, intentId)
+    if (!locked) {
+      return {
+        action: 'closed',
+        code: 'PLM_MANAGED_BROWSER_REQUIRED',
+        status: 401,
+        clearCookies: true,
+        enqueue: issued.delegation_id.length > 0,
+        delegationId: issued.delegation_id,
+        storedDelegationId: null,
+      }
+    }
+    if (!linkStillActive(locked) || text(locked.intent.status) === 'revoked') {
+      return closedResult(locked, issued, 'PLM_MANAGED_LINK_STOPPED', 403, true, true)
+    }
+    await loadUser(client, text(locked.intent.meta_user_id))
+    await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id))
+    await requireMembership(client, text(locked.intent.meta_user_id), text(locked.intent.meta_org_id))
+    const registration = registrationFor({
+      issuer: text(locked.intent.installation_issuer),
+      nativeTenantId: text(locked.intent.native_tenant_id),
+      nativeOrgId: text(locked.intent.native_org_id),
+    })
+    if (!registrationMatches(registration, locked.intent)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_REGISTRATION_MISMATCH')
+    }
+    const fingerprint = await loadSource(
+      client,
+      text(locked.intent.data_source_id),
+      text(locked.intent.meta_user_id),
+      registeredPlmOrigin(registration),
+      text(locked.intent.root_part_id),
+    )
+    if (fingerprint !== text(locked.link.source_fingerprint)) {
+      throw new ManagedCompanionRefusal(403, 'PLM_MANAGED_SOURCE_CHANGED')
+    }
+    if (text(locked.link.native_auth_user_id) !== issued.subject || text(locked.link.meta_user_id) !== text(locked.intent.meta_user_id)) {
+      if (!locked.session && text(locked.intent.status) === 'pending') await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_IDENTITY_REFUSED', 403, true, true)
+    }
+    const snapshot = { ...locked.intent, native_auth_user_id: locked.link.native_auth_user_id }
+    if (!exchangeMatches(snapshot, issued) || issued.generation_index !== 0) {
+      if (!locked.session && text(locked.intent.status) === 'pending') await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_EXCHANGE_MISMATCH', 403, true, true)
+    }
+    if (locked.session) {
+      if (!continuousSessionMatches(locked.session, issued)) {
+        return closedResult(locked, issued, 'PLM_MANAGED_EXCHANGE_MISMATCH', 409, false, true)
+      }
+      const actor = await actorForSession(client, locked.intent)
+      const expiresAt = locked.session.expires_at instanceof Date
+        ? locked.session.expires_at
+        : new Date(String(locked.session.expires_at))
+      return { action: 'cookie', sessionId: text(locked.session.id), expiresAt, email: actor.email, role: actor.role }
+    }
+    if (text(locked.intent.status) !== 'pending') {
+      return closedResult(locked, issued, 'PLM_MANAGED_INTENT_CONSUMED', 409, true, true)
+    }
+    const createdAt = new Date()
+    const expiresAt = new Date(issued.absolute_exp * 1000)
+    const remaining = issued.absolute_exp - Math.floor(Date.now() / 1000)
+    const span = expiresAt.getTime() - createdAt.getTime()
+    if (remaining < 1 || remaining > 600 || span <= 0 || span > 600_000) {
+      await markContinuousRefused(client, intentId)
+      return closedResult(locked, issued, 'PLM_MANAGED_SESSION_EXPIRY_REFUSED', 503, true, true)
+    }
+    if (failSessionInsert) throw new ManagedCompanionRefusal(503, 'PLM_MANAGED_SESSION_COMMIT_FAILED')
+    const sealed = sealCredential(issued.credential)
+    const stamped = await client.query(
+      `UPDATE plm_managed_browser_intents
+       SET status = 'consumed', consumed_at = now(), delegation_id = $2, credential_ciphertext = $3
+       WHERE id = $1 AND status = 'pending' AND request_mode = 'continuous'
+         AND completion_code_hash = $4 AND delegation_id IS NULL AND credential_ciphertext IS NULL
+       RETURNING id`,
+      [intentId, issued.delegation_id, sealed, codeHash],
+    )
+    if (stamped.rows.length !== 1) {
+      const winner = (await client.query(
+        'SELECT * FROM plm_managed_sessions WHERE intent_id = $1 FOR UPDATE',
+        [intentId],
+      )).rows[0] ?? null
+      if (winner && continuousSessionMatches(winner, issued)) {
+        const actor = await actorForSession(client, locked.intent)
+        const storedExpiry = winner.expires_at instanceof Date ? winner.expires_at : new Date(String(winner.expires_at))
+        return { action: 'cookie', sessionId: text(winner.id), expiresAt: storedExpiry, email: actor.email, role: actor.role }
+      }
+      return closedResult(
+        { ...locked, session: winner },
+        issued,
+        'PLM_MANAGED_INTENT_CONSUMED',
+        409,
+        false,
+        true,
+      )
+    }
+    const sessionId = randomUUID()
+    await client.query(
+      `INSERT INTO plm_managed_sessions (
+         id, intent_id, link_id, data_source_id, generation, delegation_id, credential_ciphertext, expires_at,
+         scope, native_subject, native_tenant_id, native_org_id, meta_user_id, meta_tenant_id, meta_org_id,
+         root_part_id, client_origin, installation_issuer, client_id, created_at, credential_generation
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,0
+       )`,
+      [
+        sessionId, intentId, text(locked.link.id), text(locked.intent.data_source_id), Number(locked.intent.generation),
+        issued.delegation_id, sealed, expiresAt, MANAGED_COMPANION_SCOPE, issued.subject, issued.tenant_id,
+        issued.org_id, text(locked.intent.meta_user_id), text(locked.intent.meta_tenant_id), text(locked.intent.meta_org_id),
+        issued.root_part_id, issued.client_origin, text(locked.intent.installation_issuer), text(locked.intent.client_id),
+        createdAt,
+      ],
+    )
+    const actor = await actorForSession(client, locked.intent)
+    return { action: 'cookie', sessionId, expiresAt, email: actor.email, role: actor.role }
+  })
+}
+
+async function runContinuousCompletion(
+  res: Response,
+  presented: { code: string; state: string },
+  delivery: CompletionDelivery,
+  intent: LinkRow,
+  callback: string,
+  intentId: string,
+): Promise<void> {
+  const codeHash = sha256Hex(presented.code)
+  const deliverFailure = (status: number, code: string, clearCookies: boolean): void => {
+    if (clearCookies) clearIntentCookies(res, callback)
+    deliverCompletion(res, delivery, fixedDestination(intent, 'refused', code), { status, code })
+  }
+  const publishCookie = (sessionId: string, expiresAt: Date, email: string, role: string): void => {
+    const token = signManagedSessionToken({
+      userId: text(intent.meta_user_id),
+      email,
+      role,
+      tenantId: text(intent.meta_tenant_id),
+      sessionId,
+      expiresAt,
+    })
+    clearIntentCookies(res, callback)
+    res.cookie(MANAGED_SESSION_COOKIE, token, { ...cookieBase(callback), maxAge: Math.max(0, expiresAt.getTime() - Date.now()) })
+    deliverCompletion(res, delivery, fixedDestination(intent, 'ready'))
+  }
+  const enqueueUntracked = async (delegationId: string | null, storedDelegationId: string | null): Promise<void> => {
+    if (!delegationId || delegationId === storedDelegationId) return
+    await enqueueObservedRevoke(intent, delegationId)
+  }
+  let frozen: ContinuousStop | { kind: 'exchange' }
+  try {
+    frozen = await freezeContinuousCode(intentId, codeHash)
+  } catch {
+    deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+    return
+  }
+  if (frozen.kind !== 'exchange') {
+    deliverFailure(frozen.status, frozen.code, frozen.clearCookies)
+    return
+  }
+  let issued: NativeContinuousExchange
+  try {
+    const registration = registrationFor({
+      issuer: text(intent.installation_issuer),
+      nativeTenantId: text(intent.native_tenant_id),
+      nativeOrgId: text(intent.native_org_id),
+    })
+    if (!registrationMatches(registration, intent)) {
+      deliverFailure(403, 'PLM_MANAGED_REGISTRATION_MISMATCH', false)
+      return
+    }
+    issued = await nativeExchangeContinuous(registration, {
+      code: presented.code,
+      codeVerifier: openVerifier(text(intent.code_verifier_ciphertext)),
+    })
+    if (loseExchangeResponse) {
+      throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', null, true)
+    }
+  } catch (error) {
+    if (error instanceof ManagedNativeCallRefusal && error.unavailable) {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+    const observed = error instanceof ManagedNativeCallRefusal ? error.observedDelegationId : null
+    const code = error instanceof ManagedCompanionRefusal ? error.code : 'PLM_MANAGED_EXCHANGE_UNAVAILABLE'
+    const status = error instanceof ManagedCompanionRefusal ? error.status : 503
+    const terminal = error instanceof ManagedNativeCallRefusal && !error.unavailable
+    if (!terminal) {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+    const decision = await transaction(async (client) => {
+      const locked = await lockContinuous(client, intentId)
+      const stored = locked?.session ? text(locked.session.delegation_id) : ''
+      if (locked && !locked.session && text(locked.intent.status) === 'pending') {
+        await markContinuousRefused(client, intentId)
+      }
+      return {
+        clearCookies: !locked?.session,
+        enqueue: !!observed && observed !== stored,
+        stored,
+      }
+    })
+    if (decision.enqueue && observed) await enqueueObservedRevoke(intent, observed)
+    deliverFailure(status, code, decision.clearCookies)
+    return
+  }
+  let committed: ContinuousCommit
+  try {
+    committed = await commitContinuousExchange(intentId, codeHash, issued)
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      try {
+        committed = await commitContinuousExchange(intentId, codeHash, issued)
+      } catch (retryError) {
+        if (retryError instanceof ManagedCompanionRefusal
+          && (retryError.code === 'PLM_MANAGED_SESSION_COMMIT_FAILED'
+            || retryError.code === 'PLM_MANAGED_SOURCE_CHANGED'
+            || retryError.code === 'PLM_MANAGED_META_MEMBERSHIP_REFUSED'
+            || retryError.code === 'PLM_MANAGED_META_USER_REFUSED'
+            || retryError.code === 'PLM_MANAGED_REGISTRATION_MISMATCH')) {
+          deliverFailure(retryError.status, retryError.code, false)
+          return
+        }
+        deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+        return
+      }
+    } else if (error instanceof ManagedCompanionRefusal
+      && (error.code === 'PLM_MANAGED_SESSION_COMMIT_FAILED'
+        || error.code === 'PLM_MANAGED_SOURCE_CHANGED'
+        || error.code === 'PLM_MANAGED_META_MEMBERSHIP_REFUSED'
+        || error.code === 'PLM_MANAGED_META_USER_REFUSED'
+        || error.code === 'PLM_MANAGED_REGISTRATION_MISMATCH')) {
+      deliverFailure(error.status, error.code, false)
+      return
+    } else {
+      deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+      return
+    }
+  }
+  if (committed.action === 'closed') {
+    await enqueueUntracked(committed.delegationId, committed.storedDelegationId)
+    deliverFailure(committed.status, committed.code, committed.clearCookies)
+    return
+  }
+  const fresh = await query(
+    `SELECT s.revoked_at, l.status AS link_status
+     FROM plm_managed_sessions s
+     JOIN plm_managed_identity_links l ON l.id = s.link_id
+     WHERE s.id = $1`,
+    [committed.sessionId],
+  )
+  const row = fresh.rows[0]
+  if (!row || row.revoked_at || text(row.link_status) !== 'active') {
+    deliverFailure(403, 'PLM_MANAGED_LINK_STOPPED', true)
+    return
+  }
+  try {
+    publishCookie(committed.sessionId, committed.expiresAt, committed.email, committed.role)
+  } catch (error) {
+    if (error instanceof ManagedCompanionRefusal && error.code === 'PLM_MANAGED_SESSION_EXPIRY_REFUSED') {
+      deliverFailure(error.status, error.code, false)
+      return
+    }
+    deliverFailure(503, 'PLM_MANAGED_EXCHANGE_UNAVAILABLE', false)
+  }
+}
+
 async function runManagedCompletion(
   req: Request,
   res: Response,
@@ -715,6 +1244,18 @@ async function runManagedCompletion(
       return
     }
     throw error
+  }
+  if (text(intent.request_mode) === 'continuous' || text(link.continuity_mode) === 'continuous') {
+    if (text(intent.request_mode) !== 'continuous' || text(link.continuity_mode) !== 'continuous') {
+      clearIntentCookies(res, callback)
+      deliverCompletion(res, delivery, fixedDestination(intent, 'refused', 'PLM_MANAGED_EXCHANGE_WRONG_MODE'), {
+        status: 403,
+        code: 'PLM_MANAGED_EXCHANGE_WRONG_MODE',
+      })
+      return
+    }
+    await runContinuousCompletion(res, presented, delivery, intent, callback, intentId)
+    return
   }
   const consumed = await consumeIntent(intentId, text(intent.state_hash), text(intent.nonce_hash))
   if (!consumed) {

@@ -164,6 +164,25 @@ describe('managed companion registration and navigation', () => {
     expect([...url.searchParams.keys()]).toHaveLength(10)
   })
 
+  it('appends continuity_hint=hour beside the ten public fields and nowhere else', () => {
+    const ordinary = new URL(buildManagedLoginNavigation(registration, {
+      rootPartId,
+      state: 'synthetic-browser-state',
+      codeChallenge: pkceS256('a'.repeat(43)),
+    }))
+    const hour = new URL(buildManagedLoginNavigation(registration, {
+      rootPartId,
+      state: 'synthetic-browser-state',
+      codeChallenge: pkceS256('a'.repeat(43)),
+      continuityHint: 'hour',
+    }))
+    expect([...ordinary.searchParams.keys()]).toHaveLength(10)
+    expect(ordinary.searchParams.has('continuity_hint')).toBe(false)
+    expect([...hour.searchParams.keys()]).toEqual([...ordinary.searchParams.keys(), 'continuity_hint'])
+    expect(hour.searchParams.getAll('continuity_hint')).toEqual(['hour'])
+    expect(hour.search).not.toMatch(/clientSecret|code_verifier|continuityMode/)
+  })
+
   it('keeps start, unlink, and revoke-retry behind the session gate', () => {
     expect(isGateException('/api/plm/managed-login/callback')).toBe(true)
     expect(isGateException('/api/plm/managed-login/browser-start')).toBe(true)
