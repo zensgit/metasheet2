@@ -37,3 +37,25 @@ Scoped default-rule rearm correction (owner follow-up, 2026-10-22): a successful
 | Full required web and exact-head CI | Pending at Draft submission; not counted as passed |
 
 Final scoped evidence is retained under `artifacts/daily-calendar/SCOPED-REARM-HANDOFF.md` and the `scoped-*` logs/manifests. The initial type-only mock signature error was corrected without changing assertions or compiler settings. Earlier shared raw log filenames were reused; `scoped-log-provenance.json` identifies this and the final copies. The current source and all final positive evidence were rechecked before submission.
+
+## Shared required-web cold-import repairs
+
+The seventeen existing web specs use the same original bytes as main and the
+report-calendar baseline. This candidate carries only their reviewed collection
+import/preload repairs from report-calendar `48d3bb350`; no report-calendar
+business feature or workflow change is copied. Original assertions, mocks,
+module-reset behavior and test/hook budgets remain. The fixed route-metadata
+case becomes synchronous; reset-dependent App/authPrincipal imports remain
+inside their original helpers. The member-bar 15-second setting is unchanged.
+
+Parent evidence includes the original cold-import failures, approval 369/369,
+two named observation failures and restored center 49/49, and the multitable
+expired-continuation control with normal target 6/6 and neighbors 47/47. Earlier
+member-bar and navigation repairs have their own original failures and restored
+neighbor evidence. These are provenance for the shared repair, not daily-run
+results. Exact original/repaired hashes and the patch are retained under
+`artifacts/daily-calendar/shared-import-harness/`; all prior daily feature,
+backend guard, test wiring and UI hashes remain unchanged except this evidence
+appendix. Fresh quality, the full required web lane (including these complete
+files) and exact-head CI must pass on the resulting daily candidate before
+acceptance. No production configuration, Stream/lifecycle or UAT change.
