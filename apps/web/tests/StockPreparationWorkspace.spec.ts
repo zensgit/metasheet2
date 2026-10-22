@@ -1280,7 +1280,7 @@ describe('StockPreparationWorkspace shell', () => {
 
     const link = await openMultitableLinkOnProjectWorkspace(root)
     expect(link.getAttribute('data-fill-target')).toBe('none')
-    expect(link.textContent).toContain('打开多维表工作台')
+    expect(link.textContent).toContain('打开多维表首页')
 
     link.click()
     await flushUi()
