@@ -3,7 +3,8 @@
 //   T2 the host readEnablement wiring opens the owner runtime for INTEGRATION_YIDA_OWNER_SEND_ENABLED === 'true' only;
 //   T3 stopOnce keeps the main pool open until an in-flight owner run has drained (initialization runtime:
 //      yida-host-initialization-barrier-realdb.test.ts, a second boot because stop() ends the module pool).
-// Real JWT login, real plugin activation, fully migrated PostgreSQL. fetch is a refusing stub; no remote IO.
+// Real JWT login, real plugin activation, fully migrated PostgreSQL. The host's YiDa egress (the fetch
+// bound at construction, src/index.ts ~:645) refuses and is counted; no other egress is configured in this step.
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -58,7 +59,7 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, owner runtime', 
         refusal(await draft(h.admin.token), 403, 'YIDA_OWNER_RUNTIME_DISABLED')
       }
       // Positive control on the switch itself: with exactly 'true' the same request is admitted past
-      // enablement and fails later, at the live integration ACL, because this caller is not an admin.
+      // enablement and refused later (503 UNAVAILABLE).
       // Never the admin here: a shared CI database must not receive owner draft rows.
       process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED = 'true'
       const admitted = await draft(h.reader.token)
@@ -113,6 +114,8 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, owner runtime', 
     expect(observation.waiterSeen).toBe(true)
     expect(observation.pluginsBeforeStop).toBe(2)
     expect(observation.sameStopPromise).toBe(true)
+    // stopOnce latches BOTH runtimes synchronously, inside the stop() call itself.
+    expect(observation.latchAtStop).toEqual({ owner: 'YIDA_OWNER_RUNTIME_INACTIVE', init: 'YIDA_INITIALIZATION_INACTIVE' })
     expect(observation.stageReached).toBe(true)
     // While the run is held and stopOnce is already at shutdownTasks:
     expect(observation.window.ms).toBeGreaterThanOrEqual(1900)
@@ -135,5 +138,7 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, owner runtime', 
     try { h.host.yidaOwnerRuntime.createPluginCapability() } catch (error) { terminal = error }
     expect(yidaOwnerRuntimeErrorCode(terminal)).toBe('YIDA_OWNER_RUNTIME_INACTIVE')
     expect(h.fetchCalls()).toBe(0)
-  }, 60000)
+    // The helper's worst-case poll budget is about 61 s; 90 s lets a deep failure surface as its own
+    // assertion rather than a generic vitest timeout.
+  }, 90000)
 })

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 import ts from 'typescript'
@@ -21,6 +21,27 @@ function servicesFor(name: string): Record<string, unknown> {
     path: `/nonexistent/${name}`,
   })
   return context.services as unknown as Record<string, unknown>
+}
+
+// Every plugin manifest name the repo ships, read the way PluginLoader reads a plugin directory
+// (plugin.json first, then manifest.json), from both containers the host may scan. Read-only.
+function repoPluginNames(): string[] {
+  const root = path.resolve(__dirname, '..', '..', '..', '..')
+  const names = new Set<string>()
+  for (const container of ['plugins', 'packages/core-backend/plugins']) {
+    const dir = path.join(root, container)
+    if (!existsSync(dir)) continue
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const manifestPath = ['plugin.json', 'manifest.json']
+        .map(file => path.join(dir, entry.name, file))
+        .find(candidate => existsSync(candidate))
+      if (!manifestPath) continue
+      const name = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: unknown }).name
+      if (typeof name === 'string') names.add(name)
+    }
+  }
+  return [...names].sort()
 }
 
 describe('YiDa host capability injection scoping', () => {
@@ -47,6 +68,19 @@ describe('YiDa host capability injection scoping', () => {
     expect(typeof services.security).toBe('object')
     expect(services.yidaOwnerRuntime).toBeUndefined()
     expect(services.yidaInitializationRuntime).toBeUndefined()
+  })
+
+  it('withholds both YiDa capabilities from every other plugin the repo ships', () => {
+    const names = repoPluginNames()
+    // Not vacuous: the scan found the core plugin and at least one real other plugin.
+    expect(names).toContain('plugin-integration-core')
+    expect(names.filter(name => name !== 'plugin-integration-core').length).toBeGreaterThan(0)
+    const holders = names.filter(name => {
+      const services = servicesFor(name)
+      expect(typeof services.security, name).toBe('object')
+      return services.yidaOwnerRuntime !== undefined || services.yidaInitializationRuntime !== undefined
+    })
+    expect(holders).toEqual(['plugin-integration-core'])
   })
 })
 

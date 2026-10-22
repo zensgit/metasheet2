@@ -2,7 +2,8 @@
 // A second boot of its own: stop() ends the module-wide main pool, so one stop per process
 // (the owner runtime barrier is in yida-host-boundaries-realdb.test.ts). The run is held on the
 // runtime's own slot key, pg_advisory_xact_lock(0x59494441, 1), by a session lock this test owns.
-// Real JWT login, real plugin activation, fully migrated PostgreSQL. fetch is a refusing stub; no remote IO.
+// Real JWT login, real plugin activation, fully migrated PostgreSQL. The host's YiDa egress (the fetch
+// bound at construction, src/index.ts ~:645) refuses and is counted; no other egress is configured in this step.
 import type { PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -82,6 +83,8 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, initialization r
     expect(observation.waiterSeen).toBe(true)
     expect(observation.pluginsBeforeStop).toBe(2)
     expect(observation.sameStopPromise).toBe(true)
+    // stopOnce latches BOTH runtimes synchronously, inside the stop() call itself.
+    expect(observation.latchAtStop).toEqual({ owner: 'YIDA_OWNER_RUNTIME_INACTIVE', init: 'YIDA_INITIALIZATION_INACTIVE' })
     expect(observation.stageReached).toBe(true)
     expect(observation.window.ms).toBeGreaterThanOrEqual(1900)
     expect(observation.window.endCalls).toBe(0)
@@ -101,5 +104,6 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, initialization r
     try { h.host.yidaInitializationRuntime.createPluginCapability() } catch (error) { terminal = error }
     expect(yidaInitializationErrorCode(terminal)).toBe('YIDA_INITIALIZATION_INACTIVE')
     expect(h.fetchCalls()).toBe(0)
-  }, 60000)
+    // Worst-case poll budget about 61 s; see the owner barrier test.
+  }, 90000)
 })

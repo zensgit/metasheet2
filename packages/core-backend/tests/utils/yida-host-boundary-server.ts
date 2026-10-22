@@ -2,7 +2,8 @@
 // MetaSheetServer (createPluginContext, readEnablement wiring, stopOnce) with the real
 // plugin-integration-core plus one synthetic near-miss fixture plugin, against a fully
 // migrated PostgreSQL. Users, tenant, password and JWT secret are random per boot.
-// globalThis.fetch refuses and counts every call, so nothing reaches YiDa or any remote host.
+// The host's YiDa egress (the fetch bound at construction, src/index.ts ~:645) refuses and is
+// counted; no other egress is configured in this step.
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
@@ -274,6 +275,8 @@ export type ShutdownBarrierObservation = Readonly<{
   waiterSeen: boolean
   pluginsBeforeStop: number
   sameStopPromise: boolean
+  // Each runtime's latch, read synchronously right after stop() returned and before any await.
+  latchAtStop: Readonly<{ owner: string; init: string }>
   stageReached: boolean
   window: Readonly<{ ms: number; samples: number; endCalls: number; ending: boolean; waiterAlways: boolean;
     runSettled: boolean; stopSettled: boolean }>
@@ -287,6 +290,14 @@ export type ShutdownBarrierObservation = Readonly<{
   timings: Readonly<{ waiterMs: number; stopToStageMs: number; releaseToRunMs: number; releaseToStopMs: number }>
 }>
 
+// On a terminal runtime createPluginCapability() only throws INACTIVE and changes nothing
+// (yida-owner-runtime.ts ~:292, yida-initialization-runtime.ts ~:287). Only a host that failed to
+// latch can reach the issuing branch; the unused capability is dropped and reported by name.
+function latchState(create: () => unknown, decode: (error: unknown) => string | undefined): string {
+  try { create() } catch (error) { return decode(error) ?? 'UNDECODED_REFUSAL' }
+  return 'CAPABILITY_ISSUED'
+}
+
 async function poll(check: () => boolean | Promise<boolean>, timeoutMs: number, intervalMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs
   for (;;) {
@@ -297,6 +308,9 @@ async function poll(check: () => boolean | Promise<boolean>, timeoutMs: number, 
 }
 
 export async function proveShutdownBarrier(h: YidaHostBoundaryHarness, probe: ShutdownBarrierProbe): Promise<ShutdownBarrierObservation> {
+  // The modules' own decoders (WeakMap-backed), so no foreign message text is examined.
+  const { yidaOwnerRuntimeErrorCode } = await import('../../src/integration/yida-owner-runtime')
+  const { yidaInitializationErrorCode } = await import('../../src/integration/yida-initialization-runtime')
   const events: string[] = []
   const internal = h.internalPool as Pool & { ending?: boolean }
   const originalEnd = internal.end
@@ -325,6 +339,12 @@ export async function proveShutdownBarrier(h: YidaHostBoundaryHarness, probe: Sh
 
     const stopCalled = performance.now()
     stopped = h.server.stop('TEST')
+    // stop() returns at stopOnce's first await (src/index.ts ~:3822), so both runtimes must already
+    // be terminal here; HTTP close and the approval barriers are only awaited after that point.
+    const latchAtStop = Object.freeze({
+      owner: latchState(() => h.host.yidaOwnerRuntime.createPluginCapability(), yidaOwnerRuntimeErrorCode),
+      init: latchState(() => h.host.yidaInitializationRuntime.createPluginCapability(), yidaInitializationErrorCode),
+    })
     const sameStopPromise = h.server.stop('REPEAT') === stopped
     stopped.catch(error => { stopError = error })
       .finally(() => { stopSettled = true; events.push('stop-settled') })
@@ -360,6 +380,7 @@ export async function proveShutdownBarrier(h: YidaHostBoundaryHarness, probe: Sh
       waiterSeen,
       pluginsBeforeStop,
       sameStopPromise,
+      latchAtStop,
       stageReached,
       window: Object.freeze({ ms: windowMs, samples, endCalls, ending, waiterAlways,
         runSettled: runSettledInWindow, stopSettled: stopSettledInWindow }),
