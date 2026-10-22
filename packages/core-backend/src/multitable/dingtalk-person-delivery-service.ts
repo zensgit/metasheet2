@@ -18,7 +18,26 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /**
+   * 客户反馈 2026-10-21 item 1 (review round 2): whether a user with this id exists NOW. A delivery row can
+   * name an id with no user (a mistyped id): the viewer must say 未找到该用户 for it, not "inactive user".
+   */
+  localUserExists: boolean
+  /** Current active flag; null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
+}
+
+/** Review round 2: the delivery list's optional server-side status filter (values-free, fixed set). */
+export const DINGTALK_PERSON_DELIVERY_STATUS_FILTERS = ['success', 'failed', 'skipped', 'outcome_unknown'] as const
+export type DingTalkPersonDeliveryStatusFilter = (typeof DINGTALK_PERSON_DELIVERY_STATUS_FILTERS)[number]
+
+/** undefined = no filter; null = an invalid value (the route answers 400). */
+export function parseDingTalkPersonDeliveryStatusFilter(value: unknown): DingTalkPersonDeliveryStatusFilter | undefined | null {
+  if (value === undefined || value === '') return undefined
+  if (typeof value !== 'string') return null
+  return (DINGTALK_PERSON_DELIVERY_STATUS_FILTERS as readonly string[]).includes(value)
+    ? value as DingTalkPersonDeliveryStatusFilter
+    : null
 }
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
@@ -43,6 +62,7 @@ type DeliveryRow = {
   local_user_name: string | null
   local_user_email: string | null
   local_user_is_active: boolean | null
+  local_user_exists?: boolean | null
 }
 
 function normalizeDeliveryStatus(status: string | null, success: boolean): DingTalkPersonDelivery['status'] {
@@ -72,7 +92,8 @@ function mapDeliveryRow(row: DeliveryRow): DingTalkPersonDelivery {
     deliveredAt: row.delivered_at ?? undefined,
     localUserLabel: row.local_user_name ?? undefined,
     localUserSubtitle: row.local_user_email ?? undefined,
-    localUserIsActive: row.local_user_is_active ?? false,
+    localUserExists: row.local_user_exists === true,
+    localUserIsActive: row.local_user_exists === true ? row.local_user_is_active === true : null,
   }
 }
 
@@ -80,8 +101,14 @@ export async function listAutomationDingTalkPersonDeliveries(
   queryFn: QueryFn,
   ruleId: string,
   limit = 50,
+  options: { status?: DingTalkPersonDeliveryStatusFilter } = {},
 ): Promise<DingTalkPersonDelivery[]> {
   const normalizedLimit = Math.min(Math.max(limit, 1), 200)
+  // Review round 2: the run log's 「查看钉钉个人消息投递记录」 opens on skipped rows — filtered HERE, before the
+  // LIMIT, so skipped rows older than the latest page are not lost. Same normalisation as mapDeliveryRow.
+  const status = options.status && (DINGTALK_PERSON_DELIVERY_STATUS_FILTERS as readonly string[]).includes(options.status)
+    ? options.status
+    : undefined
   const result = await queryFn(
     `SELECT d.id,
             d.local_user_id,
@@ -101,13 +128,19 @@ export async function listAutomationDingTalkPersonDeliveries(
             d.delivered_at,
             u.name AS local_user_name,
             u.email AS local_user_email,
-            u.is_active AS local_user_is_active
+            u.is_active AS local_user_is_active,
+            (u.id IS NOT NULL) AS local_user_exists
        FROM dingtalk_person_deliveries d
        LEFT JOIN users u ON u.id = d.local_user_id
-      WHERE d.automation_rule_id = $1
+      WHERE d.automation_rule_id = $1${status ? `
+        AND (CASE
+               WHEN d.status IN ('success', 'failed', 'skipped', 'outcome_unknown') THEN d.status
+               WHEN d.success THEN 'success'
+               ELSE 'failed'
+             END) = $3` : ''}
       ORDER BY d.created_at DESC
       LIMIT $2`,
-    [ruleId, normalizedLimit],
+    status ? [ruleId, normalizedLimit, status] : [ruleId, normalizedLimit],
   )
 
   return (result.rows as DeliveryRow[]).map(mapDeliveryRow)

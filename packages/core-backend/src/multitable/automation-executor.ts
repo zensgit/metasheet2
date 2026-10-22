@@ -65,7 +65,7 @@ import {
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
-import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL } from './dingtalk-person-recipient-status'
+import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL, resolveDingTalkPersonRecipientRows } from './dingtalk-person-recipient-status'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -5545,18 +5545,12 @@ export class AutomationExecutor {
       [userIds],
     )
 
-    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
-    // (a) which local users exist and are active — only to COUNT why a recipient was skipped.
-    const localUserActive = new Map<string, boolean>()
-    for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
-      const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
-      const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
-      const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
-      const isActive = row.local_user_active === true
-      if (localUserId && !localUserActive.has(localUserId)) localUserActive.set(localUserId, isActive)
-      if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
-      recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
-    }
+    // Review round 2: the row decision is shared with the rule editor's preflight
+    // (resolveDingTalkPersonRecipientRows), so what the editor reports is what this step does.
+    // (a) localUserActive: which local users exist and are active — only to COUNT why one was skipped.
+    const recipientResolution = resolveDingTalkPersonRecipientRows(recipientsResult.rows)
+    const recipientMap = recipientResolution.reachable
+    const localUserActive = recipientResolution.activeByUserId
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
     const skippedReasonCounts: DingTalkSkippedRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0 }

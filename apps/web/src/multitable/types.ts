@@ -1770,7 +1770,10 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /** Review round 2: false when no user has this id (a mistyped id) — the viewer says 未找到该用户. */
+  localUserExists?: boolean
+  /** null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
 }
 
 // --- Field Validation ---

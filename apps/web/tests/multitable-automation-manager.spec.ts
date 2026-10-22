@@ -2601,8 +2601,42 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
   })
 
+  // Review round 2: the advanced editor's DingTalk recipient notice is shown by the HOST only after the save
+  // really succeeded — a refused save (400 / 503) must never read 「已保存」.
+  for (const outcome of ['fails', 'succeeds'] as const) {
+    it(`advanced editor: when the save ${outcome}, the 「已保存」 DingTalk notice is ${outcome === 'fails' ? 'NOT ' : ''}shown`, async () => {
+      const personRule = fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' },
+        actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+      })
+      const { client, fetchFn } = mockClient([personRule], outcome === 'fails'
+        ? { patchError: { status: 400, code: 'VALIDATION_ERROR', message: 'Rejected by the server' } }
+        : {})
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      // the preflight says user_2 is not linked
+      expect(document.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent).toContain('1 selected user is not linked to DingTalk')
+
+      ;(document.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+      await flushPromises()
+
+      expect(fetchFn.mock.calls.some(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')).toBe(true)
+      if (outcome === 'fails') {
+        expect(document.body.textContent).not.toContain('Saved. 1 selected user is not linked')
+        // the editor stays open for a fix
+        expect(document.querySelector('[data-action="save"]')).toBeTruthy()
+      } else {
+        expect(document.body.textContent).toContain('Saved. 1 selected user is not linked to DingTalk')
+      }
+    })
+  }
+
   it('a run log row that skipped DingTalk recipients opens the rule’s person delivery records on 跳过（未绑定）', async () => {
-    const { client } = mockClient([
+    const { client, fetchFn } = mockClient([
       fakeRule({
         name: 'DingTalk person notify',
         actionType: 'send_dingtalk_person_message',
@@ -2637,6 +2671,8 @@ describe('MetaAutomationManager', () => {
     expect(document.querySelector('.meta-log-viewer')).toBeNull()
     const statusFilter = document.querySelector('.meta-person-delivery [data-field="statusFilter"]') as HTMLSelectElement
     expect(statusFilter.value).toBe('skipped')
+    // review round 2: the skipped filter is asked of the SERVER (not only applied to the latest page)
+    expect(fetchFn.mock.calls.some(([url]: [string]) => url.includes('/dingtalk-person-deliveries') && url.includes('status=skipped'))).toBe(true)
     expect(document.querySelector('[data-person-delivery-id="dpd_skipped"]')?.textContent).toContain('Unbound User')
     expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
 

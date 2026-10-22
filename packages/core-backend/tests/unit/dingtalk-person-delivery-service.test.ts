@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listAutomationDingTalkPersonDeliveries } from '../../src/multitable/dingtalk-person-delivery-service'
+import { listAutomationDingTalkPersonDeliveries, parseDingTalkPersonDeliveryStatusFilter } from '../../src/multitable/dingtalk-person-delivery-service'
 
 describe('dingtalk person delivery service', () => {
   it('lists and maps automation-scoped deliveries', async () => {
@@ -25,6 +25,7 @@ describe('dingtalk person delivery service', () => {
           local_user_name: 'Lin Lan',
           local_user_email: 'lin@example.com',
           local_user_is_active: true,
+          local_user_exists: true,
         },
         {
           id: 'dpd_2',
@@ -46,6 +47,7 @@ describe('dingtalk person delivery service', () => {
           local_user_name: 'Unbound User',
           local_user_email: null,
           local_user_is_active: true,
+          local_user_exists: true,
         },
       ],
     }))
@@ -73,6 +75,7 @@ describe('dingtalk person delivery service', () => {
         deliveredAt: '2026-04-19T12:00:01.000Z',
         localUserLabel: 'Lin Lan',
         localUserSubtitle: 'lin@example.com',
+        localUserExists: true,
         localUserIsActive: true,
       },
       {
@@ -94,6 +97,7 @@ describe('dingtalk person delivery service', () => {
         deliveredAt: undefined,
         localUserLabel: 'Unbound User',
         localUserSubtitle: undefined,
+        localUserExists: true,
         localUserIsActive: true,
       },
     ])
@@ -132,5 +136,63 @@ describe('dingtalk person delivery service', () => {
       { id: 'dpd_ou', status: 'outcome_unknown' },
       { id: 'dpd_junk', status: 'failed' },
     ])
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 2): a row whose id has no user is "not found", not "inactive".
+  it('reports whether the user exists; active is null (unknown) for an id with no user', async () => {
+    const row = {
+      id: 'dpd_missing',
+      local_user_id: 'user_fake_typo',
+      dingtalk_user_id: null,
+      source_type: 'automation',
+      subject: 'S',
+      content: 'C',
+      success: false,
+      status: 'skipped',
+      http_status: null,
+      response_body: null,
+      error_message: 'DingTalk account is not linked or user is inactive',
+      automation_rule_id: 'rule_1',
+      record_id: 'rec_1',
+      initiated_by: 'user_2',
+      created_at: '2026-10-21T10:00:00.000Z',
+      delivered_at: null,
+      local_user_name: null,
+      local_user_email: null,
+      local_user_is_active: null,
+      local_user_exists: false,
+    }
+    const queryFn = vi.fn(async () => ({ rows: [row, { ...row, id: 'dpd_inactive', local_user_id: 'user_fake_off', local_user_is_active: false, local_user_exists: true }] }))
+    const [missing, inactive] = await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1')
+    expect(missing).toMatchObject({ localUserExists: false, localUserIsActive: null })
+    expect(inactive).toMatchObject({ localUserExists: true, localUserIsActive: false })
+    expect(queryFn.mock.calls[0][0]).toContain('(u.id IS NOT NULL) AS local_user_exists')
+  })
+
+  it('filters by status in SQL, before the LIMIT, with a bound parameter; no filter keeps the old query shape', async () => {
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+    await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1', 50, { status: 'skipped' })
+    const [sql, params] = queryFn.mock.calls[0] as unknown as [string, unknown[]]
+    expect(params).toEqual(['rule_1', 50, 'skipped'])
+    expect(sql).toMatch(/END\) = \$3\s+ORDER BY d\.created_at DESC\s+LIMIT \$2/)
+    expect(sql).not.toContain("'skipped' AS")
+
+    queryFn.mockClear()
+    await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1', 50)
+    const [plainSql, plainParams] = queryFn.mock.calls[0] as unknown as [string, unknown[]]
+    expect(plainParams).toEqual(['rule_1', 50])
+    expect(plainSql).not.toContain('$3')
+
+    // an unknown value never reaches SQL
+    queryFn.mockClear()
+    await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1', 50, { status: "skipped' OR 1=1 --" as never })
+    expect((queryFn.mock.calls[0] as unknown as [string, unknown[]])[1]).toEqual(['rule_1', 50])
+  })
+
+  it('parses the status filter from the fixed value set only', () => {
+    expect(parseDingTalkPersonDeliveryStatusFilter(undefined)).toBeUndefined()
+    expect(parseDingTalkPersonDeliveryStatusFilter('')).toBeUndefined()
+    for (const value of ['success', 'failed', 'skipped', 'outcome_unknown']) expect(parseDingTalkPersonDeliveryStatusFilter(value)).toBe(value)
+    for (const value of ['SKIPPED', 'pending', ['skipped'], 1]) expect(parseDingTalkPersonDeliveryStatusFilter(value)).toBeNull()
   })
 })

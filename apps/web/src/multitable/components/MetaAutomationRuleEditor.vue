@@ -1776,7 +1776,7 @@
 <script setup lang="ts">
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import {
   forEachWithConcurrency,
   RECIPIENT_NAME_LOOKUP_CONCURRENCY,
@@ -2060,7 +2060,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'save', payload: Partial<AutomationRule>): void
+  (e: 'save', payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }): void
   (e: 'test', ruleId: string): void
   (e: 'open-dingtalk-groups'): void
 }>()
@@ -4318,6 +4318,7 @@ const PERSON_RECIPIENT_STATE_LABELS: Partial<Record<DingTalkPersonRecipientState
   inactive: 'dingtalk.recipientInactive',
   unlinked: 'dingtalk.recipientNotLinked',
   checking: 'dingtalk.recipientChecking',
+  failed: 'dingtalk.recipientCheckFailed',
 }
 
 function selectedPersonRecipients(action: DraftAction) {
@@ -4330,7 +4331,8 @@ function selectedPersonRecipients(action: DraftAction) {
       id,
       // Round 1b: a name only when the roster knows the user; otherwise the chip shows the id in its usual
       // place (the subtitle line) plus the status badge — never the bare id dressed up as a name.
-      named: Boolean(directoryEntry?.label),
+      // Round 2: the roster labels an unnamed user with its id — that is not a name either.
+      named: Boolean(directoryEntry?.label) && directoryEntry?.label !== id,
       // Round 1c: the sender sees this user (status: exists) but the member search found no such member —
       // a user with no multitable role. Say so; an unnamed chip alone would read like a mistyped id.
       outsideMemberList: !directoryEntry && notificationRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
@@ -4368,7 +4370,7 @@ function selectedPersonNotLinkedSummary(action: DraftAction): string {
 // Review round 1 F7: saving is never blocked, but a rule saved while recipients are still being checked or
 // are known to be unreachable says so.
 function personRecipientSaveNotice(): string {
-  const total = { notLinked: 0, inactive: 0, notFound: 0, checking: 0 }
+  const total = { notLinked: 0, inactive: 0, notFound: 0, checking: 0, unchecked: 0 }
   for (const action of draft.value.actions) {
     if (action.type !== 'send_dingtalk_person_message') continue
     const counts = selectedPersonRecipientCounts(action)
@@ -4376,6 +4378,7 @@ function personRecipientSaveNotice(): string {
     total.inactive += counts.inactive
     total.notFound += counts.notFound
     total.checking += counts.checking
+    total.unchecked += counts.unchecked
   }
   return automationDingTalkSaveNotice(total, isZh.value)
 }
@@ -5808,9 +5811,10 @@ async function onSave() {
   error.value = ''
   try {
     const payload = buildPayload()
+    // Review round 2: the DingTalk recipient notice travels WITH the save; the host shows it only after the
+    // save really succeeded (a refused save must never read 「已保存」).
     const notice = personRecipientSaveNotice()
-    if (notice) ElMessage({ type: 'warning', message: notice, duration: 8000, showClose: true })
-    emit('save', payload)
+    emit('save', payload, notice ? { dingtalkRecipientNotice: notice } : undefined)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : automationLabel('error.saveFailed', isZh.value)
   } finally {

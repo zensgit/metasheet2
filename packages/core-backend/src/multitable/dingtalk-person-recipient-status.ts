@@ -5,8 +5,12 @@
  * directory-synced user with no multitable role), the editor showed no DingTalk link status for it, and
  * the real run reached 0 people. The send path (automation-executor.ts, send_dingtalk_person_message) and
  * the rule editor's preflight (routes/automation.ts, POST …/automations/dingtalk-person-recipient-status)
- * therefore read the SAME query, so the editor can never say "linked" for a user the sender would skip.
+ * therefore read the SAME query and the SAME row decision (resolveDingTalkPersonRecipientRows), so the
+ * PREFLIGHT can never answer "reachable" for a user the sender would skip. (The editor's suggestion list
+ * still shows the roster's own DingTalk flags until a picked user's preflight answer arrives.)
  * Like the sender, it is not limited to users with a multitable role (review round 1c decision).
+ * `dingtalkLinked` is the link itself: an INACTIVE user may still be linked (the sender skips them because
+ * they are inactive, and the editor says 已停用).
  *
  * Conditions (unchanged from the sender, DT-OPS-04): the user row exists; `is_active`; and the most
  * recently updated `directory_account_links` row with `link_status = 'linked'` to an ACTIVE `dingtalk`
@@ -75,6 +79,47 @@ export function parseDingTalkPersonRecipientIds(raw: unknown): DingTalkPersonRec
   return { ok: true, userIds: Array.from(seen) }
 }
 
+export interface DingTalkPersonReachableRecipient {
+  localUserId: string
+  dingtalkUserId: string
+  integrationId: string
+}
+
+export interface DingTalkPersonRecipientResolution {
+  /** Local users that exist (first row per user) → whether they are active. Only to explain skips. */
+  activeByUserId: Map<string, boolean>
+  /** Local users that exist (first row per user) → whether they carry a DingTalk link. */
+  linkedByUserId: Map<string, boolean>
+  /** The users the sender notifies: first row per user that is active AND linked. */
+  reachable: Map<string, DingTalkPersonReachableRecipient>
+}
+
+/**
+ * Review round 2: THE row → recipient decision, used by the sender (automation-executor.ts,
+ * send_dingtalk_person_message) and by the preflight below — so the two cannot drift apart. Rows are
+ * DINGTALK_PERSON_RECIPIENT_STATUS_SQL rows (one per user: users.id is the primary key and the link is a
+ * LIMIT 1 lateral); the "first row per user" rules only matter if that ever changes.
+ */
+export function resolveDingTalkPersonRecipientRows(rows: unknown[]): DingTalkPersonRecipientResolution {
+  const activeByUserId = new Map<string, boolean>()
+  const linkedByUserId = new Map<string, boolean>()
+  const reachable = new Map<string, DingTalkPersonReachableRecipient>()
+  for (const raw of rows as Array<Record<string, unknown>>) {
+    const localUserId = typeof raw.local_user_id === 'string' ? raw.local_user_id.trim() : ''
+    if (!localUserId) continue
+    const dingtalkUserId = typeof raw.dingtalk_user_id === 'string' ? raw.dingtalk_user_id.trim() : ''
+    const integrationId = typeof raw.integration_id === 'string' ? raw.integration_id.trim() : ''
+    const isActive = raw.local_user_active === true
+    if (!activeByUserId.has(localUserId)) {
+      activeByUserId.set(localUserId, isActive)
+      linkedByUserId.set(localUserId, dingtalkUserId.length > 0)
+    }
+    if (!isActive || !dingtalkUserId || reachable.has(localUserId)) continue
+    reachable.set(localUserId, { localUserId, dingtalkUserId, integrationId })
+  }
+  return { activeByUserId, linkedByUserId, reachable }
+}
+
 /**
  * Status of each requested id, in request order. An id with no user row → all false. `dingtalkLinked`
  * is the link itself (an inactive user may still be linked); the sender reaches a user only when
@@ -86,20 +131,11 @@ export async function readDingTalkPersonRecipientStatuses(
 ): Promise<DingTalkPersonRecipientStatus[]> {
   if (userIds.length === 0) return []
   const result = await queryFn(DINGTALK_PERSON_RECIPIENT_STATUS_SQL, [userIds])
-  const byId = new Map<string, { active: boolean; linked: boolean }>()
-  for (const row of result.rows as Array<Record<string, unknown>>) {
-    const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
-    if (!localUserId || byId.has(localUserId)) continue
-    const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
-    byId.set(localUserId, { active: row.local_user_active === true, linked: dingtalkUserId.length > 0 })
-  }
-  return userIds.map((userId) => {
-    const found = byId.get(userId)
-    return {
-      userId,
-      exists: Boolean(found),
-      active: found?.active ?? false,
-      dingtalkLinked: found?.linked ?? false,
-    }
-  })
+  const resolution = resolveDingTalkPersonRecipientRows(result.rows)
+  return userIds.map((userId) => ({
+    userId,
+    exists: resolution.activeByUserId.has(userId),
+    active: resolution.activeByUserId.get(userId) ?? false,
+    dingtalkLinked: resolution.linkedByUserId.get(userId) ?? false,
+  }))
 }

@@ -1219,6 +1219,7 @@ const DINGTALK_PERSON_STATE_LABELS: Partial<Record<DingTalkPersonRecipientState,
   inactive: 'dingtalk.recipientInactive',
   unlinked: 'dingtalk.recipientNotLinked',
   checking: 'dingtalk.recipientChecking',
+  failed: 'dingtalk.recipientCheckFailed',
 }
 
 const selectedDingTalkPersonRecipients = computed(() =>
@@ -1230,7 +1231,8 @@ const selectedDingTalkPersonRecipients = computed(() =>
     return {
       id,
       // Round 1b: a name only when the roster knows the user (see the rule editor).
-      named: Boolean(directoryEntry?.label),
+      // Round 2: the roster labels an unnamed user with its id — that is not a name either.
+      named: Boolean(directoryEntry?.label) && directoryEntry?.label !== id,
       // Round 1c: exists for the sender, but not a member the search can name (see the rule editor).
       outsideMemberList: !directoryEntry && notifyRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
       label: directoryEntry?.label ?? id,
@@ -1916,12 +1918,16 @@ function openPersonDeliveryViewerFromLog(ruleId: string) {
   showPersonDeliveryViewer.value = true
 }
 
-async function onRuleEditorSave(payload: Partial<AutomationRule>) {
+async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }) {
   try {
     if (editingRule.value?.id) {
       await updateRule(props.sheetId, editingRule.value.id, payload)
     } else {
       await createRule(props.sheetId, payload as Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'>)
+    }
+    // Review round 2: 「已保存。…」 only once the save really succeeded (a 400 / 503 leaves the editor open, silent).
+    if (meta?.dingtalkRecipientNotice) {
+      ElMessage({ type: 'warning', message: meta.dingtalkRecipientNotice, duration: 8000, showClose: true })
     }
     showRuleEditor.value = false
     editingRule.value = null

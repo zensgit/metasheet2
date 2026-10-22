@@ -33,9 +33,11 @@
           :data-person-delivery-id="delivery.id"
         >
           <div class="meta-person-delivery__summary">
-            <span class="meta-person-delivery__recipient">
-              {{ delivery.localUserLabel || delivery.localUserId }}
-              <em v-if="!delivery.localUserIsActive">{{ automationLabel('delivery.inactiveUser', isZh) }}</em>
+            <!-- 客户反馈 2026-10-21 item 1 (review round 2): the name slot never shows the bare id; an id with no
+                 user reads 未找到该用户 (not "inactive user"), and the id moves to the secondary line. -->
+            <span class="meta-person-delivery__recipient" data-field="person-delivery-recipient">
+              {{ recipientName(delivery) }}
+              <em v-if="delivery.localUserExists !== false && delivery.localUserIsActive === false">{{ automationLabel('delivery.inactiveUser', isZh) }}</em>
             </span>
             <span
               class="meta-person-delivery__badge"
@@ -46,7 +48,8 @@
             </span>
             <span class="meta-person-delivery__time">{{ formatTime(delivery.createdAt) }}</span>
           </div>
-          <div v-if="delivery.localUserSubtitle || delivery.dingtalkUserId" class="meta-person-delivery__detail">
+          <div v-if="delivery.localUserSubtitle || delivery.dingtalkUserId || !hasRealName(delivery)" class="meta-person-delivery__detail">
+            <span v-if="!hasRealName(delivery)" data-field="person-delivery-local-user-id">{{ delivery.localUserId }}</span>
             <span v-if="delivery.localUserSubtitle">{{ delivery.localUserSubtitle }}</span>
             <span v-if="delivery.dingtalkUserId">{{ automationLabel('delivery.dingtalkPrefix', isZh) }}{{ isZh ? '：' : ': ' }}{{ delivery.dingtalkUserId }}</span>
           </div>
@@ -69,6 +72,15 @@ import { automationLabel, automationStatusLabel } from '../utils/meta-automation
 import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { MtButton, MtIconButton } from '../ui'
 
+function hasRealName(delivery: DingTalkPersonDelivery): boolean {
+  return delivery.localUserExists !== false && Boolean(delivery.localUserLabel) && delivery.localUserLabel !== delivery.localUserId
+}
+
+function recipientName(delivery: DingTalkPersonDelivery): string {
+  if (delivery.localUserExists === false) return automationLabel('delivery.userNotFound', isZh.value)
+  return hasRealName(delivery) ? delivery.localUserLabel as string : automationLabel('delivery.unnamedUser', isZh.value)
+}
+
 const props = defineProps<{
   visible: boolean
   sheetId: string
@@ -85,6 +97,11 @@ defineEmits<{
 const loading = ref(false)
 const deliveries = ref<DingTalkPersonDelivery[]>([])
 const statusFilter = ref('')
+let loadRequestId = 0
+const SERVER_STATUS_FILTERS = ['success', 'failed', 'skipped', 'outcome_unknown'] as const
+function isServerStatusFilter(value: string): value is (typeof SERVER_STATUS_FILTERS)[number] {
+  return (SERVER_STATUS_FILTERS as readonly string[]).includes(value)
+}
 const errorMessage = ref('')
 const { isZh } = useLocale()
 
@@ -114,9 +131,16 @@ function deliveryStatusLabel(delivery: DingTalkPersonDelivery): string {
 
 function deliveryReason(delivery: DingTalkPersonDelivery): string {
   if (deliveryStatus(delivery) === 'skipped') {
-    return delivery.errorMessage === UNBOUND_DINGTALK_REASON || !delivery.errorMessage
-      ? automationLabel('delivery.unboundReason', isZh.value)
-      : delivery.errorMessage
+    if (delivery.errorMessage === UNBOUND_DINGTALK_REASON || !delivery.errorMessage) {
+      // Review round 2: the sender stores one generic sentence for every skip; name the real cause where the
+      // user's CURRENT row tells it (gone / inactive / active without a DingTalk link). Older servers that do
+      // not send `localUserExists` keep the generic sentence.
+      if (delivery.localUserExists === false) return automationLabel('delivery.reasonUserNotFound', isZh.value)
+      if (delivery.localUserExists === true && delivery.localUserIsActive === false) return automationLabel('delivery.reasonUserInactive', isZh.value)
+      if (delivery.localUserExists === true && delivery.localUserIsActive === true && !delivery.dingtalkUserId) return automationLabel('delivery.reasonNotLinked', isZh.value)
+      return automationLabel('delivery.unboundReason', isZh.value)
+    }
+    return delivery.errorMessage
   }
   return delivery.errorMessage || ''
 }
@@ -134,25 +158,36 @@ function readErrorMessage(error: unknown): string {
 
 async function loadData() {
   if (!props.client || !props.sheetId || !props.ruleId) return
+  const requestId = ++loadRequestId
   loading.value = true
   errorMessage.value = ''
   try {
-    deliveries.value = await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50)
+    const status = isServerStatusFilter(statusFilter.value) ? statusFilter.value : undefined
+    const loaded = await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50, status ? { status } : {})
+    if (requestId !== loadRequestId) return
+    deliveries.value = loaded
   } catch (error) {
+    if (requestId !== loadRequestId) return
     deliveries.value = []
     errorMessage.value = readErrorMessage(error)
   } finally {
-    loading.value = false
+    if (requestId === loadRequestId) loading.value = false
   }
 }
+
+// Review round 2: the status filter is applied by the SERVER (before its LIMIT), so the skipped rows of an
+// older run are not lost behind the latest 50. Changing it reloads; the list is still filtered locally too.
+watch(statusFilter, () => {
+  if (props.visible) void loadData()
+})
 
 watch(
   () => props.visible,
   (visible) => {
-    if (visible) {
-      statusFilter.value = props.initialStatusFilter ?? ''
-      void loadData()
-    }
+    if (!visible) return
+    const next = props.initialStatusFilter ?? ''
+    if (statusFilter.value !== next) statusFilter.value = next // the watcher above loads
+    else void loadData()
   },
   { immediate: true },
 )

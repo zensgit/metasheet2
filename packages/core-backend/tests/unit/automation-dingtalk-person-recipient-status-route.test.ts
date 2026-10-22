@@ -216,7 +216,7 @@ describe('the sender and the preflight share one query', () => {
     const { readFileSync } = await import('node:fs')
     const { join } = await import('node:path')
     const source = readFileSync(join(__dirname, '../../src/multitable/automation-executor.ts'), 'utf8').replace(/\r\n/g, '\n')
-    expect(source).toContain("import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL } from './dingtalk-person-recipient-status'")
+    expect(source).toMatch(/import \{[^}]*\bDINGTALK_PERSON_RECIPIENT_STATUS_SQL\b[^}]*\} from '\.\/dingtalk-person-recipient-status'/)
     expect(source).toMatch(/this\.deps\.queryFn\(\n(?:\s*\/\/[^\n]*\n)*\s*DINGTALK_PERSON_RECIPIENT_STATUS_SQL,\n\s*\[userIds\],/)
   })
 })

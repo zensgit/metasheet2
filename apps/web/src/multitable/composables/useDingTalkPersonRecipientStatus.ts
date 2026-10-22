@@ -12,27 +12,37 @@ import type { DingTalkPersonRecipientStatus } from '../types'
  *   so a failing lookup is not retried on every blur;
  * - ids the server would refuse (too long / control characters) are not users: answered locally as missing;
  * - `reset()` (editor open) forgets everything, so a binding fixed since the last open is re-checked, and
- *   answers to requests sent before the reset are dropped.
+ *   answers to requests sent before the reset are dropped;
+ * - review round 2: a request is abandoned after LOOKUP_TIMEOUT_MS (aborted when the client honours the
+ *   signal) so a hung request cannot block the queue; a timeout or error leaves the id in the 'failed' state
+ *   (shown and counted as "could not check"), retried no sooner than RETRY_AFTER_MS later.
  */
 
 export const DINGTALK_PERSON_RECIPIENT_STATUS_CHUNK = 200
 const MAX_ID_LENGTH = 256
 const RETRY_AFTER_MS = 15_000
+export const LOOKUP_TIMEOUT_MS = 15_000
 // C0 controls and DEL (mirrors the server's validation).
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
 
-export type DingTalkPersonRecipientState = 'unknown' | 'checking' | 'missing' | 'inactive' | 'unlinked' | 'ready'
+export type DingTalkPersonRecipientState = 'unknown' | 'checking' | 'failed' | 'missing' | 'inactive' | 'unlinked' | 'ready'
 
 export interface DingTalkPersonRecipientCounts {
   notLinked: number
   inactive: number
   notFound: number
   checking: number
+  /** Ids whose lookup failed or timed out — their DingTalk link is unknown. */
+  unchecked: number
 }
 
 export interface DingTalkPersonRecipientStatusClient {
-  getDingTalkPersonRecipientStatus?: (sheetId: string, userIds: string[]) => Promise<DingTalkPersonRecipientStatus[]>
+  getDingTalkPersonRecipientStatus?: (
+    sheetId: string,
+    userIds: string[],
+    options?: { signal?: AbortSignal },
+  ) => Promise<DingTalkPersonRecipientStatus[]>
 }
 
 export function useDingTalkPersonRecipientStatus(options: {
@@ -43,7 +53,7 @@ export function useDingTalkPersonRecipientStatus(options: {
   const now = options.now ?? (() => Date.now())
   const statuses = ref<Record<string, DingTalkPersonRecipientStatus>>({})
   const pending = ref<Record<string, true>>({})
-  const failedAt = new Map<string, number>()
+  const failedAt = ref<Record<string, number>>({})
   let generation = 0
   let chain: Promise<void> = Promise.resolve()
 
@@ -52,8 +62,35 @@ export function useDingTalkPersonRecipientStatus(options: {
   }
 
   function recentlyFailed(id: string): boolean {
-    const at = failedAt.get(id)
+    const at = failedAt.value[id]
     return at !== undefined && now() - at < RETRY_AFTER_MS
+  }
+
+  function setFailed(ids: string[], on: boolean) {
+    const next = { ...failedAt.value }
+    for (const id of ids) {
+      if (on) next[id] = now()
+      else delete next[id]
+    }
+    failedAt.value = next
+  }
+
+  function lookupWithTimeout(
+    lookup: NonNullable<DingTalkPersonRecipientStatusClient['getDingTalkPersonRecipientStatus']>,
+    client: DingTalkPersonRecipientStatusClient,
+    sheetId: string,
+    batch: string[],
+  ): Promise<DingTalkPersonRecipientStatus[]> {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller?.abort()
+        reject(new Error('DingTalk recipient status lookup timed out'))
+      }, LOOKUP_TIMEOUT_MS)
+    })
+    return Promise.race([lookup.call(client, sheetId, batch, controller ? { signal: controller.signal } : undefined), timeout])
+      .finally(() => { if (timer !== undefined) clearTimeout(timer) })
   }
 
   function setStatuses(items: DingTalkPersonRecipientStatus[]) {
@@ -92,14 +129,14 @@ export function useDingTalkPersonRecipientStatus(options: {
         const batch = remote.slice(i, i + DINGTALK_PERSON_RECIPIENT_STATUS_CHUNK)
         if (started !== generation) return
         try {
-          const items = await lookup.call(client, sheetId, batch)
+          const items = await lookupWithTimeout(lookup, client, sheetId, batch)
           if (started !== generation) return
           const asked = new Set(batch)
           setStatuses(items.filter((item) => asked.has(item.userId)))
-          for (const id of batch) failedAt.delete(id)
+          setFailed(batch, false)
         } catch {
           if (started !== generation) return
-          for (const id of batch) failedAt.set(id, now())
+          setFailed(batch, true)
         } finally {
           if (started === generation) setPending(batch, false)
         }
@@ -112,7 +149,9 @@ export function useDingTalkPersonRecipientStatus(options: {
     generation += 1
     statuses.value = {}
     pending.value = {}
-    failedAt.clear()
+    failedAt.value = {}
+    // Requests of the previous open still settle (and are dropped above); new checks do not wait for them.
+    chain = Promise.resolve()
   }
 
   function stateOf(id: string): DingTalkPersonRecipientState {
@@ -123,17 +162,19 @@ export function useDingTalkPersonRecipientStatus(options: {
       if (!status.dingtalkLinked) return 'unlinked'
       return 'ready'
     }
-    return pending.value[id] ? 'checking' : 'unknown'
+    if (pending.value[id]) return 'checking'
+    return failedAt.value[id] !== undefined ? 'failed' : 'unknown'
   }
 
   function counts(ids: string[]): DingTalkPersonRecipientCounts {
-    const result: DingTalkPersonRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0, checking: 0 }
+    const result: DingTalkPersonRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0, checking: 0, unchecked: 0 }
     for (const id of new Set(ids)) {
       const state = stateOf(id)
       if (state === 'unlinked') result.notLinked += 1
       else if (state === 'inactive') result.inactive += 1
       else if (state === 'missing') result.notFound += 1
       else if (state === 'checking') result.checking += 1
+      else if (state === 'failed') result.unchecked += 1
     }
     return result
   }

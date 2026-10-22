@@ -96,6 +96,11 @@ export type AutomationLabelKey =
   | 'delivery.dingtalkPrefix'
   | 'delivery.statusSkippedUnbound'
   | 'delivery.unboundReason'
+  | 'delivery.userNotFound'
+  | 'delivery.unnamedUser'
+  | 'delivery.reasonUserNotFound'
+  | 'delivery.reasonUserInactive'
+  | 'delivery.reasonNotLinked'
   | 'editor.titleEdit'
   | 'editor.titleNew'
   | 'editor.name'
@@ -302,6 +307,8 @@ export type AutomationLabelKey =
   | 'dingtalk.recipientOutsideMemberList'
   | 'dingtalk.saveNoticeChecking'
   | 'dingtalk.saveNoticeSaved'
+  | 'dingtalk.recipientCheckFailed'
+  | 'dingtalk.saveNoticeUnchecked'
   | 'log.openPersonDeliveries'
   | 'dingtalk.localUserIds'
   | 'dingtalk.localUserIdsPlaceholder'
@@ -493,6 +500,11 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'delivery.dingtalkPrefix',
   'delivery.statusSkippedUnbound',
   'delivery.unboundReason',
+  'delivery.userNotFound',
+  'delivery.unnamedUser',
+  'delivery.reasonUserNotFound',
+  'delivery.reasonUserInactive',
+  'delivery.reasonNotLinked',
   'editor.titleEdit',
   'editor.titleNew',
   'editor.name',
@@ -691,6 +703,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'dingtalk.recipientOutsideMemberList',
   'dingtalk.saveNoticeChecking',
   'dingtalk.saveNoticeSaved',
+  'dingtalk.recipientCheckFailed',
+  'dingtalk.saveNoticeUnchecked',
   'log.openPersonDeliveries',
   'dingtalk.localUserIds',
   'dingtalk.localUserIdsPlaceholder',
@@ -890,6 +904,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'delivery.dingtalkPrefix': { en: 'DingTalk', zh: '钉钉' },
   'delivery.statusSkippedUnbound': { en: 'Skipped / unbound', zh: '跳过 / 未绑定' },
   'delivery.unboundReason': { en: 'DingTalk account is not linked or user is inactive', zh: '钉钉账号未绑定或用户已停用' },
+  // Review round 2: the person delivery viewer names the real cause where the data allows (current user state).
+  'delivery.userNotFound': { en: 'No user with this ID', zh: '未找到该用户' },
+  'delivery.unnamedUser': { en: 'Unnamed user', zh: '未命名用户' },
+  'delivery.reasonUserNotFound': { en: 'No user with this ID — nothing was sent', zh: '找不到该用户，未发送' },
+  'delivery.reasonUserInactive': { en: 'User is inactive', zh: '用户已停用' },
+  'delivery.reasonNotLinked': { en: 'DingTalk account is not linked', zh: '钉钉账号未绑定' },
   'editor.titleEdit': { en: 'Edit Automation Rule', zh: '编辑自动化规则' },
   'editor.titleNew': { en: 'New Automation Rule', zh: '新建自动化规则' },
   'editor.name': { en: 'Name', zh: '名称' },
@@ -1227,10 +1247,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     zh: '用户存在，但不在多维表成员列表中',
   },
   'dingtalk.saveNoticeChecking': {
-    en: 'Saved. Some DingTalk recipients were still being checked — reopen the rule to see whether they can receive the message.',
-    zh: '已保存。部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。',
+    en: 'Some DingTalk recipients were still being checked — reopen the rule to see whether they can receive the message.',
+    zh: '部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。',
   },
   'dingtalk.saveNoticeSaved': { en: 'Saved.', zh: '已保存。' },
+  // Review round 2: a preflight outage must not read as "all fine" (that was the "0 reached, no warning" field case).
+  'dingtalk.recipientCheckFailed': { en: 'Could not check DingTalk link', zh: '无法检查钉钉绑定' },
+  'dingtalk.saveNoticeUnchecked': {
+    en: '{count} recipient(s) could not be checked for a DingTalk link — after saving, check this rule’s DingTalk person delivery records.',
+    zh: '{count} 位收件人无法检查钉钉绑定，保存后请在「钉钉个人消息投递记录」中确认。',
+  },
   'log.openPersonDeliveries': { en: 'View DingTalk person delivery records', zh: '查看钉钉个人消息投递记录' },
   'dingtalk.localUserIds': { en: 'Local user IDs', zh: '本地用户 ID' },
   'dingtalk.localUserIdsPlaceholder': { en: 'Use comma or newline separated local user IDs', zh: '使用逗号或换行分隔本地 userId' },
@@ -2336,10 +2362,20 @@ export function automationDingTalkSelectedNotLinkedSummary(input: number | DingT
  * Review round 1 F7: the notice shown when a rule with DingTalk person recipients is saved while some are
  * still being checked or are known to be unreachable. Never blocks the save. '' = no notice.
  */
-export function automationDingTalkSaveNotice(counts: DingTalkSelectedRecipientCounts & { checking: number }, isZh: boolean): string {
-  if (counts.checking > 0) return automationLabel('dingtalk.saveNoticeChecking', isZh)
+export function automationDingTalkSaveNotice(
+  counts: DingTalkSelectedRecipientCounts & { checking: number; unchecked?: number },
+  isZh: boolean,
+): string {
+  // Review round 2: "still checking" no longer hides the counts already known, and a failed / timed-out
+  // check is said out loud (never "no warning"). Shown only AFTER the save really succeeded.
+  const parts: string[] = []
+  if (counts.checking > 0) parts.push(automationLabel('dingtalk.saveNoticeChecking', isZh))
+  const unchecked = Math.max(0, counts.unchecked ?? 0)
+  if (unchecked > 0) parts.push(automationLabel('dingtalk.saveNoticeUnchecked', isZh).replace('{count}', String(unchecked)))
   const summary = automationDingTalkSelectedNotLinkedSummary(counts, isZh)
-  return summary ? `${automationLabel('dingtalk.saveNoticeSaved', isZh)}${isZh ? '' : ' '}${summary}` : ''
+  if (summary) parts.push(summary)
+  if (parts.length === 0) return ''
+  return [automationLabel('dingtalk.saveNoticeSaved', isZh), ...parts].join(isZh ? '' : ' ')
 }
 
 export function supportCopyFailed(message: string, isZh: boolean): string {
