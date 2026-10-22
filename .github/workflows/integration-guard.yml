@@ -288,6 +288,7 @@ on:
       - 'packages/core-backend/tests/integration/yida-initialization-runtime-realdb.test.ts'
       - 'packages/core-backend/tests/unit/integration/automation-live-authority.test.ts'
       - 'packages/core-backend/tests/unit/yida-host-capability-injection.test.ts'
+      - 'packages/core-backend/tests/unit/yida-initialization-bootstrap-cli-load-graph.test.ts'
       - 'packages/core-backend/tests/unit/yida-initialization-bootstrap-cli.test.ts'
       - 'packages/core-backend/tests/unit/yida-initialization-http-boundary.test.ts'
       - 'packages/core-backend/tests/unit/yida-initialization-runtime.test.ts'
