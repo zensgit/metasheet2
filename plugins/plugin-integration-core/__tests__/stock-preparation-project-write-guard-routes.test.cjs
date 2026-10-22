@@ -341,6 +341,60 @@ test('R8 pre-work lock refusals are stamped refused (store failure on apply and 
   }
 })
 
+// ── R10 (review round 2) ───────────────────────────────────────────────────────────────────────────
+test('R10 a host write that raised after committing makes the stop partial: 503, partial true, stamped failed (not refused)', async () => {
+  const h = mount()
+  try {
+    seeded(h)
+    h.source.adapter.read = kit.createSourceAdapter(kit.goldenPlmData(PROJECT)).adapter.read
+    const dry = await dryRun(h)
+    assert.equal(dry.body.data.counts.add, 2, 'calibration: two writes planned')
+    const create = h.records.createRecord.bind(h.records)
+    let creates = 0
+    h.records.createRecord = async (input) => {
+      creates += 1
+      const landed = await create(input)
+      if (creates === 1) throw Object.assign(new Error('connection reset after commit'), { code: 'ECONNRESET' })
+      return landed
+    }
+    let holderCas = 0
+    h.env.db.faults.updateRow = (args) => {
+      if (args.set && Object.prototype.hasOwnProperty.call(args.set, 'lease_seq') && !Object.prototype.hasOwnProperty.call(args.set, 'lease_id')) {
+        holderCas += 1
+        if (holderCas === 2) return new Error('connection lost')
+      }
+      return null
+    }
+    const refused = await apply(h, dry.body.data.dryRunToken)
+    assert.equal(refused.statusCode, 503, JSON.stringify(refused.body))
+    assert.equal(errorOf(refused).details.written, 0)
+    assert.equal(errorOf(refused).details.partial, true)
+    assert.equal(registryRow(h).last_pull_outcome, 'failed', 'a write was attempted: a failed pull, not a refusal')
+  } finally { h.restore() }
+})
+
+// ── R11 (review round 2) ───────────────────────────────────────────────────────────────────────────
+test('R11 the dry-run GENERATION BUMP meeting a live lease (precheck passed) is 409 and is NOT stamped', async () => {
+  const h = mount()
+  try {
+    const scope = seeded(h)
+    const before = registryRow(h).last_pull_outcome
+    const read = h.source.adapter.read
+    let holder = null
+    h.source.adapter.read = async (input) => {
+      // The precheck already passed; a writer takes the sheet while this preview reads PLM.
+      if (!holder) holder = await h.env.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-r11-writer' })
+      return read(input)
+    }
+    const res = await dryRun(h)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.ok(holder, 'calibration: the lease was taken after the precheck')
+    assert.equal(registryRow(h).last_pull_outcome, before, 'a WRITE_LOCKED from the bump is not stamped')
+    await h.env.lock.createGuard(holder).release()
+  } finally { h.restore() }
+})
+
 // ── R9 ────────────────────────────────────────────────────────────────────────────────────────────
 test('R9 (R-52) one sheet, two projects: while project 1 writes the env sheet, project 2\'s preview is refused 409 before any source read', async () => {
   const h = mount({ switchOn: false })

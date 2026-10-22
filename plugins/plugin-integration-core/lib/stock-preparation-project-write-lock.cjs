@@ -170,13 +170,24 @@ function sqlStateOf(error) {
   return /^[0-9A-Z]{5}$/.test(code) ? code : undefined
 }
 
+// Operations that only ever run BEFORE a write (no lease is held yet, or none is involved). A store
+// failure in one of them positively means nothing was written: `partial: false`. A failure of the
+// holder CAS (before_write / heartbeat) happens mid-run; the writer's stop then reports `partial` from
+// what it actually attempted (review round 2).
+const PRE_WRITE_STORE_OPERATIONS = Object.freeze(['acquire', 'precheck', 'bump', 'read'])
+
 function storeFailed(operation, error, { fence = false, extra = {} } = {}) {
   const sqlState = sqlStateOf(error)
   return new StockPreparationProjectWriteLockError(
     503,
     PROJECT_WRITE_ERROR_CODES.STORE_FAILED,
-    'the sheet write lock store could not be read or written; nothing was written under it',
-    { operation, ...(sqlState ? { sqlState } : {}), ...extra },
+    'the sheet write lock store could not be read or written; the write did not continue',
+    {
+      operation,
+      ...(sqlState ? { sqlState } : {}),
+      ...(PRE_WRITE_STORE_OPERATIONS.includes(operation) ? { partial: false } : {}),
+      ...extra,
+    },
     { fence },
   )
 }
@@ -214,17 +225,18 @@ function planSuperseded(reason, details = {}, { fence = false } = {}) {
   )
 }
 
-// I3: compare the artifact's binding with the generation the lease GRANT observed. The token (a UUID
+// I3: compare the artifact's binding with the generation the lease GRANT observed. Called BEFORE any
+// write by both lanes, so every refusal here positively reports `partial: false` (review round 2). The token (a UUID
 // replaced on every bump) is what decides — never the integer, so a reset row cannot revive an old
 // binding. `unboundReason` names an artifact minted before bindings existed (or without the service).
 function assertWriteBindingMatchesGuard(binding, guard, { unboundReason = 'token_unbound' } = {}) {
   const writeScope = binding && nonEmptyString(binding.writeScope)
   const writeGenerationToken = binding && nonEmptyString(binding.writeGenerationToken)
   if (!writeScope || !writeGenerationToken) {
-    throw planSuperseded(unboundReason, { currentGeneration: guard.generation })
+    throw planSuperseded(unboundReason, { currentGeneration: guard.generation, partial: false })
   }
   if (writeScope !== guard.scopeKey) {
-    throw planSuperseded('scope_changed', { currentGeneration: guard.generation })
+    throw planSuperseded('scope_changed', { currentGeneration: guard.generation, partial: false })
   }
   if (writeGenerationToken !== guard.generationToken) {
     const tokenGeneration = integerOf(binding.writeGeneration)
@@ -232,6 +244,7 @@ function assertWriteBindingMatchesGuard(binding, guard, { unboundReason = 'token
       ...(tokenGeneration === null ? {} : { tokenGeneration }),
       currentGeneration: guard.generation,
       ...(guard.generationReason ? { currentReason: guard.generationReason } : {}),
+      partial: false,
     })
   }
 }
@@ -518,6 +531,11 @@ function createStockPreparationProjectWriteLock({
       }
       // Zero rows: someone moved the row between the read and the CAS. Read again and decide again.
     }
+    // Every attempt lost its race. Read once more (as acquire does): a live holder now is a writer,
+    // anything else is contention — never "another run is writing" without one (review round 2).
+    const lastRow = await readRow(scopeKey, 'bump')
+    const lastAtMs = nowMs()
+    if (leaseIsLive(lastRow, lastAtMs)) throw writeLocked(lastRow, lastAtMs)
     throw contentionRefusal()
   }
 
@@ -540,7 +558,7 @@ function createStockPreparationProjectWriteLock({
     })
   }
 
-  // The dry-run PRECHECK: refuse a preview while a live writer holds this project, before any source
+  // The dry-run PRECHECK: refuse a preview while a live writer holds this sheet, before any source
   // read. Read-only; an absent row is the legitimate initial state.
   async function assertNoLiveWriter(scopeKey) {
     const row = await readRow(scopeKey, 'precheck')

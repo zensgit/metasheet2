@@ -79,6 +79,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
   // ONE definition of logical->physical translation, not two. This file used to
   // carry its own byte-identical copy of `mapFieldName`, and the `pre_mapped`
@@ -1973,15 +1974,20 @@ function assertProjectWriteGuardScope(guard, action) {
 }
 
 // A fenced stop of the writer surfaces as the fence's own typed error, with the partial outcome
-// attached (values-free counts). `partial` tells the route to stamp `failed`, not `refused`.
+// attached (values-free counts). `partial` means ROWS MAY HAVE LANDED: at least one host write was
+// attempted (a confirmed write, or a host call that raised and may have committed — review round 2). It
+// is `false` only when no host write was issued at all, and it tells the route to stamp `failed`, not
+// `refused`. `written` stays the confirmed count; `attemptedWrites` is the attempted one.
 function projectWriteAbortError(applyResult) {
   const source = applyResult.abort && applyResult.abort.error
   const counts = isPlainObject(applyResult.counts) ? { ...applyResult.counts } : {}
   const written = Number(applyResult.written || 0)
+  const attemptedWrites = countAttemptedHostWrites(applyResult)
   const details = {
     ...(source && isPlainObject(source.details) ? source.details : {}),
-    partial: written > 0,
+    partial: attemptedWrites > 0,
     written,
+    attemptedWrites,
     counts,
     abortedAtDecisionIndex: applyResult.abort.index,
   }

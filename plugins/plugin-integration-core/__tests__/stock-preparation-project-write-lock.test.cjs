@@ -372,6 +372,72 @@ test('L8 (review round 1) bumps that lose every CAS race on a FREE row give up a
   assert.deepEqual(slept, [1, 2, 3, 4].map((n) => n * PROJECT_WRITE_BUMP_BACKOFF_MS), 'a growing backoff between the five attempts')
 })
 
+test('L8 (review round 2) a bump that loses every race re-reads once: a holder that appeared meanwhile is named, not "contention"', async () => {
+  const { lock, scope, db, clock } = setup({ bumpBackoffMs: 0 })
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  let bumpCas = 0
+  db.pauses.updateRow = async (args) => {
+    if (!(args.set && args.set.generation !== undefined && args.where && args.where.lease_id === null)) return
+    bumpCas += 1
+    const table = db.tables.get(PROJECT_WRITE_LOCK_TABLE)
+    const current = table.get(scope)
+    const moved = { ...current, generation: current.generation + 1, generation_token: `swl-other-${bumpCas}` }
+    if (bumpCas === PROJECT_WRITE_BUMP_MAX_ATTEMPTS) {
+      // While the last attempt is in flight, another process acquires the sheet.
+      const at = clock.now()
+      Object.assign(moved, {
+        lease_id: 'swl-late-holder', lease_seq: 0, lease_purpose: 'small_apply', lease_run_id: 'swl-late',
+        lease_acquired_at: at.toISOString(), lease_expires_at: new Date(at.getTime() + PROJECT_WRITE_LEASE_TTL_MS).toISOString(),
+      })
+    }
+    table.set(scope, moved)
+  }
+  await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'small_preview' }), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.equal(error.details.holderPurpose, 'small_apply', 'the late holder is named')
+    assert.notEqual(error.details.reason, 'contention')
+    return true
+  })
+  assert.equal(bumpCas, PROJECT_WRITE_BUMP_MAX_ATTEMPTS, 'calibration: every attempt lost its race')
+})
+
+test('L8 (review round 2) acquire losing BOTH CAS races: no live holder after them -> contention; a holder that took the sheet -> named', async () => {
+  for (const variant of ['contention', 'holder']) {
+    const { lock, scope, db, clock } = setup()
+    await lock.bumpGeneration(scope, { reason: 'small_preview' }) // a free row exists
+    let acquireCas = 0
+    db.pauses.updateRow = async (args) => {
+      // acquire's free-row CAS: it sets a lease and pins lease_id IS NULL
+      if (!(args.set && args.set.lease_id && args.where && args.where.lease_id === null)) return
+      acquireCas += 1
+      const table = db.tables.get(PROJECT_WRITE_LOCK_TABLE)
+      const current = table.get(scope)
+      const moved = { ...current, fencing_epoch: current.fencing_epoch + 1 } // someone acquired + released
+      if (variant === 'holder' && acquireCas === 2) {
+        const at = clock.now()
+        Object.assign(moved, {
+          lease_id: 'swl-racer', lease_seq: 0, lease_purpose: 'large_apply_chunk', lease_run_id: 'swl-racer',
+          lease_acquired_at: at.toISOString(), lease_expires_at: new Date(at.getTime() + PROJECT_WRITE_LEASE_TTL_MS).toISOString(),
+        })
+      }
+      table.set(scope, moved)
+    }
+    await assert.rejects(() => lock.acquire(scope, { purpose: 'small_apply' }), (error) => {
+      assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+      if (variant === 'contention') {
+        assert.equal(error.details.reason, 'contention')
+        assert.equal('holderPurpose' in error.details, false)
+        assert.doesNotMatch(error.message, /another run is writing/)
+      } else {
+        assert.equal(error.details.holderPurpose, 'large_apply_chunk')
+        assert.notEqual(error.details.reason, 'contention')
+      }
+      return true
+    })
+    assert.equal(acquireCas, 2, `calibration (${variant}): both CAS races were lost`)
+  }
+})
+
 test('L8 (review round 1) acquire that loses both CAS races to a LIVE holder still names the writer', async () => {
   const { lock, scope } = setup()
   await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-holder' })

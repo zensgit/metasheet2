@@ -1055,11 +1055,12 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
   ] as const
 
   it.each(LOCK_CODES)('WL-1: apply refused %s (%i) reports %s with its own sentence', async (code, status, reason) => {
-    const api = makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code })) })
+    // The server reports `partial: false` positively on every refusal that precedes a host write (review round 2).
+    const api = makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code, detailPartial: false })) })
     const report = await runStockPreparationProjectSync(api, PROJECT_NO)
     expect(stepOf(report, 'apply')).toMatchObject({ status: 'fail', reason, detail: { status, code } })
     expect(stepOf(report, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_ATTEMPTED' })
-    expect(classifyWriteLockFailure(code)).toBe(reason)
+    expect(classifyWriteLockFailure(code, { partial: false })).toBe(reason)
     const plain = STOCK_PREP_SYNC_REASON_PLAIN[reason]
     expect(plain).toBeDefined()
     expect(plain.zh.length * plain.en.length * (plain.zhNext ?? '').length * (plain.enNext ?? '').length).toBeGreaterThan(0)
@@ -1137,10 +1138,45 @@ describe('batch-refresh phase 0 step 1 — project write lock codes', () => {
     expect(classifyPlanReadFailureReason(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED')).toBe('PLAN_PROJECT_WRITE_LOCKED')
   })
 
-  it('WL-8: details.partial is carried only as the literal boolean true', () => {
+  it('WL-8: details.partial is TRI-STATE: only the literal booleans count, anything else is unknown (null)', () => {
     expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: true }).detailPartial).toBe(true)
-    expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: 'true' }).detailPartial).toBe(false)
-    expect(new StockPreparationProjectSyncCallError(503, '/apply', {}).detailPartial).toBe(false)
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: false }).detailPartial).toBe(false)
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', { detailPartial: 'true' }).detailPartial).toBeNull()
+    expect(new StockPreparationProjectSyncCallError(503, '/apply', {}).detailPartial).toBeNull()
+  })
+
+  // Review round 2 (F1): an absent / unknown `partial` never reads "nothing was written".
+  it.each([
+    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 409],
+    ['STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', 503],
+    ['STOCK_PREP_PROJECT_PLAN_SUPERSEDED', 409],
+  ] as const)('WL-10: %s (%i) with partial NOT reported reads neutral — neither "nothing written" nor "rows landed"', async (code, status) => {
+    const report = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code })) }), PROJECT_NO)
+    expect(stepOf(report, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_STOPPED_UNCONFIRMED' })
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_STOPPED_UNCONFIRMED
+    expect(`${plain.zh}${plain.zhNext}`).not.toMatch(/没有写入|没有变化|可能已写进一部分/)
+    expect(plain.zh).toContain('无法确认')
+  })
+
+  it('WL-10b: the three states of a lock-store stop map to three different sentences', () => {
+    const code = 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED'
+    expect(classifyWriteLockFailure(code, { partial: true })).toBe('WRITE_LOCK_FAILED_MIDWAY')
+    expect(classifyWriteLockFailure(code, { partial: false })).toBe('WRITE_LOCK_UNAVAILABLE')
+    expect(classifyWriteLockFailure(code, { partial: null })).toBe('WRITE_STOPPED_UNCONFIRMED')
+    expect(classifyWriteLockFailure(code)).toBe('WRITE_STOPPED_UNCONFIRMED')
+    // A lock that is not wired refuses before any lock IO: "nothing written" holds by construction.
+    expect(classifyWriteLockFailure('STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE')).toBe('WRITE_LOCK_UNAVAILABLE')
+  })
+
+  // Review round 2 (F6): an unbound token is not "a newer preview exists".
+  it('WL-11: PLAN_SUPERSEDED / token_unbound says the trial account cannot write, not that a newer preview exists', async () => {
+    const report = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, '/apply', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'token_unbound', detailPartial: false })) }), PROJECT_NO)
+    expect(stepOf(report, 'apply')).toMatchObject({ status: 'fail', reason: 'WRITE_TOKEN_UNBOUND' })
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.WRITE_TOKEN_UNBOUND
+    expect(plain.zh).toContain('没有写入权限')
+    expect(plain.zhNext).toContain('有拉取权限的人重新试算')
+    expect(plain.zh).not.toContain('更新的试算')
+    expect(classifyWriteLockFailure('STOCK_PREP_PROJECT_PLAN_SUPERSEDED', { partial: false, detailReason: 'newer_plan' })).toBe('WRITE_PLAN_SUPERSEDED')
   })
 
   it('WL-9: the code-only sentences (large-BOM panel) claim neither a writer nor landed rows', () => {

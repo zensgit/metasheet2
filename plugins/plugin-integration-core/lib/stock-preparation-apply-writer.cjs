@@ -892,6 +892,18 @@ async function applyStockPreparationPlan(input = {}) {
   }
 }
 
+// Review round 2 (F1): how many HOST WRITES this run issued — confirmed ones (`written`) plus every row
+// that failed INSIDE a createRecord / patchRecord call. A host write that raised may still have LANDED
+// (an error after the COMMIT, see the W9 note in the loop), so "rows may have landed" is "a host write
+// was attempted", never "a write was confirmed". Failures before the host call (the human wall, a
+// lookup, a missing target row) are not attempts.
+function countAttemptedHostWrites(result = {}) {
+  const written = Number(result.written || 0)
+  const errors = Array.isArray(result.errors) ? result.errors : []
+  const failedHostCalls = errors.filter((entry) => entry && (entry.operation === 'createRecord' || entry.operation === 'patchRecord')).length
+  return written + failedHostCalls
+}
+
 function summarizeApplyResultForEvidence(result = {}) {
   const errors = Array.isArray(result.errors) ? result.errors : []
   return {
@@ -912,6 +924,7 @@ module.exports = {
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
   summarizeApplyResultForEvidence,
+  countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
     batchKeyLookupDisabled,

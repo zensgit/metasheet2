@@ -5471,10 +5471,12 @@ async function testTableActionRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'dry-run evidence is values-free')
   // Batch-refresh phase 0 step 1, review round 1: a READ-tier preview is answered in full but its token is
   // UNBOUND (it supersedes nothing, and apply refuses it). The apply sequence below plans as the write tier.
+  // PADDED on purpose (review round 2): the token binds the NORMALIZED parameters, so this padded preview
+  // must apply as the trimmed number below — a regression that hashed the raw parameters turns this red.
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
     user: WRITE_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
-    body: { parameters: { projectNo: 'P-001' } },
+    body: { parameters: { projectNo: ' P-001 ' } },
   })
   assertOkResponse(res, 200)
   const dryRunToken = res.body.data.dryRunToken

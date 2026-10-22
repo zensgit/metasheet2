@@ -2126,6 +2126,20 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请联系平台管理员检查服务,恢复后重新同步;已写入的行不会重复写。',
     enNext: 'Ask the platform admin to check the service, then sync again; rows that landed will not be written twice.',
   }),
+  /** Review round 2 (F1): the stop did not report whether a host write was attempted — claim neither way. */
+  WRITE_STOPPED_UNCONFIRMED: Object.freeze({
+    zh: '写入被写入锁拦下或中途停止,无法确认是否已写进部分行',
+    en: 'Writing was stopped by the write lock; it is not known whether any rows landed',
+    zhNext: '请重新同步(重新试算);如果已写进一部分行,它们不会重复写。一直这样请联系平台管理员。',
+    enNext: 'Sync again (preview again); any rows that already landed will not be written twice. If it keeps happening, ask the platform admin.',
+  }),
+  /** Review round 2 (F6): the preview's token was unbound — its account cannot write (or it predates the lock). */
+  WRITE_TOKEN_UNBOUND: Object.freeze({
+    zh: '这次试算的账号没有写入权限,这份试算不能用来写入,没有写入',
+    en: 'This trial was run by an account without write rights, so it cannot be written; nothing was written',
+    zhNext: '请由有拉取权限的人重新试算后再写入。',
+    enNext: 'Have someone with pull rights run the trial again, then write.',
+  }),
   /** Review round 1: lost a race for the write lock while NO run holds it — busy, not "someone is writing". */
   WRITE_LOCK_BUSY: Object.freeze({
     zh: '系统正忙,这次没有写入',

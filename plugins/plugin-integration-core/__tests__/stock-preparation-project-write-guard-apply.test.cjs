@@ -363,6 +363,48 @@ test('T7 the lock store fails mid-run: the writer stops, 503 STORE_FAILED with t
   assert.equal(s.records.writes().length, 1)
 })
 
+test('T7b (review round 2) a host write that RAISED after committing counts as attempted: decision 0 fails post-commit, decision 1 is fenced -> partial true, written 0', async () => {
+  const harness = kit.createLibWriteLockHarness()
+  const records = kit.createRecordsApi()
+  const create = records.recordsApi.createRecord
+  let creates = 0
+  records.recordsApi.createRecord = async (input) => {
+    creates += 1
+    const landed = await create(input)
+    if (creates === 1) throw Object.assign(new Error('connection reset after commit'), { code: 'ECONNRESET' })
+    return landed
+  }
+  const s = scenario({ harness, records })
+  const token = (await s.dryRun()).dryRunToken
+  let holderCas = 0
+  harness.db.faults.updateRow = (args) => {
+    if (args.set && Object.prototype.hasOwnProperty.call(args.set, 'lease_seq') && !Object.prototype.hasOwnProperty.call(args.set, 'lease_id')) {
+      holderCas += 1
+      if (holderCas === 2) return Object.assign(new Error('connection lost'), { code: '08006' })
+    }
+    return null
+  }
+  await assert.rejects(() => s.apply(token), (error) => {
+    assert.equal(error.code, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+    assert.equal(error.details.written, 0, 'no write was CONFIRMED')
+    assert.equal(error.details.attemptedWrites, 1, 'one host write was attempted')
+    assert.equal(error.details.partial, true, 'rows may have landed')
+    assert.equal(error.details.abortedAtDecisionIndex, 1)
+    return true
+  })
+  assert.equal(records.rows.length, 1, 'calibration: the "failed" write is in fact on the sheet')
+})
+
+test('T7c (review round 2) refusals before any host write report partial: false positively (binding check, pre-write store failure)', async () => {
+  const harness = kit.createLibWriteLockHarness()
+  const s = scenario({ harness })
+  const stale = (await s.dryRun()).dryRunToken
+  await s.dryRun()
+  await assert.rejects(() => s.apply(stale), (error) => error.code === PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED && error.details.partial === false)
+  harness.db.faults.selectOne = new Error('down')
+  await assert.rejects(() => s.dryRun(), (error) => error.code === PROJECT_WRITE_ERROR_CODES.STORE_FAILED && error.details.partial === false)
+})
+
 // ── T9 ────────────────────────────────────────────────────────────────────────────────────────────
 test('T9 (E02, R-52) the scope is the sheet: another project on the same sheet is excluded; the same project on another sheet proceeds; two tenant strings are one scope', async () => {
   const harness = kit.createLibWriteLockHarness()

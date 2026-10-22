@@ -4592,11 +4592,12 @@ function requireStockPreparationAudit() {
       return false
     }
   }
-  // Review round 1 (item 8): a write-lock refusal raised BEFORE the work starts (no lock service, a
-  // malformed project number, a lock store that cannot be read) is stamped on the project registry like
-  // every other refusal. WRITE_LOCKED is deliberately NOT stamped: it describes ANOTHER run that holds the
-  // sheet and stamps its own outcome when it releases, and a late `refused` stamp from the loser could
-  // land after — and overwrite — the holder's `applied`.
+  // Review rounds 1 + 2: the ONE `refused` stamp for a refusal that wrote nothing — a write-lock refusal
+  // raised before the work starts (no lock service, a malformed project number, a lock store that cannot
+  // be read) and every dry-run refusal. WRITE_LOCKED is deliberately NOT stamped, wherever it comes from
+  // (apply acquire, dry-run precheck, dry-run generation bump, contention): it describes ANOTHER run that
+  // holds the sheet and stamps its own outcome when it releases, and a late `refused` stamp from the loser
+  // could land after — and overwrite — the holder's `applied`.
   async function stampWriteLockRefusal(action, tenantId, error) {
     if (error && error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED) return
     await stampProjectPullOutcome(action, tenantId, { outcome: 'refused', code: error && error.code })
@@ -7519,9 +7520,10 @@ function requireStockPreparationAudit() {
               : undefined,
           })
         } catch (error) {
-          await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
-          // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-          if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo)
+          // Stamped `refused` (and the overview row follows; S3 fix round 1, R5) — except WRITE_LOCKED from
+          // the generation bump (a live holder, or lock contention): that describes another run, which
+          // stamps its own outcome, and a late `refused` could overwrite its `applied` (review round 2).
+          await stampWriteLockRefusal(action, dryRunTenantId, error)
           throw error
         }
         await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })

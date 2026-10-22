@@ -23,6 +23,7 @@ const {
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
   applyStockPreparationPlan,
+  countAttemptedHostWrites,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
 // Batch-refresh phase 0 step 1: the project write lock. An approval BUMPS the plan generation and binds the
@@ -1427,8 +1428,11 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
         source && source.message ? source.message : 'the large-BOM chunk stopped before finishing',
         {
           ...(source && isPlainObject(source.details) ? source.details : {}),
-          partial: Number(applyResult.written || 0) > 0,
+          // Rows may have landed whenever a host write was attempted (review round 2), not only when one
+          // was confirmed.
+          partial: countAttemptedHostWrites(applyResult) > 0,
           written: Number(applyResult.written || 0),
+          attemptedWrites: countAttemptedHostWrites(applyResult),
           counts: { ...applyResult.counts },
           abortedAtDecisionIndex: stoppedAt,
         },

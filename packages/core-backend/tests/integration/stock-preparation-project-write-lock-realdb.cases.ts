@@ -163,6 +163,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         [PROJECT_WRITE_LOCK_TABLE],
       )
       expect(pk.rows.map((row: any) => row.attname)).toEqual(['scope_key'])
+      // Review round 2: the applied table comment is permanent (it changes only through a new migration),
+      // so it must describe the scope actually used — the target sheet ('spw2:'), not (sheet, project).
+      const comment = String((await q(`SELECT obj_description($1::regclass, 'pg_class') AS c`, [PROJECT_WRITE_LOCK_TABLE])).rows[0].c || '')
+      expect(comment).toContain('TARGET SHEET')
+      expect(comment).toContain('spw2:')
+      expect(comment).not.toContain('(target sheet, project)')
       const key = scope('D0')
       await expect(q(
         `INSERT INTO ${PROJECT_WRITE_LOCK_TABLE} (scope_key, generation_token, lease_id) VALUES ($1, 'g', 'half-a-lease')`,
@@ -539,6 +545,14 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           }))
         const P1 = 'SYN-SWL-D7A'
         const P2 = 'SYN-SWL-D7B'
+        // Deterministic half (review round 2): the race below can be won by either apply, so it alone does
+        // not prove the generation. Sequentially, the OLDER plan (project 1, superseded by project 2's
+        // preview) applied ALONE to the still-empty sheet is refused PLAN_SUPERSEDED and writes nothing.
+        const staleFirst = (await plan(lockA, P1)).dryRunToken
+        await plan(lockB, P2)
+        await expect(applyWith(lockA, P1, staleFirst)).rejects.toMatchObject({ code: PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED })
+        expect((await q('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0].n).toBe(0)
+        // The race: both re-plan (project 2 last, so its token is the current one) and apply at once.
         const t1 = (await plan(lockA, P1)).dryRunToken
         const t2 = (await plan(lockB, P2)).dryRunToken
         expect(typeof t1).toBe('string')

@@ -376,7 +376,7 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
       detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
-      detailPartial: detailRecord.partial === true,
+      detailPartial: detailRecord.partial,
     })
   }
   if (!envelope || envelope.ok !== true) {
