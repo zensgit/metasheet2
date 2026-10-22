@@ -43,6 +43,7 @@ function extractStep(source, selectedId = stepId) {
 }
 
 const step = extractStep(workflow)
+const expectedContractTests = Number(/^EXPECTED_YIDA_CONTRACT_TESTS=([1-9][0-9]*)$/mu.exec(step.run)?.[1])
 
 const candidateStep = extractStep(workflow, 'stock-preparation-pinned-browser-install')
 const candidateArchiveSha = '691d6469ab37218a362aaffff974fd378985d1428c2a690c6dbeb73501bbe51d'
@@ -251,7 +252,10 @@ test('actual Git sparse checkout preserves all fixture sources and still rejects
   }
 })
 
-function withProbe(callback, pgConfigMode = 'wrong-directory') {
+// The adapter answers the contract call with a node --test style summary (default: the exact
+// expected count) so the caller's count check is exercised without running the contracts.
+function withProbe(callback, pgConfigMode = 'wrong-directory',
+  { summary = `# tests ${expectedContractTests}\n# pass ${expectedContractTests}\n# fail 0\n`, exitCode = 0 } = {}) {
   const temporaryRoot = path.join(root, 'tmp')
   const fixture = path.join(temporaryRoot, 'yida-workflow-caller-' + randomUUID())
   const bin = path.join(fixture, 'bin')
@@ -267,7 +271,8 @@ function withProbe(callback, pgConfigMode = 'wrong-directory') {
   try {
     const executable = realpathSync(process.execPath)
     assert.doesNotMatch(executable, /[\s\0]/u, 'probe Node shebang must be an absolute executable path')
-    writeFileSync(adapter, `#!${executable}\nprocess.stdout.write(${JSON.stringify(probePrefix)} + JSON.stringify({ executable: process.argv[1], argv: process.argv.slice(2), env: process.env }) + '\\n')\n`, { mode: 0o700 })
+    writeFileSync(adapter, `#!${executable}\nprocess.stdout.write(${JSON.stringify(probePrefix)} + JSON.stringify({ executable: process.argv[1], argv: process.argv.slice(2), env: process.env }) + '\\n')\n`
+      + `if (process.argv[2] === '--test') { process.stdout.write(${JSON.stringify(summary)}); process.exitCode = ${Number(exitCode)} }\n`, { mode: 0o700 })
     chmodSync(adapter, 0o700)
     symlinkSync(adapter, path.join(bin, 'node'))
     writeFileSync(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'synthetic preload ran before callback\\n')\n`, { mode: 0o600 })
@@ -335,6 +340,30 @@ test('required owner step resolves Node and PG before two clean-environment call
   assert.ok(step.run.indexOf('test -x "$yida_tool"') < step.run.indexOf('/usr/bin/env -i '), 'preflight must finish before the first Node callback')
   assert.doesNotMatch(step.run, /DATABASE_URL|EXPECT_DB|\|\|\s*true/u)
 })
+
+test('required owner step checks the exact contract subtest count before the launcher', () => {
+  assert.equal((step.run.match(/^EXPECTED_YIDA_CONTRACT_TESTS=/gmu) ?? []).length, 1)
+  assert.ok(Number.isInteger(expectedContractTests) && expectedContractTests > 1)
+  const check = step.run.indexOf('if [ "$yida_contract_tests" -ne "$EXPECTED_YIDA_CONTRACT_TESTS" ]; then')
+  assert.ok(check > 0 && check < step.run.indexOf(runner), 'count check must precede the launcher')
+})
+
+for (const [name, contract, refusal] of [
+  ['one subtest fewer', { summary: `# tests ${expectedContractTests - 1}\n` }, /^YIDA_CALLER_CONTRACT_COUNT: \d+ subtests ran, expected exactly \d+$/mu],
+  ['one subtest more', { summary: `# tests ${expectedContractTests + 1}\n` }, /^YIDA_CALLER_CONTRACT_COUNT: \d+ subtests ran, expected exactly \d+$/mu],
+  ['a file that exits 0 early (one passing test)', { summary: '# tests 1\n# pass 1\n' }, /^YIDA_CALLER_CONTRACT_COUNT: 1 subtests ran, expected exactly \d+$/mu],
+  ['no summary line', { summary: '' }, /^YIDA_CALLER_CONTRACT_COUNT: no 'tests <N>' summary line found$/mu],
+  ['a non-zero contract exit', { exitCode: 1 }, /^YIDA_CALLER_CONTRACT: node --test exited non-zero \(output above\)$/mu],
+]) {
+  test(`actual workflow bash refuses ${name} before the launcher`, linuxShell, () => {
+    withProbe(({ execute }) => {
+      const result = execute(step.run)
+      assert.notEqual(result.status, 0, 'CALLER_CONTRACT_COUNT: a contract run without the exact count must not pass')
+      assert.match(result.stderr, refusal)
+      assert.deepEqual(result.receipts.map(receipt => receipt.argv[0]), ['--test'], 'launcher must not run')
+    }, 'wrong-directory', contract)
+  })
+}
 
 test('actual workflow bash clears hostile ambient state before either Node callback', linuxShell, () => {
   withProbe(({ execute, assertClean }) => assertClean(execute(step.run)))
