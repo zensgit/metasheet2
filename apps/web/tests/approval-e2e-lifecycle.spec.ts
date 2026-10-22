@@ -11,6 +11,11 @@ import { computed, createApp, defineComponent, h, nextTick, ref, type App as Vue
 import { useLocale } from '../src/composables/useLocale'
 import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../src/approvals/addSignHonestyCopy'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// Collect SFC modules before timed tests; keep cold imports out of mount helpers.
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
+import ApprovalNewView from '../src/views/approval/ApprovalNewView.vue'
+import TemplateCenterView from '../src/views/approval/TemplateCenterView.vue'
+import TemplateDetailView from '../src/views/approval/TemplateDetailView.vue'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -634,7 +639,6 @@ describe('Approval E2E Lifecycle', () => {
   // Mount helpers
   // -------------------------------------------------------------------------
   async function mountDetailView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -643,7 +647,6 @@ describe('Approval E2E Lifecycle', () => {
   }
 
   async function mountNewView() {
-    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -652,7 +655,6 @@ describe('Approval E2E Lifecycle', () => {
   }
 
   async function mountTemplateCenterView() {
-    const { default: TemplateCenterView } = await import('../src/views/approval/TemplateCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateCenterView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -661,7 +663,6 @@ describe('Approval E2E Lifecycle', () => {
   }
 
   async function mountTemplateDetailView() {
-    const { default: TemplateDetailView } = await import('../src/views/approval/TemplateDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)
