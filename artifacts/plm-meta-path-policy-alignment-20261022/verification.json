@@ -1,0 +1,27 @@
+{
+  "source_sha": "27abfadecf3cec7fd0a89c9b26e95b7fe8253339",
+  "base_sha": "c61f9e47d31b0c4228c53230d1b45af0ab40a542",
+  "source_files_sha256": {
+    "packages/core-backend/src/multitable/oapi-read-allowlist.ts": "cf541e76a16cae577184fba502e904df812fb7adc6979d8380d5fff55e225d69",
+    "packages/core-backend/src/services/plm-managed-discussion.ts": "2ceb8724764980918bf17f1ded6efc9335b54c5d94d45312ae9676263c39829c",
+    "packages/core-backend/tests/unit/plm-record-ingress-routes.test.ts": "52762a6bf0215211d336633b7aad371cb183400b71920d1adaf13f52a5381eff"
+  },
+  "checks": {
+    "guard_before": {
+      "passed": 3,
+      "failed": 1
+    },
+    "focused_after": {
+      "files": 5,
+      "tests": 208,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 1.79
+    },
+    "typecheck_exit": 0,
+    "typecheck_source_stable": true,
+    "guard_source_unchanged": true
+  },
+  "red_green_manifest_sha256": "78874cc507af6416fbabeb4f97fcf71a89faf1d8a10bb69b2882cc62fd5a7ff8",
+  "limits": "Checks ran in the isolated tree containing uncommitted renewal B. This receipt qualifies only the three listed guard-repair files; B is not accepted. No publication, browser, installed image, real hour or production qualification."
+}
