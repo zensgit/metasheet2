@@ -60,3 +60,21 @@ Keep Draft. Stream/lifecycle OFF. No merge, deployment, real UAT or 50004.
   15-second limit; member-bar/current-node now pass 36/36 and instance-consistency
   passes 39/39. Full-lane, follow-up quality and exact-head CI remain pending
   until their terminal results are recorded in the PR.
+
+## Route-metadata import follow-up
+
+The full web rerun passed the previous 37-file/789-test member-bar batch, then
+failed the unchanged approval navigation route test at its existing 5-second
+limit. The original four-file batch reproduced 115 passes and that one timeout.
+Instrumenting the real import without an artificial delay observed appRoutes
+still loading at 4,899ms; its 17 statically imported views were inside the test
+budget. Fixed route metadata now loads during collection. App/authPrincipal
+dynamic imports and module-reset/crash-isolation behavior remain unchanged.
+
+All 37 original assertion lines remain. The target file passes 13/13. A transform
+removing only the batch-transfer route's requiresAdmin produces the original
+named assertion failure (12 filtered cases excluded); after restoring the real
+module, the whole four-file batch passes 116/116 with zero excluded. No assertion,
+permission guard, timeout or workflow is weakened. Evidence is under
+artifacts/report-calendar/nav-route-timeout. Follow-up quality, full web and
+exact-head CI must finish on the repaired source before final acceptance.

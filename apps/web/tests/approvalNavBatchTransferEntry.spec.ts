@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
+// Fixed route metadata can load during collection; App/authPrincipal stay dynamic for module resets below.
+import { appRoutes } from '../src/router/appRoutes'
 
 // P1b round 2, item (1) — the 批量转交 nav entry's gate.
 //
@@ -307,8 +309,7 @@ describe('批量转交 nav entry gate', () => {
     }
   })
 
-  it('the route it points at is still the requiresAdmin one (the token gate is NOT removed)', async () => {
-    const { appRoutes } = await import('../src/router/appRoutes')
+  it('the route it points at is still the requiresAdmin one (the token gate is NOT removed)', () => {
     const route = appRoutes.find((r) => r.path === '/approvals/batch-transfer')
     expect(route?.meta?.requiresAuth).toBe(true)
     // Conjunctive, not replaced: the server capability narrows the entry; the existing
