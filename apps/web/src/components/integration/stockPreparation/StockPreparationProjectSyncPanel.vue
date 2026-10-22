@@ -412,7 +412,7 @@
         class="sp-sync__no-link-hint"
         data-testid="stock-prep-project-sync-no-sheet-link-hint"
       >
-        {{ bi(STOCK_PREP_NO_SHEET_LINK_HINT.zh, STOCK_PREP_NO_SHEET_LINK_HINT.en) }}
+        {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
       </p>
       <button
         v-if="report.pendingConfirmCount > 0"
@@ -485,6 +485,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       :fill-target="fillTarget"
+      :no-link-hint-context="noLinkHintContext"
       @open-multitable="emit('open-multitable')"
       @synced="emit('synced', null)"
     />
@@ -569,15 +570,16 @@ import type { StockPreparationLargeBomJobApi } from '../../../services/integrati
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
-  STOCK_PREP_NO_SHEET_LINK_HINT,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepErrorPlain,
+  stockPrepNoSheetLinkHint,
   stockPrepProjectTargetPlain,
   stockPrepProjectTargetRowCountText,
   stockPrepProjectTargetWritePreviewText,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
+  type StockPrepNoSheetLinkHintContext,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
@@ -665,6 +667,12 @@ const props = withDefaults(
      * pre-S2 suite keeps its exact request set). No production mount injects either.
      */
     targetApi?: StockPreparationProjectTargetApi | null
+    /**
+     * Where this panel is mounted, for the no-link sentence only (review round 1 of 客户反馈 9a).
+     * `board` = 项目备料, whose own fill area further down explains the missing link; `workspace` =
+     * 项目工作台, which points the reader at 项目备料. Copy only — nothing routes on it.
+     */
+    noLinkHintContext?: StockPrepNoSheetLinkHintContext
   }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
@@ -677,8 +685,11 @@ const props = withDefaults(
     runVariant: 'sync',
     fillTarget: null,
     targetApi: null,
+    noLinkHintContext: 'workspace',
   },
 )
+
+const noSheetLinkHint = computed(() => stockPrepNoSheetLinkHint(props.noLinkHintContext))
 
 const emit = defineEmits<{
   /** Reuses the shell's ONE tab-nav surface (the same event the dashboard's stepper emits). */

@@ -1381,13 +1381,42 @@ export const STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT: StockPrepPlainText = Obj
  * open-the-multitable button when the parent holds NO sheet handle. Without a handle the shell pushes
  * the plain `/multitable` route, which is the multitable HOME page: a 「新建 Base」 form and template
  * cards. A customer reading those cards asked whether they had to choose a template for the project.
- * They do not — one project, one sheet, built from a fixed template — so this says where the button
- * lands, that nothing there is theirs to choose, and where the project's sheet is reached instead.
+ * They do not — one project, one sheet, set up from a fixed template — so this says where the button
+ * lands, that nothing there is theirs to choose, and where the reason for the missing link is shown.
+ *
+ * WHERE THE PANEL IS MOUNTED DECIDES THE LAST SENTENCE (review round 1). On 项目备料 (the only place a
+ * puller or operator ever sees this panel) the page's own fill area further down already explains the
+ * missing link next to its own 「打开多维表首页」 button — that explanation names the administrator and
+ * 「数据来源与体检」 — so the panel points DOWN at it rather than sending the reader to the page they are
+ * on. On 项目工作台 (platform-admin) it points at 项目备料. Neither tail promises that pulling again
+ * creates a link, and the first half says "the system or an administrator" because on a deployment
+ * without per-project sheets it is an administrator who builds the sheet.
  */
-export const STOCK_PREP_NO_SHEET_LINK_HINT: StockPrepPlainText = Object.freeze({
-  zh: '这个项目的备料表链接现在还拿不到,所以这个按钮只会打开多维表首页。备料表是系统按固定模板自动建的:不用在首页选模板,也不要在那里新建 Base。请到「项目备料」页打开这个项目、再拉取一次 —— 那一页能直接跳到备料表,或者说明它为什么还没建好。',
-  en: 'This project’s stock-preparation sheet link is not available yet, so this button only opens the multitable home. The stock-preparation sheet is created automatically from a fixed template — do not pick a template or create a Base there. Open this project on the Project Board page and pull again: that page either jumps straight to the sheet or says why it is not there yet.',
+export type StockPrepNoSheetLinkHintContext = 'board' | 'workspace'
+
+const STOCK_PREP_NO_SHEET_LINK_HINT_LEAD: StockPrepPlainText = Object.freeze({
+  zh: '这个项目的备料表链接现在还拿不到,所以这个按钮只会打开多维表首页。备料表由系统或管理员按固定模板建立:不用在首页选模板,也不要在那里新建 Base。',
+  en: 'This project’s stock-preparation sheet link is not available yet, so this button only opens the multitable home. The stock-preparation sheet is set up from a fixed template by the system or an administrator — do not pick a template or create a Base there.',
 })
+
+const STOCK_PREP_NO_SHEET_LINK_HINT_TAIL: Readonly<Record<StockPrepNoSheetLinkHintContext, StockPrepPlainText>> = Object.freeze({
+  board: Object.freeze({
+    zh: '为什么还没有链接,见本页下方另一个「打开多维表首页」按钮旁的说明。',
+    en: 'Why there is no link yet is explained next to the other “Open the multitable home” button further down this page.',
+  }),
+  workspace: Object.freeze({
+    zh: '请在「项目备料」页打开这个项目:能跳就直接跳到备料表,不能会写明原因。',
+    en: 'Open this project on the Project Board page: it jumps straight to the sheet when it can, and says why when it cannot.',
+  }),
+})
+
+export function stockPrepNoSheetLinkHint(context: StockPrepNoSheetLinkHintContext): StockPrepPlainText {
+  const tail = STOCK_PREP_NO_SHEET_LINK_HINT_TAIL[context === 'board' ? 'board' : 'workspace']
+  return Object.freeze({
+    zh: `${STOCK_PREP_NO_SHEET_LINK_HINT_LEAD.zh}${tail.zh}`,
+    en: `${STOCK_PREP_NO_SHEET_LINK_HINT_LEAD.en} ${tail.en}`,
+  })
+}
 
 // ---------------------------------------------------------------------------
 // I-20 — field-level tooltips (native `title`, the existing 最近变更(来自 PLM) pattern)
@@ -2114,8 +2143,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zh: '数据已经写进去了;快照表还没建,这次没有存档',
     en: 'The data is in; the snapshot tables have not been built yet, so nothing was kept',
     // 9b: there is no 「建快照表」 button anywhere in the UI — the old quotes made it read like one.
-    zhNext: '页面上没有建表的按钮:要由平台管理员在服务器上调用一次建快照表的接口(mvp/ensure,每个租户一次即可),之后再同步就会存档。这套部署如果用不到批次存档,也可以请平台管理员把批次存档的部署开关关掉,这一步以后就显示「这套部署没有开启批次存档」。少这一批只影响「差异对比」。',
-    enNext: 'There is no button for this on the page: a platform administrator calls the snapshot-table build once on the server (mvp/ensure, once per tenant), and syncs after that keep their batch. A deployment that does not use batch archiving can instead have a platform administrator switch the batch-archive deployment flag off; this step then reads “This deployment does not keep snapshot batches”. Missing this one only affects the diff view.',
+    zhNext: '页面上没有建表按钮,由平台管理员调用一次建快照表接口(给管理员看的接口名:mvp/ensure,每个租户一次),之后再同步就会存档。这套部署如果用不到批次存档,也可以请平台管理员把批次存档的部署开关关掉,这一步以后就显示「这套部署没有开启批次存档」。少这一批只影响「差异对比」。',
+    enNext: 'There is no button for this on the page: a platform administrator calls the snapshot-table build API once (the API name, for the administrator: mvp/ensure, once per tenant), and syncs after that keep their batch. A deployment that does not use batch archiving can instead have a platform administrator switch the batch-archive deployment flag off; this step then reads “This deployment does not keep snapshot batches”. Missing this one only affects the diff view.',
   }),
   BATCH_ARCHIVE_LEDGER_CONFLICT: Object.freeze({
     zh: '数据已经写进去了;快照账本里已有的记录和这次要存的对不上,这次没有存档',
@@ -2132,8 +2161,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_SCHEMA_INCOMPLETE: Object.freeze({
     zh: '数据已经写进去了;快照表缺了列,这次的存档没成功',
     en: 'The data is in; a snapshot table is missing columns, so keeping a copy did not work',
-    zhNext: '请平台管理员执行一次「修复快照表」(mvp/repair,只补缺的列,不动数据),再同步一次。',
-    enNext: 'Ask a platform administrator to repair the snapshot tables once (mvp/repair adds only the missing columns and touches no data), then sync again.',
+    zhNext: '页面上没有修复按钮,由平台管理员调用一次修复快照表接口(给管理员看的接口名:mvp/repair,只补缺的列,不动数据),之后再同步一次。',
+    enNext: 'There is no repair button on the page: a platform administrator calls the snapshot-table repair API once (the API name, for the administrator: mvp/repair; it adds only the missing columns and touches no data), then sync again.',
   }),
   BATCH_ARCHIVE_SCHEMA_UNAVAILABLE: Object.freeze({
     zh: '数据已经写进去了;暂时读不到快照表的结构,这次的存档没成功',
@@ -2220,14 +2249,14 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND: Object.freeze({
     zh: '数据已经写进去了;存档这一步没找到这个项目的 PLM 数据源,这次没有存档',
     en: 'The data is in; the archive step could not find this project’s PLM data source, so nothing was kept',
-    zhNext: '服务器只回了「找不到」(技术详情 status=404),没有给错误码。最常见的原因是:试算和写入带着当前工作区去找数据源,存档不带工作区,只找得到租户级(不属于某个工作区)的数据源。这是部署配置的问题,再同步不会改变:请平台管理员检查这个动作绑定的 PLM 数据源是不是只建在某个工作区里,绑定还在不在。',
-    enNext: 'The server answered only “not found” (technical detail status=404) and sent no error code. The most common cause: the trial and the write look the data source up with the current workspace, while the archive looks it up with none and so only finds a tenant-wide one (not inside a workspace). That is deployment configuration and syncing again does not change it: ask a platform administrator to check whether the PLM data source bound to this action exists only inside a workspace, and whether the binding is still there.',
+    zhNext: '服务器只回了「找不到」(技术详情 status=404),没有给错误码。最常见的原因是存档找数据源的范围和试算、写入不一样:存档不带页面上的工作区,数据源只建在某个工作区里时,它可能找不到。这是部署配置的问题,再同步一般不会改变:请平台管理员检查这个动作绑定的 PLM 数据源建在哪一级(租户级还是某个工作区),绑定还在不在。',
+    enNext: 'The server answered only “not found” (technical detail status=404) and sent no error code. The most common cause is that the archive looks for the data source in a different scope from the trial and the write: it does not carry the page’s workspace, so a data source that exists only inside a workspace may not be found. That is deployment configuration and syncing again usually does not change it: ask a platform administrator to check at which level the PLM data source bound to this action lives (tenant-wide or inside a workspace), and whether the binding is still there.',
   }),
   BATCH_ARCHIVE_SERVICE_UNAVAILABLE: Object.freeze({
-    zh: '数据已经写进去了;存档时服务器回答「暂时不可用」,这次没有存档',
-    en: 'The data is in; the server answered “unavailable” at the archive step, so nothing was kept',
-    zhNext: '可以过一会儿再同步一次;如果每次都这样,多半是服务器缺少存档要用的功能或连接,等也等不好,请把技术详情里的 status 和错误码(有的话)交给平台管理员。少这一批只影响「差异对比」。',
-    enNext: 'You can sync again after a while; if it happens every time, the server is most likely missing a feature or connection the archive needs and waiting will not fix it — give the status and error code (if any) from the technical details to a platform administrator. Missing this batch only affects the diff view.',
+    zh: '数据已经写进去了;存档时服务器(或它前面的网关)没能正常答复,这次存档没有确认完成',
+    en: 'The data is in; the server (or a gateway in front of it) did not answer the archive step normally, so this batch is not confirmed as kept',
+    zhNext: '可以过一会儿再同步一次:如果其实已经存上了,会显示「这一批之前已经存过了」,不会重复存。如果每次都这样,多半是服务器缺少存档要用的功能或连接,等也等不好,请把技术详情里的 status 和错误码(有的话)交给平台管理员。少这一批只影响「差异对比」。',
+    enNext: 'You can sync again after a while: if the batch was in fact kept, the step says it was already kept and nothing is stored twice. If it happens every time, the server is most likely missing a feature or connection the archive needs and waiting will not fix it — give the status and error code (if any) from the technical details to a platform administrator. Missing this batch only affects the diff view.',
   }),
   /**
    * #6475 round 2 — step ③ was partial, so step ④ was not attempted. A SKIP, and deliberately NOT

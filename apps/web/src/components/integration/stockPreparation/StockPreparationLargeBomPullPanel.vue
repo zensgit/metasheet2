@@ -36,7 +36,7 @@
       class="sp-large-bom__no-link-hint"
       data-testid="stock-prep-large-bom-no-sheet-link-hint"
     >
-      {{ bi(STOCK_PREP_NO_SHEET_LINK_HINT.zh, STOCK_PREP_NO_SHEET_LINK_HINT.en) }}
+      {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
     </p>
 
     <StockPrepTechnicalDetails testid="stock-prep-large-bom-tech">
@@ -81,9 +81,10 @@ import { STOCK_PREPARATION_PULL_BOM_ACTION_ID } from '../../../services/integrat
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
-  STOCK_PREP_NO_SHEET_LINK_HINT,
   stockPrepErrorPlain,
   stockPrepLargeBomPhasePlain,
+  stockPrepNoSheetLinkHint,
+  type StockPrepNoSheetLinkHintContext,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
@@ -98,6 +99,8 @@ const props = withDefaults(
     pollIntervalMs?: number
     /** The 备料主表 handle the parent holds, or null. Label only — this panel routes nothing. */
     fillTarget?: StockPreparationFillTarget | null
+    /** Where the parent panel is mounted — picks the no-link sentence's last clause only. */
+    noLinkHintContext?: StockPrepNoSheetLinkHintContext
   }>(),  {
     scope: () => ({}),
     actionId: STOCK_PREPARATION_PULL_BOM_ACTION_ID,
@@ -105,8 +108,11 @@ const props = withDefaults(
     wait: null,
     pollIntervalMs: 2000,
     fillTarget: null,
+    noLinkHintContext: 'workspace',
   },
 )
+
+const noSheetLinkHint = computed(() => stockPrepNoSheetLinkHint(props.noLinkHintContext))
 
 const emit = defineEmits<{
   /** Identical to the parent panel's own event — the shell owns the one navigation this surface has. */

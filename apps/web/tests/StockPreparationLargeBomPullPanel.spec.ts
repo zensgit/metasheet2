@@ -159,6 +159,17 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(plainLink.getAttribute('data-fill-target')).toBe('none')
     expect(plainLink.textContent).toContain('打开多维表首页')
     expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('不用在首页选模板')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('请在「项目备料」页打开这个项目')
+    app?.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    // Review round 1 (F1): inside 项目备料 the sentence points down the page instead.
+    const onBoard = mountPanel({ api: doneApi(), noLinkHintContext: 'board' })
+    await flushUi()
+    const boardHint = onBoard.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]') as HTMLElement
+    expect(boardHint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(boardHint.textContent).not.toContain('「项目备料」页')
   })
   it('D-02: no open-multitable link renders before done', async () => {
     const api = doneApi({

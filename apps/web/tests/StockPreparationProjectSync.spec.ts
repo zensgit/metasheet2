@@ -526,7 +526,12 @@ describe('項目接入 — the four-step import run', () => {
     expect(plain.zhNext).toContain('status=404')
     expect(plain.enNext).toContain('status=404')
     expect(plain.zhNext).toContain('平台管理员')
-    expect(plain.zhNext).toContain('再同步不会改变')
+    // Review round 1 (F7): a likely cause, never an assertion that the archive ignores every workspace.
+    expect(plain.zhNext).toContain('再同步一般不会改变')
+    expect(plain.zhNext).toContain('最常见的原因')
+    expect(plain.zhNext).not.toContain('只找得到租户级')
+    expect(plain.enNext).toContain('The most common cause')
+    expect(plain.enNext).not.toContain('only finds a tenant-wide one')
     // A 404 that DID carry a code keeps that code's own reason; an unmapped coded 404 stays generic.
     expect(classifyArchiveFailure(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND').reason).toBe('BATCH_ARCHIVE_SOURCE_PROJECT_NOT_FOUND')
     expect(classifyArchiveFailure(404, 'SOME_OTHER_NOT_FOUND')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
@@ -551,6 +556,9 @@ describe('項目接入 — the four-step import run', () => {
     [503, null],
     [503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE'],
     [503, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED'],
+    // Review round 1 (F4): a code-less gateway answer is the same "not answered normally".
+    [502, null],
+    [504, null],
   ] as const)('9b: a %i (code %s) the table does not name is "server unavailable", not the generic failure', async (status, code) => {
     const api = makeApi({
       archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/mvp-persist', { code })),
@@ -564,6 +572,19 @@ describe('項目接入 — the four-step import run', () => {
     expect(plain.zh.startsWith('数据已经写进去了')).toBe(true)
     expect(plain.zhNext).toContain('平台管理员')
     expect(plain.enNext).toContain('platform administrator')
+  })
+
+  it('round 1 (F4): a 502/504 that carries an unrecognised code stays the generic failure; the copy does not claim nothing was kept', () => {
+    expect(classifyArchiveFailure(502, 'SOME_UPSTREAM_CODE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(504, 'SOME_UPSTREAM_CODE')).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    expect(classifyArchiveFailure(500, null)).toEqual({ status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' })
+    // A 504 may have kept the batch server-side: the sentence says "not confirmed", not "nothing was kept".
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SERVICE_UNAVAILABLE
+    expect(plain.zh).toContain('没有确认完成')
+    expect(plain.zh).not.toContain('这次没有存档')
+    expect(plain.en).toContain('not confirmed')
+    expect(plain.en).not.toContain('nothing was kept')
+    expect(plain.zhNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ALREADY_ARCHIVED.zh.split(',')[0])
   })
 
   it('9b: a coded answer still wins over the status rules', () => {
@@ -590,13 +611,25 @@ describe('項目接入 — the four-step import run', () => {
   it('9b: the unprovisioned-tables copy names the admin action without implying a page button, and the off switch', () => {
     const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_TABLES_NOT_PROVISIONED
     expect(plain.zhNext).not.toContain('「建快照表」')
-    expect(plain.zhNext).toContain('页面上没有建表的按钮')
+    expect(plain.zhNext).toContain('页面上没有建表按钮')
     expect(plain.enNext).toContain('There is no button for this on the page')
+    // Review round 1 (F8): an authenticated API call, named for the administrator — not a server-shell step.
+    expect(plain.zhNext).toContain('给管理员看的接口名:mvp/ensure')
+    expect(plain.zhNext).not.toContain('在服务器上')
+    expect(plain.enNext).not.toContain('on the server')
     expect(plain.zhNext).toContain('开关关掉')
     expect(plain.enNext).toContain('flag off')
     // ...and the sentence it says the step will then show is the real one.
     expect(plain.zhNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_DISABLED.zh)
     expect(plain.enNext).toContain(STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_DISABLED.en)
+  })
+
+  it('round 1 (F5): the schema-repair copy no longer quotes a page button that does not exist', () => {
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.BATCH_ARCHIVE_SCHEMA_INCOMPLETE
+    expect(plain.zhNext).not.toContain('「修复快照表」')
+    expect(plain.zhNext).toContain('页面上没有修复按钮')
+    expect(plain.zhNext).toContain('给管理员看的接口名:mvp/repair')
+    expect(plain.enNext).toContain('There is no repair button on the page')
   })
 
   it('9b: the pointer and version refusals name their detail reason and the administrator, never a self-heal', () => {

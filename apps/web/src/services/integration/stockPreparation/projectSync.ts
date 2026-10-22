@@ -971,12 +971,16 @@ export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_P
  * and two classified by HTTP status, AFTER the code table (a coded answer always wins):
  *   503 with no mapped code                   the server (or a host capability the archive needs, e.g.
  *       STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE) answered "unavailable". FAIL →
- *       BATCH_ARCHIVE_SERVICE_UNAVAILABLE.
+ *       BATCH_ARCHIVE_SERVICE_UNAVAILABLE. Review round 1: a CODE-LESS 502 or 504 (a gateway in front
+ *       of the server) lands there too. A 504 may still have kept the batch server-side, which is why
+ *       that copy says "not confirmed" and that the next sync reports an already-kept batch as such.
  *   404 with NO usable code                   in practice `ExternalSystemNotFoundError`, whose class
- *       name is the wire code and so fails `clampErrorCode`: the archive resolves the PLM source with
- *       no workspace (http-routes.cjs `tableActionMvpPersist` → `loadTableActionSourceAdapter`;
- *       external-systems.cjs `selectScopedRow` never widens a null workspace), so a source the trial
- *       found under the page's workspace can be invisible to it. FAIL →
+ *       name is the wire code and so fails `clampErrorCode`. The archive does not carry the page's
+ *       workspace hint (http-routes.cjs `tableActionMvpPersist` → `loadTableActionSourceAdapter`): it
+ *       uses the action's own workspace, or the binding's single matched workspace when exactly one
+ *       binding applies, and otherwise the tenant-wide row only (external-systems.cjs
+ *       `selectScopedRow` never widens a null workspace). So a source the trial found under the page's
+ *       workspace CAN be invisible to it — the copy says "most common cause", not "the cause". FAIL →
  *       BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND. A 404 WITH a code (SOURCE_PROJECT_NOT_FOUND) is not this.
  *
  * Every other refusal keeps BATCH_ARCHIVE_FAILED, whose copy no longer promises a re-sync fixes it.
@@ -1019,7 +1023,11 @@ export function classifyArchiveFailure(
     const outcome = STOCK_PREP_ARCHIVE_REFUSAL_OUTCOMES[code]
     return { status: outcome.status, reason: outcome.reason }
   }
-  if (status === 503) return { status: 'fail', reason: 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE' }
+  // Review round 1: a gateway answer (502 / 504) with no code is the same "not answered normally" as
+  // a 503 — the plan-read classifier above already groups every 5xx as the transient bucket.
+  if (status === 503 || (!code && (status === 502 || status === 504))) {
+    return { status: 'fail', reason: 'BATCH_ARCHIVE_SERVICE_UNAVAILABLE' }
+  }
   if (status === 404 && !code) return { status: 'fail', reason: 'BATCH_ARCHIVE_SOURCE_SYSTEM_NOT_FOUND' }
   return { status: 'fail', reason: 'BATCH_ARCHIVE_FAILED' }
 }

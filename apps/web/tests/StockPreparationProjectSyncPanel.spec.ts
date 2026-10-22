@@ -269,10 +269,13 @@ describe('StockPreparationProjectSyncPanel', () => {
     const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
     expect(hint).not.toBeNull()
     expect(hint.textContent).toContain('多维表首页')
-    expect(hint.textContent).toContain('固定模板自动建')
+    expect(hint.textContent).toContain('由系统或管理员按固定模板建立')
     expect(hint.textContent).toContain('不用在首页选模板')
     expect(hint.textContent).toContain('不要在那里新建 Base')
-    expect(hint.textContent).toContain('「项目备料」')
+    // Default mount = 项目工作台: it points at 项目备料, and never promises a re-pull makes a link.
+    expect(hint.textContent).toContain('请在「项目备料」页打开这个项目')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    expect(hint.textContent).not.toContain('自动建')
     // It sits in the same next-step row as the button it explains.
     const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLElement
     expect(hint.parentElement).toBe(link.parentElement)
@@ -286,6 +289,16 @@ describe('StockPreparationProjectSyncPanel', () => {
     const enHint = en.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
     expect(enHint.textContent).toContain('multitable home')
     expect(enHint.textContent).toContain('do not pick a template or create a Base')
+  })
+
+  it('round 1 (F1): mounted on 项目备料 the sentence points DOWN this page, not back to the page it is on', async () => {
+    const root = mountPanel({ api: api(), noLinkHintContext: 'board' })
+    await runSync(root)
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('「项目备料」页')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    expect(hint.textContent).toContain('不用在首页选模板')
   })
 
   it('9a: WITH a handle there is no such sentence — the button lands on the sheet itself', async () => {
@@ -574,6 +587,24 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(link).not.toBeNull()
     link.click()
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
+  })
+
+  it('round 1 (F1): the background channel inherits the panel\'s mount context for its no-link sentence', async () => {
+    const double = api({
+      dryRun: vi.fn().mockResolvedValue({ status: 'large_bom_bounded', canApply: false, dryRunToken: null, counts: {} }),
+    })
+    const root = mountPanel({
+      api: double,
+      largeBomApi: largeBomJobApi(),
+      largeBomPollWait: vi.fn().mockResolvedValue(undefined),
+      noLinkHintContext: 'board',
+    })
+    await runSync(root)
+    await flushUi()
+    const hint = root.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('「项目备料」页')
   })
 
   it('L-BOM: an ordinary (non-large-BOM) run never mounts the background channel', async () => {
