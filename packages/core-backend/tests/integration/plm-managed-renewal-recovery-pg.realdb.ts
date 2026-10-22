@@ -2054,6 +2054,103 @@ describe('renewal recovery admission', () => {
     expect(outbox.rows.map((row) => row.delegation_id)).toEqual(['del-stranger'])
   })
 
+  it('returns continuity mode and native credential generation after current verification', async () => {
+    const predecessor = await issuePredecessor(90)
+    const linkRevision = Number(predecessor.session?.generation)
+    expect(linkRevision).toBeGreaterThanOrEqual(1)
+    const active = (delegationId: string) => Response.json({
+      active: true,
+      subject: '42',
+      tenant_id: 'default',
+      org_id: 'fixture-org',
+      client_id: 'managed-fixture',
+      issuer: ISSUER,
+      scope: 'bom_review_read',
+      delegation_id: delegationId,
+      expires_in: 120,
+      root_part_id: 'part',
+      client_origin: ORIGIN,
+    })
+    let predecessorLive = true
+    setManagedNativeFetchForTests(async (url, init) => {
+      const href = String(url)
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null
+      nativeCalls.push({ url: href, body })
+      if (href.endsWith('/status')) {
+        const delegationId = typeof body?.delegation_id === 'string' ? body.delegation_id : ''
+        if (delegationId === 'del-pred' && predecessorLive) return active(delegationId)
+        if (delegationId === 'del-succ') return active(delegationId)
+        return new Response(null, { status: 401 })
+      }
+      if (href.endsWith('/renew')) return Response.json(continuousJson(successorSpec))
+      if (href.endsWith('/revoke')) return new Response(null, { status: 204 })
+      return new Response('missing', { status: 404 })
+    })
+    const readCurrent = async (cookie: string) => {
+      const app = express()
+      app.use(express.json())
+      app.use('/api/plm/managed-login', managedLoginRouter)
+      const currentServer = await listen(app)
+      try {
+        const response = await fetch(`http://127.0.0.1:${currentServer.port}/api/plm/managed-login/current`, {
+          headers: { cookie: `${MANAGED_SESSION_COOKIE}=${cookie}` },
+        })
+        return { status: response.status, body: await response.json() as { data?: { managedSession?: Record<string, unknown> } } }
+      } finally {
+        await new Promise<void>((resolve, reject) => currentServer.server.close((error) => error ? reject(error) : resolve()))
+      }
+    }
+    const before = await readCurrent(predecessor.cookie)
+    expect(before.status).toBe(200)
+    expect(before.body.data?.managedSession).toMatchObject({
+      mode: 'managed-cookie',
+      revision: linkRevision,
+      continuityMode: 'continuous',
+      credentialGeneration: 0,
+    })
+    expect(before.body.data?.managedSession?.revision).not.toBe(before.body.data?.managedSession?.credentialGeneration)
+    const renewed = await recover(predecessor.cookie)
+    expect(renewed.res.statusCode).toBe(200)
+    const successorCookie = renewed.res.cookies[MANAGED_SESSION_COOKIE]?.value ?? ''
+    const after = await readCurrent(successorCookie)
+    expect(after.status).toBe(200)
+    expect(after.body.data?.managedSession).toMatchObject({
+      revision: linkRevision,
+      continuityMode: 'continuous',
+      credentialGeneration: 1,
+    })
+    predecessorLive = false
+    const rotated = await readCurrent(predecessor.cookie)
+    expect(rotated.status).toBe(401)
+    expect(JSON.stringify(rotated.body)).not.toContain('credentialGeneration')
+
+    await resetRows()
+    const ordinarySpec: CredentialSpec = {
+      jti: 'jti-ordinary-descriptor',
+      exp: Math.floor(Date.now() / 1000) + 400,
+      delegationId: 'del-ordinary-descriptor',
+      expiresIn: 30,
+      generationIndex: 0,
+    }
+    installOrdinaryExchange(ordinarySpec, { revokeStatus: 204, delayMs: 0 }, { at: 0 })
+    const started = await beginOrdinary('source-ordinary-descriptor')
+    const done = await finish(started)
+    expect(done.statusCode).toBe(200)
+    setManagedNativeFetchForTests(async (url, init) => {
+      const href = String(url)
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null
+      if (href.endsWith('/status') && body?.delegation_id === 'del-ordinary-descriptor') return active('del-ordinary-descriptor')
+      return new Response(null, { status: 401 })
+    })
+    const ordinary = await readCurrent(done.cookies[MANAGED_SESSION_COOKIE]?.value ?? '')
+    expect(ordinary.status).toBe(200)
+    expect(ordinary.body.data?.managedSession).toMatchObject({
+      continuityMode: 'ordinary',
+      credentialGeneration: null,
+    })
+    expect(Number(ordinary.body.data?.managedSession?.revision)).toBeGreaterThanOrEqual(1)
+  })
+
   it('denies a rotated predecessor on ordinary verification and current, and still admits exact recovery', async () => {
     const predecessor = await issuePredecessor(90)
     const renewed = await recover(predecessor.cookie)

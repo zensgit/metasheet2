@@ -5,11 +5,21 @@ import {
   authIdentityLocksAvailable,
   managedResidueRemains,
   ordinaryTakeoverRequired,
+  managedRenewalPendingPresent,
   readManagedCompletePending,
+  readManagedRenewalPending,
   runSyncAuthMutation,
+  sameManagedRenewalSession,
   withAuthIdentityLock,
 } from './authIdentityLock'
-import { postManagedLogoutUnlocked } from '../services/plm/plmManagedCompanion'
+import {
+  PlmManagedCompanionError,
+  continuousRenewalDue,
+  continuousRenewalEligible,
+  postManagedLogoutUnlocked,
+  renewManagedContinuousSessionUnlocked,
+  type ManagedRenewalOutcome,
+} from '../services/plm/plmManagedCompanion'
 import { matchesPermission } from '../utils/permission-match'
 import { getCurrentScope, onScopeDispose } from 'vue'
 import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSION_ORG_KEY, installExplicitSessionOrg, ownsExplicitSessionOrgChange, restoreExplicitSessionOrg } from '../utils/explicitSessionOrg'
@@ -506,71 +516,148 @@ export function useAuth() {
     }
     if (managedFlight?.key === flightKey) return managedFlight.promise
     const pending = (async (): Promise<SessionBootstrapResult> => {
-      const response = await fetch(currentUrl.toString(), {
-        credentials: 'include',
-        headers: { accept: 'application/json' },
-      }).catch(() => null)
-      if (staleManagedAttempt(startedEpoch, startedSignature)) {
-        return { ok: false, status: 0, payload: null }
-      }
-      if (!response) {
-        if (keepSessionOnFailure) return { ok: false, status: 0, payload: null }
-        sessionCache = { ok: false, status: 0, payload: null }
-        return sessionCache
-      }
-      let payload: SessionBootstrapPayload | null = null
-      try {
-        payload = await response.json() as SessionBootstrapPayload
-      } catch {
-        payload = null
-      }
-      if (staleManagedAttempt(startedEpoch, startedSignature)) {
-        return { ok: false, status: 0, payload: null }
-      }
-      if (!response.ok) {
-        if (keepSessionOnFailure && response.status !== 401) {
-          return { ok: false, status: response.status, payload }
+      const context = readManagedDescriptor()
+      const renewalSameSession = sameManagedRenewalSession(
+        readManagedRenewalPending(),
+        context,
+        startedEpoch,
+        startedToken,
+      )
+      if (managedRenewalPendingPresent() && !renewalSameSession) {
+        if (!authIdentityLocksAvailable()) return { ok: false, status: 0, payload: null }
+        try {
+          await withAuthIdentityLock(async () => {
+            if (
+              managedRenewalPendingPresent()
+              && !sameManagedRenewalSession(
+                readManagedRenewalPending(),
+                readManagedDescriptor(),
+                readManagedEpoch(),
+                readStoredToken(),
+              )
+            ) {
+              await postManagedLogoutUnlocked()
+            }
+          }, { failClosed: true })
+        } catch {
+          return { ok: false, status: 0, payload: null }
         }
-        clearManagedDescriptor()
-        clearStoredUserSnapshot()
+        return { ok: false, status: 0, payload: null }
+      }
+      let renewalUsed = false
+      const renewalStops = (outcome: ManagedRenewalOutcome | null): boolean => {
+        if (!outcome || outcome.ok) return false
+        return outcome.reason === 'transport' || outcome.reason === 'stale' || outcome.reason === 'malformed'
+      }
+      const renewOnce = async (): Promise<ManagedRenewalOutcome | null> => {
+        if (renewalUsed || !continuousRenewalEligible(context)) return null
+        renewalUsed = true
+        if (!authIdentityLocksAvailable()) return { ok: false, reason: 'unavailable' }
+        try {
+          return await withAuthIdentityLock(async () => {
+            const moved = readManagedEpoch() !== startedEpoch
+              || readAuthSessionSignature() !== startedSignature
+              || readStoredToken() !== startedToken
+            const pendingOwner = readManagedRenewalPending()
+            const pendingMismatch = managedRenewalPendingPresent() && !sameManagedRenewalSession(
+              pendingOwner,
+              readManagedDescriptor(),
+              readManagedEpoch(),
+              readStoredToken(),
+            )
+            if (moved || pendingMismatch) {
+              if (managedRenewalPendingPresent()) await postManagedLogoutUnlocked()
+              return { ok: false, reason: 'stale' }
+            }
+            return renewManagedContinuousSessionUnlocked()
+          }, { failClosed: true })
+        } catch (error) {
+          if (error instanceof AuthIdentityLockError || error instanceof PlmManagedCompanionError) {
+            return { ok: false, reason: 'unavailable' }
+          }
+          throw error
+        }
+      }
+      const loadCurrent = async (allowRecovery: boolean): Promise<SessionBootstrapResult> => {
+        const response = await fetch(currentUrl.toString(), {
+          credentials: 'include',
+          headers: { accept: 'application/json' },
+        }).catch(() => null)
+        if (staleManagedAttempt(startedEpoch, startedSignature) || readStoredToken() !== startedToken) {
+          return { ok: false, status: 0, payload: null }
+        }
+        if (!response) {
+          if (keepSessionOnFailure) return { ok: false, status: 0, payload: null }
+          sessionCache = { ok: false, status: 0, payload: null }
+          return sessionCache
+        }
+        let payload: SessionBootstrapPayload | null = null
+        try {
+          payload = await response.json() as SessionBootstrapPayload
+        } catch {
+          payload = null
+        }
+        if (staleManagedAttempt(startedEpoch, startedSignature) || readStoredToken() !== startedToken) {
+          return { ok: false, status: 0, payload: null }
+        }
+        if (!response.ok) {
+          if (allowRecovery && response.status === 401) {
+            const outcome = await renewOnce()
+            if (outcome?.ok === true) return loadCurrent(false)
+            if (renewalStops(outcome)) return { ok: false, status: 0, payload: null }
+          }
+          if (keepSessionOnFailure && response.status !== 401) {
+            return { ok: false, status: response.status, payload }
+          }
+          clearManagedDescriptor()
+          clearStoredUserSnapshot()
+          sessionToken = null
+          sessionIdentity = null
+          sessionCache = { ok: false, status: response.status, payload }
+          notifyAuthPrincipalChange()
+          return sessionCache
+        }
+        const data = payload?.data
+        const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+        const user = record.user
+        const userId = extractUserId(user)
+        if (staleManagedAttempt(startedEpoch, startedSignature) || readStoredToken() !== startedToken) {
+          return { ok: false, status: 0, payload: null }
+        }
+        const installed = installManagedDescriptor(record.managedSession)
+        if (!installed || !userId || installed.userId !== userId) {
+          clearManagedDescriptor()
+          sessionCache = { ok: false, status: 401, payload }
+          return sessionCache
+        }
+        if (readManagedEpoch() !== startedEpoch || readStoredToken() !== startedToken) {
+          const current = readManagedDescriptor()
+          if (
+            current
+            && current.userId === installed.userId
+            && current.tenantId === installed.tenantId
+            && current.sessionId === installed.sessionId
+            && current.revision === installed.revision
+          ) {
+            clearManagedDescriptor()
+          }
+          return { ok: false, status: 0, payload: null }
+        }
+        setManagedProbeMarker()
+        persistUserSnapshot(user)
+        persistTenantHint(installed.tenantId)
         sessionToken = null
-        sessionIdentity = null
-        sessionCache = { ok: false, status: response.status, payload }
+        sessionWasExplicit = false
+        sessionIdentity = getAuthPrincipalKey()
+        sessionCache = { ok: true, status: response.status, payload }
         notifyAuthPrincipalChange()
         return sessionCache
       }
-      const data = payload?.data
-      const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
-      const user = record.user
-      const userId = extractUserId(user)
-      const installed = installManagedDescriptor(record.managedSession)
-      if (!installed || !userId || installed.userId !== userId) {
-        clearManagedDescriptor()
-        sessionCache = { ok: false, status: 401, payload }
-        return sessionCache
+      if (continuousRenewalDue(context)) {
+        const outcome = await renewOnce()
+        if (renewalStops(outcome)) return { ok: false, status: 0, payload: null }
       }
-      if (readManagedEpoch() !== startedEpoch || readStoredToken() !== startedToken) {
-        const current = readManagedDescriptor()
-        if (
-          current
-          && current.userId === installed.userId
-          && current.tenantId === installed.tenantId
-          && current.sessionId === installed.sessionId
-          && current.revision === installed.revision
-        ) {
-          clearManagedDescriptor()
-        }
-        return { ok: false, status: 0, payload: null }
-      }
-      setManagedProbeMarker()
-      persistUserSnapshot(user)
-      persistTenantHint(installed.tenantId)
-      sessionToken = null
-      sessionWasExplicit = false
-      sessionIdentity = getAuthPrincipalKey()
-      sessionCache = { ok: true, status: response.status, payload }
-      notifyAuthPrincipalChange()
-      return sessionCache
+      return loadCurrent(true)
     })()
     sessionPromise = pending
     managedFlight = { key: flightKey, promise: pending }

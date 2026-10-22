@@ -253,6 +253,57 @@ export async function readLiveManagedCookieIdentity(token: string): Promise<{
   }
 }
 
+export type ManagedContinuityMode = 'ordinary' | 'continuous'
+
+/**
+ * Persisted continuity after native verification has already succeeded.
+ * Link generation stays the Meta revision. Credential generation is the native index.
+ * Inconsistent rows fail closed instead of becoming renewable.
+ */
+export function persistedManagedContinuity(row: {
+  generation: unknown
+  linkGeneration: unknown
+  continuityMode: unknown
+  credentialGeneration: unknown
+  intentId: unknown
+}): {
+  revision: number
+  continuityMode: ManagedContinuityMode
+  credentialGeneration: number | null
+} | null {
+  const revision = sqlInteger(row.generation)
+  const linkRevision = sqlInteger(row.linkGeneration)
+  if (revision === null || revision === undefined || revision < 1) return null
+  if (linkRevision !== revision) return null
+  const credential = sqlInteger(row.credentialGeneration)
+  const intentId = sqlText(row.intentId)
+  if (credential === undefined || intentId === undefined) return null
+  if (row.continuityMode === 'ordinary') {
+    if (credential !== null || intentId === null) return null
+    return { revision, continuityMode: 'ordinary', credentialGeneration: null }
+  }
+  if (row.continuityMode === 'continuous') {
+    if (credential === null || credential < 0 || credential > 7) return null
+    if (credential === 0 && intentId === null) return null
+    if (credential > 0 && intentId !== null) return null
+    return { revision, continuityMode: 'continuous', credentialGeneration: credential }
+  }
+  return null
+}
+
+function sqlInteger(value: unknown): number | null | undefined {
+  if (value === null) return null
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  if (typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value)) return Number(value)
+  return undefined
+}
+
+function sqlText(value: unknown): string | null | undefined {
+  if (value === null) return null
+  if (typeof value === 'string' && value.length > 0) return value
+  return undefined
+}
+
 export async function describeManagedCookie(token: string): Promise<{
   user: User
   descriptor: {
@@ -262,6 +313,8 @@ export async function describeManagedCookie(token: string): Promise<{
     sessionId: string
     revision: number
     expiresAt: string
+    continuityMode: ManagedContinuityMode
+    credentialGeneration: number | null
   }
 } | null> {
   const user = await verifyManagedCompanionToken(token)
@@ -271,14 +324,24 @@ export async function describeManagedCookie(token: string): Promise<{
   if (!user || !sessionId || !tenantId) return null
   try {
     const found = await query(
-      `SELECT generation, expires_at, revoked_at FROM plm_managed_sessions WHERE id = $1`,
+      `SELECT s.generation, s.expires_at, s.revoked_at, s.credential_generation, s.intent_id,
+              l.continuity_mode, l.generation AS link_generation
+       FROM plm_managed_sessions s
+       JOIN plm_managed_identity_links l ON l.id = s.link_id
+       WHERE s.id = $1`,
       [sessionId],
     )
     const row = found.rows[0]
     const expiresAt = asDate(row?.expires_at)
-    const revision = Number(row?.generation)
     if (!row || row.revoked_at || !expiresAt || expiresAt.getTime() <= Date.now()) return null
-    if (!Number.isInteger(revision) || revision < 1) return null
+    const continuity = persistedManagedContinuity({
+      generation: row.generation,
+      linkGeneration: row.link_generation,
+      continuityMode: row.continuity_mode,
+      credentialGeneration: row.credential_generation,
+      intentId: row.intent_id,
+    })
+    if (!continuity) return null
     return {
       user,
       descriptor: {
@@ -286,8 +349,10 @@ export async function describeManagedCookie(token: string): Promise<{
         userId: user.id,
         tenantId,
         sessionId,
-        revision,
+        revision: continuity.revision,
         expiresAt: expiresAt.toISOString(),
+        continuityMode: continuity.continuityMode,
+        credentialGeneration: continuity.credentialGeneration,
       },
     }
   } catch {

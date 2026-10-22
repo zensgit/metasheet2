@@ -36,6 +36,10 @@ export interface ManagedSessionDescriptor {
   sessionId: string
   revision: number
   expiresAt: string
+  /** Server-authenticated scheduling hint. Absence is not renewal authority. */
+  continuityMode?: 'ordinary' | 'continuous'
+  /** Native credential index. Distinct from the Meta link revision. */
+  credentialGeneration?: number | null
 }
 
 let managedDescriptor: ManagedSessionDescriptor | null = null
@@ -74,6 +78,8 @@ export function installManagedDescriptor(value: unknown): ManagedSessionDescript
   if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId !== sessionId.trim()) return null
   if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) return null
   if (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) return null
+  const continuity = continuityFields(record)
+  if (continuity === null) return null
   const installed: ManagedSessionDescriptor = {
     mode: 'managed-cookie',
     userId,
@@ -82,8 +88,33 @@ export function installManagedDescriptor(value: unknown): ManagedSessionDescript
     revision,
     expiresAt,
   }
+  if (continuity !== 'absent') {
+    installed.continuityMode = continuity.continuityMode
+    installed.credentialGeneration = continuity.credentialGeneration
+  }
   managedDescriptor = installed
   return installed
+}
+
+/** Missing continuity fields stay non-renewable. Present fields must agree. */
+function continuityFields(record: Record<string, unknown>):
+  | 'absent'
+  | { continuityMode: 'ordinary' | 'continuous'; credentialGeneration: number | null }
+  | null {
+  const hasMode = Object.prototype.hasOwnProperty.call(record, 'continuityMode')
+  const hasGeneration = Object.prototype.hasOwnProperty.call(record, 'credentialGeneration')
+  if (!hasMode && !hasGeneration) return 'absent'
+  if (!hasMode || !hasGeneration) return null
+  if (record.continuityMode === 'ordinary') {
+    if (record.credentialGeneration !== null) return null
+    return { continuityMode: 'ordinary', credentialGeneration: null }
+  }
+  if (record.continuityMode === 'continuous') {
+    const generation = record.credentialGeneration
+    if (typeof generation !== 'number' || !Number.isInteger(generation) || generation < 0 || generation > 7) return null
+    return { continuityMode: 'continuous', credentialGeneration: generation }
+  }
+  return null
 }
 
 export function readManagedProbeMarker(): boolean {

@@ -2197,8 +2197,17 @@ describe('managed companion postgresql', () => {
         must_change_password: false,
       })
       expect(payload.data.features.plm).toBe(true)
-      expect(payload.data.managedSession).toMatchObject({ mode: 'managed-cookie', userId: OWNER, tenantId: TENANT, revision: 1 })
-      expect(Object.keys(payload.data.managedSession).sort()).toEqual(['expiresAt', 'mode', 'revision', 'sessionId', 'tenantId', 'userId'])
+      expect(payload.data.managedSession).toMatchObject({
+        mode: 'managed-cookie',
+        userId: OWNER,
+        tenantId: TENANT,
+        revision: 1,
+        continuityMode: 'ordinary',
+        credentialGeneration: null,
+      })
+      expect(Object.keys(payload.data.managedSession).sort()).toEqual([
+        'continuityMode', 'credentialGeneration', 'expiresAt', 'mode', 'revision', 'sessionId', 'tenantId', 'userId',
+      ])
       expect(typeof payload.data.managedSession.sessionId).toBe('string')
       expect(typeof payload.data.managedSession.expiresAt).toBe('string')
       expect(current.text).not.toMatch(/yur_|code_verifier|clientSecret|client_secret|eyJ/)

@@ -86,6 +86,8 @@ function managedCurrentPayload(described: NonNullable<Awaited<ReturnType<typeof 
         sessionId: session.sessionId,
         revision: session.revision,
         expiresAt: session.expiresAt,
+        continuityMode: session.continuityMode,
+        credentialGeneration: session.credentialGeneration,
       },
     },
   }
