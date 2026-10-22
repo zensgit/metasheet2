@@ -6,14 +6,13 @@
  * the real run reached 0 people. The send path (automation-executor.ts, send_dingtalk_person_message) and
  * the rule editor's preflight (routes/automation.ts, POST …/automations/dingtalk-person-recipient-status)
  * therefore read the SAME query, so the editor can never say "linked" for a user the sender would skip.
+ * Like the sender, it is not limited to users with a multitable role (review round 1c decision).
  *
  * Conditions (unchanged from the sender, DT-OPS-04): the user row exists; `is_active`; and the most
  * recently updated `directory_account_links` row with `link_status = 'linked'` to an ACTIVE `dingtalk`
  * `directory_accounts` row, whose `external_user_id` is the DingTalk userid (its integration is carried
  * so the sender can notify with the right corp's credentials).
  */
-
-import { isElearningProjectionSheetIdCandidate } from './elearning-projection-constants'
 
 export type DingTalkPersonRecipientStatusQueryFn = (
   sql: string,
@@ -74,37 +73,6 @@ export function parseDingTalkPersonRecipientIds(raw: unknown): DingTalkPersonRec
     if (seen.size > DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS) return { ok: false, code: 'TOO_MANY_USER_IDS' }
   }
   return { ok: true, userIds: Array.from(seen) }
-}
-
-/**
- * Review round 1b — exposure parity with the roster. The rule editor's names come from
- * `GET /sheets/:sheetId/form-share-candidates` (routes/univer-meta.ts), which (a) needs
- * `canManageFormShareForSheet` = canManageViews on a non-projection sheet, and (b) lists only users that
- * pass `listSheetPermissionCandidates`' eligibility filter — and returns their names, emails, active flag
- * and DingTalk binding/delivery flags. The preflight therefore answers ONLY for ids that roster could show
- * the same caller; every other id (and every id when the caller cannot use the roster) is answered exactly
- * like an id with no user row, so the endpoint cannot enumerate anything the roster does not already list.
- * Kept equal to univer-meta.ts's canManageFormShareForSheet by a source-pin test.
- */
-export function callerCanListRosterUsers(capabilities: { canManageViews: boolean }, sheetId: string): boolean {
-  return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)
-}
-
-function unknownStatus(userId: string): DingTalkPersonRecipientStatus {
-  return { userId, exists: false, active: false, dingtalkLinked: false }
-}
-
-/** Roster-scoped statuses: out-of-scope ids are never queried and read exactly like unknown ids. */
-export async function readRosterScopedDingTalkPersonRecipientStatuses(
-  queryFn: DingTalkPersonRecipientStatusQueryFn,
-  userIds: string[],
-  scope: { rosterVisible: boolean; loadEligibleUserIds: (userIds: string[]) => Promise<Set<string>> },
-): Promise<DingTalkPersonRecipientStatus[]> {
-  if (!scope.rosterVisible || userIds.length === 0) return userIds.map(unknownStatus)
-  const eligible = await scope.loadEligibleUserIds(userIds)
-  const inScope = userIds.filter((userId) => eligible.has(userId))
-  const known = new Map((await readDingTalkPersonRecipientStatuses(queryFn, inScope)).map((item) => [item.userId, item]))
-  return userIds.map((userId) => known.get(userId) ?? unknownStatus(userId))
 }
 
 /**

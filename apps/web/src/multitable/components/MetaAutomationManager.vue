@@ -413,6 +413,7 @@
               >
                 <strong v-if="recipient.named" data-automation-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                 <span>{{ recipient.subtitle || recipient.id }}</span>
+                <span v-if="recipient.outsideMemberList" class="meta-automation__recipient-badge" data-automation-field="dingtalkPersonRecipientOutsideMemberList">{{ l('dingtalk.recipientOutsideMemberList') }}</span>
                 <span v-if="recipient.stateLabel" class="meta-automation__recipient-badge" data-automation-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
                 <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                 <em>{{ l('dingtalk.remove') }}</em>
@@ -1230,6 +1231,8 @@ const selectedDingTalkPersonRecipients = computed(() =>
       id,
       // Round 1b: a name only when the roster knows the user (see the rule editor).
       named: Boolean(directoryEntry?.label),
+      // Round 1c: exists for the sender, but not a member the search can name (see the rule editor).
+      outsideMemberList: !directoryEntry && notifyRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,

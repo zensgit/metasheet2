@@ -8,7 +8,10 @@
  *  - the read is the SENDER's own query (same SQL constant the executor runs), with the parsed ids;
  *  - the answer is booleans only — no name, email, DingTalk userid or integration — and unknown ids are
  *    exists:false;
- *  - ids are validated, trimmed, deduped and capped.
+ *  - ids are validated, trimmed, deduped and capped;
+ *  - review round 1c (T-layer decision, Ratified-by-default-2026-10-22): NOT narrowed to the form-share
+ *    roster — a user with no multitable role (the directory-synced field case) is answered like the sender
+ *    sees them, e.g. exists:true / dingtalkLinked:true when linked.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
@@ -17,15 +20,13 @@ import { createAutomationRoutes } from '../../src/routes/automation'
 import {
   DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS,
   DINGTALK_PERSON_RECIPIENT_STATUS_SQL,
-  callerCanListRosterUsers,
   readDingTalkPersonRecipientStatuses,
 } from '../../src/multitable/dingtalk-person-recipient-status'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const resolveSheetCapabilities = vi.hoisted(() => vi.fn())
-const loadPermissionCandidateEligibleUserIds = vi.hoisted(() => vi.fn())
 const poolQuery = vi.hoisted(() => vi.fn())
-vi.mock('../../src/multitable/permission-service', () => ({ resolveSheetCapabilities, loadPermissionCandidateEligibleUserIds }))
+vi.mock('../../src/multitable/permission-service', () => ({ resolveSheetCapabilities }))
 vi.mock('../../src/integration/db/connection-pool', () => {
   const client = { query: poolQuery, getInternalPool: () => null }
   return { poolManager: { get: () => client } }
@@ -53,10 +54,18 @@ const ROWS = [
   { local_user_id: 'user_inactive', local_user_active: false, dingtalk_user_id: 'dt_fake_2', integration_id: 'int_fake_1' },
 ]
 
-// Users the sheet roster (form-share-candidates) could list. `user_fake_roleless` exists, but has no
-// multitable role — the roster never shows it, so neither may the preflight.
-const ROSTER_ELIGIBLE = new Set(['user_linked', 'user_unlinked', 'user_inactive'])
-const AUTHORIZED = { capabilities: { canManageAutomation: true, canManageViews: true }, sheetLiveness: 'live' }
+// `user_fake_roleless` exists and is linked to DingTalk but holds no multitable role: the form-share roster
+// never lists it, the sender still reaches it. The row also carries name/email columns, which must never leave
+// the route (the shared SQL does not select them; a regression that did would be caught here).
+const ROLELESS_ROW = {
+  local_user_id: 'user_fake_roleless',
+  local_user_active: true,
+  dingtalk_user_id: 'dt_fake_3',
+  integration_id: 'int_fake_1',
+  name: 'Fake Person',
+  email: 'fake.person@example.test',
+}
+const AUTHORIZED = { capabilities: { canManageAutomation: true, canManageViews: false }, sheetLiveness: 'live' }
 
 function usersQueries() {
   return poolQuery.mock.calls.filter(([sql]) => sql === DINGTALK_PERSON_RECIPIENT_STATUS_SQL)
@@ -68,14 +77,10 @@ describe('DingTalk person-recipient preflight route', () => {
   beforeEach(() => {
     resolveSheetCapabilities.mockReset()
     poolQuery.mockReset()
-    loadPermissionCandidateEligibleUserIds.mockReset()
-    loadPermissionCandidateEligibleUserIds.mockImplementation(async (_query: unknown, ids: string[]) =>
-      new Set(ids.filter((id) => ROSTER_ELIGIBLE.has(id))))
     // The users table answers for whatever ids it is asked about — including the roleless user.
     poolQuery.mockImplementation(async (_sql: string, params?: unknown[]) => {
       const asked = new Set(((params?.[0] ?? []) as string[]))
-      const rows = [...ROWS, { local_user_id: 'user_fake_roleless', local_user_active: true, dingtalk_user_id: 'dt_fake_3', integration_id: 'int_fake_1' }]
-        .filter((row) => asked.has(row.local_user_id))
+      const rows = [...ROWS, ROLELESS_ROW].filter((row) => asked.has(row.local_user_id))
       return { rows, rowCount: rows.length }
     })
     resolveSheetCapabilities.mockResolvedValue(AUTHORIZED)
@@ -132,9 +137,8 @@ describe('DingTalk person-recipient preflight route', () => {
         ],
       },
     })
-    // Same SQL the sender runs — once, and only for ids the roster could list (the unknown id is out of scope).
-    expect(usersQueries()).toEqual([[DINGTALK_PERSON_RECIPIENT_STATUS_SQL, [['user_linked', 'user_unlinked', 'user_inactive']]]])
-    expect(loadPermissionCandidateEligibleUserIds).toHaveBeenCalledWith(expect.any(Function), ['user_linked', 'user_unlinked', 'user_inactive', 'user_fake_missing'])
+    // Same SQL the sender runs, with the trimmed, deduped ids — once.
+    expect(usersQueries()).toEqual([[DINGTALK_PERSON_RECIPIENT_STATUS_SQL, [['user_linked', 'user_unlinked', 'user_inactive', 'user_fake_missing']]]])
     // Nothing but the requested ids and booleans leaves the route.
     const text = JSON.stringify(res.body)
     for (const leaked of ['dt_fake_1', 'dt_fake_2', 'int_fake_1', 'local_user', 'integration', 'external']) {
@@ -142,29 +146,26 @@ describe('DingTalk person-recipient preflight route', () => {
     }
   })
 
-  // Review round 1b: the preflight reveals nothing the roster does not already show the same caller.
-  it('an existing user the roster cannot list reads exactly like an unknown id (no enumeration)', async () => {
-    const res = await request(pinned.url()).post(PATH).send({ userIds: ['user_fake_roleless', 'user_fake_missing', 'user_linked'] })
+  // Review round 1c: the answer is what the SENDER sees — not narrowed to the form-share roster, and not to
+  // callers who can use it (AUTHORIZED has canManageViews:false on purpose).
+  it('a roleless but linked user comes back exists:true, dingtalkLinked:true — never as an unknown id', async () => {
+    const res = await request(pinned.url()).post(PATH).send({ userIds: ['user_fake_roleless', 'user_fake_missing'] })
     expect(res.status).toBe(200)
     expect(res.body.data.items).toEqual([
-      { userId: 'user_fake_roleless', exists: false, active: false, dingtalkLinked: false },
+      { userId: 'user_fake_roleless', exists: true, active: true, dingtalkLinked: true },
       { userId: 'user_fake_missing', exists: false, active: false, dingtalkLinked: false },
-      { userId: 'user_linked', exists: true, active: true, dingtalkLinked: true },
     ])
-    // the out-of-scope user is never even looked up
-    expect(usersQueries()).toEqual([[DINGTALK_PERSON_RECIPIENT_STATUS_SQL, [['user_linked']]]])
+    expect(usersQueries()).toEqual([[DINGTALK_PERSON_RECIPIENT_STATUS_SQL, [['user_fake_roleless', 'user_fake_missing']]]])
   })
 
-  it('a caller who cannot use the roster (no canManageViews, or a projection sheet) gets every id as unknown and reads no user', async () => {
-    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true, canManageViews: false }, sheetLiveness: 'live' })
-    const res = await request(pinned.url()).post(PATH).send({ userIds: ['user_linked', 'user_fake_missing'] })
+  it('the response carries no name, email or DingTalk id — even when the row has them', async () => {
+    const res = await request(pinned.url()).post(PATH).send({ userIds: ['user_fake_roleless', 'user_linked'] })
     expect(res.status).toBe(200)
-    expect(res.body.data.items).toEqual([
-      { userId: 'user_linked', exists: false, active: false, dingtalkLinked: false },
-      { userId: 'user_fake_missing', exists: false, active: false, dingtalkLinked: false },
-    ])
-    expect(usersQueries()).toHaveLength(0)
-    expect(loadPermissionCandidateEligibleUserIds).not.toHaveBeenCalled()
+    for (const item of res.body.data.items) expect(Object.keys(item).sort()).toEqual(['active', 'dingtalkLinked', 'exists', 'userId'])
+    const text = JSON.stringify(res.body)
+    for (const leaked of ['Fake Person', 'fake.person@example.test', 'dt_fake_1', 'dt_fake_3', 'int_fake_1', 'name', 'email']) {
+      expect(text).not.toContain(leaked)
+    }
   })
 
   it('rejects a missing, malformed or oversized id list before reading', async () => {
@@ -180,7 +181,6 @@ describe('DingTalk person-recipient preflight route', () => {
 
     // Exactly the cap is fine, and duplicates do not count against it.
     const atCap = Array.from({ length: DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS }, (_, i) => `user_fake_${i}`)
-    loadPermissionCandidateEligibleUserIds.mockImplementation(async (_query: unknown, ids: string[]) => new Set(ids))
     const ok = await request(pinned.url()).post(PATH).send({ userIds: [...atCap, ...atCap] })
     expect(ok.status).toBe(200)
     expect(ok.body.data.items).toHaveLength(DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS)
@@ -211,30 +211,6 @@ describe('readDingTalkPersonRecipientStatuses', () => {
   })
 })
 
-describe('the preflight scope equals the roster gate', () => {
-  it('callerCanListRosterUsers is univer-meta.ts canManageFormShareForSheet, expression for expression', async () => {
-    const { readFileSync } = await import('node:fs')
-    const { join } = await import('node:path')
-    const univerMeta = readFileSync(join(__dirname, '../../src/routes/univer-meta.ts'), 'utf8').replace(/\r\n/g, '\n')
-    const own = readFileSync(join(__dirname, '../../src/multitable/dingtalk-person-recipient-status.ts'), 'utf8').replace(/\r\n/g, '\n')
-    const body = (source: string, name: string) => {
-      const match = new RegExp(`function ${name}\\([^)]*\\)[^{]*\\{\\n([\\s\\S]*?)\\n\\}`).exec(source)
-      return match?.[1].trim()
-    }
-    expect(body(univerMeta, 'canManageFormShareForSheet')).toBe('return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)')
-    expect(body(own, 'callerCanListRosterUsers')).toBe(body(univerMeta, 'canManageFormShareForSheet'))
-    // and the roster route really gates on it
-    expect(univerMeta).toMatch(/form-share-candidates'[\s\S]{0,1200}if \(!canManageFormShareForSheet\(capabilities, sheetId\)\) return sendForbidden\(res\)/)
-  })
-
-  it('callerCanListRosterUsers: canManageViews on a non-projection sheet', () => {
-    expect(callerCanListRosterUsers({ canManageViews: true }, 'sheet-a')).toBe(true)
-    expect(callerCanListRosterUsers({ canManageViews: false }, 'sheet-a')).toBe(false)
-    // an e-learning projection sheet never offers the roster (form-share-candidates refuses it)
-    expect(callerCanListRosterUsers({ canManageViews: true }, `sht_el_stats_${'0'.repeat(32)}`)).toBe(false)
-  })
-})
-
 describe('the sender and the preflight share one query', () => {
   it('automation-executor.ts sends with DINGTALK_PERSON_RECIPIENT_STATUS_SQL, not a private copy', async () => {
     const { readFileSync } = await import('node:fs')
@@ -242,18 +218,5 @@ describe('the sender and the preflight share one query', () => {
     const source = readFileSync(join(__dirname, '../../src/multitable/automation-executor.ts'), 'utf8').replace(/\r\n/g, '\n')
     expect(source).toContain("import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL } from './dingtalk-person-recipient-status'")
     expect(source).toMatch(/this\.deps\.queryFn\(\n(?:\s*\/\/[^\n]*\n)*\s*DINGTALK_PERSON_RECIPIENT_STATUS_SQL,\n\s*\[userIds\],/)
-  })
-})
-
-describe('loadPermissionCandidateEligibleUserIds (the roster eligibility filter)', () => {
-  it('keeps only users with multitable read/write or the admin role; a roleless user is out of scope', async () => {
-    const actual = await vi.importActual<typeof import('../../src/multitable/permission-service')>('../../src/multitable/permission-service')
-    const query = vi.fn(async (sql: string) => {
-      if (sql.includes('FROM user_permissions')) return { rows: [{ user_id: 'user_fake_reader', permission_code: 'multitable:read' }, { user_id: 'user_fake_other', permission_code: 'attendance:read' }] }
-      if (sql.includes('role_id = $2')) return { rows: [{ user_id: 'user_fake_admin' }] }
-      return { rows: [{ id: 'user_fake_roleless', permissions: [] }] }
-    })
-    const ids = await actual.loadPermissionCandidateEligibleUserIds(query as never, ['user_fake_reader', 'user_fake_other', 'user_fake_admin', 'user_fake_roleless'])
-    expect([...ids].sort()).toEqual(['user_fake_admin', 'user_fake_reader'])
   })
 })

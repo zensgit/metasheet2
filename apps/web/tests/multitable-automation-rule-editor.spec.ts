@@ -167,8 +167,9 @@ function mockClient() {
       query: '',
     })),
     // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side preflight (link/active status only; names
-    // still come from listFormShareCandidates). `user_fake_synced` is a user typed by id that the mocked roster
-    // page has no name for, not linked.
+    // still come from listFormShareCandidates). `user_fake_synced` is the field case — a directory-synced user
+    // with no multitable role (the roster cannot name it), not linked; `user_fake_roleless_linked` is the same
+    // kind of user, linked (review round 1c).
     getDingTalkPersonRecipientStatus: vi.fn(async (_sheetId: string, userIds: string[]) =>
       userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false })),
   }
@@ -179,6 +180,7 @@ const RECIPIENT_STATUS: Record<string, { userId: string; exists: boolean; active
   user_2: { userId: 'user_2', exists: true, active: true, dingtalkLinked: false },
   user_fake_synced: { userId: 'user_fake_synced', exists: true, active: true, dingtalkLinked: false },
   user_fake_inactive: { userId: 'user_fake_inactive', exists: true, active: false, dingtalkLinked: true },
+  user_fake_roleless_linked: { userId: 'user_fake_roleless_linked', exists: true, active: true, dingtalkLinked: true },
 }
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
@@ -4529,6 +4531,40 @@ describe('MetaAutomationRuleEditor', () => {
     const sizes = client.getDingTalkPersonRecipientStatus.mock.calls.map((call) => (call[1] as string[]).length)
     expect(sizes).toEqual([200, 1])
     expect(maxInFlight).toBe(1)
+  })
+
+  // Review round 1c: a user with no multitable role exists for the sender but the member search cannot name
+  // it. The chip must not read like a mistyped id (and never 未找到该用户), and a linked one is not a warning.
+  it('a roleless user the sender reaches is shown as existing but outside the member list — not as 未找到该用户', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = mockClient()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_roleless_linked, user_fake_synced, user_fake_unknown'
+    idsInput.dispatchEvent(new Event('input'))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    const chip = (id: string) => container.querySelector(`[data-person-recipient="${id}"]`) as HTMLElement
+    const outside = (id: string) => chip(id).querySelector('[data-field="dingtalkPersonRecipientOutsideMemberList"]')?.textContent ?? null
+    const state = (id: string) => chip(id).querySelector('[data-field="dingtalkPersonRecipientState"]')?.textContent ?? null
+
+    // roleless + linked: exists, reachable — no warning badge, just "outside the member list"
+    expect(outside('user_fake_roleless_linked')).toBe('用户存在，但不在多维表成员列表中')
+    expect(state('user_fake_roleless_linked')).toBeNull()
+    expect(chip('user_fake_roleless_linked').querySelector('strong')).toBeNull()
+    // roleless + unlinked: same note, plus the real reason
+    expect(outside('user_fake_synced')).toBe('用户存在，但不在多维表成员列表中')
+    expect(state('user_fake_synced')).toBe('未绑定钉钉')
+    // a truly unknown id is the only 未找到该用户, and gets no "exists" note
+    expect(outside('user_fake_unknown')).toBeNull()
+    expect(state('user_fake_unknown')).toBe('未找到该用户')
+    // the warning counts the unlinked and the unknown id, not the reachable roleless user
+    expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
+      .toContain('已选收件人中 1 位未绑定钉钉，1 个 ID 未找到用户，规则触发时他们收不到消息。')
   })
 
   it('zh: typed-id states read 未找到该用户 / 已停用 / 未绑定钉钉', async () => {

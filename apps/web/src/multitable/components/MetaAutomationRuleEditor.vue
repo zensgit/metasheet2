@@ -1098,6 +1098,7 @@
                 >
                   <strong v-if="recipient.named" data-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
+                  <span v-if="recipient.outsideMemberList" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientOutsideMemberList">{{ automationLabel('dingtalk.recipientOutsideMemberList', isZh) }}</span>
                   <span v-if="recipient.stateLabel" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
                   <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                   <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
@@ -4330,6 +4331,9 @@ function selectedPersonRecipients(action: DraftAction) {
       // Round 1b: a name only when the roster knows the user; otherwise the chip shows the id in its usual
       // place (the subtitle line) plus the status badge — never the bare id dressed up as a name.
       named: Boolean(directoryEntry?.label),
+      // Round 1c: the sender sees this user (status: exists) but the member search found no such member —
+      // a user with no multitable role. Say so; an unnamed chip alone would read like a mistyped id.
+      outsideMemberList: !directoryEntry && notificationRecipientMisses.value[id] === true && (state === 'ready' || state === 'unlinked' || state === 'inactive'),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,

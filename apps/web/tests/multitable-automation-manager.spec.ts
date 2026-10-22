@@ -39,6 +39,7 @@ const RECIPIENT_STATUS: Record<string, { userId: string; exists: boolean; active
   user_2: { userId: 'user_2', exists: true, active: true, dingtalkLinked: false },
   user_fake_synced: { userId: 'user_fake_synced', exists: true, active: true, dingtalkLinked: false },
   user_fake_inactive: { userId: 'user_fake_inactive', exists: true, active: false, dingtalkLinked: true },
+  user_fake_roleless_linked: { userId: 'user_fake_roleless_linked', exists: true, active: true, dingtalkLinked: true },
 }
 
 function mockClient(
@@ -2577,6 +2578,27 @@ describe('MetaAutomationManager', () => {
     const chip = container.querySelector('[data-automation-person-recipient="user_2"]') as HTMLElement
     expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Zhao Ming')
     expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')?.textContent).toBe('Not linked to DingTalk')
+  })
+
+  it('quick legacy form: a roleless user the sender reaches reads as outside the member list, not 未找到该用户', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_roleless_linked'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-person-recipient="user_fake_roleless_linked"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientOutsideMemberList"]')?.textContent)
+      .toBe('User exists, but is not in this table’s member list')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
   })
 
   it('a run log row that skipped DingTalk recipients opens the rule’s person delivery records on 跳过（未绑定）', async () => {

@@ -299,6 +299,7 @@ export type AutomationLabelKey =
   | 'dingtalk.recipientInactive'
   | 'dingtalk.recipientNotLinked'
   | 'dingtalk.recipientChecking'
+  | 'dingtalk.recipientOutsideMemberList'
   | 'dingtalk.saveNoticeChecking'
   | 'dingtalk.saveNoticeSaved'
   | 'log.openPersonDeliveries'
@@ -687,6 +688,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'dingtalk.recipientInactive',
   'dingtalk.recipientNotLinked',
   'dingtalk.recipientChecking',
+  'dingtalk.recipientOutsideMemberList',
   'dingtalk.saveNoticeChecking',
   'dingtalk.saveNoticeSaved',
   'log.openPersonDeliveries',
@@ -1218,6 +1220,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'dingtalk.recipientInactive': { en: 'Inactive', zh: '已停用' },
   'dingtalk.recipientNotLinked': { en: 'Not linked to DingTalk', zh: '未绑定钉钉' },
   'dingtalk.recipientChecking': { en: 'Checking DingTalk link…', zh: '正在检查钉钉绑定…' },
+  // Review round 1c: the user exists (the sender sees it) but holds no multitable role, so the member search
+  // cannot name it — say so instead of leaving a bare id that reads like a typo.
+  'dingtalk.recipientOutsideMemberList': {
+    en: 'User exists, but is not in this table’s member list',
+    zh: '用户存在，但不在多维表成员列表中',
+  },
   'dingtalk.saveNoticeChecking': {
     en: 'Saved. Some DingTalk recipients were still being checked — reopen the rule to see whether they can receive the message.',
     zh: '已保存。部分钉钉收件人仍在检查中，可重新打开规则查看他们能否收到消息。',
