@@ -10,6 +10,7 @@ export default defineConfig({
     include: [
       'tests/integration/plm-managed-companion-pg.realdb.ts',
       'tests/integration/plm-managed-continuous-completion-pg.realdb.ts',
+      'tests/integration/plm-managed-renewal-recovery-pg.realdb.ts',
     ],
     environment: 'node',
     pool: 'forks',

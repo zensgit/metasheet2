@@ -22,6 +22,7 @@ import {
   assertManagedOrigin,
   completeManagedBrowserLogin,
   handoffManagedCallback,
+  recoverManagedContinuousSession,
   provisionManagedLink,
   readManagedSessionStatus,
   retryManagedRevoke,
@@ -195,6 +196,18 @@ router.post('/complete', async (req: Request, res: Response) => {
 
 router.all('/complete', (_req: Request, res: Response) => {
   methodNotAllowed(res, 'POST', 'PLM_MANAGED_COMPLETE_POST_ONLY')
+})
+
+router.post('/renew-recovery', async (req: Request, res: Response) => {
+  try {
+    await recoverManagedContinuousSession(req, res)
+  } catch (error) {
+    if (!res.headersSent) sendRefusal(res, error)
+  }
+})
+
+router.all('/renew-recovery', (_req: Request, res: Response) => {
+  methodNotAllowed(res, 'POST', 'PLM_MANAGED_RENEW_RECOVERY_POST_ONLY')
 })
 
 router.get('/current', async (req: Request, res: Response) => {

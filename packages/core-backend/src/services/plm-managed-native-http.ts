@@ -169,6 +169,16 @@ function demandString(value: string | null, reject: () => never): string {
   return value
 }
 
+function successorIndex(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 7) return null
+  return value
+}
+
+function demandIndex(value: number | null, reject: () => never): number {
+  if (value === null) reject()
+  return value
+}
+
 export function decodeBoundYurClaims(credential: string): BoundCredentialClaims | null {
   if (!credential.startsWith('yur_')) return null
   const token = credential.slice(4)
@@ -265,6 +275,97 @@ export async function nativeExchangeContinuous(
     root_part_id: field('root_part_id'),
     client_origin: field('client_origin'),
     generation_index: 0,
+    credential_jti: credentialJti,
+    absolute_exp: claims.exp,
+  }
+}
+
+export type NativeRenewal = NativeExchange & {
+  generation_index: number
+  credential_jti: string
+  absolute_exp: number
+}
+
+const RENEWAL_KEY = /^[A-Za-z0-9_-]{36,64}$/
+
+/**
+ * Same-key renewal. The body is the native RenewBody: client_id, client_secret,
+ * credential, idempotency_key. HTTP 401 stays a terminal refusal. Timeouts,
+ * resets, and other non-401 responses stay unavailable. generation_index comes
+ * from the authenticated JSON. The decoded yur_ payload is bound to that JSON
+ * and is not a separate authority. expires_in is not the stored absolute exp.
+ */
+export async function nativeRenew(
+  registration: ManagedClientRegistration,
+  input: { credential: string; idempotencyKey: string },
+): Promise<NativeRenewal> {
+  if (!RENEWAL_KEY.test(input.idempotencyKey) || !input.credential.startsWith('yur_')) {
+    throw new ManagedNativeCallRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH', null, false)
+  }
+  let response: Response
+  try {
+    response = await postJson(
+      `${registration.nativeBaseUrl}/api/v1/auth/managed-login/renew`,
+      {
+        client_id: registration.clientId,
+        client_secret: registration.clientSecret,
+        credential: input.credential,
+        idempotency_key: input.idempotencyKey,
+      },
+      headersFor(registration),
+    )
+  } catch {
+    throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  }
+  if (response.status === 401) {
+    let observedDelegationId: string | null = null
+    try {
+      const body = asRecord(await response.json())
+      if (body && typeof body.delegation_id === 'string' && body.delegation_id.trim() !== '') {
+        observedDelegationId = body.delegation_id
+      }
+    } catch {
+      observedDelegationId = null
+    }
+    throw new ManagedNativeCallRefusal(401, 'PLM_MANAGED_RENEW_UNAUTHORIZED', observedDelegationId, false)
+  }
+  if (!response.ok) throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  let body: Record<string, unknown> | null
+  try {
+    body = asRecord(await response.json())
+  } catch {
+    throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  }
+  if (!body) throw new ManagedNativeCallRefusal(503, 'PLM_MANAGED_RENEW_UNAVAILABLE', null, true)
+  const record = body
+  const delegationId = nonEmptyString(record.delegation_id)
+  const mismatch = (): never => {
+    throw new ManagedNativeCallRefusal(403, 'PLM_MANAGED_RENEW_MISMATCH', delegationId, false)
+  }
+  if (delegationId === null) mismatch()
+  const credential = yurCredential(record.credential)
+  if (credential === null) mismatch()
+  const claims = decodeBoundYurClaims(credential)
+  if (!claims || claims.delegation_id !== delegationId) mismatch()
+  const generation = demandIndex(successorIndex(record.generation_index), mismatch)
+  const credentialJti = exactString(record.credential_jti, claims.jti)
+  if (credentialJti === null) mismatch()
+  const expiresIn = record.expires_in
+  const reportedExpires = typeof expiresIn === 'number' && Number.isInteger(expiresIn) ? expiresIn : 0
+  const field = (key: string): string => demandString(nonEmptyString(record[key]), mismatch)
+  return {
+    subject: field('subject'),
+    tenant_id: field('tenant_id'),
+    org_id: field('org_id'),
+    client_id: field('client_id'),
+    issuer: field('issuer'),
+    scope: field('scope'),
+    delegation_id: delegationId,
+    expires_in: reportedExpires,
+    credential,
+    root_part_id: field('root_part_id'),
+    client_origin: field('client_origin'),
+    generation_index: generation,
     credential_jti: credentialJti,
     absolute_exp: claims.exp,
   }
