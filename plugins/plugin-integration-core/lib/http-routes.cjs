@@ -491,6 +491,13 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 备料 project write lock (batch-refresh phase 0 step 1, migration 100): the cross-process write lease
+// and the plan generation for one (target sheet, project) write scope.
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  projectWriteScopeKey,
+  writeBindingFromGeneration,
+} = require('./stock-preparation-project-write-lock.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -4550,6 +4557,26 @@ function requireStockPreparationAudit() {
     }
     return stockPreparationConfirmationLease
   }
+  // Batch-refresh phase 0 step 1 (migration 100): the project write lock — one cross-process write
+  // lease plus the plan generation per (target sheet, project). Optional at registration like the
+  // lease above; every small apply (and, from the large-lane wiring, every large chunk) fails closed
+  // 501 without it. The dry-run consults it when present (precheck + generation bump) and otherwise
+  // mints an UNBOUND token, which apply refuses anyway.
+  const stockPreparationProjectWriteLock = services.stockPreparationProjectWriteLock || null
+  function requireStockPreparationProjectWriteLock() {
+    if (!stockPreparationProjectWriteLock
+      || typeof stockPreparationProjectWriteLock.withProjectWriteLease !== 'function'
+      || typeof stockPreparationProjectWriteLock.bumpGeneration !== 'function'
+      || typeof stockPreparationProjectWriteLock.assertNoLiveWriter !== 'function') {
+      throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the stock-prep project write lock is not available; nothing is written without it')
+    }
+    return stockPreparationProjectWriteLock
+  }
+  // THE write scope of a table action: the resolved target sheet + the NORMALIZED project number (the
+  // plan's own validator, so a malformed number is the same 400 the plan would answer).
+  function stockPreparationProjectWriteScope(action, rawParameters) {
+    return projectWriteScopeKey(action.target.sheetId, normalizeActionParameters(rawParameters).projectNo)
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -7373,6 +7400,21 @@ function requireStockPreparationAudit() {
       // has passed, and nothing below (B2a claim, credential load, source read) has started. No-op on
       // this synchronous route.
       const dryRunJob = reserveDryRunJobForRequest(req, { actionId, body, tenantId: dryRunTenantId, includeMissingComponents })
+      // Batch-refresh phase 0 step 1 — PRECHECK: a preview of a project that another run is WRITING
+      // right now is refused 409 STOCK_PREP_PROJECT_WRITE_LOCKED here, before the B2a claim, the
+      // credential load and the PLM read (an applicable preview would supersede that run's plan, and the
+      // bump below refuses the same way). Read-only; no lock service wired -> no precheck (the token is
+      // then minted unbound, and apply refuses it). A malformed project number skips it: the plan
+      // answers its own 400 below, exactly as before.
+      let previewWriteScope = null
+      if (stockPreparationProjectWriteLock) {
+        try {
+          previewWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
+        } catch {
+          previewWriteScope = null
+        }
+        if (previewWriteScope) await stockPreparationProjectWriteLock.assertNoLiveWriter(previewWriteScope)
+      }
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
       // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
@@ -7433,6 +7475,12 @@ function requireStockPreparationAudit() {
             b2aSourceObjects: dryRunB2aSourceObjects,
             tenantId: dryRunTenantId,
             now: Date.now(),
+            // Batch-refresh phase 0 step 1 — PLAN GENERATION: an APPLICABLE preview supersedes every
+            // earlier plan of this write scope. Called by the lib only when it is about to mint a token;
+            // refused 409 while a live writer holds the project (no token is minted then).
+            projectWriteGenerationBinder: previewWriteScope
+              ? async () => writeBindingFromGeneration(await stockPreparationProjectWriteLock.bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
+              : undefined,
           })
         } catch (error) {
           await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
@@ -7878,76 +7926,95 @@ function requireStockPreparationAudit() {
       const applyTenantId = resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, applyTenantId)
+      // Batch-refresh phase 0 step 1 — THE PROJECT WRITE LEASE (S2/S3). One writer per (target sheet,
+      // project) across processes, held around everything below: the B2a claim, the credential load,
+      // the token claim, the re-plan and every write. Acquired BEFORE all of them, so a busy refusal
+      // (409 STOCK_PREP_PROJECT_WRITE_LOCKED) costs no B2a claim, no adapter load and no token; a lock
+      // store that cannot be read or written refuses 503 (fail closed), and no lock service at all 501.
+      const projectWriteLock = requireStockPreparationProjectWriteLock()
+      const applyWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
       const applyB2aRunId = b2aRunId('table-action-apply')
-      // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
-      // so a refusal never burns a single-use dry-run token.
-      const {
-        authorization: applyB2aAuthorization,
-        sourceObjects: applyB2aSourceObjects,
-      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
-        req,
-        tenantScope: applyTenantId,
-        purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-        runId: applyB2aRunId,
-      })
-      // W-5: same stanza, forwarded — see the dry-run route above for why.
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
-      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       // S3 (ADR §5: apply 结束): the registry row the overlay resolved gets `last_pull_*` stamped —
       // `applied` with the run's distinct missing-component count, or `refused` with the typed code.
+      // The stamp runs AFTER the lease is released (S12), so a slow stamp never holds the project.
       let applyResult
-      try {
-        applyResult = await applyStockPreparationAction({
-          action,
-          parameters: body.parameters,
-          dryRunToken: confirm.dryRunToken,
-          acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
-          acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
-          permission: applyPermissionForUser(user),
-          sourceAdapter,
-          // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
-          // plan and compares revisions, so the two routes must read the bands from one seam.
-          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-          // Same probe input the dry-run route threaded, from the same tenant derivation.
-          targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
-          // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
-          // compares its revision against the token. A mapping on one route and not the other would
-          // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
-          extFieldMapping: stockPreparationExtFieldMapping,
-          // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
-          // decision confirmed/superseded between dry-run and apply changes the recomputed revision
-          // and fails the token check — fail-closed. Production Apply remains off this line entirely
-          // (sandbox/production gates above are untouched).
-          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-          recordsApi: getMultitableRecordsApi(),
-          tokenStore: context.storage,
-          policyStore: context.storage,
-          // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
-          // Absent (e.g. prod default) → undefined → apply fail-closed.
-          sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
-          // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
-          // → sandbox gate (canonical rejected). Request body never supplies it.
-          productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
-          // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
-          // nothing in the request; undefined when no overlay was applied.
-          projectSheetGate: projectSheetGateFor(action),
-          // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
-          // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
-          // right — it does not inherit the dry-run's authorization through the token.
-          b2aTrialRegistry,
-          b2aClaimStore: context.storage,
-          b2aOperationClaim,
-          b2aRunId: applyB2aRunId,
-          // R-02 (contract half): same list as the guard above — see the dry-run route.
-          b2aSourceObjects: applyB2aSourceObjects,
-          tenantId: applyTenantId,
-          now: Date.now(),
+      let applyFailure = null
+      await projectWriteLock.withProjectWriteLease(applyWriteScope, { purpose: 'small_apply', runId: applyB2aRunId, tenantId: applyTenantId }, async (projectWriteGuard) => {
+        // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
+        // so a refusal never burns a single-use dry-run token.
+        const {
+          authorization: applyB2aAuthorization,
+          sourceObjects: applyB2aSourceObjects,
+        } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+          req,
+          tenantScope: applyTenantId,
+          purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+          runId: applyB2aRunId,
         })
-      } catch (error) {
-        await stampProjectPullOutcome(action, applyTenantId, { outcome: 'refused', code: error && error.code })
+        // W-5: same stanza, forwarded — see the dry-run route above for why.
+        const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
+        const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+        try {
+          applyResult = await applyStockPreparationAction({
+            action,
+            parameters: body.parameters,
+            dryRunToken: confirm.dryRunToken,
+            acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+            acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
+            permission: applyPermissionForUser(user),
+            sourceAdapter,
+            // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
+            // plan and compares revisions, so the two routes must read the bands from one seam.
+            installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+            // Same probe input the dry-run route threaded, from the same tenant derivation.
+            targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
+            // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
+            // compares its revision against the token. A mapping on one route and not the other would
+            // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+            extFieldMapping: stockPreparationExtFieldMapping,
+            // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
+            // decision confirmed/superseded between dry-run and apply changes the recomputed revision
+            // and fails the token check — fail-closed. Production Apply remains off this line entirely
+            // (sandbox/production gates above are untouched).
+            confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+            recordsApi: getMultitableRecordsApi(),
+            tokenStore: context.storage,
+            policyStore: context.storage,
+            // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+            // Absent (e.g. prod default) → undefined → apply fail-closed.
+            sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+            // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
+            // → sandbox gate (canonical rejected). Request body never supplies it.
+            productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+            // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
+            // nothing in the request; undefined when no overlay was applied.
+            projectSheetGate: projectSheetGateFor(action),
+            // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
+            // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
+            // right — it does not inherit the dry-run's authorization through the token.
+            b2aTrialRegistry,
+            b2aClaimStore: context.storage,
+            b2aOperationClaim,
+            b2aRunId: applyB2aRunId,
+            // R-02 (contract half): same list as the guard above — see the dry-run route.
+            b2aSourceObjects: applyB2aSourceObjects,
+            tenantId: applyTenantId,
+            now: Date.now(),
+            // I1: the guard of the lease held around this call — one holder CAS before every write.
+            projectWriteGuard,
+          })
+        } catch (error) {
+          applyFailure = error
+        }
+      })
+      if (applyFailure) {
+        // A run the fence STOPPED after some rows landed is a failed pull, not a refusal: rows are on
+        // the sheet. Everything else that threw wrote nothing and keeps its `refused` stamp.
+        const partial = Boolean(applyFailure.details && applyFailure.details.partial === true)
+        await stampProjectPullOutcome(action, applyTenantId, { outcome: partial ? 'failed' : 'refused', code: applyFailure && applyFailure.code })
         // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo)
-        throw error
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, partial ? { recount: true } : undefined)
+        throw applyFailure
       }
       // G1 field defect (R67): `applied` only when no row failed; otherwise `failed` + the dominant row code.
       // Either way the overview row is RECOUNTED, so its 「物料行数」 is what actually landed on the sheet.

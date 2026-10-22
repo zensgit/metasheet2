@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
@@ -281,6 +283,8 @@ function createMockServices(overrides = {}) {
   }
 
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       async listExternalSystems(input) {
         calls.push(['listExternalSystems', input])

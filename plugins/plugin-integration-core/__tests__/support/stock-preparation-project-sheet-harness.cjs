@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const { consumableMap } = require('./consumable-storage.cjs')
 
 // 一个项目一张备料表 — ONE in-memory substrate for the project-sheet route suites (S2, R-36).
@@ -381,6 +383,8 @@ function baseServices(sourceAdapter) {
     config: { dataSourceId: 'ds_synthetic', object: 'DN_PDM_PathExAttrInfo' },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },

@@ -26,6 +26,7 @@ const { createStockPreparationSourceBindingStore } = require('./lib/stock-prepar
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createStockPreparationProjectWriteLock } = require('./lib/stock-preparation-project-write-lock.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -90,6 +91,7 @@ let stockPreparationHandoffStore = null
 let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
+let stockPreparationProjectWriteLock = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -355,6 +357,10 @@ module.exports = {
     // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // Batch-refresh phase 0 step 1 (migration 100): the cross-process project write lease + plan
+    // generation, one row per (target sheet, project). Every small apply and large chunk takes it and
+    // fails closed (501) without it; a lock table that cannot be read or written refuses 503.
+    stockPreparationProjectWriteLock = createStockPreparationProjectWriteLock({ db, logger })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -542,6 +548,7 @@ module.exports = {
         stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
+        stockPreparationProjectWriteLock,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,

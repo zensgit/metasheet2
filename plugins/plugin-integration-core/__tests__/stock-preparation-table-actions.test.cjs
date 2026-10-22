@@ -11,15 +11,30 @@ const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cj
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
-  applyStockPreparationAction,
+  applyStockPreparationAction: rawApplyStockPreparationAction,
   assertStockPrepApplySandboxAllowed,
   resolveStockPrepApplySandboxPolicy,
   createStockPreparationTableActionRegistry,
-  dryRunStockPreparationAction,
+  dryRunStockPreparationAction: rawDryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
   createTargetScopedRecordsApi,
   __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+// Batch-refresh phase 0 step 1: apply requires the project write guard (the route holds the lease) and an
+// applicable dry-run binds its token to the plan generation. This suite predates that, so it calls the lib
+// through the REAL lock module (in memory, support/stock-preparation-project-write-lock-kit.cjs) exactly the way
+// the routes do: the dry-run with the generation binder, the apply inside the lease with the guard.
+const projectWriteLockHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs')).createLibWriteLockHarness()
+const applyStockPreparationAction = projectWriteLockHarness.wrapApply(rawApplyStockPreparationAction)
+const dryRunStockPreparationAction = projectWriteLockHarness.wrapDryRun(rawDryRunStockPreparationAction)
+
+// A hand-forged token must also carry a CURRENT plan-generation binding (bumped the way an applicable
+// preview would) to get past the binding check — so the forgery tests below still prove what they always
+// proved: the RECOMPUTE refuses, whatever the token says.
+async function currentWriteBindingFor(action, parameters) {
+  const generation = await projectWriteLockHarness.lock.bumpGeneration(projectWriteLockHarness.scopeOf({ action, parameters }), { reason: 'small_preview' })
+  return { writeScope: generation.scopeKey, writeGeneration: generation.generation, writeGenerationToken: generation.generationToken }
+}
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
@@ -962,6 +977,7 @@ async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
     parametersHash: tableActionInternals.hashJson(parameters),
     revision: dryRun.revision,
     conflictPolicyReview: null,
+    ...(await currentWriteBindingFor(action, parameters)),
   })
 
   await assert.rejects(
@@ -1019,6 +1035,7 @@ async function testMissingChildBomDryRunBlocksApplyTokenAndWrites() {
     parametersHash: tableActionInternals.hashJson(parameters),
     revision: dryRun.revision,
     conflictPolicyReview: null,
+    ...(await currentWriteBindingFor(action, parameters)),
   })
 
   await assert.rejects(

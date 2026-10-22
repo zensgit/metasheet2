@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const { consumableMap } = require('./support/consumable-storage.cjs')
 
 // THE WIRING, not the mapper.
@@ -251,6 +253,8 @@ function adapterReadyRow(input = {}) {
 
 function baseServices(sourceAdapter) {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the

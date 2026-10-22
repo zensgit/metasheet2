@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const { consumableMap } = require('./support/consumable-storage.cjs')
 
 // #6475 fix round 1 — 批次存档 (mvp-persist, the project-sync panel's step ④) ARCHIVES THE SOURCE
@@ -241,6 +243,8 @@ function services({ bindingStore, disabled, reads, created }) {
     }
   }
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },

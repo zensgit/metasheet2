@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const { consumableMap } = require('./support/consumable-storage.cjs')
 
 // #6475 — WHY 批次存档 (mvp-persist) DOES NOT REUSE THE DRY-RUN'S RESOLVED DUPLICATE GROUPS.
@@ -271,6 +273,8 @@ function services(sourceAdapter, bindingStore) {
     config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },

@@ -16,7 +16,15 @@
 const crypto = require('node:crypto')
 const path = require('node:path')
 
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const {
+  PLM_STOCK_PREPARATION_ACTION_ID,
+  normalizeActionParameters,
+} = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const {
+  createStockPreparationProjectWriteLock,
+  projectWriteScopeKey,
+  writeBindingFromGeneration,
+} = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
@@ -260,6 +268,64 @@ function createRecordsApi({ existing = [], beforeWrite } = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// 2b. The REAL lock module over the fake db, and the wrappers that let pre-existing callers of the lib
+//     (and route mounts) run through it.
+// ---------------------------------------------------------------------------------------------------
+
+// `timers: 'real'` keeps the module's own unref'd setInterval; the default is manual timers.
+function createInMemoryProjectWriteLock({ db, clock, timers, ...options } = {}) {
+  const lockDb = db || createFakeLockDb()
+  const lockClock = clock || null
+  const lockTimers = timers === 'real' ? undefined : (timers || createManualTimers())
+  const lock = createStockPreparationProjectWriteLock({
+    db: lockDb,
+    ...(lockClock ? { now: lockClock.now } : {}),
+    ...(lockTimers ? { timers: lockTimers } : {}),
+    ...options,
+  })
+  return { db: lockDb, clock: lockClock, timers: lockTimers, lock }
+}
+
+// The write scope a table-action input addresses, or null when the input cannot name one (the lib then
+// refuses with its own error before it ever asks for the guard).
+function writeScopeOfInput(input = {}) {
+  try {
+    return projectWriteScopeKey(input.action && input.action.target && input.action.target.sheetId, normalizeActionParameters(input.parameters).projectNo)
+  } catch {
+    return null
+  }
+}
+
+// Wraps `dryRunStockPreparationAction` / `applyStockPreparationAction` the way the routes call them:
+// the dry-run gets a generation binder (an applicable preview bumps), the apply runs inside the lease
+// with the guard. A caller that passes `projectWriteGenerationBinder` / `projectWriteGuard` itself
+// (even as undefined) is passed through untouched — that is how the guard's own tests opt out.
+function createLibWriteLockHarness(options = {}) {
+  const env = options.lock ? { lock: options.lock } : createInMemoryProjectWriteLock(options)
+  function wrapDryRun(dryRun) {
+    return (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGenerationBinder')) return dryRun(input)
+      const scope = writeScopeOfInput(input)
+      return dryRun({
+        ...input,
+        projectWriteGenerationBinder: scope
+          ? async () => writeBindingFromGeneration(await env.lock.bumpGeneration(scope, { reason: 'small_preview', tenantId: input.tenantId }))
+          : undefined,
+      })
+    }
+  }
+  function wrapApply(apply) {
+    return (input = {}) => {
+      if (Object.prototype.hasOwnProperty.call(input, 'projectWriteGuard')) return apply(input)
+      const scope = writeScopeOfInput(input)
+      if (!scope) return apply(input)
+      return env.lock.withProjectWriteLease(scope, { purpose: 'small_apply', runId: 'swl-test-run', tenantId: input.tenantId }, (guard) => apply({ ...input, projectWriteGuard: guard }))
+    }
+  }
+  return { ...env, wrapDryRun, wrapApply, scopeOf: writeScopeOfInput }
+}
+
+// ---------------------------------------------------------------------------------------------------
 // 3. The synthetic golden fixture
 // ---------------------------------------------------------------------------------------------------
 
@@ -307,6 +373,8 @@ module.exports = {
   createClock,
   createConsumableStorage,
   createFakeLockDb,
+  createInMemoryProjectWriteLock,
+  createLibWriteLockHarness,
   createManualTimers,
   createRecordsApi,
   createSourceAdapter,
@@ -315,4 +383,5 @@ module.exports = {
   goldenPlmData,
   hashJsonForGolden,
   uniqueViolation,
+  writeScopeOfInput,
 }

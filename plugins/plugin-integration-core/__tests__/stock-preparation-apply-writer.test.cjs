@@ -1160,7 +1160,108 @@ function testKillSwitchAcceptsTheSpellingsOperatorsType() {
   assert.equal(__internals.batchKeyLookupDisabled({}), false, 'unset is ON')
 }
 
+// ── Batch-refresh phase 0 step 1: the project write FENCE (W1–W4) ─────────────────────────────────
+// The fence is the lease guard's `beforeWrite`; here a recording stand-in that shares the records
+// API's call log, so ORDER is observable.
+
+function recordingFence(calls, { throwAt = null, error = null } = {}) {
+  let n = 0
+  return {
+    async beforeWrite(meta) {
+      calls.push(['fence', { ...meta }])
+      n += 1
+      if (throwAt !== null && n === throwAt) throw error
+    },
+  }
+}
+
+function fenceError(code = 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST') {
+  return Object.assign(new Error('fenced'), { code, status: 409, fence: true })
+}
+
+async function testWriteFenceAbsentOrPassingIsByteIdentical() {
+  const plan = buildPlan()
+  // Same plan, same starting sheet, three runs: no fence key, fence explicitly null, a fence that passes.
+  const runs = []
+  for (const variant of ['absent', 'null', 'passing']) {
+    const api = createRecordsApi({ existing: seededRowsFor(plan) })
+    const input = { permission: 'write', plan: buildPlan(), target: target(), recordsApi: api.recordsApi }
+    if (variant === 'null') input.writeFence = null
+    if (variant === 'passing') input.writeFence = recordingFence([])
+    runs.push(await applyStockPreparationPlan(input))
+  }
+  assert.equal(Object.prototype.hasOwnProperty.call(runs[0], 'abort'), false, 'W1: no abort key without a fenced stop')
+  assert.deepEqual(runs[1], runs[0], 'W1: writeFence null == absent')
+  assert.deepEqual(runs[2], runs[0], 'W1: a passing fence leaves the result byte-identical')
+}
+
+// The rows the buildPlan() decisions expect to find (UPDATE / INACTIVE targets), so the writer can patch.
+function seededRowsFor(plan) {
+  return plan.decisions
+    .filter((d) => d.decision === DECISIONS.UPDATE || d.decision === DECISIONS.INACTIVE)
+    .map((d, i) => ({ id: `rec_seed_${i + 1}`, sheetId: 'sheet_stock_preparation', data: { idempotencyKey: d.idempotencyKey } }))
+}
+
+async function testWriteFenceRunsImmediatelyBeforeEveryHostWriteOnly() {
+  const plan = buildPlan()
+  const api = createRecordsApi({ existing: seededRowsFor(plan) })
+  const result = await applyStockPreparationPlan({ permission: 'write', plan, target: target(), recordsApi: api.recordsApi, writeFence: recordingFence(api.calls) })
+  const writes = api.calls.filter(([op]) => op === 'createRecord' || op === 'patchRecord')
+  const fences = api.calls.filter(([op]) => op === 'fence')
+  assert.ok(writes.length >= 2, 'calibration: the plan writes')
+  assert.equal(fences.length, writes.length, 'W2: one fence per host write, none for SKIP / MANUAL_CONFIRM')
+  api.calls.forEach(([op], i) => {
+    if (op === 'createRecord' || op === 'patchRecord') assert.equal(api.calls[i - 1][0], 'fence', `W2: ${op} at ${i} is immediately preceded by the fence`)
+    if (op === 'fence') {
+      assert.ok(['createRecord', 'patchRecord'].includes(api.calls[i + 1][0]), 'W2: nothing between the fence and the write')
+      assert.equal(api.calls[i + 1][0], api.calls[i][1].operation, 'W2: the fence names the write it precedes')
+    }
+  })
+  const skippedOrHeld = plan.decisions.filter((d) => d.decision === DECISIONS.SKIP || d.decision === DECISIONS.MANUAL_CONFIRM).length
+  assert.ok(skippedOrHeld > 0, 'calibration: the plan has rows that write nothing')
+  assert.equal(result.status === 'aborted', false)
+}
+
+async function testWriteFenceThrowStopsTheLoopBeforeTheNextWrite() {
+  const plan = buildPlan()
+  const api = createRecordsApi({ existing: seededRowsFor(plan) })
+  const writingIndexes = plan.decisions
+    .map((d, i) => [d.decision, i])
+    .filter(([d]) => d === DECISIONS.ADD || d === DECISIONS.UPDATE || d === DECISIONS.INACTIVE)
+    .map(([, i]) => i)
+  assert.ok(writingIndexes.length >= 2, 'calibration')
+  const error = fenceError()
+  const result = await applyStockPreparationPlan({ permission: 'write', plan, target: target(), recordsApi: api.recordsApi, writeFence: recordingFence(api.calls, { throwAt: 2, error }) })
+  const abortedAt = writingIndexes[1]
+  assert.equal(result.status, 'aborted', 'W3')
+  assert.equal(result.abort.index, abortedAt)
+  assert.equal(result.abort.code, 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST')
+  assert.equal(result.abort.error, error)
+  assert.equal(result.results.length, abortedAt, 'W3: results end before the stopped decision')
+  const writes = api.calls.filter(([op]) => op === 'createRecord' || op === 'patchRecord')
+  assert.equal(writes.length, 1, 'W3: exactly the one write before the stop; none at or after it')
+  assert.equal(result.written, 1)
+  assert.equal(result.counts.failed, 0, 'W3: the stop is not a failed row')
+  assert.deepEqual(result.errors, [])
+  assert.equal(summarizeApplyResultForEvidence(result).status, 'aborted')
+}
+
+async function testOrdinaryRowErrorsStillContinueUnderAFence() {
+  const plan = buildPlan()
+  const failing = createFailingCreateRecordsApi({ error: Object.assign(new Error('invalid select option'), { code: 'VALIDATION_ERROR' }) })
+  const fenceCalls = []
+  const result = await applyStockPreparationPlan({ permission: 'write', plan, target: target(), recordsApi: failing.recordsApi, writeFence: recordingFence(fenceCalls) })
+  assert.notEqual(result.status, 'aborted', 'W4: a row error is not a fenced stop')
+  assert.equal(Object.prototype.hasOwnProperty.call(result, 'abort'), false)
+  assert.equal(result.results.length, plan.decisions.length, 'W4: every decision was still attempted')
+  assert.ok(result.counts.failed > 0)
+}
+
 async function main() {
+  await testWriteFenceAbsentOrPassingIsByteIdentical()
+  await testWriteFenceRunsImmediatelyBeforeEveryHostWriteOnly()
+  await testWriteFenceThrowStopsTheLoopBeforeTheNextWrite()
+  await testOrdinaryRowErrorsStillContinueUnderAFence()
   await testApplyCleanDecisionsAndHoldManualConfirm()
   await testRerunIsIdempotentForAddDecision()
   await testUpdateAndInactiveNeverCreateMissingTargets()

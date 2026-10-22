@@ -552,7 +552,18 @@ async function callRecordsApi(operation, callback) {
   }
 }
 
-async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex }) {
+// THE PROJECT WRITE FENCE (batch-refresh phase 0 step 1). Optional: absent, every line below runs exactly
+// as before. Present (both stock-prep apply callers pass the lease guard), it is awaited IMMEDIATELY
+// before each createRecord / patchRecord — after the existing-row lookup, so nothing sits between the
+// lease CAS and the host write but the payload mapping — and it THROWS (`error.fence === true`) when
+// this run may no longer write: the lease was lost, the plan was superseded, or the lock store failed.
+// The loop in applyStockPreparationPlan stops on that throw instead of recording one failed row and
+// writing the next.
+async function fenceBeforeWrite(writeFence, meta) {
+  if (writeFence) await writeFence.beforeWrite(meta)
+}
+
+async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
   const key = decisionKey(decision, target)
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
@@ -561,6 +572,7 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
 
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
   if (existing && existing.id) {
+    await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'patchRecord' })
     const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
       sheetId: target.sheetId,
       recordId: existing.id,
@@ -571,6 +583,7 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
     return { status: 'updated', recordId }
   }
 
+  await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'createRecord' })
   const created = await callRecordsApi('createRecord', () => recordsApi.createRecord({
     sheetId: target.sheetId,
     data: mapRecordFields(record, target.fieldIdMap),
@@ -580,7 +593,7 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   return { status: 'created', recordId }
 }
 
-async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex }) {
+async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
   const key = decisionKey(decision, target)
   let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
@@ -594,6 +607,7 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
     })
   }
 
+  await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'patchRecord' })
   const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
     sheetId: target.sheetId,
     recordId: existing.id,
@@ -690,7 +704,9 @@ function summarizeApplyErrors(errors = []) {
     .sort((left, right) => left.code.localeCompare(right.code))
 }
 
-function applyStatus(counts, written) {
+function applyStatus(counts, written, aborted) {
+  // A fenced stop is its own outcome: the run did NOT get through its plan, whatever the counts say.
+  if (aborted) return 'aborted'
   if (counts.failed > 0) return written > 0 ? 'partial' : 'failed'
   if (counts.held > 0) return written > 0 ? 'partial' : 'held'
   return 'succeeded'
@@ -728,6 +744,9 @@ async function applyStockPreparationPlan(input = {}) {
   }
   const results = []
   const errors = []
+  // Optional project write fence (see fenceBeforeWrite). `abort` is set when it stops the loop.
+  const writeFence = input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null
+  let abort = null
 
   // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
   // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
@@ -758,13 +777,13 @@ async function applyStockPreparationPlan(input = {}) {
           continue
         }
         if (decision.decision === DECISIONS.ADD) {
-          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex })
+          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
         }
         if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
-          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex })
+          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
@@ -774,6 +793,13 @@ async function applyStockPreparationPlan(input = {}) {
           decision: decision.decision,
         })
       } catch (error) {
+        // FENCED STOP. The fence threw BEFORE this decision's host write, so nothing of decision `index`
+        // landed and every decision before it is in `results`. Stop here: writing the next row after
+        // the lease is gone is exactly what the fence exists to prevent.
+        if (writeFence && error && error.fence === true) {
+          abort = { index, error }
+          break
+        }
         // W9: a failed write may still have LANDED. `createRecord`/`patchRecord` wrap a committed
         // transaction, so a connection or pool error raised AFTER the COMMIT surfaces here while
         // the row is already in the table — and only the success paths keep the index in step
@@ -832,19 +858,21 @@ async function applyStockPreparationPlan(input = {}) {
   // past every decision in this chunk — a green lie that silently drops rows. The in-repo
   // implementation always invokes it, so this is unreachable today and costs one comparison;
   // it exists so that a future host cannot make skipping rows look like success.
-  if (results.length !== plan.decisions.length) {
+  // A fenced stop ran exactly the decisions before the abort index.
+  const expectedResults = abort ? abort.index : plan.decisions.length
+  if (results.length !== expectedResults) {
     throw new StockPreparationApplyWriterError(
       'metadata scope returned without running every decision',
       {
         code: 'metadata_scope_incomplete',
-        expected: plan.decisions.length,
+        expected: expectedResults,
         actual: results.length,
       },
     )
   }
 
   const written = counts.created + counts.updated + counts.inactive
-  const status = applyStatus(counts, written)
+  const status = applyStatus(counts, written, Boolean(abort))
   return {
     ok: counts.failed === 0 && counts.held === 0,
     status,
@@ -858,6 +886,9 @@ async function applyStockPreparationPlan(input = {}) {
     counts,
     results,
     errors,
+    // Present ONLY on a fenced stop, so an unfenced (or uninterrupted) run's result is byte-identical.
+    // `error` is the fence's own typed error: the caller rethrows it with the partial counts attached.
+    ...(abort ? { abort: { index: abort.index, code: abort.error.code, error: abort.error } } : {}),
   }
 }
 
