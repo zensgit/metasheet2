@@ -470,6 +470,9 @@ describe('DingTalk OAuth state store', () => {
   })
 
   it('writes a password hash when auto-provisioning a new DingTalk user', async () => {
+    vi.mocked(readDingTalkOauthConfig).mockReturnValue({
+      ...readDingTalkOauthConfig(), corpId: 'ding-corp-1',
+    })
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
     // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
     vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp-1')
