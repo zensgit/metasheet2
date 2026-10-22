@@ -1,6 +1,5 @@
 import { open } from 'node:fs/promises'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { types } from 'node:util'
 
 /** Operator-only local database bootstrap. This is NOT an HTTP role-grant,
@@ -112,8 +111,10 @@ export async function runYidaInitializationBootstrapCli(argv: string[],
   }
 }
 
-const entry = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null
-if (entry === import.meta.url) {
+// The package compiles scripts to CommonJS (tsconfig "module"), so the entry check is the
+// CommonJS one: true only when this file is the process entry, never when a test imports it.
+// Deployed server: node packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js --input <absolute path> --apply
+if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {
   void runYidaInitializationBootstrapCli(process.argv.slice(2)).then(summary => {
     process.stdout.write(`${JSON.stringify(summary)}\n`)
     process.exitCode = summary.ok ? 0 : 1

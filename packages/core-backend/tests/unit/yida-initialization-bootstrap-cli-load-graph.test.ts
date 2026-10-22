@@ -46,3 +46,19 @@ it('loading the CLI evaluates neither the automation-live-authority chain nor pg
     vi.doUnmock('pg')
   }
 })
+
+it('importing the CLI as a module never runs it: no summary written and no exit code set', async () => {
+  // A fresh evaluation, so the CommonJS entry check runs again under the test runner.
+  vi.resetModules()
+  const write = vi.spyOn(process.stdout, 'write')
+  const saved = process.exitCode
+  try {
+    await import('../../scripts/bootstrap-yida-initialization-owner')
+    await new Promise(resolve => setImmediate(resolve))
+    expect(write.mock.calls.some(([chunk]) => String(chunk).includes('"status"'))).toBe(false)
+    expect(process.exitCode).toBe(saved)
+  } finally {
+    write.mockRestore()
+    process.exitCode = saved
+  }
+})
