@@ -33,16 +33,25 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
     'tests/integration/yida-host-initialization-barrier-realdb.test.ts']
   const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/plugin-tests.yml'), 'utf8'))
   const step = workflow.jobs.test.steps.find((entry) => entry.id === 'external-system-delete-bind-lock-protocol-real-db')
+  assert.deepEqual(Object.keys(step).sort(), ['env', 'id', 'if', 'name', 'run'])
+  assert.deepEqual(Object.keys(step.env).sort(), ['DATABASE_URL', 'EXPECT_DB'])
   assert.equal(step.env.EXPECT_DB, '1')
   assert.equal(step.if, "matrix.node-version == '20.x'")
   assert.ok(step.env.DATABASE_URL)
-  const command = step.run.replace(/\\\r?\n/g, ' ')
-  assert.match(command, /vitest --config vitest\.integration\.config\.ts run /)
-  for (const spec of specs) assert.equal(command.split(/\s+/).filter((token) => token === spec).length, 1)
-  const tokens = command.split(/\s+/)
-  assert.ok(tokens.indexOf('run') > 0)
-  assert.deepEqual(tokens.slice(tokens.indexOf('run') + 1).filter((token) => token && !token.startsWith('-')).sort(), [...lane].sort())
-  assert.doesNotMatch(command, /(?:^|\s)(?:-t|--testNamePattern|--passWithNoTests|--exclude|--shard|--changed|--related|--bail)(?:\s|=|$)/)
+  // An allowlist, not a denylist: vitest also accepts kebab and short-cluster spellings of its filter
+  // flags, so every token is pinned. The DATABASE_URL guard line, then one command line whose tokens
+  // before 'run' are exact and whose only option after 'run' is the reporter.
+  const lines = step.run.replace(/\\\r?\n/g, ' ').split(/\r?\n/).filter((line) => line.trim())
+  assert.equal(lines.length, 2)
+  assert.equal(lines[0].trim(), ': "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"')
+  const tokens = lines[1].trim().split(/\s+/)
+  const runAt = tokens.indexOf('run')
+  assert.deepEqual(tokens.slice(0, runAt + 1),
+    ['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])
+  const files = tokens.slice(runAt + 1)
+  assert.deepEqual(files.filter((token) => token.startsWith('-')), ['--reporter=verbose'])
+  for (const spec of specs) assert.equal(files.filter((token) => token === spec).length, 1)
+  assert.deepEqual(files.filter((token) => !token.startsWith('-')).sort(), [...lane].sort())
   const config = ts.createSourceFile('vitest.config.ts', fs.readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const excluded = new Set()
   const visit = (node) => {

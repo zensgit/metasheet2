@@ -98,10 +98,18 @@ it('registers both host-boundary real-PG proofs in the EXPECT_DB lane and exclud
   expect(step?.env?.DATABASE_URL).toBeTruthy()
   expect(step?.if).toBe("matrix.node-version == '20.x'")
   expect(step?.['continue-on-error']).toBeUndefined()
-  const command = (step?.run ?? '').replace(/\\\r?\n/g, ' ')
-  expect(command).toMatch(/vitest --config vitest\.integration\.config\.ts run /)
-  for (const spec of specs) expect(command.split(/\s+/).filter(token => token === spec), spec).toHaveLength(1)
-  expect(command).not.toMatch(/(?:^|\s)(?:-t|--testNamePattern|--passWithNoTests)(?:\s|=|$)/)
+  // The same exact-token rule as plugins/plugin-integration-core/__tests__/yida-delivery-store.test.cjs,
+  // which also pins this step's whole file list: the tokens before 'run' are exact and the reporter is
+  // the only option after it, so no filter flag in any spelling vitest accepts can skip these DB cases.
+  const lines = (step?.run ?? '').replace(/\\\r?\n/g, ' ').split(/\r?\n/).filter(line => line.trim())
+  expect(lines).toHaveLength(2)
+  const tokens = lines[1].trim().split(/\s+/)
+  const runAt = tokens.indexOf('run')
+  expect(tokens.slice(0, runAt + 1))
+    .toEqual(['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])
+  const files = tokens.slice(runAt + 1)
+  expect(files.filter(token => token.startsWith('-'))).toEqual(['--reporter=verbose'])
+  for (const spec of specs) expect(files.filter(token => token === spec), spec).toHaveLength(1)
   const config = ts.createSourceFile('vitest.config.ts', readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const excluded = new Set<string>()
   const visit = (node: ts.Node): void => {
