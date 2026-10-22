@@ -454,3 +454,45 @@ describe('MetaAutomationLogViewer — a run skipped because its trigger record i
     expect(outputs[2]).toContain('APPROVAL_FWB_WRITEBACK_ENABLED is OFF')
   })
 })
+
+// 客户反馈 2026-10-21 (a): a DingTalk person message that reached nobody was read as "success" in the field.
+// The run log now says how many received it and why the rest did not — counts only, no user ids in the copy.
+const NOBODY_REACHED_EXECUTION: AutomationExecution = {
+  id: 'exec-nobody',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-10-21T10:00:00Z',
+  duration: 9,
+  steps: [
+    {
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      durationMs: 8,
+      error: 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)',
+      output: {
+        reason: 'dingtalk_recipients_unreachable',
+        notifiedUsers: 0,
+        skippedRecipientCount: 1,
+        skippedUserIds: ['user_fake_nobody'],
+        skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 },
+      },
+    },
+  ],
+}
+
+describe('MetaAutomationLogViewer — DingTalk person message that reached nobody (customer feedback 2026-10-21)', () => {
+  it('zh: the step reads 「0 人收到：1 人未绑定钉钉」 with the link hint; the error line carries no user id', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [NOBODY_REACHED_EXECUTION], stats: GONE_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-nobody')
+
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent)
+      .toBe('0 人收到：1 人未绑定钉钉。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(item.querySelector('[data-field="step-error"]')?.textContent ?? '').not.toContain('user_fake_nobody')
+    expect(item.textContent ?? '').not.toContain('dingtalk_recipients_unreachable')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
+  })
+})

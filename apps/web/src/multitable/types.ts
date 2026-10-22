@@ -578,6 +578,15 @@ export interface MetaCapabilities {
    * construction, like canDeleteSheet — never applied to the rail's other rows.
    */
   canCopySheet?: boolean
+  /**
+   * R68 (#6454 judge note): set by /context ONLY when true — the sheet has a column people may not write
+   * (`property.humanWriteLock`, the 备料 project sheet's PLM columns) that its own validation also marks
+   * required, so a person-created record can never pass (empty fails the rule, filled is a locked write).
+   * Sent only to an actor who could otherwise create. The workbench then hides its hand-create entries
+   * (toolbar add / import, grid "+ row", duplicate, new form submission) and says why. Absent ⇒ unchanged.
+   * Display only: every create route keeps its own refusal.
+   */
+  recordCreateBlockedByLock?: boolean
 }
 
 export interface YjsPresenceUser {
@@ -1317,6 +1326,8 @@ export interface AutomationRule {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: the step was planned but nothing was dispatched (backend AutomationStepResult.simulated). */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number

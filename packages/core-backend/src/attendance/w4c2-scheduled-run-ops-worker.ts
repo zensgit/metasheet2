@@ -29,7 +29,7 @@
  */
 import type { Pool, PoolClient } from 'pg'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { attendanceW4ConnectionDiscardV1, runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import { createAuthorizedAttendanceWriteContextV1 } from './w4c0-authorization'
 import {
   abandonAttendanceScheduledRunV1,
@@ -234,6 +234,7 @@ export async function sweepAttendanceScheduledRunsOnceV1(
   const logger = options.logger ?? noopSweepTickLogger
 
   const scanClient = (await pool.connect()) as unknown as PoolClient
+  let scanDiscard: Error | undefined
   let candidates: readonly { orgId: string; initiator: string; workDate: string; runId: string }[]
   let backlogRemaining: number
   let neverAttemptedRunning: number
@@ -268,8 +269,13 @@ export async function sweepAttendanceScheduledRunsOnceV1(
           }
         },
       ))
+  } catch (error) {
+    // Settlement coordination (r6.1 §1.1 P1-1): a connection the runner could not vouch for is
+    // destroyed, not returned; the tick still fails with the original error, as before.
+    scanDiscard = attendanceW4ConnectionDiscardV1(error)
+    throw error
   } finally {
-    scanClient.release()
+    scanClient.release(scanDiscard)
   }
 
   let finalized = 0
@@ -279,15 +285,19 @@ export async function sweepAttendanceScheduledRunsOnceV1(
   for (const candidate of candidates) {
     const client = (await pool.connect()) as unknown as PoolClient
     let outcome: Awaited<ReturnType<typeof sweepAttendanceScheduledRunCandidateV1>> | null = null
+    let discard: Error | undefined
     try {
       outcome = await runAttendanceResultOperationTransactionV1(
         client as unknown as AttendanceW4TransactionClientV1,
         (trx) => sweepAttendanceScheduledRunCandidateV1(trx, candidate as AttendanceScheduledRunSweepCandidateV1),
       )
-    } catch {
+    } catch (error) {
       errored += 1
+      // Settlement coordination (r6.1 §1.1 P1-1): still counted and swallowed as before, but a
+      // connection the runner could not vouch for is destroyed instead of going back to the pool.
+      discard = attendanceW4ConnectionDiscardV1(error)
     } finally {
-      client.release()
+      client.release(discard)
     }
     if (!outcome) continue
     if (outcome.kind === 'finalized') {
@@ -360,13 +370,20 @@ export async function abandonScheduledRunOnceV1(
     sourceRef: 'ref:w4c2-scheduled-run-admin-abandon',
   })
   const client = (await pool.connect()) as unknown as PoolClient
+  let discard: Error | undefined
   try {
     return await runAttendanceResultOperationTransactionV1(
       client as unknown as AttendanceW4TransactionClientV1,
       (trx) =>
         abandonAttendanceScheduledRunV1(trx, callerIdentity, { orgId: input.orgId, runId: input.runId }, input.reasonCode),
     )
+  } catch (error) {
+    // Settlement coordination (r6.1 §1.1 P1-1, OPS:370): destroyed on a ROLLBACK that failed or a
+    // COMMIT that failed with anything but 40001 / 40P01; released exactly once either way; the
+    // error reaches the caller unchanged.
+    discard = attendanceW4ConnectionDiscardV1(error)
+    throw error
   } finally {
-    client.release()
+    client.release(discard)
   }
 }

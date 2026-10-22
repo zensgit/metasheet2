@@ -810,7 +810,23 @@
                 class="meta-rule-editor__hint"
                 data-field="dingtalkDestinationEmpty"
               >
-                {{ automationLabel('dingtalk.noGroupsAvailable', isZh) }}
+                <div>{{ automationLabel('dingtalk.noGroupsAvailable', isZh) }}</div>
+                <div class="meta-rule-editor__inline-actions">
+                  <el-button
+                    v-if="props.canOpenDingTalkGroupSettings === true"
+                    size="small"
+                    class="meta-rule-editor__btn"
+                    data-field="dingtalkOpenGroupSettings"
+                    @click="emit('open-dingtalk-groups')"
+                  >{{ automationLabel('dingtalk.openGroupSettings', isZh) }}</el-button>
+                  <el-button
+                    size="small"
+                    class="meta-rule-editor__btn"
+                    data-field="dingtalkReloadGroups"
+                    :disabled="dingTalkDestinationsReloading"
+                    @click="void reloadDingTalkDestinations()"
+                  >{{ automationLabel('dingtalk.reloadGroups', isZh) }}</el-button>
+                </div>
               </div>
               <div
                 v-if="selectedGroupDestinations(action).length"
@@ -1067,7 +1083,10 @@
                   <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ automationLabel('dingtalk.inactiveUsersCannotBeAdded', isZh) }}</span>
                 </button>
               </div>
-              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">{{ automationLabel('dingtalk.noMatchingUsersOrGroups', isZh) }}</div>
+              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint" data-field="dingtalkPersonNoMatch">
+                <div>{{ automationLabel('dingtalk.noMatchingUsersOrGroups', isZh) }}</div>
+                <div data-field="dingtalkPersonSearchScopeHint">{{ automationLabel('dingtalk.recipientSearchScopeHint', isZh) }}</div>
+              </div>
               <div v-if="selectedPersonRecipients(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="recipient in selectedPersonRecipients(action)"
@@ -1083,6 +1102,11 @@
                   <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
+              <div
+                v-if="selectedPersonNotLinkedSummary(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                data-field="dingtalkPersonNotLinkedSummary"
+              >{{ selectedPersonNotLinkedSummary(action) }}</div>
               <div v-if="selectedPersonRecipientGroups(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="group in selectedPersonRecipientGroups(action)"
@@ -1820,6 +1844,7 @@ import {
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
   automationDingTalkPersonStatusLabel,
+  automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
@@ -2010,19 +2035,22 @@ const props = defineProps<{
   sheetId: string
   rule?: AutomationRule
   testRunState?: {
-    status: 'running' | 'success' | 'failed' | 'skipped'
+    status: 'running' | 'success' | 'failed' | 'skipped' | 'warning'
     message: string
   }
   visible: boolean
   fields: AutomationRuleEditorField[]
   client?: MultitableApiClient
   views?: MetaView[]
+  /** 客户反馈 2026-10-21 (c): the host can open API & Webhooks > DingTalk Groups on request. */
+  canOpenDingTalkGroupSettings?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'save', payload: Partial<AutomationRule>): void
   (e: 'test', ruleId: string): void
+  (e: 'open-dingtalk-groups'): void
 }>()
 
 const error = ref('')
@@ -2062,6 +2090,22 @@ function cronPresetForDraft(d: Draft): string {
 }
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
+const dingTalkDestinationsReloading = ref(false)
+
+// 客户反馈 2026-10-21 (c): after adding a group in API & Webhooks > DingTalk Groups, pick it up without
+// closing the editor (and losing the unsaved draft).
+async function reloadDingTalkDestinations() {
+  if (!props.client || dingTalkDestinationsReloading.value) return
+  dingTalkDestinationsReloading.value = true
+  try {
+    dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
+    dingTalkDestinationsError.value = ''
+  } catch (err) {
+    dingTalkDestinationsError.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
+  } finally {
+    dingTalkDestinationsReloading.value = false
+  }
+}
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
 // the config block degrades to a free-text template-id input; the select is never a hard dependency.
 const approvalTemplates = ref<Array<{ id: string; name?: string }>>([])
@@ -3575,6 +3619,8 @@ watch(
       // Resolve persisted notification recipient ids to names/emails so an existing rule opens with
       // readable chips; ids the roster does not know get the "unmatched" badge.
       void resolveNotificationRecipientIds(collectDraftNotificationRecipientIds())
+      // 客户反馈 2026-10-21 (a): a saved person-message recipient shows its DingTalk link status on open too.
+      void resolveNotificationRecipientIds(collectDraftPersonRecipientIds())
       // FWB template source: load active version + form fields for the mapping editor.
       const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
         ? draft.value.triggerConfig.templateId
@@ -4252,6 +4298,15 @@ function selectedPersonRecipients(action: DraftAction) {
   })
 }
 
+// 客户反馈 2026-10-21 (a): visible BEFORE saving — selected users the roster says have no DingTalk delivery
+// link (the same link the executor requires), as a count.
+function selectedPersonNotLinkedSummary(action: DraftAction): string {
+  return automationDingTalkSelectedNotLinkedSummary(
+    selectedPersonRecipients(action).filter((recipient) => recipient.dingtalkPersonDeliveryAvailable === false).length,
+    isZh.value,
+  )
+}
+
 function selectedPersonRecipientGroups(action: DraftAction) {
   return parseMemberGroupIdsText(action.config.memberGroupIdsText).map((id) => {
     const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('member-group', id)]
@@ -4423,6 +4478,14 @@ function removeNotificationRecipient(holder: NotificationRecipientHolder, userId
   holder.userId = parseUserIdsText(holder.userId)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+function collectDraftPersonRecipientIds(): string[] {
+  const ids: string[] = []
+  for (const action of draft.value.actions) {
+    if (action.type === 'send_dingtalk_person_message') ids.push(...parseUserIdsText(action.config.userIdsText))
+  }
+  return Array.from(new Set(ids))
 }
 
 function collectDraftNotificationRecipientIds(): string[] {
@@ -5773,6 +5836,9 @@ async function onTestRun(): Promise<void> {
 .meta-rule-editor__test-run-status--success { color: var(--el-color-success-dark-2); }
 .meta-rule-editor__test-run-status--failed { color: var(--el-color-danger-dark-2); }
 .meta-rule-editor__test-run-status--skipped { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__test-run-status--warning { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__hint--warning { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__inline-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 .meta-rule-editor__test-run-status--running { color: var(--el-color-primary-dark-2); }
 
 .meta-rule-editor__input--sm,

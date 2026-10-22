@@ -253,7 +253,8 @@ function createAttendanceTimezoneRuntime({
     }
   }
   const frames = new WeakMap()
-  const companion = require('./attendance-timezone-companion-store.cjs').createAttendanceTimezoneCompanionStore({ HttpError,validateFrozenContext,validateFrozenAttribution })
+  const { createAttendanceTimezoneCompanionStore, admitsPreCompanionLegacyTarget } = require('./attendance-timezone-companion-store.cjs')
+  const companion = createAttendanceTimezoneCompanionStore({ HttpError,validateFrozenContext,validateFrozenAttribution })
   async function assertLegacyRepairPosture(trx, frame) {
     if (frame?.identity?.source !== 'legacy_repair') return
     // An unresolved historical rule is not an issued segment-calculation context.
@@ -676,10 +677,14 @@ function createAttendanceTimezoneRuntime({
       }
       const legacy = batch ? batch.legacy.get(workDate) : await companion.readLegacyFrozenV2(trx,{orgId,userId,workDate})
       if (legacy) return target(legacy.frame,legacy.recordId,true)
-      const prior = batch ? (batch.priorDates.has(workDate) ? [{}] : []) : await trx.query(`SELECT id FROM attendance_records
+      const prior = batch ? (batch.priorDates.get(workDate) ?? []) : await trx.query(`SELECT id,timezone,current_calculation_id FROM attendance_records
         WHERE org_id=$1 AND user_id=$2 AND work_date=$3 AND visibility_state='active'`,[orgId,userId,workDate])
-      if (prior.length) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',409)
       const window = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate},batch)
+      // Same rule as companion.assertTarget: only a default-only reading in the
+      // record's own zone, under legacy posture, may stand in for a pre-companion record, unfrozen.
+      if (prior.length && !await admitsPreCompanionLegacyTarget(trx,orgId,{timezone:window.timezone,timezoneContext:window.timezoneContext},prior)) {
+        fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',409)
+      }
       requestTargetFacts.set(trx,{window})
       return {
         orgId,userId,workDate,timezone:window.timezone,contextFingerprint:window.contextFingerprint,
@@ -712,11 +717,12 @@ function createAttendanceTimezoneRuntime({
         if (legacy.has(entry.frame.workDate)) fail('ATTENDANCE_TIMEZONE_OPEN_CONTEXT_AMBIGUOUS',409)
         legacy.set(entry.frame.workDate,entry)
       }
-      const priorRows = await trx.query(`SELECT work_date::text FROM attendance_records
+      const priorRows = await trx.query(`SELECT id,timezone,current_calculation_id,work_date::text FROM attendance_records
         WHERE org_id=$1 AND user_id=$2 AND work_date=ANY($3::date[]) AND visibility_state='active'`,[orgId,userId,dates])
-      const priorDates = new Set(priorRows.map(row=>row.work_date))
+      const priorDates = new Map()
+      for (const row of priorRows) priorDates.set(row.work_date,[...(priorDates.get(row.work_date) ?? []),row])
       const freshDates = dates.filter(date=>!companions.has(date) && !legacy.has(date))
-      if (freshDates.some(date=>priorDates.has(date))) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',409)
+      // Pre-companion dates are decided per date, after the fresh reading exists.
       const batch = {members,companions,legacy,priorDates,candidates:[],cuts:[],policy:null,holidays:new Map(),calendarOverrides:[]}
       let batchTrx = trx
       if (freshDates.length) {

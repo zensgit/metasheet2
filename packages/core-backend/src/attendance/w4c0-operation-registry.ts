@@ -39,6 +39,10 @@ import type {
 } from './w4c0-identity'
 import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
 import {
+  SettlementCoordinationRestartSignalV1,
+  currentSettlementCoordinationContextV1,
+} from './coordination/settlement-coordination-context'
+import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
   assertConnectionIsIdleV1,
@@ -83,6 +87,66 @@ export class AttendanceW4RegistryError extends Error {
 /** The caller must destroy, not return, this pooled connection. */
 export class AttendanceCleaningConnectionUncertainError extends AttendanceW4RegistryError {
   constructor() { super('W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN') }
+}
+
+/**
+ * Settlement coordination (r6.1 §1.1 P1-1 「连接销毁语义」): when the runner can no longer say what state
+ * the connection is in — ROLLBACK failed, or COMMIT failed with anything other than 40001 / 40P01 — it
+ * marks the original error and sends it out unchanged otherwise: same object, same `code`, same message.
+ * The mark is a non-enumerable own property keyed by this symbol, invisible to JSON, `Object.keys` and
+ * equality. Releasers read it with `isAttendanceW4ConnectionUncertainV1` and destroy the connection
+ * instead of returning it; a same-connection wrapper checks it before any retry.
+ */
+export const ATTENDANCE_W4_CONNECTION_UNCERTAIN = Symbol.for('ms2.attendance.w4.connectionUncertain')
+
+/** Error objects that cannot take the own property (frozen or sealed) are remembered by identity. */
+const uncertainByIdentity = new WeakSet<object>()
+
+/** A thrown primitive cannot carry the mark; it travels as `cause` of this registry error instead. */
+export class AttendanceW4ConnectionUncertainPrimitiveError extends AttendanceW4RegistryError {
+  readonly cause: unknown
+
+  constructor(cause: unknown) {
+    super('W4C0_CONNECTION_UNCERTAIN')
+    this.name = 'AttendanceW4ConnectionUncertainPrimitiveError'
+    this.cause = cause
+  }
+}
+
+/** Marks `error` as having left its connection in an unknown state; returns the same object. */
+export function markAttendanceW4ConnectionUncertainV1(error: unknown): unknown {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return new AttendanceW4ConnectionUncertainPrimitiveError(error)
+  }
+  const target = error as Record<symbol, unknown>
+  if (target[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)) return error
+  try {
+    Object.defineProperty(target, ATTENDANCE_W4_CONNECTION_UNCERTAIN, { value: true, enumerable: false, configurable: false, writable: false })
+  } catch {
+    uncertainByIdentity.add(error as object)
+  }
+  return error
+}
+
+/**
+ * What a releaser passes to `release(error?)` for an error that left its body: the error itself
+ * (wrapped when it is not an `Error`) when the connection's state is unknown, so the pool destroys the
+ * connection; `undefined` otherwise, so it goes back. The error that propagates is never changed.
+ */
+export function attendanceW4ConnectionDiscardV1(error: unknown): Error | undefined {
+  if (!isAttendanceW4ConnectionUncertainV1(error)) return undefined
+  return error instanceof Error ? error : new AttendanceW4ConnectionUncertainPrimitiveError(error)
+}
+
+/** The mark, or one of the uncertain error classes that predate it. */
+export function isAttendanceW4ConnectionUncertainV1(error: unknown): boolean {
+  if (
+    error instanceof AttendanceCleaningConnectionUncertainError
+    || error instanceof OnlinePunchConnectionUncertainError
+    || error instanceof AttendanceW4ConnectionUncertainPrimitiveError
+  ) return true
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false
+  return (error as Record<symbol, unknown>)[ATTENDANCE_W4_CONNECTION_UNCERTAIN] === true || uncertainByIdentity.has(error as object)
 }
 
 function fail(code: string): never {
@@ -1109,6 +1173,9 @@ export async function runAttendanceResultOperationTransactionV1<T>(
         // Retry only an explicit serialization/deadlock rollback; an ambiguous
         // commit must recover via the durable operation, never blindly reapply.
         if (sessionFenced && !isRetryableSqlState(error)) throw new AttendanceCleaningConnectionUncertainError()
+        // Settlement coordination: a COMMIT that failed with anything else left the connection's state
+        // unknown. The error keeps its object and code and goes out carrying the uncertainty mark.
+        if (!isRetryableSqlState(error)) throw markAttendanceW4ConnectionUncertainV1(error)
         throw error
       }
       return result
@@ -1116,6 +1183,9 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       try { await connection.query('ROLLBACK', []) } catch {
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
         if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+        // Settlement coordination: a failed ROLLBACK leaves the connection's state unknown — no further
+        // attempt on this connection, retryable or not; the original error goes out marked.
+        throw markAttendanceW4ConnectionUncertainV1(error)
       }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1
@@ -1127,5 +1197,28 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       // Never unlock-all or silently return an uncertain connection to its pool.
       if (sessionFenced) await releaseCleaningSessionFences(connection, held)
     }
+  }
+}
+
+/**
+ * Handed-over mode (settlement coordination, r6.1 §8 W-7). The coordinated-transaction port has
+ * already borrowed `connection`, proven it idle (S1, which takes the place of Gate E), begun the
+ * transaction and set its timeouts (S2). This runs `body` on it and nothing else: no Gate E, no
+ * BEGIN / COMMIT / ROLLBACK, no settings, no retry. A 40001 / 40P01 becomes the coordination restart
+ * signal, which only the port handles; every other error is rethrown unchanged. Refused unless
+ * `connection` is the active coordination context's own connection, so a body never runs outside
+ * the transaction the port opened. The default mode above is unchanged.
+ */
+export async function runAttendanceResultOperationHandedOverV1<T>(
+  connection: AttendanceW4TransactionClientV1,
+  body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+): Promise<T> {
+  const context = currentSettlementCoordinationContextV1()
+  if (!context || context.connection !== connection) fail('W4C0_CONNECTION_NOT_HANDED_OVER')
+  try {
+    return await body(connection)
+  } catch (error) {
+    if (isRetryableSqlState(error)) throw new SettlementCoordinationRestartSignalV1(error)
+    throw error
   }
 }

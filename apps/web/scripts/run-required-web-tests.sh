@@ -1684,6 +1684,7 @@ exec npx vitest run \
   IntegrationStockPrepPanel \
   IntegrationWorkbenchView \
   lineDerivation \
+  LoginView.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \

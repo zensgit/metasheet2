@@ -317,6 +317,196 @@ describe('LoginView', () => {
     expect(container?.textContent).toContain('白名单')
   })
 
+  it.each([
+    ['missing_client_id',
+      '缺少服务端配置 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY），请联系管理员配置钉钉登录。',
+      'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY) for DingTalk login.'],
+    ['missing_client_secret',
+      '缺少服务端配置 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET），请联系管理员配置钉钉登录。',
+      'Ask an administrator to configure DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET) for DingTalk login.'],
+    ['missing_redirect_uri',
+      '缺少服务端配置 DINGTALK_REDIRECT_URI，请联系管理员填写与钉钉开放平台一致的登录回调地址。',
+      'Ask an administrator to configure DINGTALK_REDIRECT_URI to match the login callback URL in DingTalk.'],
+    ['corp_not_allowed',
+      '钉钉企业白名单未放行，请联系管理员检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+      'Ask an administrator to check DINGTALK_CORP_ID against DINGTALK_ALLOWED_CORP_IDS; the corporate allowlist blocks DingTalk login.'],
+  ])('explains %s and updates the configuration hint when switching language', async (reason, zh, en) => {
+    mocks.apiFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: {
+          configured: reason === 'corp_not_allowed',
+          available: false,
+          corpId: 'private-corp-value',
+          allowedCorpIds: ['private-allowlist-value'],
+          requireGrant: false,
+          autoLinkEmail: false,
+          autoProvision: false,
+          unavailableReason: reason,
+        },
+      }),
+    }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+
+    const switcher = container.querySelector<HTMLSelectElement>('[data-testid="locale-switcher"]')!
+    for (const [locale, expected] of [['en', en], ['zh-CN', zh]]) {
+      switcher.value = locale
+      switcher.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+      expect(container.querySelector('.login-hint')?.textContent).toBe(expected)
+      expect(container.querySelector('.login-dingtalk')).toBeNull()
+      expect(container.querySelector('button[type="submit"]')).not.toBeNull()
+      expect(container.textContent).not.toContain('private-corp-value')
+      expect(container.textContent).not.toContain('private-allowlist-value')
+    }
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
+  it('uses a safe generic hint for an unknown reason without exposing response values', async () => {
+    mocks.apiFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: {
+          configured: false,
+          available: false,
+          corpId: 'private-corp-value',
+          allowedCorpIds: [],
+          requireGrant: false,
+          autoLinkEmail: false,
+          autoProvision: false,
+          unavailableReason: 'unexpected-private-value',
+          clientSecret: 'private-secret-value',
+        },
+      }),
+    }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+    const switcher = container.querySelector<HTMLSelectElement>('[data-testid="locale-switcher"]')!
+    switcher.value = 'en'
+    switcher.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container.querySelector('.login-hint')?.textContent).toBe('DingTalk login is unavailable right now.')
+    expect(container.querySelector('.login-dingtalk')).toBeNull()
+    for (const value of ['unexpected-private-value', 'private-secret-value', 'private-corp-value']) {
+      expect(container.textContent).not.toContain(value)
+    }
+  })
+
+  describe('#6467 missingEnv names every missing login variable', () => {
+    async function mountWithProbe(data: Record<string, unknown>): Promise<HTMLSelectElement> {
+      mocks.apiFetch.mockImplementationOnce(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          data: {
+            configured: false,
+            available: false,
+            corpId: null,
+            allowedCorpIds: [],
+            requireGrant: false,
+            autoLinkEmail: false,
+            autoProvision: false,
+            ...data,
+          },
+        }),
+      }))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(LoginViewComponent)
+      app.mount(container)
+      await flushUi()
+      return container.querySelector<HTMLSelectElement>('[data-testid="locale-switcher"]')!
+    }
+
+    async function hintIn(switcher: HTMLSelectElement, locale: 'en' | 'zh-CN'): Promise<string | null | undefined> {
+      switcher.value = locale
+      switcher.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+      return container!.querySelector('.login-hint')?.textContent
+    }
+
+    it.each([
+      [
+        'all three',
+        'missing_client_id',
+        ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET', 'DINGTALK_REDIRECT_URI'],
+        '缺少服务端配置 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）、DINGTALK_REDIRECT_URI，请联系管理员配置钉钉登录；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+        'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY), DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET), DINGTALK_REDIRECT_URI for DingTalk login; DINGTALK_REDIRECT_URI must match the login callback URL in DingTalk.',
+      ],
+      [
+        'id + secret',
+        'missing_client_id',
+        ['DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_ID|DINGTALK_APP_KEY'],
+        '缺少服务端配置 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET），请联系管理员配置钉钉登录。',
+        'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY), DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET) for DingTalk login.',
+      ],
+      [
+        'secret + redirect',
+        'missing_client_secret',
+        ['DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET', 'DINGTALK_REDIRECT_URI'],
+        '缺少服务端配置 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）、DINGTALK_REDIRECT_URI，请联系管理员配置钉钉登录；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+        'Ask an administrator to configure DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET), DINGTALK_REDIRECT_URI for DingTalk login; DINGTALK_REDIRECT_URI must match the login callback URL in DingTalk.',
+      ],
+    ])('lists %s in canonical order (zh/en)', async (_label, reason, missingEnv, zh, en) => {
+      const switcher = await mountWithProbe({ unavailableReason: reason, missingEnv })
+      expect(await hintIn(switcher, 'en')).toBe(en)
+      expect(await hintIn(switcher, 'zh-CN')).toBe(zh)
+      expect(container!.querySelector('.login-dingtalk')).toBeNull()
+    })
+
+    it('keeps the per-reason sentence when only one variable is missing', async () => {
+      const switcher = await mountWithProbe({
+        unavailableReason: 'missing_redirect_uri',
+        missingEnv: ['DINGTALK_REDIRECT_URI'],
+      })
+      expect(await hintIn(switcher, 'zh-CN')).toBe('缺少服务端配置 DINGTALK_REDIRECT_URI，请联系管理员填写与钉钉开放平台一致的登录回调地址。')
+    })
+
+    it('renders only known names: unexpected or value-bearing entries are dropped', async () => {
+      const switcher = await mountWithProbe({
+        unavailableReason: 'missing_client_id',
+        missingEnv: [
+          'DINGTALK_CLIENT_ID|DINGTALK_APP_KEY',
+          'private-secret-value',
+          'DINGTALK_REDIRECT_URI=https://private-host.example',
+          'DINGTALK_REDIRECT_URI',
+          42,
+        ],
+      })
+      expect(await hintIn(switcher, 'en')).toBe(
+        'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY), DINGTALK_REDIRECT_URI for DingTalk login; DINGTALK_REDIRECT_URI must match the login callback URL in DingTalk.',
+      )
+      for (const value of ['private-secret-value', 'private-host.example']) {
+        expect(container!.textContent).not.toContain(value)
+      }
+    })
+
+    it('corp_not_allowed keeps its own sentence even if missingEnv were non-empty', async () => {
+      const switcher = await mountWithProbe({
+        configured: true,
+        unavailableReason: 'corp_not_allowed',
+        missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+      })
+      expect(await hintIn(switcher, 'zh-CN')).toBe('钉钉企业白名单未放行，请联系管理员检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。')
+    })
+  })
+
   describe('E2b container auto 免登', () => {
     function setContainer(withAuthCode = true) {
       // navigator.userAgent is a prototype getter in jsdom (no own descriptor),

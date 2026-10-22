@@ -1800,6 +1800,35 @@ describe('auth login routes', () => {
     })
   })
 
+  it('#6467 anonymous probe passes missingEnv (variable names only) through unchanged', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(false)
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: false,
+      available: false,
+      corpId: null,
+      allowedCorpIds: [],
+      requireGrant: false,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      available: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+    })
+  })
+
   it('exchanges a DingTalk callback into a local session token', async () => {
     const expSeconds = Math.floor(new Date('2026-04-08T10:00:00.000Z').getTime() / 1000)
 

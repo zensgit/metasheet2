@@ -1702,6 +1702,102 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
   })
 }
 
+// #6475 fix round 2 — WHAT A SYNC'S WRITE READ, AS CONTENT.
+//
+// The project-sync panel's archive (④, mvp-persist) is a SECOND read of the source, after the write
+// (③, apply). Round 1 made ④ prove it reads the same SOURCE as ③ (http-routes.cjs
+// `stockPreparationSourceScopeDigest`). That says nothing about the source's CONTENT: a PLM edit
+// between ③ and ④ (a quantity, a part added or removed) used to be archived as this sync's batch
+// while the sheet held what ③ wrote.
+//
+// This revision is the content half: one hash over exactly what the expansion produced for this
+// project — the rows in canonical identity order, the status, the action, the parameters and the
+// read plan. It deliberately leaves out everything that differs between ③ and ④ while the source
+// does not:
+//   * the target sheet's rows and the plan (③ plans against the sheet BEFORE its write, ④ after);
+//   * the source binding's workspace row (③ resolves with the page's workspace hint, ④ with none —
+//     WHICH system was read is the scope digest's job, not this one's);
+//   * the tenant `ext_` keys an `extFieldMapping` adds to a row. The apply expands WITH the mapping
+//     and mvp-persist deliberately WITHOUT it (see `prepareStockPreparationMvpSnapshot`), and the
+//     snapshot vocabulary has no `ext_` key, so they are not part of what the archive keeps;
+//   * row errors. A plan that carries any is held (every row error is a manual_confirm), so neither
+//     the panel's apply nor mvp-persist's readiness gate reaches a state where they could differ.
+// Values-free on the wire: only the truncated, domain-separated digest below ever leaves the process.
+const SOURCE_CONTENT_REVISION_SCHEME = 'stock-preparation/source-content/v1'
+const STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+
+function withoutTenantExtensionKeys(row) {
+  if (!isPlainObject(row)) return row
+  const out = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (!isTenantExtensionField(key)) out[key] = value
+  }
+  return out
+}
+
+function buildSourceContentRevision({ action, parameters, expansion }) {
+  const rows = Array.isArray(expansion && expansion.rows) ? expansion.rows.map(withoutTenantExtensionKeys) : []
+  return hashJson({
+    scheme: SOURCE_CONTENT_REVISION_SCHEME,
+    actionId: action.actionId,
+    parameters,
+    readPlan: action.source.readPlan,
+    status: expansion ? expansion.status : null,
+    rows: canonicalHashOrder(rows, expandedRowHashIdentity),
+  })
+}
+
+// What the apply answers as `sourceContentDigest` and what mvp-persist compares it with. One
+// definition, so the two sides cannot drift.
+function stockPreparationSourceContentDigest(sourceContentRevision) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify([SOURCE_CONTENT_REVISION_SCHEME, sourceContentRevision]))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+const STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE = 'STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH'
+
+// #6475 fix round 2 — THE REVISION mvp-persist MINTS ITS IDS FROM.
+//
+// The dry-run `revision` hashes the target sheet's rows as they stand, so a 备注 edit — a column the
+// sync never writes and the archive never keeps — moved the archive's run id and, under the default
+// rule, its batch id: a duplicate batch of identical lines, or (creation-hour rule) a permanent
+// idempotency conflict. This is that same revision over the same inputs with ONE difference: each
+// existing row loses the columns PEOPLE own — the template's human_preserved columns, and every tenant
+// `ext_` column outside the action's declared extension band (the only `ext_` columns a sync writes:
+// `assertExtFieldMappingAgreesWithAction` refuses a mapping that writes an undeclared one).
+// Everything the sync itself wrote stays, the refresh stamps included, so a sync that really rewrote
+// the sheet still mints a new run (a BOM that changed and changed back still gets its own batch under
+// the default rule, as before). For rows that carry no such column it is byte-identical to `revision`,
+// so a batch kept from an untouched sheet keeps its id. Not used for tokens or the ledger.
+function withoutPeopleOwnedColumns(row, humanFieldIds, declaredExtensionFieldIds) {
+  if (!isPlainObject(row)) return row
+  const out = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (humanFieldIds.has(key)) continue
+    if (isTenantExtensionField(key) && !declaredExtensionFieldIds.has(key)) continue
+    out[key] = value
+  }
+  return out
+}
+
+function buildArchiveRevision({ action, parameters, dryRun }) {
+  const humanFieldIds = new Set((action.template && Array.isArray(action.template.fields) ? action.template.fields : [])
+    .filter((field) => field && field.ownership === 'human_preserved')
+    .map((field) => field.id))
+  const declaredExtensionFieldIds = new Set(Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : [])
+  return buildRevision({
+    action,
+    parameters,
+    expansion: dryRun.expansion,
+    existingRows: (Array.isArray(dryRun.existingRows) ? dryRun.existingRows : [])
+      .map((row) => withoutPeopleOwnedColumns(row, humanFieldIds, declaredExtensionFieldIds)),
+    conflictPolicyReview: dryRun.conflictPolicyReview,
+    plan: dryRun.plan,
+  })
+}
+
 // Confirmation-ledger readback merge (FIRST CUT: duplicate_expanded_key x
 // keep_multiple_rows only). The ledger review arrives in the SAME shape the
 // stored table-scope review uses ({ policies: [{ fingerprint, policy }] }), so
@@ -2131,7 +2227,17 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // vanish according to whether the PROJECT exists in the source, which is a property of the data;
     // whether a mapping is configured is a property of the deployment, and evidence should only ever
     // report the second.
-    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
+    return {
+      expansion,
+      existingRows: [],
+      plan: emptyPlan(),
+      revision,
+      sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
+      canApply: false,
+      hasGlobalErrors,
+      extFieldMapping,
+      b2aSchemaContract,
+    }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
@@ -2200,6 +2306,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     existingRows,
     plan,
     revision,
+    // #6475 round 2: the content half only — see buildSourceContentRevision. NOT an input to
+    // `revision` (which keeps hashing exactly what it always did, so no token or batch id moves).
+    sourceContentRevision: buildSourceContentRevision({ action, parameters, expansion }),
     canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
@@ -2487,14 +2596,45 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
   if (isLargeBomBoundedExpansion(dryRun.expansion)) {
     throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED', 'source expansion requires the large-BOM workflow')
   }
+  // #6475 fix round 2 — WITH THE APPLY'S CONTENT DIGEST, THE ARCHIVE IS WHAT THE SYNC WROTE, OR NOTHING.
+  //
+  // The panel hands step ③'s `sourceContentDigest` back to step ④. Present, it makes two claims this
+  // function now proves before anything is persisted:
+  //   1. the source still says what ③ read (the digest of THIS expansion equals ③'s) — checked BEFORE
+  //      the readiness gate, so a PLM change between ③ and ④ is named as such even where it also
+  //      makes the recomputed plan unready (an identity or lineage change does both);
+  //   2. the sheet holds all of it: this recomputed plan, against the sheet ③ just wrote, has nothing
+  //      left to add, update or mark inactive. A partial write (some rows failed) or a hand edit of a
+  //      PLM-owned cell since ③ leaves such rows, and archiving then would keep a batch the sheet does
+  //      not hold.
+  // Absent, nothing here runs and the route is the admin's direct "archive the source now" it always
+  // was — that caller makes no claim about a write, and this cannot hold it to one.
+  // The digest selects nothing: it can only make this function refuse.
+  const writtenSourceContentDigest = input.writtenSourceContentDigest === undefined ? null : input.writtenSourceContentDigest
+  if (writtenSourceContentDigest !== null) {
+    if (stockPreparationSourceContentDigest(dryRun.sourceContentRevision) !== writtenSourceContentDigest) {
+      throw new StockPreparationTableActionError(409, STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE, 'the source no longer holds what this sync wrote; nothing was stored', { reason: 'source_changed_since_write' })
+    }
+  }
   if (!dryRun.canApply || !dryRun.plan.valid) {
     throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 'source expansion is not ready for internal persistence')
+  }
+  if (writtenSourceContentDigest !== null) {
+    const pending = {
+      add: Number(dryRun.plan.counts[DECISIONS.ADD] || 0),
+      update: Number(dryRun.plan.counts[DECISIONS.UPDATE] || 0),
+      inactive: Number(dryRun.plan.counts[DECISIONS.INACTIVE] || 0),
+    }
+    if (pending.add + pending.update + pending.inactive > 0) {
+      throw new StockPreparationTableActionError(409, STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE, 'the sheet does not hold everything this sync read; nothing was stored', { reason: 'sheet_not_settled', pending })
+    }
   }
   return {
     action,
     parameters,
     expansionResult: dryRun.expansion.rows,
     revision: dryRun.revision,
+    archiveRevision: buildArchiveRevision({ action, parameters, dryRun }),
     evidence: {
       ...evidenceForDryRun({
         action,
@@ -2760,6 +2900,9 @@ async function applyStockPreparationAction(input = {}) {
     status: applyResult.status,
     permission: applyResult.permission,
     dryRunRevision: dryRun.revision,
+    // #6475 round 2: the content this write read. The route answers only its digest
+    // (`stockPreparationSourceContentDigest`) and strips this key from the response.
+    sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
     evidence: {
       actionId: action.actionId,
@@ -2808,6 +2951,9 @@ module.exports = {
   largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
+  STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE,
+  STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN,
+  stockPreparationSourceContentDigest,
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
@@ -2816,7 +2962,9 @@ module.exports = {
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     assertTargetFieldsExist,
+    buildArchiveRevision,
     buildRevision,
+    buildSourceContentRevision,
     confirmationDecisionEvidence,
     hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,

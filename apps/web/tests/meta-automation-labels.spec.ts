@@ -19,6 +19,7 @@ import {
   automationDingTalkPersonStatusLabel,
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
+  automationDingTalkSelectedNotLinkedSummary,
   automationDingTalkTemplateTokenLabel,
   automationLabel,
   automationLastRunChip,
@@ -341,6 +342,50 @@ describe('automationStepOutputView', () => {
       expect(view.reason, JSON.stringify(output)).toBeNull()
       expect(view.output).toBe(output)
     }
+  })
+
+  // 客户反馈 2026-10-21 (a): DingTalk person message recipient outcome — counts only, never ids.
+  it('all-skipped DingTalk person message → 「0 人收到：…」 with the link hint; reason + counts dropped, stored ids kept', () => {
+    const output = {
+      reason: 'dingtalk_recipients_unreachable',
+      notifiedUsers: 0,
+      skippedRecipientCount: 3,
+      skippedUserIds: ['user_fake_a', 'user_fake_b', 'user_fake_c'],
+      skippedReasonCounts: { notLinked: 1, inactive: 1, notFound: 1 },
+    }
+    const zh = automationStepOutputView(output, true)
+    expect(zh.reason).toBe('0 人收到：1 人未绑定钉钉，1 人已停用，1 人不存在。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(zh.output).toEqual({ notifiedUsers: 0, skippedRecipientCount: 3, skippedUserIds: ['user_fake_a', 'user_fake_b', 'user_fake_c'] })
+    const en = automationStepOutputView(output, false)
+    expect(en.reason).toBe('0 received: 1 not linked to DingTalk, 1 inactive, 1 not found. Each member must be linked to DingTalk in the directory and sign in with DingTalk once.')
+    for (const id of output.skippedUserIds) expect(`${zh.reason}${en.reason}`).not.toContain(id)
+  })
+
+  it('partial DingTalk delivery (success step) still gets the count sentence', () => {
+    expect(automationStepOutputView({ notifiedUsers: 4, skippedRecipientCount: 1, skippedUserIds: ['user_fake_a'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } }, true).reason)
+      .toBe('4 人收到：1 人未绑定钉钉。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    // only inactive/not-found: no link hint
+    expect(automationStepOutputView({ notifiedUsers: 1, skippedRecipientCount: 1, skippedReasonCounts: { notLinked: 0, inactive: 1, notFound: 0 } }, true).reason)
+      .toBe('1 人收到：1 人已停用。')
+  })
+
+  it('an execution stored before the per-cause counts falls back to the total', () => {
+    expect(automationStepOutputView({ notifiedUsers: 0, skippedRecipientCount: 2, skippedUserIds: ['user_fake_a', 'user_fake_b'] }, true).reason)
+      .toBe('0 人收到：2 人未绑定钉钉或已停用。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+  })
+
+  it('a person message that skipped nobody, or a send_notification output, is left untouched', () => {
+    for (const output of [{ notifiedUsers: 3, skippedRecipientCount: 0, skippedUserIds: [] }, { notifiedUsers: 2, persisted: true }]) {
+      const view = automationStepOutputView(output, true)
+      expect(view.reason).toBeNull()
+      expect(view.output).toBe(output)
+    }
+  })
+
+  it('rule editor summary for selected users without a DingTalk link is a count', () => {
+    expect(automationDingTalkSelectedNotLinkedSummary(0, true)).toBe('')
+    expect(automationDingTalkSelectedNotLinkedSummary(2, true)).toBe('2 位已选用户未绑定钉钉，规则触发时他们收不到消息。成员需要先在目录中绑定钉钉账号，并用钉钉登录一次。')
+    expect(automationDingTalkSelectedNotLinkedSummary(1, false)).toContain('1 selected user is not linked to DingTalk')
   })
 
   it('the log panel wording for a skipped run is 已跳过 in zh', () => {

@@ -26,6 +26,28 @@ async function resetSources() {
   await fixture.pool.query('DELETE FROM attendance_timezone_policies WHERE org_id=$1',[fixture.orgId])
   await fixture.pool.query("UPDATE attendance_rules SET timezone='UTC' WHERE org_id=$1 AND is_default=true",[fixture.orgId])
 }
+// Persisted calculation posture of the fixture org. Rollout rows are append-only (no DELETE),
+// so postures are only walked along the legal transitions legacy <-> shadow <-> eligible <-> authoritative.
+// 'authoritative' cannot be left, hence the posture cases run before the W4 authoritative case below.
+const POSTURE_PATH = ['legacy','shadow','eligible','authoritative'] as const
+async function goPosture(target: typeof POSTURE_PATH[number]) {
+  let current = (await fixture.pool.query('SELECT state,version FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows[0]
+  if (!current) {
+    await fixture.pool.query(`INSERT INTO attendance_calculation_rollout_state
+      (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
+      VALUES($1,'legacy','timezone-runtime-test','TEST_FIXTURE',$2,1,NULL)`,[fixture.orgId,admin.userId])
+    current = {state:'legacy',version:1}
+  }
+  let position = POSTURE_PATH.indexOf(current.state)
+  const goal = POSTURE_PATH.indexOf(target)
+  if (position < 0 || (current.state === 'authoritative' && goal < position)) throw new Error('POSTURE_FIXTURE_UNREACHABLE')
+  while (position !== goal) {
+    position += position < goal ? 1 : -1
+    await fixture.pool.query('UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',
+      [fixture.orgId,POSTURE_PATH[position],current.state,Number(current.version)+1])
+    current = {state:POSTURE_PATH[position],version:Number(current.version)+1}
+  }
+}
 async function punch(actor: Actor, eventType: 'check_in' | 'check_out', instant: string, operationId = randomUUID(), timezone?: string) {
   punchClock.setOnlinePunchInstantForTests(instant)
   return fixture.request('/api/attendance/punch',actor.token,{
@@ -266,17 +288,148 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       await resetSources()
     }
   })
+  // Pre-companion admission needs the persisted posture to be legacy. These cases come first in the file:
+  // the fixture org has no rollout row yet, and the W4 authoritative case below leaves it authoritative for good.
+  it.each(['none','legacy'] as const)('OFF: a same-zone pre-companion record keeps its pre-upgrade path, unfrozen, for checkout and a correction (%s posture)',async posture=>{
+    if (posture === 'legacy') await goPosture('legacy')
+    else expect((await fixture.pool.query('SELECT 1 FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows).toEqual([])
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-03','UTC','2026-02-03T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
+    const companions=async()=>(await fixture.pool.query('SELECT record_id FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows
+    expect(await targetContext(actor,'2026-02-03')).toMatchObject({timezone:'UTC',frozen:false,workDate:'2026-02-03'})
+    const closed=await punch(actor,'check_out','2026-02-03T18:00:00Z')
+    expect(closed.status,JSON.stringify(closed.body)).toBe(200)
+    expect((await fixture.pool.query('SELECT work_date::text,timezone,first_in_at,last_out_at FROM attendance_records WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows)
+      .toEqual([{work_date:'2026-02-03',timezone:'UTC',first_in_at:new Date('2026-02-03T09:00:00Z'),last_out_at:new Date('2026-02-03T18:00:00Z')}])
+    expect(await companions()).toEqual([])
+    const corrected=await fixture.request('/api/attendance/requests',actor.token,{
+      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-03',operationId:randomUUID(),
+      requestedInAt:'2026-02-03T08:30:00Z',
+    })
+    expect(corrected.status,JSON.stringify(corrected.body)).toBe(201)
+    expect(await companions()).toEqual([])
+    const approved=await fixture.request('/api/attendance/requests/'+corrected.body.data.request.id+'/approve',admin.token,{})
+    expect(approved.status,JSON.stringify(approved.body)).toBe(200)
+    expect((await fixture.pool.query('SELECT first_in_at FROM attendance_records WHERE id=$1',[id])).rows)
+      .toEqual([{first_in_at:new Date('2026-02-03T08:30:00Z')}])
+    expect(await companions()).toEqual([])
+  })
+  // Refusals that must hold on their own guards (zone check, multi-timezone ON) run while the posture is still legacy;
+  // under a non-legacy posture the posture gate alone would refuse and hide a regression in those guards.
+  async function expectLegacyPosture() {
+    const rows=(await fixture.pool.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows
+    expect(rows.every((row: { state: string })=>row.state==='legacy')).toBe(true)
+  }
+  it('an incomplete historical absence record refuses current-zone target and request reinterpretation',async()=>{
+    await expectLegacyPosture()
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query("INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,status,is_workday) VALUES($1,$2,$3,'2026-02-02','America/New_York','absent',true)",
+      [id,fixture.orgId,actor.userId])
+    const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+    await expect(targetContext(actor,'2026-02-02')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+    const refused=await fixture.request('/api/attendance/requests',actor.token,{
+      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-02',operationId:randomUUID(),
+      requestedInAt:'2026-02-02T09:00:00Z',
+    })
+    expect({status:refused.status,body:refused.body}).toEqual({status:409,body:{ok:false,error:{
+      code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',message:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
+    }}})
+    expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
+    expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
+  })
+  it('ON still refuses a same-zone pre-companion record with zero DML',async()=>{
+    await expectLegacyPosture()
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-04','UTC','2026-02-04T09:00:00Z','partial',true)`,[id,fixture.orgId,actor.userId])
+    await policy(true)
+    try {
+      const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+      await expect(targetContext(actor,'2026-02-04')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      const refused=await punch(actor,'check_out','2026-02-04T18:00:00Z')
+      expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
+      expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
+    } finally {
+      await resetSources()
+      await fixture.pool.query("UPDATE attendance_records SET last_out_at='2026-02-04T18:00:00Z' WHERE id=$1",[id])
+    }
+  })
+  async function preCompanionRefusal(date: string, posture: 'shadow' | 'authoritative') {
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,status,is_workday)
+      VALUES($1,$2,$3,$4,'UTC',$5,'partial',true)`,[id,fixture.orgId,actor.userId,date,date+'T09:00:00Z'])
+    const prior = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+    try {
+      await goPosture(posture)
+      const shape=async()=>({
+        record:(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows,
+        counts:await fixture.counts(actor.userId),
+        calculations:(await fixture.pool.query('SELECT count(*)::int AS n FROM attendance_record_calculations WHERE org_id=$1 AND attendance_record_id=$2',[fixture.orgId,id])).rows,
+        companions:(await fixture.pool.query('SELECT count(*)::int AS n FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows,
+      })
+      const before=await shape()
+      expect(before.counts).toEqual({events:0,records:1,requests:0,operations:0})
+      await expect(targetContext(actor,date)).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      const refused=await punch(actor,'check_out',date+'T18:00:00Z')
+      expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+      expect(await shape()).toEqual(before)
+    } finally {
+      if (prior === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = prior
+      await fixture.pool.query("UPDATE attendance_records SET last_out_at=$2 WHERE id=$1",[id,date+'T18:00:00Z'])
+    }
+  }
+  it('OFF: a same-zone pre-companion record stays migration-required under shadow posture, with zero DML',async()=>{
+    await preCompanionRefusal('2026-02-05','shadow')
+  })
+  it('OFF: approving a correction on a same-zone pre-companion record is refused once the posture is no longer legacy, with zero DML',async()=>{
+    await resetSources()
+    const actor=await fixture.user()
+    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
+    const id=randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,first_in_at,last_out_at,status,is_workday)
+      VALUES($1,$2,$3,'2026-02-06','UTC','2026-02-06T09:00:00Z','2026-02-06T18:00:00Z','normal',true)`,[id,fixture.orgId,actor.userId])
+    await goPosture('legacy')
+    const created=await fixture.request('/api/attendance/requests',actor.token,{
+      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-06',operationId:randomUUID(),
+      requestedInAt:'2026-02-06T08:30:00Z',
+    })
+    expect(created.status,JSON.stringify(created.body)).toBe(201)
+    const requestId=created.body.data.request.id
+    await goPosture('shadow')
+    const record=async()=>(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
+    const before=await record()
+    const refused=await fixture.request('/api/attendance/requests/'+requestId+'/approve',admin.token,{})
+    expect({status:refused.status,code:refused.body.error?.code}).toEqual({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
+    expect(await record()).toEqual(before)
+    expect((await fixture.pool.query('SELECT status FROM attendance_requests WHERE id=$1',[requestId])).rows).toEqual([{status:'pending'}])
+    expect((await fixture.pool.query('SELECT count(*)::int AS n FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',[fixture.orgId,actor.userId])).rows).toEqual([{n:0}])
+    expect((await fixture.pool.query('SELECT count(*)::int AS n FROM attendance_record_calculations WHERE org_id=$1 AND attendance_record_id=$2',[fixture.orgId,id])).rows).toEqual([{n:0}])
+  })
+  it('OFF: a same-zone pre-companion record stays migration-required under authoritative posture, with zero DML',async()=>{
+    await preCompanionRefusal('2026-02-07','authoritative')
+  })
   it('W4 authoritative HTTP keeps the effective zone and binds the first actual calculation immutably',async () => {
     const prior = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     const actor = await fixture.user()
     const slot = await assignment(actor,'2026-01-30','Asia/Tokyo')
     process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
-    await fixture.pool.query(`INSERT INTO attendance_calculation_rollout_state
-      (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
-      VALUES($1,'legacy','timezone-runtime-test','TEST_FIXTURE',$2,1,NULL)`,[fixture.orgId,admin.userId])
-    for (const [state,priorState,version] of [['shadow','legacy',2],['eligible','shadow',3],['authoritative','eligible',4]]) {
-      await fixture.pool.query('UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',[fixture.orgId,state,priorState,version])
-    }
+    await goPosture('authoritative')
     try {
       const incoming = await punch(actor,'check_in','2026-01-30T09:00:00.000Z')
       expect(incoming.status,incoming.body.error?.code).toBe(200)
@@ -1005,25 +1158,6 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       .toEqual([{context_fingerprint:target.contextFingerprint}])
   })
 
-  it('an incomplete historical absence record refuses current-zone target and request reinterpretation',async()=>{
-    await resetSources()
-    const actor=await fixture.user()
-    await fixture.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
-    const id=randomUUID()
-    await fixture.pool.query("INSERT INTO attendance_records(id,org_id,user_id,work_date,timezone,status,is_workday) VALUES($1,$2,$3,'2026-02-02','America/New_York','absent',true)",
-      [id,fixture.orgId,actor.userId])
-    const before=(await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows
-    await expect(targetContext(actor,'2026-02-02')).rejects.toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED'})
-    const refused=await fixture.request('/api/attendance/requests',actor.token,{
-      orgId:fixture.orgId,requestType:'time_correction',workDate:'2026-02-02',operationId:randomUUID(),
-      requestedInAt:'2026-02-02T09:00:00Z',
-    })
-    expect({status:refused.status,body:refused.body}).toEqual({status:409,body:{ok:false,error:{
-      code:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',message:'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
-    }}})
-    expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE id=$1',[id])).rows).toEqual(before)
-    expect(await fixture.counts(actor.userId)).toEqual({events:0,records:1,requests:0,operations:0})
-  })
   it('a real holiday published punch freezes one calculation definition in identity and persisted issuance',async()=>{
     await resetSources()
     const prior = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED

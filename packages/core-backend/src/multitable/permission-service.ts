@@ -420,12 +420,46 @@ export async function listSheetPermissionEntries(
     .filter((entry): entry is MultitableSheetPermissionEntry => !!entry)
 }
 
+/**
+ * 客户反馈 2026-10-21 (b) — the candidate roster is read in pages and the eligibility filter (active
+ * multitable read/write or admin) is applied to EACH page, so ineligible matches can no longer use up the
+ * caller's window. Before this, `LIMIT limit` ran in SQL and eligibility ran afterwards in JS: a term whose
+ * first `limit` matches were all ineligible (e.g. many similarly-named accounts without a multitable role)
+ * answered "no match" even though an eligible user matched further down. The ELIGIBLE SET is unchanged —
+ * this only stops it being truncated early. Bounded: at most CANDIDATE_SCAN_MAX_ROWS rows are scanned
+ * (or `limit`, when a caller asks for more — loadSheetMemberUserIdSet's 10000 is still one page, as before),
+ * and the result never exceeds `limit` (the route-level ceilings in univer-meta.ts are untouched).
+ */
+const CANDIDATE_SCAN_PAGE_SIZE = 200
+const CANDIDATE_SCAN_MAX_ROWS = 1000
+
 export async function listSheetPermissionCandidates(
   query: QueryFn,
   sheetId: string,
   params: { q?: string; limit: number },
 ): Promise<MultitableSheetPermissionCandidate[]> {
-  const q = params.q?.trim() ?? ''
+  const limit = Math.max(0, Math.floor(params.limit))
+  const pageSize = Math.max(limit, CANDIDATE_SCAN_PAGE_SIZE)
+  const scanCeiling = Math.max(limit, CANDIDATE_SCAN_MAX_ROWS)
+  const eligible: MultitableSheetPermissionCandidate[] = []
+  let offset = 0
+  while (eligible.length < limit && offset < scanCeiling) {
+    const page = await readSheetPermissionCandidatePage(query, sheetId, params.q, pageSize, offset)
+    eligible.push(...page.eligible)
+    offset += page.rowCount
+    if (page.rowCount < pageSize) break
+  }
+  return eligible.slice(0, limit)
+}
+
+async function readSheetPermissionCandidatePage(
+  query: QueryFn,
+  sheetId: string,
+  rawQ: string | undefined,
+  pageSize: number,
+  offset: number,
+): Promise<{ eligible: MultitableSheetPermissionCandidate[]; rowCount: number }> {
+  const q = rawQ?.trim() ?? ''
   const term = q ? `%${q}%` : '%'
   const result = await query(
     `WITH user_candidates AS (
@@ -434,6 +468,7 @@ export async function listSheetPermissionCandidates(
           u.id AS subject_id,
           u.name AS user_name,
           u.email AS user_email,
+          u.username AS user_username,
           u.is_active AS user_is_active,
           NULL::text AS role_name,
           NULL::text AS group_name,
@@ -448,8 +483,8 @@ export async function listSheetPermissionCandidates(
           ON sp.sheet_id = $1
          AND sp.subject_type = 'user'
          AND sp.subject_id = u.id
-        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
-        GROUP BY u.id, u.name, u.email, u.is_active
+        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR COALESCE(u.username, '') ILIKE $3)
+        GROUP BY u.id, u.name, u.email, u.username, u.is_active
       ),
       member_group_candidates AS (
         SELECT
@@ -457,6 +492,7 @@ export async function listSheetPermissionCandidates(
           g.id::text AS subject_id,
           NULL::text AS user_name,
           NULL::text AS user_email,
+          NULL::text AS user_username,
           true AS user_is_active,
           NULL::text AS role_name,
           g.name AS group_name,
@@ -482,6 +518,7 @@ export async function listSheetPermissionCandidates(
           r.id AS subject_id,
           NULL::text AS user_name,
           NULL::text AS user_email,
+          NULL::text AS user_username,
           true AS user_is_active,
           r.name AS role_name,
           NULL::text AS group_name,
@@ -514,16 +551,19 @@ export async function listSheetPermissionCandidates(
           ELSE 2
         END,
         CASE WHEN user_is_active THEN 0 ELSE 1 END,
-        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(group_name, ''), NULLIF(role_name, ''), subject_id) ASC
-      LIMIT $4`,
-    [sheetId, q, term, params.limit],
+        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(user_username, ''), NULLIF(group_name, ''), NULLIF(role_name, ''), subject_id) ASC,
+        subject_id ASC
+      LIMIT $4 OFFSET $5`,
+    [sheetId, q, term, pageSize, offset],
   )
 
+  const rowCount = result.rows.length
   const candidates = (result.rows as Array<{
     subject_type: string
     subject_id: string
     user_name?: string | null
     user_email?: string | null
+    user_username?: string | null
     user_is_active?: boolean | null
     role_name?: string | null
     group_name?: string | null
@@ -536,6 +576,7 @@ export async function listSheetPermissionCandidates(
       const subjectId = String(row.subject_id)
       const name = typeof row.user_name === 'string' ? row.user_name.trim() : ''
       const email = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const username = typeof row.user_username === 'string' ? row.user_username.trim() : ''
       const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
       const groupName = typeof row.group_name === 'string' ? row.group_name.trim() : ''
       const groupDescription = typeof row.group_description === 'string' ? row.group_description.trim() : ''
@@ -543,15 +584,17 @@ export async function listSheetPermissionCandidates(
       return {
         subjectType,
         subjectId,
+        // (b) a user with no display name but a login name is labelled by the login name (the admin user
+        // list does the same), not by the opaque id; email still wins when present, as before.
         label:
           subjectType === 'user'
-            ? (name || email || subjectId)
+            ? (name || email || username || subjectId)
             : subjectType === 'member-group'
               ? (groupName || subjectId)
               : (roleName || subjectId),
         subtitle:
           subjectType === 'user'
-            ? (email || (name && name !== subjectId ? subjectId : null))
+            ? (email || ((name || username) && (name || username) !== subjectId ? subjectId : null))
             : subjectType === 'member-group'
               ? (groupDescription || (memberCount != null ? `${memberCount} member${memberCount === 1 ? '' : 's'}` : 'Member group'))
               : (roleName && roleName !== subjectId ? subjectId : 'Role'),
@@ -598,7 +641,7 @@ export async function listSheetPermissionCandidates(
     }),
   )
 
-  return candidates.filter((_candidate, index) => eligibility[index])
+  return { eligible: candidates.filter((_candidate, index) => eligibility[index]), rowCount }
 }
 
 /**

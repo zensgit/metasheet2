@@ -3040,7 +3040,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as
@@ -3364,7 +3364,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: (error?: Error) => client.release(error) }
                     },
                   })
                   return processor.processLegacyImportPlanV1(jobId)
@@ -3376,7 +3376,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: (error?: Error) => client.release(error) }
                     },
                   })
                   return host.reserveLegacyImportPlanV1(input)
@@ -3391,7 +3391,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   })
                   return host.commitSyncImportPlanV1(input)
@@ -3476,7 +3476,7 @@ export class MetaSheetServer {
             ? createAttendanceImportRollbackBoundaryV1({
                 acquireConnection: async () => {
                   const client = await poolManager.get().getInternalPool().connect()
-                  return { client, release: () => client.release() }
+                  return { client, release: (error?: Error) => client.release(error) }
                 },
               })
             : undefined,

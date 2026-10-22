@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
+import { randomUUID } from 'node:crypto'
+import type { PoolClient } from 'pg'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
@@ -20,6 +22,13 @@ import type {
   AttendanceRequestOperationExternalTransactionInputV1,
   AttendanceRequestOperationExternalTransactionResultV1,
 } from '../../src/attendance/w4c3b-request-operation-boundary'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  type AttendanceW4TransactionClientV1,
+} from '../../src/attendance/w4c0-identity'
+import { acquireBusinessTripRequestPrefixV1 } from '../../src/attendance/attendance-business-trip-locks'
 
 /**
  * Approval change-request design lock v5.9 §14.2 — real-DB acceptance for 判据 III (WI-13,
@@ -4636,5 +4645,289 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       // bypass — proves the projection for a reader who may read, not requester readability.
       await expectProjectedOutcome(roundInstanceId, requesterToken, { status: 'cancelled', reversal }, [delegateeD, otherUserE])
     },
+  )
+
+  // ── S5 G3 (P1-1 A02-P4 / A02-M1 / A11-M4): the external entry's class-00 check, at runtime ──────
+  //
+  // `assertExternalTransactionRolloutLockHeldV1` (w4c3b-request-operation-boundary, ~L572, called
+  // from the protocol ~L846) refuses an external transaction that does not hold the org's class-00
+  // rollout lock. Until these cases it was pinned only by source text (the lock-order census counts
+  // the call string), so a commented-out call or a gutted `pg_locks` predicate stayed green. These
+  // cases drive the plugin's REAL boundary (bound at activate, asserted) on a caller-owned connection
+  // and transaction, prepared the way `dispatchAction` prepares it for a redemption:
+  //   BEGIN ISOLATION LEVEL SERIALIZABLE → class-00 shared (`acquireAttendanceCalculationRolloutLock`)
+  //   → the request prefix (`acquireBusinessTripRequestPrefixV1`) → `executeInExternalTransaction`
+  // with the input `redeemCancelRoundInTxn` builds. The refused transactions differ from the accepted
+  // one ONLY in the class-00 call, so the refusal is attributable to that lock and nothing else.
+  // "Nothing written" is measured INSIDE the open transaction, before the ROLLBACK (after a ROLLBACK
+  // it would hold trivially): the statements the entry sent, the advisory locks held, and the rows.
+
+  /** The guard's own predicate, copied as the oracle: is the org's class-00 key held by this backend? */
+  const CLASS_ZERO_HELD_SQL = `SELECT count(*)::int AS n FROM pg_locks
+      WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted
+        AND objsubid = 1
+        AND classid::bigint = (($1::bigint >> 32) & 4294967295)
+        AND objid::bigint = ($1::bigint & 4294967295)
+        AND mode IN ('ShareLock', 'ExclusiveLock')`
+  const ROLLOUT_LOCK_NOT_HELD = 'W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD'
+
+  type ExternalEntryClient = AttendanceRequestOperationExternalTransactionInputV1['client']
+
+  interface ExternalEntryFixture {
+    documentId: string
+    requesterId: string
+    roundInstanceId: string
+    requestId: string
+    orgId: string
+  }
+
+  /** An approved leave request behind an approved original and a pending cancel round; a real actor. */
+  async function externalEntryFixture(label: string): Promise<ExternalEntryFixture> {
+    const suffix = `g3${label}-${TS}`
+    let attached: { requestId: string; orgId: string } | undefined
+    const fixture = await seedPendingCancelRound(suffix, async (documentId) => {
+      attached = await attachAttendanceRequest(documentId, `wi13-req-${suffix}`)
+    })
+    expect(attached).toBeTruthy()
+    // The accepted call runs the W4 preflight's actor-liveness recheck; seeded for the refused ones
+    // too, so that a call which got past the class-00 check would run to completion rather than
+    // failing somewhere else.
+    await seedDirectoryIdentity(fixture.requesterId, attached!.orgId)
+    // The provider is the plugin's real boundary, not a double a sibling case left bound.
+    expect(getAttendanceCancellationExecutionPort()).toBeDefined()
+    return {
+      documentId: fixture.documentId,
+      requesterId: fixture.requesterId,
+      roundInstanceId: fixture.roundInstanceId,
+      requestId: attached!.requestId,
+      orgId: attached!.orgId,
+    }
+  }
+
+  /**
+   * One caller-owned connection. Statements sent through `client.query` are recorded while
+   * `recorder.on` is set; the override is on the client object itself, so the object the prefix
+   * helper remembers and the object handed to the entry stay the same object.
+   */
+  async function withExternalEntryClient<T>(
+    body: (client: PoolClient, recorder: { on: boolean; statements: string[] }) => Promise<T>,
+  ): Promise<T> {
+    const client = await pool().getInternalPool().connect()
+    const recorder = { on: false, statements: [] as string[] }
+    const realQuery = (Object.getPrototypeOf(client) as { query: (...args: unknown[]) => unknown }).query
+    Object.defineProperty(client, 'query', {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]) => {
+        if (recorder.on) {
+          const text = args[0]
+          recorder.statements.push(typeof text === 'string' ? text : String((text as { text?: unknown } | null)?.text ?? text))
+        }
+        return realQuery.apply(client, args)
+      },
+    })
+    let destroy: Error | undefined
+    try {
+      return await body(client, recorder)
+    } finally {
+      delete (client as { query?: unknown }).query
+      await client.query('ROLLBACK').catch((error: unknown) => {
+        destroy = error instanceof Error ? error : new Error(String(error))
+      })
+      client.release(destroy)
+    }
+  }
+
+  /** `dispatchAction`'s preparation for a redemption, with or without the class-00 call. */
+  async function beginExternalTransaction(client: PoolClient, f: ExternalEntryFixture, classZero: boolean): Promise<void> {
+    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+    const trx = client as unknown as AttendanceW4TransactionClientV1
+    if (classZero) await acquireAttendanceCalculationRolloutLock(trx, parseCanonicalAttendanceRolloutOrgKeyV1(f.orgId), 'shared')
+    await acquireBusinessTripRequestPrefixV1(trx, { orgId: f.orgId, requestId: f.requestId })
+  }
+
+  /** The input `redeemCancelRoundInTxn` builds (same keys, same values for this fixture). */
+  function externalCancelInput(client: PoolClient, f: ExternalEntryFixture, operationId: string): AttendanceRequestOperationExternalTransactionInputV1 {
+    return {
+      client: client as unknown as ExternalEntryClient,
+      kind: 'request_cancel',
+      operationId,
+      correlationId: `approval-cancel-round:g3-${operationId}`,
+      routeVariant: null,
+      routeInput: {
+        actorId: f.requesterId,
+        tokenSubjectUserId: f.requesterId,
+        actorName: f.requesterId,
+        orgId: f.orgId,
+        requestId: f.requestId,
+        requestBody: {},
+        ipAddress: null,
+        userAgent: null,
+      },
+    }
+  }
+
+  async function classZeroHeld(client: PoolClient, orgId: string): Promise<number> {
+    const key = buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+    const rows = await client.query<{ n: number }>(CLASS_ZERO_HELD_SQL, [key.toString()])
+    return rows.rows[0].n
+  }
+
+  async function advisoryLocksHeld(client: PoolClient): Promise<Array<{ classid: string; objid: string; objsubid: number; mode: string }>> {
+    const rows = await client.query<{ classid: string; objid: string; objsubid: number; mode: string }>(
+      `SELECT classid::text AS classid, objid::text AS objid, objsubid::int AS objsubid, mode FROM pg_locks
+        WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted
+        ORDER BY classid, objid, objsubid, mode`,
+    )
+    return rows.rows
+  }
+
+  /** The business rows the entry would write, read on the given connection (inside its transaction). */
+  async function entryRowsOn(client: PoolClient, f: ExternalEntryFixture, operationId: string) {
+    const request = await client.query<{ status: string; resolved_by: string | null }>(
+      'SELECT status, resolved_by FROM attendance_requests WHERE id = $1::uuid',
+      [f.requestId],
+    )
+    const original = await client.query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [f.documentId])
+    const revokes = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_records WHERE instance_id = $1 AND action = 'revoke'`,
+      [f.documentId],
+    )
+    const operations = await client.query<{ state: string }>(
+      'SELECT state FROM attendance_result_operations WHERE operation_id = $1::uuid',
+      [operationId],
+    )
+    return {
+      request: request.rows,
+      original: original.rows,
+      revokes: revokes.rows[0].n,
+      operations: operations.rows,
+    }
+  }
+
+  function untouchedRows() {
+    return { request: [{ status: 'approved', resolved_by: null }], original: [{ status: 'approved' }], revokes: 0, operations: [] }
+  }
+
+  function refusalOf(failure: unknown) {
+    const error = failure as { name?: unknown; code?: unknown; httpStatus?: unknown; message?: unknown } | null
+    return { name: error?.name, code: error?.code, httpStatus: error?.httpStatus, message: error?.message }
+  }
+
+  const EXPECTED_REFUSAL = {
+    name: 'AttendanceW4RequestBoundaryError',
+    code: ROLLOUT_LOCK_NOT_HELD,
+    httpStatus: 500,
+    message: ROLLOUT_LOCK_NOT_HELD,
+  }
+
+  const isRolloutGuardProbe = (sql: string): boolean => {
+    const flat = sql.replace(/\s+/g, ' ')
+    return flat.includes('FROM pg_locks')
+      && flat.includes('classid::bigint = (($1::bigint >> 32) & 4294967295)')
+      && flat.includes("mode IN ('ShareLock', 'ExclusiveLock')")
+  }
+
+  /**
+   * What a refused call sends, in order: the isolation probe (SAVEPOINT / ROLLBACK TO / RELEASE /
+   * isolation read), the entry's attempt SAVEPOINT, `prepareIdentity`'s request read, and the class-00
+   * probe — and then nothing: no DML, no advisory lock, no registry row.
+   */
+  function expectRefusedAtTheClassZeroProbe(statements: readonly string[]): void {
+    expect(statements.map((sql) => sql.trim().split(/\s+/)[0].toUpperCase())).toEqual([
+      'SAVEPOINT',
+      'ROLLBACK',
+      'RELEASE',
+      'SELECT',
+      'SAVEPOINT',
+      'SELECT',
+      'SELECT',
+    ])
+    expect(statements.map(isRolloutGuardProbe)).toEqual([false, false, false, false, false, false, true])
+    expect(statements.filter((sql) => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql) || /pg_advisory_/i.test(sql))).toEqual([])
+  }
+
+  it(
+    'G3 negative: an external transaction that does not hold class-00 is refused with ' +
+      'W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD 500 at the class-00 probe, and the ' +
+      'refused call wrote nothing and took no advisory lock',
+    async () => {
+      const f = await externalEntryFixture('neg')
+      const port = getAttendanceCancellationExecutionPort()!
+      const operationId = randomUUID()
+      await withExternalEntryClient(async (client, recorder) => {
+        await beginExternalTransaction(client, f, false)
+        expect(await classZeroHeld(client, f.orgId)).toBe(0)
+        const locksBefore = await advisoryLocksHeld(client)
+
+        recorder.on = true
+        const failure = await port.executeInExternalTransaction(externalCancelInput(client, f, operationId)).then(
+          () => null,
+          (error: unknown) => error,
+        )
+        recorder.on = false
+
+        expect(refusalOf(failure)).toEqual(EXPECTED_REFUSAL)
+        expectRefusedAtTheClassZeroProbe(recorder.statements)
+        // Inside the still-open transaction: no lock taken, no row written.
+        expect(await classZeroHeld(client, f.orgId)).toBe(0)
+        expect(await advisoryLocksHeld(client)).toEqual(locksBefore)
+        expect(await entryRowsOn(client, f, operationId)).toEqual(untouchedRows())
+      })
+      // And nothing reached the database.
+      const after = await pool().query<{ status: string }>('SELECT status FROM attendance_requests WHERE id = $1::uuid', [f.requestId])
+      expect(after.rows).toEqual([{ status: 'approved' }])
+    },
+    120_000,
+  )
+
+  it(
+    'G3 positive control and every call: holding class-00 shared the same call is accepted ' +
+      'legacy_compat, and on the same boundary and connection the next transaction without ' +
+      'class-00 is refused again at the class-00 probe',
+    async () => {
+      const f = await externalEntryFixture('pos')
+      const port = getAttendanceCancellationExecutionPort()!
+      await withExternalEntryClient(async (client, recorder) => {
+        // T1 — class-00 held the way `dispatchAction` takes it: accepted.
+        const acceptedOperationId = randomUUID()
+        await beginExternalTransaction(client, f, true)
+        expect(await classZeroHeld(client, f.orgId)).toBe(1)
+        recorder.on = true
+        const accepted = await port.executeInExternalTransaction(externalCancelInput(client, f, acceptedOperationId))
+        recorder.on = false
+        expect(accepted.kind).toBe('legacy_compat')
+        // The class-00 probe ran on this call and passed (it is the probe the refused calls end on).
+        expect(recorder.statements.filter(isRolloutGuardProbe)).toHaveLength(1)
+        // The real adapter ran, inside this transaction: the request is cancelled and the operation sealed.
+        expect(await entryRowsOn(client, f, acceptedOperationId)).toEqual({
+          request: [{ status: 'cancelled', resolved_by: f.requesterId }],
+          original: [{ status: 'cancelled' }],
+          revokes: 1,
+          operations: [{ state: 'completed' }],
+        })
+        await client.query('ROLLBACK')
+        expect(await entryRowsOn(client, f, acceptedOperationId)).toEqual(untouchedRows())
+
+        // T2 — the same boundary object, the same connection, a new transaction without class-00.
+        // A check that ran once (per boundary, per connection or per org) would let this through.
+        const refusedOperationId = randomUUID()
+        recorder.statements.length = 0
+        await beginExternalTransaction(client, f, false)
+        expect(await classZeroHeld(client, f.orgId)).toBe(0)
+        const locksBefore = await advisoryLocksHeld(client)
+        recorder.on = true
+        const failure = await port.executeInExternalTransaction(externalCancelInput(client, f, refusedOperationId)).then(
+          () => null,
+          (error: unknown) => error,
+        )
+        recorder.on = false
+        expect(refusalOf(failure)).toEqual(EXPECTED_REFUSAL)
+        expectRefusedAtTheClassZeroProbe(recorder.statements)
+        expect(await advisoryLocksHeld(client)).toEqual(locksBefore)
+        expect(await entryRowsOn(client, f, refusedOperationId)).toEqual(untouchedRows())
+      })
+    },
+    120_000,
   )
 })

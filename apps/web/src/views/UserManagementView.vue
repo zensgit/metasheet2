@@ -3557,9 +3557,16 @@ onUnmounted(() => {
 
 .user-admin__layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  /* minmax(0, ...) on both tracks (customer field report 2026-10-21): a plain `1fr` track is
+     minmax(auto, 1fr) and grows to its content's min-content, so one long unbreakable string could
+     push the right column (and the page) wider than the viewport. */
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
   gap: 16px;
   min-height: 520px;
+}
+
+.user-admin__layout > * {
+  min-width: 0;
 }
 
 .user-admin__panel--create {
@@ -3594,6 +3601,13 @@ onUnmounted(() => {
   border-radius: 12px;
   padding: 16px;
   display: grid;
+  /* Explicit single track capped at the card width (customer field report 2026-10-21). The implicit
+     track was `auto`, which grows to the widest child's min-content (e.g. a long unbreakable account
+     identifier in a user row): every block in the left card was then laid out wider than the card,
+     the export buttons were clipped at its edge and the bulk-action buttons were drawn over the
+     right panel. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 12px;
   align-content: start;
 }
@@ -3612,6 +3626,36 @@ onUnmounted(() => {
 
 .user-admin__section-head--workbench {
   margin-top: 4px;
+  /* In the 320px left card the export buttons do not fit beside the heading: wrap them onto their
+     own line instead of squeezing the heading into a one-word-per-line column. */
+  flex-wrap: wrap;
+}
+
+.user-admin__section-head--workbench > * {
+  min-width: 0;
+}
+
+/* Long button labels wrap inside the card instead of overflowing it. */
+.user-admin__role-actions > .user-admin__button {
+  max-width: 100%;
+  height: auto;
+  min-height: 38px;
+  white-space: normal;
+}
+
+/* Account identifiers (e.g. directory-synced ids) are one unbreakable token; let them break. */
+.user-admin__user-body > strong,
+.user-admin__user-body > span,
+.user-admin__detail-head h2,
+.user-admin__detail-head p {
+  overflow-wrap: anywhere;
+}
+
+/* The missing-OpenID hint carries the whole corpId (one unbreakable token): full row, may break. */
+.user-admin__user > .user-admin__hint {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .user-admin__panel--detail {
@@ -3721,10 +3765,15 @@ onUnmounted(() => {
 
 .user-admin__user {
   display: flex;
+  /* The missing-OpenID governance hint (a <p> after the user-body button) takes its own line instead
+     of squeezing the button and running past the card. */
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 10px;
   text-align: left;
   width: 100%;
+  /* width: 100% plus padding/border must still fit the card. */
+  box-sizing: border-box;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #fff;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp } from 'vue'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 
 // ---------------------------------------------------------------------------
 // ApprovalDetailView — viewer-scoped decision affordance (2026-09-07).
@@ -299,7 +300,6 @@ describe('ApprovalDetailView — canDecideCurrentNode gates the decision verbs',
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of ['ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElSkeleton', 'ElSkeletonItem']) {

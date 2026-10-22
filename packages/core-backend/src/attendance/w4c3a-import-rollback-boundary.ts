@@ -22,7 +22,7 @@ import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
 // closure precondition asks "does any pointer-owning row still reference this
 // batch"; spelled as `= 'w4'` it would have missed a `w4_group` row.
 import { ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1 } from './w7-provenance-domain'
-import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
+import { runAttendanceResultOperationTransactionV1, attendanceW4ConnectionDiscardV1 } from './w4c0-operation-registry'
 import {
   AttendanceLegacyPlanEnqueueError,
   recheckAttendanceFullImportAuthorizationInTransactionV1,
@@ -72,7 +72,8 @@ export interface AttendanceImportRollbackBoundaryV1 {
 export interface AttendanceImportRollbackBoundaryDependenciesV1 {
   acquireConnection(): Promise<{
     client: AttendanceW4TransactionClientV1
-    release(): void
+    /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
+    release(error?: Error): void
   }>
 }
 
@@ -1048,12 +1049,18 @@ export function createAttendanceImportRollbackBoundaryV1(
     ): Promise<AttendanceImportRollbackBoundaryResultV1> {
       const request = requireExactInput(input)
       const acquired = await dependencies.acquireConnection()
+      let discard: Error | undefined
       try {
         return await runAttendanceResultOperationTransactionV1(acquired.client, (trx) =>
           rollbackInTransaction(trx, request),
         )
+      } catch (error) {
+        // Settlement coordination (r6.1 §1.1 P1-1): a connection whose state the runner could not vouch for is
+        // destroyed, not returned; every other error returns it as before. The error itself goes up unchanged.
+        discard = attendanceW4ConnectionDiscardV1(error)
+        throw error
       } finally {
-        acquired.release()
+        acquired.release(discard)
       }
     },
   })

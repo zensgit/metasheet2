@@ -15,6 +15,26 @@
       本页配置路径已按 2026-07-09 的钉钉后台真机登录验证整理。
     </section>
 
+    <section id="server-login" class="dingtalk-help__section" data-testid="dingtalk-help-server-login">
+      <h2>MetaSheet 服务端钉钉登录配置</h2>
+      <p>
+        「目录同步」中的 App Key / App Secret 保存到目录集成，用于通讯录拉取。
+        网页 OAuth 登录读取服务端环境变量；保存目录集成不会同步这些变量。
+        请由部署管理员在后端实际加载的环境文件中配置，Docker 部署使用 <code>docker/app.env</code>。
+      </p>
+      <ul>
+        <li><code>DINGTALK_CLIENT_ID</code>（或 <code>DINGTALK_APP_KEY</code>）：登录应用的 App Key。</li>
+        <li><code>DINGTALK_CLIENT_SECRET</code>（或 <code>DINGTALK_APP_SECRET</code>）：登录应用的 App Secret，仅在服务端填写。</li>
+        <li><code>DINGTALK_REDIRECT_URI</code>：完整 HTTPS 回调地址，路径为 <code>/login/dingtalk/callback</code>，必须与钉钉开放平台配置一致。</li>
+      </ul>
+      <p>
+        如提示企业白名单未放行，检查 <code>DINGTALK_CORP_ID</code> 是否属于
+        <code>DINGTALK_ALLOWED_CORP_IDS</code>，不要通过清空白名单绕过限制。
+        环境文件修改后，按当前部署方式重新创建后端容器或重新加载后端进程环境，再刷新普通浏览器中的登录页。
+        登录页会列出全部缺失的变量名；企业白名单问题在三项都配齐后才会提示。
+      </p>
+    </section>
+
     <section class="dingtalk-help__grid" data-testid="dingtalk-help-checklist">
       <article
         v-for="item in checklist"

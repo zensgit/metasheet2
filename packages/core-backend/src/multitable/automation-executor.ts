@@ -1739,6 +1739,37 @@ export class SameBaseTargetRecordMissingSignal extends Error {
 /** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
 export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
 
+/**
+ * 客户反馈 2026-10-21 (a) — values-free reason on a `send_dingtalk_person_message` step that reached NOBODY
+ * because every resolved recipient was skipped (no linked DingTalk account, inactive, or no such user).
+ *
+ * The step stays `skipped`, NOT `failed`, on purpose: a failed step fail-stops every action after it in
+ * `executeActions` (the same reason DT-OPS-04 refuses to fail a valid-but-split audience), and an
+ * unreachable audience is a configuration gap, not a transport fault — nothing about re-running it helps
+ * until somebody links DingTalk. What changes is that it is no longer silent: the reason code plus the
+ * per-cause counts let the manager/test-run/log surfaces say "0 人收到：N 人未绑定钉钉" instead of a bare
+ * "skipped", and the step error no longer carries user ids (the UI renders step.error verbatim). The ids
+ * stay in `output.skippedUserIds` and in the per-recipient delivery rows exactly as before.
+ */
+export const DINGTALK_RECIPIENTS_UNREACHABLE_REASON = 'dingtalk_recipients_unreachable'
+
+export interface DingTalkSkippedRecipientCounts {
+  /** Active local user with no linked, active DingTalk directory account. */
+  notLinked: number
+  /** Local user exists but is deactivated. */
+  inactive: number
+  /** No local user with that id. */
+  notFound: number
+}
+
+/** Values-free step error for an all-skipped person message: counts only, never ids. */
+export function describeDingTalkUnreachableRecipients(counts: DingTalkSkippedRecipientCounts): string {
+  const total = counts.notLinked + counts.inactive + counts.notFound
+  return `No DingTalk recipient was reached: ${total} skipped `
+    + `(not linked: ${counts.notLinked}, inactive: ${counts.inactive}, not found: ${counts.notFound}) `
+    + '(DINGTALK_RECIPIENTS_UNREACHABLE)'
+}
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -5529,16 +5560,26 @@ export class AutomationExecutor {
     )
 
     const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
+    // (a) which local users exist and are active — only to COUNT why a recipient was skipped.
+    const localUserActive = new Map<string, boolean>()
     for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
       const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
       const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
       const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
       const isActive = row.local_user_active === true
+      if (localUserId && !localUserActive.has(localUserId)) localUserActive.set(localUserId, isActive)
       if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
       recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
     }
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
+    const skippedReasonCounts: DingTalkSkippedRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0 }
+    for (const userId of missingUserIds) {
+      const active = localUserActive.get(userId)
+      if (active === undefined) skippedReasonCounts.notFound += 1
+      else if (active) skippedReasonCounts.notLinked += 1
+      else skippedReasonCounts.inactive += 1
+    }
     if (missingUserIds.length > 0) {
       await Promise.all(missingUserIds.map((userId) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: userId,
@@ -5561,11 +5602,13 @@ export class AutomationExecutor {
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'skipped',
-        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
+        error: describeDingTalkUnreachableRecipients(skippedReasonCounts),
         output: {
+          reason: DINGTALK_RECIPIENTS_UNREACHABLE_REASON,
           notifiedUsers: 0,
           skippedRecipientCount: missingUserIds.length,
           skippedUserIds: missingUserIds,
+          skippedReasonCounts,
         },
       }
     }
@@ -5680,6 +5723,7 @@ export class AutomationExecutor {
           dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
           skippedRecipientCount: missingUserIds.length,
           skippedUserIds: missingUserIds,
+          skippedReasonCounts,
           memberGroupIds,
           recipientFieldPath: recipientFieldPaths[0] ?? null,
           recipientFieldPaths,

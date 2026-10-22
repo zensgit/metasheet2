@@ -82,6 +82,13 @@ import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
 import { ensureDingTalkJsApi, isDingTalkContainer, requestContainerAuthCode } from '../utils/dingtalkContainer'
+import {
+  DINGTALK_REDIRECT_URI_REQUIREMENT,
+  formatDingTalkLoginEnvList,
+  readDingTalkMissingEnv,
+  requirementForDingTalkReason,
+  type DingTalkLoginEnvRequirement,
+} from '../utils/dingtalkLoginConfig'
 
 interface AuthUserPayload {
   role?: unknown
@@ -109,6 +116,7 @@ interface DingTalkRuntimeStatus {
   autoLinkEmail?: unknown
   autoProvision?: unknown
   unavailableReason?: unknown
+  missingEnv?: unknown
 }
 
 const router = useRouter()
@@ -125,7 +133,7 @@ const dingtalkAvailable = ref(false)
 const dingtalkSubmitting = ref(false)
 const containerLoginInProgress = ref(false)
 const dingtalkErrorMessage = ref('')
-const dingtalkStatusMessage = ref('')
+const dingtalkStatus = ref<DingTalkRuntimeStatus | null>(null)
 
 const text = computed(() => {
   if (isZh.value) {
@@ -147,8 +155,10 @@ const text = computed(() => {
       networkError: '登录失败，请稍后再试。',
       dingtalkUnavailable: '钉钉登录暂不可用，请稍后重试。',
       dingtalkMissingUrl: '未获取到钉钉登录地址。',
-      dingtalkCorpBlocked: '当前服务端钉钉企业白名单未放行，暂时无法使用钉钉登录。',
-      dingtalkConfigMissing: '当前服务端钉钉登录配置不完整。',
+      dingtalkCorpBlocked: '钉钉企业白名单未放行，请联系管理员检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+      dingtalkClientIdMissing: '缺少服务端配置 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY），请联系管理员配置钉钉登录。',
+      dingtalkClientSecretMissing: '缺少服务端配置 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET），请联系管理员配置钉钉登录。',
+      dingtalkRedirectUriMissing: '缺少服务端配置 DINGTALK_REDIRECT_URI，请联系管理员填写与钉钉开放平台一致的登录回调地址。',
     }
   }
   return {
@@ -169,21 +179,44 @@ const text = computed(() => {
     networkError: 'Sign-in failed. Please try again.',
     dingtalkUnavailable: 'DingTalk login is unavailable right now.',
     dingtalkMissingUrl: 'No DingTalk login URL was returned.',
-    dingtalkCorpBlocked: 'DingTalk login is blocked by the current corporate allowlist.',
-    dingtalkConfigMissing: 'The server DingTalk login configuration is incomplete.',
+    dingtalkCorpBlocked: 'Ask an administrator to check DINGTALK_CORP_ID against DINGTALK_ALLOWED_CORP_IDS; the corporate allowlist blocks DingTalk login.',
+    dingtalkClientIdMissing: 'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY) for DingTalk login.',
+    dingtalkClientSecretMissing: 'Ask an administrator to configure DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET) for DingTalk login.',
+    dingtalkRedirectUriMissing: 'Ask an administrator to configure DINGTALK_REDIRECT_URI to match the login callback URL in DingTalk.',
   }
 })
+
+const dingtalkStatusMessage = computed(() => (
+  dingtalkAvailable.value ? '' : readDingTalkStatusMessage(dingtalkStatus.value)
+))
+
+// #6467: when the server reports more than one missing login variable, name all of them so the
+// operator can set everything before a single backend restart. One missing item keeps the
+// per-reason sentence below; only names from the closed list in dingtalkLoginConfig render.
+function describeMissingDingTalkEnv(missingEnv: readonly DingTalkLoginEnvRequirement[]): string {
+  const zh = isZh.value
+  const list = formatDingTalkLoginEnvList(missingEnv, zh)
+  const needsRedirect = missingEnv.includes(DINGTALK_REDIRECT_URI_REQUIREMENT)
+  if (zh) {
+    return needsRedirect
+      ? `缺少服务端配置 ${list}，请联系管理员配置钉钉登录；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。`
+      : `缺少服务端配置 ${list}，请联系管理员配置钉钉登录。`
+  }
+  return needsRedirect
+    ? `Ask an administrator to configure ${list} for DingTalk login; DINGTALK_REDIRECT_URI must match the login callback URL in DingTalk.`
+    : `Ask an administrator to configure ${list} for DingTalk login.`
+}
 
 function readDingTalkStatusMessage(status: DingTalkRuntimeStatus | null): string {
   const reason = typeof status?.unavailableReason === 'string' ? status.unavailableReason : null
   if (reason === 'corp_not_allowed') return text.value.dingtalkCorpBlocked
-  if (
-    reason === 'missing_client_id' ||
-    reason === 'missing_client_secret' ||
-    reason === 'missing_redirect_uri'
-  ) {
-    return text.value.dingtalkConfigMissing
+  const missingEnv = readDingTalkMissingEnv(status?.missingEnv)
+  if (requirementForDingTalkReason(reason) && missingEnv.length > 1) {
+    return describeMissingDingTalkEnv(missingEnv)
   }
+  if (reason === 'missing_client_id') return text.value.dingtalkClientIdMissing
+  if (reason === 'missing_client_secret') return text.value.dingtalkClientSecretMissing
+  if (reason === 'missing_redirect_uri') return text.value.dingtalkRedirectUriMissing
   if (status && status.available === false) {
     return text.value.dingtalkUnavailable
   }
@@ -304,7 +337,7 @@ async function onSubmit(): Promise<void> {
 }
 
 async function probeDingTalkLogin(): Promise<DingTalkRuntimeStatus | null> {
-  dingtalkStatusMessage.value = ''
+  dingtalkStatus.value = null
   try {
     const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
       method: 'GET',
@@ -313,11 +346,13 @@ async function probeDingTalkLogin(): Promise<DingTalkRuntimeStatus | null> {
     const payload = await response.json().catch(() => null)
     const status = (payload?.data ?? null) as DingTalkRuntimeStatus | null
     dingtalkAvailable.value = response.ok && payload?.success === true && status?.available === true
-    dingtalkStatusMessage.value = dingtalkAvailable.value ? '' : readDingTalkStatusMessage(status)
+    dingtalkStatus.value = response.ok && payload?.success === true
+      ? status ?? { available: false }
+      : { available: false }
     return status
   } catch {
     dingtalkAvailable.value = false
-    dingtalkStatusMessage.value = text.value.dingtalkUnavailable
+    dingtalkStatus.value = { available: false }
     return null
   }
 }

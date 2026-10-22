@@ -528,6 +528,12 @@ describe('DingTalk OAuth state store', () => {
             }],
           }
         }
+        if (/SELECT COALESCE\(role[\s\S]*FROM users/i.test(statement)) {
+          return { rows: [{ role: 'user', is_active: true, activation_status: 'activated' }] }
+        }
+        if (/SELECT enabled[\s\S]*FROM user_external_auth_grants/i.test(statement)) {
+          return { rows: [{ enabled: true }] }
+        }
         if (/INSERT INTO user_external_auth_grants/i.test(statement)) {
           return { rows: [{ local_user_id: String(params[1]) }] }
         }

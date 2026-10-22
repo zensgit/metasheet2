@@ -84,6 +84,8 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 | `Invoke-RestMethod http://127.0.0.1/api/health` | 正常返回 |
 | 版本号 | `node -e "console.log(require('<部署根目录>/packages/core-backend/dist/src/version.js'))"` 对应这次打包的提交,不是升级前旧值(没变说明升级没真正生效) |
 
+**`/api/health` 里的 `build` 字段(addresses #6463)**:本地 Windows 起法不设 `METASHEET_BUILD_*` 环境变量时,`build.commit` / `build.imageTag` / `build.created` 现在取自部署根目录的 `BUILD_PROVENANCE.json`(`gitCommit` / `gitRef` / `builtAt`),此时 `build.source` 显示 `provenance-file`、`build.imageDigest` 仍为 null。只要设了任何一个 `METASHEET_BUILD_*` 变量,就只用环境变量、不读文件。文件从工作目录与后端模块目录向上最多找 6 层;要钉死路径就设 `METASHEET_BUILD_PROVENANCE_PATH`(绝对路径;设了就只认这一个路径,不再向上找,也就不会读到部署根目录上层意外放置的文件)。文件缺失、损坏或超过 1 MB(按文件大小判断,不读内容)时各字段保持 null,不影响健康检查。后端按文件的大小与修改时间判断是否变化,所以升级后按 ① 把新的 `BUILD_PROVENANCE.json` 拷到部署根目录,下一次健康检查(一个轮询周期内)就会显示新值,不需要再重启后端。
+
 **失败处理**:脚本第 4-7 步之间任何异常,会**自动**停 pm2、打印"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令),照抄执行即可,不用自己回忆回退步骤。若尚未开始执行就失败(如 SHA-256 校验不过),说明包传输损坏,重新传一次,不要跳过校验。
 
 **升级后必做**:①`BUILD_PROVENANCE.json` 不会被脚本自动刷新,需要手动从包根目录拷到部署根目录;②确认备料所在 base 能正常打开、四张受管表都能点开(零默认视图的表会拖累整个 base 打不开);③挑 1-2 张与备料无关的既有业务表(如考勤/审批)比对升级前后行数,必须一致,不一致立即停止并评估数据库级回滚。
