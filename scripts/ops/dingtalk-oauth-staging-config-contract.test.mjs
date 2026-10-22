@@ -25,6 +25,7 @@ test('contract has a path-scoped pull-request workflow on Node 20', () => {
     '.github/workflows/dingtalk-oauth-staging-config.yml',
     '.github/workflows/dingtalk-oauth-staging-config-contract.yml',
     'scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs',
+    'scripts/ops/dingtalk-oauth-staging-config-env.test.mjs',
     'scripts/ops/dingtalk-oauth-staging-config-remote.sh',
   ]) {
     assert.match(contractWorkflow, new RegExp(file.replaceAll('.', '\\.')))
@@ -85,12 +86,18 @@ test('transport input closed sets reject shell metacharacters', () => {
   }
 })
 
-test('all lifecycle gates are forced false in the candidate env', () => {
+test('Stream and lifecycle gates are forced false in the candidate env', () => {
   for (const key of [
     'AUTH_LOGIN_USE_ALIASES',
     'DIRECTORY_PENDING_ACTIVATION_ENABLED',
     'DIRECTORY_DEPROVISION_ENABLED',
+    'DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
   ]) {
     assert.match(remote, new RegExp(`"${key}": "false"`))
   }
+})
+
+test('source preservation behavior is wired into the required backend context', () => {
+  const required = readFileSync(new URL('../../.github/workflows/plugin-tests.yml', import.meta.url), 'utf8')
+  assert.match(required, /node --test scripts\/ops\/dingtalk-oauth-staging-config-contract\.test\.mjs scripts\/ops\/dingtalk-oauth-staging-config-env\.test\.mjs/)
 })
