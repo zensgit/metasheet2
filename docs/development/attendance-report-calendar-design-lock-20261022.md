@@ -55,5 +55,8 @@ Keep Draft. Stream/lifecycle OFF. No merge, deployment, real UAT or 50004.
   No live backend/provider was contacted; no real UAT is implied.
 - Full required web lane: initial run stopped on the unchanged approval member-bar
   positive control at its existing 15-second timeout (788 other assertions passed
-  in that batch). Investigation/revalidation and exact-head CI remain pending;
-  the full lane is not claimed successful.
+  in that batch). The same failure reproduced standalone (26/27 passed). Moving
+  the component import into test collection preserves every assertion and the
+  15-second limit; member-bar/current-node now pass 36/36 and instance-consistency
+  passes 39/39. Full-lane, follow-up quality and exact-head CI remain pending
+  until their terminal results are recorded in the PR.

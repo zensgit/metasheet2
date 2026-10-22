@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 
-// Gate finding P2-R1 on PR #4983: this file's first mounted test needs ~9.8s wall inside the
+// Historical P2-R1 on PR #4983: this file's first mounted test needed ~9.8s wall inside the
 // 26-file canary block (dynamic `import()` of ApprovalDetailView.vue + a full mount), against
 // vitest's 5s default — so it went red in 2 of 3 block runs while the base 25-file block was green
 // twice. It is wired into BOTH `run-required-web-tests.sh` and `approval-web-guard`, so that would
 // have flaked the REQUIRED web lane on main. The cascade made it worse: a timed-out test never
 // unmounts its app, and the next test then warns "There is already an app instance mounted".
+// Keep component compilation in test collection: the unchanged 15s positive control
+// also timed out in a standalone run. Assertions and their timeout stay unchanged.
 vi.setConfig({ testTimeout: 15_000 })
 import { cloneVNode, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
@@ -342,7 +345,6 @@ describe('Lock-5 A-2 (FE door) — the member bar mirrors the per-node operation
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
@@ -479,7 +481,6 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
@@ -733,7 +734,6 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
@@ -940,7 +940,6 @@ describe('Lock-5 CR-3 (detail dialog) — the comment requirement derives from t
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
@@ -1087,7 +1086,6 @@ describe('F4-S1 (Lock-5 L5-B) — 后加签 on the add-sign dialog', () => {
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of [
