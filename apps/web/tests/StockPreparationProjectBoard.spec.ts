@@ -1872,6 +1872,39 @@ describe('项目备料页 — the operator project board', () => {
     const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
     expect(fallback, 'a board with no handle must still offer the plain workbench').not.toBeNull()
     expect(fallback.disabled).toBe(false)
+    // Review round 1 (F2): one destination, one label — the same words the pull panel's button uses.
+    expect(fallback.textContent).toContain('打开多维表首页')
+  })
+
+  it('round 1 (F1): on 项目备料 the pull panel\'s no-link sentence points down to the board\'s own explanation', async () => {
+    routeApi({ board: () => ok(boardPayload({ fillTarget: null })) })
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    const panelButton = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
+    expect(panelButton).not.toBeNull()
+    expect(panelButton.getAttribute('data-fill-target')).toBe('none')
+    expect(panelButton.textContent).toContain('打开多维表首页')
+    const hint = root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]') as HTMLElement
+    expect(hint).not.toBeNull()
+    // It names the page's OTHER button by its label, and that button really is on the page with the explanation.
+    expect(hint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(hint.textContent).not.toContain('请在「项目备料」页')
+    expect(hint.textContent).not.toContain('再拉取一次')
+    const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
+    expect(fallback.textContent).toContain('打开多维表首页')
+    const explanation = root.querySelector('[data-testid="stock-prep-project-board-no-fill-target"]') as HTMLElement
+    expect(explanation.textContent).toContain('数据来源与体检')
+    // DOM order: the explanation it points at is further DOWN the page than the sentence pointing at it.
+    expect(hint.compareDocumentPosition(explanation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // And the two sentences do not disagree about who builds the sheet.
+    expect(hint.textContent).toContain('由系统或管理员按固定模板建立')
+  })
+
+  it('round 1 (F1): with a handle on 项目备料 neither the panel sentence nor the board fallback renders', async () => {
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-no-sheet-link-hint"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]')).toBeNull()
   })
 
   /** The shell has no '?projectNo=' in these specs, so a board only appears once one is opened. */
