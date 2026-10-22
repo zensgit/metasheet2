@@ -1,0 +1,86 @@
+{
+  "source_hashes": {
+    "packages/core-backend/src/services/plm-managed-companion-flow.ts": "3c1901eed1f7e5df49af423d321023affc6aaa2461965398bfaa7e4c39ec1690",
+    "packages/core-backend/tests/integration/plm-managed-renewal-recovery-pg.realdb.ts": "9cf17180bc8917d485559e19822a71132cb082cc18b2428dcba743f4d6eafb2c",
+    "packages/core-backend/src/services/plm-managed-native-http.ts": "b1bffd1635010c5b1975b28cdc73785e582f165d65a9d0a12a4fc0b13fc4a9db",
+    "packages/core-backend/src/routes/plm-managed-companion.ts": "733619348b3b6a38464a3cf537440f50fc35e38215051719d15ae3a1875cb000",
+    "packages/core-backend/src/auth/api-path-policy.ts": "5fb204aa5476e1fea380613119108bfed42b6a48e479899a72e54cfce7b34029",
+    "packages/core-backend/src/db/migrations/zzzz20261022020000_plm_managed_renewal_recovery.ts": "b40bc660f3e5bd889acd41b12d00dd0207301ad563a26683c6d4b936e6bcab7e",
+    "packages/core-backend/vitest.plm-managed-companion.config.ts": "b38daa409d627e9b45bc4805d638b2cf2302180ddf96878f777b8359a0a9aba3"
+  },
+  "source_unchanged": true,
+  "at": "2026-10-22T19:13:27.516236+00:00",
+  "results": [
+    {
+      "check": "typecheck",
+      "exit": 0,
+      "log": "/tmp/plm-meta-root-renewal-final-typecheck-20261022.log"
+    },
+    {
+      "check": "pg",
+      "exit": 0,
+      "encoding": "UTF8",
+      "log": "/tmp/plm-meta-root-renewal-final-pg-20261022.log"
+    }
+  ],
+  "cleanup": {
+    "ok": true,
+    "command": "cleanup",
+    "nonce": "1299a9c8364d2a56",
+    "root": "/tmp/plm-managed-consumer-pg-1299a9c8364d2a56",
+    "data": "/tmp/plm-managed-consumer-pg-1299a9c8364d2a56/data",
+    "socket": "/tmp/plm-managed-consumer-pg-1299a9c8364d2a56/s",
+    "postgresStopped": true,
+    "postgresRunning": false,
+    "directoryRemoved": true,
+    "locale": "C",
+    "markerMatched": true,
+    "pgBin": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-pg16-runtime-20261019-y7640_uy/install/bin"
+  },
+  "source_sha": "3d30489de756c7663cf7482de92c17009bf966ee",
+  "status": "LOCAL_BACKEND_SLICE_VERIFIED",
+  "pg_passed": 90,
+  "pg_duration_s": 48.31,
+  "pg_failed": 0,
+  "pg_skipped": 0,
+  "root_compensation_probe": {
+    "at": "2026-10-22T19:12:22.221573+00:00",
+    "probe_dir": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-meta-renewal-ordinary-compensation-race-green-ysm0dgtv",
+    "source_hashes": {
+      "src/services/plm-managed-companion-flow.ts": "3c1901eed1f7e5df49af423d321023affc6aaa2461965398bfaa7e4c39ec1690",
+      "src/services/plm-managed-native-http.ts": "b1bffd1635010c5b1975b28cdc73785e582f165d65a9d0a12a4fc0b13fc4a9db",
+      "src/db/migrations/zzzz20261022020000_plm_managed_renewal_recovery.ts": "b40bc660f3e5bd889acd41b12d00dd0207301ad563a26683c6d4b936e6bcab7e"
+    },
+    "source_unchanged": true,
+    "exit": 0,
+    "cleanup": {
+      "ok": true,
+      "command": "cleanup",
+      "nonce": "96490600b0db4a5f",
+      "root": "/tmp/plm-managed-consumer-pg-96490600b0db4a5f",
+      "data": "/tmp/plm-managed-consumer-pg-96490600b0db4a5f/data",
+      "socket": "/tmp/plm-managed-consumer-pg-96490600b0db4a5f/s",
+      "postgresStopped": true,
+      "postgresRunning": false,
+      "directoryRemoved": true,
+      "locale": "C",
+      "markerMatched": true,
+      "pgBin": "/var/folders/yh/vsjnc3z117zg5_rxcjdml1k00000gn/T/plm-pg16-runtime-20261019-y7640_uy/install/bin"
+    }
+  },
+  "private_evidence_bundle": "w10-meta-renewal-final-root-green-20261022",
+  "manifest_sha256": "9495458203992ab64dadfe2665eaf0029487a06dd37d7389d254574f004ff363",
+  "worker_unit": {
+    "passed": 37,
+    "duration_s": 1.57,
+    "independently_rerun_this_slice": false
+  },
+  "not_accepted": [
+    "original iframe",
+    "browser",
+    "actual hour",
+    "current image install",
+    "cross-process recovery",
+    "whole master goal"
+  ]
+}
