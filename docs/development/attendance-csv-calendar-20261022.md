@@ -77,3 +77,30 @@ stops only the isolated synthetic cluster; no business database is used.
 Stream/lifecycle remain OFF. No deployment, real UAT or 50004 changes. #6491 rule
 default preservation, #5999 scheduler and #6001 report presets are separate slices.
 Do not merge or treat this candidate as a built R71 release.
+
+## Required backend regression repair
+
+The initial required backend job failed an unchanged realtime retype test: the
+bridge writer was correctly parked on the conversion fence, but its independent
+Yjs persistence INSERT had not committed when the test read it. A dedicated real
+PostgreSQL control blocks the INSERT with a table lock and releases it only after
+the first count. The original one-shot read then fails the same `0 >= 1` assertion.
+This reproduces the concrete race; historical CI did not record its exact schedule.
+
+The test now waits for persisted state while keeping the conversion blocked, then
+retains every original invalidation, document-eviction, record and reopen assertion.
+The normal and delayed paths both pass. No runtime, timeout, assertion, skip or
+workflow was weakened; all 284 original assertion lines remain.
+
+| Additional gate | Evidence |
+| --- | --- |
+| Controlled original race | One named assertion failure, one positive control; 72 name-filtered cases excluded |
+| Repaired normal and delayed paths | 2 passed; 72 name-filtered cases excluded |
+| Entire containing file and two DB neighbors | 3 files, 83/83 passed, zero skipped |
+| Database preparation | Actual workflow migration setup, 440 ledger entries; isolated PostgreSQL 16 |
+| Cleanup | Test cluster stopped, no remaining blocked sessions; files retained |
+
+Evidence: `artifacts/csv-calendar/ci-retype-failure/report.md`, terminal JSON,
+red/green source snapshots, command records and assertion-preservation census.
+The local PostgreSQL 16 result does not claim PostgreSQL 14 CI qualification;
+required CI must succeed again on the committed repair.
