@@ -1456,6 +1456,41 @@ describe('auth login routes', () => {
     expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
   })
 
+  it('activation without configured corp cannot fall back to an unscoped identity', async () => {
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({ corpId: null })
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'wrong-open',
+      unionId: 'wrong-union',
+      nick: 'Wrong Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('activate_source_ineligible')
+    expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
   it('issues no session and hides internal details when activate commit fails', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,

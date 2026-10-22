@@ -758,6 +758,33 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   }
 }
 
+/** Missing corp makes the candidate set span all corp indexes. Serialize its check/write
+ * window against every identity DML writer, just as directory sync does. Call after users
+ * locks, never before them. Scoped callbacks retain their existing row/index concurrency. */
+async function lockUnscopedIdentityNamespace(
+  client: AccessGraphTransactionClient,
+  corpId: string | null | undefined,
+): Promise<void> {
+  if (!corpId) await client.query('LOCK TABLE user_external_identities IN SHARE ROW EXCLUSIVE MODE')
+}
+
+/** Revalidate unscoped selection after waiting for the canonical users mutex. */
+async function recheckUnscopedIdentity(
+  client: AccessGraphTransactionClient,
+  localUserId: string,
+  dtUser: DingTalkUserInfo,
+  corpId: string | null | undefined,
+): Promise<void> {
+  if (corpId) return
+  const current = await findIdentityUser(dtUser, client)
+  if (current && current.id !== localUserId) {
+    throw createPolicyError('DingTalk identity is already bound to another local user', {
+      statusCode: 409,
+      code: 'identity_already_bound',
+    })
+  }
+}
+
 type ImplicitIdentityWriteOptions = {
   resolvedBy: 'identity' | 'association'
   requireGrant: boolean
@@ -776,6 +803,7 @@ async function upsertExternalIdentity(
   const profile = JSON.stringify(dtUser)
 
   await transaction(async (client) => {
+    if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -783,6 +811,8 @@ async function upsertExternalIdentity(
         code: 'local_user_disabled',
       })
     }
+    await lockUnscopedIdentityNamespace(client, config.corpId)
+    await recheckUnscopedIdentity(client, localUserId, dtUser, config.corpId)
     const grantState = await recheckLocalUserAuthorization(client, localUserId, options.requireGrant)
     const existingByUser = await client.query(
       `SELECT id,
@@ -908,8 +938,11 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
   const profile = JSON.stringify(dtUser)
 
   await transaction(async (client) => {
+    if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) return
+    await lockUnscopedIdentityNamespace(client, config.corpId)
+    await recheckUnscopedIdentity(client, localUserId, dtUser, config.corpId)
     const currentIdentity = await client.query(
       `SELECT id, external_key, provider_union_id, provider_open_id, corp_id
        FROM user_external_identities
@@ -979,10 +1012,13 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
   return result.rows[0] ?? null
 }
 
-async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow | null> {
+async function findIdentityUser(
+  dtUser: DingTalkUserInfo,
+  runner: AccessGraphTransactionClient = { query },
+): Promise<LocalUserRow | null> {
   try {
     const config = readDingTalkOauthConfig()
-    const result = await query<LocalUserRow>(
+    const result = await runner.query(
       `SELECT u.id,
               u.email,
               COALESCE(u.name, '') AS name,
@@ -1010,12 +1046,20 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
              )
            )
          )
-       ORDER BY identity.updated_at DESC
-       LIMIT 1`,
+       LIMIT 2`,
       [PROVIDER, buildExternalKey(dtUser), dtUser.openId, dtUser.unionId || '', config.corpId || ''],
     )
-    return result.rows[0] ?? null
+    // Never choose a local account (and its privileges) by update order. The schema permits
+    // the same provider identifier in different corps, including legacy NULL-corp rows.
+    if (result.rows.length > 1) {
+      throw createPolicyError('DingTalk identity matches multiple accounts; configure the intended enterprise', {
+        statusCode: 409,
+        code: 'identity_ambiguous',
+      })
+    }
+    return (result.rows[0] as unknown as LocalUserRow | undefined) ?? null
   } catch (error) {
+    if (error instanceof DingTalkLoginPolicyError) throw error
     // Fail CLOSED (post-merge review P2-2): the same collapse readGrantState fixes lived here
     // too — a swallowed read error returned null, indistinguishable from "no linked identity",
     // so a failed identity read let the login fall through to the email-link / auto-provision
@@ -1273,6 +1317,15 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
         code: 'unlinked_local_user',
       },
     )
+  }
+
+  // An allowlist alone cannot authorize a new account when there is no enterprise to
+  // compare with it. Unique pre-existing associations remain usable without configuration.
+  if (!readDingTalkOauthConfig().corpId) {
+    throw createPolicyError('An enterprise must be configured before DingTalk auto-provisioning', {
+      statusCode: 409,
+      code: 'auto_provision_corp_required',
+    })
   }
 
   const provisionedUser = await createProvisionedUser(dtUser)
@@ -1585,6 +1638,7 @@ export async function bindDingTalkIdentityToUser(input: {
   // held) re-raises as the named retryable RecoveryConflictError; every policy error and
   // fail-closed path below rethrows unchanged.
   await translateRecoveryConflict(() => transaction(async (client) => {
+    if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -1592,6 +1646,7 @@ export async function bindDingTalkIdentityToUser(input: {
         code: 'local_user_disabled',
       })
     }
+    await lockUnscopedIdentityNamespace(client, config.corpId)
     // Self-bind never requires a grant row (first binding creates it), but an explicit
     // disabled row rejects regardless of DINGTALK_AUTH_REQUIRE_GRANT.
     const grantState = await recheckLocalUserAuthorization(client, localUserId, false)
@@ -1603,8 +1658,8 @@ export async function bindDingTalkIdentityToUser(input: {
          AND local_user_id <> $2
          AND (
            external_key = $3
-           OR ($4 <> '' AND provider_open_id = $4 AND corp_id IS NOT DISTINCT FROM $6)
-           OR ($5 <> '' AND provider_union_id = $5 AND corp_id IS NOT DISTINCT FROM $6)
+           OR ($4 <> '' AND provider_open_id = $4 AND ($6::text IS NULL OR corp_id IS NOT DISTINCT FROM $6))
+           OR ($5 <> '' AND provider_union_id = $5 AND ($6::text IS NULL OR corp_id IS NOT DISTINCT FROM $6))
          )
        LIMIT 1`,
       [PROVIDER, localUserId, externalKey, openId, unionId, config.corpId || null],
