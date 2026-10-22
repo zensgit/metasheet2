@@ -1866,3 +1866,6 @@ describe('Stock Preparation per-view service stubs (readonly GET, values-free)',
     }
   })
 })
+
+// Preload the compiler during collection; the guard keeps its dynamic import and assertions.
+await import('typescript')
