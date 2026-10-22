@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // #6475 fix round 2 — 批次存档 (mvp-persist, the project-sync panel's step ④) KEEPS WHAT THE SYNC
 // WROTE, OR NOTHING; AND A BATCH ALREADY KEPT STAYS KEEPABLE WHEN ONLY THE SHEET MOVED.
 //
@@ -374,7 +376,7 @@ function mount({ parts = [PART.A1], hourRule = false, extMapping = false } = {})
       },
       multitable: { provisioning: createProvisioning(), records: records.api },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig({ hourRule, extMapping })],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [CANONICAL_OBJECT_ID] },

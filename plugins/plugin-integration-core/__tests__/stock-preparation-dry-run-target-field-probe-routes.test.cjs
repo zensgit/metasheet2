@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 目标表字段存在性探针 — THROUGH THE REAL ROUTE TABLE.
 //
 // The unit suite (stock-preparation-target-field-existence-probe.test.cjs) proves the probe inside
@@ -254,7 +256,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
         records: records.api,
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [OBJECT_ID] },

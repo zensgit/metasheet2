@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 一个项目一张备料表 — THE THREE S1 ROUTES and the overlay as the existing routes see it (S1 of ADR
 // adr-stock-prep-project-sheets-20261008 §2 / §4 / §3). The real route stack is mounted; the
 // registry store is the REAL one over an in-memory db; the host provisioning, records, audit gate
@@ -228,7 +230,7 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
       multitable: { provisioning, records },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job (R-14..R-16).
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,

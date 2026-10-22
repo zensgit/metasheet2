@@ -1915,15 +1915,31 @@ async function createDryRunToken(tokenStore, record) {
   return token
 }
 
-async function consumeDryRunToken(tokenStore, token, expected) {
+// THE CLAIM STORE MUST BE ABLE TO CLAIM. A single-use token is only single-use if taking it is ONE
+// atomic step: `get` then `delete` lets two concurrent applies both read the record before either
+// removes it, and both proceed to write. The host's plugin storage offers `consume` — one
+// `DELETE ... RETURNING` on the durable store (packages/core-backend/src/plugins/plugin-durable-storage.ts),
+// one synchronous Map step in memory — so of two concurrent claims exactly one answers the record.
+// A store without it is refused (501) rather than claimed non-atomically: there is deliberately no
+// get+delete fallback here.
+function requireConsumableTokenStore(tokenStore) {
   const store = requireTokenStore(tokenStore)
+  if (typeof store.consume !== 'function') {
+    throw new StockPreparationTableActionError(501, 'TABLE_ACTION_TOKEN_STORE_UNAVAILABLE', 'table action requires plugin storage with an atomic consume to claim dry-run tokens')
+  }
+  return store
+}
+
+async function consumeDryRunToken(tokenStore, token, expected) {
+  const store = requireConsumableTokenStore(tokenStore)
   const dryRunToken = optionalString(token)
   if (!dryRunToken) {
     throw new StockPreparationTableActionError(400, 'TABLE_ACTION_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply', { field: 'confirm.dryRunToken' })
   }
   const key = tokenStoreKey(dryRunToken)
-  const stored = await store.get(key)
-  if (typeof store.delete === 'function') await store.delete(key)
+  // ATOMIC CLAIM: read-and-remove in one store operation. Validation runs AFTER the claim, so a token
+  // refused below (expired / mismatched) stays burned — the same single-use semantics as before.
+  const stored = await store.consume(key)
   if (!isPlainObject(stored)) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
   }
@@ -2972,6 +2988,7 @@ module.exports = {
     normalizeActionReadConcurrency,
     actionReadConcurrency,
     consumeDryRunToken,
+    requireConsumableTokenStore,
     createDryRunToken,
     hashJson,
     normalizeActionExtensionFieldIds,

@@ -164,6 +164,8 @@ function createMemoryStore() {
     async get(key) { return map.has(key) ? clone(map.get(key)) : null },
     async set(key, value) { map.set(key, clone(value)) },
     async delete(key) { map.delete(key) },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) { if (!map.has(key)) return null; const value = map.get(key); map.delete(key); return clone(value) },
   }
 }
 

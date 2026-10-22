@@ -92,6 +92,13 @@ function createMemoryStorage() {
     async delete(key) {
       map.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      map.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
   }
 }
 
@@ -116,6 +123,13 @@ function createSharedDurableStorage(backing = new Map()) {
     async delete(key) {
       backing.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!backing.has(key)) return null
+      const value = backing.get(key)
+      backing.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
     async list() {
       return Array.from(backing.keys()).sort()
     },
@@ -133,6 +147,10 @@ function createFailingDurableStorage(operation = 'set') {
       if (operation === 'set') throw createDurableStorageFailure('set')
     },
     async delete() {},
+    async consume() {
+      if (operation === 'consume') throw createDurableStorageFailure('consume')
+      return null
+    },
     async list() {
       return []
     },

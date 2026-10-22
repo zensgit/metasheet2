@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // #6475 — WHY 批次存档 (mvp-persist) DOES NOT REUSE THE DRY-RUN'S RESOLVED DUPLICATE GROUPS.
 // THROUGH THE REAL ROUTE TABLE, PLUS THE ONE LIB-LEVEL FACT THAT MAKES IT LOAD-BEARING.
 //
@@ -324,7 +326,7 @@ function mount() {
       },
       multitable: { provisioning: createProvisioning(), records: records.api },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [CANONICAL_OBJECT_ID] },

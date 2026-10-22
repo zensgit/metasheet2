@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, not the mapper.
 //
 // stock-preparation-ext-field-mapping.test.cjs already pins what the mapper DOES. This suite pins
@@ -319,7 +321,7 @@ function mount({ config = {}, sourceAdapter, records, provisioning } = {}) {
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job; the
     // small-BOM token/policy store ignores the flag entirely.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config,
   }
   httpRoutes.registerIntegrationRoutes({

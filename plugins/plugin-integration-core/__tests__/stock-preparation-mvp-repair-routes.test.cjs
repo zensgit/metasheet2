@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // MVP 快照表补列动词挂路由 — THROUGH THE REAL ROUTE TABLE (#5721 终审, 规格 R).
 //
 // The unit suite (stock-preparation-mvp-provisioning.test.cjs, cases (a)-(i)) proves the verb
@@ -284,7 +286,7 @@ function mount(hostOptions = {}) {
         records: records.api,
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {},
   }
   const logLines = []

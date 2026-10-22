@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // #6475 fix round 1 — 批次存档 (mvp-persist, the project-sync panel's step ④) ARCHIVES THE SOURCE
 // STEP ③ WROTE FROM, OR NOTHING. Through the real route table, the REAL source-binding store (over an
 // in-memory db) and the panel's own request shapes.
@@ -300,7 +302,7 @@ function mount({ bindings = [], disabled = [], store = 'real' } = {}) {
       },
       multitable: { provisioning: createProvisioning(), records: records.api },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig()],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [CANONICAL_OBJECT_ID] },

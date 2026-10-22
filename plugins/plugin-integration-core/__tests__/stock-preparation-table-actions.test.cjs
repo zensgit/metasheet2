@@ -75,6 +75,13 @@ function createMemoryStorage() {
     async delete(key) {
       map.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      map.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
   }
 }
 

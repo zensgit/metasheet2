@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, large-BOM side: `installedFieldProperties` through the real HTTP routes.
 //
 // `stock-preparation-pack-install-readback.test.cjs` pins the seam (ledger -> live host read ->
@@ -344,7 +346,7 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig(objectId)],
       stockPreparationCustomerPacks: { [PACK_ID]: PACK },

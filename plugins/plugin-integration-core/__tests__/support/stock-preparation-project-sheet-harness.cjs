@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./consumable-storage.cjs')
+
 // 一个项目一张备料表 — ONE in-memory substrate for the project-sheet route suites (S2, R-36).
 //
 // Shared by `stock-preparation-project-target-pack-reinstall.test.cjs` and the permission matrix's
@@ -444,7 +446,7 @@ function mountProjectSheetRoutes({
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
       multitable: { provisioning, records },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
