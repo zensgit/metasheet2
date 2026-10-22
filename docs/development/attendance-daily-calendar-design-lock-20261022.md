@@ -59,3 +59,11 @@ backend guard, test wiring and UI hashes remain unchanged except this evidence
 appendix. Fresh quality, the full required web lane (including these complete
 files) and exact-head CI must pass on the resulting daily candidate before
 acceptance. No production configuration, Stream/lifecycle or UAT change.
+
+## Session fixture clock-boundary follow-up (2026-10-22)
+
+The `5e7e219e2` attendance-web-guard failed the old-bootstrap / explicit-switch test (62 passed, one failed). Its two independently generated org-a tokens could straddle an expiration-second boundary, correctly failing the runtime expected-token check before any switch. The test did not assert that the requested switch succeeded.
+
+A deterministic artifact-only 1ms boundary reproduces the same named assertion failure (35 passed, one failed): the expected token differs, the real setter returns false, and the original bootstrap remains current. Reusing the captured original token and asserting setter success passes all 36 cases under the identical boundary. The actual fix is confined to three inserted / two removed test lines; all four original outcome assertions, mocks and timeouts remain. No runtime, authorization or configuration code changed.
+
+The original four-file explicit-session CI selection then passes 63/63 under the normal config, zero skipped or pending, exit 0. Main independently audited raw exits, actual assertion results, clock call-through/restoration, exact diff and unchanged runtime hashes. Evidence: `artifacts/daily-calendar/auth-bootstrap-clock-5e7/`, including `main-independent-audit.json`. Fresh commit quality/full-web and exact-head required CI remain mandatory and pending; this is fixture repair evidence, not UAT or a release result.
