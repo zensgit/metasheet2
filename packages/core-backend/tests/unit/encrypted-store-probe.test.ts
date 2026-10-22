@@ -932,13 +932,13 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     for (const [message, meta] of logger.warn.mock.calls) {
       expect(message).toContain(ENCRYPTED_STORE_REENTER_HINT)
       // Nothing was truncated here, so no warning claims a sample.
-      expect(message).not.toContain('Sampled the first')
+      expect(message).not.toContain('Checked a sample')
       expect(meta).toEqual({ store: expect.any(String), field: expect.any(String), encrypted: expect.any(Number), undecryptable: expect.any(Number) })
       expect(meta.undecryptable).toBeGreaterThan(0)
     }
   })
 
-  it('a truncated store field warns that it sampled only the first N rows (a count, never a value)', async () => {
+  it('a truncated store field warns that only an unordered sample of N rows was checked (a count, never a value)', async () => {
     const logger = captureLogger()
     const label = 'integration_yida_send_approvals.snapshot_encrypted'
     const rows: FixtureRows = { [label]: Array.from({ length: 30 }, () => (fixture.rows[label] as string[])[0]) }
@@ -946,7 +946,7 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     expect(logger.warn).toHaveBeenCalledTimes(1)
     const [message, meta] = logger.warn.mock.calls[0]
     expect(message).toBe(`Encrypted store probe: ${label} has 20 of 20 encrypted value(s) the current material cannot decrypt. ` +
-      `Sampled the first 20 row(s) only; later rows were not checked. ${ENCRYPTED_STORE_REENTER_HINT}`)
+      `Checked a sample of 20 row(s) (unordered LIMIT); other rows were not checked. ${ENCRYPTED_STORE_REENTER_HINT}`)
     expect(meta).toEqual({ store: 'integration_yida_send_approvals', field: 'snapshot_encrypted', encrypted: 20, undecryptable: 20 })
   })
 

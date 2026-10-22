@@ -25,7 +25,8 @@
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
  *     An entry with `maxRows` (the YiDa stores: large snapshots that are never deleted) reads at
  *     most min(rowLimit, maxRows) + 1 rows, so one run cannot buffer and decrypt gigabytes. A
- *     truncated entry's warning says it sampled only the first N rows.
+ *     truncated entry with undecryptable values warns that only a sample of N rows was checked
+ *     (an unordered LIMIT: no ORDER BY, so which rows is unspecified).
  *   - `plaintext` is narrow on purpose: non-encrypted values in the catalogued field each reader uses,
  *     not every plaintext secret in the database (see EncryptedStoreProbeResult.plaintext).
  *   - Classified the way each store's runtime READER sees the value: the `enc:` / `v1:` prefix is tested
@@ -311,7 +312,7 @@ export interface EncryptedStoreProbeResult {
   legacyNotChecked?: number
   /** More rows matched than were read (rowLimit, or the entry's smaller maxRows); the counts cover those read. */
   truncated?: true
-  /** With `truncated`: the rows read (the limit that applied), i.e. the counts sample the first N rows. */
+  /** With `truncated`: the rows read (the limit that applied), i.e. the counts cover an unordered sample of N rows. */
   sampled?: number
   /** The PostgreSQL SQLSTATE of a failed read, when the error carried one. */
   sqlState?: string
@@ -651,7 +652,7 @@ function logReport(logger: EncryptedStoreProbeLogger, report: EncryptedStoreProb
   for (const store of report.stores) {
     if (store.undecryptable <= 0) continue
     // A row count only, never a value: rows past the sample were not read.
-    const sample = store.truncated ? ` Sampled the first ${store.sampled} row(s) only; later rows were not checked.` : ''
+    const sample = store.truncated ? ` Checked a sample of ${store.sampled} row(s) (unordered LIMIT); other rows were not checked.` : ''
     logger.warn(
       `Encrypted store probe: ${label(store)} has ${store.undecryptable} of ${store.encrypted} encrypted value(s) ` +
         `the current material cannot decrypt.${sample} ${ENCRYPTED_STORE_REENTER_HINT}`,
