@@ -35,8 +35,10 @@ export type YidaInitializationAnchor = Readonly<{
 // Fixed two-int transaction advisory key: ASCII YIDA (0x59494441), permanent slot 1.
 // Provision/status/initialize all use this SAME barrier. It survives the callback
 // until the actual host COMMIT/ROLLBACK, without granting UPDATE on the anchor.
+// Registered as 'yida-initialization-slot' in ADVISORY_FIXED_KEY1_REGISTRY.
+export const YIDA_INITIALIZATION_LOCK_NS = 0x59494441
 export async function lockYidaInitializationSlot(trx: Queryable): Promise<void> {
-  await trx.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [0x59494441, 1])
+  await trx.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [YIDA_INITIALIZATION_LOCK_NS, 1])
 }
 function id(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 128 || value.trim() !== value

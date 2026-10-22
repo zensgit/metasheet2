@@ -119,6 +119,7 @@ export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
   fixedKey1('stock-preparation-project', { literal: 0x73700101 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('stock-preparation-batch', { literal: 0x73700102 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('multitable-pit-recovery', { literal: 0x77303104 }, 'packages/core-backend/src/multitable/canonical-sheet-fence.ts (fixed namespace; documented, no production query site today)'),
+  fixedKey1('yida-initialization-slot', { literal: 0x59494441 }, 'packages/core-backend/src/integration/yida-initialization-bootstrap.ts (bind parameter)'),
   fixedKey1('stock-prep-members', { hashtext: 'stock-prep' }, 'packages/core-backend/src/services/stock-preparation-members.ts (bind parameter)'),
   fixedKey1('elearning-title-request', { hashtext: 'elearning-title-request' }, `${ELEARNING}/elearning-title-surface.ts (bind parameter)`),
   fixedKey1('elearning-title-head', { hashtext: 'elearning-title-head' }, `${ELEARNING}/elearning-title-surface.ts (bind parameter)`),
