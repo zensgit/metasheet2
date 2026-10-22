@@ -25,6 +25,13 @@ export interface DingTalkPersonDelivery {
   localUserExists: boolean
   /** Current active flag; null when the user does not exist (unknown, not "inactive"). */
   localUserIsActive: boolean | null
+  /**
+   * Codex review P2: whether the user is linked to DingTalk NOW (same link conditions as the sender: a
+   * `linked` directory_account_links row to an active `dingtalk` directory account); null when the user does
+   * not exist. A CURRENT fact — the viewer labels it 「当前状态」 and never presents it as the cause of a
+   * historical skip (the sender stores no per-recipient cause; follow-up).
+   */
+  localUserDingTalkLinked: boolean | null
 }
 
 /** Review round 2: the delivery list's optional server-side status filter (values-free, fixed set). */
@@ -63,6 +70,7 @@ type DeliveryRow = {
   local_user_email: string | null
   local_user_is_active: boolean | null
   local_user_exists?: boolean | null
+  local_user_dingtalk_linked?: boolean | null
 }
 
 function normalizeDeliveryStatus(status: string | null, success: boolean): DingTalkPersonDelivery['status'] {
@@ -94,6 +102,7 @@ function mapDeliveryRow(row: DeliveryRow): DingTalkPersonDelivery {
     localUserSubtitle: row.local_user_email ?? undefined,
     localUserExists: row.local_user_exists === true,
     localUserIsActive: row.local_user_exists === true ? row.local_user_is_active === true : null,
+    localUserDingTalkLinked: row.local_user_exists === true ? row.local_user_dingtalk_linked === true : null,
   }
 }
 
@@ -129,7 +138,16 @@ export async function listAutomationDingTalkPersonDeliveries(
             u.name AS local_user_name,
             u.email AS local_user_email,
             u.is_active AS local_user_is_active,
-            (u.id IS NOT NULL) AS local_user_exists
+            (u.id IS NOT NULL) AS local_user_exists,
+            EXISTS (
+              SELECT 1
+                FROM directory_account_links l
+                JOIN directory_accounts a ON a.id = l.directory_account_id
+               WHERE l.local_user_id = u.id
+                 AND l.link_status = 'linked'
+                 AND a.provider = 'dingtalk'
+                 AND a.is_active = TRUE
+            ) AS local_user_dingtalk_linked
        FROM dingtalk_person_deliveries d
        LEFT JOIN users u ON u.id = d.local_user_id
       WHERE d.automation_rule_id = $1${status ? `

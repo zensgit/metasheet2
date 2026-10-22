@@ -54,8 +54,11 @@
             <span v-if="delivery.dingtalkUserId">{{ automationLabel('delivery.dingtalkPrefix', isZh) }}{{ isZh ? '：' : ': ' }}{{ delivery.dingtalkUserId }}</span>
           </div>
           <div class="meta-person-delivery__subject">{{ delivery.subject }}</div>
-          <div v-if="deliveryStatus(delivery) !== 'success' && deliveryReason(delivery)" class="meta-person-delivery__error">
+          <div v-if="deliveryStatus(delivery) !== 'success' && deliveryReason(delivery)" class="meta-person-delivery__error" data-field="person-delivery-reason">
             {{ deliveryReason(delivery) }}
+          </div>
+          <div v-if="currentStateText(delivery)" class="meta-person-delivery__detail" data-field="person-delivery-current-state">
+            {{ currentStateText(delivery) }}
           </div>
         </div>
       </div>
@@ -68,7 +71,7 @@ import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { DingTalkPersonDelivery } from '../types'
 import type { MultitableApiClient } from '../api/client'
-import { automationLabel, automationStatusLabel } from '../utils/meta-automation-labels'
+import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../utils/meta-automation-labels'
 import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { MtButton, MtIconButton } from '../ui'
 
@@ -129,20 +132,26 @@ function deliveryStatusLabel(delivery: DingTalkPersonDelivery): string {
   return automationStatusLabel(status, isZh.value)
 }
 
+// Codex review P2: a skipped row is HISTORY. The sender stores one generic sentence for every skip (no
+// per-recipient cause), and the user may have changed since (reactivated, linked, unlinked). So the reason line
+// shows exactly what was stored at send time, and the user's state today is a separate 「当前状态」 line.
 function deliveryReason(delivery: DingTalkPersonDelivery): string {
   if (deliveryStatus(delivery) === 'skipped') {
-    if (delivery.errorMessage === UNBOUND_DINGTALK_REASON || !delivery.errorMessage) {
-      // Review round 2: the sender stores one generic sentence for every skip; name the real cause where the
-      // user's CURRENT row tells it (gone / inactive / active without a DingTalk link). Older servers that do
-      // not send `localUserExists` keep the generic sentence.
-      if (delivery.localUserExists === false) return automationLabel('delivery.reasonUserNotFound', isZh.value)
-      if (delivery.localUserExists === true && delivery.localUserIsActive === false) return automationLabel('delivery.reasonUserInactive', isZh.value)
-      if (delivery.localUserExists === true && delivery.localUserIsActive === true && !delivery.dingtalkUserId) return automationLabel('delivery.reasonNotLinked', isZh.value)
-      return automationLabel('delivery.unboundReason', isZh.value)
-    }
-    return delivery.errorMessage
+    return delivery.errorMessage === UNBOUND_DINGTALK_REASON || !delivery.errorMessage
+      ? automationLabel('delivery.unboundReason', isZh.value)
+      : delivery.errorMessage
   }
   return delivery.errorMessage || ''
+}
+
+function currentStateText(delivery: DingTalkPersonDelivery): string {
+  if (deliveryStatus(delivery) !== 'skipped' || delivery.localUserExists === undefined) return ''
+  let key: AutomationLabelKey | null = null
+  if (delivery.localUserExists === false) key = 'delivery.currentUserNotFound'
+  else if (delivery.localUserIsActive === false) key = 'delivery.currentInactive'
+  else if (delivery.localUserDingTalkLinked === false) key = 'delivery.currentNotLinked'
+  else if (delivery.localUserIsActive === true && delivery.localUserDingTalkLinked === true) key = 'delivery.currentReachable'
+  return key ? `${automationLabel('delivery.currentStatePrefix', isZh.value)}${automationLabel(key, isZh.value)}` : ''
 }
 
 // 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.

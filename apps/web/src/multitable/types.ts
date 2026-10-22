@@ -1774,6 +1774,8 @@ export interface DingTalkPersonDelivery {
   localUserExists?: boolean
   /** null when the user does not exist (unknown, not "inactive"). */
   localUserIsActive: boolean | null
+  /** Codex review P2: linked to DingTalk NOW (a current fact, never the cause of a past skip); null if no user. */
+  localUserDingTalkLinked?: boolean | null
 }
 
 // --- Field Validation ---

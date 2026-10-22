@@ -77,6 +77,7 @@ describe('dingtalk person delivery service', () => {
         localUserSubtitle: 'lin@example.com',
         localUserExists: true,
         localUserIsActive: true,
+        localUserDingTalkLinked: false,
       },
       {
         id: 'dpd_2',
@@ -99,6 +100,7 @@ describe('dingtalk person delivery service', () => {
         localUserSubtitle: undefined,
         localUserExists: true,
         localUserIsActive: true,
+        localUserDingTalkLinked: false,
       },
     ])
   })
@@ -164,9 +166,28 @@ describe('dingtalk person delivery service', () => {
     }
     const queryFn = vi.fn(async () => ({ rows: [row, { ...row, id: 'dpd_inactive', local_user_id: 'user_fake_off', local_user_is_active: false, local_user_exists: true }] }))
     const [missing, inactive] = await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1')
-    expect(missing).toMatchObject({ localUserExists: false, localUserIsActive: null })
-    expect(inactive).toMatchObject({ localUserExists: true, localUserIsActive: false })
+    expect(missing).toMatchObject({ localUserExists: false, localUserIsActive: null, localUserDingTalkLinked: null })
+    expect(inactive).toMatchObject({ localUserExists: true, localUserIsActive: false, localUserDingTalkLinked: false })
     expect(queryFn.mock.calls[0][0]).toContain('(u.id IS NOT NULL) AS local_user_exists')
+  })
+
+  // Codex review P2: the user's CURRENT DingTalk link (same conditions as the sender), reported as a current fact.
+  it('reports the current DingTalk link with the sender link conditions; null for a missing user', async () => {
+    const row = {
+      id: 'dpd_relinked', local_user_id: 'user_fake_back', dingtalk_user_id: null, source_type: 'automation', subject: 'S', content: 'C',
+      success: false, status: 'skipped', http_status: null, response_body: null,
+      error_message: 'DingTalk account is not linked or user is inactive', automation_rule_id: 'rule_1', record_id: 'rec_1',
+      initiated_by: 'user_2', created_at: '2026-10-21T10:00:00.000Z', delivered_at: null, local_user_name: 'Fake Back',
+      local_user_email: null, local_user_is_active: true, local_user_exists: true, local_user_dingtalk_linked: true,
+    }
+    const queryFn = vi.fn(async () => ({ rows: [row, { ...row, id: 'dpd_gone', local_user_exists: false, local_user_is_active: null, local_user_dingtalk_linked: false }] }))
+    const [relinked, gone] = await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1')
+    expect(relinked).toMatchObject({ localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: true })
+    expect(gone).toMatchObject({ localUserExists: false, localUserIsActive: null, localUserDingTalkLinked: null })
+    const sql = queryFn.mock.calls[0][0] as unknown as string
+    for (const condition of ["l.link_status = 'linked'", "a.provider = 'dingtalk'", 'a.is_active = TRUE', 'AS local_user_dingtalk_linked']) {
+      expect(sql).toContain(condition)
+    }
   })
 
   it('filters by status in SQL, before the LIMIT, with a bound parameter; no filter keeps the old query shape', async () => {

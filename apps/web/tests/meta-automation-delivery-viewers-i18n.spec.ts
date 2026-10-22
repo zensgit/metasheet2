@@ -186,27 +186,26 @@ describe('automation delivery viewers i18n', () => {
   })
 
   // 客户反馈 2026-10-21 item 1 (review round 2): identity text matches the editor — an id with no user reads
-  // 未找到该用户 (never the bare id as a name, never "inactive user"), and the skip reason names the real cause.
-  it('a delivery to an id with no user reads 未找到该用户 with the id on the secondary line; reasons name the cause', async () => {
+  // 未找到该用户 (never the bare id as a name, never "inactive user"). Codex review P2: a skipped row keeps the
+  // reason STORED at send time; the user's state today is a separate line labelled 当前状态, never the cause.
+  const SKIP_BASE = {
+    sourceType: 'automation',
+    subject: 'Ticket rec_9 ready',
+    content: 'Please review.',
+    success: false,
+    status: 'skipped' as const,
+    errorMessage: 'DingTalk account is not linked or user is inactive',
+    createdAt: '2026-10-21T10:00:00.000Z',
+  }
+
+  it('a delivery to an id with no user reads 未找到该用户 with the id on the secondary line; a label equal to the id is not a name', async () => {
     useLocale().setLocale('zh-CN')
-    const base = {
-      sourceType: 'automation',
-      subject: 'Ticket rec_9 ready',
-      content: 'Please review.',
-      success: false,
-      status: 'skipped' as const,
-      errorMessage: 'DingTalk account is not linked or user is inactive',
-      createdAt: '2026-10-21T10:00:00.000Z',
-    }
     const deliveries: DingTalkPersonDelivery[] = [
-      { ...base, id: 'd_missing', localUserId: 'user_fake_typo', localUserExists: false, localUserIsActive: null },
-      { ...base, id: 'd_inactive', localUserId: 'user_fake_off', localUserLabel: 'Fake Off', localUserExists: true, localUserIsActive: false },
-      { ...base, id: 'd_unlinked', localUserId: 'user_fake_on', localUserLabel: 'Fake On', localUserExists: true, localUserIsActive: true },
-      { ...base, id: 'd_unnamed', localUserId: 'user_fake_noname', localUserLabel: 'user_fake_noname', localUserExists: true, localUserIsActive: true },
+      { ...SKIP_BASE, id: 'd_missing', localUserId: 'user_fake_typo', localUserExists: false, localUserIsActive: null, localUserDingTalkLinked: null },
+      { ...SKIP_BASE, id: 'd_unnamed', localUserId: 'user_fake_noname', localUserLabel: 'user_fake_noname', localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: false },
     ]
     const root = mount(MetaAutomationPersonDeliveryViewer, { getAutomationDingTalkPersonDeliveries: async () => deliveries })
     await flushPromises()
-
     const row = (id: string) => root.querySelector(`[data-person-delivery-id="${id}"]`) as HTMLElement
     const name = (id: string) => row(id).querySelector('[data-field="person-delivery-recipient"]')?.textContent?.trim()
 
@@ -214,18 +213,54 @@ describe('automation delivery viewers i18n', () => {
     expect(name('d_missing')).not.toContain('user_fake_typo')
     expect(name('d_missing')).not.toContain('已停用用户')
     expect(row('d_missing').querySelector('[data-field="person-delivery-local-user-id"]')?.textContent).toBe('user_fake_typo')
-    expect(row('d_missing').textContent).toContain('找不到该用户，未发送')
-
-    expect(name('d_inactive')).toContain('Fake Off')
-    expect(name('d_inactive')).toContain('已停用用户')
-    expect(row('d_inactive').textContent).toContain('用户已停用')
-
-    expect(row('d_unlinked').textContent).toContain('钉钉账号未绑定')
-    expect(row('d_unlinked').textContent).not.toContain('钉钉账号未绑定或用户已停用')
-
-    // a roster-less label equal to the id is not a name either
     expect(name('d_unnamed')).toBe('未命名用户')
     expect(row('d_unnamed').querySelector('[data-field="person-delivery-local-user-id"]')?.textContent).toBe('user_fake_noname')
+  })
+
+  it('Codex P2: a user linked at send time, skipped, and active + linked now is NOT shown 「钉钉账号未绑定」 as the cause', async () => {
+    useLocale().setLocale('zh-CN')
+    // skipped rows carry no DingTalk id (the sender stores none on a skip), whatever the cause was
+    const deliveries: DingTalkPersonDelivery[] = [
+      { ...SKIP_BASE, id: 'd_reactivated', localUserId: 'user_fake_back', localUserLabel: 'Fake Back', localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: true },
+    ]
+    const root = mount(MetaAutomationPersonDeliveryViewer, { getAutomationDingTalkPersonDeliveries: async () => deliveries })
+    await flushPromises()
+    const row = root.querySelector('[data-person-delivery-id="d_reactivated"]') as HTMLElement
+
+    // the reason is what was stored at send time — the generic sentence, not an inferred 「钉钉账号未绑定」
+    expect(row.querySelector('[data-field="person-delivery-reason"]')?.textContent?.trim()).toBe('钉钉账号未绑定或用户已停用')
+    // today's state is a separate, labelled line
+    expect(row.querySelector('[data-field="person-delivery-current-state"]')?.textContent?.trim()).toBe('当前状态：已启用且已绑定钉钉')
+    expect(row.querySelector('[data-field="person-delivery-current-state"]')?.textContent).not.toContain('未绑定')
+  })
+
+  it('the current-state line names each state today, labelled as current; an older server (no flag) shows none', async () => {
+    useLocale().setLocale('zh-CN')
+    const deliveries: DingTalkPersonDelivery[] = [
+      { ...SKIP_BASE, id: 'c_missing', localUserId: 'user_fake_typo', localUserExists: false, localUserIsActive: null, localUserDingTalkLinked: null },
+      { ...SKIP_BASE, id: 'c_inactive', localUserId: 'user_fake_off', localUserLabel: 'Fake Off', localUserExists: true, localUserIsActive: false, localUserDingTalkLinked: true },
+      { ...SKIP_BASE, id: 'c_unlinked', localUserId: 'user_fake_on', localUserLabel: 'Fake On', localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: false },
+      { ...SKIP_BASE, id: 'c_ready', localUserId: 'user_fake_ok', localUserLabel: 'Fake Ok', localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: true },
+      { ...SKIP_BASE, id: 'c_legacy', localUserId: 'user_fake_old', localUserLabel: 'Fake Old', localUserIsActive: true },
+      { ...SKIP_BASE, id: 'c_success', status: 'success', success: true, errorMessage: undefined, localUserId: 'user_fake_ok', localUserLabel: 'Fake Ok', localUserExists: true, localUserIsActive: true, localUserDingTalkLinked: true },
+    ]
+    const root = mount(MetaAutomationPersonDeliveryViewer, { getAutomationDingTalkPersonDeliveries: async () => deliveries })
+    await flushPromises()
+    const current = (id: string) => root.querySelector(`[data-person-delivery-id="${id}"] [data-field="person-delivery-current-state"]`)?.textContent?.trim() ?? null
+    const reason = (id: string) => root.querySelector(`[data-person-delivery-id="${id}"] [data-field="person-delivery-reason"]`)?.textContent?.trim() ?? null
+
+    expect(current('c_missing')).toBe('当前状态：找不到该用户')
+    expect(current('c_inactive')).toBe('当前状态：已停用')
+    expect(current('c_unlinked')).toBe('当前状态：未绑定钉钉')
+    expect(current('c_ready')).toBe('当前状态：已启用且已绑定钉钉')
+    expect(current('c_legacy')).toBeNull()
+    expect(current('c_success')).toBeNull()
+    // every skipped row keeps the stored reason, whatever its user looks like today
+    for (const id of ['c_missing', 'c_inactive', 'c_unlinked', 'c_ready', 'c_legacy']) expect(reason(id)).toBe('钉钉账号未绑定或用户已停用')
+
+    useLocale().setLocale('en')
+    await flushPromises()
+    expect(current('c_unlinked')).toBe('Current state: not linked to DingTalk')
   })
 
   it('asks the SERVER for the status it opens on (the run log link), and reloads with the new status when changed', async () => {

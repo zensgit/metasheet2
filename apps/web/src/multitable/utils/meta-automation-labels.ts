@@ -98,9 +98,11 @@ export type AutomationLabelKey =
   | 'delivery.unboundReason'
   | 'delivery.userNotFound'
   | 'delivery.unnamedUser'
-  | 'delivery.reasonUserNotFound'
-  | 'delivery.reasonUserInactive'
-  | 'delivery.reasonNotLinked'
+  | 'delivery.currentStatePrefix'
+  | 'delivery.currentUserNotFound'
+  | 'delivery.currentInactive'
+  | 'delivery.currentNotLinked'
+  | 'delivery.currentReachable'
   | 'editor.titleEdit'
   | 'editor.titleNew'
   | 'editor.name'
@@ -502,9 +504,11 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'delivery.unboundReason',
   'delivery.userNotFound',
   'delivery.unnamedUser',
-  'delivery.reasonUserNotFound',
-  'delivery.reasonUserInactive',
-  'delivery.reasonNotLinked',
+  'delivery.currentStatePrefix',
+  'delivery.currentUserNotFound',
+  'delivery.currentInactive',
+  'delivery.currentNotLinked',
+  'delivery.currentReachable',
   'editor.titleEdit',
   'editor.titleNew',
   'editor.name',
@@ -904,12 +908,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'delivery.dingtalkPrefix': { en: 'DingTalk', zh: '钉钉' },
   'delivery.statusSkippedUnbound': { en: 'Skipped / unbound', zh: '跳过 / 未绑定' },
   'delivery.unboundReason': { en: 'DingTalk account is not linked or user is inactive', zh: '钉钉账号未绑定或用户已停用' },
-  // Review round 2: the person delivery viewer names the real cause where the data allows (current user state).
+  // Review round 2: identity text in the person delivery viewer describes the user record NOW.
   'delivery.userNotFound': { en: 'No user with this ID', zh: '未找到该用户' },
   'delivery.unnamedUser': { en: 'Unnamed user', zh: '未命名用户' },
-  'delivery.reasonUserNotFound': { en: 'No user with this ID — nothing was sent', zh: '找不到该用户，未发送' },
-  'delivery.reasonUserInactive': { en: 'User is inactive', zh: '用户已停用' },
-  'delivery.reasonNotLinked': { en: 'DingTalk account is not linked', zh: '钉钉账号未绑定' },
+  // Codex review P2: a skipped row keeps its stored (historical) reason; the user's state today is a separate,
+  // explicitly labelled line — never presented as the cause at send time.
+  'delivery.currentStatePrefix': { en: 'Current state: ', zh: '当前状态：' },
+  'delivery.currentUserNotFound': { en: 'no user with this ID', zh: '找不到该用户' },
+  'delivery.currentInactive': { en: 'inactive', zh: '已停用' },
+  'delivery.currentNotLinked': { en: 'not linked to DingTalk', zh: '未绑定钉钉' },
+  'delivery.currentReachable': { en: 'active and linked to DingTalk', zh: '已启用且已绑定钉钉' },
   'editor.titleEdit': { en: 'Edit Automation Rule', zh: '编辑自动化规则' },
   'editor.titleNew': { en: 'New Automation Rule', zh: '新建自动化规则' },
   'editor.name': { en: 'Name', zh: '名称' },
