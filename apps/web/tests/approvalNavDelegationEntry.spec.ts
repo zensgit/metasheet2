@@ -249,3 +249,6 @@ describe('my-delegation self-service entry', () => {
     expect(enclosingOpeningTag(source, 'no-such-attribute-anywhere')).toBe('')
   })
 })
+
+// Preload the shell during collection; mountApp keeps its dynamic import for module resets.
+await import('../src/App.vue')
