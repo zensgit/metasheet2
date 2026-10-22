@@ -31,7 +31,7 @@ import type { AutomationExecution, AutomationStepResult } from '../multitable/au
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
-import { resolveSheetCapabilities } from '../multitable/permission-service'
+import { loadPermissionCandidateEligibleUserIds, resolveSheetCapabilities } from '../multitable/permission-service'
 // The 403 body and the two liveness-404 bodies are a CLIENT CONTRACT (clients switch on
 // `error.code`), so they come from one shared module instead of being hand-copied per route. See
 // multitable/sheet-refusals.ts for the drift those copies used to invite.
@@ -64,8 +64,9 @@ import { resolveMultitableBusinessTimezone } from '../multitable/business-timezo
 import {
   DINGTALK_PERSON_RECIPIENT_STATUS_MAX_ID_LENGTH,
   DINGTALK_PERSON_RECIPIENT_STATUS_MAX_IDS,
+  callerCanListRosterUsers,
   parseDingTalkPersonRecipientIds,
-  readDingTalkPersonRecipientStatuses,
+  readRosterScopedDingTalkPersonRecipientStatuses,
 } from '../multitable/dingtalk-person-recipient-status'
 
 /**
@@ -767,6 +768,8 @@ export function createAutomationRoutes(
   // (DINGTALK_PERSON_RECIPIENT_STATUS_SQL) and answers booleans only: no name, email, DingTalk userid or
   // integration. Gate = the test-run gate: canManageAutomation on the PATH sheet (403 first, no liveness
   // oracle), then a live sheet; a permission-resolution failure fails closed. Read-only.
+  // Review round 1b: answers only for ids the sheet roster (form-share-candidates) could show this caller —
+  // see readRosterScopedDingTalkPersonRecipientStatuses; any other id reads exactly like an unknown id.
 
   router.post('/sheets/:sheetId/automations/dingtalk-person-recipient-status', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -774,6 +777,7 @@ export function createAutomationRoutes(
       return res.status(400).json({ ok: false, error: { code: 'SHEET_ID_REQUIRED', message: 'sheetId is required' } })
     }
 
+    let rosterVisible = false
     try {
       const pool = poolManager.get()
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -783,6 +787,7 @@ export function createAutomationRoutes(
       if (sheetLiveness !== 'live') {
         return sendSheetNotLive(res, sheetLiveness)
       }
+      rosterVisible = callerCanListRosterUsers(capabilities, sheetId)
     } catch (err) {
       return sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
     }
@@ -803,7 +808,11 @@ export function createAutomationRoutes(
 
     try {
       const pool = poolManager.get()
-      const items = await readDingTalkPersonRecipientStatuses(pool.query.bind(pool), parsed.userIds)
+      const query = pool.query.bind(pool)
+      const items = await readRosterScopedDingTalkPersonRecipientStatuses(query, parsed.userIds, {
+        rosterVisible,
+        loadEligibleUserIds: (userIds) => loadPermissionCandidateEligibleUserIds(query, userIds),
+      })
       return res.json({ ok: true, data: { items } })
     } catch (err) {
       return sendFailClosedResolutionError(res, err, 'RECIPIENT_STATUS_FAILED', 'Failed to read recipient status')

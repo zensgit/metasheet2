@@ -1096,7 +1096,7 @@
                   :data-person-recipient="recipient.id"
                   @click="removePersonRecipient(action, recipient.id)"
                 >
-                  <strong>{{ recipient.label }}</strong>
+                  <strong v-if="recipient.named" data-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
                   <span v-if="recipient.stateLabel" class="meta-rule-editor__recipient-badge" data-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
                   <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
@@ -1130,7 +1130,7 @@
                 :rows="3"
                 :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
-                @blur="void personRecipientStatus.check(parseUserIdsText(action.config.userIdsText))"
+                @blur="onPersonRecipientIdsBlur(action)"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
               <el-input
@@ -1776,7 +1776,13 @@
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
-import { useDingTalkPersonRecipientStatus, type DingTalkPersonRecipientState } from '../composables/useDingTalkPersonRecipientStatus'
+import {
+  forEachWithConcurrency,
+  RECIPIENT_NAME_LOOKUP_CONCURRENCY,
+  RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS,
+  useDingTalkPersonRecipientStatus,
+  type DingTalkPersonRecipientState,
+} from '../composables/useDingTalkPersonRecipientStatus'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { getTemplate } from '../../approvals/api'
@@ -2192,6 +2198,7 @@ const notificationRecipientErrors = ref<Record<string, string>>({})
 // a miss: it renders as a plain raw-id chip, still removable.
 const notificationRecipientMisses = ref<Record<string, boolean>>({})
 const notificationRecipientResolveInFlight = new Set<string>()
+const notificationRecipientLookupFailedAt = new Map<string, number>()
 let notificationRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
@@ -3635,6 +3642,9 @@ watch(
       // review round 1: from the sender-side preflight, forgetting what an earlier open learned.
       personRecipientStatus.reset()
       void personRecipientStatus.check(collectDraftPersonRecipientIds())
+      // Round 1b: names still come from the roster (exact-id lookup), as before — the preflight only answers
+      // link/active status. A saved recipient must reopen as a name, never as a bare id.
+      void resolveNotificationRecipientIds(collectDraftPersonRecipientIds())
       // FWB template source: load active version + form fields for the mapping editor.
       const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
         ? draft.value.triggerConfig.templateId
@@ -4317,6 +4327,9 @@ function selectedPersonRecipients(action: DraftAction) {
     const known = state === 'missing' || state === 'inactive' || state === 'unlinked' || state === 'ready'
     return {
       id,
+      // Round 1b: a name only when the roster knows the user; otherwise the chip shows the id in its usual
+      // place (the subtitle line) plus the status badge — never the bare id dressed up as a name.
+      named: Boolean(directoryEntry?.label),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
@@ -4326,6 +4339,13 @@ function selectedPersonRecipients(action: DraftAction) {
       stateLabel: stateLabelKey ? automationLabel(stateLabelKey, isZh.value) : '',
     }
   })
+}
+
+// Round 1b: typed ids get their name from the roster and their link/active status from the preflight.
+function onPersonRecipientIdsBlur(action: DraftAction) {
+  const ids = parseUserIdsText(action.config.userIdsText)
+  void personRecipientStatus.check(ids)
+  void resolveNotificationRecipientIds(ids)
 }
 
 function selectedPersonRecipientCounts(action: DraftAction) {
@@ -4564,13 +4584,16 @@ function collectDraftNotificationRecipientIds(): string[] {
 async function resolveNotificationRecipientIds(ids: string[]) {
   const client = props.client
   if (!client) return
+  const now = Date.now()
   const pending = Array.from(new Set(ids)).filter((id) =>
     !personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
     && notificationRecipientMisses.value[id] === undefined
-    && !notificationRecipientResolveInFlight.has(id),
+    && !notificationRecipientResolveInFlight.has(id)
+    && !(now - (notificationRecipientLookupFailedAt.get(id) ?? -Infinity) < RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS),
   )
-  await Promise.all(pending.map(async (id) => {
-    notificationRecipientResolveInFlight.add(id)
+  for (const id of pending) notificationRecipientResolveInFlight.add(id)
+  // Round 1b (F10): at most RECIPIENT_NAME_LOOKUP_CONCURRENCY lookups in flight; a failed one waits before a retry.
+  await forEachWithConcurrency(pending, RECIPIENT_NAME_LOOKUP_CONCURRENCY, async (id) => {
     try {
       const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
       const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
@@ -4579,12 +4602,14 @@ async function resolveNotificationRecipientIds(ids: string[]) {
       } else {
         notificationRecipientMisses.value = { ...notificationRecipientMisses.value, [id]: true }
       }
+      notificationRecipientLookupFailedAt.delete(id)
     } catch {
       // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+      notificationRecipientLookupFailedAt.set(id, Date.now())
     } finally {
       notificationRecipientResolveInFlight.delete(id)
     }
-  }))
+  })
 }
 
 function groupDestinationScope(destination?: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {

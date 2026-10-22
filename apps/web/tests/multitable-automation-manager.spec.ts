@@ -2529,6 +2529,10 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
     idsInput.dispatchEvent(new FocusEvent('blur'))
     await flushPromises()
+    // round 1b: no name known → no name slot (the id is not shown as if it were a name)
+    for (const id of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) {
+      expect(container.querySelector(`[data-automation-person-recipient="${id}"] strong`)).toBeNull()
+    }
 
     const preflights = fetchFn.mock.calls.filter(([url]: [string]) => url.includes('/automations/dingtalk-person-recipient-status'))
     expect(preflights).toHaveLength(1)
@@ -2553,6 +2557,26 @@ describe('MetaAutomationManager', () => {
     const saves = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !url.includes('dingtalk-person-recipient-status'))
     expect(saves).toHaveLength(1)
     expect(document.body.textContent).toContain('Saved. Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user')
+  })
+
+  it('quick legacy form: a typed id the roster knows is shown by name (status still from the preflight)', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_2'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    const chip = container.querySelector('[data-automation-person-recipient="user_2"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Zhao Ming')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')?.textContent).toBe('Not linked to DingTalk')
   })
 
   it('a run log row that skipped DingTalk recipients opens the rule’s person delivery records on 跳过（未绑定）', async () => {

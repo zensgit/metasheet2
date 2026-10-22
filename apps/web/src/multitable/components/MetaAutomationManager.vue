@@ -411,7 +411,7 @@
                 :data-automation-person-recipient="recipient.id"
                 @click="removeDingTalkPersonRecipient(recipient.id)"
               >
-                <strong>{{ recipient.label }}</strong>
+                <strong v-if="recipient.named" data-automation-field="dingtalkPersonRecipientName">{{ recipient.label }}</strong>
                 <span>{{ recipient.subtitle || recipient.id }}</span>
                 <span v-if="recipient.stateLabel" class="meta-automation__recipient-badge" data-automation-field="dingtalkPersonRecipientState" :data-state="recipient.state">{{ recipient.stateLabel }}</span>
                 <span v-else-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
@@ -445,7 +445,7 @@
               :rows="3"
               :placeholder="l('dingtalk.localUserIdsPlaceholder')"
               data-automation-field="dingtalkPersonUserIds"
-              @blur="void dingtalkPersonRecipientStatus.check(parseUserIdsText(draft.dingtalkPersonUserIds))"
+              @blur="onDingTalkPersonUserIdsBlur"
             />
             <label class="meta-automation__label">{{ l('dingtalk.memberGroupIds') }}</label>
             <el-input
@@ -895,7 +895,13 @@
 import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
-import { useDingTalkPersonRecipientStatus, type DingTalkPersonRecipientState } from '../composables/useDingTalkPersonRecipientStatus'
+import {
+  forEachWithConcurrency,
+  RECIPIENT_NAME_LOOKUP_CONCURRENCY,
+  RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS,
+  useDingTalkPersonRecipientStatus,
+  type DingTalkPersonRecipientState,
+} from '../composables/useDingTalkPersonRecipientStatus'
 import { useRouter } from 'vue-router'
 import type {
   AutomationExecution,
@@ -1106,6 +1112,7 @@ const notifyRecipientSearchLoading = ref(false)
 const notifyRecipientSearchError = ref('')
 const notifyRecipientMisses = ref<Record<string, boolean>>({})
 const notifyRecipientResolveInFlight = new Set<string>()
+const notifyRecipientLookupFailedAt = new Map<string, number>()
 let notifyRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
@@ -1221,6 +1228,8 @@ const selectedDingTalkPersonRecipients = computed(() =>
     const known = state === 'missing' || state === 'inactive' || state === 'unlinked' || state === 'ready'
     return {
       id,
+      // Round 1b: a name only when the roster knows the user (see the rule editor).
+      named: Boolean(directoryEntry?.label),
       label: directoryEntry?.label ?? id,
       subtitle: directoryEntry?.subtitle,
       dingtalkBound: directoryEntry?.dingtalkBound ?? null,
@@ -1231,6 +1240,13 @@ const selectedDingTalkPersonRecipients = computed(() =>
     }
   }),
 )
+
+// Round 1b: typed ids get their name from the roster and their link/active status from the preflight.
+function onDingTalkPersonUserIdsBlur() {
+  const ids = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+  void dingtalkPersonRecipientStatus.check(ids)
+  void resolveNotifyRecipientIds(ids)
+}
 
 const selectedDingTalkPersonCounts = computed(() => {
   const recipients = selectedDingTalkPersonRecipients.value
@@ -1420,13 +1436,16 @@ function removeNotifyRecipient(userId: string) {
 async function resolveNotifyRecipientIds(ids: string[]) {
   const client = props.client
   if (!client) return
+  const now = Date.now()
   const pending = Array.from(new Set(ids)).filter((id) =>
     !dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
     && notifyRecipientMisses.value[id] === undefined
-    && !notifyRecipientResolveInFlight.has(id),
+    && !notifyRecipientResolveInFlight.has(id)
+    && !(now - (notifyRecipientLookupFailedAt.get(id) ?? -Infinity) < RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS),
   )
-  await Promise.all(pending.map(async (id) => {
-    notifyRecipientResolveInFlight.add(id)
+  for (const id of pending) notifyRecipientResolveInFlight.add(id)
+  // Round 1b (F10): bounded concurrency; a failed lookup waits before a retry.
+  await forEachWithConcurrency(pending, RECIPIENT_NAME_LOOKUP_CONCURRENCY, async (id) => {
     try {
       const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
       const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
@@ -1435,12 +1454,14 @@ async function resolveNotifyRecipientIds(ids: string[]) {
       } else {
         notifyRecipientMisses.value = { ...notifyRecipientMisses.value, [id]: true }
       }
+      notifyRecipientLookupFailedAt.delete(id)
     } catch {
       // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+      notifyRecipientLookupFailedAt.set(id, Date.now())
     } finally {
       notifyRecipientResolveInFlight.delete(id)
     }
-  }))
+  })
 }
 
 function parseGroupDestinationIds(value: unknown): string[] {
@@ -2229,6 +2250,7 @@ function openEditForm(rule: AutomationRule) {
   dingtalkPersonUserSearchError.value = ''
   dingtalkPersonRecipientStatus.reset()
   void dingtalkPersonRecipientStatus.check(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  void resolveNotifyRecipientIds(parseUserIdsText(draft.value.dingtalkPersonUserIds))
   resetNotifyRecipientPicker()
   void resolveNotifyRecipientIds(parseUserIdsText(draft.value.notifyUserIds))
   showForm.value = true

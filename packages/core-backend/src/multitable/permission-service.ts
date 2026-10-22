@@ -316,6 +316,21 @@ async function loadCandidateUserEligibilityMap(
   return eligibility
 }
 
+/**
+ * The subset of `userIds` the sheet roster search (`listSheetPermissionCandidates`, i.e. the
+ * form-share-candidates route) can list: the SAME eligibility filter (multitable read/write through a
+ * direct grant, a role or legacy permissions, or the admin role). 客户反馈 2026-10-21 item 1 (review round
+ * 1b): the DingTalk person-recipient preflight answers only inside this scope, so it reveals nothing the
+ * roster does not already show the same caller.
+ */
+export async function loadPermissionCandidateEligibleUserIds(
+  query: QueryFn,
+  userIds: string[],
+): Promise<Set<string>> {
+  const eligibility = await loadCandidateUserEligibilityMap(query, userIds)
+  return new Set(Array.from(eligibility).filter(([, eligible]) => eligible).map(([userId]) => userId))
+}
+
 export function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
   return {
     hasAssignments: codes.length > 0,

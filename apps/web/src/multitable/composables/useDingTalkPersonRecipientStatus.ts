@@ -140,3 +140,21 @@ export function useDingTalkPersonRecipientStatus(options: {
 
   return { statuses, pending, check, reset, stateOf, counts }
 }
+
+/** Name lookups (exact-id roster searches) run at most this many at a time. */
+export const RECIPIENT_NAME_LOOKUP_CONCURRENCY = 4
+/** A failed name lookup is not retried for this long (review round 1 F10). */
+export const RECIPIENT_NAME_LOOKUP_RETRY_AFTER_MS = RETRY_AFTER_MS
+
+/** Run `fn` over `items` with at most `limit` calls in flight. */
+export async function forEachWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next]
+      next += 1
+      await fn(item)
+    }
+  })
+  await Promise.all(workers)
+}

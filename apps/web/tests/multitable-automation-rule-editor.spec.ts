@@ -166,8 +166,9 @@ function mockClient() {
       limit: 8,
       query: '',
     })),
-    // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side preflight. `user_fake_synced` is the field
-    // case — a directory-synced user the roster search never lists (no multitable role), not linked.
+    // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side preflight (link/active status only; names
+    // still come from listFormShareCandidates). `user_fake_synced` is a user typed by id that the mocked roster
+    // page has no name for, not linked.
     getDingTalkPersonRecipientStatus: vi.fn(async (_sheetId: string, userIds: string[]) =>
       userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false })),
   }
@@ -4355,11 +4356,78 @@ describe('MetaAutomationRuleEditor', () => {
       }),
     })
     await flushPromises()
-    // review round 1: the sender-side preflight, not the roster lookup
+    // status from the sender-side preflight, name from the roster (round 1b)
     expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledWith('sheet_1', ['user_2'])
-    expect(client.listFormShareCandidates).not.toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
     expect(container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent)
       .toContain('1 selected user is not linked to DingTalk')
+  })
+
+  // Review round 1b: item 1 is about customers seeing raw ids — a saved recipient reopens as a NAME.
+  it('reopening a saved rule shows each person recipient by name, not by id; an unknown id gets 未找到该用户 instead of a name', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = mockClient()
+    const config = { userIds: ['user_2', 'user_fake_unknown'], titleTemplate: 'T', bodyTemplate: 'B' }
+    const rule = fakeRule({
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: config,
+      actions: [{ type: 'send_dingtalk_person_message', config }],
+    })
+    const visible = ref(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    createApp({ render: () => h(MetaAutomationRuleEditor, { visible: visible.value, sheetId: 'sheet_1', fields, views, client, rule }) }).mount(container)
+    await flushPromises()
+    visible.value = false
+    await flushPromises()
+    visible.value = true
+    await flushPromises()
+
+    const known = container.querySelector('[data-person-recipient="user_2"]') as HTMLElement
+    expect(known.querySelector('[data-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Zhao Ming')
+    expect(known.querySelector('strong')?.textContent).not.toBe('user_2')
+    expect(known.querySelector('[data-field="dingtalkPersonRecipientState"]')?.textContent).toBe('未绑定钉钉')
+
+    const unknown = container.querySelector('[data-person-recipient="user_fake_unknown"]') as HTMLElement
+    expect(unknown.querySelector('strong')).toBeNull()
+    expect(unknown.querySelector('[data-field="dingtalkPersonRecipientState"]')?.textContent).toBe('未找到该用户')
+  })
+
+  it('two blurs in quick succession send two queued preflight requests, never concurrently', async () => {
+    const client = mockClient()
+    const releases: Array<() => void> = []
+    let inFlight = 0
+    let maxInFlight = 0
+    client.getDingTalkPersonRecipientStatus.mockImplementation(async (_sheetId: string, userIds: string[]) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      inFlight -= 1
+      return userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false })
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_1'
+    idsInput.dispatchEvent(new Event('input'))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    idsInput.value = 'user_1, user_2'
+    idsInput.dispatchEvent(new Event('input'))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    // the second batch waits for the first
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(1)
+    expect(client.getDingTalkPersonRecipientStatus.mock.calls[0][1]).toEqual(['user_1'])
+    releases.shift()?.()
+    await flushPromises()
+    expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(2)
+    expect(client.getDingTalkPersonRecipientStatus.mock.calls[1][1]).toEqual(['user_2'])
+    releases.shift()?.()
+    await flushPromises()
+    expect(maxInFlight).toBe(1)
   })
 
   it('re-checks saved recipients on every open (a binding fixed since the last open is not served from cache)', async () => {
@@ -4391,7 +4459,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   // 客户反馈 2026-10-21 item 1 follow-up: the field typed the user into 本地用户 ID instead of picking it; the
   // typed id never got a link check, so the "not linked" warning stayed hidden until the real run reached 0 people.
-  it('looks up ids TYPED into the local user id box on blur with the sender-side preflight — including a user the roster never lists', async () => {
+  it('looks up ids TYPED into the local user id box on blur: status from the sender-side preflight, names from the roster', async () => {
     const client = mockClient()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
@@ -4408,10 +4476,15 @@ describe('MetaAutomationRuleEditor', () => {
     idsInput.dispatchEvent(new FocusEvent('blur'))
     await flushPromises()
 
-    // ONE batched request, deduped; the roster search is not used for typed ids any more
+    // ONE batched status request, deduped; names still come from the roster's exact-id lookup (round 1b)
     expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledTimes(1)
     expect(client.getDingTalkPersonRecipientStatus).toHaveBeenCalledWith('sheet_1', ['user_1', 'user_fake_synced', 'user_fake_inactive', 'user_fake_unknown'])
-    expect(client.listFormShareCandidates).not.toHaveBeenCalled()
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_1', limit: 50 })
+    expect(container.querySelector('[data-person-recipient="user_1"] [data-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Lin Lan')
+    // no name known → no name slot; the id stays on its usual subtitle line next to the badge
+    const unnamed = container.querySelector('[data-person-recipient="user_fake_unknown"]') as HTMLElement
+    expect(unnamed.querySelector('strong')).toBeNull()
+    expect(unnamed.textContent).toContain('user_fake_unknown')
 
     const summary = container.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')
     expect(summary?.textContent).toContain('Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user — they will not receive the message when the rule fires.')
