@@ -68,7 +68,9 @@ describe('operator-only Yida initializer bootstrap CLI', () => {
   // The CLI's load graph is proven in yida-initialization-bootstrap-cli-load-graph.test.ts: its module
   // reset must not run here, or the CLI below would decode against a fresh YidaInitializationError class.
   it('a foreign error that only imitates a definite code stays unconfirmed', async () => {
-    const forged = Object.assign(new Error('YIDA_INITIALIZATION_CONFLICT'), { code: 'YIDA_INITIALIZATION_CONFLICT' })
+    const forged = Object.assign(new Error('YIDA_INITIALIZATION_CONFLICT'), {
+      code: 'YIDA_INITIALIZATION_CONFLICT', name: 'YidaInitializationError',
+    })
     Object.setPrototypeOf(forged, YidaInitializationError.prototype)
     const provision = vi.fn(async () => { throw forged })
     expect(await runYidaInitializationBootstrapCli(['--input', inputPath, '--apply'], {

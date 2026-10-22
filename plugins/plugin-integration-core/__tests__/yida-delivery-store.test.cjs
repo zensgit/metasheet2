@@ -41,10 +41,14 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   // An allowlist, not a denylist: vitest also accepts kebab and short-cluster spellings of its filter
   // flags, so every token is pinned. The DATABASE_URL guard line, then one command line whose tokens
   // before 'run' are exact and whose only option after 'run' is the reporter.
-  const lines = step.run.replace(/\\\r?\n/g, ' ').split(/\r?\n/).filter((line) => line.trim())
+  // Join continuations and split words the way bash does: a backslash-newline pair is deleted, not
+  // replaced by a space, and only spaces and tabs separate words. Anything outside printable ASCII is
+  // refused, so no exotic space or unspaced continuation can hide two files in one bash argument.
+  assert.match(step.run, /^[\x20-\x7e\n]*$/)
+  const lines = step.run.replace(/\\\r?\n/g, '').split(/\r?\n/).filter((line) => line.trim())
   assert.equal(lines.length, 2)
   assert.equal(lines[0].trim(), ': "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"')
-  const tokens = lines[1].trim().split(/\s+/)
+  const tokens = lines[1].trim().split(/[ \t]+/)
   const runAt = tokens.indexOf('run')
   assert.deepEqual(tokens.slice(0, runAt + 1),
     ['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])

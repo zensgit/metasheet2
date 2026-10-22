@@ -101,9 +101,11 @@ it('registers both host-boundary real-PG proofs in the EXPECT_DB lane and exclud
   // The same exact-token rule as plugins/plugin-integration-core/__tests__/yida-delivery-store.test.cjs,
   // which also pins this step's whole file list: the tokens before 'run' are exact and the reporter is
   // the only option after it, so no filter flag in any spelling vitest accepts can skip these DB cases.
-  const lines = (step?.run ?? '').replace(/\\\r?\n/g, ' ').split(/\r?\n/).filter(line => line.trim())
+  // Same bash-faithful join and split as the plugin guard, with the same printable-ASCII refusal.
+  expect(step?.run ?? '').toMatch(/^[\x20-\x7e\n]*$/)
+  const lines = (step?.run ?? '').replace(/\\\r?\n/g, '').split(/\r?\n/).filter(line => line.trim())
   expect(lines).toHaveLength(2)
-  const tokens = lines[1].trim().split(/\s+/)
+  const tokens = lines[1].trim().split(/[ \t]+/)
   const runAt = tokens.indexOf('run')
   expect(tokens.slice(0, runAt + 1))
     .toEqual(['pnpm', '--filter', '@metasheet/core-backend', 'exec', 'vitest', '--config', 'vitest.integration.config.ts', 'run'])
