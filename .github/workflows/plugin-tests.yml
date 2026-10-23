@@ -1137,6 +1137,17 @@ jobs:
           dropdb -U postgres --if-exists metasheet_test
           createdb -U postgres metasheet_test || true
 
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run attendance import timezone protocol gate
+        id: attendance-import-timezone-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance import timezone protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/6032/protocol-result.json
+
       - name: Run private-db backend drain proof
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test

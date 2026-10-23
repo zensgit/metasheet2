@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { parseImportAbsoluteDate, normalizeImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
   isCanonicalImportUserId,
   importUserIdentifierLookupKey,
@@ -7003,6 +7004,8 @@ function parseImportedDateTime(value, workDate, timeZone) {
   if (value instanceof Date) return value
   const text = String(value).trim()
   if (!text) return null
+  const absolute = parseImportAbsoluteDate(text)
+  if (absolute) return absolute
   const dateMatch = text.match(/\d{4}-\d{2}-\d{2}/)
   const timeMatch = text.match(/\d{2}:\d{2}(:\d{2})?/)
   if (dateMatch && timeMatch) {
@@ -7177,7 +7180,7 @@ function buildRowsFromDingTalk({ columns, data, userId }) {
     for (const entry of values) {
       const dateRaw = entry?.date
       if (!dateRaw) continue
-      const dateKey = String(dateRaw).slice(0, 10)
+      const dateKey = String(dateRaw)
       if (!rowsByDate.has(dateKey)) {
         rowsByDate.set(dateKey, {
           workDate: dateKey,
@@ -7202,7 +7205,7 @@ function buildRowsFromEntries({ entries }) {
   const rowsByKey = new Map()
   for (const entry of entries) {
     const meta = entry?.meta ?? {}
-    const workDate = entry?.workDate ?? meta.workDate ?? (entry?.occurredAt ? String(entry.occurredAt).slice(0, 10) : null)
+    const workDate = entry?.workDate ?? meta.workDate ?? (entry?.occurredAt ? String(entry.occurredAt) : null)
     if (!workDate) continue
     const userId = entry?.userId ?? meta.userId
     const rowKey = `${userId ?? meta.sourceUserKey ?? 'unknown'}|${workDate}`
@@ -28326,7 +28329,24 @@ module.exports = {
 		      importUploadCleanupInterval = null
 		    }
 
-	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+    const resolveImportCalendarRows = async (rows, payload, orgId, coalesce = false, fallbackUserId = payload.userId, deferCalendarErrors = false) => {
+      const result = await normalizeImportCalendarRows({ db, orgId, payload, rows, coalesce, fallbackUserId }, {
+        loadDefaultRule, loadAttendanceGroupRuleSetMap, loadRuleSetConfigById,
+        resolveAttendanceGroupKey, normalizeRuleOverride, toWorkDate, normalizeDateOnly,
+        resolveRowUserId, resolveImportRowUserReference, loadAttendanceImportUserIdentifierIndex,
+        loadRotationAssignment, loadShiftAssignment, addDaysToDateKey, HttpError,
+      })
+      if (deferCalendarErrors) return result
+      if (result.calendarError) throw result.calendarError
+      return result.rows
+    }
+
+	    const resolveImportRows = async ({ payload, orgId, fallbackUserId, deferCalendarErrors = false }) => {
+      const calendar = async (rows, coalesce = false) => {
+        const result = await resolveImportCalendarRows(rows, payload, orgId, coalesce, fallbackUserId, true)
+        if (!deferCalendarErrors && result.calendarError) throw result.calendarError
+        return { ...result, csvWarnings: [], csvFileId: null }
+      }
 	      let csvWarnings = []
 	      let csvFileId = null
 		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
@@ -28338,23 +28358,19 @@ module.exports = {
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
-		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
+		      if (Array.isArray(payload.rows)) return calendar(payload.rows)
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
 		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
-		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
-	      return {
-	        rows: buildRowsFromDingTalk({
-	          columns: payload.columns,
-		          data: payload.data,
-		          userId: payload.userId ?? fallbackUserId,
-		        }),
-		        csvWarnings,
-	        csvFileId,
-	      }
+		      if (Array.isArray(payload.entries)) return calendar(buildRowsFromEntries({ entries: payload.entries }), true)
+      return calendar(buildRowsFromDingTalk({
+        columns: payload.columns,
+        data: payload.data,
+        userId: payload.userId ?? fallbackUserId,
+      }), true)
 	    }
 
 	    const createMaterializedImportRowSource = ({ rows, csvWarnings, csvFileId }) => ({
@@ -43478,7 +43494,8 @@ module.exports = {
             },
           })
 
-	          const { rows, csvWarnings: rawCsvWarnings } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
@@ -43504,12 +43521,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportPreviewAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? userId,
             actorAccess: importAccess,
           })
           if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (requireImportCommitToken) {
             if (!requesterId) {
               res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -44083,7 +44101,8 @@ module.exports = {
             },
           })
 
-	          const { rows, csvWarnings: rawCsvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, csvFileId, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? requesterId,
@@ -44109,12 +44128,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? requesterId,
             actorAccess: importAccess,
 	          })
 	          if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (!importAccess.fullImport && idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey, { createdBy: requesterId })
 	          if (existing) {
@@ -44836,7 +44856,8 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings, csvFileId, calendarError, scopeRows } = await resolveImportRows({
+	            deferCalendarErrors: true,
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
@@ -44848,12 +44869,13 @@ module.exports = {
 	          }
           const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
             orgId,
-            rows,
+            rows: scopeRows ?? rows,
             payload: parsed.data,
             fallbackUserId: parsed.data.userId ?? userId,
             actorAccess: importAccess,
           })
           if (!scopedAccess) return
+          if (calendarError) throw calendarError
 	        if (requireImportCommitToken) {
           let tokenOk = false
           try {
@@ -45325,9 +45347,11 @@ module.exports = {
               userMapSourceFields: config.userMapSourceFields,
               mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
             }
+            const normalizedRows = await resolveImportCalendarRows(allRows, payload, orgId, true, requesterId)
+            payload.rows = normalizedRows
 	        const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
 	          orgId,
-	          rows: allRows,
+	          rows: normalizedRows,
 	          payload,
 	          fallbackUserId: requesterId,
 	          actorAccess: importAccess,
