@@ -132,6 +132,7 @@ node __tests__/stock-preparation-table-actions.test.cjs
 node __tests__/stock-preparation-project-write-lock.test.cjs
 node __tests__/stock-preparation-project-write-guard-apply.test.cjs
 node __tests__/stock-preparation-project-write-guard-routes.test.cjs
+node __tests__/stock-preparation-carry-confirm-write-lease.test.cjs
 node __tests__/stock-preparation-target-field-existence-probe.test.cjs
 node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs
 node __tests__/stock-preparation-mvp-generation.test.cjs
