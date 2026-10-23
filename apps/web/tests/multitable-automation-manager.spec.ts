@@ -34,6 +34,14 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   }
 }
 
+const RECIPIENT_STATUS: Record<string, { userId: string; exists: boolean; active: boolean; dingtalkLinked: boolean }> = {
+  user_1: { userId: 'user_1', exists: true, active: true, dingtalkLinked: true },
+  user_2: { userId: 'user_2', exists: true, active: true, dingtalkLinked: false },
+  user_fake_synced: { userId: 'user_fake_synced', exists: true, active: true, dingtalkLinked: false },
+  user_fake_inactive: { userId: 'user_fake_inactive', exists: true, active: false, dingtalkLinked: true },
+  user_fake_roleless_linked: { userId: 'user_fake_roleless_linked', exists: true, active: true, dingtalkLinked: true },
+}
+
 function mockClient(
   rules: AutomationRule[] = [],
   options: {
@@ -54,6 +62,8 @@ function mockClient(
     rulesAfterPatch?: AutomationRule[]
     /** #6155: the rule PATCH does not answer until this settles (lets a spec look at the in-flight state). */
     patchGate?: Promise<void>
+    /** 客户反馈 2026-10-21 item 1 (review round 1): the rule's run log. */
+    logs?: Array<Record<string, unknown>>
   } = {},
 ) {
   let patchAttempted = false
@@ -149,7 +159,13 @@ function mockClient(
         steps: [],
       }))
     }
+    // 客户反馈 2026-10-21 item 1 (review round 1): the sender-side recipient preflight (booleans only).
+    if (method === 'POST' && url.includes('/automations/dingtalk-person-recipient-status')) {
+      const body = JSON.parse(init?.body as string) as { userIds: string[] }
+      return ok({ items: body.userIds.map((userId) => RECIPIENT_STATUS[userId] ?? { userId, exists: false, active: false, dingtalkLinked: false }) })
+    }
     if (method === 'GET' && url.includes('/automations')) {
+      if (url.includes('/logs')) return ok({ executions: options.logs ?? [] })
       if (url.includes('/dingtalk-group-deliveries')) {
         if (options.groupDeliveryErrorMessage) return apiError(options.groupDeliveryErrorMessage)
         return ok({ deliveries: groupDeliveries })
@@ -2399,8 +2415,11 @@ describe('MetaAutomationManager', () => {
     saveBtn.click()
     await flushPromises()
 
-    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    const isPreflight = (url: string) => url.includes('/automations/dingtalk-person-recipient-status')
+    const postCalls = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !isPreflight(url))
     expect(postCalls.length).toBe(1)
+    // the picked user was checked with the sender-side preflight
+    expect(fetchFn.mock.calls.some(([url, init]: [string, RequestInit | undefined]) => isPreflight(url) && JSON.parse(init?.body as string).userIds.includes('user_1'))).toBe(true)
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.actionConfig.userIds).toEqual(['user_1'])
     expect(body.actionConfig.memberGroupIds).toEqual(['group_1'])
@@ -2488,6 +2507,175 @@ describe('MetaAutomationManager', () => {
     const memberGroupIdsInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
     expect(memberGroupIdsInput.value).toBe('group_1')
     expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'inactive', limit: 8 })
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 1, F2): the quick legacy form's 本地用户 ID box gets the same
+  // sender-side preflight as the rule editor.
+  it('quick legacy form: typed local user ids are checked on blur and a save with unreachable ones shows a notice', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Typed recipients'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_synced, user_fake_inactive, user_fake_unknown'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+    // round 1b: no name known → no name slot (the id is not shown as if it were a name)
+    for (const id of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) {
+      expect(container.querySelector(`[data-automation-person-recipient="${id}"] strong`)).toBeNull()
+    }
+
+    const preflights = fetchFn.mock.calls.filter(([url]: [string]) => url.includes('/automations/dingtalk-person-recipient-status'))
+    expect(preflights).toHaveLength(1)
+    expect(JSON.parse(preflights[0][1]?.body as string)).toEqual({ userIds: ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown'] })
+    const states = [...container.querySelectorAll('[data-automation-field="dingtalkPersonRecipientState"]')].map((el) => el.textContent)
+    expect(states).toEqual(['Not linked to DingTalk', 'Inactive', 'No user with this ID'])
+    const summary = container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')?.textContent ?? ''
+    expect(summary).toContain('Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user')
+    for (const id of ['user_fake_synced', 'user_fake_inactive', 'user_fake_unknown']) expect(summary).not.toContain(id)
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'T'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'B'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement).click()
+    await flushPromises()
+
+    // saved (not blocked) and told
+    const saves = fetchFn.mock.calls.filter(([url, init]: [string, RequestInit | undefined]) => init?.method === 'POST' && !url.includes('dingtalk-person-recipient-status'))
+    expect(saves).toHaveLength(1)
+    expect(document.body.textContent).toContain('Saved. Selected recipients: 1 not linked to DingTalk, 1 inactive, 1 with no matching user')
+  })
+
+  it('quick legacy form: a typed id the roster knows is shown by name (status still from the preflight)', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_2'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'user_2', limit: 50 })
+    const chip = container.querySelector('[data-automation-person-recipient="user_2"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientName"]')?.textContent).toBe('Zhao Ming')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')?.textContent).toBe('Not linked to DingTalk')
+  })
+
+  it('quick legacy form: a roleless user the sender reaches reads as outside the member list, not 未找到该用户', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'send_dingtalk_person_message')
+    await flushPromises()
+    const idsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    idsInput.value = 'user_fake_roleless_linked'
+    idsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    idsInput.dispatchEvent(new FocusEvent('blur'))
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-person-recipient="user_fake_roleless_linked"]') as HTMLElement
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientOutsideMemberList"]')?.textContent)
+      .toBe('User exists, but is not in this table’s member list')
+    expect(chip.querySelector('[data-automation-field="dingtalkPersonRecipientState"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="dingtalkPersonNotLinkedSummary"]')).toBeNull()
+  })
+
+  // Review round 2: the advanced editor's DingTalk recipient notice is shown by the HOST only after the save
+  // really succeeded — a refused save (400 / 503) must never read 「已保存」.
+  for (const outcome of ['fails', 'succeeds'] as const) {
+    it(`advanced editor: when the save ${outcome}, the 「已保存」 DingTalk notice is ${outcome === 'fails' ? 'NOT ' : ''}shown`, async () => {
+      const personRule = fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' },
+        actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_2'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+      })
+      const { client, fetchFn } = mockClient([personRule], outcome === 'fails'
+        ? { patchError: { status: 400, code: 'VALIDATION_ERROR', message: 'Rejected by the server' } }
+        : {})
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+      await flushPromises()
+      // the preflight says user_2 is not linked
+      expect(document.querySelector('[data-field="dingtalkPersonNotLinkedSummary"]')?.textContent).toContain('1 selected user is not linked to DingTalk')
+
+      ;(document.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+      await flushPromises()
+
+      expect(fetchFn.mock.calls.some(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')).toBe(true)
+      if (outcome === 'fails') {
+        expect(document.body.textContent).not.toContain('Saved. 1 selected user is not linked')
+        // the editor stays open for a fix
+        expect(document.querySelector('[data-action="save"]')).toBeTruthy()
+      } else {
+        expect(document.body.textContent).toContain('Saved. 1 selected user is not linked to DingTalk')
+      }
+    })
+  }
+
+  it('a run log row that skipped DingTalk recipients opens the rule’s person delivery records on 跳过（未绑定）', async () => {
+    const { client, fetchFn } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_1'], titleTemplate: 'T', bodyTemplate: 'B' },
+      }),
+    ], {
+      logs: [{
+        id: 'exec_skip',
+        ruleId: 'rule_1',
+        status: 'skipped',
+        triggeredBy: 'event',
+        triggeredAt: '2026-10-21T10:00:00Z',
+        duration: 5,
+        steps: [{
+          actionType: 'send_dingtalk_person_message',
+          status: 'skipped',
+          output: { reason: 'dingtalk_recipients_unreachable', notifiedUsers: 0, skippedRecipientCount: 1, skippedUserIds: ['user_unbound'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } },
+        }],
+      }],
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('[data-automation-logs="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(document.querySelector('[data-log-id="exec_skip"]') as HTMLElement).click()
+    await flushPromises()
+    expect(document.querySelector('.meta-log-viewer')?.textContent ?? '').not.toContain('user_unbound')
+
+    ;(document.querySelector('[data-action="open-person-deliveries"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(document.querySelector('.meta-log-viewer')).toBeNull()
+    const statusFilter = document.querySelector('.meta-person-delivery [data-field="statusFilter"]') as HTMLSelectElement
+    expect(statusFilter.value).toBe('skipped')
+    // review round 2: the skipped filter is asked of the SERVER (not only applied to the latest page)
+    expect(fetchFn.mock.calls.some(([url]: [string]) => url.includes('/dingtalk-person-deliveries') && url.includes('status=skipped'))).toBe(true)
+    expect(document.querySelector('[data-person-delivery-id="dpd_skipped"]')?.textContent).toContain('Unbound User')
+    expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
+
   })
 
   it('opens DingTalk person delivery viewer for person message rules', async () => {
@@ -2732,7 +2920,9 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('can send real DingTalk messages')
+    // 客户反馈 2026-10-21 item 1 follow-up: the UI test run is a simulation; the copy no longer claims real sends.
+    expect(container.textContent).toContain('Test Run simulates the saved rule: it sends no DingTalk messages')
+    expect(container.textContent).not.toContain('can send real DingTalk messages')
 
     testBtn.click()
     await flushPromises()
@@ -2775,7 +2965,8 @@ describe('MetaAutomationManager', () => {
 
     const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
     expect(testBtn.disabled).toBe(false)
-    expect(container.textContent).toContain('可能向已配置的钉钉群或用户发送真实消息')
+    expect(container.textContent).toContain('测试运行是对已保存规则的模拟：不会发送任何钉钉消息')
+    expect(container.textContent).not.toContain('发送真实消息')
 
     testBtn.click()
     // UF-8: the test-run confirm is now async (ElMessageBox) — flush microtasks so the handler
@@ -2784,7 +2975,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('正在运行测试。钉钉动作可能发送真实消息。')
+      .toContain('正在模拟运行测试，不会发送钉钉消息。')
 
     resolveExecution({
       id: 'exec_1',
@@ -2971,7 +3162,7 @@ describe('MetaAutomationManager', () => {
 
     const runningStatus = container.querySelector('[data-field="testRunStatus"]')
     expect(runningStatus?.textContent).toContain('Running test.')
-    expect(runningStatus?.textContent).not.toContain('DingTalk actions may send real messages')
+    expect(runningStatus?.textContent).not.toContain('No DingTalk messages are sent')
 
     resolveExecution({
       id: 'exec_1',

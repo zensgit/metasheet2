@@ -95,8 +95,10 @@ async function createApp(options: {
   vi.doMock('../../src/multitable/dingtalk-group-delivery-service', () => ({
     listAutomationDingTalkGroupDeliveries: listGroupDeliveries,
   }))
+  const actualPersonDeliveryService = await vi.importActual<typeof import('../../src/multitable/dingtalk-person-delivery-service')>('../../src/multitable/dingtalk-person-delivery-service')
   vi.doMock('../../src/multitable/dingtalk-person-delivery-service', () => ({
     listAutomationDingTalkPersonDeliveries: listPersonDeliveries,
+    parseDingTalkPersonDeliveryStatusFilter: actualPersonDeliveryService.parseDingTalkPersonDeliveryStatusFilter,
   }))
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
@@ -160,6 +162,34 @@ describe('DingTalk automation delivery routes', () => {
       data: { deliveries: personDeliveries },
     })
     expect(listPersonDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 1)
+  })
+
+  // 客户反馈 2026-10-21 item 1 (review round 2): the run log's link asks the SERVER for skipped rows.
+  it('forwards a valid status filter to the delivery list and rejects any other value before reading', async () => {
+    const { app, listPersonDeliveries } = await createApp({ personDeliveries: [] })
+    await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}/dingtalk-person-deliveries`)
+      .query({ status: 'skipped' })
+      .expect(200)
+    expect(listPersonDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 50, { status: 'skipped' })
+
+    listPersonDeliveries.mockClear()
+    const bad = await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}/dingtalk-person-deliveries`)
+      .query({ status: 'pending' })
+      .expect(400)
+    expect(bad.body.error.code).toBe('VALIDATION_ERROR')
+    expect(JSON.stringify(bad.body)).not.toContain('pending')
+    expect(listPersonDeliveries).not.toHaveBeenCalled()
+  })
+
+  it('the status filter does not bypass the gate', async () => {
+    const { app, listPersonDeliveries } = await createApp({ perms: ['multitable:read'] })
+    await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}/dingtalk-person-deliveries`)
+      .query({ status: 'skipped' })
+      .expect(403)
+    expect(listPersonDeliveries).not.toHaveBeenCalled()
   })
 
   it('lists group delivery history and clamps large limits to 200', async () => {

@@ -1103,8 +1103,8 @@ const COVERED: Record<string, CoveredFile> = {
     },
   },
   'routes/automation.ts': {
-    minHandlers: 9,
-    minInScope: 5,
+    minHandlers: 10,
+    minInScope: 6,
     exempt: {
       'GET /automation-executions': {
         reason: 'PLATFORM-ADMIN GOVERNANCE READ and the post-mortem path for deleted rules and sheets '
