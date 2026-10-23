@@ -22,6 +22,12 @@
 // 5f978b240 (`git diff --stat 5f978b240 1638ab91c -- plugins/plugin-integration-core/lib/stock-preparation-*`
 // is empty). A literal that has to move is a behaviour change of the old flow, not a re-capture.
 //
+// RE-CAPTURED ON origin/main cde8e17e21b93384154eca6aa9c4679621e1a15b (#6501, the project write lease)
+// with the lanes wrapped the way that commit's golden harness wraps them (binder-wrapped dry-run,
+// lease-wrapped apply with its guard, consumable token store) — again with no PR-1 code (a
+// `git -c core.autocrlf=false archive` copy of that commit's plugin directory, this file added): the
+// SCC_CAPTURE output was BYTE-IDENTICAL to the 1638ab91c capture, so GOLDEN holds on both bases.
+//
 // After PR-1 the same legs must reproduce GOLDEN exactly AND the rows the reader returned must carry
 // the record reference (otherwise the identity would be vacuous: nothing would have been attached).
 //
@@ -42,6 +48,8 @@ const {
 } = require('./support/stock-preparation-demand-evidence-golden-harness.cjs')
 
 const GOLDEN_BASE_SHA = '1638ab91cc89e04b839dc78ed55a7b49bb40ff4f'
+// The #6501 base the same literals were re-captured on (byte-identical, see the header).
+const GOLDEN_RECAPTURE_SHA = 'cde8e17e21b93384154eca6aa9c4679621e1a15b'
 const CAPTURE = process.env.SCC_CAPTURE === '1'
 const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
 
@@ -222,9 +230,16 @@ function recordRefsOf(rows) {
 
 async function observeScenario(harness, scenario) {
   const { tableActions, largeBomJobs } = harness
+  // The lanes the way the routes drive them since #6501 (the same wrapping the #6502 golden harness's
+  // `laneCalls` applies): the dry-run through the generation binder, the apply inside the project write
+  // lease with its guard (a records fake gets the kit's fake host write fence), and a token store with
+  // the atomic consume. The large approval stays unbound, as in that harness.
+  const writeLockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
+  const writeLock = writeLockKit.createLibWriteLockHarness()
+  const dryRunStockPreparationAction = writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction)
+  const applyStockPreparationAction = writeLock.wrapApply(tableActions.applyStockPreparationAction)
+  const createTokenStore = () => writeLockKit.createConsumableStorage()
   const {
-    applyStockPreparationAction,
-    dryRunStockPreparationAction,
     prepareStockPreparationConfirmationDecisions,
     prepareStockPreparationMvpSnapshot,
     stockPreparationSourceContentDigest,
@@ -243,7 +258,7 @@ async function observeScenario(harness, scenario) {
   const refs = {}
 
   // 1. Small dry-run against the seeded sheet.
-  const tokenStore = createMemoryStorage()
+  const tokenStore = createTokenStore()
   const dryRun = await dryRunStockPreparationAction({
     action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
   })
@@ -332,7 +347,7 @@ async function observeScenario(harness, scenario) {
     }
 
     // 6. Apply onto the SEEDED sheet: the written rows include the patched (UPDATE / INACTIVE) ones.
-    const applyStore = createMemoryStorage()
+    const applyStore = createTokenStore()
     const applyRecords = seededRecordsApi(scenario)
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
@@ -516,6 +531,7 @@ async function run(name, fn) {
 
 async function main() {
   assert.match(GOLDEN_BASE_SHA, /^[0-9a-f]{40}$/)
+  assert.match(GOLDEN_RECAPTURE_SHA, /^[0-9a-f]{40}$/)
   const harness = installExpansionCaptureSwitch()
   const captured = {}
 
