@@ -6,7 +6,9 @@
 //
 // It holds:
 //   1. a FAITHFUL fake of the scoped db helper (lib/db.cjs) over the FIVE step-4 tables of migrations 102 /
-//      103: equality WHERE with null meaning IS NULL, ORDER BY one column, LIMIT / OFFSET, SELECT *, PRIMARY
+//      103 (plus the registry table of 087 / 101, columns only, so PR B's pilot reads can run on the consult's
+//      snapshot handle — review X-1; `registryPilotColumns: false` is a database without migration 101):
+//      equality WHERE with null meaning IS NULL, ORDER BY one column, LIMIT / OFFSET, SELECT *, PRIMARY
 //      KEY and every UNIQUE index of the two migrations modelled EXACTLY (name, columns, partial predicate ->
 //      23505 with the constraint name), NOT NULL / DEFAULT / enum CHECKs PARSED FROM THE MIGRATION TEXT
 //      itself (so the fake cannot drift from the SQL), the shape CHECKs that are not enum lists modelled by
@@ -31,7 +33,12 @@ const MIGRATIONS = path.join(__dirname, '..', '..', '..', '..', 'packages', 'cor
 const MIGRATION_FILES = Object.freeze({
   continuation: path.join(MIGRATIONS, '102_create_integration_stock_prep_continuation.sql'),
   refreshState: path.join(MIGRATIONS, '103_create_integration_stock_prep_refresh_state.sql'),
+  // The registry (PR B's pilot reads run on the consult's snapshot handle, review X-1): 087's table plus the
+  // three pilot columns migration 101 adds.
+  registry: path.join(MIGRATIONS, '087_create_integration_stock_prep_project_target.sql'),
+  registryPilot: path.join(MIGRATIONS, '101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable.sql'),
 })
+const REGISTRY_TABLE = 'integration_stock_prep_project_target'
 
 const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const { REFRESH_STORE_TABLES: T } = storeModule
@@ -111,7 +118,7 @@ function parseSchema(sql) {
         if (unique) enums.push({ name, unique: unique[1].split(',').map((column) => column.trim()) })
         continue
       }
-      const column = part.match(/^(\w+) (TEXT|INTEGER|BOOLEAN|NUMERIC|JSONB|TIMESTAMPTZ)(.*)$/)
+      const column = part.match(/^(\w+) (TEXT|INTEGER|BOOLEAN|NUMERIC|JSONB|TIMESTAMPTZ|DATE)(.*)$/)
       if (!column) throw new Error(`refresh-store kit: unparsed column "${part}" in ${table}`)
       const [, name, type, rest] = column
       const defaultMatch = rest.match(/DEFAULT ([^ ]+(?:\(\))?)/)
@@ -127,10 +134,26 @@ function parseSchema(sql) {
   return out
 }
 
-function loadSchema() {
+/**
+ * The five step-4 tables (102 / 103) and the registry table. The registry is 087's columns plus — unless
+ * `registryPilotColumns: false` (a database where migration 101 has not run) — the columns 101 ADDs, parsed from
+ * its `ADD COLUMN IF NOT EXISTS` lines. The registry's CHECKs and unique indexes are NOT modelled (later
+ * migrations re-list its CHECKs; the suites only read it through PR B's pilot reads).
+ */
+function loadSchema({ registryPilotColumns = true } = {}) {
+  const registry = parseSchema(readMigrationText(MIGRATION_FILES.registry))
+  if (!registry[REGISTRY_TABLE]) throw new Error('refresh-store kit: migration 087 no longer creates the registry table')
+  registry[REGISTRY_TABLE].enums = []
+  if (registryPilotColumns) {
+    const text = stripComments(readMigrationText(MIGRATION_FILES.registryPilot))
+    const added = Array.from(text.matchAll(/ADD COLUMN IF NOT EXISTS (\w+) (TEXT|INTEGER|TIMESTAMPTZ|BOOLEAN)\b/g))
+    if (added.length !== 3) throw new Error(`refresh-store kit: migration 101 adds ${added.length} registry columns, expected 3`)
+    for (const [, name, type] of added) registry[REGISTRY_TABLE].columns[name] = { type, primaryKey: false, notNull: false, default: undefined }
+  }
   return {
     ...parseSchema(readMigrationText(MIGRATION_FILES.continuation)),
     ...parseSchema(readMigrationText(MIGRATION_FILES.refreshState)),
+    ...registry,
   }
 }
 
@@ -192,8 +215,8 @@ function compareValues(left, right) {
   return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0)
 }
 
-function createFakeRefreshDb({ withoutUniqueIndexes = [], clock } = {}) {
-  const schema = loadSchema()
+function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotColumns = true } = {}) {
+  const schema = loadSchema({ registryPilotColumns })
   const nowFn = clock && typeof clock.now === 'function' ? clock.now : () => new Date()
   const uniques = UNIQUE_INDEXES.filter((index) => !withoutUniqueIndexes.includes(index.name))
   for (const name of withoutUniqueIndexes) {
@@ -430,6 +453,8 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock } = {}) {
           await enter('setTransactionIsolationLevel', { level }, 'trx.')
         },
       }
+      // The handle of the transaction in progress (or last run): a suite can assert a callee was handed THIS one.
+      db.lastTransactionHandle = handle
       try {
         const result = await callback(handle)
         log.push(['commit', {}])
@@ -638,12 +663,77 @@ function memberCollisionHold(base, which, { parentId = 'R-001', suffix = '_mc' }
   return hold
 }
 
+/**
+ * A candidate hold whose claims share NOTHING with `base` (review X-3 control): every old record id and old key
+ * is fresh and the subtree is re-rooted under another parent, so no old record, old key or new position (root
+ * or member) overlaps. On a sheet where `base` is confirmed it commits on its own — so a supersede naming
+ * `base` that is refused is refused by the relatedness rule alone.
+ */
+function disjointCandidateHold(base, { parentId = 'Z-001', suffix = '_dj' } = {}) {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const moved = competingCandidateHold(base, { parentId })
+  const freshKey = (key) => {
+    const parsed = JSON.parse(key)
+    return JSON.stringify({ ...parsed, path: parsed.path.map((token, index) => (index === 0 ? `${token}${suffix}` : token)) })
+  }
+  const pairs = moved.detail.pairs.map((pair) => ({ ...pair, oldRecordId: `${pair.oldRecordId}${suffix}`, oldKey: freshKey(pair.oldKey) }))
+  const root = pairs.find((pair) => pair.relativePath.length === 0)
+  const detail = { ...moved.detail, pairs, oldRootKeys: [root.oldKey], oldRootRecordIds: [root.oldRecordId], newPositionKeys: [root.newKey] }
+  const subject = { ...moved.subject, oldRootRecordId: root.oldRecordId }
+  const hold = {
+    kind: 'continuation_candidate',
+    confirmable: true,
+    subject,
+    evidenceFingerprint: crypto.createHash('sha256').update(`disjoint-evidence:${suffix}:${base.evidenceFingerprint}`).digest('hex'),
+    comparisonFingerprint: base.comparisonFingerprint,
+    pairingFingerprint: crypto.createHash('sha256').update(`disjoint-pairing:${suffix}:${base.pairingFingerprint}`).digest('hex'),
+    detail,
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
+/**
+ * A `relationship_reconfirm` hold about `continuationId`, as the pure core's verification emits it (pairing.cjs
+ * verificationHold): confirmable for the re-confirmable verdicts, else not confirmable with its reason token.
+ */
+function reconfirmHoldFor(continuationId, { confirmable = true, reason = 'reconfirm_not_admissible', verdict = 'source_scope_changed' } = {}) {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const hold = {
+    kind: 'relationship_reconfirm',
+    confirmable,
+    ...(confirmable ? {} : { notConfirmableReason: reason }),
+    continuationId,
+    subject: { continuationId, newRootKeyDigest: 'f'.repeat(64) },
+    evidenceFingerprint: `${verdict}-evidence-${'1'.repeat(40)}`,
+    comparisonFingerprint: `${verdict}-comparison-${'2'.repeat(40)}`,
+    pairingFingerprint: `${verdict}-pairing-${'3'.repeat(40)}`,
+    detail: { verdict, steps: {}, pairs: null, comparison: null, demand: null },
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
+/** A registry row (087 + 101 columns) as PR B's store writes it; `pilot` stamps the three 101 columns. */
+function registryRow({ id, tenantId, projectNo, sheetId, objectId, status = 'active', pilot = false, at = new Date('2026-10-24T00:00:00.000Z') }) {
+  return {
+    id: id || `pt_${sheetId}`,
+    tenant_id: tenantId,
+    project_no: projectNo,
+    sheet_id: sheetId,
+    object_id: objectId || `obj_${sheetId}`,
+    status,
+    ...(pilot ? { pilot_enabled_at: at, pilot_enabled_by: 'u_admin', pilot_readiness_version: 1 } : {}),
+  }
+}
+
 function echoOf(hold) {
   return { holdFingerprint: hold.fingerprint, comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint }
 }
 
 module.exports = {
   MIGRATION_FILES,
+  REGISTRY_TABLE,
   SHAPE_CHECKS,
   UNIQUE_INDEXES,
   candidateHoldFixture,
@@ -652,11 +742,14 @@ module.exports = {
   createClock,
   createFakeBumpWithin,
   createFakeRefreshDb,
+  disjointCandidateHold,
   echoOf,
   loadSchema,
   memberCollisionHold,
   parseSchema,
   readMigrationText,
+  reconfirmHoldFor,
+  registryRow,
   sameNewPositionHold,
   sqlError,
   writeLockedError,

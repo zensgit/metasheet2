@@ -13,6 +13,29 @@
 //   3. open holds, the refresh-state row, the executions (newest five + every unfinished one) — by
 //      (sheet, project) AND by (tenant, project);
 //   4. the lock row: `readState(sheetWriteScopeKey(sheetId))` and `readGeneration(...)` (values-free).
+//
+// ONE SNAPSHOT FOR 1-3 (review X-1). Steps 1-3 run in ONE plugin-db transaction pinned to REPEATABLE READ by
+// its first statement (the continuation store's `readGovernanceRows`; the registry reads are handed in as its
+// `readFirst` and run on the same handle through PR B's `{ executor }` option). PostgreSQL takes the snapshot
+// at the first SELECT — the registry read — so the pilot marker, the open holds, the continuations, their
+// members and the state row's `decision_version` (the CAS key every hold reconciliation is handed back) are one
+// point in time. A confirm / end that commits while the consult reads is wholly in the answer or wholly out of
+// it; when out, the computation's reconciliation is refused 409 STOCK_PREP_PULL_STATE_MOVED instead of
+// re-opening the hold the decision just resolved, and no derivation can mix "continuation gone" with "hold
+// resolved" into a torn 已完成. A registry refusal still happens before any step-4 row is read.
+//
+// STEP 4 STAYS OUTSIDE THE SNAPSHOT. The lock module reads its row on its own handle, after the snapshot
+// commits. The lock row is never the CAS key (decision_version is), so no tear there can let a stale hold set
+// persist; and the derivation takes only a LIVE / HELD lease from it, so a lease or an execution row that
+// straddles the boundary derives a state that refuses writes and the export: a lease acquired after the
+// snapshot derives 执行中 (`executing`); a lease released after it leaves a snapshot `running` execution with no
+// live lease, which derives 失败待恢复 (`failed_pending_recovery`, transient until the next consult); a lease
+// acquired between `readState` and `readGeneration` derives 失败待恢复 too. The ONE interleaving this does not
+// refuse: a WHOLE execution — its row begun after the snapshot's first SELECT, finished and its lease released
+// before the lock read — is invisible to both halves, and the answer is the state before it (possibly 已完成).
+// A settling computation built on such a consult names the execution it saw (O-14), so the unseen one stays
+// 已执行待核对 for the next consult; the formal export keeps its own double lock / generation read and the
+// settled machine-digest check, which a written execution moves (design §11, O-9 / O-18, PR-5).
 // Then the assertions: EVERY row's tenant must be the proven tenant (409 STOCK_PREP_REFRESH_TENANT_MISMATCH —
 // a derivation discrepancy fails closed, A-M6); every governed row and the registry row must name the
 // RESOLVED sheet and this project (409 STOCK_PREP_REFRESH_TARGET_RETARGETED — the project-sheets switch
@@ -180,16 +203,18 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
     if (!projectWriteLock || typeof projectWriteLock.readState !== 'function' || typeof projectWriteLock.readGeneration !== 'function') throw unavailable('project_write_lock')
   }
 
-  async function readRegistry(scope) {
+  // `snapshot` is the consult's REPEATABLE READ transaction handle (review X-1): PR B's reads run ON it, so the
+  // registry row and the step-4 rows are one point in time.
+  async function readRegistry(scope, snapshot) {
     let byProject
     let bySheet
     try {
-      byProject = await projectTargetStore.getPilotState({ tenantId: scope.tenantId, projectNo: scope.projectNo })
+      byProject = await projectTargetStore.getPilotState({ tenantId: scope.tenantId, projectNo: scope.projectNo }, { executor: snapshot })
     } catch (error) {
       throw translate('registry', 'pilot_state_by_project', error)
     }
     try {
-      bySheet = await projectTargetStore.getPilotStateBySheetId({ sheetId: scope.sheetId })
+      bySheet = await projectTargetStore.getPilotStateBySheetId({ sheetId: scope.sheetId }, { executor: snapshot })
     } catch (error) {
       throw translate('registry', 'pilot_state_by_sheet', error)
     }
@@ -208,14 +233,29 @@ function createStockPreparationRefreshGovernance({ continuationStore = null, pro
   async function consult(input = {}) {
     const scope = normalizeScope(input)
     requireWired()
-    const registry = await readRegistry(scope)
+    // ONE snapshot (review X-1): the store opens the REPEATABLE READ transaction and runs the registry reads
+    // FIRST on its handle, then every step-4 read. A registry refusal (409) or failure (503) is thrown inside it
+    // and passes through untouched (the transaction rolls back before any step-4 row is read).
+    let registry = null
+    let registryRead = false
     let rows
     try {
-      rows = await continuationStore.readGovernanceRows({ tenantId: scope.tenantId, sheetId: scope.sheetId, projectNo: scope.projectNo })
+      rows = await continuationStore.readGovernanceRows(
+        { tenantId: scope.tenantId, sheetId: scope.sheetId, projectNo: scope.projectNo },
+        {
+          readFirst: async (snapshot) => {
+            registry = await readRegistry(scope, snapshot)
+            registryRead = true
+          },
+        },
+      )
     } catch (error) {
       throw translate('continuation', 'read_governance_rows', error)
     }
     if (!isPlainObject(rows) || rows.ok !== true) throw storeFailed('continuation', 'read_governance_rows', null)
+    // A store that answered without running the registry reads in its snapshot never read the registry: that is
+    // unreadable by name, never "not pilot".
+    if (!registryRead) throw storeFailed('registry', 'read_snapshot', null)
     assertRows(rows.continuations, scope, 'continuation', 'continuation')
     assertRows(rows.members, scope, 'continuation', 'continuation_member')
     assertRows(rows.holds, scope, 'continuation', 'refresh_hold')

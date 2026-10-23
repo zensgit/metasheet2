@@ -40,6 +40,26 @@
 // for a clean computation with zero pending decisions — the settled columns (§9.2). `runbook_only` holds
 // (an escalated continuation, §8.4) are never superseded by a computation.
 //
+// THE CONSULT READ IS ONE SNAPSHOT (review X-1). The CAS above only holds if the decision_version the consult
+// observed and the holds / continuations / members it planned from are ONE point in time. `readGovernanceRows`
+// therefore runs every read in ONE transaction pinned to REPEATABLE READ by its first statement (and lets the
+// governance reader put its registry reads first in the same snapshot): a decision that commits mid-consult
+// is either wholly in the answer or wholly out of it — and then the reconciliation keyed on the old
+// decision_version is refused STATE_MOVED.
+//
+// END AND SUPERSEDE ADMISSIBILITY (design §8.4, §9.3; review X-2 / X-3). `endContinuation` ends only a
+// relationship that NEEDS RECONFIRMATION (an ACTIVE one ends only through a confirm's `supersedes`), and
+// `escalate_special_repair` only while an OPEN hold names it (that hold stays open, runbook-only, so the
+// project can never derive 已完成 while it is open). A confirm `supersedes` only a relationship whose claims it
+// overlaps (`claimsOverlap`: an old record, an old key or a new position). Both are refused 409
+// STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE inside the transaction before any row moves.
+//
+// STATUS CONVENTION FOR BAD INPUT: what a PULLER's request carries (scope / actor / row ids 422, the basis
+// and the end note 422 / 400, echoed fingerprints 400, revisions / outcomes / the `supersedes` shape 400) is a
+// 4xx; what the PLANNER or the lane hands over (hold shapes, duplicate fingerprints in one computation,
+// verdicts, settlements, the source identity, a bump answer, the execution guard) is a server-side defect:
+// 500 STOCK_PREP_REFRESH_INPUT_INVALID, refused before any statement.
+//
 // VALUES. Columns marked PRIVATE in the migrations (keys, paths, component ids, quantities, basis text,
 // hold detail) come back from the read projections because the planner and the audited pull-tier routes
 // need them; the CONSULT ANSWER IS SERVER-HELD and never a response body. Every error raised here carries
@@ -115,6 +135,10 @@ const REFRESH_STORE_ERROR_CODES = Object.freeze({
   END_OUTCOME_NOT_ADMISSIBLE: 'STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE',
   HOLD_MALFORMED: 'STOCK_PREP_CONTINUATION_HOLD_MALFORMED',
 })
+
+// The consult's reads share ONE snapshot (review X-1): a lib/db.cjs whitelisted isolation level, pinned by the
+// transaction's first statement.
+const CONSULT_SNAPSHOT_ISOLATION = 'repeatable read'
 
 // Paging: the scoped helper clamps a page at 10000; the ceilings bound what one consult may hold in memory.
 const READ_PAGE_SIZE = 1000
@@ -243,6 +267,12 @@ function holdMalformed(reason) {
   return new StockPreparationRefreshStoreError(500, REFRESH_STORE_ERROR_CODES.HOLD_MALFORMED, 'the hold being confirmed does not carry what a continuation needs', { reason })
 }
 
+// An end outcome the relationship's current state does not admit (design §8.4, §9.3; review X-2 / X-3).
+// Values-free: a closed reason token, the outcome token and, where it helps, the continuation's status token.
+function endNotAdmissible(reason, outcome, extra = {}) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'this end outcome is not admissible for the relationship as it stands; preview again', { reason, outcome, ...extra })
+}
+
 // A typed error of this store passes through untouched; a database error becomes 503 (or the one 23505 mapping
 // the caller names).
 function translate(error, operation, { onUnique } = {}) {
@@ -253,6 +283,33 @@ function translate(error, operation, { onUnique } = {}) {
 
 function keyDigest(key) {
   return subjectDigest(key)
+}
+
+/**
+ * Review X-3 / design §8.4: `superseded_by_new_confirmation` is admissible only when the REPLACING continuation
+ * is "for the same old rows / new position" as the one it ends. Decided precisely as: the two claim sets
+ * OVERLAP on at least one of the A08 claims migration 102's partial unique indexes guard — an old record id
+ * (`old_record_id`, the header's `old_root_record_id` being the root member's), an old key
+ * (`old_key_digest`) or a new position (`new_key_digest`, the header's `new_root_key_digest` being the root
+ * member's). That is exactly "without the supersede this confirmation would collide with the relationship it
+ * names": a supersede is the only way to replace a relationship whose claims the new one needs, and it can
+ * never end a relationship that claims nothing the new one claims (that end would release a subtree's
+ * protection with nothing put in its place). Root-only overlap would be stricter but would leave a puller
+ * whose candidate shares only a child row stuck between CONFIRM_CONFLICT and an ACTIVE relationship no end
+ * outcome admits (§9.3). Digests are compared, never raw keys.
+ */
+function claimsOverlap(previousRow, previousMembers, candidateMembers) {
+  const oldRecordIds = new Set([previousRow.old_root_record_id])
+  const oldKeyDigests = new Set()
+  const newKeyDigests = new Set([previousRow.new_root_key_digest])
+  for (const member of previousMembers) {
+    oldRecordIds.add(member.old_record_id)
+    oldKeyDigests.add(member.old_key_digest)
+    newKeyDigests.add(member.new_key_digest)
+  }
+  return candidateMembers.some((member) => oldRecordIds.has(member.oldRecordId)
+    || oldKeyDigests.has(keyDigest(member.oldKey))
+    || newKeyDigests.has(keyDigest(member.newKey)))
 }
 
 function holdSetFingerprintOf(fingerprints) {
@@ -516,7 +573,9 @@ function normalizeIncomingHold(hold, index) {
   if (hold.confirmable === false && !NOT_CONFIRMABLE_REASONS.includes(reason)) throw inputInvalid('a non-confirmable hold needs a notConfirmableReason token', `${field}.notConfirmableReason`)
   if (hold.shapeToken !== undefined && hold.shapeToken !== null && !SHAPE_TOKENS.includes(hold.shapeToken)) throw inputInvalid('hold.shapeToken is not a shape token', `${field}.shapeToken`)
   if (!isPlainObject(hold.subject)) throw inputInvalid('hold.subject must be an object', `${field}.subject`)
-  if (hold.detail === undefined) throw inputInvalid('hold.detail is required', `${field}.detail`)
+  // `detail` is NOT NULL in migration 103 and the pure core always emits an object: a null is a planner defect,
+  // refused here (500) before any statement instead of reaching the DB as 23502 (which would read as 503).
+  if (hold.detail === undefined || hold.detail === null) throw inputInvalid('hold.detail is required', `${field}.detail`)
   for (const name of ['evidenceFingerprint', 'comparisonFingerprint', 'pairingFingerprint', 'continuationId']) {
     if (hold[name] !== undefined && hold[name] !== null && !nonBlankString(hold[name])) throw inputInvalid(`hold.${name} must be a string when given`, `${field}.${name}`)
   }
@@ -528,7 +587,7 @@ function normalizeIncomingHold(hold, index) {
     shapeToken: hold.shapeToken || null,
     continuationId: hold.continuationId || null,
     subject: hold.subject,
-    detail: hold.detail === null ? null : hold.detail,
+    detail: hold.detail,
     evidenceFingerprint: hold.evidenceFingerprint || null,
     comparisonFingerprint: hold.comparisonFingerprint || null,
     pairingFingerprint: hold.pairingFingerprint || null,
@@ -717,6 +776,21 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
 
   // ── reads ──────────────────────────────────────────────────────────────────────────────────────
 
+  // The ONE consult snapshot (review X-1): a transaction handle that can pin its isolation level, pinned to
+  // REPEATABLE READ by its FIRST statement. A handle that cannot pin is refused before it reads anything (501,
+  // the pinLockProtocolIsolation posture of external-system-pointer-lock.cjs); a failed SET is 503.
+  async function pinConsultSnapshot(rawTrx) {
+    if (!rawTrx || typeof rawTrx.setTransactionIsolationLevel !== 'function' || typeof rawTrx.select !== 'function') {
+      throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the consult snapshot needs a transaction handle that can pin REPEATABLE READ; refusing to read the governance rows without it', { reason: 'snapshot_handle' })
+    }
+    try {
+      await rawTrx.setTransactionIsolationLevel(CONSULT_SNAPSHOT_ISOLATION)
+    } catch (error) {
+      throw translate(error, 'read_snapshot')
+    }
+    return rawTrx
+  }
+
   /**
    * Everything the governance consult needs, read by (tenant, project) AND by sheet (design §5.1 step 2-3):
    * rows that name THIS project on another sheet, or this sheet under another project / tenant, come back
@@ -724,46 +798,72 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * wrong target. Continuations: every status (ended rows still govern, D3). Members: claim_active only
    * (the projection's input). Holds: open only. Executions: the newest five plus every unfinished one.
    * Throws 503 on any failure — never an empty list.
+   *
+   * ONE CONSISTENT SNAPSHOT (review X-1). Every read runs in ONE db.transaction whose FIRST statement is
+   * `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`, so the open holds, the continuations, their members and
+   * the state row's `decision_version` (the CAS key `reconcileHolds` is handed back) are one point in time: a
+   * decision that commits while the consult reads is either wholly visible (its new decision_version with its
+   * rows) or wholly invisible (the old decision_version — and the reconciliation keyed on it is refused 409
+   * STATE_MOVED). Without it the reads were independent autocommit statements and a confirm landing between the
+   * hold reads and the state read re-opened the hold it had just resolved. Read-only: PostgreSQL never answers
+   * a serialization failure to a REPEATABLE READ transaction that only reads.
+   *
+   * `options.readFirst(snapshot)` (optional) runs on the SAME handle right after the SET and before any step-4
+   * read: the governance reader's registry reads (PR B's getPilotState / getPilotStateBySheetId with
+   * `{ executor: snapshot }`). PostgreSQL takes a REPEATABLE READ snapshot at the transaction's first query, so
+   * the registry row and every step-4 row come from one snapshot. Whatever it throws (the reader's typed
+   * refusals) passes through unchanged and the transaction rolls back; its result is not part of this answer.
    */
-  async function readGovernanceRows(input = {}) {
+  async function readGovernanceRows(input = {}, options = {}) {
     const scope = normalizeScope(input)
+    const opts = options === undefined || options === null ? {} : options
+    if (!isPlainObject(opts)) throw inputInvalid('options must be an object', 'options')
+    if (opts.readFirst !== undefined && opts.readFirst !== null && typeof opts.readFirst !== 'function') {
+      throw inputInvalid('readFirst must be a function when given', 'readFirst')
+    }
+    const readFirst = typeof opts.readFirst === 'function' ? opts.readFirst : null
     const T = REFRESH_STORE_TABLES
     const byProject = { tenant_id: scope.tenantId, project_no: scope.projectNo }
     const bySheetProject = { sheet_id: scope.sheetId, project_no: scope.projectNo }
 
-    const continuations = unionById(
-      await selectAll(db, T.continuation, byProject, { ceiling: READ_CEILINGS.continuation, operation: 'read_continuations' }),
-      await selectAll(db, T.continuation, { sheet_id: scope.sheetId }, { ceiling: READ_CEILINGS.continuation, operation: 'read_continuations' }),
-    )
-    const members = unionById(
-      await selectAll(db, T.member, { ...byProject, claim_active: true }, { ceiling: READ_CEILINGS.member, operation: 'read_members' }),
-      await selectAll(db, T.member, { sheet_id: scope.sheetId, claim_active: true }, { ceiling: READ_CEILINGS.member, operation: 'read_members' }),
-    )
-    const holds = unionById(
-      await selectAll(db, T.hold, { ...byProject, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' }),
-      await selectAll(db, T.hold, { ...bySheetProject, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' }),
-    )
-    const states = unionById(
-      await selectAll(db, T.state, byProject, { ceiling: READ_CEILINGS.state, operation: 'read_state' }),
-      await selectAll(db, T.state, bySheetProject, { ceiling: READ_CEILINGS.state, operation: 'read_state' }),
-    )
-    const executionLists = [
-      await selectLimited(db, T.execution, { where: bySheetProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
-      await selectLimited(db, T.execution, { where: byProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
-    ]
-    for (const status of UNFINISHED_EXECUTION_STATUSES) {
-      executionLists.push(await selectAll(db, T.execution, { ...bySheetProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
-      executionLists.push(await selectAll(db, T.execution, { ...byProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
-    }
-    const executions = unionById(...executionLists)
-    return Object.freeze({
-      ok: true,
-      scope,
-      continuations: continuations.map(rowToContinuation),
-      members: members.map(rowToMember),
-      holds: holds.map(rowToHold),
-      states: states.map(rowToState),
-      executions: executions.map(rowToExecution),
+    return db.transaction(async (rawTrx) => {
+      const snapshot = await pinConsultSnapshot(rawTrx)
+      if (readFirst) await readFirst(snapshot)
+
+      const continuations = unionById(
+        await selectAll(snapshot, T.continuation, byProject, { ceiling: READ_CEILINGS.continuation, operation: 'read_continuations' }),
+        await selectAll(snapshot, T.continuation, { sheet_id: scope.sheetId }, { ceiling: READ_CEILINGS.continuation, operation: 'read_continuations' }),
+      )
+      const members = unionById(
+        await selectAll(snapshot, T.member, { ...byProject, claim_active: true }, { ceiling: READ_CEILINGS.member, operation: 'read_members' }),
+        await selectAll(snapshot, T.member, { sheet_id: scope.sheetId, claim_active: true }, { ceiling: READ_CEILINGS.member, operation: 'read_members' }),
+      )
+      const holds = unionById(
+        await selectAll(snapshot, T.hold, { ...byProject, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' }),
+        await selectAll(snapshot, T.hold, { ...bySheetProject, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' }),
+      )
+      const states = unionById(
+        await selectAll(snapshot, T.state, byProject, { ceiling: READ_CEILINGS.state, operation: 'read_state' }),
+        await selectAll(snapshot, T.state, bySheetProject, { ceiling: READ_CEILINGS.state, operation: 'read_state' }),
+      )
+      const executionLists = [
+        await selectLimited(snapshot, T.execution, { where: bySheetProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
+        await selectLimited(snapshot, T.execution, { where: byProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
+      ]
+      for (const status of UNFINISHED_EXECUTION_STATUSES) {
+        executionLists.push(await selectAll(snapshot, T.execution, { ...bySheetProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
+        executionLists.push(await selectAll(snapshot, T.execution, { ...byProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
+      }
+      const executions = unionById(...executionLists)
+      return Object.freeze({
+        ok: true,
+        scope,
+        continuations: continuations.map(rowToContinuation),
+        members: members.map(rowToMember),
+        holds: holds.map(rowToHold),
+        states: states.map(rowToState),
+        executions: executions.map(rowToExecution),
+      })
     })
   }
 
@@ -962,7 +1062,9 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * Confirm a `continuation_candidate` hold into an ACTIVE continuation (revision 1) with its members.
    * Refusals before any row moves: the hold must be open, of that kind, confirmable, and carry exactly the
    * echoed fingerprints (409 CONFIRM_STALE / CONFIRM_NOT_ALLOWED); a store failure is 503. In the
-   * transaction: state FOR UPDATE -> hold re-read -> [supersede the named continuation] -> bumpWithin ->
+   * transaction: state FOR UPDATE -> hold re-read -> [the named continuation FOR UPDATE, its claim_active
+   * members read, refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` unless the claims overlap
+   * (claimsOverlap, review X-3), then ended as superseded_by_new_confirmation] -> bumpWithin ->
    * INSERT header + members (23505 -> 409 CONFIRM_CONFLICT) -> hold resolved -> decision_version + 1 ->
    * auditWithin. Returns a values-free summary.
    */
@@ -997,6 +1099,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       let supersededId = null
       if (supersedes) {
         const previous = await lockedContinuation(trx, scope, supersedes.continuationId.trim(), { revision: supersedes.revision })
+        // Review X-3 (§8.4): only a relationship whose claims this confirmation needs may be superseded by it —
+        // decided here, inside the transaction, before any row moves (claimsOverlap).
+        const previousMembers = await selectAll(trx, REFRESH_STORE_TABLES.member, { continuation_id: previous.id, claim_active: true }, { orderBy: ['position', 'ASC'], ceiling: READ_CEILINGS.member, operation: 'read_members' })
+        if (!claimsOverlap(previous, previousMembers, facts.members)) {
+          throw endNotAdmissible('supersedes_unrelated', 'superseded_by_new_confirmation')
+        }
         await endRows(trx, previous, { outcome: 'superseded_by_new_confirmation', endedBy: confirmedBy, note: null, at })
         supersededId = previous.id
       }
@@ -1206,13 +1314,18 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
   // ── end (design §8.4) ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * End a live continuation with an explicit outcome. `superseded_by_new_confirmation` is only ever written
-   * INSIDE a confirm (`supersedes`), never here; `release_to_normal_refresh` is admissible only when the
-   * continuation's last verdict is `new_position_removed` AND the caller asserts, from the latest
-   * computation's recorded facts, that the current expansion holds NO new position of the component
-   * (`currentExpansionHoldsNoNewPosition: true`) — so an end can never produce "copies ADDed + old rows
-   * swept"; `escalate_special_repair` keeps the project's relationship_reconfirm hold(s) OPEN as
-   * runbook-only (not confirmable), so the project stays suspended until an owner-approved runbook closes them.
+   * End a continuation that NEEDS RECONFIRMATION with an explicit outcome (design §9.3: `needs_reconfirmation
+   * -> ended` is the end transition; `active -> ended` exists only through a confirm's `supersedes`). An
+   * ACTIVE continuation is refused 409 END_OUTCOME_NOT_ADMISSIBLE (reason `status`) whatever the outcome
+   * (review X-2). `superseded_by_new_confirmation` is only ever written INSIDE a confirm (`supersedes`), never
+   * here; `release_to_normal_refresh` is admissible only when the continuation's last verdict is
+   * `new_position_removed` AND the caller asserts, from the latest computation's recorded facts, that the
+   * current expansion holds NO new position of the component (`currentExpansionHoldsNoNewPosition: true`) — so
+   * an end can never produce "copies ADDed + old rows swept"; `escalate_special_repair` is admissible only
+   * while at least one OPEN hold names this continuation (reason `no_open_hold` otherwise), and keeps every
+   * such hold OPEN as runbook-only (not confirmable): an open hold derives 待确认 and is never superseded by a
+   * computation nor settled over, so nothing derives 已完成 / export-allowed until an owner-approved runbook
+   * closes it. Every refusal is decided inside the transaction BEFORE the bump and before any row moves.
    */
   async function endContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1242,6 +1355,10 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       const stateRow = await lockStateRow(trx, scope, { at })
       if (!stateRow) throw confirmStale('state_row_absent')
       const continuationRow = await lockedContinuation(trx, scope, continuationId, { revision: input.revision })
+      // Review X-2 / §9.3: only a relationship that needs reconfirmation is ended here.
+      if (continuationRow.status !== 'needs_reconfirmation') {
+        throw endNotAdmissible('status', input.outcome, { status: continuationRow.status })
+      }
       if (input.outcome === 'release_to_normal_refresh') {
         if (continuationRow.last_verdict !== 'new_position_removed' || input.currentExpansionHoldsNoNewPosition !== true) {
           throw new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.END_OUTCOME_NOT_ADMISSIBLE, 'release_to_normal_refresh is admissible only after the new position was removed from the source and the current expansion holds no new position of the component', {
@@ -1251,12 +1368,16 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
           })
         }
       }
+      // The continuation's own open holds: released -> resolved as continuation_ended; escalated -> kept open,
+      // runbook-only, never confirmable; a computation never supersedes a runbook-only hold. Read BEFORE the
+      // bump: an escalation with no open hold to keep would leave nothing suspending the project (review X-2).
+      const holdsAbout = await selectAll(trx, REFRESH_STORE_TABLES.hold, { sheet_id: scope.sheetId, project_no: scope.projectNo, continuation_id: continuationId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' })
+      if (input.outcome === 'escalate_special_repair' && holdsAbout.length === 0) {
+        throw endNotAdmissible('no_open_hold', input.outcome)
+      }
       const bump = await runBump(trx, scope, BUMP_REASONS.end, bumpWithin)
       await endRows(trx, continuationRow, { outcome: input.outcome, endedBy, note, at })
 
-      // The continuation's own open holds: released -> resolved as continuation_ended; escalated -> kept open,
-      // runbook-only, never confirmable; a computation never supersedes a runbook-only hold.
-      const holdsAbout = await selectAll(trx, REFRESH_STORE_TABLES.hold, { sheet_id: scope.sheetId, project_no: scope.projectNo, continuation_id: continuationId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'read_holds' })
       let holdsResolved = 0
       let holdsEscalated = 0
       for (const holdRow of holdsAbout) {
@@ -1654,6 +1775,7 @@ module.exports = {
   BASIS_NOTE_MAX_LENGTH,
   READ_CEILINGS,
   NEWEST_EXECUTIONS,
+  CONSULT_SNAPSHOT_ISOLATION,
   StockPreparationRefreshStoreError,
   createStockPreparationContinuationStore,
   holdSetFingerprintOf,
@@ -1665,6 +1787,7 @@ module.exports = {
     rowToState,
     rowToExecution,
     continuationFactsFromHold,
+    claimsOverlap,
     normalizeIncomingHold,
     normalizeScope,
     SCHEMES,

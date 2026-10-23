@@ -12,7 +12,8 @@
 //         integration_ prefix, no DROP, no audit vocabulary re-listing (D9), the rollback / G10 and Q-B notes.
 //   ST-02 scope validation is a 422 before any statement.
 //   ST-03 A11: a read that fails (a fault, a missing table) is 503 STORE_FAILED with operation + SQLSTATE + partial:false
-//         — never an empty list; a page past its ceiling is a failure too.
+//         — never an empty list; a page past its ceiling is a failure too. The failing read is inside the consult
+//         snapshot (BEGIN, the REPEATABLE READ pin, the read, ROLLBACK).
 //   ST-04 confirm (design §8.2): statement order (state FOR UPDATE -> hold re-read -> bump on the TRANSACTION handle ->
 //         header + members -> hold resolved -> decision_version + 1), the rows written, the read-back feeds the pure
 //         core's normalizeContinuationInput + buildContinuationProjection, the digests agree with the hold's subject,
@@ -40,8 +41,23 @@
 //   ST-13 A08 per index: each of the five partial unique CLAIM indexes is the first to answer its own collision
 //         (exact constraint name; the header row is inserted before the members, and indexes are checked in
 //         creation order, as in PostgreSQL), so a fake without any ONE of them answers differently. The open-hold
-//         unique is never reached through the store (duplicate fingerprints are 422, reconciliations serialise on
+//         unique is never reached through the store (two holds of one computation sharing a fingerprint are a
+//         planner defect, refused 500 INPUT_INVALID before any statement — ST-07; reconciliations serialise on
 //         the state row FOR UPDATE); its DB fact is the real-DB case S2-01.
+//   ST-14 ONE CONSULT SNAPSHOT (review X-1): readGovernanceRows runs every read in ONE transaction whose FIRST
+//         statement pins REPEATABLE READ (no autocommit read); `readFirst` runs on that handle after the pin and
+//         before any step-4 read, its refusal passes through untouched and rolls back; a handle that cannot pin is
+//         501 and a failed pin 503 `read_snapshot`, both before any read.
+//   ST-15 END ADMISSIBILITY (review X-2, design §9.3 / §8.4): an ACTIVE continuation is never ended here (409
+//         END_OUTCOME_NOT_ADMISSIBLE `status`, any outcome); `escalate_special_repair` needs an OPEN hold naming
+//         the continuation (`no_open_hold` otherwise); both refused before the bump and before any write. An
+//         admitted escalation keeps the hold open runbook-only: the project derives pending_confirmation, a clean
+//         settling computation neither supersedes the hold nor settles, nothing derives complete / export-allowed.
+//   ST-16 SUPERSEDE RELATEDNESS (review X-3, design §8.4): a confirm `supersedes` only a continuation whose claims
+//         it overlaps (old record, old key or new position — root or member); a candidate sharing nothing is
+//         refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` before any write (and commits alone,
+//         without `supersedes` — the control); every related shape (old root, new root, a child's old record, a
+//         duplicate old key, a nested new position) is admitted.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -142,20 +158,17 @@ async function confirmHold(w, hold, options = {}) {
   }, { bumpWithin: bump.bumpWithin, ...(options.hooks || {}) })
 }
 
-function reconfirmHoldFor(continuationId, { confirmable = true, reason = 'reconfirm_not_admissible', verdict = 'source_scope_changed' } = {}) {
-  const hold = {
-    kind: 'relationship_reconfirm',
-    confirmable,
-    ...(confirmable ? {} : { notConfirmableReason: reason }),
-    continuationId,
-    subject: { continuationId, newRootKeyDigest: 'f'.repeat(64) },
-    evidenceFingerprint: `${verdict}-evidence-${'1'.repeat(40)}`,
-    comparisonFingerprint: `${verdict}-comparison-${'2'.repeat(40)}`,
-    pairingFingerprint: `${verdict}-pairing-${'3'.repeat(40)}`,
-    detail: { verdict, steps: {}, pairs: null, comparison: null, demand: null },
-  }
-  hold.fingerprint = pairing.holdFingerprint(hold)
-  return hold
+// The kit's (shared with the real-DB cases): a relationship_reconfirm hold about one continuation.
+const reconfirmHoldFor = kit.reconfirmHoldFor
+
+// The fake db's statement log as `method:table` (the table prefix dropped), for statement-order pins.
+function statementsOf(db, prefix = 'trx.') {
+  return db.statements(prefix).map(([method, table]) => `${method}:${String(table).replace('integration_stock_prep_', '')}`)
+}
+
+// Every row of the five step-4 tables (the "nothing persisted" fingerprint of a refused decision).
+function tablesSnapshot(db) {
+  return JSON.stringify(Object.values(T).map((table) => db.rows(table)))
 }
 
 function derivedState(w, { pilot = { enabled: true }, lock = FREE_LOCK } = {}) {
@@ -259,6 +272,13 @@ test('ST-03 A11: a failing read is 503 STORE_FAILED (operation, SQLSTATE, partia
   assert.equal(failed.details.sqlState, '57P01')
   assert.equal(failed.details.partial, false)
   assertValuesFree(failed)
+  // The failing read is the first step-4 read INSIDE the pinned consult snapshot (review X-1), which rolls back.
+  assert.deepEqual(w.db.log.map(([method, args]) => [method, (args && (args.table || args.level)) || null]), [
+    ['transaction', null],
+    ['trx.setTransactionIsolationLevel', 'repeatable read'],
+    ['trx.select', T.continuation],
+    ['rollback', null],
+  ])
   // A missing table (deploy without migrations 102 / 103): 42P01, same posture.
   w.db.faults.select = (args) => (args.table === T.hold ? kit.sqlError('42P01', 'relation does not exist') : null)
   const missing = await expectError(w.store.readGovernanceRows(w.scope), { status: 503, code: CODES.STORE_FAILED })
@@ -568,9 +588,14 @@ test('ST-07 reconciliation: upsert-then-lock, the decision_version CAS, open / k
   await w2.store.reconcileHolds({ ...w2.scope, decisionVersionObserved: 1, holds: [], verdicts: { [id2]: 'content_changed' }, computation: computation({ suspended: false }) })
   assert.equal(w2.db.rows(T.continuation)[0].status, 'active')
   assert.equal(w2.db.rows(T.continuation)[0].last_verdict, 'content_changed')
-  // Two holds of one computation sharing a fingerprint: refused before any statement.
+  // Two holds of one computation sharing a fingerprint: a planner defect, refused 500 before any statement.
   w2.db.log.length = 0
   await expectError(w2.store.reconcileHolds({ ...w2.scope, decisionVersionObserved: 1, holds: [w2.hold, w2.hold], computation: computation() }), { status: 500, code: CODES.INPUT_INVALID })
+  assert.equal(w2.db.log.length, 0)
+  // A hold whose `detail` is null (migration 103: NOT NULL; the pure core always emits an object): refused 500
+  // INPUT_INVALID before any statement — never sent to the DB to come back 23502 -> 503.
+  const nullDetail = await expectError(w2.store.reconcileHolds({ ...w2.scope, decisionVersionObserved: 1, holds: [{ ...w2.hold, detail: null }], computation: computation() }), { status: 500, code: CODES.INPUT_INVALID })
+  assert.equal(nullDetail.details.field, 'holds[0].detail')
   assert.equal(w2.db.log.length, 0)
 })
 
@@ -852,6 +877,204 @@ test('ST-13 A08 per index: each partial unique claim index is the FIRST to answe
       assert.equal(committed.revision, 1, `${shape.label}: the rival alone commits`)
       assert.equal(alone.db.rows(T.member).length, own.detail.pairs.length, shape.label)
     }
+  }
+})
+
+// ── ST-14 one consult snapshot (review X-1) ──────────────────────────────────────────────────────
+
+test('ST-14 one consult snapshot (review X-1): every read in ONE transaction pinned to REPEATABLE READ by its first statement; readFirst on that handle after the pin and before any step-4 read; its refusal passes through and rolls back; a handle that cannot pin is 501 and a failed pin 503, before any read', async () => {
+  const w = await world()
+  const { store, db, scope, hold } = w
+  await seedHolds(w, [hold])
+  await confirmHold(w, hold)
+  db.log.length = 0
+  const seen = []
+  const rows = await store.readGovernanceRows(scope, { readFirst: async (snapshot) => { seen.push({ handle: snapshot, logLength: db.log.length }) } })
+  assert.equal(rows.ok, true)
+  assert.equal(rows.continuations.length, 1)
+  assert.equal(rows.members.length, 4)
+  assert.equal(rows.states[0].decisionVersion, 1)
+  const log = db.log.map(([method, args]) => [method, (args && (args.table || args.level)) || null])
+  assert.deepEqual(log[0], ['transaction', null])
+  assert.deepEqual(log[1], ['trx.setTransactionIsolationLevel', 'repeatable read'], 'the pin is the transaction\'s FIRST statement')
+  assert.deepEqual(log[log.length - 1], ['commit', null])
+  const reads = log.slice(2, -1)
+  assert.equal(reads.length, 18, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished)')
+  assert.ok(reads.every(([method]) => method === 'trx.select'), `every read on the transaction handle, none in autocommit: ${JSON.stringify(reads)}`)
+  // readFirst: once, on THE transaction handle, after BEGIN + the pin, before any step-4 read.
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].handle, db.lastTransactionHandle)
+  assert.equal(seen[0].logLength, 2)
+  // Without readFirst: the same pinned snapshot.
+  db.log.length = 0
+  await store.readGovernanceRows(scope)
+  assert.deepEqual(db.log.slice(0, 2).map(([method]) => method), ['transaction', 'trx.setTransactionIsolationLevel'])
+  assert.equal(db.statements('').filter(([method]) => method === 'select').length, 0, 'no autocommit read')
+  // readFirst's refusal (the reader's typed 409) passes through UNCHANGED and the snapshot rolls back before any step-4 read.
+  const refusal = Object.assign(new Error('retargeted'), { status: 409, code: 'STOCK_PREP_REFRESH_TARGET_RETARGETED', details: { reason: 'sheet' } })
+  db.log.length = 0
+  let caught = null
+  try {
+    await store.readGovernanceRows(scope, { readFirst: async () => { throw refusal } })
+  } catch (error) {
+    caught = error
+  }
+  assert.equal(caught, refusal, 'the same error object, untranslated')
+  assert.deepEqual(db.log.map(([method]) => method), ['transaction', 'trx.setTransactionIsolationLevel', 'rollback'])
+  // readFirst that is not a function: 500 before any statement.
+  db.log.length = 0
+  await expectError(store.readGovernanceRows(scope, { readFirst: 'registry' }), { status: 500, code: CODES.INPUT_INVALID })
+  assert.equal(db.log.length, 0)
+  // A transaction handle that cannot pin its isolation level: 501 before any read (never an unpinned consult).
+  const unpinnable = { ...db, transaction: (callback) => db.transaction((handle) => callback({ ...handle, setTransactionIsolationLevel: undefined })) }
+  const unpinnableStore = createStockPreparationContinuationStore({ db: unpinnable, now: w.clock.now })
+  db.log.length = 0
+  await expectError(unpinnableStore.readGovernanceRows(scope), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'snapshot_handle' })
+  assert.deepEqual(db.log.map(([method]) => method), ['transaction', 'rollback'])
+  // The pin itself fails (SQLSTATE 25001: a query already ran in the transaction): 503 read_snapshot, nothing read.
+  db.log.length = 0
+  db.faults.setTransactionIsolationLevel = kit.sqlError('25001', 'SET TRANSACTION ISOLATION LEVEL must be called before any query')
+  const pinFailed = await expectError(store.readGovernanceRows(scope), { status: 503, code: CODES.STORE_FAILED })
+  assert.equal(pinFailed.details.operation, 'read_snapshot')
+  assert.equal(pinFailed.details.sqlState, '25001')
+  assert.deepEqual(db.log.map(([method]) => method), ['transaction', 'trx.setTransactionIsolationLevel', 'rollback'])
+})
+
+// ── ST-15 end admissibility (review X-2) ──────────────────────────────────────────────────────────
+
+test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE continuation is never ended here; escalate needs an OPEN hold naming it; both refused before the bump and before any write; an admitted escalation keeps the project pending (never complete, never export-allowed)', async () => {
+  const w = await world()
+  const { hold, store, db, scope, bump } = w
+  await seedHolds(w, [hold])
+  const confirmed = await confirmHold(w, hold)
+  const id = confirmed.continuationId
+  const hooks = { bumpWithin: bump.bumpWithin }
+  const endBase = { ...scope, continuationId: id, revision: 1, endedBy: PULLER }
+  // (a) ACTIVE: refused for both outcomes the end transaction takes (supersede is confirm-only, ST-08).
+  for (const extra of [{ outcome: 'escalate_special_repair' }, { outcome: 'release_to_normal_refresh', currentExpansionHoldsNoNewPosition: true }]) {
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    db.log.length = 0
+    const refused = await expectError(store.endContinuation({ ...endBase, ...extra }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'status' })
+    assert.equal(refused.details.status, 'active')
+    assert.equal(refused.details.outcome, extra.outcome)
+    assertValuesFree(refused)
+    assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOneForUpdate:continuation'], `${extra.outcome}: refused right after the continuation lock`)
+    assert.equal(db.log[db.log.length - 1][0], 'rollback')
+    assert.equal(bump.calls.length, bumpsBefore, `${extra.outcome}: no bump`)
+    assert.equal(tablesSnapshot(db), before, `${extra.outcome}: nothing persisted`)
+  }
+  assert.equal(derivedState(w).status, 'confirmed_pending_execution', 'the active relationship still protects its subtree')
+  // (b) needs_reconfirmation but NO open hold names it (a computation recorded the verdict without raising the
+  //     hold): escalating would release the claims and leave nothing suspending the project -> refused.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [], verdicts: { [id]: 'structure_changed' }, computation: computation({ suspended: false }) })
+  assert.equal(db.rows(T.continuation)[0].status, 'needs_reconfirmation')
+  {
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    db.log.length = 0
+    const refused = await expectError(store.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, hooks), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'no_open_hold' })
+    assert.equal(refused.details.outcome, 'escalate_special_repair')
+    assertValuesFree(refused)
+    assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOneForUpdate:continuation', 'trx.select:refresh_hold'])
+    assert.equal(db.log[db.log.length - 1][0], 'rollback')
+    assert.equal(bump.calls.length, bumpsBefore, 'no bump')
+    assert.equal(tablesSnapshot(db), before, 'nothing persisted')
+  }
+  // (c) the next computation raises the relationship_reconfirm hold: the escalation is admitted. The admissibility
+  //     reads all come BEFORE the bump, the writes after it.
+  await store.reconcileHolds({ ...scope, decisionVersionObserved: 1, holds: [reconfirmHoldFor(id, { confirmable: false, verdict: 'structure_changed' })], verdicts: { [id]: 'structure_changed' }, computation: computation() })
+  const bumpsBefore = bump.calls.length
+  db.log.length = 0
+  let statementsAtBump = null
+  const escalated = await store.endContinuation({ ...endBase, outcome: 'escalate_special_repair' }, {
+    bumpWithin: async (trx, scopeKey, options) => {
+      statementsAtBump = statementsOf(db)
+      return bump.bumpWithin(trx, scopeKey, options)
+    },
+  })
+  assert.deepEqual(statementsAtBump, ['trx.selectOneForUpdate:refresh_state', 'trx.selectOneForUpdate:continuation', 'trx.select:refresh_hold'], 'the bump follows every admissibility read and precedes every write')
+  assert.deepEqual(statementsOf(db), [
+    'trx.selectOneForUpdate:refresh_state',
+    'trx.selectOneForUpdate:continuation',
+    'trx.select:refresh_hold',
+    'trx.updateRow:continuation',
+    'trx.updateRow:continuation_member',
+    'trx.updateRow:refresh_hold',
+    'trx.select:refresh_hold',
+    'trx.updateRow:refresh_state',
+  ])
+  assert.equal(bump.calls.length, bumpsBefore + 1)
+  assert.equal(escalated.holdsEscalated, 1)
+  assert.equal(escalated.decisionVersion, 2)
+  const kept = db.rows(T.hold).find((row) => row.continuation_id === id && row.status === 'open')
+  assert.ok(kept, 'the hold naming the continuation stays OPEN')
+  assert.equal(kept.runbook_only, true)
+  assert.equal(kept.confirmable, false)
+  // Nothing derives complete while it is open: pending_confirmation; a clean SETTLING computation neither
+  // supersedes the runbook-only hold nor settles.
+  let state = derivedState(w)
+  assert.equal(state.status, 'pending_confirmation')
+  assert.equal(state.exportAllowed, false)
+  const clean = await store.reconcileHolds({ ...scope, decisionVersionObserved: 2, holds: [], computation: computation({ suspended: false, lane: 'small_apply' }), settlement: { executionId: null, generationToken: 'g_s', sourceContentDigest: 'src_1', sheetMachineDigest: 'm_1' } })
+  assert.equal(clean.settled, false)
+  assert.deepEqual(clean.holds, { opened: 0, kept: 0, superseded: 0, open: 1 })
+  assert.equal(db.rows(T.state)[0].settled_at, null)
+  state = derivedState(w)
+  assert.equal(state.status, 'pending_confirmation')
+  assert.equal(state.exportAllowed, false)
+})
+
+// ── ST-16 supersede relatedness (review X-3) ─────────────────────────────────────────────────────
+
+test('ST-16 supersede relatedness (review X-3, design §8.4): a candidate sharing no claim cannot supersede (409 supersedes_unrelated before any write) and commits alone (control); every related shape — old root, new root, a child\'s old record, a duplicate old key, a nested new position — is admitted', async () => {
+  const w = await world()
+  const { hold, store, db, bump } = w
+  await seedHolds(w, [hold])
+  const first = await confirmHold(w, hold)
+  const disjoint = kit.disjointCandidateHold(hold)
+  // Sanity: the disjoint candidate shares no old record, no old key and no new key with the base.
+  const baseOld = new Set(hold.detail.pairs.map((pair) => pair.oldRecordId))
+  const baseOldKeys = new Set(hold.detail.pairs.map((pair) => pair.oldKey))
+  const baseNewKeys = new Set(hold.detail.pairs.map((pair) => pair.newKey))
+  assert.ok(disjoint.detail.pairs.every((pair) => !baseOld.has(pair.oldRecordId) && !baseOldKeys.has(pair.oldKey) && !baseNewKeys.has(pair.newKey)))
+  await seedHolds(w, [disjoint], { decisionVersionObserved: 1 })
+  const before = tablesSnapshot(db)
+  const bumpsBefore = bump.calls.length
+  db.log.length = 0
+  const refused = await expectError(confirmHold(w, disjoint, { input: { supersedes: { continuationId: first.continuationId, revision: 1 } } }), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'supersedes_unrelated' })
+  assert.equal(refused.details.outcome, 'superseded_by_new_confirmation')
+  assertValuesFree(refused)
+  assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOne:refresh_hold', 'trx.selectOneForUpdate:continuation', 'trx.select:continuation_member'], 'decided on the named relationship\'s claims, before any write')
+  assert.equal(db.log[db.log.length - 1][0], 'rollback')
+  assert.equal(bump.calls.length, bumpsBefore, 'no bump')
+  assert.equal(tablesSnapshot(db), before, 'nothing persisted: the relationship keeps its claims, the hold stays open')
+  // Control: the same candidate confirms on its own (no claim collides) — the refusal above is the relatedness rule alone.
+  const alone = await confirmHold(w, disjoint)
+  assert.equal(alone.supersededContinuationId, null)
+  assert.equal(db.rows(T.continuation).filter((row) => row.claim_active).length, 2)
+  // Every RELATED shape: without `supersedes` the claims collide (409 CONFIRM_CONFLICT); with it the old one is
+  // ended as superseded_by_new_confirmation and the new one takes the claims, in one transaction.
+  const shapes = [
+    ['old root (the same old records under another parent)', (base) => kit.competingCandidateHold(base)],
+    ['new root (another old set at the same new position)', (base) => kit.sameNewPositionHold(base)],
+    ['a child\'s old record', (base) => kit.memberCollisionHold(base, 'old_record')],
+    ['a duplicate old key', (base) => kit.memberCollisionHold(base, 'old_key')],
+    ['a nested new position', (base) => kit.memberCollisionHold(base, 'new_key')],
+  ]
+  for (const [label, build] of shapes) {
+    const v = await world()
+    await seedHolds(v, [v.hold])
+    const base = await confirmHold(v, v.hold)
+    const rival = build(v.hold)
+    await seedHolds(v, [rival], { decisionVersionObserved: 1 })
+    await expectError(confirmHold(v, rival), { status: 409, code: CODES.CONFIRM_CONFLICT })
+    const replaced = await confirmHold(v, rival, { input: { supersedes: { continuationId: base.continuationId, revision: 1 } } })
+    assert.equal(replaced.supersededContinuationId, base.continuationId, label)
+    const old = v.db.rows(T.continuation).find((row) => row.id === base.continuationId)
+    assert.equal(old.status, 'ended', label)
+    assert.equal(old.ended_outcome, 'superseded_by_new_confirmation', label)
+    assert.equal(v.db.rows(T.continuation).filter((row) => row.claim_active).length, 1, label)
   }
 })
 

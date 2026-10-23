@@ -692,10 +692,26 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
 
   // ── 备料分批拉取第一期 step 3 PR B (migration 101): the pilot marker ──────────────────────────────
 
+  /**
+   * The handle a pilot read runs ON. `options.executor` (optional) is a scoped-db TRANSACTION handle of the
+   * caller's: the step-4 governance consult passes its REPEATABLE READ snapshot handle so the registry row and
+   * the step-4 rows it is compared with come from ONE snapshot (stock-preparation-continuation-store.cjs
+   * readGovernanceRows, #6514 review X-1). Absent => this store's own db, exactly as before. A handle that
+   * cannot read is refused (a throw is the caller's unreadable, never "not pilot").
+   */
+  function pilotReadHandle(options) {
+    const executor = options && typeof options === 'object' ? options.executor : undefined
+    if (executor === undefined || executor === null) return db
+    if (typeof executor.selectOne !== 'function') {
+      throw new Error('createStockPreparationProjectTargetStore: a pilot read executor must expose selectOne')
+    }
+    return executor
+  }
+
   /** The pilot state of ONE project, by (tenant, project). `null` is ABSENT; a throw is the caller's unreadable. */
-  async function getPilotState(input = {}) {
+  async function getPilotState(input = {}, options = {}) {
     const { tenantId, projectNo } = scope(input)
-    return rowToPilotState(await db.selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
   }
 
   /**
@@ -704,9 +720,9 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * tenant-scoped on purpose (sheet ids are globally unique; the caller compares `tenantId` if it must);
    * a refusal derived from it is values-free, so no tenant learns anything it could not already see.
    */
-  async function getPilotStateBySheetId(input = {}) {
+  async function getPilotStateBySheetId(input = {}, options = {}) {
     const sheetId = requiredString(input.sheetId, 'sheetId')
-    return rowToPilotState(await db.selectOne(PROJECT_TARGET_TABLE, { sheet_id: sheetId }))
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { sheet_id: sheetId }))
   }
 
   /**

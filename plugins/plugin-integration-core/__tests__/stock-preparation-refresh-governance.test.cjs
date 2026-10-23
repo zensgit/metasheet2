@@ -8,25 +8,33 @@
 //         constructing with nothing does not throw (a build without PR B activates).
 //   GR-02 scope validation: 422 before any read.
 //   GR-03 not governed: every store answered, zero rows, no marker -> governed:false, the derived state not_governed.
+//         ONE SNAPSHOT (review X-1): the statement order is BEGIN, SET TRANSACTION ISOLATION LEVEL REPEATABLE READ,
+//         the registry reads handed THAT transaction handle, every step-4 read on it (no autocommit read), COMMIT;
+//         the lock after, on its own handle.
 //   GR-04 pilot: the marker alone governs; a non-pilot registry row does not; a failed registry read is 503
 //         (unreadable), never "not pilot".
 //   GR-05 the tenant assertion (A-M6): a row of another tenant on this sheet — through the store or the registry
 //         — is 409 TENANT_MISMATCH; a header-steered tenant that owns no rows is REFUSED, never "not governed";
-//         readRefreshState rethrows it (a refusal is not a state).
+//         readRefreshState rethrows it (a refusal is not a state). A registry refusal reads no step-4 row.
 //   GR-06 retarget (B-B3 / E-2(b)): the registry naming another sheet for this project, or another project for
-//         this sheet, is 409 RETARGETED BEFORE any row read; this project's rows on another sheet, and another
-//         project's continuation on this sheet (found by the SHEET-keyed read), are RETARGETED too.
-//   GR-07 unreadable: a store failure, a lock read failure, a malformed store answer -> 503 with the store token;
-//         readRefreshState answers the `unreadable` state carrying that token — never not_governed.
+//         this sheet, is 409 RETARGETED BEFORE any step-4 row read (the snapshot rolls back); this project's rows
+//         on another sheet, and another project's continuation on this sheet (found by the SHEET-keyed read), are
+//         RETARGETED too.
+//   GR-07 unreadable: a store failure, a lock read failure, a malformed store answer, a snapshot that cannot be
+//         pinned, a store that answered without running the registry reads in its snapshot -> 503 with the store
+//         token; readRefreshState answers the `unreadable` state carrying that token — never not_governed.
 //   GR-08 governed by rows: a real confirm -> headers with memberCount, members, state, decisionVersionObserved;
-//         readProjectRefreshState derives confirmed_pending_execution; plannerSlice feeds the pure core; ended
-//         rows stay in the consult (they govern) and leave the slice; the answer is frozen.
+//         readProjectRefreshState derives confirmed_pending_execution; plannerSlice feeds the pure core; a
+//         RELATED supersede (review X-3) ends it: the ended row stays in the consult (it governs) and leaves the
+//         slice; the answer is frozen.
 //   GR-09 the lock shapes are the real module's: a live lease derives executing, an abandoned one
 //         failed_pending_recovery.
 //   GR-10 PR B's pilot reads REUSED (#6510): the reader over the PRODUCTION registry store (its getPilotState /
-//         getPilotStateBySheetId -> rowToPilotState, on a fake scoped db) — a row without the migration-101
-//         columns is not pilot, a marked row governs, a failed read is 503 naming the registry, a sheet
-//         registered to another project retargets before any store row read. No second pilot reader.
+//         getPilotStateBySheetId -> rowToPilotState) — a row without the migration-101 columns is not pilot, a
+//         marked row governs, a failed read is 503 naming the registry, a sheet registered to another project
+//         retargets before any step-4 row read. No second pilot reader. The registry reads are `trx.selectOne`s
+//         on the consult's snapshot handle, AFTER the REPEATABLE READ pin and BEFORE any step-4 read (review X-1):
+//         the registry row and the step-4 rows are one snapshot.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -67,24 +75,38 @@ async function expectError(promise, { status, code, reason }) {
 }
 
 // PR B's registry pilot reads, faked: rows keyed by (tenant, project) and by sheet, the `rowToPilotState` shape.
-function createFakeRegistry(rows = []) {
+// Each call records the `executor` it was handed and how many statements the step-4 fake db had logged by then
+// (the snapshot proof of GR-03: the handle is the consult's transaction, pinned, with no step-4 read yet).
+function createFakeRegistry(rows = [], { db = null } = {}) {
   const calls = []
   let fault = null
+  const record = (name, args, options) => {
+    const call = [name, ...args]
+    call.executor = options && options.executor ? options.executor : null
+    call.logLength = db ? db.log.length : null
+    calls.push(call)
+  }
   return {
     calls,
     rows,
     fail(error) { fault = error },
-    async getPilotState({ tenantId, projectNo }) {
-      calls.push(['getPilotState', tenantId, projectNo])
+    async getPilotState({ tenantId, projectNo }, options) {
+      record('getPilotState', [tenantId, projectNo], options)
       if (fault) throw fault
       return rows.find((row) => row.tenantId === tenantId && row.projectNo === projectNo) || null
     },
-    async getPilotStateBySheetId({ sheetId }) {
-      calls.push(['getPilotStateBySheetId', sheetId])
+    async getPilotStateBySheetId({ sheetId }, options) {
+      record('getPilotStateBySheetId', [sheetId], options)
       if (fault) throw fault
       return rows.find((row) => row.sheetId === sheetId) || null
     },
   }
+}
+
+// The step-4 reads in a fake db's statement log (autocommit or transaction): a registry refusal must leave none.
+const STEP4_TABLES = new Set(Object.values(T))
+function stepFourReads(db) {
+  return db.log.filter(([method, args]) => /(^|\.)(select|selectOne|selectOneForUpdate)$/.test(method) && args && STEP4_TABLES.has(args.table))
 }
 
 function registryRow({ tenantId = TENANT, projectNo, sheetId = SHEET, pilot = false } = {}) {
@@ -97,14 +119,14 @@ function registryRow({ tenantId = TENANT, projectNo, sheetId = SHEET, pilot = fa
   }
 }
 
-async function world({ registryRows } = {}) {
+async function world({ registryRows, registryPilotColumns = true } = {}) {
   const fixture = await refreshKit.candidateHoldFixture()
   const clock = refreshKit.createClock()
-  const db = refreshKit.createFakeRefreshDb({ clock })
+  const db = refreshKit.createFakeRefreshDb({ clock, registryPilotColumns })
   let n = 0
   const continuationStore = storeModule.createStockPreparationContinuationStore({ db, now: clock.now, idGenerator: (kind) => `${kind}_${String((n += 1)).padStart(4, '0')}` })
   const lockEnv = lockKit.createInMemoryProjectWriteLock({ clock: lockKit.createClock(clock.iso()) })
-  const registry = createFakeRegistry(registryRows === undefined ? [] : registryRows)
+  const registry = createFakeRegistry(registryRows === undefined ? [] : registryRows, { db })
   const governance = createStockPreparationRefreshGovernance({ continuationStore, projectTargetStore: registry, projectWriteLock: lockEnv.lock })
   const scope = { tenantId: TENANT, projectNo: fixture.projectNo, sheetId: SHEET }
   const bump = refreshKit.createFakeBumpWithin()
@@ -182,7 +204,25 @@ test('GR-03 not governed: every store answered, zero rows, no marker', async () 
   assert.equal(read.error, null)
   // Both registry reads happened, in the design's order: registry first, then the store, then the lock.
   assert.deepEqual(w.registry.calls.slice(0, 2).map((call) => call[0]), ['getPilotState', 'getPilotStateBySheetId'])
-  assert.equal(w.db.log[0][0], 'select')
+  // ONE SNAPSHOT (review X-1), per consult: BEGIN; the FIRST statement pins REPEATABLE READ; the registry reads are
+  // handed THAT transaction handle before any step-4 read; every step-4 read runs on it (none in autocommit);
+  // COMMIT. (Two consults ran above: consult + readRefreshState.)
+  const log = w.db.log.map(([method, args]) => [method, args && args.table ? args.table : (args && args.level) || null])
+  const firstConsult = log.slice(0, log.findIndex(([method]) => method === 'commit') + 1)
+  assert.deepEqual(firstConsult[0], ['transaction', null])
+  assert.deepEqual(firstConsult[1], ['trx.setTransactionIsolationLevel', 'repeatable read'], 'the snapshot is pinned by the transaction\'s first statement')
+  assert.ok(firstConsult.slice(2, -1).length >= 18, `every step-4 read in the snapshot (${firstConsult.length - 3})`)
+  assert.ok(firstConsult.slice(2, -1).every(([method, table]) => method === 'trx.select' && STEP4_TABLES.has(table)), JSON.stringify(firstConsult))
+  assert.deepEqual(firstConsult[firstConsult.length - 1], ['commit', null])
+  assert.equal(log.filter(([method]) => method === 'select' || method === 'selectOne').length, 0, 'no autocommit read of a step-4 table')
+  assert.equal(w.registry.calls.length, 4, 'two registry reads per consult')
+  for (const [index, call] of w.registry.calls.entries()) {
+    assert.ok(call.executor && typeof call.executor.setTransactionIsolationLevel === 'function', `${call[0]} ran on the consult's transaction handle`)
+    assert.equal(call.logLength, index < 2 ? 2 : firstConsult.length + 2, `${call[0]} ran right after BEGIN + SET, before any step-4 read`)
+  }
+  assert.equal(w.registry.calls[2].executor, w.db.lastTransactionHandle, 'the second consult\'s registry reads ran on ITS snapshot handle')
+  assert.equal(w.registry.calls[3].executor, w.db.lastTransactionHandle)
+  assert.notEqual(w.registry.calls[0].executor, w.registry.calls[2].executor, 'each consult opens its own snapshot')
 })
 
 test('GR-04 pilot: the marker alone governs; a non-pilot row does not; a failed registry read is unreadable, never "not pilot"', async () => {
@@ -232,7 +272,8 @@ test('GR-05 tenant assertion: a row of another tenant on this sheet is 409 TENAN
   const w2 = await world({ registryRows: [registryRow({ tenantId: TENANT, projectNo: 'PRJ-SCC-1', sheetId: SHEET })] })
   const viaRegistry = await expectError(w2.governance.consult({ ...w2.scope, tenantId: OTHER_TENANT }), { status: 409, code: CODES.TENANT_MISMATCH })
   assert.equal(viaRegistry.details.store, 'registry')
-  assert.equal(w2.db.log.length, 0, 'refused before any store row was read')
+  assert.equal(stepFourReads(w2.db).length, 0, 'refused before any step-4 row was read')
+  assert.equal(w2.db.log[w2.db.log.length - 1][0], 'rollback', 'the snapshot rolled back with the refusal (typed 409 passed through the store untouched)')
   // A tenant-B state row planted on the sheet (a defect or a cross-tenant derivation): refused by table name.
   const w3 = await world()
   await w3.continuationStore.reconcileHolds({ ...w3.scope, tenantId: OTHER_TENANT, decisionVersionObserved: 0, holds: [], computation: computation({ suspended: false }) })
@@ -247,12 +288,14 @@ test('GR-06 retarget: the registry naming another sheet / another project refuse
   const w = await world({ registryRows: [registryRow({ projectNo: 'PRJ-SCC-1', sheetId: 'sheet_managed' })] })
   const refused = await expectError(w.governance.consult(w.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'project_registered_on_another_sheet' })
   assert.equal(refused.details.store, 'registry')
-  assert.equal(w.db.log.length, 0, 'refused before any row read')
+  assert.equal(stepFourReads(w.db).length, 0, 'refused before any step-4 row read')
+  assert.equal(w.db.log[w.db.log.length - 1][0], 'rollback')
   assert.ok(!JSON.stringify(refused.details).includes('sheet_managed'), 'values-free')
   await expectError(w.governance.readRefreshState(w.scope), { status: 409, code: CODES.TARGET_RETARGETED })
   // This sheet is registered to ANOTHER project.
   const w2 = await world({ registryRows: [registryRow({ projectNo: 'PRJ-OTHER', sheetId: SHEET })] })
   await expectError(w2.governance.consult(w2.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet_registered_to_another_project' })
+  assert.equal(stepFourReads(w2.db).length, 0)
   // No registry row at all (legacy env sheet), but this project's protection lives on another sheet.
   const w3 = await world()
   await seedAndConfirm(w3, { sheetId: OTHER_SHEET })
@@ -311,6 +354,28 @@ test('GR-07 unreadable: a store failure, a lock read failure or a malformed stor
   const thrower = createStockPreparationRefreshGovernance({ continuationStore: { readGovernanceRows: async () => { throw new Error('PRJ-SCC-1 secret value') } }, projectTargetStore: w.registry, projectWriteLock: w.lockEnv.lock })
   const plain = await expectError(thrower.consult(w.scope), { status: 503, code: CODES.STORE_FAILED })
   assert.ok(!JSON.stringify({ m: plain.message, d: plain.details }).includes('secret'))
+  // The snapshot cannot be pinned (the SET fails): 503 naming the snapshot, nothing read, the derived state unreadable.
+  w.db.log.length = 0
+  w.db.faults.setTransactionIsolationLevel = refreshKit.sqlError('25001', 'SET TRANSACTION ISOLATION LEVEL must be called before any query')
+  const unpinned = await expectError(w.governance.consult(w.scope), { status: 503, code: CODES.STORE_FAILED })
+  assert.equal(unpinned.details.store, 'continuation')
+  assert.equal(unpinned.details.operation, 'read_snapshot')
+  assert.equal(unpinned.details.sqlState, '25001')
+  assert.equal(stepFourReads(w.db).length, 0, 'nothing read outside a pinned snapshot')
+  w.db.faults.setTransactionIsolationLevel = refreshKit.sqlError('25001', 'SET TRANSACTION ISOLATION LEVEL must be called before any query')
+  const unpinnedRead = await w.governance.readRefreshState(w.scope)
+  assert.equal(unpinnedRead.state.status, 'unreadable')
+  assert.equal(unpinnedRead.state.unreadable.operation, 'read_snapshot')
+  // A store that answers `ok` without running the registry reads in its snapshot: the registry was never read —
+  // 503 naming the registry, never "not pilot".
+  const skipper = createStockPreparationRefreshGovernance({
+    continuationStore: { readGovernanceRows: async () => ({ ok: true, scope: w.scope, continuations: [], members: [], holds: [], states: [], executions: [] }) },
+    projectTargetStore: w.registry,
+    projectWriteLock: w.lockEnv.lock,
+  })
+  const skipped = await expectError(skipper.consult(w.scope), { status: 503, code: CODES.STORE_FAILED })
+  assert.equal(skipped.details.store, 'registry')
+  assert.equal(skipped.details.operation, 'read_snapshot')
 })
 
 // ── GR-08 governed by rows ───────────────────────────────────────────────────────────────────────
@@ -341,15 +406,29 @@ test('GR-08 governed by rows: headers with memberCount, members, state, decision
   assert.equal(projection.suppressAddKeys.size, 4)
   assert.equal(projection.protectInactiveKeys.size, 4)
   assert.ok(Object.isFrozen(answer) && Object.isFrozen(answer.continuations) && Object.isFrozen(slice))
-  // End it: the ended row still governs (D3) and leaves the planner slice; the derived state is complete.
-  await w.continuationStore.endContinuation({ ...w.scope, continuationId: confirmed.continuationId, revision: 1, endedBy: PULLER, outcome: 'escalate_special_repair' }, { bumpWithin: w.bump.bumpWithin })
+  // End it the only way an ACTIVE relationship ends (design §9.3; review X-2 / X-3): a confirmation of a RELATED
+  // candidate (the same old rows under another parent) that supersedes it. The ended row still governs (D3) and
+  // leaves the planner slice; its claims and members leave with it; the replacing one is the slice.
+  const rival = refreshKit.competingCandidateHold(w.hold)
+  await w.continuationStore.reconcileHolds({ ...w.scope, decisionVersionObserved: answer.decisionVersionObserved, holds: [rival], computation: computation() })
+  const rivalRow = w.db.rows(T.hold).find((row) => row.fingerprint === rival.fingerprint && row.status === 'open')
+  const replaced = await w.continuationStore.confirmContinuation({
+    ...w.scope, holdId: rivalRow.id, echo: refreshKit.echoOf(rival), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: w.sourceIdentity,
+    supersedes: { continuationId: confirmed.continuationId, revision: 1 },
+  }, { bumpWithin: w.bump.bumpWithin })
+  assert.equal(replaced.supersededContinuationId, confirmed.continuationId)
   const after = await w.governance.consult(w.scope)
   assert.equal(after.governed, true)
-  assert.equal(after.continuations[0].status, 'ended')
-  assert.equal(after.continuations[0].memberCount, 0)
-  assert.equal(after.members.length, 0)
-  assert.equal(plannerSlice(after).continuations.length, 0)
+  assert.equal(after.decisionVersionObserved, 2)
+  const ended = after.continuations.find((entry) => entry.id === confirmed.continuationId)
+  assert.equal(ended.status, 'ended')
+  assert.equal(ended.endedOutcome, 'superseded_by_new_confirmation')
+  assert.equal(ended.memberCount, 0)
+  assert.equal(after.members.length, 4)
+  assert.ok(after.members.every((member) => member.continuationId === replaced.continuationId), 'only the replacing relationship\'s members are claimed')
+  assert.deepEqual(plannerSlice(after).continuations.map((entry) => entry.id), [replaced.continuationId], 'the ended row leaves the planner slice')
   assert.equal(readProjectRefreshState(after).governed, 'protected')
+  assert.equal(readProjectRefreshState(after).status, 'confirmed_pending_execution')
   await expectError(Promise.resolve().then(() => plannerSlice({ ok: false })), { status: 503, code: CODES.STORE_FAILED })
 })
 
@@ -373,57 +452,61 @@ test('GR-09 the lock shapes are the real module\'s: a live lease derives executi
 
 // ── GR-10 PR B's pilot reads, REUSED ─────────────────────────────────────────────────────────────
 
-test('GR-10 the reader REUSES PR B\'s registry pilot reads (the production store\'s getPilotState / getPilotStateBySheetId, migration 101): a row without the pilot columns is not pilot, a marked row governs, a failed read is unreadable, a sheet registered to another project retargets before any store row read', async () => {
+test('GR-10 the reader REUSES PR B\'s registry pilot reads (the production store\'s getPilotState / getPilotStateBySheetId, migration 101) ON the consult\'s snapshot handle: a row without the pilot columns is not pilot, a marked row governs, a failed read is unreadable, a sheet registered to another project retargets before any step-4 row read', async () => {
   const registryModule = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
   assert.equal(typeof registryModule.rowToPilotState, 'function', 'PR B (#6510) is on the tree')
-  // A minimal fake of the scoped db under the REAL registry store (only selectOne is exercised by the pilot reads).
-  function registryDb(rows) {
-    const faults = {}
-    const matches = (row, where) => Object.entries(where).every(([column, value]) => (row[column] === undefined ? null : row[column]) === (value === undefined ? null : value))
-    return {
-      rows,
-      faults,
-      async selectOne(table, where) {
-        assert.equal(table, 'integration_stock_prep_project_target')
-        if (faults.selectOne) throw faults.selectOne
-        return rows.find((row) => matches(row, where)) || null
-      },
-      async select() { return [] },
-      async insertOne() { throw new Error('unused') },
-      async countRows() { return 0 },
-      async updateRow() { return [] },
-      async transaction() { throw new Error('unused') },
-    }
-  }
-  const w = await world()
-  const PRJ = w.scope.projectNo
+  const RT = refreshKit.REGISTRY_TABLE
+  // The PRODUCTION registry store over the SAME fake scoped db the step-4 store uses (one plugin database, as wired
+  // in index.cjs): its pilot reads are handed the consult's transaction handle as `executor`.
+  const readerOver = (w) => createStockPreparationRefreshGovernance({
+    continuationStore: w.continuationStore,
+    projectTargetStore: registryModule.createStockPreparationProjectTargetStore({ db: w.db }),
+    projectWriteLock: w.lockEnv.lock,
+  })
+  const entries = (db) => db.log.map(([method, args]) => `${method}:${args && args.table ? args.table : (args && args.level) || ''}`)
   // (a) a database where migration 101 has NOT run: the row carries no pilot column at all -> not pilot (never 501 / unreadable).
-  const registry = registryDb([{ id: 'pt_1', tenant_id: TENANT, project_no: PRJ, sheet_id: SHEET, object_id: 'obj_a', status: 'active' }])
-  const realRegistryStore = registryModule.createStockPreparationProjectTargetStore({ db: registry })
-  const reader = createStockPreparationRefreshGovernance({ continuationStore: w.continuationStore, projectTargetStore: realRegistryStore, projectWriteLock: w.lockEnv.lock })
-  const pre101 = await reader.consult(w.scope)
+  const pre = await world({ registryPilotColumns: false })
+  const PRJ = pre.scope.projectNo
+  await pre.db.insertOne(RT, refreshKit.registryRow({ tenantId: TENANT, projectNo: PRJ, sheetId: SHEET, objectId: 'obj_a' }))
+  assert.ok(!Object.prototype.hasOwnProperty.call(pre.db.rows(RT)[0], 'pilot_enabled_at'), 'no migration-101 column on this database')
+  pre.db.log.length = 0
+  const pre101 = await readerOver(pre).consult(pre.scope)
   assert.deepEqual(pre101.pilot, { enabled: false, enabledAt: null, enabledBy: null, readinessVersion: null })
   assert.equal(pre101.governed, false)
   assert.deepEqual(pre101.registry, { sheetId: SHEET, objectId: 'obj_a', status: 'active' })
   assert.equal(readProjectRefreshState(pre101).status, 'not_governed')
+  // ONE SNAPSHOT (review X-1): the two registry reads are `trx.selectOne`s ON the consult's transaction, right after
+  // the REPEATABLE READ pin and before every step-4 read — never an autocommit read beside the snapshot.
+  const log = entries(pre.db)
+  assert.deepEqual(log.slice(0, 4), ['transaction:', 'trx.setTransactionIsolationLevel:repeatable read', `trx.selectOne:${RT}`, `trx.selectOne:${RT}`])
+  assert.equal(log.filter((entry) => entry.endsWith(`:${RT}`)).length, 2, 'the registry is read twice (by project, by sheet), both in the snapshot')
+  assert.ok(log.slice(4, -1).every((entry) => entry.startsWith('trx.select:') && STEP4_TABLES.has(entry.slice('trx.select:'.length))), 'then only step-4 reads, on the same transaction')
+  assert.equal(log[log.length - 1], 'commit:')
   // (b) the marker set (migration 101 applied, the admin enabled the pilot): the marker alone governs.
-  Object.assign(registry.rows[0], { pilot_enabled_at: new Date('2026-10-24T00:00:00.000Z'), pilot_enabled_by: 'u_admin', pilot_readiness_version: 1 })
+  const w = await world()
+  await w.db.insertOne(RT, refreshKit.registryRow({ tenantId: TENANT, projectNo: PRJ, sheetId: SHEET, objectId: 'obj_a', pilot: true, at: new Date('2026-10-24T00:00:00.000Z') }))
+  const reader = readerOver(w)
   const marked = await reader.consult(w.scope)
   assert.deepEqual(marked.pilot, { enabled: true, enabledAt: '2026-10-24T00:00:00.000Z', enabledBy: 'u_admin', readinessVersion: 1 })
   assert.equal(marked.governed, true)
   assert.equal(readProjectRefreshState(marked).governed, 'pilot')
-  // (c) the registry read fails: 503 naming the registry — never "not pilot".
-  registry.faults.selectOne = refreshKit.sqlError('42703', 'column does not exist')
+  // (c) the registry read fails: 503 naming the registry — never "not pilot"; the snapshot rolls back, no step-4 read.
+  w.db.log.length = 0
+  w.db.faults.selectOne = refreshKit.sqlError('42703', 'column does not exist')
   const failed = await expectError(reader.consult(w.scope), { status: 503, code: CODES.STORE_FAILED })
   assert.equal(failed.details.store, 'registry')
+  assert.equal(failed.details.operation, 'pilot_state_by_project')
   assert.equal(failed.details.sqlState, '42703')
-  delete registry.faults.selectOne
-  // (d) through the real by-sheet read: this sheet is registered to ANOTHER project -> RETARGETED before any store row read.
-  const foreign = registryDb([{ id: 'pt_2', tenant_id: TENANT, project_no: 'PRJ-OTHER', sheet_id: SHEET, object_id: 'obj_b', status: 'active' }])
-  const reader2 = createStockPreparationRefreshGovernance({ continuationStore: w.continuationStore, projectTargetStore: registryModule.createStockPreparationProjectTargetStore({ db: foreign }), projectWriteLock: w.lockEnv.lock })
-  w.db.log.length = 0
-  await expectError(reader2.consult(w.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet_registered_to_another_project' })
-  assert.equal(w.db.log.length, 0, 'refused before any store row read')
+  assert.equal(stepFourReads(w.db).length, 0)
+  assert.equal(w.db.log[w.db.log.length - 1][0], 'rollback')
+  // (d) through the real by-sheet read: this sheet is registered to ANOTHER project -> RETARGETED before any step-4 row read.
+  const foreign = await world()
+  await foreign.db.insertOne(RT, refreshKit.registryRow({ tenantId: TENANT, projectNo: 'PRJ-OTHER', sheetId: SHEET, objectId: 'obj_b' }))
+  foreign.db.log.length = 0
+  await expectError(readerOver(foreign).consult(foreign.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet_registered_to_another_project' })
+  assert.equal(stepFourReads(foreign.db).length, 0, 'refused before any step-4 row read')
+  assert.deepEqual(entries(foreign.db).slice(0, 2), ['transaction:', 'trx.setTransactionIsolationLevel:repeatable read'])
+  assert.equal(foreign.db.log[foreign.db.log.length - 1][0], 'rollback')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-governance.test.cjs', tests)
