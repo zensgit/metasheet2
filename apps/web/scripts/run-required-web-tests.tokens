@@ -616,6 +616,7 @@ useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
 useAttendanceRequestTimezone
 useAutoSumTotal
+useDingTalkPersonRecipientStatus
 usePlmExportActions
 userManagementRoleMembership
 userManagementView

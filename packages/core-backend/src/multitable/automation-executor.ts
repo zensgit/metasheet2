@@ -65,6 +65,7 @@ import {
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
+import { DINGTALK_PERSON_RECIPIENT_STATUS_SQL, resolveDingTalkPersonRecipientRows } from './dingtalk-person-recipient-status'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -5538,39 +5539,18 @@ export class AutomationExecutor {
       // DT-OPS-04: carry the integration the recipient is actually bound under. A
       // DingTalk userid is only meaningful inside its own corp, so the credentials used
       // to notify them must come from that integration — not from whichever integration
-      // happens to sort first as "latest active".
-      `SELECT u.id AS local_user_id,
-              u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id,
-              linked.integration_id AS integration_id
-         FROM users u
-         LEFT JOIN LATERAL (
-           SELECT a.external_user_id, a.integration_id::text AS integration_id
-             FROM directory_account_links l
-             JOIN directory_accounts a ON a.id = l.directory_account_id
-            WHERE l.local_user_id = u.id
-              AND l.link_status = 'linked'
-              AND a.provider = 'dingtalk'
-              AND a.is_active = TRUE
-            ORDER BY a.updated_at DESC
-            LIMIT 1
-         ) linked ON TRUE
-        WHERE u.id = ANY($1::text[])`,
+      // happens to sort first as "latest active". The query is shared with the rule editor's
+      // recipient-status preflight (客户反馈 2026-10-21 item 1), so both read the same conditions.
+      DINGTALK_PERSON_RECIPIENT_STATUS_SQL,
       [userIds],
     )
 
-    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
-    // (a) which local users exist and are active — only to COUNT why a recipient was skipped.
-    const localUserActive = new Map<string, boolean>()
-    for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
-      const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
-      const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
-      const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
-      const isActive = row.local_user_active === true
-      if (localUserId && !localUserActive.has(localUserId)) localUserActive.set(localUserId, isActive)
-      if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
-      recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
-    }
+    // Review round 2: the row decision is shared with the rule editor's preflight
+    // (resolveDingTalkPersonRecipientRows), so what the editor reports is what this step does.
+    // (a) localUserActive: which local users exist and are active — only to COUNT why one was skipped.
+    const recipientResolution = resolveDingTalkPersonRecipientRows(recipientsResult.rows)
+    const recipientMap = recipientResolution.reachable
+    const localUserActive = recipientResolution.activeByUserId
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
     const skippedReasonCounts: DingTalkSkippedRecipientCounts = { notLinked: 0, inactive: 0, notFound: 0 }
