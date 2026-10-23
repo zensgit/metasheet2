@@ -18,7 +18,8 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 1):
+// THE LIST (PILOT_READINESS_VERSION 2 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// design §23.4 F-3 / F-5 added the three marked ★, which only ever refuse more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -26,14 +27,33 @@
 //   contract_option_sets           every contract select column carries a non-empty option list
 //   views_present                  the fill view and the to-fill view exist
 //   single_project_on_sheet        no other project's active rows sit on the sheet (foreign-project guard)
+// ★ no_two_copy_component          no component of the project is held on the sheet BOTH as an active root row
+//                                  (blank parentSourceId) AND as an active nested row (non-blank parentSourceId):
+//                                  such a "two-copy" sheet goes through the step-6 repair first (O-6). "Active"
+//                                  and "root" are the continuation core's own predicates (active !== false — the
+//                                  wider reading; refuses more than the fill view's), keyless rows included
 //   write_lock_store_readable      the sheet write lock row can be read (migration 100 present)
 //   write_lock_free                no LIVE lease on the sheet (an expired one is cleared by the enable's bump)
+// ★ no_open_large_job              no checkpoint-apply job that targets this sheet is still OPEN (queued, paused,
+//                                  failed, running, or any status that is not terminal) and none is
+//                                  unattributable; the job store must answer (F-3). A job half-landed across an
+//                                  enablement can be neither resumed (the pilot gate refuses the large lane) nor
+//                                  closed (there is no apply-job cancel) — runbook 旧作业处置
 //   export_closure_port            the host offers closeSheetGridExport + getSheetGridExportClosure (#6507)
 //                                  and can READ this sheet's closure (so a stamp can land where the resolvers look)
 //   continuation_store_readable    the step-4 continuation table is readable      ← step 4 PR-2
 //   refresh_state_store_readable   the step-4 refresh-state table is readable     ← step 4 PR-2
 //   spec_read_plan_slot            the read plan declares the 规格 column, or server config declares it
 //                                  not applicable (never guessed)                   ← step-4 refuter B-M8
+// ★ pack_columns_installed         EITHER the action declares at least one `ext_` column (`extensionFieldIds`)
+//                                  and EVERY declared column is installed on THIS sheet — listed live by the
+//                                  pack-install ledger for (tenant, staging project, objectId) AND present on the
+//                                  host (the same two facts the planner's `installedFieldProperties` is built
+//                                  from) — OR server config declares the customer pack not applicable
+//                                  (`stockPreparationPilot.customerPack: 'not_applicable'`), the action declares
+//                                  no `ext_` column and the ledger lists no live pack column on the sheet. Never
+//                                  guessed; both reads must answer (O-8: a declared pack column installed after a
+//                                  continuation is confirmed would leave it evidence_incomplete with no confirm)
 //   no_generic_writer_names_sheet  no external-system object config and no pipeline's erp-feedback option
 //                                  names this sheet or objectId (and both registries answered) ← step 4 PR-6
 //   continuation_support_version   the plugin build recognises continuations    ← step 4 PR-3 flips the marker
@@ -55,8 +75,10 @@ const {
 // flips it to REQUIRED when the build really recognises persisted continuations on every lane. Until
 // then readiness refuses by construction (D-22).
 const continuationSupport = require('./stock-preparation-continuation-support.cjs')
+// O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
+const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
 
-const PILOT_READINESS_VERSION = 1
+const PILOT_READINESS_VERSION = 2
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -71,6 +93,11 @@ const STEP4_STORE_TABLES = Object.freeze({
 // declares nothing.
 const SPEC_READ_PLAN_SLOT_NOT_APPLICABLE = 'not_applicable'
 
+// Server config (NOT an env flag), F-5 / O-8: `stockPreparationPilot.customerPack` with the exact literal
+// 'not_applicable' declares that this deployment runs without a customer pack (no `ext_` columns). Anything
+// else declares nothing.
+const CUSTOMER_PACK_NOT_APPLICABLE = 'not_applicable'
+
 const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'registry_row_active',
   'sheet_present',
@@ -79,12 +106,15 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'contract_option_sets',
   'views_present',
   'single_project_on_sheet',
+  'no_two_copy_component',
   'write_lock_store_readable',
   'write_lock_free',
+  'no_open_large_job',
   'export_closure_port',
   'continuation_store_readable',
   'refresh_state_store_readable',
   'spec_read_plan_slot',
+  'pack_columns_installed',
   'no_generic_writer_names_sheet',
   'continuation_support_version',
 ])
@@ -145,6 +175,50 @@ async function collectGenericWriterTargets({ externalSystemRegistry, pipelineReg
   return { complete: true, sheetIds, objectIds }
 }
 
+/**
+ * O-6: how many components the project holds on the sheet BOTH as an active root row and as an active nested
+ * row. Rows are the project-scoped read's logical rows; a row without a non-blank string componentSourceId
+ * cannot be grouped and is skipped. Values-free: one integer.
+ */
+function countTwoCopyComponents(rows) {
+  const roots = new Set()
+  const nested = new Set()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isActiveRow(row)) continue
+    const component = row && typeof row.componentSourceId === 'string' && row.componentSourceId.trim() !== '' ? row.componentSourceId : null
+    if (!component) continue
+    if (isRootRow(row)) roots.add(component)
+    else nested.add(component)
+  }
+  let count = 0
+  for (const component of roots) if (nested.has(component)) count += 1
+  return count
+}
+
+/**
+ * O-8: the pack facts for ONE sheet, read STRICTLY — unlike loadPackInstalledFieldProperties, which degrades
+ * every failure to "no pack" by design (the refresh falls back to legacy bands), a readiness probe must not
+ * read a failure as an answer. Throws when the ledger or the host cannot answer.
+ *   declared  the action's `extensionFieldIds` (null when the config value is not a list of strings)
+ *   ledger    the ledger's live field ids and pack ids for (tenant, staging project, objectId)
+ *   live      the subset of `declared` the host returns a field for on this sheet
+ */
+async function readPackColumnFacts({ action, packInstallStore, provisioning, tenantId, projectId, objectId } = {}) {
+  const raw = isPlainObject(action) && action.extensionFieldIds !== undefined ? action.extensionFieldIds : []
+  const declared = Array.isArray(raw) && raw.every((id) => nonEmptyString(id) !== null) ? raw.map((id) => id.trim()) : null
+  if (!packInstallStore || typeof packInstallStore.listInstalledFieldIds !== 'function') throw new Error('pack install ledger unavailable')
+  const ledger = await packInstallStore.listInstalledFieldIds({ tenantId, projectId, objectId })
+  if (!isPlainObject(ledger) || !Array.isArray(ledger.fieldIds) || !Array.isArray(ledger.packIds)) throw new Error('pack install ledger answered no lists')
+  const live = new Set()
+  if (declared && declared.length > 0) {
+    if (!provisioning || typeof provisioning.readObjectFieldsContent !== 'function') throw new Error('host field read unavailable')
+    const content = await provisioning.readObjectFieldsContent({ projectId, objectId, fieldIds: [...declared] })
+    if (!isPlainObject(content)) throw new Error('host field read answered no map')
+    for (const fieldId of declared) if (isPlainObject(content[fieldId])) live.add(fieldId)
+  }
+  return { declared, ledgerFieldIds: new Set(ledger.fieldIds), ledgerPackCount: ledger.packIds.length, live }
+}
+
 // Each check: (deps) => boolean | Promise<boolean>. A throw is `ok: false`.
 const CHECKS = Object.freeze({
   registry_row_active(deps) {
@@ -193,6 +267,13 @@ const CHECKS = Object.freeze({
     await deps.assertTargetSheetHoldsNoForeignActiveRows(deps.recordsApi, deps.target, deps.projectNo)
     return true
   },
+  async no_two_copy_component(deps) {
+    // The project-scoped read the planner itself plans from (same page bounds; past them it throws ⇒ false).
+    if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) return false
+    const rows = await deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo)
+    if (!Array.isArray(rows)) return false
+    return countTwoCopyComponents(rows) === 0
+  },
   async write_lock_store_readable(deps) {
     if (!deps.lock || typeof deps.lock.readState !== 'function' || !nonEmptyString(deps.writeScope)) return false
     const state = await deps.lock.readState(deps.writeScope)
@@ -202,6 +283,13 @@ const CHECKS = Object.freeze({
     if (!deps.lock || typeof deps.lock.readState !== 'function' || !nonEmptyString(deps.writeScope)) return false
     const state = await deps.lock.readState(deps.writeScope)
     return Boolean(state) && state.leaseLive !== true
+  },
+  async no_open_large_job(deps) {
+    // `countOpenLargeJobs` = the large-BOM job store's own scan for this sheet
+    // (countOpenLargeBomCheckpointApplyJobsForSheet); an unreadable store throws ⇒ false.
+    if (typeof deps.countOpenLargeJobs !== 'function') return false
+    const scan = await deps.countOpenLargeJobs()
+    return isPlainObject(scan) && scan.open === 0 && scan.unattributed === 0
   },
   async export_closure_port(deps) {
     const provisioning = deps.provisioning
@@ -225,6 +313,23 @@ const CHECKS = Object.freeze({
     if (declared) return true
     return deps.specReadPlanSlotDeclaration === SPEC_READ_PLAN_SLOT_NOT_APPLICABLE
   },
+  async pack_columns_installed(deps) {
+    const facts = await readPackColumnFacts({
+      action: deps.action,
+      packInstallStore: deps.packInstallStore,
+      provisioning: deps.provisioning,
+      tenantId: deps.tenantId,
+      projectId: deps.projectId,
+      objectId: deps.objectId,
+    })
+    if (!facts.declared) return false
+    if (deps.customerPackDeclaration === CUSTOMER_PACK_NOT_APPLICABLE) {
+      // Declared not applicable: only true while the facts agree — nothing declared, nothing installed.
+      return facts.declared.length === 0 && facts.ledgerFieldIds.size === 0 && facts.ledgerPackCount === 0
+    }
+    if (facts.declared.length === 0) return false
+    return facts.declared.every((fieldId) => facts.ledgerFieldIds.has(fieldId) && facts.live.has(fieldId))
+  },
   async no_generic_writer_names_sheet(deps) {
     if (typeof deps.collectGenericWriterTargets !== 'function') return false
     const targets = await deps.collectGenericWriterTargets()
@@ -240,8 +345,9 @@ const CHECKS = Object.freeze({
 /**
  * Run every check; never throws. `deps` (all server-held, nothing from a request):
  *   row, sheetId, objectId, projectId, projectNo, tenantId, action, target, recordsApi, provisioning,
- *   assertTargetSheetHoldsNoForeignActiveRows, lock, writeScope, probeTableReadable,
- *   specReadPlanSlotDeclaration, collectGenericWriterTargets
+ *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
+ *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
+ *   customerPackDeclaration, collectGenericWriterTargets
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
@@ -268,7 +374,12 @@ module.exports = {
   PILOT_READINESS_CHECK_IDS,
   REQUIRED_CONTINUATION_SUPPORT_VERSION,
   SPEC_READ_PLAN_SLOT_NOT_APPLICABLE,
+  CUSTOMER_PACK_NOT_APPLICABLE,
   STEP4_STORE_TABLES,
   collectGenericWriterTargets,
   evaluatePilotReadiness,
+  __internals: {
+    countTwoCopyComponents,
+    readPackColumnFacts,
+  },
 }

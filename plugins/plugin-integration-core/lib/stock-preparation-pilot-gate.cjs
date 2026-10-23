@@ -100,13 +100,24 @@ function createStockPreparationPilotGate({ store = null } = {}) {
   /**
    * `{ state: 'pilot' | 'not_pilot', byProject, bySheet, registry: 'present' | 'absent' }`. Reads by
    * (tenant, project) when both are given and by sheet when one is given; a read that throws is 503.
+   *
+   * Pre-enable hardening F-4(a) (step-4 design §23.4): a call that names NEITHER identity — no (tenant,
+   * project) pair and no sheet — is REFUSED, never answered `not_pilot`: with nothing to read, "not pilot"
+   * would be a guess, and every lane gate built on it would let a pilot project through. Checked first,
+   * before the absent-registry answer, because a caller that cannot name what it is about to touch is a
+   * defect whatever the deployment (every route passes the sheet it writes). 500 STATE_UNREADABLE with
+   * `reason: 'identity_missing'` — the same answer as an unknown lane token: a caller error, never a
+   * client one, and never "proceed".
    */
   async function readPilotState({ tenantId, projectNo, sheetId } = {}) {
-    const reads = pilotReads()
-    if (!reads) return Object.freeze({ state: 'not_pilot', byProject: false, bySheet: false, registry: 'absent' })
     const tenant = nonEmptyString(tenantId)
     const project = nonEmptyString(projectNo)
     const sheet = nonEmptyString(sheetId)
+    if (!(tenant && project) && !sheet) {
+      throw new StockPreparationPilotError(500, PILOT_ERROR_CODES.STATE_UNREADABLE, 'the pilot state was asked without a project or a sheet to read it by', { operation: 'pilot_state_read', reason: 'identity_missing', partial: false })
+    }
+    const reads = pilotReads()
+    if (!reads) return Object.freeze({ state: 'not_pilot', byProject: false, bySheet: false, registry: 'absent' })
     let byProject = null
     let bySheet = null
     try {

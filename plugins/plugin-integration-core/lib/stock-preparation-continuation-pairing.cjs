@@ -1532,6 +1532,10 @@ module.exports = {
     detectDroppedHeads,
     evidenceUsability,
     expectedKeyForTokens,
+    // Pre-enable hardening F-5 (O-6): the pilot readiness check reads "active" and "root" with THESE two
+    // predicates, so the readiness refusal and the candidate filter it protects can never disagree.
+    isActiveRow,
+    isRootRow,
     isColdStartExempt,
     keyPathTokens,
     subjectDigest,

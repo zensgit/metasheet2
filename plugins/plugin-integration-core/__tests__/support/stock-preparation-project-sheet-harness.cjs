@@ -522,6 +522,16 @@ function mountProjectSheetRoutes({
       auditAppends.push(entry)
       return { ok: true }
     },
+    // Pre-enable hardening F-4(c): the in-transaction append (the real store inserts on `trx`). The memory db
+    // here does not roll back, so this records the row like `append` and pins that it was handed a TRANSACTION
+    // handle (one carrying the advisory lock the registry's transactions take) — atomicity itself is real-DB.
+    async appendWithin(trx, entry) {
+      assert.ok(trx && typeof trx.advisoryXactLock === 'function', 'appendWithin is handed a transaction handle')
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes(entry.action), `audit action ${entry.action} is in the closed vocabulary`)
+      auditAppends.push(entry)
+      return { ok: true }
+    },
     async supportsAction() { return { supported: true, reason: 'check_constraint_accepts' } },
     async list() { return { rowCount: 0, entries: [] } },
   }
