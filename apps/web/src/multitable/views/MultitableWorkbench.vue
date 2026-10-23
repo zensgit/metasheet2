@@ -250,8 +250,8 @@
       :filter-groups="grid.filterGroups.value"
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="canCreateRecordByHand" :can-export="canExportNow" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
-      :export-closed-reason="gridExportClosedReason"
+      :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :export-closed-reason="gridExportClosedReason" :export-pending="capabilitiesStale"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -1079,21 +1079,24 @@ const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !reco
 // grid export (canExport is then already false). The toolbar keeps its export buttons visible but disabled with
 // this reason, and every client-side export entry below re-checks `canRunGridExport()` before it builds a file.
 // Same fail-closed read as recordCreateBlockedByLock: absent ⇒ exactly the old behaviour.
+// Review round 1, fix 3 / round 2: `selectSheet` switches the active sheet at once, but the capabilities (and so the
+// closure marker) stay the PREVIOUS sheet's until its `/context` lands. In that window nothing about the active
+// sheet is known: no generic export may start (`canRunGridExport` refuses), the toolbar keeps its export pair
+// mounted but disabled (`exportPending`), and a closure reason is shown only when the capabilities belong to the
+// active sheet (no stale reason after closed -> open). Only a string owner can be stale: before any context it is
+// null. Typed through the composable's return type (no cast), so removing `capabilitiesSheetId` there is a type
+// error here; the `?.` only tolerates the many spec doubles of the composable that predate the ref.
+const capabilitiesStale = computed(() => {
+  const owner = workbench.capabilitiesSheetId?.value
+  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
+})
 const gridExportClosed = computed(() => {
   const marker = (capabilitySource.value as { gridExportClosure?: unknown } | null | undefined)?.gridExportClosure
   return marker !== null && marker !== undefined && marker !== false
 })
-const gridExportClosedReason = computed(() => (gridExportClosed.value ? wb('notice.gridExportClosed', isZh.value) : null))
-// Review round 1, fix 3: `selectSheet` switches the active sheet at once, but the capabilities (and so the closure
-// marker) stay the PREVIOUS sheet's until its `/context` lands. In that window no generic export may start — a
-// switch from an open sheet to a closed one would otherwise pass the gate with the open sheet's capabilities. Fail
-// closed: the export entries are off until the capabilities belong to the active sheet (the same state a first
-// load is in before its context arrives). Only a string id can be stale: before any context it is null.
-const capabilitiesStale = computed(() => {
-  const owner = (workbench as { capabilitiesSheetId?: { value: string | null } }).capabilitiesSheetId?.value
-  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
-})
-const canExportNow = computed(() => caps.canExport.value && !capabilitiesStale.value)
+const gridExportClosedReason = computed(() => (
+  gridExportClosed.value && !capabilitiesStale.value ? wb('notice.gridExportClosed', isZh.value) : null
+))
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the

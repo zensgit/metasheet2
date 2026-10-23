@@ -219,11 +219,14 @@
         <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
         {{ l('toolbar.import') }}
       </MtButton>
-      <MtButton v-if="canExport && !exportClosedReason" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+      <!-- Review round 2: in the sheet-switch stale window (`exportPending`) the pair stays MOUNTED but disabled, so an
+           ordinary-to-ordinary switch does not unmount and remount it; it is enabled again once the new sheet's own
+           capabilities arrive. -->
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportCsv') }}
       </MtButton>
-      <MtButton v-if="canExport && !exportClosedReason" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+      <MtButton v-if="canExport && !exportClosedReason" :disabled="exportPending" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
         <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
         {{ l('toolbar.exportXlsx') }}
       </MtButton>
@@ -324,6 +327,9 @@ const props = withDefaults(defineProps<{
   // 备料分批拉取第一期 step 3: non-empty ⇒ the sheet's generic grid export is closed; the export buttons render
   // disabled with this reason. Absent / empty ⇒ unchanged (`canExport` alone decides, as before).
   exportClosedReason?: string | null
+  // Review round 2: true while the capabilities shown belong to ANOTHER sheet (the workbench's sheet-switch window):
+  // the export pair renders disabled, without any reason, until the active sheet's capabilities land.
+  exportPending?: boolean
   canUndo: boolean
   canRedo: boolean
   // Nested / multi-level grouping: ordered group field ids (level 0 = outermost), 1..MAX_GROUP_LEVELS.

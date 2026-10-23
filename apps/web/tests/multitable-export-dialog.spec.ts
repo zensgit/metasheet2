@@ -225,6 +225,22 @@ describe('MetaToolbar export buttons — grid export closure', () => {
     expect(root.querySelectorAll('button:not([disabled])[aria-label*="导出"]').length).toBe(0)
   })
 
+  it('exportPending (sheet-switch window): the pair stays rendered but disabled, no reason wrapper, clicks emit nothing', async () => {
+    useLocale().setLocale('en')
+    const onExportCsv = vi.fn()
+    const onExportXlsx = vi.fn()
+    const root = mountToolbar({ canExport: true, exportPending: true, onExportCsv, onExportXlsx })
+    await nextTick()
+    expect(root.querySelector('[data-testid="meta-toolbar-export-closed"]')).toBeNull()
+    const csv = root.querySelector<HTMLButtonElement>('button[title="Export CSV"]')!
+    const xlsx = root.querySelector<HTMLButtonElement>('button[aria-label="Export Excel"]')!
+    expect([csv.disabled, xlsx.disabled]).toEqual([true, true])
+    csv.click()
+    xlsx.click()
+    expect(onExportCsv).not.toHaveBeenCalled()
+    expect(onExportXlsx).not.toHaveBeenCalled()
+  })
+
   it('closed sheet: a stray canExport=true never re-enables the buttons (the reason wins)', async () => {
     const onExportCsv = vi.fn()
     const root = mountToolbar({ canExport: true, exportClosedReason: REASON, onExportCsv })

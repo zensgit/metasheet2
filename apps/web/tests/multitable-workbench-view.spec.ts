@@ -299,9 +299,16 @@ vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
+// Review round 2 (S2): `toolbarMode.real` makes this double render the REAL MetaToolbar with everything the
+// workbench passed, so the sheet-switch specs see the real buttons (mount identity, `disabled`, the closed-reason
+// span). Off by default: every other spec keeps the stand-in below.
+const toolbarMode = vi.hoisted(() => ({ real: false }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/multitable/components/MetaToolbar.vue')>()
+  return {
   default: defineComponent({
     name: 'MetaToolbar',
+    inheritAttrs: false,
     props: {
       fields: { type: Array, default: () => [] },
       // persist-display-prefs: expose the inbound row-density so the round-trip can be asserted.
@@ -309,9 +316,21 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
       // 备料分批拉取第一期 step 3: what the workbench hands the toolbar about the export buttons.
       canExport: { type: Boolean, default: undefined },
       exportClosedReason: { type: String, default: null },
+      exportPending: { type: Boolean, default: false },
     },
     emits: ['add-record', 'import', 'export-csv', 'export-xlsx', 'set-row-density'],
     render() {
+      if (toolbarMode.real) {
+        return h(actual.default as never, {
+          ...this.$attrs,
+          ...this.$props,
+          onAddRecord: () => this.$emit('add-record'),
+          onImport: () => this.$emit('import'),
+          onExportCsv: () => this.$emit('export-csv'),
+          onExportXlsx: () => this.$emit('export-xlsx'),
+          onSetRowDensity: (density: string) => this.$emit('set-row-density', density),
+        })
+      }
       const fieldIds = (this.$props.fields as Array<{ id?: string }>)
         .map((field) => field.id ?? '')
         .filter((fieldId) => fieldId.length > 0)
@@ -323,6 +342,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
           'data-toolbar-row-density': this.$props.rowDensity ?? '',
           'data-toolbar-can-export': String(this.$props.canExport),
           'data-toolbar-export-closed-reason': this.$props.exportClosedReason ?? '',
+          'data-toolbar-export-pending': String(this.$props.exportPending),
         },
         [
           // The stub's xlsx button ignores any disabled state on purpose: it stands for a stale or scripted
@@ -371,7 +391,8 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
       )
     },
   }),
-}))
+  }
+})
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
   default: defineComponent({
     name: 'MetaGridTable',
@@ -1418,6 +1439,7 @@ describe('MultitableWorkbench view wiring', () => {
     authAccessSnapshot.isAdmin = false
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
+    toolbarMode.real = false
     inspectorStubSeen.openerEl = null
     inspectorStubSeen.renders = 0
     inspectorStubSeen.fieldLayout = undefined
@@ -2324,7 +2346,8 @@ describe('MultitableWorkbench view wiring', () => {
 
         workbenchMock.selectSheet('sheet_pilot') // the switch; capabilities are still sheet_orders'
         await flushUi()
-        expect(toolbar().getAttribute('data-toolbar-can-export')).toBe('false')
+        // Round 2: the pair stays mounted (can-export unchanged) but pending → disabled; no reason yet.
+        expect(toolbar().getAttribute('data-toolbar-export-pending')).toBe('true')
         expect(toolbar().getAttribute('data-toolbar-export-closed-reason')).toBe('')
         for (const selector of ['[data-export-csv="true"]', '[data-export-xlsx="true"]']) {
           container!.querySelector<HTMLButtonElement>(selector)!.click()
@@ -2365,6 +2388,87 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
       await flushUi()
       expect(document.body.querySelector('.meta-export__btn--primary')).not.toBeNull()
+    })
+
+    // Review round 2 (S2): the same switches against the REAL MetaToolbar (toolbarMode.real), so what the user sees is
+    // asserted on the real buttons — mount identity, `disabled`, and the closed-reason span.
+    describe('sheet switch on the REAL MetaToolbar', () => {
+      const realCsv = () => container!.querySelector<HTMLButtonElement>('button[title="Export CSV"]')
+      const realXlsx = () => container!.querySelector<HTMLButtonElement>('button[aria-label="Export Excel"]:not([data-export-closed])')
+      const closedWrapper = () => container!.querySelector<HTMLElement>('[data-testid="meta-toolbar-export-closed"]')
+      function twoSheets(second: string) {
+        toolbarMode.real = true
+        useLocale().setLocale('en')
+        workbenchMock.capabilitiesSheetId = ref('sheet_orders')
+        workbenchMock.sheets.value = [
+          { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+          { id: second, baseId: 'base_ops', name: 'Second', description: null },
+        ]
+      }
+
+      it('ordinary → ordinary: the pair stays MOUNTED (same nodes), disabled in the window, enabled when the context lands', async () => {
+        twoSheets('sheet_other')
+        mountWorkbench()
+        await flushUi()
+        const csv = realCsv()
+        const xlsx = realXlsx()
+        expect(csv).not.toBeNull()
+        expect(xlsx).not.toBeNull()
+        expect(csv!.disabled).toBe(false)
+
+        workbenchMock.selectSheet('sheet_other')
+        await flushUi()
+        expect(realCsv()).toBe(csv) // not unmounted / remounted
+        expect(realXlsx()).toBe(xlsx)
+        expect(csv!.disabled).toBe(true)
+        expect(xlsx!.disabled).toBe(true)
+        expect(closedWrapper()).toBeNull()
+
+        workbenchMock.capabilitiesSheetId.value = 'sheet_other' // the new sheet's own context lands
+        await flushUi()
+        expect(realCsv()).toBe(csv)
+        expect(csv!.disabled).toBe(false)
+        expect(xlsx!.disabled).toBe(false)
+      })
+
+      it('closed → open: the previous sheet\'s closed reason is NOT shown in the window; enabled export once the context lands', async () => {
+        twoSheets('sheet_open')
+        closeActiveSheet()
+        mountWorkbench()
+        await flushUi()
+        expect(closedWrapper()?.getAttribute('title')).toBe(CLOSED_REASON_EN)
+
+        workbenchMock.selectSheet('sheet_open')
+        await flushUi()
+        expect(closedWrapper()).toBeNull() // no stale reason
+        expect(realCsv()).toBeNull() // the closed sheet's capabilities still say no export; nothing enabled
+
+        workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canExport: true, gridExportClosure: undefined } as never
+        workbenchMock.capabilitiesSheetId.value = 'sheet_open'
+        await flushUi()
+        expect(closedWrapper()).toBeNull()
+        expect(realCsv()?.disabled).toBe(false)
+      })
+
+      it('open → closed: disabled in the window (no reason), then the reason with both buttons disabled', async () => {
+        twoSheets('sheet_pilot')
+        mountWorkbench()
+        await flushUi()
+        expect(realCsv()?.disabled).toBe(false)
+
+        workbenchMock.selectSheet('sheet_pilot')
+        await flushUi()
+        expect(realCsv()?.disabled).toBe(true)
+        expect(closedWrapper()).toBeNull()
+
+        closeActiveSheet()
+        workbenchMock.capabilitiesSheetId.value = 'sheet_pilot'
+        await flushUi()
+        expect(closedWrapper()?.getAttribute('title')).toBe(CLOSED_REASON_EN)
+        const closedButtons = Array.from(closedWrapper()!.querySelectorAll<HTMLButtonElement>('button[data-export-closed]'))
+        expect(closedButtons.map((b) => b.disabled)).toEqual([true, true])
+        expect(realCsv()).toBeNull() // the enabled pair is gone; only the disabled closed pair remains
+      })
     })
 
     it('control: the same selected-rows csv export on an ordinary sheet still downloads', async () => {
