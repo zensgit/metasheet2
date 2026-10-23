@@ -1,0 +1,72 @@
+{
+  "status": "LOCAL_FINITE_ECO_WIRE_NOT_W23_PERSISTENCE_OR_CURRENT_HEAD_CI",
+  "parent": "18acca1ec49920592644dbfb1eb994b12eac141f",
+  "native_source": "ef026b22f691c270854373c306e4cc0938a053cc",
+  "native_closeout": "e84cf8866af94be6a9db897e9f8873d9103cd02e",
+  "actual_implementation_model": "Grok4.7(xhigh), actualTUI; finalstopped/done afterclosecommandexit1",
+  "source_pins": [
+    {
+      "path": "packages/core-backend/src/multitable/plm-collaboration-snapshot-wire.ts",
+      "sha256": "4f40028b44d1d675dd87cd85ea79e04e320ae5db74582c0eef22b0c4a792a559",
+      "bytes": 10221
+    },
+    {
+      "path": "packages/core-backend/src/data-adapters/PLMAdapter.ts",
+      "sha256": "b2cf3aa31fb763a929ada84a4f07553cc5b0b1c6664676f71a7c7db6f7e33638",
+      "bytes": 177607
+    },
+    {
+      "path": "packages/core-backend/tests/unit/plm-collaboration-snapshot-wire.test.ts",
+      "sha256": "191c70510fd34b4e6e4d8796d9394904eaef4ca8cca3f77af0c82526ef4e2cd0",
+      "bytes": 16443
+    },
+    {
+      "path": "packages/core-backend/tests/unit/plm-collaboration-eco-source-transport.test.ts",
+      "sha256": "1113dae8a3462ff1ca56a2e8f351c1b738721aed69dc42e219a0566fb3acae9b",
+      "bytes": 22892
+    }
+  ],
+  "evidence_packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/w23-meta-eco-wire-final-local-20261023",
+  "manifest_sha256": "8a1840fd14255fdfde0b1eb5294252e1636cf097b1fdfa2301acf3800fb3de64",
+  "historical_red_packets": [
+    {
+      "name": "w23-meta-first-wire-and-deferred-body-red-20261023",
+      "manifest_sha256": "969b981017f5f84cf10d043d9bd4f22a006c778a2e21a8981f906d2cc04ca842"
+    },
+    {
+      "name": "w23-meta-body-repair-green-and-wire-compat-red-20261023",
+      "manifest_sha256": "5959327fe655c0efbf50cd155aa6c81834df1a571a9f0d9043e6f63cc5e15dc5"
+    }
+  ],
+  "separate_cohorts_not_additive": {
+    "first_historical33": "33PASS0skip; Vitestpassedbutwrapperexit1zshreadonlystatus",
+    "root_body_red": "2FAILED0skip realownedloopback+classifierdouble",
+    "selected_transport_repair": "15PASS13deselected; notfullcurrenthead",
+    "root_body_green": "2PASS0skip",
+    "root_wire_red": "3FAILED0skip",
+    "selected_wire_repair": "6PASS3deselected; notfullcurrenthead",
+    "root_wire_green": "3PASS0skip"
+  },
+  "root_verification": "Final4pinsstable; Adapter/transporttestsameasbodyGREEN; originalwire3failedonlyrepeated; diffcheck0. Workerreporttopat/resourcesinheritedold15:02 andnotusedasfinaltime; actualJUnit/session/rootobservationsretained.",
+  "default_vitest_discovery": "Existingunitglobincludesboth; noCIchange; featurepushaloneisnotworkflowtrigger",
+  "not_run": [
+    "package typecheck",
+    "PG classifier/owner/transaction",
+    "Meta persistent sheets/DBguards",
+    "readiness",
+    "browser/build/install",
+    "current remote head CI"
+  ],
+  "limits": [
+    "AdmissionreadsnotcrossDB/HTTPlinearizablelock",
+    "Callerfreshconfignotpersistentownerproof",
+    "HashoneECOrownotcollectionCAS",
+    "HeaderUnicodebytesnotverified",
+    "No route mounted/noactualwrite"
+  ],
+  "final_root_at": "2026-10-23T15:34:35.266155+00:00",
+  "pre_free_bytes": 7166234624,
+  "post_free_bytes": 7166103552,
+  "small_floor": 4563402752,
+  "heavy_floor": 8589934592
+}
