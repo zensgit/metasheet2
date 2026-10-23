@@ -354,11 +354,27 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
 
 /** Status + error code: the short form a failure message names (a 200 is `200:ok`). */
 const outcome = (res) => `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
-/** The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. */
+/**
+ * The export's Content-Disposition, split around the ONE wall-clock segment it carries: the route stamps the
+ * filename with the current second (`stockPreparationExportTimestamp()`), so two calls that straddle a second
+ * boundary differ there and nowhere else. Fully anchored: prefix (incl. the sanitized project token) and suffix
+ * stay byte-compared; only `\d{8}T\d{6}Z` is replaced.
+ */
+const EXPORT_DISPOSITION_RE = /^(attachment; filename="stock-prep-[A-Za-z0-9._-]+-)(\d{8}T\d{6}Z)(\.xlsx")$/
+const EXPORT_TIMESTAMP_MASK = '<export-second>'
+const maskExportTimestamp = (headers) => {
+  const value = headers['Content-Disposition']
+  if (typeof value !== 'string' || !EXPORT_DISPOSITION_RE.test(value)) return headers
+  return { ...headers, 'Content-Disposition': value.replace(EXPORT_DISPOSITION_RE, `$1${EXPORT_TIMESTAMP_MASK}$3`) }
+}
+/**
+ * The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. The only
+ * byte not compared is the export filename's seconds timestamp (see EXPORT_DISPOSITION_RE).
+ */
 const fullAnswer = (res) => JSON.stringify({
   status: res.statusCode,
   body: res.body === undefined ? null : res.body,
-  headers: res.headers || {},
+  headers: maskExportTimestamp(res.headers || {}),
   sent: res.sentBuffer === undefined ? null : Buffer.from(res.sentBuffer).toString('base64'),
 })
 
@@ -412,6 +428,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       before[label] = outcome(res)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (before): the filename has the shape the mask expects')
       beforeFull[label] = fullAnswer(res)
     }
     assert.equal(before.board, '200:ok', `the board answers while active: ${before.board}`)
@@ -464,6 +481,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       assert.equal(outcome(res), before[label], `${label} answers exactly as before the archive`)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (after): the filename has the shape the mask expects')
       assert.equal(fullAnswer(res), beforeFull[label], `${label}: the whole answer is byte-identical`)
     }
     // GET target still reads; only the lifecycle fields move.
