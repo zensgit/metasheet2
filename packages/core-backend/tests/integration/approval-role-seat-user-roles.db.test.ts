@@ -542,7 +542,7 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
 
   it('(j) the live count push to OTHER affected users carries their stored role ids: a handler holding R via user_roles is pushed the same todo count their own GET answers', async () => {
     const role = await seedRole('push-j')
-    // P: an unrelated pending item seated ONLY on role R.
+    // P: two unrelated pending items seated ONLY on role R (the fixture creates two).
     const { instanceA: roleItem } = await fixture('push-j', role.id)
     const handler = await seedViewer('push-j-handler', { role: 'user', roleIds: [role.id] })
     const first = await seedViewer('push-j-first', { role: 'user' })
@@ -563,8 +563,8 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
         const approved = await act(first.token, userItem, 'approve')
         expect(approved.status, await approved.clone().text()).toBe(200)
         const handlerCount = await todoCount(handler.token)
-        // Both the role-seated item and the now-active user seat are the handler's.
-        expect(handlerCount).toBe(2)
+        // The two role-seated items and the now-active user seat are the handler's.
+        expect(handlerCount).toBe(3)
         const handlerPushes = recorder.pushes.filter(
           (push) => push.room === buildAuthenticatedUserRoom(handler.id) && push.event === 'todo:counts-updated',
         )
