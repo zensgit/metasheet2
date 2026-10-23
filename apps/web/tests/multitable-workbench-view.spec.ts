@@ -6,6 +6,7 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 // beside the WB `mentionDisplayFieldId` computed it replaces — see that describe block below.
 import { resolveMentionDisplayField, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
+import { workbenchLabel } from '../src/multitable/utils/workbench-labels'
 import type { MetaField } from '../src/multitable/types'
 
 const showErrorSpy = vi.fn()
@@ -305,8 +306,11 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
       fields: { type: Array, default: () => [] },
       // persist-display-prefs: expose the inbound row-density so the round-trip can be asserted.
       rowDensity: { type: String, default: undefined },
+      // 备料分批拉取第一期 step 3: what the workbench hands the toolbar about the export buttons.
+      canExport: { type: Boolean, default: undefined },
+      exportClosedReason: { type: String, default: null },
     },
-    emits: ['add-record', 'import', 'export-csv', 'set-row-density'],
+    emits: ['add-record', 'import', 'export-csv', 'export-xlsx', 'set-row-density'],
     render() {
       const fieldIds = (this.$props.fields as Array<{ id?: string }>)
         .map((field) => field.id ?? '')
@@ -314,8 +318,23 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
         .join(',')
       return h(
         'div',
-        { 'data-toolbar-field-ids': fieldIds, 'data-toolbar-row-density': this.$props.rowDensity ?? '' },
+        {
+          'data-toolbar-field-ids': fieldIds,
+          'data-toolbar-row-density': this.$props.rowDensity ?? '',
+          'data-toolbar-can-export': String(this.$props.canExport),
+          'data-toolbar-export-closed-reason': this.$props.exportClosedReason ?? '',
+        },
         [
+          // The stub's xlsx button ignores any disabled state on purpose: it stands for a stale or scripted
+          // emit, so the workbench's own re-check is what the closure tests exercise.
+          h(
+            'button',
+            {
+              'data-export-xlsx': 'true',
+              onClick: () => this.$emit('export-xlsx'),
+            },
+            'export-xlsx',
+          ),
           h(
             'button',
             {
@@ -2199,6 +2218,111 @@ describe('MultitableWorkbench view wiring', () => {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
     }
+  })
+
+  // 备料分批拉取第一期 step 3 (PR A): a sheet the server stamped closed for generic grid export arrives with
+  // `capabilities.gridExportClosure` (and canExport false). The toolbar gets the reason (buttons disabled, not
+  // hidden), and EVERY client-side export entry re-checks before building a file — selected rows included,
+  // because those are generated in the browser and the server's 403 cannot stop them.
+  describe('grid export closure (pilot stock-preparation sheet)', () => {
+    const CLOSED_REASON_EN = workbenchLabel('notice.gridExportClosed', false)
+    function closeActiveSheet() {
+      workbenchMock.capabilities.value = { ...workbenchMock.capabilities.value, canExport: false, gridExportClosure: { reason: 'stock_prep_pilot' } } as never
+    }
+    function withDownloadSpies<T>(run: (spies: { createObjectURL: ReturnType<typeof vi.fn>; downloads: string[] }) => Promise<T>): Promise<T> {
+      const downloads: string[] = []
+      const originalCreateObjectURL = URL.createObjectURL
+      const originalRevokeObjectURL = URL.revokeObjectURL
+      const createObjectURL = vi.fn(() => 'blob:multitable-export')
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        downloads.push(this.download)
+      })
+      return run({ createObjectURL, downloads }).finally(() => {
+        clickSpy.mockRestore()
+        Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+        Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+      })
+    }
+
+    it('ordinary sheet: the toolbar gets no closure reason and export opens the dialog as before', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toolbar = container!.querySelector<HTMLElement>('[data-toolbar-export-closed-reason]')!
+      expect(toolbar.getAttribute('data-toolbar-export-closed-reason')).toBe('')
+      expect(toolbar.getAttribute('data-toolbar-can-export')).toBe('true')
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      expect(document.body.querySelector('.meta-export__btn--primary')).not.toBeNull()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('closed sheet: the toolbar gets the reason, and a stale csv / xlsx emit opens no dialog, builds no file and calls no route', async () => {
+      closeActiveSheet()
+      await withDownloadSpies(async ({ createObjectURL, downloads }) => {
+        mountWorkbench()
+        await flushUi()
+        const toolbar = container!.querySelector<HTMLElement>('[data-toolbar-export-closed-reason]')!
+        expect(toolbar.getAttribute('data-toolbar-export-closed-reason')).toBe(CLOSED_REASON_EN)
+        expect(toolbar.getAttribute('data-toolbar-can-export')).toBe('false')
+        for (const selector of ['[data-export-csv="true"]', '[data-export-xlsx="true"]']) {
+          container!.querySelector<HTMLButtonElement>(selector)!.click()
+          await flushUi()
+          expect(document.body.querySelector('.meta-export__btn--primary'), selector).toBeNull()
+        }
+        expect(showErrorSpy).toHaveBeenCalledWith(CLOSED_REASON_EN)
+        expect(workbenchMock.client.exportSheet).not.toHaveBeenCalled()
+        expect(createObjectURL).not.toHaveBeenCalled()
+        expect(downloads).toEqual([])
+      })
+    })
+
+    for (const format of ['csv', 'xlsx'] as const) {
+      it(`the dialog re-checks at confirm: selected rows (${format}) of a sheet closed while the dialog was open are not generated`, async () => {
+        buildXlsxBufferMock.mockClear()
+        await withDownloadSpies(async ({ createObjectURL, downloads }) => {
+          mountWorkbench()
+          await flushUi()
+          container!.querySelector<HTMLButtonElement>('[data-select-rows="rec_1"]')!.click()
+          await flushUi()
+          container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+          await flushUi()
+          document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="selected"]')!.click()
+          document.body.querySelector<HTMLInputElement>(`.meta-export__opt input[value="${format}"]`)!.click()
+          await flushUi()
+          // The server closes the sheet and the context reloads while the dialog is still open.
+          closeActiveSheet()
+          await flushUi()
+          document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+          for (let i = 0; i < 10; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+            await flushUi()
+          }
+          expect(downloads).toEqual([])
+          expect(createObjectURL).not.toHaveBeenCalled()
+          expect(buildXlsxBufferMock).not.toHaveBeenCalled()
+          expect(workbenchMock.client.exportSheet).not.toHaveBeenCalled()
+          expect(showErrorSpy).toHaveBeenCalledWith(CLOSED_REASON_EN)
+        })
+      })
+    }
+
+    it('control: the same selected-rows csv export on an ordinary sheet still downloads', async () => {
+      await withDownloadSpies(async ({ downloads }) => {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-select-rows="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+        await flushUi()
+        document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="selected"]')!.click()
+        await flushUi()
+        document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+        await flushUi()
+        expect(downloads).toEqual(['Orders.csv'])
+      })
+    })
   })
 
   // G-10 follow-up: bulk-edit failure samples (dialog error + toast, normal-user surfaces) lead with

@@ -1,0 +1,962 @@
+{
+  "context:admin:sheet_0123456789abcdef01234567": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": true,
+          "canCopySheet": true,
+          "canCreateRecord": true,
+          "canDeleteRecord": true,
+          "canDeleteSheet": true,
+          "canEditRecord": true,
+          "canExport": true,
+          "canManageAutomation": true,
+          "canManageFields": true,
+          "canManageSheetAccess": true,
+          "canManageViews": true,
+          "canRead": true,
+          "canSendNotification": true,
+          "canSubmitApproval": true,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "admin"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sheet_0123456789abcdef01234567": {
+            "readOnly": false,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sheet_0123456789abcdef01234567",
+          "name": "Derived"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sheet_0123456789abcdef01234567": {
+            "canAccess": true,
+            "canConfigure": true,
+            "canDelete": true
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sheet_0123456789abcdef01234567",
+            "name": "Grid",
+            "sheetId": "sheet_0123456789abcdef01234567",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "context:admin:sht_gec_identity_plain": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": true,
+          "canCopySheet": true,
+          "canCreateRecord": true,
+          "canDeleteRecord": true,
+          "canDeleteSheet": true,
+          "canEditRecord": true,
+          "canExport": true,
+          "canManageAutomation": true,
+          "canManageFields": true,
+          "canManageSheetAccess": true,
+          "canManageViews": true,
+          "canRead": true,
+          "canSendNotification": true,
+          "canSubmitApproval": true,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "admin"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sht_gec_identity_plain": {
+            "readOnly": false,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sht_gec_identity_plain",
+          "name": "Plain"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sht_gec_identity_plain": {
+            "canAccess": true,
+            "canConfigure": true,
+            "canDelete": true
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sht_gec_identity_plain",
+            "name": "Grid",
+            "sheetId": "sht_gec_identity_plain",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "context:reader:sheet_0123456789abcdef01234567": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": false,
+          "canCopySheet": false,
+          "canCreateRecord": false,
+          "canDeleteRecord": false,
+          "canDeleteSheet": false,
+          "canEditRecord": false,
+          "canExport": true,
+          "canManageAutomation": false,
+          "canManageFields": false,
+          "canManageSheetAccess": false,
+          "canManageViews": false,
+          "canRead": true,
+          "canSendNotification": false,
+          "canSubmitApproval": false,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "global-rbac"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sheet_0123456789abcdef01234567": {
+            "readOnly": true,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sheet_0123456789abcdef01234567",
+          "name": "Derived"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sheet_0123456789abcdef01234567": {
+            "canAccess": true,
+            "canConfigure": false,
+            "canDelete": false
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sheet_0123456789abcdef01234567",
+            "name": "Grid",
+            "sheetId": "sheet_0123456789abcdef01234567",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "context:reader:sht_gec_identity_plain": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": false,
+          "canCopySheet": false,
+          "canCreateRecord": false,
+          "canDeleteRecord": false,
+          "canDeleteSheet": false,
+          "canEditRecord": false,
+          "canExport": true,
+          "canManageAutomation": false,
+          "canManageFields": false,
+          "canManageSheetAccess": false,
+          "canManageViews": false,
+          "canRead": true,
+          "canSendNotification": false,
+          "canSubmitApproval": false,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "global-rbac"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sht_gec_identity_plain": {
+            "readOnly": true,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sht_gec_identity_plain",
+          "name": "Plain"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sht_gec_identity_plain": {
+            "canAccess": true,
+            "canConfigure": false,
+            "canDelete": false
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sht_gec_identity_plain",
+            "name": "Grid",
+            "sheetId": "sht_gec_identity_plain",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "context:writer:sheet_0123456789abcdef01234567": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": false,
+          "canCopySheet": false,
+          "canCreateRecord": true,
+          "canDeleteRecord": true,
+          "canDeleteSheet": false,
+          "canEditRecord": true,
+          "canExport": true,
+          "canManageAutomation": false,
+          "canManageFields": false,
+          "canManageSheetAccess": true,
+          "canManageViews": true,
+          "canRead": true,
+          "canSendNotification": true,
+          "canSubmitApproval": false,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "global-rbac"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sheet_0123456789abcdef01234567": {
+            "readOnly": false,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sheet_0123456789abcdef01234567",
+          "name": "Derived"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sheet_0123456789abcdef01234567": {
+            "canAccess": true,
+            "canConfigure": true,
+            "canDelete": true
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sheet_0123456789abcdef01234567",
+            "name": "Grid",
+            "sheetId": "sheet_0123456789abcdef01234567",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "context:writer:sht_gec_identity_plain": {
+    "body": {
+      "data": {
+        "base": {
+          "color": null,
+          "icon": null,
+          "id": "base_gec_identity",
+          "name": "Identity",
+          "ownerId": "u_gec_owner",
+          "workspaceId": null
+        },
+        "businessTimezone": "Asia/Shanghai",
+        "capabilities": {
+          "canComment": false,
+          "canCopySheet": false,
+          "canCreateRecord": true,
+          "canDeleteRecord": true,
+          "canDeleteSheet": false,
+          "canEditRecord": true,
+          "canExport": true,
+          "canManageAutomation": false,
+          "canManageFields": false,
+          "canManageSheetAccess": true,
+          "canManageViews": true,
+          "canRead": true,
+          "canSendNotification": true,
+          "canSubmitApproval": false,
+          "personalViewsEnabled": false,
+          "pitResetEnabled": false,
+          "sheetRevertEnabled": false
+        },
+        "capabilityOrigin": {
+          "hasSheetAssignments": false,
+          "source": "global-rbac"
+        },
+        "fieldPermissions": {
+          "fld_gec_identity_title_sht_gec_identity_plain": {
+            "readOnly": false,
+            "visible": true
+          }
+        },
+        "personalOverrideViewIds": [],
+        "sheet": {
+          "baseId": "base_gec_identity",
+          "copiedFrom": null,
+          "description": null,
+          "id": "sht_gec_identity_plain",
+          "name": "Plain"
+        },
+        "sheets": [
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sht_gec_identity_plain",
+            "name": "Plain"
+          },
+          {
+            "baseId": "base_gec_identity",
+            "copiedFrom": null,
+            "description": null,
+            "id": "sheet_0123456789abcdef01234567",
+            "name": "Derived"
+          }
+        ],
+        "viewPermissions": {
+          "vw_gec_identity_grid_sht_gec_identity_plain": {
+            "canAccess": true,
+            "canConfigure": true,
+            "canDelete": true
+          }
+        },
+        "views": [
+          {
+            "config": {},
+            "filterInfo": {},
+            "groupInfo": {},
+            "hiddenFieldIds": [],
+            "id": "vw_gec_identity_grid_sht_gec_identity_plain",
+            "name": "Grid",
+            "sheetId": "sht_gec_identity_plain",
+            "sortInfo": {},
+            "type": "grid"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "status": 200
+  },
+  "resolvers:admin:sheet_0123456789abcdef01234567": {
+    "collab": {
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "isAdminRole": true,
+      "permissions": []
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "isAdminRole": true,
+      "permissions": []
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": true,
+        "permissions": [],
+        "userId": "u_gec_admin"
+      },
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "admin"
+      },
+      "sheetLiveness": "live"
+    }
+  },
+  "resolvers:admin:sht_gec_identity_plain": {
+    "collab": {
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "isAdminRole": true,
+      "permissions": []
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "isAdminRole": true,
+      "permissions": []
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": true,
+        "permissions": [],
+        "userId": "u_gec_admin"
+      },
+      "capabilities": {
+        "canComment": true,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": true,
+        "canManageFields": true,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": true
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "admin"
+      },
+      "sheetLiveness": "live"
+    }
+  },
+  "resolvers:reader:sheet_0123456789abcdef01234567": {
+    "collab": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read"
+      ]
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read"
+      ]
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": false,
+        "permissions": [
+          "multitable:read"
+        ],
+        "userId": "u_gec_reader"
+      },
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "global-rbac"
+      },
+      "sheetLiveness": "live"
+    }
+  },
+  "resolvers:reader:sht_gec_identity_plain": {
+    "collab": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read"
+      ]
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read"
+      ]
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": false,
+        "permissions": [
+          "multitable:read"
+        ],
+        "userId": "u_gec_reader"
+      },
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": false,
+        "canDeleteRecord": false,
+        "canEditRecord": false,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": false,
+        "canManageViews": false,
+        "canRead": true,
+        "canSendNotification": false,
+        "canSubmitApproval": false
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "global-rbac"
+      },
+      "sheetLiveness": "live"
+    }
+  },
+  "resolvers:writer:sheet_0123456789abcdef01234567": {
+    "collab": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read",
+        "multitable:write",
+        "multitable:share"
+      ]
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read",
+        "multitable:write",
+        "multitable:share"
+      ]
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": false,
+        "permissions": [
+          "multitable:read",
+          "multitable:write",
+          "multitable:share"
+        ],
+        "userId": "u_gec_writer"
+      },
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "global-rbac"
+      },
+      "sheetLiveness": "live"
+    }
+  },
+  "resolvers:writer:sht_gec_identity_plain": {
+    "collab": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read",
+        "multitable:write",
+        "multitable:share"
+      ]
+    },
+    "onQuery": {
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "isAdminRole": false,
+      "permissions": [
+        "multitable:read",
+        "multitable:write",
+        "multitable:share"
+      ]
+    },
+    "rest": {
+      "access": {
+        "isAdminRole": false,
+        "permissions": [
+          "multitable:read",
+          "multitable:write",
+          "multitable:share"
+        ],
+        "userId": "u_gec_writer"
+      },
+      "capabilities": {
+        "canComment": false,
+        "canCreateRecord": true,
+        "canDeleteRecord": true,
+        "canEditRecord": true,
+        "canExport": true,
+        "canManageAutomation": false,
+        "canManageFields": false,
+        "canManageSheetAccess": true,
+        "canManageViews": true,
+        "canRead": true,
+        "canSendNotification": true,
+        "canSubmitApproval": false
+      },
+      "capabilityOrigin": {
+        "hasSheetAssignments": false,
+        "source": "global-rbac"
+      },
+      "sheetLiveness": "live"
+    }
+  }
+}
