@@ -31,9 +31,9 @@ import {
   type MultitableCapabilities,
 } from '../multitable/sheet-capabilities'
 import {
-  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from '../multitable/sheet-grid-export-closure'
 
 /** Ordered stages for base-authority probes (always all four, even when base is missing). */
 export const RECORD_LINK_BASE_AUTH_STAGES = [
@@ -694,6 +694,8 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   isAdminRole: boolean
   capabilities: MultitableCapabilities
   permissions: string[]
+  /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
+  gridExportClosed?: true
 }> {
   const normalizedUserId = userId.trim()
   const normalizedSheetId = sheetId.trim()
@@ -739,14 +741,23 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
   // as the request-bound resolver's. This query-bound path gates the automation FWB record writes, the
   // FWB activation gates and the record-permission routes, so it must not hand out a write the REST
   // resolver refuses. Every person, admins included. Rides the `sheet_cap_eval` stage (no new stage).
-  if ((await loadStockPreparationOverviewSheetIds(query, [normalizedSheetId])).has(normalizedSheetId)) {
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): both host stamps in ONE statement.
+  const stamps = await loadStockPreparationSheetStamps(query, [normalizedSheetId])
+  if (stamps.overviewSheetIds.has(normalizedSheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the request-bound resolver's (only
+  // `canExport` changes; every person, admins included). Rides the `sheet_cap_eval` stage (no new stage).
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(normalizedSheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
   }
 
   return {
     isAdminRole,
     capabilities,
     permissions,
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
   }
 }
 

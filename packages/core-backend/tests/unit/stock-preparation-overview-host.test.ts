@@ -54,6 +54,7 @@ import {
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
+import { STOCK_PREPARATION_SHEET_STAMPS_SQL } from '../../src/multitable/sheet-grid-export-closure'
 import { isSystemManagedSheet, resolveSheetDeleteRefusal } from '../../src/multitable/sheet-delete-guard'
 import {
   STOCK_PREPARATION_OVERVIEW_GRANT_PERM_CODE,
@@ -438,6 +439,13 @@ function clampQuery(sheetId: string, premise: ClampPremise): QueryFn & ReturnTyp
       expect(params[1]).toBe(KIND)
       return { rows: premise.overview && ids.includes(sheetId) ? [{ id: sheetId }] : [] }
     }
+    // 备料分批拉取第一期 step 3 (review round 1, fix 2): the three resolvers read the overview kind and the
+    // grid-export closure in ONE statement; answer it with the same overview premise (never closed here).
+    if (q === STOCK_PREPARATION_SHEET_STAMPS_SQL) {
+      const ids = Array.isArray(params[0]) ? (params[0] as string[]) : []
+      expect(params[1]).toBe(KIND)
+      return { rows: premise.overview && ids.includes(sheetId) ? [{ id: sheetId, stock_prep_overview: true, grid_export_closed: false }] : [] }
+    }
     if (q === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') return { rows: [{ deleted_at: null }] }
     if (q.includes('FROM spreadsheet_permissions')) {
       return { rows: (premise.sheetCodes ?? []).map((code) => ({ sheet_id: sheetId, perm_code: code, subject_type: 'role' })) }
@@ -527,10 +535,13 @@ describe('S3 host — every person resolves read + export only on the overview (
     expect(resolved.capabilities.canEditRecord).toBe(true)
     expect(resolved.capabilities.canManageFields).toBe(true)
     expect('stockPrepOverview' in resolved).toBe(false)
-    // The lookup WAS asked (for an admin too — no isAdminRole short-circuit), with the sheet id and the kind.
-    const lookups = query.mock.calls.filter(([sql]) => normalize(sql as string) === OVERVIEW_SQL)
+    // The lookup WAS asked (for an admin too — no isAdminRole short-circuit), with the sheet id and the kind —
+    // since the grid-export closure (review round 1, fix 2) as the ONE combined stamp statement, so a derived-id
+    // sheet still costs exactly one statement and the old overview-only statement is no longer issued here.
+    const lookups = query.mock.calls.filter(([sql]) => normalize(sql as string) === STOCK_PREPARATION_SHEET_STAMPS_SQL)
     expect(lookups).toHaveLength(1)
     expect(lookups[0][1]).toEqual([[sheetId], KIND])
+    expect(query.mock.calls.filter(([sql]) => normalize(sql as string) === OVERVIEW_SQL)).toHaveLength(0)
   })
 
   it('fix round 1 (R12): an ordinary NON-derived id costs NO overview statement in any of the three resolvers', async () => {

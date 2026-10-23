@@ -59,9 +59,9 @@ import {
 } from './elearning-projection-access'
 import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
 import {
-  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -1809,6 +1809,8 @@ export async function resolveSheetCapabilities(
   sheetLiveness: SheetLiveness
   /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
   stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
 }> {
   const access = await resolveRequestAccess(req)
   return resolveSheetCapabilitiesForAccess(query, sheetId, access)
@@ -1841,6 +1843,8 @@ export async function resolveSheetCapabilitiesForAccess(
   sheetLiveness: SheetLiveness
   /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
   stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const sheetLiveness = await loadSheetLiveness(query, sheetId)
@@ -1872,9 +1876,19 @@ export async function resolveSheetCapabilitiesForAccess(
   // projection fence). Readability and listing are untouched: canRead passes through as resolved.
   // Fix round 1 (R12): the lookup issues NO statement for an id that cannot be an overview (the derived-id
   // prefilter in stock-preparation-overview-contract.ts), so an ordinary sheet costs what it cost before.
-  const stockPrepOverview = (await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): the overview kind and the grid-export closure are read in
+  // ONE statement (multitable/sheet-grid-export-closure.ts `loadStockPreparationSheetStamps`), so a derived-id
+  // sheet still costs one statement and a client-id sheet none.
+  const stamps = await loadStockPreparationSheetStamps(query, [sheetId])
+  const stockPrepOverview = stamps.overviewSheetIds.has(sheetId)
   if (stockPrepOverview) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // 备料分批拉取第一期 step 3: a sheet the host stamped closed for generic grid export loses `canExport` for EVERY
+  // access, administrators included; nothing else changes.
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
   }
   return {
     access,
@@ -1886,6 +1900,9 @@ export async function resolveSheetCapabilitiesForAccess(
     // a capability bit says — the grant routes (no level above read) and the comment writes. Present only
     // on an overview, so every other caller's result is unchanged in shape.
     ...(stockPrepOverview ? { stockPrepOverview: true as const } : {}),
+    // Present only on a closed sheet, so every other caller's result is unchanged in shape (the export route
+    // names the closure to a reader; `/context` sends its marker).
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
   }
 }
 
@@ -1908,6 +1925,8 @@ export async function resolveSheetReadableCapabilities(
   sheetLiveness: SheetLiveness
   /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
   stockPrepOverview?: true
+  /** 备料分批拉取第一期 step 3: present (true) only when the sheet carries a grid-export closure stamp. */
+  gridExportClosed?: true
 }> {
   return resolveSheetCapabilities(req, query, sheetId)
 }

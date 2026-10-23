@@ -321,6 +321,19 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_RELABEL_SCOPE_FORBIDDEN', // object not bound to the caller's project in the registry (403), not a flag
   'MULTITABLE_RELABEL_APPLY_DISABLED', // write leg refused because the operator switch is off (409), not a flag
   'MULTITABLE_RELABEL_PLAN_CHANGED', // write leg refused because the plan differs from the preview (409), not a flag
+  // 备料分批拉取第一期 step 3 (PR #6507, register R-53): the sheet-level grid-export closure
+  // (multitable/sheet-grid-export-closure.ts, services/sheet-grid-export-closure-service.ts, plugin-scope.ts and
+  // the migration zzzz20261022150000). ERROR CODES and the constants that hold the code and its message — none is
+  // read from process.env, and the closure has no switch: it is a per-sheet stamp the plugin sets through a host
+  // port. EXACT, not a `MULTITABLE_GRID_EXPORT_` prefix, so a real flag added under that name later still reds.
+  'MULTITABLE_GRID_EXPORT_CLOSED', // export-xlsx 403 refusal code on a stamped sheet, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSED_CODE', // constant holding that code, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSED_MESSAGE', // constant holding the refusal copy, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_OBJECT_NOT_PROJECT_SHEET', // close/read port refusal (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_MISMATCH', // close/read port refusal (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_INVALID', // close service refusal of a non-derived sheet id (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_UNAVAILABLE', // close service refusal when the column is missing (503), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_ROWS_PRESENT', // migration down() refusal code, not a flag
   // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
   // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
   // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
@@ -387,12 +400,14 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {

@@ -64,6 +64,7 @@ import {
   type QueryFn,
 } from './record-service'
 import { isPluginManagedSheet, isSystemManagedSheet } from './sheet-delete-guard'
+import { isSheetGridExportClosed } from './sheet-grid-export-closure'
 import { assertSheetLiveForUpdate } from './sheet-liveness'
 import {
   COPY_SHEET_INTENT_KIND,
@@ -92,6 +93,8 @@ export class CopySheetError extends Error {
 export const COPY_SHEET_ERROR_CODES = {
   sourceNotFullyReadable: 'COPY_SOURCE_NOT_FULLY_READABLE',
   sourceSystemSheet: 'COPY_SOURCE_SYSTEM_SHEET',
+  /** 备料分批拉取第一期 step 3: a WITH-DATA copy of a sheet stamped closed for generic grid export (structure-only copy stays open). */
+  sourceGridExportClosed: 'COPY_SOURCE_GRID_EXPORT_CLOSED',
   sourceChanged: 'COPY_SOURCE_CHANGED',
   tooLarge: 'COPY_TOO_LARGE',
   tooManyFields: 'COPY_TOO_MANY_FIELDS',
@@ -464,6 +467,19 @@ export async function assertSourceIsNotSystemSheet(query: QueryFn, source: { id:
 }
 
 /**
+ * 备料分批拉取第一期 step 3（multitable/sheet-grid-export-closure.ts）：源表被宿主盖了「通用网格导出关闭」戳时，
+ * **含数据**复制等于另一条整表导出路径，拒绝（403 `COPY_SOURCE_GRID_EXPORT_CLOSED`）；只复制结构不带一行数据，照常放行。
+ * 在 planCopySheet 里跑，所以 dry-run 与执行两条路都过它；执行路径上它在源表行锁（FOR UPDATE）之后读戳，
+ * 与盖戳服务（同一把行锁）串行，不存在先读后盖的空窗。查询列容忍、非派生 id 零语句（普通表成本不变）。
+ */
+export async function assertSourceGridExportOpenForData(query: QueryFn, sourceSheetId: string, withData: boolean): Promise<void> {
+  if (!withData) return
+  if (await isSheetGridExportClosed(query, sourceSheetId)) {
+    throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.sourceGridExportClosed)
+  }
+}
+
+/**
  * 零写分析。前置：调用方已跑事务外快速拒（canRead / liveness / 全表读门 / 目标 Base 可写 / 系统表）。
  * 这里再做：字段数与行数上限、字段 / 视图 / 规则 remap（fail-closed）、计数与披露。
  */
@@ -491,6 +507,7 @@ export async function planCopySheet(
   const source = opts.source ?? await loadSourceSheet(query, request.sourceSheetId)
   if (!source) throw new CopySheetError(404, 'NOT_FOUND')
   await assertSourceIsNotSystemSheet(query, source)
+  await assertSourceGridExportOpenForData(query, source.id, request.withData)
 
   const maxRows = resolveCopySheetSyncMaxRows()
   const fields = await loadSourceFields(query, source.id)

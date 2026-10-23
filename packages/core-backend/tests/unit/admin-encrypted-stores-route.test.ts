@@ -38,6 +38,7 @@ import {
   ADMIN_READ_FAILED_MESSAGE,
 } from '../../src/routes/admin-routes'
 
+const CATALOG_TABLE_COUNT = new Set(ENCRYPTED_STORE_CATALOG.map((entry) => entry.store)).size
 const ROUTE = '/api/admin/security/encrypted-stores'
 const MARKER = 'MARKER-route-secret-3e8a51d2'
 const LEAKY = 'connect ECONNREFUSED 203.0.113.9:5432 — password authentication failed for user "fixture-role"'
@@ -128,8 +129,8 @@ describe('GET /api/admin/security/encrypted-stores — platform-admin gate', () 
     })
     expect(report.stores.find((s: { store: string }) => s.store === 'system_configs')).toMatchObject({ status: 'table_missing' })
     expect(report.totals).toMatchObject({ encrypted: 2, undecryptable: 1, plaintext: 1, missing: 1 })
-    // 6 per-table prechecks + every catalog SELECT except system_configs' (absent: never issued)
-    expect(query).toHaveBeenCalledTimes(6 + ENCRYPTED_STORE_CATALOG.length - 1)
+    // One precheck per distinct catalog table + every SELECT except absent system_configs'.
+    expect(query).toHaveBeenCalledTimes(CATALOG_TABLE_COUNT + ENCRYPTED_STORE_CATALOG.length - 1)
     expect(query.mock.calls.map((c) => c[0])).not.toContain(ENCRYPTED_STORE_CATALOG.find((e) => e.store === 'system_configs')?.sql)
     const serialized = JSON.stringify(res.body)
     expect(serialized).not.toContain('MARKER')
@@ -183,7 +184,7 @@ describe('GET /api/admin/security/encrypted-stores — failure envelope', () => 
 describe('GET /api/admin/security/encrypted-stores — single-flight', () => {
   it('two concurrent admin reads share ONE probe run and get the same report; a later read runs again', async () => {
     pinned.setApp(buildApp({ id: 'u-admin-fixture' }))
-    const ONE_RUN = 6 + ENCRYPTED_STORE_CATALOG.length - 1 // prechecks + every SELECT but system_configs'
+    const ONE_RUN = CATALOG_TABLE_COUNT + ENCRYPTED_STORE_CATALOG.length - 1 // prechecks + every SELECT but system_configs'
     let release: () => void = () => {}
     const gate = new Promise<void>((resolve) => { release = resolve })
     const answer = query.getMockImplementation() as (sql: string, params?: unknown[]) => Promise<unknown>

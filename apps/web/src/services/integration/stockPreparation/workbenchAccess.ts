@@ -531,6 +531,24 @@ export function canUseLegacyMvpTabs(snapshot: StockPrepAccessSnapshot): boolean 
 }
 
 /**
+ * 项目备料页's TWO 宜搭 ENTRIES (local preparation + static preview). Every server action behind them
+ * (initialization, drafts, preview, approval, sending) runs the core live gate
+ * (`automation-live-authority.ts`: the admin role, `role:admin`, or the literal `integration:admin`
+ * code — wildcards and `users:write` never qualify), so they render only for that same literal
+ * platform admin. Everyone else keeps main's disabled 「推送宜搭(暂未接入)」 placeholder: a
+ * stock-prep operator's page is unchanged. The client cannot see the server's namespace admission,
+ * tenant membership or anchor, so this mirror is WIDER than the server: it also shows the entries to a
+ * bare `integration:admin` holder without the admission, to an admin without active membership in the
+ * token tenant and to any admin who is not the anchored owner (they get the server's refusal code). It
+ * re-reads only on storage, focus or session events. The 单行 CREATE entry inside additionally waits for
+ * the server's own send-switch bit.
+ * Deliberately NOT in STOCK_PREP_WORKBENCH_CAPABILITIES, for the same reason as the install tab below.
+ */
+export function canOpenStockPrepYidaEntries(snapshot: StockPrepAccessSnapshot): boolean {
+  return holdsPlatformAdmin(snapshot)
+}
+
+/**
  * THE INSTALL / 体检 TAB — who may OPEN it.
  *
  * `stock-prep:admin` is the workbench-scoped ceiling, and opening this tab is exactly a
