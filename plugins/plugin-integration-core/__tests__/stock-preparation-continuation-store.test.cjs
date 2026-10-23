@@ -59,8 +59,9 @@
 //         END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` (and commits alone, without `supersedes` — the
 //         control); a PARTIAL takeover is `supersedes_incomplete` with the uncovered counts — the reviewer's
 //         real-planner shape (two of the four new positions, two other rows), another old set at the same new
-//         positions, one shared child claim of each kind, every record but one re-keyed old key; all refused
-//         before the bump and any write. Only the full takeover (every old row, another parent) supersedes.
+//         positions, one shared child claim of each kind, every record with one old key re-keyed, every key with
+//         one old record replaced (each half of the rule pinned on its own); all refused before the bump and any
+//         write. Only the full takeover (every old row and key, another parent) supersedes.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -1085,6 +1086,7 @@ test('ST-16 supersede admissibility (review X-3 + round 2, design §8.4): a cand
     ['one shared child old key', kit.memberCollisionHold(hold, 'old_key'), { uncoveredOldRecords: 4, uncoveredOldKeys: 3 }],
     ['one shared nested new position', kit.memberCollisionHold(hold, 'new_key'), { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }],
     ['every old record, one old key re-keyed', kit.rekeyedTakeoverHold(hold), { uncoveredOldRecords: 0, uncoveredOldKeys: 1 }],
+    ['every old key, one old record replaced', kit.rerecordedTakeoverHold(hold), { uncoveredOldRecords: 1, uncoveredOldKeys: 0 }],
   ]
   await seedHolds(w, [disjoint, ...partials.map(([, candidate]) => candidate)], { decisionVersionObserved: 1 })
   await refusedBeforeAnyWrite(disjoint, { reason: 'supersedes_unrelated' }, 'unrelated')

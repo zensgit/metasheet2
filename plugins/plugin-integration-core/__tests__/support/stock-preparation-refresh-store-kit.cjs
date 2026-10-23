@@ -742,6 +742,30 @@ function rekeyedTakeoverHold(base, { parentId = 'K-001', suffix = '_rk' } = {}) 
 }
 
 /**
+ * The mirror of `rekeyedTakeoverHold`: every old KEY of `base` (re-rooted under another parent) but ONE child's old
+ * record id replaced by another record — a covered key whose record the replacement would not claim (A08). Review
+ * round 2: a takeover must cover the old record ids too, so this is `supersedes_incomplete` with one uncovered record.
+ */
+function rerecordedTakeoverHold(base, { parentId = 'J-001', suffix = '_rr' } = {}) {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const moved = competingCandidateHold(base, { parentId })
+  const pathKeyOf = (pair) => JSON.stringify(pair.relativePath)
+  const target = moved.detail.pairs.filter((pair) => pair.relativePath.length > 0).map(pathKeyOf).sort()[0]
+  const pairs = moved.detail.pairs.map((pair) => (pathKeyOf(pair) === target ? { ...pair, oldRecordId: `${pair.oldRecordId}${suffix}` } : pair))
+  const hold = {
+    kind: 'continuation_candidate',
+    confirmable: true,
+    subject: moved.subject,
+    evidenceFingerprint: crypto.createHash('sha256').update(`rerecorded-evidence:${suffix}:${base.evidenceFingerprint}`).digest('hex'),
+    comparisonFingerprint: base.comparisonFingerprint,
+    pairingFingerprint: crypto.createHash('sha256').update(`rerecorded-pairing:${suffix}:${base.pairingFingerprint}`).digest('hex'),
+    detail: { ...moved.detail, pairs },
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
+/**
  * A `relationship_reconfirm` hold about `continuationId`, as the pure core's verification emits it (pairing.cjs
  * verificationHold): confirmable for the re-confirmable verdicts, else not confirmable with its reason token.
  */
@@ -823,6 +847,7 @@ module.exports = {
   readMigrationText,
   reconfirmHoldFor,
   rekeyedTakeoverHold,
+  rerecordedTakeoverHold,
   registryRow,
   sameNewPositionHold,
   sqlError,
