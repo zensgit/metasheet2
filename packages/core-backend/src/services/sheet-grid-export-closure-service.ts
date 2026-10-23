@@ -7,8 +7,10 @@
  *     `'stock_prep_pilot'` with `WHERE grid_export_closure IS NULL`. The reason is not a parameter of any function
  *     here, and no statement in core-backend/src writes the column back to NULL — there is no reopen / unset verb
  *     there. KNOWN BYPASS (same posture as `meta_sheets.system_kind`): every plugin's raw `database.query` handle
- *     could UPDATE the column directly. The unit suite pins this file's statement census and scans core-backend/src
- *     AND plugins/ for any other writer of the column, so such a plugin write reds before it merges.
+ *     could UPDATE the column directly. The unit suite pins this file's statement census and scans exactly
+ *     packages/core-backend/src, packages/core-backend/plugins and the repo-root plugins/ (the in-tree plugin-loader
+ *     roots) for any other writer of the column, so such an in-tree plugin write reds before it merges; a plugin
+ *     loaded from an operator-configured `pluginDirs` outside the tree cannot be scanned.
  *   * IDEMPOTENT. A second call on a stamped sheet writes nothing and reports `alreadyClosed: true` with the
  *     ORIGINAL time and actor (a re-POST from the plugin repairs a missing stamp; it never moves an existing one).
  *   * ONE TRANSACTION, the same order every other sheet-config writer uses: the canonical writer fence first

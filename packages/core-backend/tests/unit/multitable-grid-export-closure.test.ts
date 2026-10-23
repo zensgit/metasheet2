@@ -639,9 +639,50 @@ describe('S — the close / read service', () => {
     expect(await readSheetGridExportClosure(absent.query, { sheetId: CLOSED })).toMatchObject({ present: false, closure: null })
   })
 
-  it('S-07 ONE WRITER: across core-backend/src AND plugins/, the host service holds the only statement that writes grid_export_closure, and nothing writes it back to NULL', () => {
-    // Review round 1, fix 4: plugins get a raw `database.query` handle, so the census also walks plugins/ — a plugin
-    // (PR B included) that wrote the column directly instead of calling the port would red here.
+  // Review round 2 (S1): every IN-TREE root the plugin loader discovers (src/core/plugin-loader.ts: the default
+  // `./plugins` under the core-backend cwd and its `..` / `../..` fallbacks = packages/core-backend/plugins and the
+  // repo-root plugins/; packages/plugins does not exist), plus core-backend/src. Operator-configured `pluginDirs`
+  // outside the tree are not scannable here (stated in the docblocks).
+  const CENSUS_ROOTS = ['packages/core-backend/src', 'packages/core-backend/plugins', 'plugins'] as const
+  // Each pattern is one way code could WRITE the column. Named, so the self-test below proves each one.
+  const WRITER_PATTERNS: ReadonlyArray<[string, RegExp]> = [
+    ['assignment (SQL text, $n, sql`${}` or ?)', /\bgrid_export_closure\s*=(?!=)/i],
+    ['SET clause', /\bSET\s+grid_export_closure\b/i],
+    ['object key (Kysely .set({ … }) / insert values / row literal)', /['"`]?\bgrid_export_closure['"`]?\s*:/i],
+    ["Kysely .set('grid_export_closure', …)", /\.set\(\s*['"`]grid_export_closure['"`]/i],
+    ['INSERT INTO meta_sheets column list', /\bINSERT\s+INTO\s+"?meta_sheets"?\s*\([^)]*\bgrid_export_closure\b/i],
+  ]
+  const isWriter = (text: string) => WRITER_PATTERNS.some(([, pattern]) => pattern.test(text))
+
+  it('S-08 the writer patterns: each catches its own shape; the legitimate readers and the migration DDL do not match', () => {
+    const samples: Record<string, string> = {
+      'assignment (SQL text, $n, sql`${}` or ?)': 'const q = sql`UPDATE meta_sheets SET name = name, grid_export_closure = ${value} WHERE id = ${id}`',
+      'SET clause': "await db.query('UPDATE meta_sheets SET grid_export_closure = NULL WHERE id = $1', [id])",
+      'object key (Kysely .set({ … }) / insert values / row literal)': "await db.updateTable('meta_sheets').set({ 'grid_export_closure': null }).execute()",
+      "Kysely .set('grid_export_closure', …)": "await db.updateTable('meta_sheets').set('grid_export_closure', null).execute()",
+      'INSERT INTO meta_sheets column list': 'INSERT INTO meta_sheets (id, base_id, name,\n  grid_export_closure, grid_export_closed_at) SELECT id, base_id, name, closure, now() FROM staging',
+    }
+    for (const [label, pattern] of WRITER_PATTERNS) {
+      expect(pattern.test(samples[label]), label).toBe(true)
+    }
+    // Not writers: the column-tolerant reads, the closure lookup, the migration's DDL and CHECKs.
+    for (const reader of [
+      "SELECT (to_jsonb(meta_sheets) ->> 'grid_export_closure') AS grid_export_closure FROM meta_sheets WHERE id = $1",
+      "AND ((to_jsonb(meta_sheets) ->> 'system_kind') = $2 OR (to_jsonb(meta_sheets) ->> 'grid_export_closure') IS NOT NULL)",
+      'ALTER TABLE meta_sheets ADD COLUMN IF NOT EXISTS grid_export_closure text',
+      "CHECK (grid_export_closure IS NULL OR grid_export_closure IN ('stock_prep_pilot'))",
+      'CHECK ((grid_export_closure IS NULL) = (grid_export_closed_at IS NULL))',
+      'SELECT count(*)::int AS count FROM meta_sheets WHERE grid_export_closure IS NOT NULL',
+      'const closure = row.grid_export_closure',
+    ]) {
+      expect(isWriter(reader), reader).toBe(false)
+    }
+  })
+
+  it('S-07 ONE WRITER: across core-backend/src and every in-tree plugin-loader root, the host service holds the only statement that writes grid_export_closure, and nothing writes it back to NULL', () => {
+    // Review round 1 (fix 4) / round 2 (S1): plugins get a raw `database.query` handle, so the census walks every
+    // in-tree root the loader discovers — a plugin (PR B included) that wrote the column directly instead of calling
+    // the port would red here.
     const repoRoot = join(__dirname, '../../../..')
     const root = join(__dirname, '../../src')
     const files: string[] = []
@@ -653,16 +694,15 @@ describe('S — the close / read service', () => {
         else if (/\.(ts|cjs|js|mjs|sql)$/.test(name)) files.push(full)
       }
     }
-    walk(root)
-    const pluginFilesStart = files.length
-    walk(join(repoRoot, 'plugins'))
-    expect(files.length - pluginFilesStart, 'the plugins/ walk found files (it is not a silent no-op)').toBeGreaterThan(100)
+    for (const censusRoot of CENSUS_ROOTS) {
+      const before = files.length
+      walk(join(repoRoot, censusRoot))
+      expect(files.length - before, `the ${censusRoot} walk found files (it is not a silent no-op)`).toBeGreaterThan(0)
+    }
+    expect(files.some((file) => /plugin-view-kanban/.test(file)), 'packages/core-backend/plugins is walked').toBe(true)
     const writers: string[] = []
     for (const file of files) {
-      const text = readFileSync(file, 'utf8')
-      if (/grid_export_closure\s*=\s*(NULL|\$\d+|'|\?)/i.test(text) || /SET\s+grid_export_closure/i.test(text) || /\bgrid_export_closure\s*:/i.test(text)) {
-        writers.push(relative(repoRoot, file).replace(/\\/g, '/'))
-      }
+      if (isWriter(readFileSync(file, 'utf8'))) writers.push(relative(repoRoot, file).replace(/\\/g, '/'))
     }
     expect(writers).toEqual(['packages/core-backend/src/services/sheet-grid-export-closure-service.ts'])
     const service = readFileSync(join(root, 'services/sheet-grid-export-closure-service.ts'), 'utf8')

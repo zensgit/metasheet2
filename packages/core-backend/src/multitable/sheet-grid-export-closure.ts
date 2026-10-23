@@ -35,8 +35,10 @@
  * services/sheet-grid-export-closure-service.ts, reached through the plugin-only port
  * `provisioning.closeSheetGridExport` (plugin-scope.ts). KNOWN BYPASS, same posture as `system_kind`: every plugin's
  * raw `database.query` handle could UPDATE the column directly; the one-writer census
- * (tests/unit/multitable-grid-export-closure.test.ts S-07) scans core-backend/src AND plugins/, so a plugin that
- * writes the column instead of calling the port reds there.
+ * (tests/unit/multitable-grid-export-closure.test.ts S-07/S-08) scans exactly packages/core-backend/src,
+ * packages/core-backend/plugins and the repo-root plugins/ — the in-tree roots the plugin loader discovers — so an
+ * in-tree plugin that writes the column instead of calling the port reds there. Plugins loaded from an
+ * operator-configured `pluginDirs` outside the tree cannot be scanned.
  *
  * THE LOOKUP ({@link loadGridExportClosedSheetIds}):
  *   - COLUMN-TOLERANT (`to_jsonb(meta_sheets) ->> 'grid_export_closure'`): a database where the migration has not

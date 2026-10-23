@@ -15,7 +15,8 @@ import { sql, type Kysely } from 'kysely'
  * `plugin-integration-core` alone (same gate shape as `grantSheetRoleWrite`). It sets the stamp once
  * (`WHERE grid_export_closure IS NULL`); there is NO reopen / unset verb in core-backend/src. The raw plugin
  * `database.query` handle is the known bypass (same posture as `system_kind`); a one-writer census over
- * core-backend/src and plugins/ pins that no code writes the column except the host service. A mistaken
+ * packages/core-backend/src, packages/core-backend/plugins and the repo-root plugins/ (the in-tree plugin-loader
+ * roots) pins that no in-tree code writes the column except the host service. A mistaken
  * stamp is repaired by an owner-approved runbook DB operation (register R-53).
  *
  * WHAT IT CAN DO. The stamp can only TAKE EXPORT AWAY: every capability resolver turns `canExport` off on a
