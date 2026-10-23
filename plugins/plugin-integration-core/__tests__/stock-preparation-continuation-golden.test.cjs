@@ -18,9 +18,11 @@
 // GOLDEN BASELINE: every literal in GOLDEN below was captured on origin/main
 //   1638ab91cc89e04b839dc78ed55a7b49bb40ff4f
 // BEFORE any PR-1 code existed (no Symbol attach, no continuation input), by running this file with
-// SCC_CAPTURE=1. On that commit the stock-preparation lib is byte-identical to the design's base
-// 5f978b240 (`git diff --stat 5f978b240 1638ab91c -- plugins/plugin-integration-core/lib/stock-preparation-*`
-// is empty). A literal that has to move is a behaviour change of the old flow, not a re-capture.
+// SCC_CAPTURE=1. Between the design's base 5f978b240 and that commit, the only stock-preparation lib
+// changes are two NEW files (`stock-preparation-yida-allocation.mjs` / `.d.mts`, #6315), required only
+// by the yida modules; the conflict planner, table actions, BOM expansion and demand evidence are
+// unchanged (`git diff --stat 5f978b240 1638ab91c` over those four files is empty). A literal that has
+// to move is a behaviour change of the old flow, not a re-capture.
 //
 // RE-CAPTURED ON origin/main cde8e17e21b93384154eca6aa9c4679621e1a15b (#6501, the project write lease)
 // with the lanes wrapped the way that commit's golden harness wraps them (binder-wrapped dry-run,
