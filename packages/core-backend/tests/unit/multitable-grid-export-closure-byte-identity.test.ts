@@ -5,12 +5,19 @@
  * unstamped sheet none of that may show: the `/context` body and the three resolvers' results must be exactly
  * what origin/main produced. This file records them for two unstamped sheets — an ordinary client-id sheet (the
  * closure lookup issues no statement for it) and an UNSTAMPED host-derived project sheet (the lookup runs and
- * answers "not closed") — for an admin, a reader and a writer, and compares them, as canonical JSON, with
+ * answers "not closed") — for an admin, a reader, a writer, the base owner (no code), a sheet-scoped member (a
+ * user-subject spreadsheet:read row) and a non-member — and compares them, as canonical JSON, with
  * tests/fixtures/multitable-grid-export-closure-byte-identity.json.
  *
- * THE BASELINE WAS CAPTURED ON origin/main fae8946d1 and RE-CAPTURED, byte-identical, on origin/main cb22e18e1
- * (this file imports nothing the PR adds, so it runs unchanged there):`GEC_CAPTURE_BASELINE=<path> vitest run tests/unit/multitable-grid-export-closure-byte-identity.test.ts`
- * writes the observed set instead of comparing. The PR head must reproduce it byte for byte.
+ * PROVENANCE (review round 1, fix 5). The fixture was captured ON origin/main 99a217010 (the main this branch merged),
+ * in a fresh detached worktree with only this test file copied in — this file imports nothing the PR adds, so it
+ * runs unchanged there:
+ *   git worktree add --detach E:/Projects/wt-mt-gec-baseline-main-20261023 99a217010
+ *   pnpm install --frozen-lockfile; cp <this file> packages/core-backend/tests/unit/
+ *   GEC_CAPTURE_BASELINE=<path> vitest run tests/unit/multitable-grid-export-closure-byte-identity.test.ts
+ * and that capture is byte-identical (sha256 898101982494e303f2c63cf4936c57cbcda7ea9ac0289b3da582678aa03f01bf) to
+ * what the PR head produces. The PR head must keep reproducing it byte for byte. (GEC_CAPTURE_BASELINE makes the
+ * run write the observed set instead of comparing.)
  *
  * Mock pool, no DB, the real univer-meta router behind one pinned listener (`request(app)` is banned in
  * tests/unit, #4154).
@@ -44,6 +51,10 @@ const USERS = {
   admin: { id: 'u_gec_admin', roles: ['admin'], perms: [] as string[] },
   reader: { id: 'u_gec_reader', roles: [] as string[], perms: ['multitable:read'] },
   writer: { id: 'u_gec_writer', roles: [] as string[], perms: ['multitable:read', 'multitable:write', 'multitable:share'] },
+  // Review round 1, fix 5: the three identities that reach a sheet WITHOUT a global multitable code.
+  owner: { id: 'u_gec_owner', roles: [] as string[], perms: [] as string[] }, // owner_id of the base row below
+  member: { id: 'u_gec_member', roles: [] as string[], perms: [] as string[] }, // sheet-scoped spreadsheet:read grant on both sheets
+  outsider: { id: 'u_gec_outsider', roles: [] as string[], perms: [] as string[] }, // no code, no grant, not the owner
 } as const
 type UserKey = keyof typeof USERS
 
@@ -68,6 +79,13 @@ async function answer(sql: string, params: unknown[] = []): Promise<{ rows: unkn
     return params[0] === BASE_ID
       ? { rows: [{ id: BASE_ID, name: 'Identity', icon: null, color: null, owner_id: 'u_gec_owner', workspace_id: null }], rowCount: 1 }
       : { rows: [], rowCount: 0 }
+  }
+  // The sheet-scope lookup (permission-service loadSheetPermissionScopeMap): the member holds a user-subject
+  // spreadsheet:read row on both sheets; nobody else holds a row.
+  if (q.includes('FROM spreadsheet_permissions sp') && q.includes('sp.sheet_id = ANY($2::text[])')) {
+    if (params[0] !== 'u_gec_member') return { rows: [], rowCount: 0 }
+    const ids = ((params[1] as string[]) ?? []).filter(known)
+    return { rows: ids.map((sheetId) => ({ sheet_id: sheetId, perm_code: 'spreadsheet:read', subject_type: 'user' })), rowCount: ids.length }
   }
   if (/FROM meta_sheets WHERE base_id = \$1 AND deleted_at IS NULL/.test(q)) {
     return params[0] === BASE_ID ? { rows: [sheetRow(PLAIN), sheetRow(DERIVED_OPEN)], rowCount: 2 } : { rows: [], rowCount: 0 }
@@ -154,8 +172,8 @@ describe('grid-export closure — unstamped sheets are byte-identical to origin/
         currentUser = userKey
         const res = await request(pinned.url()).get('/api/multitable/context').query({ sheetId })
         expectIdentical(`context:${userKey}:${sheetId}`, { status: res.status, body: res.body })
-        expect(res.status).toBe(200)
-        expect(res.body?.data?.capabilities).not.toHaveProperty('gridExportClosure')
+        // Some identities are refused (their 403 / 404 body is pinned just the same); none may see the marker.
+        expect(JSON.stringify(res.body)).not.toContain('gridExportClosure')
       }, 60_000)
 
       it(`the three resolvers (${userKey}, ${sheetId === PLAIN ? 'client-id' : 'derived-id'} sheet)`, async () => {
