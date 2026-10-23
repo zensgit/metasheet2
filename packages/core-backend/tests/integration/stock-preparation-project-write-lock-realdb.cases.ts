@@ -1875,7 +1875,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     //    Review round 1 of #6514 adds: S2-07 / S2-08 / S2-09 (X-1) the consult is ONE REPEATABLE READ snapshot —
     //    frozen at every step-4 read boundary (and after the registry reads) while another session decides, it
     //    answers one instant, and a bounded natural race loop never persists a stale hold nor derives a torn
-    //    complete; S2-10 (X-2) the end admissibility; S2-11 (X-3) the supersede relatedness.
+    //    complete; S2-10 (X-2) the end admissibility; S2-11 (X-3) the supersede relatedness. Review round 2 adds
+    //    S2-12: a PARTIAL takeover cannot supersede — the reviewer's real-planner shape, refused with every row
+    //    unchanged, and after a pilot exit the real planner and the REAL host writer still leave all four old rows
+    //    alone; a full takeover supersedes and keeps them protected.
     //    Cases are prefixed S2- (PR-0 / PR B own D17-D21, the pre-enable hardening H-01 / H-02). Every value is
     //    synthetic and per-run.
     describe('S2 continuation / refresh-state stores + governance reader (real Postgres, migrations 102 / 103)', () => {
@@ -2568,6 +2571,121 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           .toEqual({ status: 'ended', ended_outcome: 'superseded_by_new_confirmation', claim_active: false })
         expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(2)
       }, 30000)
+
+      test('S2-12 (review round 2, P1 on X-3) a PARTIAL takeover cannot supersede — the reviewer\'s shape end to end on the real host: (a) refused 409 supersedes_incomplete, every step-4 row and the lock row byte-identical; (b) after pilot exit the persisted relationship still protects all four old rows through the REAL planner and the REAL host writer (zero INACTIVE / UPDATE / copy-ADD for them); (c) a FULL takeover supersedes, and after pilot exit the old rows stay protected under the replacing relationship', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const F = fixture.fixtures
+        const storeA = storeOn(clientA)
+        const demandEvidence = fixture.expansion.demandEvidence
+        const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+        const writesTouching = (planned: any, keys: Set<string>) => planned.decisions
+          .filter((decision: any) => keys.has(decision.idempotencyKey) && ['add', 'update', 'inactive'].includes(decision.decision))
+          .map((decision: any) => decision.decision)
+        // The runbook's pilot exit (migration 101): ONE statement clearing all three columns.
+        const pilotExit = (scope: Record<string, string>) => q(
+          'UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE id = $1',
+          [`pt_${scope.sheetId}`],
+        )
+        // (a) + (b) on a REAL sandbox sheet: the four old rows and the independent PART-A rows written through the host.
+        // One observed table, asserted once: a regression shows the reviewer's whole outcome, not only its first step.
+        const observed: Record<string, unknown> = {}
+        const sb = await sandboxSheet('s2_12')
+        try {
+          const scope = { tenantId: tenantFor('s2_12'), sheetId: sb.sheetId, projectNo: fixture.projectNo }
+          const fields = sb.target.fieldIdMap
+          const seedRows = async (rows: any[]) => {
+            const out: any[] = []
+            for (const row of rows) {
+              const data = Object.fromEntries(Object.entries(row).map(([name, value]) => [fields[name] || name, value]))
+              const record = await sb.multitable.records.createRecord({ sheetId: sb.sheetId, data })
+              out.push(F.withRecordRef(row, record.id, record.version))
+            }
+            return out
+          }
+          await registerProject(scope, { pilot: true })
+          const oldRows = await seedRows(fixture.sheet)
+          const original = F.plan(fixture.expansion, oldRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const idOf = await seedOpenHolds(storeA, scope, [original])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(original), original, fixture), { bumpWithin: testBumpWithin })
+          // The reviewer's candidate, emitted by the REAL planner against an independent PART-A subtree on the same sheet:
+          // two of the relationship's four new positions, none of its four old rows.
+          const independent = await F.expand(F.project({ orders: [{ part: 'PART-A', qty: 20 }], parts: F.PARTS.slice(), boms: { 'PART-A': [{ part: 'PART-C', usage: 4 }] } }))
+          const aRows = await seedRows(F.applyToSheet(F.plan(independent, []), [], { idPrefix: 's2_12_independent_a' }))
+          const partial = F.plan(fixture.expansion, aRows, { continuation: F.continuationInput({ demandEvidence }) }).holds.find((entry: any) => entry.kind === 'continuation_candidate')
+          const oldNewKeys = new Set<string>(original.detail.pairs.map((pair: any) => pair.newKey))
+          const oldRecordIds = new Set<string>(original.detail.pairs.map((pair: any) => pair.oldRecordId))
+          expect(partial.detail.pairs.length).toBe(2)
+          expect(partial.detail.pairs.every((pair: any) => oldNewKeys.has(pair.newKey) && !oldRecordIds.has(pair.oldRecordId))).toBe(true)
+          const idOf2 = await seedOpenHolds(storeA, scope, [partial], 1)
+          // (a) the partial supersede.
+          const before = await sheetFingerprint(scope.sheetId)
+          const supersede = await settle(storeA.confirmContinuation(confirmInput(scope, idOf2(partial), partial, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin }))
+          observed.supersede = supersede.ok ? 'admitted' : `${(supersede as any).error.code}:${(supersede as any).error.details.reason}`
+          observed.supersedeDetails = supersede.ok ? null : (supersede as any).error.details
+          observed.stepFourRowsAndLockRowUnchanged = (await sheetFingerprint(scope.sheetId)) === before
+          // (b) pilot exit; the next plan over the PERSISTED state; the REAL host writer under a real lease.
+          await pilotExit(scope)
+          const consult = await pilotReaderOn().consult(scope)
+          observed.pilotAfterExit = consult.pilot ? consult.pilot.enabled : null
+          observed.governedAfterExit = consult.governed
+          const next = F.plan(fixture.expansion, oldRows.concat(aRows), { continuation: F.continuationInput({ pilot: false, demandEvidence, ...governanceModule.plannerSlice(consult) }) })
+          observed.nextSuspended = next.suspended === true
+          observed.oldRowWrites = writesTouching(next, new Set<string>(oldRows.map((row: any) => row.idempotencyKey)))
+          observed.copyAddsAtOldPositions = writesTouching(next, oldNewKeys)
+          const oldIds = oldRows.map((row: any) => row[RECORD_REF].id)
+          const rowsOf = async () => (await q('SELECT id, version, data FROM meta_records WHERE id = ANY($1::text[]) ORDER BY id', [oldIds])).rows
+          const beforeRows = await rowsOf()
+          const writer = require(path.join(PLUGIN_LIB, 'stock-preparation-apply-writer.cjs'))
+          const writeLock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+          const applied = await writeLock.withProjectWriteLease(sb.key, { purpose: 'small_apply', runId: 's2_12_run' }, (guard: any) => writer.applyStockPreparationPlan({ permission: 'write', plan: next, target: sb.target, recordsApi: sb.multitable.records, writeFence: guard, writeFenceRequired: true }))
+          observed.writerStatus = applied.status
+          const afterRows = await rowsOf()
+          observed.oldRowsChangedByWriter = afterRows.filter((row: any, index: number) => JSON.stringify(row) !== JSON.stringify(beforeRows[index])).length
+        } finally {
+          await dropSheet(sb.sheetId)
+        }
+        console.log(`[S2-12] partial ${JSON.stringify(observed)}`)
+        expect(observed).toEqual({
+          supersede: `${RC.END_OUTCOME_NOT_ADMISSIBLE}:supersedes_incomplete`,
+          supersedeDetails: { reason: 'supersedes_incomplete', outcome: 'superseded_by_new_confirmation', uncoveredOldRecords: 4, uncoveredOldKeys: 4 },
+          stepFourRowsAndLockRowUnchanged: true,
+          pilotAfterExit: false,
+          governedAfterExit: true,
+          nextSuspended: false,
+          oldRowWrites: [],
+          copyAddsAtOldPositions: [],
+          writerStatus: 'succeeded',
+          oldRowsChangedByWriter: 0,
+        })
+        // (c) a FULL takeover: every old row (and old key) re-rooted under another parent supersedes; after pilot exit the
+        //     replacing relationship is the only one in the projection and still protects every old row.
+        const scope = { tenantId: tenantFor('s2_12_full'), sheetId: sheetFor('s2_12_full'), projectNo: fixture.projectNo }
+        await registerProject(scope, { pilot: true })
+        const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+        const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const full = refreshKit.competingCandidateHold(fixture.hold)
+        const idOf2 = await seedOpenHolds(storeA, scope, [full], 1)
+        const replaced = await storeA.confirmContinuation(confirmInput(scope, idOf2(full), full, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })
+        await pilotExit(scope)
+        const consult = await pilotReaderOn().consult(scope)
+        const slice = governanceModule.plannerSlice(consult)
+        const next = F.plan(fixture.expansion, fixture.sheet, { continuation: F.continuationInput({ pilot: false, demandEvidence, ...slice }) })
+        const fullObserved = {
+          superseded: replaced.supersededContinuationId === first.continuationId,
+          pilotAfterExit: consult.pilot ? consult.pilot.enabled : null,
+          projection: slice.continuations.map((entry: any) => entry.id === replaced.continuationId ? 'replacing' : 'other'),
+          claimedOldRecords: slice.members.map((member: any) => member.oldRecordId).sort(),
+          oldRowWrites: writesTouching(next, new Set<string>(fixture.sheet.map((row: any) => row.idempotencyKey))),
+        }
+        console.log(`[S2-12] full ${JSON.stringify({ ...fullObserved, claimedOldRecords: fullObserved.claimedOldRecords.length })}`)
+        expect(fullObserved).toEqual({
+          superseded: true,
+          pilotAfterExit: false,
+          projection: ['replacing'],
+          claimedOldRecords: fixture.hold.detail.pairs.map((pair: any) => pair.oldRecordId).sort(),
+          oldRowWrites: [],
+        })
+      }, 90000)
     })
   })
 }

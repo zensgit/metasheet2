@@ -53,11 +53,14 @@
 //         the continuation (`no_open_hold` otherwise); both refused before the bump and before any write. An
 //         admitted escalation keeps the hold open runbook-only: the project derives pending_confirmation, a clean
 //         settling computation neither supersedes the hold nor settles, nothing derives complete / export-allowed.
-//   ST-16 SUPERSEDE RELATEDNESS (review X-3, design §8.4): a confirm `supersedes` only a continuation whose claims
-//         it overlaps (old record, old key or new position — root or member); a candidate sharing nothing is
-//         refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` before any write (and commits alone,
-//         without `supersedes` — the control); every related shape (old root, new root, a child's old record, a
-//         duplicate old key, a nested new position) is admitted.
+//   ST-16 SUPERSEDE ADMISSIBILITY (review X-3 + round 2, design §8.4): a confirm `supersedes` only a continuation
+//         it FULLY takes over — every old record id and every old key digest the continuation claims (root and
+//         every member) is claimed by the replacement. A candidate sharing nothing is 409
+//         END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` (and commits alone, without `supersedes` — the
+//         control); a PARTIAL takeover is `supersedes_incomplete` with the uncovered counts — the reviewer's
+//         real-planner shape (two of the four new positions, two other rows), another old set at the same new
+//         positions, one shared child claim of each kind, every record but one re-keyed old key; all refused
+//         before the bump and any write. Only the full takeover (every old row, another parent) supersedes.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -1045,57 +1048,73 @@ test('ST-15 end admissibility (review X-2, design §9.3 / §8.4): an ACTIVE cont
   assert.equal(state.exportAllowed, false)
 })
 
-// ── ST-16 supersede relatedness (review X-3) ─────────────────────────────────────────────────────
+// ── ST-16 supersede admissibility (review X-3 + round 2) ─────────────────────────────────────────
 
-test('ST-16 supersede relatedness (review X-3, design §8.4): a candidate sharing no claim cannot supersede (409 supersedes_unrelated before any write) and commits alone (control); every related shape — old root, new root, a child\'s old record, a duplicate old key, a nested new position — is admitted', async () => {
+test('ST-16 supersede admissibility (review X-3 + round 2, design §8.4): a candidate sharing no claim is 409 supersedes_unrelated (and commits alone — control); a PARTIAL takeover — the reviewer\'s real-planner shape, another old set at the same new positions, one shared child claim, every record but one re-keyed old key — is 409 supersedes_incomplete with the uncovered counts; all refused before the bump and any write; only a FULL takeover of the old side (every old record id and old key digest) supersedes', async () => {
   const w = await world()
   const { hold, store, db, bump } = w
   await seedHolds(w, [hold])
   const first = await confirmHold(w, hold)
+  const supersedesFirst = { input: { supersedes: { continuationId: first.continuationId, revision: 1 } } }
+  const refusedBeforeAnyWrite = async (candidate, expected, label) => {
+    const before = tablesSnapshot(db)
+    const bumpsBefore = bump.calls.length
+    db.log.length = 0
+    const refused = await expectError(confirmHold(w, candidate, supersedesFirst), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: expected.reason })
+    assert.deepEqual(refused.details, { outcome: 'superseded_by_new_confirmation', ...expected }, label)
+    assertValuesFree(refused)
+    assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOne:refresh_hold', 'trx.selectOneForUpdate:continuation', 'trx.select:continuation_member'], `${label}: decided on the named relationship's claims, before any write`)
+    assert.equal(db.log[db.log.length - 1][0], 'rollback', label)
+    assert.equal(bump.calls.length, bumpsBefore, `${label}: no bump`)
+    assert.equal(tablesSnapshot(db), before, `${label}: nothing persisted — the relationship keeps every claim, the hold stays open`)
+  }
+  // (a) UNRELATED: shares no old record, no old key and no new position with the relationship it names.
   const disjoint = kit.disjointCandidateHold(hold)
-  // Sanity: the disjoint candidate shares no old record, no old key and no new key with the base.
   const baseOld = new Set(hold.detail.pairs.map((pair) => pair.oldRecordId))
   const baseOldKeys = new Set(hold.detail.pairs.map((pair) => pair.oldKey))
   const baseNewKeys = new Set(hold.detail.pairs.map((pair) => pair.newKey))
   assert.ok(disjoint.detail.pairs.every((pair) => !baseOld.has(pair.oldRecordId) && !baseOldKeys.has(pair.oldKey) && !baseNewKeys.has(pair.newKey)))
-  await seedHolds(w, [disjoint], { decisionVersionObserved: 1 })
-  const before = tablesSnapshot(db)
-  const bumpsBefore = bump.calls.length
-  db.log.length = 0
-  const refused = await expectError(confirmHold(w, disjoint, { input: { supersedes: { continuationId: first.continuationId, revision: 1 } } }), { status: 409, code: CODES.END_OUTCOME_NOT_ADMISSIBLE, reason: 'supersedes_unrelated' })
-  assert.equal(refused.details.outcome, 'superseded_by_new_confirmation')
-  assertValuesFree(refused)
-  assert.deepEqual(statementsOf(db), ['trx.selectOneForUpdate:refresh_state', 'trx.selectOne:refresh_hold', 'trx.selectOneForUpdate:continuation', 'trx.select:continuation_member'], 'decided on the named relationship\'s claims, before any write')
-  assert.equal(db.log[db.log.length - 1][0], 'rollback')
-  assert.equal(bump.calls.length, bumpsBefore, 'no bump')
-  assert.equal(tablesSnapshot(db), before, 'nothing persisted: the relationship keeps its claims, the hold stays open')
-  // Control: the same candidate confirms on its own (no claim collides) — the refusal above is the relatedness rule alone.
+  // (b) PARTIAL takeovers: related, but at least one old record id or old key of the relationship left uncovered.
+  const reviewerPartial = (await kit.partialTakeoverCandidate()).hold
+  assert.equal(reviewerPartial.detail.pairs.length, 2, 'the reviewer\'s shape: two pairs')
+  assert.ok(reviewerPartial.detail.pairs.every((pair) => baseNewKeys.has(pair.newKey) && !baseOld.has(pair.oldRecordId)), 'two of the old relationship\'s new positions, none of its old rows')
+  const partials = [
+    ['the reviewer\'s real-planner partial (2 of 4 new positions, 2 other rows)', reviewerPartial, { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }],
+    ['another old set at the same new positions', kit.sameNewPositionHold(hold), { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }],
+    ['one shared child old record', kit.memberCollisionHold(hold, 'old_record'), { uncoveredOldRecords: 3, uncoveredOldKeys: 4 }],
+    ['one shared child old key', kit.memberCollisionHold(hold, 'old_key'), { uncoveredOldRecords: 4, uncoveredOldKeys: 3 }],
+    ['one shared nested new position', kit.memberCollisionHold(hold, 'new_key'), { uncoveredOldRecords: 4, uncoveredOldKeys: 4 }],
+    ['every old record, one old key re-keyed', kit.rekeyedTakeoverHold(hold), { uncoveredOldRecords: 0, uncoveredOldKeys: 1 }],
+  ]
+  await seedHolds(w, [disjoint, ...partials.map(([, candidate]) => candidate)], { decisionVersionObserved: 1 })
+  await refusedBeforeAnyWrite(disjoint, { reason: 'supersedes_unrelated' }, 'unrelated')
+  for (const [label, candidate, counts] of partials) {
+    await refusedBeforeAnyWrite(candidate, { reason: 'supersedes_incomplete', ...counts }, label)
+    // Nor can it commit beside the relationship: it collides with a claim of it (A08).
+    await expectError(confirmHold(w, candidate), { status: 409, code: CODES.CONFIRM_CONFLICT })
+  }
+  assert.equal(db.rows(T.continuation).find((row) => row.id === first.continuationId).claim_active, true, 'the relationship still claims every row')
+  // Control: the unrelated candidate commits on its own — its refusal above was the relatedness rule alone.
   const alone = await confirmHold(w, disjoint)
   assert.equal(alone.supersededContinuationId, null)
   assert.equal(db.rows(T.continuation).filter((row) => row.claim_active).length, 2)
-  // Every RELATED shape: without `supersedes` the claims collide (409 CONFIRM_CONFLICT); with it the old one is
-  // ended as superseded_by_new_confirmation and the new one takes the claims, in one transaction.
-  const shapes = [
-    ['old root (the same old records under another parent)', (base) => kit.competingCandidateHold(base)],
-    ['new root (another old set at the same new position)', (base) => kit.sameNewPositionHold(base)],
-    ['a child\'s old record', (base) => kit.memberCollisionHold(base, 'old_record')],
-    ['a duplicate old key', (base) => kit.memberCollisionHold(base, 'old_key')],
-    ['a nested new position', (base) => kit.memberCollisionHold(base, 'new_key')],
-  ]
-  for (const [label, build] of shapes) {
-    const v = await world()
-    await seedHolds(v, [v.hold])
-    const base = await confirmHold(v, v.hold)
-    const rival = build(v.hold)
-    await seedHolds(v, [rival], { decisionVersionObserved: 1 })
-    await expectError(confirmHold(v, rival), { status: 409, code: CODES.CONFIRM_CONFLICT })
-    const replaced = await confirmHold(v, rival, { input: { supersedes: { continuationId: base.continuationId, revision: 1 } } })
-    assert.equal(replaced.supersededContinuationId, base.continuationId, label)
-    const old = v.db.rows(T.continuation).find((row) => row.id === base.continuationId)
-    assert.equal(old.status, 'ended', label)
-    assert.equal(old.ended_outcome, 'superseded_by_new_confirmation', label)
-    assert.equal(v.db.rows(T.continuation).filter((row) => row.claim_active).length, 1, label)
-  }
+  // (c) FULL takeover: every old record id AND old key of the relationship (re-rooted under another parent). Without
+  //     `supersedes` the claims collide; with it the old relationship ends and the new one claims every old row.
+  const v = await world()
+  await seedHolds(v, [v.hold])
+  const base = await confirmHold(v, v.hold)
+  const full = kit.competingCandidateHold(v.hold)
+  await seedHolds(v, [full], { decisionVersionObserved: 1 })
+  await expectError(confirmHold(v, full), { status: 409, code: CODES.CONFIRM_CONFLICT })
+  const replaced = await confirmHold(v, full, { input: { supersedes: { continuationId: base.continuationId, revision: 1 } } })
+  assert.equal(replaced.supersededContinuationId, base.continuationId)
+  const old = v.db.rows(T.continuation).find((row) => row.id === base.continuationId)
+  assert.equal(old.status, 'ended')
+  assert.equal(old.ended_outcome, 'superseded_by_new_confirmation')
+  const liveMembers = v.db.rows(T.member).filter((row) => row.claim_active)
+  assert.equal(v.db.rows(T.continuation).filter((row) => row.claim_active).length, 1)
+  assert.deepEqual(liveMembers.map((row) => row.old_record_id).sort(), v.hold.detail.pairs.map((pair) => pair.oldRecordId).sort(), 'every old row is still claimed — by the replacing relationship')
+  assert.deepEqual(liveMembers.map((row) => row.old_key_digest).sort(), v.hold.detail.pairs.map((pair) => storeModule.keyDigest(pair.oldKey)).sort(), 'and still protected by its old key')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-store.test.cjs', tests)

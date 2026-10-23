@@ -694,6 +694,54 @@ function disjointCandidateHold(base, { parentId = 'Z-001', suffix = '_dj' } = {}
 }
 
 /**
+ * Review round 2 (P1 on X-3): the reviewer's PARTIAL-TAKEOVER shape, emitted by the REAL planner. An independent
+ * PART-A order (PART-A > PART-C, two rows) was pulled on its own; planning the canonical second pull against ONLY
+ * those rows detects a `continuation_candidate` that pairs them with the PART-A position inside P-001 / S-001 —
+ * two of the four NEW positions the canonical candidate claims, and NONE of its four old rows. Superseding the
+ * canonical relationship with it would end all four old claims and keep two other rows. Returns the hold and the
+ * independent rows (with record refs under `idPrefix`).
+ */
+async function partialTakeoverCandidate({ idPrefix = 'rec_independent_a' } = {}) {
+  const base = await candidateHoldFixture()
+  const F = base.fixtures
+  const independent = await F.expand(F.project({ orders: [{ part: 'PART-A', qty: 20 }], parts: F.PARTS.slice(), boms: { 'PART-A': [{ part: 'PART-C', usage: 4 }] } }))
+  const sheetRows = F.applyToSheet(F.plan(independent, []), [], { idPrefix })
+  const planned = F.plan(base.expansion, sheetRows, { continuation: F.continuationInput({ pilot: true, demandEvidence: base.expansion.demandEvidence }) })
+  const hold = (planned.holds || []).find((entry) => entry.kind === 'continuation_candidate')
+  if (!hold || hold.detail.pairs.length !== 2) throw new Error('refresh-store kit: the independent PART-A subtree did not yield the two-pair partial candidate')
+  return Object.freeze({ hold, sheetRows })
+}
+
+/**
+ * A FULL-RECORD takeover with one old key re-keyed: every old record id of `base` (same rows, re-rooted under another
+ * parent like `competingCandidateHold`) but ONE child's old key replaced by a fresh one — a covered record whose key
+ * the replacement would not protect. Review round 2: a takeover must cover the old keys too (the planner's sweep
+ * protection is keyed on them), so this is `supersedes_incomplete` with one uncovered old key.
+ */
+function rekeyedTakeoverHold(base, { parentId = 'K-001', suffix = '_rk' } = {}) {
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const moved = competingCandidateHold(base, { parentId })
+  const pathKeyOf = (pair) => JSON.stringify(pair.relativePath)
+  const target = moved.detail.pairs.filter((pair) => pair.relativePath.length > 0).map(pathKeyOf).sort()[0]
+  const pairs = moved.detail.pairs.map((pair) => {
+    if (pathKeyOf(pair) !== target) return pair
+    const parsed = JSON.parse(pair.oldKey)
+    return { ...pair, oldKey: JSON.stringify({ ...parsed, path: parsed.path.map((token, index) => (index === 0 ? `${token}${suffix}` : token)) }) }
+  })
+  const hold = {
+    kind: 'continuation_candidate',
+    confirmable: true,
+    subject: moved.subject,
+    evidenceFingerprint: crypto.createHash('sha256').update(`rekeyed-evidence:${suffix}:${base.evidenceFingerprint}`).digest('hex'),
+    comparisonFingerprint: base.comparisonFingerprint,
+    pairingFingerprint: crypto.createHash('sha256').update(`rekeyed-pairing:${suffix}:${base.pairingFingerprint}`).digest('hex'),
+    detail: { ...moved.detail, pairs },
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
+/**
  * A `relationship_reconfirm` hold about `continuationId`, as the pure core's verification emits it (pairing.cjs
  * verificationHold): confirmable for the re-confirmable verdicts, else not confirmable with its reason token.
  */
@@ -771,8 +819,10 @@ module.exports = {
   loadSchema,
   memberCollisionHold,
   parseSchema,
+  partialTakeoverCandidate,
   readMigrationText,
   reconfirmHoldFor,
+  rekeyedTakeoverHold,
   registryRow,
   sameNewPositionHold,
   sqlError,

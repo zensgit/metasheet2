@@ -32,10 +32,13 @@
 // live lease, which derives 失败待恢复 (`failed_pending_recovery`, transient until the next consult); a lease
 // acquired between `readState` and `readGeneration` derives 失败待恢复 too. The ONE interleaving this does not
 // refuse: a WHOLE execution — its row begun after the snapshot's first SELECT, finished and its lease released
-// before the lock read — is invisible to both halves, and the answer is the state before it (possibly 已完成).
-// A settling computation built on such a consult names the execution it saw (O-14), so the unseen one stays
-// 已执行待核对 for the next consult; the formal export keeps its own double lock / generation read and the
-// settled machine-digest check, which a written execution moves (design §11, O-9 / O-18, PR-5).
+// before the lock read — is invisible to both halves, and the answer is the state before it (possibly 已完成,
+// export allowed). The review (round 2) reproduced it with a zero-write FAILED run: the stale consult answers
+// 已完成, the next one 失败待恢复. A settling computation built on such a consult names the execution it saw
+// (O-14), so it cannot settle over the unseen one. The formal export must not trust one consult: a zero-write
+// failure moves neither the lock generation nor the sheet's machine digest, so the export gate's double
+// generation read and digest check cannot see it — its FINAL re-consult inside its own read must (design
+// O-21, PR-5).
 // Then the assertions: EVERY row's tenant must be the proven tenant (409 STOCK_PREP_REFRESH_TENANT_MISMATCH —
 // a derivation discrepancy fails closed, A-M6); every governed row and the registry row must name the
 // RESOLVED sheet and this project (409 STOCK_PREP_REFRESH_TARGET_RETARGETED — the project-sheets switch

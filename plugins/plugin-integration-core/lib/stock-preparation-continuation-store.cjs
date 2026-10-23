@@ -50,9 +50,11 @@
 // END AND SUPERSEDE ADMISSIBILITY (design §8.4, §9.3; review X-2 / X-3). `endContinuation` ends only a
 // relationship that NEEDS RECONFIRMATION (an ACTIVE one ends only through a confirm's `supersedes`), and
 // `escalate_special_repair` only while an OPEN hold names it (that hold stays open, runbook-only, so the
-// project can never derive 已完成 while it is open). A confirm `supersedes` only a relationship whose claims it
-// overlaps (`claimsOverlap`: an old record, an old key or a new position). Both are refused 409
-// STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE inside the transaction before any row moves.
+// project can never derive 已完成 while it is open). A confirm `supersedes` only a relationship it FULLY takes
+// over: related to it (`claimsOverlap`, else `supersedes_unrelated`) and claiming every old record id and every
+// old key digest it claims, root and every member (`takeoverGaps`, else `supersedes_incomplete`) — a supersede
+// ends all of the old claims, so anything left uncovered would lose its protection (review round 2). All are
+// refused 409 STOCK_PREP_CONTINUATION_END_OUTCOME_NOT_ADMISSIBLE inside the transaction before any row moves.
 //
 // STATUS CONVENTION FOR BAD INPUT: what a PULLER's request carries (scope / actor / row ids 422, the basis
 // and the end note 422 / 400, echoed fingerprints 400, revisions / outcomes / the `supersedes` shape 400) is a
@@ -286,17 +288,13 @@ function keyDigest(key) {
 }
 
 /**
- * Review X-3 / design §8.4: `superseded_by_new_confirmation` is admissible only when the REPLACING continuation
- * is "for the same old rows / new position" as the one it ends. Decided precisely as: the two claim sets
- * OVERLAP on at least one of the A08 claims migration 102's partial unique indexes guard — an old record id
- * (`old_record_id`, the header's `old_root_record_id` being the root member's), an old key
- * (`old_key_digest`) or a new position (`new_key_digest`, the header's `new_root_key_digest` being the root
- * member's). That is exactly "without the supersede this confirmation would collide with the relationship it
- * names": a supersede is the only way to replace a relationship whose claims the new one needs, and it can
- * never end a relationship that claims nothing the new one claims (that end would release a subtree's
- * protection with nothing put in its place). Root-only overlap would be stricter but would leave a puller
- * whose candidate shares only a child row stuck between CONFIRM_CONFLICT and an ACTIVE relationship no end
- * outcome admits (§9.3). Digests are compared, never raw keys.
+ * Review X-3 / design §8.4 — RELATED: the two claim sets share at least one of the A08 claims migration 102's
+ * partial unique indexes guard — an old record id (`old_record_id`, the header's `old_root_record_id` being the
+ * root member's), an old key (`old_key_digest`) or a new position (`new_key_digest`, the header's
+ * `new_root_key_digest` being the root member's). A candidate that shares NOTHING with the relationship it
+ * names is refused `supersedes_unrelated`: ending that relationship would release a subtree's protection with
+ * nothing put in its place. Relatedness is necessary, not sufficient — see `takeoverGaps`. Digests are
+ * compared, never raw keys.
  */
 function claimsOverlap(previousRow, previousMembers, candidateMembers) {
   const oldRecordIds = new Set([previousRow.old_root_record_id])
@@ -310,6 +308,41 @@ function claimsOverlap(previousRow, previousMembers, candidateMembers) {
   return candidateMembers.some((member) => oldRecordIds.has(member.oldRecordId)
     || oldKeyDigests.has(keyDigest(member.oldKey))
     || newKeyDigests.has(keyDigest(member.newKey)))
+}
+
+/**
+ * Review round 2 (P1 on X-3) — FULL TAKEOVER, the phase-1 rule. A supersede ends EVERY claim of the old
+ * relationship (`endRows`: the header and all its members) and leaves no hold behind, so whatever the replacing
+ * continuation does not claim loses its protection on the spot: after a pilot exit the next plan sweeps those
+ * old rows (the review's real-host repro — four old rows INACTIVE, the replacement covering two other rows at a
+ * part of the old new positions). A supersede is therefore admissible only when the replacing continuation
+ * claims the WHOLE old side of the relationship it ends:
+ *   - every old record id it claims (`old_root_record_id` and every claim_active member's `old_record_id`) —
+ *     the A08 claim, i.e. WHICH rows are protected; and
+ *   - every old key digest it claims (every member's `old_key_digest`) — the planner's sweep protection is keyed
+ *     on the OLD KEY (stock-preparation-continuation-pairing.cjs buildContinuationProjection
+ *     `protectInactiveKeys` / `continuedRefFor`), i.e. HOW they are protected.
+ * For rows as confirmed the two are 1:1 (the store writes both from one pair, and each is unique among a sheet's
+ * active claims), so a genuine takeover covers both and the key check refuses nothing it needs; it fails closed
+ * where the record check alone could drop a key-based protection (a covered record re-keyed since, a key shared
+ * by duplicate rows). The NEW side need not be covered: a new position the replacement does not keep is merely no
+ * longer suppressed — the planner may ADD a row there, but no old row loses protection. Answers the values-free
+ * counts of uncovered old claims (0 / 0 = a full takeover).
+ */
+function takeoverGaps(previousRow, previousMembers, candidateMembers) {
+  const candidateRecordIds = new Set(candidateMembers.map((member) => member.oldRecordId))
+  const candidateKeyDigests = new Set(candidateMembers.map((member) => keyDigest(member.oldKey)))
+  const previousRecordIds = new Set([previousRow.old_root_record_id])
+  const previousKeyDigests = new Set()
+  for (const member of previousMembers) {
+    previousRecordIds.add(member.old_record_id)
+    previousKeyDigests.add(member.old_key_digest)
+  }
+  let uncoveredOldRecords = 0
+  for (const id of previousRecordIds) if (!candidateRecordIds.has(id)) uncoveredOldRecords += 1
+  let uncoveredOldKeys = 0
+  for (const digest of previousKeyDigests) if (!candidateKeyDigests.has(digest)) uncoveredOldKeys += 1
+  return Object.freeze({ uncoveredOldRecords, uncoveredOldKeys })
 }
 
 function holdSetFingerprintOf(fingerprints) {
@@ -1063,8 +1096,10 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * Refusals before any row moves: the hold must be open, of that kind, confirmable, and carry exactly the
    * echoed fingerprints (409 CONFIRM_STALE / CONFIRM_NOT_ALLOWED); a store failure is 503. In the
    * transaction: state FOR UPDATE -> hold re-read -> [the named continuation FOR UPDATE, its claim_active
-   * members read, refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` unless the claims overlap
-   * (claimsOverlap, review X-3), then ended as superseded_by_new_confirmation] -> bumpWithin ->
+   * members read, refused 409 END_OUTCOME_NOT_ADMISSIBLE `supersedes_unrelated` when the claims share nothing
+   * (claimsOverlap, review X-3) and `supersedes_incomplete` when the new claims do not cover every old record id
+   * and old key digest of it (takeoverGaps, review round 2), then ended as superseded_by_new_confirmation] ->
+   * bumpWithin ->
    * INSERT header + members (23505 -> 409 CONFIRM_CONFLICT) -> hold resolved -> decision_version + 1 ->
    * auditWithin. Returns a values-free summary.
    */
@@ -1099,11 +1134,16 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       let supersededId = null
       if (supersedes) {
         const previous = await lockedContinuation(trx, scope, supersedes.continuationId.trim(), { revision: supersedes.revision })
-        // Review X-3 (§8.4): only a relationship whose claims this confirmation needs may be superseded by it —
-        // decided here, inside the transaction, before any row moves (claimsOverlap).
+        // Review X-3 (§8.4) + round 2: a relationship may be superseded only by a confirmation that is related to it
+        // (claimsOverlap) AND takes over its whole old side (takeoverGaps) — decided here, inside the transaction,
+        // before the bump and before any row moves.
         const previousMembers = await selectAll(trx, REFRESH_STORE_TABLES.member, { continuation_id: previous.id, claim_active: true }, { orderBy: ['position', 'ASC'], ceiling: READ_CEILINGS.member, operation: 'read_members' })
         if (!claimsOverlap(previous, previousMembers, facts.members)) {
           throw endNotAdmissible('supersedes_unrelated', 'superseded_by_new_confirmation')
+        }
+        const gaps = takeoverGaps(previous, previousMembers, facts.members)
+        if (gaps.uncoveredOldRecords > 0 || gaps.uncoveredOldKeys > 0) {
+          throw endNotAdmissible('supersedes_incomplete', 'superseded_by_new_confirmation', { uncoveredOldRecords: gaps.uncoveredOldRecords, uncoveredOldKeys: gaps.uncoveredOldKeys })
         }
         await endRows(trx, previous, { outcome: 'superseded_by_new_confirmation', endedBy: confirmedBy, note: null, at })
         supersededId = previous.id
@@ -1788,6 +1828,7 @@ module.exports = {
     rowToExecution,
     continuationFactsFromHold,
     claimsOverlap,
+    takeoverGaps,
     normalizeIncomingHold,
     normalizeScope,
     SCHEMES,
