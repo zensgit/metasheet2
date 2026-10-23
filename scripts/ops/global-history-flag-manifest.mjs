@@ -48,6 +48,17 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true enables the reviewed owner-only Yida single-target manual CREATE flow. Draft/preview/approval/submit refuse while off; local history and revoke remain owner/admin gated and perform no remote IO. Token HTTP and form HTTP also recheck this literal. This switch is not a grant: current owner plus live integration-admin, tenant-level null workspace, immutable plan/material/target evidence, one confirmed admission and the permanent CREATE fence are mandatory. No bulk, UPDATE, Automation sender or automatic retry. Turning off cannot recall admitted requests already in flight; unknown is never retried. Real customer access, token exchange, Yida sending and deployment require separate owner authorization.',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts; plugins/plugin-integration-core/lib/yida-owner-send-port.mjs',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

@@ -16,8 +16,8 @@
  *     refusals issue NO statement at all;
  *   - (#6164 step 1, last case) the encrypted-store probe's own SELECTs run in a READ ONLY session on
  *     real columns of EVERY catalog store: per field, a value sealed under the current material opens
- *     and one sealed under the previous material is counted undecryptable; a dropped column / table is
- *     classified by the real SQLSTATE (42703 / 42P01); no row changes.
+ *     and one sealed under the previous material is counted undecryptable (the approved-target singleton
+ *     uses two independent schemas); a dropped column / table is classified by the precheck; no row changes.
  *
  * Isolation: every table lives in a throwaway schema (search_path), created from the real
  * migrations and dropped afterwards. Real-DB gate: runs only where DATABASE_URL is configured (the
@@ -121,9 +121,9 @@ const OWNER = { userId: OWNER_ID, platformAdmin: false }
 const OTHER = { userId: OTHER_ID, platformAdmin: false }
 const CONNECTION = { host: 'db.reseal-realdb.test', port: 5432, database: 'plm', encrypt: true }
 const SCHEMA = `reseal_realdb_${process.pid}_${Date.now()}`
-// The encrypted-store probe case's own schema (#6164 step 1); afterAll drops it too, so a timed-out case
-// cannot leave it behind.
-const PROBE_SCHEMA = `${SCHEMA}_probe`
+// Each encrypted-store probe variant has its own schema (#6164 step 1); afterAll drops both too,
+// so a timed-out case cannot leave its schema behind.
+const PROBE_SCHEMAS = { current: `${SCHEMA}_probe_current`, previous: `${SCHEMA}_probe_previous` }
 // application_name of each simulated server process's pool (lets a case see WHICH one waits).
 const PROCESS_A = `reseal-realdb-a-${process.pid}`
 const PROCESS_B = `reseal-realdb-b-${process.pid}`
@@ -251,7 +251,9 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
   afterAll(async () => {
     await db?.destroy()
     await admin?.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`)
-    await admin?.query(`DROP SCHEMA IF EXISTS ${PROBE_SCHEMA} CASCADE`).catch(() => {}) // best-effort
+    for (const probeSchema of Object.values(PROBE_SCHEMAS)) {
+      await admin?.query(`DROP SCHEMA IF EXISTS ${probeSchema} CASCADE`).catch(() => {}) // best-effort
+    }
     await admin?.end()
     if (savedMaterial.key === undefined) delete process.env.ENCRYPTION_KEY
     else process.env.ENCRYPTION_KEY = savedMaterial.key
@@ -522,11 +524,13 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
   // #6164 step 1: the encrypted-store probe's own SQL against REAL columns of every catalog store. Own
   // schema (so the rows of the cases above do not count), a session forced READ ONLY for the probe (any
   // write would fail with 25006 and show up as read_failed), one value sealed under the CURRENT material
-  // and one under the PREVIOUS material per field; then a dropped column / table must be reported by the
+  // and one under the PREVIOUS material per field (the approved-target singleton uses two independent
+  // schemas, one material variant each); then a dropped column / table must be reported by the
   // existence precheck WITHOUT any statement being rejected (no server-side ERROR, no 42703 / 42P01).
-  it('encrypted-store probe: every catalog field read from real columns — one current-sealed and one previous-sealed value each; a dropped column / table reported by the precheck with no rejected statement; nothing written', async () => {
-    const probeSchema = PROBE_SCHEMA
-    await admin.query(`CREATE SCHEMA IF NOT EXISTS ${probeSchema}`)
+  it.each(['current', 'previous'] as const)('encrypted-store probe: every catalog field read from real columns — current/previous pairs, with the approved-target singleton %s-sealed in its own schema; a dropped column / table reported by the precheck with no rejected statement; nothing written', async (approvedTargetMaterial) => {
+    const probeSchema = PROBE_SCHEMAS[approvedTargetMaterial]
+    const approvedTargetUndecryptable = approvedTargetMaterial === 'previous' ? 1 : 0
+    await admin.query(`CREATE SCHEMA ${probeSchema}`)
     const setupPool = new Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${probeSchema}`, max: 2 })
     const readOnlyPool = new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -547,7 +551,12 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
     const sealed: string[] = []
     const cur = (name: string) => { const v = sealCurrent(`MARKER-probe-${name}-current`); sealed.push(v); return v }
     const prev = (name: string) => { const v = sealPrevious(`MARKER-probe-${name}-previous`); sealed.push(v); return v }
-    const TABLES = ['data_sources', 'directory_integrations', 'dingtalk_group_destinations', 'integration_external_systems', 'attendance_integrations', 'system_configs']
+    const TABLES = [
+      'data_sources', 'directory_integrations', 'dingtalk_group_destinations', 'integration_external_systems',
+      'attendance_integrations', 'system_configs', 'integration_yida_credential_materials',
+      'integration_yida_draft_targets', 'integration_yida_draft_operations', 'integration_yida_approved_target',
+      'integration_yida_send_approvals',
+    ]
     try {
       // data_sources: the same real migrations beforeAll runs (tenant_id / scope_kind come from the
       // second). They run BEFORE integration_external_systems exists, as in the cases above.
@@ -573,6 +582,19 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       //   system_configs               src/db/migrations/z20251231_create_system_configs.ts (value text)
       await setupPool.query(`CREATE TABLE IF NOT EXISTS system_configs (
         id uuid PRIMARY KEY, key varchar(255) NOT NULL UNIQUE, value text NOT NULL, is_encrypted boolean NOT NULL DEFAULT false)`)
+      // YiDa probe-only column subsets from SQL migrations 092/093/094/095. Their encrypted columns
+      // retain their real names, TEXT types and nullability; the approved target also retains its
+      // permanent single-slot primary key / CHECK, so its two material variants cannot coexist.
+      await setupPool.query(`CREATE TABLE integration_yida_credential_materials (
+        credential_ref TEXT PRIMARY KEY, material_encrypted TEXT)`)
+      await setupPool.query(`CREATE TABLE integration_yida_draft_targets (
+        target_ref TEXT PRIMARY KEY, target_encrypted TEXT NOT NULL)`)
+      await setupPool.query(`CREATE TABLE integration_yida_draft_operations (
+        operation_id TEXT PRIMARY KEY, snapshot_encrypted TEXT NOT NULL)`)
+      await setupPool.query(`CREATE TABLE integration_yida_approved_target (
+        slot INTEGER PRIMARY KEY CHECK (slot = 1), evidence_encrypted TEXT NOT NULL)`)
+      await setupPool.query(`CREATE TABLE integration_yida_send_approvals (
+        grant_id TEXT PRIMARY KEY, snapshot_encrypted TEXT NOT NULL)`)
 
       const seedDataSource = async (id: string, credentials: Record<string, string>, active = true, deleted = false) => {
         await setupPool.query(
@@ -626,6 +648,30 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
            ('00000000-0000-4000-8000-000000000107', 'probe.plain', '"plain"', false)`,
         [cur('sys-a'), prev('sys-b').slice('enc:'.length)],
       )
+      await setupPool.query(
+        `INSERT INTO integration_yida_credential_materials (credential_ref, material_encrypted) VALUES
+           ('probe-yida-material-a', $1), ('probe-yida-material-b', $2)`,
+        [cur('yida-material'), prev('yida-material')],
+      )
+      await setupPool.query(
+        `INSERT INTO integration_yida_draft_targets (target_ref, target_encrypted) VALUES
+           ('probe-yida-target-a', $1), ('probe-yida-target-b', $2)`,
+        [cur('yida-target'), prev('yida-target')],
+      )
+      await setupPool.query(
+        `INSERT INTO integration_yida_draft_operations (operation_id, snapshot_encrypted) VALUES
+           ('probe-yida-operation-a', $1), ('probe-yida-operation-b', $2)`,
+        [cur('yida-operation'), prev('yida-operation')],
+      )
+      await setupPool.query(
+        `INSERT INTO integration_yida_approved_target (slot, evidence_encrypted) VALUES (1, $1)`,
+        [approvedTargetMaterial === 'current' ? cur('yida-approved-target') : prev('yida-approved-target')],
+      )
+      await setupPool.query(
+        `INSERT INTO integration_yida_send_approvals (grant_id, snapshot_encrypted) VALUES
+           ('probe-yida-approval-a', $1), ('probe-yida-approval-b', $2)`,
+        [cur('yida-approval'), prev('yida-approval')],
+      )
 
       const fingerprint = async () => {
         const parts: string[] = []
@@ -665,9 +711,14 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
         ['integration_external_systems.credentials_encrypted', 'ok', 3, 2, 1, 0, 1],
         ['attendance_integrations.config.appSecret|appsecret|app_secret', 'ok', 2, 2, 1, 0, null],
         ['system_configs.value (is_encrypted)', 'ok', 2, 2, 1, 0, null],
+        ['integration_yida_credential_materials.material_encrypted', 'ok', 2, 2, 1, 0, null],
+        ['integration_yida_draft_targets.target_encrypted', 'ok', 2, 2, 1, 0, null],
+        ['integration_yida_draft_operations.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
+        ['integration_yida_approved_target.evidence_encrypted', 'ok', 1, 1, approvedTargetUndecryptable, 0, null],
+        ['integration_yida_send_approvals.snapshot_encrypted', 'ok', 2, 2, 1, 0, null],
       ])
       expect(report.material.status).toBe('ok')
-      expect(report.totals).toMatchObject({ encrypted: 22, undecryptable: 11, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+      expect(report.totals).toMatchObject({ encrypted: 31, undecryptable: 15 + approvedTargetUndecryptable, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
       // one existence precheck per table + one SELECT per field, every one a SELECT, none rejected
       expect(statements).toHaveLength(TABLES.length + report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
@@ -687,7 +738,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       expect(rejected).toEqual([])
       expect(statements).toHaveLength(TABLES.length + report.stores.length - 2)
       expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
-      expect(degraded.totals).toMatchObject({ encrypted: 18, undecryptable: 9, missing: 2, unreadable: 0 })
+      expect(degraded.totals).toMatchObject({ encrypted: 27, undecryptable: 13 + approvedTargetUndecryptable, missing: 2, unreadable: 0 })
 
       const serialized = JSON.stringify([report, degraded])
       for (const secret of [...sealed, SECRET.secondPassword, SECRET.username, 'MARKER', CURRENT.key, PREVIOUS.key]) {
