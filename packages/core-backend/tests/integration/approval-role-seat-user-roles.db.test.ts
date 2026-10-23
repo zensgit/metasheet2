@@ -86,18 +86,9 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
 
   const pool = () => poolManager.get()
 
-  // R: a non-admin role id, with a display NAME that differs from the id (case (f)).
-  const ROLE_ID = `f1-role-${TS}`
-  const ROLE_NAME = `F1 Role Name ${TS}`
-
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
     await ensureApprovalSchemaReady()
-    seededRoleIds.add(ROLE_ID)
-    await pool().query(
-      `INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
-      [ROLE_ID, ROLE_NAME],
-    )
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     const address = server.getAddress()
@@ -138,6 +129,22 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
 
   function freshId(label: string): string {
     return `f1rs-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+  }
+
+  /**
+   * A fresh non-admin role R per case (counts are per viewer across ALL pending instances, so a role
+   * shared between cases would leak one case's still-pending seats into another's counts), with a
+   * display NAME that differs from its id (case (f)).
+   */
+  async function seedRole(label: string): Promise<{ id: string; name: string }> {
+    const id = freshId(`role-${label}`)
+    const name = `F1 Role Name ${label} ${TS}`
+    seededRoleIds.add(id)
+    await pool().query(
+      `INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+      [id, name],
+    )
+    return { id, name }
   }
 
   /** Token claims name only `member` — never the role under test. */
@@ -331,9 +338,10 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
   }
 
   it('(a)(b)(c) a non-admin holding R ONLY via user_roles sees, counts, and decides the role-seated instances', async () => {
-    const { instanceA, instanceB } = await fixture('row', ROLE_ID)
+    const role = await seedRole('row')
+    const { instanceA, instanceB } = await fixture('row', role.id)
     // users.role is NOT R — the only source of R is the user_roles row.
-    const holder = await seedViewer('row-holder', { role: 'user', roleIds: [ROLE_ID] })
+    const holder = await seedViewer('row-holder', { role: 'user', roleIds: [role.id] })
 
     await withoutTokenClaimTrust(async () => {
       // Pre-existing discriminator: the legacy feed already resolves roles from the DB.
@@ -369,8 +377,9 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
   })
 
   it('(d) a viewer who does NOT hold R sees none of it and is refused by the seat gate', async () => {
-    const { instanceA } = await fixture('out', ROLE_ID)
-    const outsider = await seedViewer('outsider', { role: 'user', roleIds: [`${ROLE_ID}-other`] })
+    const role = await seedRole('out')
+    const { instanceA } = await fixture('out', role.id)
+    const outsider = await seedViewer('outsider', { role: 'user', roleIds: [`${role.id}-other`] })
 
     await withoutTokenClaimTrust(async () => {
       expect(await pendingTabIds(outsider.token)).not.toContain(instanceA)
@@ -379,24 +388,22 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       expect(await todoCount(outsider.token)).toBe(0)
       expect((await todoItems(outsider.token)).map((item) => item.id)).not.toContain(instanceA)
       const refused = await act(outsider.token, instanceA, 'approve')
-      expect([403, 404], await refused.clone().text()).toContain(refused.status)
-      if (refused.status === 403) {
-        expect(await refused.json()).toMatchObject({ error: { code: 'APPROVAL_ASSIGNMENT_REQUIRED' } })
-      }
+      await expectSeatGateRefusal(refused)
       expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_a' })
     })
   })
 
   it('(e) the users.role-column path still works: users.role = R, no user_roles row', async () => {
-    const { instanceA } = await fixture('col', ROLE_ID)
-    const columnHolder = await seedViewer('col-holder', { role: ROLE_ID })
+    const role = await seedRole('col')
+    const { instanceA, instanceB } = await fixture('col', role.id)
+    const columnHolder = await seedViewer('col-holder', { role: role.id })
     const rows = await pool().query('SELECT 1 FROM user_roles WHERE user_id = $1', [columnHolder.id])
     expect(rows.rows).toHaveLength(0)
 
     await withoutTokenClaimTrust(async () => {
-      expect(await pendingTabIds(columnHolder.token)).toContain(instanceA)
-      expect(await pendingCount(columnHolder.token)).toBeGreaterThanOrEqual(1)
-      expect(await todoCount(columnHolder.token)).toBeGreaterThanOrEqual(1)
+      expect(await pendingTabIds(columnHolder.token)).toEqual(expect.arrayContaining([instanceA, instanceB]))
+      expect(await pendingCount(columnHolder.token)).toBe(2)
+      expect(await todoCount(columnHolder.token)).toBe(2)
       const approved = await act(columnHolder.token, instanceA, 'approve')
       expect(approved.status, await approved.clone().text()).toBe(200)
       expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_b' })
@@ -404,8 +411,9 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
   })
 
   it('(f) ids only: a seat naming R\'s display NAME does not match a holder of R (user_roles row) on any can-act surface', async () => {
-    const { instanceA } = await fixture('name', ROLE_NAME)
-    const holder = await seedViewer('name-holder', { role: 'user', roleIds: [ROLE_ID] })
+    const role = await seedRole('name')
+    const { instanceA } = await fixture('name', role.name)
+    const holder = await seedViewer('name-holder', { role: 'user', roleIds: [role.id] })
 
     await withoutTokenClaimTrust(async () => {
       expect(await pendingTabIds(holder.token)).not.toContain(instanceA)
@@ -421,10 +429,7 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
         expect(read.status).toBe(404)
       }
       const refused = await act(holder.token, instanceA, 'approve')
-      expect([403, 404], await refused.clone().text()).toContain(refused.status)
-      if (refused.status === 403) {
-        expect(await refused.json()).toMatchObject({ error: { code: 'APPROVAL_ASSIGNMENT_REQUIRED' } })
-      }
+      await expectSeatGateRefusal(refused)
       expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_a' })
     })
   })
