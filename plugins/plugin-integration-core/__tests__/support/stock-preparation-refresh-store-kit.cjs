@@ -592,6 +592,52 @@ function sameNewPositionHold(base, { recordSuffix = '_other' } = {}) {
   return hold
 }
 
+/**
+ * A candidate hold whose HEADER claims collide with nothing in `base` (another old root record and key; the new
+ * root re-rooted under another parent, so every new key differs) while ONE child member — `base`'s first child
+ * in the store's member order — collides with `base` on exactly ONE member claim:
+ *   'old_record'  the same old record id, another old key;
+ *   'old_key'     another old record id, the same old key (a duplicate key on the sheet);
+ *   'new_key'     another old record and key, the same new key (a nested new position).
+ * Each shape is answered FIRST by its own member index (the header indexes see no collision), so dropping that
+ * one index changes the answer — the per-index A08 evidence the pair-wise probes cannot give.
+ */
+function memberCollisionHold(base, which, { parentId = 'R-001', suffix = '_mc' } = {}) {
+  if (!['old_record', 'old_key', 'new_key'].includes(which)) throw new Error(`refresh-store kit: unknown member collision ${which}`)
+  const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
+  const moved = competingCandidateHold(base, { parentId })
+  const freshKey = (key) => {
+    const parsed = JSON.parse(key)
+    return JSON.stringify({ ...parsed, path: parsed.path.map((token, index) => (index === 0 ? `${token}${suffix}` : token)) })
+  }
+  const pathKeyOf = (pair) => JSON.stringify(pair.relativePath)
+  const children = base.detail.pairs.filter((pair) => pair.relativePath.length > 0).map(pathKeyOf).sort()
+  if (children.length === 0) throw new Error('refresh-store kit: the base hold has no child pair')
+  const target = children[0]
+  const original = base.detail.pairs.find((pair) => pathKeyOf(pair) === target)
+  const pairs = moved.detail.pairs.map((pair) => {
+    const fresh = { ...pair, oldRecordId: `${pair.oldRecordId}${suffix}`, oldKey: freshKey(pair.oldKey) }
+    if (pathKeyOf(pair) !== target) return fresh
+    if (which === 'old_record') return { ...fresh, oldRecordId: original.oldRecordId }
+    if (which === 'old_key') return { ...fresh, oldKey: original.oldKey }
+    return { ...fresh, newKey: original.newKey }
+  })
+  const root = pairs.find((pair) => pair.relativePath.length === 0)
+  const detail = { ...moved.detail, pairs, oldRootKeys: [root.oldKey], oldRootRecordIds: [root.oldRecordId], newPositionKeys: [root.newKey] }
+  const subject = { ...moved.subject, oldRootRecordId: root.oldRecordId }
+  const hold = {
+    kind: 'continuation_candidate',
+    confirmable: true,
+    subject,
+    evidenceFingerprint: crypto.createHash('sha256').update(`member-collision-evidence:${which}:${base.evidenceFingerprint}`).digest('hex'),
+    comparisonFingerprint: base.comparisonFingerprint,
+    pairingFingerprint: crypto.createHash('sha256').update(`member-collision-pairing:${which}:${base.pairingFingerprint}`).digest('hex'),
+    detail,
+  }
+  hold.fingerprint = pairing.holdFingerprint(hold)
+  return hold
+}
+
 function echoOf(hold) {
   return { holdFingerprint: hold.fingerprint, comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint }
 }
@@ -608,6 +654,7 @@ module.exports = {
   createFakeRefreshDb,
   echoOf,
   loadSchema,
+  memberCollisionHold,
   parseSchema,
   readMigrationText,
   sameNewPositionHold,

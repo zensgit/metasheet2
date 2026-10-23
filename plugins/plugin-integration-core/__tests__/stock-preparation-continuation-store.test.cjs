@@ -37,6 +37,11 @@
 //   ST-11 values-free errors: no key, path, component id or drawing number in any error's details.
 //   ST-12 the governance read is keyed by (tenant, project) AND by sheet: rows of this project on another sheet,
 //         and rows of another project on this sheet, come back (the reader refuses on them).
+//   ST-13 A08 per index: each of the five partial unique CLAIM indexes is the first to answer its own collision
+//         (exact constraint name; the header row is inserted before the members, and indexes are checked in
+//         creation order, as in PostgreSQL), so a fake without any ONE of them answers differently. The open-hold
+//         unique is never reached through the store (duplicate fingerprints are 422, reconciliations serialise on
+//         the state row FOR UPDATE); its DB fact is the real-DB case S2-01.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -809,6 +814,45 @@ test('ST-12 the governance read is keyed by (tenant, project) AND by sheet: this
   const holdRow = db.rows(T.hold)[0]
   await expectError(store.readHold({ ...scope, holdId: holdRow.id }), { status: 409, code: CODES.CONFIRM_STALE, reason: 'hold_scope' })
   assert.equal((await store.readHold({ ...scope, sheetId: OTHER_SHEET, holdId: holdRow.id })).id, holdRow.id)
+})
+
+// ── ST-13 A08 per index ──────────────────────────────────────────────────────────────────────────
+
+test('ST-13 A08 per index: each partial unique claim index is the FIRST to answer its own collision (exact constraint) — the header new root, the header old root, a child\'s old record, a duplicate old key, a nested new position — so a fake without any ONE of them answers differently; each member-only rival commits on its own', async () => {
+  const shapes = [
+    { label: 'header new root', constraint: 'uniq_integration_stock_prep_continuation_new_root', build: (base) => kit.sameNewPositionHold(base) },
+    { label: 'header old root', constraint: 'uniq_integration_stock_prep_continuation_old_root', build: (base) => kit.competingCandidateHold(base) },
+    { label: 'child old record', constraint: 'uniq_integration_stock_prep_continuation_member_old_record', build: (base) => kit.memberCollisionHold(base, 'old_record'), memberOnly: true },
+    { label: 'duplicate old key', constraint: 'uniq_integration_stock_prep_continuation_member_old_key', build: (base) => kit.memberCollisionHold(base, 'old_key'), memberOnly: true },
+    { label: 'nested new position', constraint: 'uniq_integration_stock_prep_continuation_member_new_key', build: (base) => kit.memberCollisionHold(base, 'new_key'), memberOnly: true },
+  ]
+  for (const shape of shapes) {
+    const w = await world()
+    const rival = shape.build(w.hold)
+    assert.notEqual(rival.fingerprint, w.hold.fingerprint, shape.label)
+    await seedHolds(w, [w.hold, rival])
+    await confirmHold(w, w.hold)
+    const membersBefore = w.db.rows(T.member).length
+    const decisionBefore = w.db.rows(T.state)[0].decision_version
+    const conflict = await expectError(confirmHold(w, rival), { status: 409, code: CODES.CONFIRM_CONFLICT, reason: 'claim_taken' })
+    assert.equal(conflict.details.constraint, shape.constraint, `${shape.label}: answered first by its own index`)
+    assert.equal(conflict.details.sqlState, '23505', shape.label)
+    assertValuesFree(conflict)
+    assert.equal(w.db.rows(T.continuation).length, 1, `${shape.label}: no second continuation`)
+    assert.equal(w.db.rows(T.member).length, membersBefore, `${shape.label}: no member of the loser`)
+    assert.equal(w.db.rows(T.state)[0].decision_version, decisionBefore, `${shape.label}: the loser moved no decision`)
+    assert.equal(w.db.rows(T.hold).find((row) => row.fingerprint === rival.fingerprint).status, 'open', `${shape.label}: the losing hold stays open`)
+    if (shape.memberOnly) {
+      // Control: the rival is a well-formed hold whose header claims are disjoint from the base's — on a sheet where
+      // the base was never confirmed it commits, so the conflict above is the member claim and nothing else.
+      const alone = await world()
+      const own = shape.build(alone.hold)
+      await seedHolds(alone, [own])
+      const committed = await confirmHold(alone, own)
+      assert.equal(committed.revision, 1, `${shape.label}: the rival alone commits`)
+      assert.equal(alone.db.rows(T.member).length, own.detail.pairs.length, shape.label)
+    }
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-continuation-store.test.cjs', tests)
