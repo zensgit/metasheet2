@@ -1,0 +1,25 @@
+{
+  "source_commit": "23a2374545f351ba269b26c52117e92498bf59db",
+  "source_hashes": {
+    "packages/core-backend/src/routes/plm-embed.ts": "14849e6226788ea5f9c8dcdbb372234b57480d0163fa4d9eb8e4fc54105b80b0",
+    "packages/core-backend/tests/unit/plm-embed-routes.test.ts": "2bb6601d6020019581d4e13c9d76cf4fe2c60ba9446cf1778e9353500d4058e4",
+    "packages/core-backend/vitest.plm-managed-companion.config.ts": "0e2083809d7fee21b8f583bc49df9df506c5e1ad006b87ad29bdf4ca1de87258",
+    "packages/core-backend/tests/integration/plm-managed-embed-pg.realdb.ts": "b6e597e2a262b804647787018e38cc4d098116de2a2d55feeb32bb9eee86c151"
+  },
+  "root_checks": {
+    "backend_typecheck": 0,
+    "unit_passed": 54,
+    "pg_passed": 133,
+    "pg_files": 4,
+    "pg_skipped": 0,
+    "independent_guard_rebind_passed": 2,
+    "independent_fixture_tests_unselected": 14
+  },
+  "evidence": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/w10-meta-c2b-root-green-20261023",
+  "manifest_sha256": "3720176d48a348c8f0704544dece3815bb1e2de3668603c9328ae2fed216c0f0",
+  "cleanup_nonces": [
+    "65ed5874c0d5b678",
+    "92fc907bb74ff7bb"
+  ],
+  "acceptance": "local backend only; native HTTP fixture and process-local Redis double; original iframe, independent processes, hour and exact images not accepted"
+}
