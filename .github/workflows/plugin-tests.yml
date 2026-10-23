@@ -1148,6 +1148,15 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for attendance import timezone protocol}"
           pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/6032/protocol-result.json
 
+      # CSV must exercise real upload and the streamed plan builder, not just parser units.
+      - name: Run attendance CSV calendar protocol gate
+        id: attendance-csv-calendar-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance CSV calendar protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.csv.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/csv-calendar/csv-result.json
+
       - name: Run private-db backend drain proof
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test

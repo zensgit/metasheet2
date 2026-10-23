@@ -1,5 +1,5 @@
 const crypto = require('crypto')
-const { parseImportAbsoluteDate, normalizeImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
+const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
   isCanonicalImportUserId,
   importUserIdentifierLookupKey,
@@ -7671,15 +7671,7 @@ function normalizeCsvWorkDate(value) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
   if (!text) return null
-  const numeric = text.replace(/[^0-9]/g, '')
-  if (/^\d{13}$/.test(numeric)) {
-    const date = new Date(Number(numeric))
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
-  }
-  if (/^\d{10}$/.test(numeric)) {
-    const date = new Date(Number(numeric) * 1000)
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
-  }
+  if (parseImportAbsoluteDate(text)) return text
   const cleaned = text.split(' ')[0].trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned
   if (/^\d{2}-\d{2}-\d{2}$/.test(cleaned)) {
@@ -28358,14 +28350,14 @@ module.exports = {
 		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
-		        return { rows: result.rows, csvWarnings, csvFileId }
+		        return { ...await calendar(result.rows), csvWarnings, csvFileId }
 		      }
 		      if (Array.isArray(payload.rows)) return calendar(payload.rows)
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
 		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
-		        return { rows: result.rows, csvWarnings, csvFileId }
+		        return { ...await calendar(result.rows), csvWarnings, csvFileId }
 		      }
 		      if (Array.isArray(payload.entries)) return calendar(buildRowsFromEntries({ entries: payload.entries }), true)
       return calendar(buildRowsFromDingTalk({
@@ -28404,11 +28396,15 @@ module.exports = {
 	        return {
 	          csvFileId,
 	          iterateRows: async (onRow) => {
-	            const result = await iterateImportRowsFromCsvFileAsync({
-	              csvPath,
-	              csvOptions: payload.csvOptions,
-	              onRow,
-	            })
+	            const result = await iterateImportCalendarRows({
+              iterateRows: (consume) => iterateImportRowsFromCsvFileAsync({
+                csvPath,
+                csvOptions: payload.csvOptions,
+                onRow: consume,
+              }),
+              normalizeRows: (rows) => resolveImportCalendarRows(rows, payload, orgId, false, fallbackUserId),
+              onRow,
+            })
 	            ensureCsvRowsWithinLimit(result)
 	            return result
 	          },

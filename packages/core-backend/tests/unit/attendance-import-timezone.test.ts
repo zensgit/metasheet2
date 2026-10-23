@@ -295,3 +295,38 @@ describe('#6032 calendar selection without calculation admission', () => {
     })
   }
 })
+
+describe('CSV calendar source parity', () => {
+  function csv(date: string, punch = '2026-09-22T16:30:00.000Z') {
+    return { csvText: `UserId,日期,上班1打卡时间,下班1打卡时间\n${USER},${date},${punch},${punch}\n` }
+  }
+  it('valid CSV control preserves calendar dates and required punch fields', async () => {
+    const [row] = await preview(csv('2026-09-23'))
+    expect(row).toMatchObject({ workDate: '2026-09-23', firstInAt: INSTANT, lastOutAt: INSTANT, warnings: [] })
+  })
+  for (const date of [String(Date.parse(INSTANT)), String(Date.parse(INSTANT) / 1000), INSTANT, '2026-09-23T00:30:00+08:00']) {
+    it(`resolves CSV instant date ${date} against the effective calendar`, async () => {
+      const [row] = await preview(csv(date))
+      expect(row).toMatchObject({ workDate: '2026-09-23', firstInAt: INSTANT, lastOutAt: INSTANT, warnings: [] })
+    })
+  }
+  for (const source of ['shift', 'rotation', 'single-day', 'both', 'neighbor-multi'] as const) {
+    it(`uses the published ${source} calendar for CSV instants`, async () => {
+      published = source
+      const instant = '2026-09-23T02:30:00.000Z'
+      const [row] = await preview(csv(String(Date.parse(instant)), instant))
+      expect(row).toMatchObject({ workDate: '2026-09-22', firstInAt: instant, lastOutAt: instant, warnings: [] })
+    })
+  }
+  it('preserves CSV duplicate detection after local date normalization', async () => {
+    const rows = await preview({ csvText: `UserId,日期,上班1打卡时间,下班1打卡时间\n${USER},${Date.parse(INSTANT)},${INSTANT},${INSTANT}\n${USER},2026-09-23,${INSTANT},${INSTANT}\n` }, 2)
+    expect(rows[0]).toMatchObject({ workDate: '2026-09-23', firstInAt: INSTANT })
+    expect(rows[1]).toMatchObject({ workDate: '2026-09-23', status: 'invalid', warnings: ['Duplicate row for same user/workDate (skipped during commit).'] })
+  })
+  it('rejects two published calendar dates for CSV after canonical resolution', async () => {
+    published = 'ambiguous'
+    const response = await invokePreview(csv('2026-09-23T02:30:00Z'))
+    expect(response.statusCode).toBe(422)
+    expect(response.body).toEqual({ ok: false, error: { code: 'IMPORT_CALENDAR_DATE_UNRESOLVED', message: 'Import calendar date could not be resolved uniquely' } })
+  })
+})
