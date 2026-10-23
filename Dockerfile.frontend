@@ -22,6 +22,9 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile
+# The stock-prep YiDa preview panel (#6315) imports these three self-contained modules and their
+# declarations from the plugin tree; copy exactly them, not plugins/. They import only each other.
+COPY plugins/plugin-integration-core/lib/yida-static-plan.mjs plugins/plugin-integration-core/lib/yida-static-plan.d.mts plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.mjs plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.d.mts plugins/plugin-integration-core/lib/yida-rule-template.mjs plugins/plugin-integration-core/lib/yida-rule-template.d.mts ./plugins/plugin-integration-core/lib/
 # Build-only heap budget; leave native-memory headroom on an 8GB builder.
 RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @metasheet/web build
 RUN node -e "const fs=require('fs'); const clean=(value)=>{const trimmed=(value||'').trim(); return !trimmed || trimmed === 'unknown' ? null : trimmed}; const info={commit:clean(process.env.METASHEET_BUILD_COMMIT),imageTag:clean(process.env.METASHEET_BUILD_IMAGE_TAG),source:clean(process.env.METASHEET_BUILD_SOURCE),created:clean(process.env.METASHEET_BUILD_CREATED)}; fs.writeFileSync('apps/web/dist/build-info.json', JSON.stringify(info, null, 2)+'\n')"
