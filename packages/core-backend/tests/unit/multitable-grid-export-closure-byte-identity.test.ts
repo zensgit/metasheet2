@@ -5,17 +5,18 @@
  * unstamped sheet none of that may show: the `/context` body and the three resolvers' results must be exactly
  * what origin/main produced. This file records them for two unstamped sheets — an ordinary client-id sheet (the
  * closure lookup issues no statement for it) and an UNSTAMPED host-derived project sheet (the lookup runs and
- * answers "not closed") — for an admin, a reader, a writer, the base owner (no code), a sheet-scoped member (a
- * user-subject spreadsheet:read row) and a non-member — and compares them, as canonical JSON, with
+ * answers "not closed") — for an admin, a reader, a writer, the base owner (no code; a role-subject spreadsheet:admin
+ * grant), a sheet-scoped member (a user-subject spreadsheet:read row) and a non-member — and compares them, as
+ * canonical JSON, with
  * tests/fixtures/multitable-grid-export-closure-byte-identity.json.
  *
- * PROVENANCE (review round 1, fix 5). The fixture was captured ON origin/main 99a217010 (the main this branch merged),
+ * PROVENANCE (review rounds 1-2). The fixture was captured ON origin/main b87320aab (the main this branch merged),
  * in a fresh detached worktree with only this test file copied in — this file imports nothing the PR adds, so it
  * runs unchanged there:
- *   git worktree add --detach E:/Projects/wt-mt-gec-baseline-main-20261023 99a217010
+ *   git worktree add --detach E:/Projects/wt-mt-gec-baseline-main-r2-20261023 b87320aab
  *   pnpm install --frozen-lockfile; cp <this file> packages/core-backend/tests/unit/
  *   GEC_CAPTURE_BASELINE=<path> vitest run tests/unit/multitable-grid-export-closure-byte-identity.test.ts
- * and that capture is byte-identical (sha256 898101982494e303f2c63cf4936c57cbcda7ea9ac0289b3da582678aa03f01bf) to
+ * and that capture is byte-identical (sha256 a0a322fb612704332f0a57b162fa7de4f6f511e0640e5e9a8e677002bb2ee6bf) to
  * what the PR head produces. The PR head must keep reproducing it byte for byte. (GEC_CAPTURE_BASELINE makes the
  * run write the observed set instead of comparing.)
  *
@@ -52,7 +53,12 @@ const USERS = {
   reader: { id: 'u_gec_reader', roles: [] as string[], perms: ['multitable:read'] },
   writer: { id: 'u_gec_writer', roles: [] as string[], perms: ['multitable:read', 'multitable:write', 'multitable:share'] },
   // Review round 1, fix 5: the three identities that reach a sheet WITHOUT a global multitable code.
-  owner: { id: 'u_gec_owner', roles: [] as string[], perms: [] as string[] }, // owner_id of the base row below
+  // Review round 2 (S3): the base owner (owner_id of the base row below) reaching the sheets the way an owner
+  // actually can — the REST resolver ignores base ownership, so without a grant this identity was a duplicate of
+  // `outsider`. It holds a ROLE-subject spreadsheet:admin grant (a role it is a member of), the admin-level and
+  // role-subject path the user-subject read `member` does not cover; base ownership still feeds /context's
+  // copy-target check.
+  owner: { id: 'u_gec_owner', roles: [] as string[], perms: [] as string[] },
   member: { id: 'u_gec_member', roles: [] as string[], perms: [] as string[] }, // sheet-scoped spreadsheet:read grant on both sheets
   outsider: { id: 'u_gec_outsider', roles: [] as string[], perms: [] as string[] }, // no code, no grant, not the owner
 } as const
@@ -81,11 +87,16 @@ async function answer(sql: string, params: unknown[] = []): Promise<{ rows: unkn
       : { rows: [], rowCount: 0 }
   }
   // The sheet-scope lookup (permission-service loadSheetPermissionScopeMap): the member holds a user-subject
-  // spreadsheet:read row on both sheets; nobody else holds a row.
+  // spreadsheet:read row and the owner a role-subject spreadsheet:admin row on both sheets; nobody else holds one.
   if (q.includes('FROM spreadsheet_permissions sp') && q.includes('sp.sheet_id = ANY($2::text[])')) {
-    if (params[0] !== 'u_gec_member') return { rows: [], rowCount: 0 }
     const ids = ((params[1] as string[]) ?? []).filter(known)
-    return { rows: ids.map((sheetId) => ({ sheet_id: sheetId, perm_code: 'spreadsheet:read', subject_type: 'user' })), rowCount: ids.length }
+    if (params[0] === 'u_gec_member') {
+      return { rows: ids.map((sheetId) => ({ sheet_id: sheetId, perm_code: 'spreadsheet:read', subject_type: 'user' })), rowCount: ids.length }
+    }
+    if (params[0] === 'u_gec_owner') {
+      return { rows: ids.map((sheetId) => ({ sheet_id: sheetId, perm_code: 'spreadsheet:admin', subject_type: 'role' })), rowCount: ids.length }
+    }
+    return { rows: [], rowCount: 0 }
   }
   if (/FROM meta_sheets WHERE base_id = \$1 AND deleted_at IS NULL/.test(q)) {
     return params[0] === BASE_ID ? { rows: [sheetRow(PLAIN), sheetRow(DERIVED_OPEN)], rowCount: 2 } : { rows: [], rowCount: 0 }
