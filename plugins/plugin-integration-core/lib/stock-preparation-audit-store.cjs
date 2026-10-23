@@ -99,6 +99,13 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'project_target_grant',
   'project_fields_update',
   'project_overview_refresh',
+  // 备料分批拉取第一期 step 3 PR B (migration 101): an administrator (stock-prep:admin) ENABLED THE
+  // PILOT of one project sheet — from then on the large-BOM lane refuses the project, an over-cap
+  // preview refuses instead of falling to the large lane, and the host keeps the sheet's generic grid
+  // export closed. Written ONCE per project (a re-POST that only repairs a missing host stamp writes no
+  // second row). Values-free: `project_id` the project NUMBER, `subject_id` the sheet id, `mode` the
+  // enum `enabled`, `detail` the readiness version, the objectId handle and booleans about the stamp.
+  'project_pilot_enable',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 
@@ -220,7 +227,7 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     throw new Error('createStockPreparationAuditStore: scoped db helper (insertOne + select) is required')
   }
 
-  async function append({ tenantId, workspaceId, projectId, action, subjectId, mode, actor, detail } = {}) {
+  function buildRow({ tenantId, workspaceId, projectId, action, subjectId, mode, actor, detail } = {}) {
     const tenant = optionalString(tenantId)
     if (!tenant) {
       throw new StockPreparationAuditError(422, 'AUDIT_CONFIG_INVALID', 'tenantId is required', { field: 'tenantId' })
@@ -230,7 +237,7 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
       throw new StockPreparationAuditError(422, 'AUDIT_ACTION_INVALID', 'action must be one of the stock-prep audit vocabulary', { field: 'action' })
     }
     const safeDetail = assertValuesFreeDetail(detail)
-    const row = {
+    return {
       id: idGenerator(),
       tenant_id: tenant,
       // CALLER/CUSTOMER columns — stored as given. See assertValuesFreeColumn for why gating these
@@ -244,8 +251,29 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
       actor: optionalString(actor),
       detail: safeDetail,
     }
+  }
+
+  async function append(entry = {}) {
+    const row = buildRow(entry)
     await db.insertOne(AUDIT_TABLE, row)
-    return { id: row.id, action: normalizedAction }
+    return { id: row.id, action: row.action }
+  }
+
+  /**
+   * THE SAME ROW, INSIDE THE CALLER'S TRANSACTION (pre-enable hardening F-4(c), step-4 design §23.4).
+   * `trx` is a transaction handle of the scoped db helper (lib/db.cjs wraps it with the same structured
+   * API, `insertOne` included) — the transaction of the write this row records, so the effect and its
+   * audit row commit or roll back TOGETHER: a crash between them cannot leave the effect unaudited. Same
+   * vocabulary, same values-free gates, same columns as `append`; a refusal throws inside the caller's
+   * transaction and rolls the effect back with it.
+   */
+  async function appendWithin(trx, entry = {}) {
+    if (!trx || typeof trx.insertOne !== 'function') {
+      throw new StockPreparationAuditError(500, 'AUDIT_TRANSACTION_INVALID', 'appendWithin needs the transaction handle of the write it records', { field: 'trx' })
+    }
+    const row = buildRow(entry)
+    await trx.insertOne(AUDIT_TABLE, row)
+    return { id: row.id, action: row.action }
   }
 
   async function list({ tenantId, workspaceId, projectId, action, limit } = {}) {
@@ -338,7 +366,7 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     }
   }
 
-  return { append, list, supportsAction }
+  return { append, appendWithin, list, supportsAction }
 }
 
 module.exports = {

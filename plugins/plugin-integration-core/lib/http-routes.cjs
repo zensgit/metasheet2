@@ -245,6 +245,17 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/archive', 'stockPreparationProjectTargetArchive'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/restore', 'stockPreparationProjectTargetRestore'],
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §7 G5, G7 / §9.4 / §9.5 U05; register R-53, R-54) — THE
+  // PILOT MARKER of one project sheet. Both stock-prep:admin (R-53 owner default ②), both 404 DISABLED
+  // after the gate while the switch is off, zero IO.
+  //   GET  target/pilot   — the pilot state + the values-free readiness (check ids and booleans).
+  //   POST target/pilot   — ENABLE, set-once, body `{ confirmProjectNo }`: readiness must pass in full
+  //                  (409 STOCK_PREP_PILOT_NOT_READY lists the failing ids), then the generation is bumped
+  //                  (reason pilot_enable), then under the sheet write lease the host stamps the sheet
+  //                  closed for grid export and the registry row is marked; audited `project_pilot_enable`
+  //                  once. A re-POST repairs a missing stamp and writes no second audit row. NO unset.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotGet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pilot', 'stockPreparationProjectPilotEnable'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -491,6 +502,15 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 备料 project write lock (batch-refresh phase 0 step 1, migration 100): the cross-process write lease
+// and the plan generation for one target sheet (R-52).
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  sheetWriteScopeKey,
+  writeBindingFromGeneration,
+  writeObservationFromGeneration,
+} = require('./stock-preparation-project-write-lock.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -566,6 +586,20 @@ const {
   // S3 fix round 1 (R10): a pull's refusal code as the registry may store it (UNKNOWN for a bad shape).
   normalizeProjectPullCode,
 } = require('./stock-preparation-project-target-store.cjs')
+// 备料分批拉取第一期 step 3 PR B: the pilot lane gate (large lane refused / over-cap preview refused for
+// a pilot project; an unreadable state is 503, never "not pilot") and the readiness evaluator the enable
+// route must satisfy in full. The marker itself lives on the registry row (migration 101).
+const {
+  PILOT_ERROR_CODES: STOCK_PREP_PILOT_ERROR_CODES,
+  StockPreparationPilotError,
+  createStockPreparationPilotGate,
+} = require('./stock-preparation-pilot-gate.cjs')
+const {
+  CUSTOMER_PACK_NOT_APPLICABLE: STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE,
+  SPEC_READ_PLAN_SLOT_NOT_APPLICABLE: STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE,
+  collectGenericWriterTargets: collectStockPrepGenericWriterTargets,
+  evaluatePilotReadiness: evaluateStockPrepPilotReadiness,
+} = require('./stock-preparation-pilot-readiness.cjs')
 // S3 (ADR §5, register R-37): the project overview — the PULL tier's ensure of the host-stamped
 // read-only sheet (+ its G1 READ grant), the bounded projection, the per-event row update, and the
 // stamped lookup the list route hands the home page.
@@ -624,6 +658,7 @@ const {
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
+  countOpenLargeBomCheckpointApplyJobsForSheet,
   createLargeBomBackgroundExpansionJob,
   createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
@@ -2048,6 +2083,8 @@ const VALID_STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_KEYS = new Set(['proje
 const STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE = 'contract_options_synced'
 const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
 const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
+// PR B (migration 101): the pilot enablement of one project sheet — written once per project.
+const STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION = 'project_pilot_enable'
 const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH'
 // S3 (register R-37): the two remaining 088 actions. `project_fields_update` records WHICH of the three
 // O2(a) columns changed (a count map keyed by column name) and never a value; `project_overview_refresh`
@@ -2197,6 +2234,10 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetArchive',
   'stockPreparationProjectTargetRestore',
+  // 备料分批拉取第一期 step 3 PR B: the pilot read (marker booleans, a clock, an actor handle, readiness
+  // check ids) and the enable (the same, plus the outcome booleans) — handles, enums and check ids only.
+  'stockPreparationProjectPilotGet',
+  'stockPreparationProjectPilotEnable',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -4550,6 +4591,54 @@ function requireStockPreparationAudit() {
     }
     return stockPreparationConfirmationLease
   }
+  // Batch-refresh phase 0 step 1 (migration 100): the project write lock — one cross-process write
+  // lease plus the plan generation per target sheet (R-52). Optional at registration like the
+  // lease above; every small apply (and, from the large-lane wiring, every large chunk) fails closed
+  // 501 without it. The dry-run consults it when present (precheck + generation bump) and otherwise
+  // mints an UNBOUND token, which apply refuses anyway.
+  const stockPreparationProjectWriteLock = services.stockPreparationProjectWriteLock || null
+  function requireStockPreparationProjectWriteLock() {
+    if (!stockPreparationProjectWriteLock
+      || typeof stockPreparationProjectWriteLock.withProjectWriteLease !== 'function'
+      || typeof stockPreparationProjectWriteLock.bumpGeneration !== 'function'
+      || typeof stockPreparationProjectWriteLock.assertNoLiveWriter !== 'function'
+      || typeof stockPreparationProjectWriteLock.observeGeneration !== 'function'
+      || typeof stockPreparationProjectWriteLock.readGeneration !== 'function') {
+      throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the stock-prep project write lock is not available; nothing is written without it')
+    }
+    return stockPreparationProjectWriteLock
+  }
+  // THE write scope of a table action: the resolved target sheet (R-52). The project number is validated
+  // first with the plan's own validator, so a malformed number is the same 400 the plan would answer.
+  function stockPreparationProjectWriteScope(action, rawParameters) {
+    // The project number is validated (the plan's own 400) but is NOT part of the scope: the scope is the
+    // target sheet (R-52), which the foreign-project guard keeps to one active project.
+    normalizeActionParameters(rawParameters)
+    return sheetWriteScopeKey(action.target.sheetId)
+  }
+  // Review round 1 (item 2): only a caller who would pass the APPLY gate may supersede other plans. The
+  // dry-run route is read-tier; a read-tier caller's clean trial must not cancel a puller's pending
+  // token, so it gets an UNBOUND token (same response shape; apply refuses it token_unbound). The check
+  // is the apply route's own gate, run without its refusal: any refusal (or failure) answers "no".
+  async function callerMayBindPlanGeneration(req, actionId) {
+    try {
+      await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      return true
+    } catch {
+      return false
+    }
+  }
+  // Review rounds 1 + 2: the ONE `refused` stamp for a refusal that wrote nothing — a write-lock refusal
+  // raised before the work starts (no lock service, a malformed project number, a lock store that cannot
+  // be read) and every dry-run refusal. WRITE_LOCKED is deliberately NOT stamped, wherever it comes from
+  // (apply acquire, dry-run precheck, dry-run generation bump, contention): it describes ANOTHER run that
+  // holds the sheet and stamps its own outcome when it releases, and a late `refused` stamp from the loser
+  // could land after — and overwrite — the holder's `applied`.
+  async function stampWriteLockRefusal(action, tenantId, error) {
+    if (error && error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED) return
+    await stampProjectPullOutcome(action, tenantId, { outcome: 'refused', code: error && error.code })
+    if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(tenantId, action.projectTarget.projectNo)
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -4623,6 +4712,103 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here')
     }
     return store
+  }
+  // 备料分批拉取第一期 step 3 PR B: the pilot routes need the store's pilot surface (migration 101). Same
+  // posture as the lifecycle check: an older store binding serves the older routes, these fail closed (501).
+  function requireStockPreparationProjectPilot() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.getPilotState !== 'function' || typeof store.getPilotStateBySheetId !== 'function'
+      || typeof store.markPilotEnabled !== 'function' || typeof store.probeTableReadable !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot read or mark the pilot here')
+    }
+    return store
+  }
+  /**
+   * THE PILOT LANE GATE (PR B; plan §5.1 / §9.4 L01–L05). Built over the registry store the routes already
+   * resolve projects through — null store (no plugin SQL db): nothing can be pilot, and the gate says so by
+   * name. Consulted on every large-BOM route by (tenant, project number) AND by the sheet the route is about
+   * to work on, and by the small lane's over-cap rule. An unreadable state is 503, never "not pilot".
+   */
+  const stockPreparationPilotGate = createStockPreparationPilotGate({ store: stockPreparationProjectTargets })
+  async function assertLargeLaneAllowedForPilot(input, lane) {
+    return stockPreparationPilotGate.assertLargeLaneAllowed(input, lane)
+  }
+  /** The server-held 规格 read-plan slot declaration (plugin config, exact literal; never a request value). */
+  function stockPreparationPilotSpecSlotDeclaration() {
+    const pilotConfig = context && isPlainObject(context.config) && isPlainObject(context.config.stockPreparationPilot) ? context.config.stockPreparationPilot : null
+    return pilotConfig && pilotConfig.specReadPlanSlot === STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE ? STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE : null
+  }
+  /** Pre-enable hardening O-8: the server-held "no customer pack here" declaration (plugin config, exact literal). */
+  function stockPreparationPilotCustomerPackDeclaration() {
+    const pilotConfig = context && isPlainObject(context.config) && isPlainObject(context.config.stockPreparationPilot) ? context.config.stockPreparationPilot : null
+    return pilotConfig && pilotConfig.customerPack === STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE ? STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE : null
+  }
+  /**
+   * The pilot readiness of ONE registered, ACTIVE project (PR B): resolves the project's sheet through the
+   * registry overlay (a WRITE lookup — an archived project is the §6 409 here), walls it to the tenant, and
+   * runs every check of stock-preparation-pilot-readiness.cjs over server-held inputs only. Returns the
+   * resolved action, its sheet write scope and the values-free readiness answer.
+   */
+  async function evaluateStockPreparationProjectPilotReadiness({ tenantId, workspaceId, projectNo, pilotRow, store }) {
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+      tenantId,
+      actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+      projectNo,
+      targetPurpose: 'write',
+    }))
+    await assertResolvedProjectTargetTenancy(action, tenantId)
+    const provisioning = getMultitableProvisioning()
+    const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    const writeScope = sheetWriteScopeKey(action.target.sheetId)
+    const readiness = await evaluateStockPrepPilotReadiness({
+      row: pilotRow,
+      sheetId: action.target.sheetId,
+      objectId: action.target.objectId,
+      projectId,
+      projectNo,
+      tenantId,
+      action,
+      target: action.target,
+      recordsApi: getMultitableRecordsApi(),
+      provisioning,
+      assertTargetSheetHoldsNoForeignActiveRows: tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows,
+      // Pre-enable hardening (step-4 design §23.4): O-6 reads the project's rows the planner plans from; F-3
+      // scans the large-BOM job store (the same `context.storage` every large route writes) for this sheet;
+      // O-8 reads the pack-install ledger and the host strictly.
+      readExistingStockPreparationRows: tableActionInternals.readExistingStockPreparationRows,
+      lock: stockPreparationProjectWriteLock,
+      writeScope,
+      countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
+      probeTableReadable: (table) => store.probeTableReadable(table),
+      specReadPlanSlotDeclaration: stockPreparationPilotSpecSlotDeclaration(),
+      packInstallStore: stockPreparationPackInstalls,
+      customerPackDeclaration: stockPreparationPilotCustomerPackDeclaration(),
+      collectGenericWriterTargets: () => collectStockPrepGenericWriterTargets({
+        externalSystemRegistry: externalSystems,
+        pipelineRegistry,
+        tenantId,
+        workspaceId,
+      }),
+    })
+    return { action, projectId, writeScope, readiness }
+  }
+  /** The pilot read of the enable / read routes: a store failure is the gate's 503, never a 500 or "not pilot". */
+  async function readStockPreparationProjectPilotRow(store, { tenantId, projectNo }) {
+    try {
+      return await store.getPilotState({ tenantId, projectNo })
+    } catch (error) {
+      const sqlState = error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined
+      throw new StockPreparationPilotError(503, STOCK_PREP_PILOT_ERROR_CODES.STATE_UNREADABLE, 'the pilot state of this project could not be read', { operation: 'pilot_state_read', ...(sqlState ? { sqlState } : {}), partial: false })
+    }
+  }
+  /** What the pilot routes answer about the marker: booleans, a server clock, an actor handle, an integer. */
+  function publicStockPreparationPilot(pilotRow) {
+    return {
+      enabled: pilotRow.pilot === true,
+      enabledAt: pilotRow.pilotEnabledAt,
+      enabledBy: pilotRow.pilotEnabledBy,
+      readinessVersion: pilotRow.pilotReadinessVersion,
+    }
   }
   // S3 fix round 1 (R6): the refresh cooldown, per tenant, in THIS process. Keyed by the VERIFIED tenant
   // (the operator scope), stamped when a refresh starts and cleared when it fails, so a second click within
@@ -7373,6 +7559,33 @@ function requireStockPreparationAudit() {
       // has passed, and nothing below (B2a claim, credential load, source read) has started. No-op on
       // this synchronous route.
       const dryRunJob = reserveDryRunJobForRequest(req, { actionId, body, tenantId: dryRunTenantId, includeMissingComponents })
+      // Batch-refresh phase 0 step 1 — PRECHECK: a preview of a sheet that another run is WRITING
+      // right now is refused 409 STOCK_PREP_PROJECT_WRITE_LOCKED here, before the B2a claim, the
+      // credential load and the PLM read (an applicable preview would supersede that run's plan, and the
+      // bump below refuses the same way). Read-only; no lock service wired -> no precheck (the token is
+      // then minted unbound, and apply refuses it). A malformed project number skips it: the plan
+      // answers its own 400 below, exactly as before.
+      let previewWriteScope = null
+      let previewMayBind = false
+      if (stockPreparationProjectWriteLock) {
+        try {
+          previewWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
+        } catch {
+          previewWriteScope = null
+        }
+        if (previewWriteScope) {
+          try {
+            // Round 6 (N4): through the require helper, like the apply route — a partially wired lock service
+            // is the same 501 everywhere, never a 500 from a missing method.
+            await requireStockPreparationProjectWriteLock().assertNoLiveWriter(previewWriteScope)
+          } catch (error) {
+            await stampWriteLockRefusal(action, dryRunTenantId, error)
+            throw error
+          }
+          // Only a caller who may APPLY binds (and so supersedes); see callerMayBindPlanGeneration.
+          previewMayBind = await callerMayBindPlanGeneration(req, actionId)
+        }
+      }
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
       // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
@@ -7433,11 +7646,28 @@ function requireStockPreparationAudit() {
             b2aSourceObjects: dryRunB2aSourceObjects,
             tenantId: dryRunTenantId,
             now: Date.now(),
+            // PR B (plan §5.1 / §9.4 L03): the small lane's over-cap rule for a PILOT project. Run by the lib
+            // only when the expansion hit a small-lane cap, before the token block: pilot -> 409
+            // STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED (the panel never auto-starts the large lane);
+            // unreadable -> 503; not pilot -> the `large_bom_bounded` answer, byte for byte.
+            pilotLaneGuard: () => stockPreparationPilotGate.assertSmallLaneCapNotExceededForPilot({
+              tenantId: dryRunTenantId,
+              projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+              sheetId: action.target.sheetId,
+            }),
+            // Batch-refresh phase 0 step 1 — PLAN GENERATION: an APPLICABLE preview by a caller who may
+            // apply supersedes every earlier plan of this sheet. Called by the lib only when it is about to
+            // mint a token; refused 409 while a live writer holds the sheet (no token is minted then). A
+            // read-tier caller gets no binder: an unbound token that supersedes nothing (review round 1).
+            projectWriteGenerationBinder: previewWriteScope && previewMayBind
+              ? async () => writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
+              : undefined,
           })
         } catch (error) {
-          await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
-          // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-          if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo)
+          // Stamped `refused` (and the overview row follows; S3 fix round 1, R5) — except WRITE_LOCKED from
+          // the generation bump (a live holder, or lock contention): that describes another run, which
+          // stamps its own outcome, and a late `refused` could overwrite its `applied` (review round 2).
+          await stampWriteLockRefusal(action, dryRunTenantId, error)
           throw error
         }
         await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
@@ -7878,76 +8108,104 @@ function requireStockPreparationAudit() {
       const applyTenantId = resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, applyTenantId)
+      // Batch-refresh phase 0 step 1 — THE SHEET WRITE LEASE (S2/S3). One writer per target sheet (R-52)
+      // across processes, held around everything below: the B2a claim, the credential load,
+      // the token claim, the re-plan and every write. Acquired BEFORE all of them, so a busy refusal
+      // (409 STOCK_PREP_PROJECT_WRITE_LOCKED) costs no B2a claim, no adapter load and no token; a lock
+      // store that cannot be read or written refuses 503 (fail closed), and no lock service at all 501.
       const applyB2aRunId = b2aRunId('table-action-apply')
-      // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
-      // so a refusal never burns a single-use dry-run token.
-      const {
-        authorization: applyB2aAuthorization,
-        sourceObjects: applyB2aSourceObjects,
-      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
-        req,
-        tenantScope: applyTenantId,
-        purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-        runId: applyB2aRunId,
-      })
-      // W-5: same stanza, forwarded — see the dry-run route above for why.
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
-      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       // S3 (ADR §5: apply 结束): the registry row the overlay resolved gets `last_pull_*` stamped —
       // `applied` with the run's distinct missing-component count, or `refused` with the typed code.
+      // The stamp runs AFTER the lease is released (S12), so a slow stamp never holds the sheet.
       let applyResult
+      let applyFailure = null
+      let leaseEntered = false
       try {
-        applyResult = await applyStockPreparationAction({
-          action,
-          parameters: body.parameters,
-          dryRunToken: confirm.dryRunToken,
-          acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
-          acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
-          permission: applyPermissionForUser(user),
-          sourceAdapter,
-          // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
-          // plan and compares revisions, so the two routes must read the bands from one seam.
-          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-          // Same probe input the dry-run route threaded, from the same tenant derivation.
-          targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
-          // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
-          // compares its revision against the token. A mapping on one route and not the other would
-          // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
-          extFieldMapping: stockPreparationExtFieldMapping,
-          // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
-          // decision confirmed/superseded between dry-run and apply changes the recomputed revision
-          // and fails the token check — fail-closed. Production Apply remains off this line entirely
-          // (sandbox/production gates above are untouched).
-          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-          recordsApi: getMultitableRecordsApi(),
-          tokenStore: context.storage,
-          policyStore: context.storage,
-          // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
-          // Absent (e.g. prod default) → undefined → apply fail-closed.
-          sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
-          // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
-          // → sandbox gate (canonical rejected). Request body never supplies it.
-          productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
-          // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
-          // nothing in the request; undefined when no overlay was applied.
-          projectSheetGate: projectSheetGateFor(action),
-          // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
-          // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
-          // right — it does not inherit the dry-run's authorization through the token.
-          b2aTrialRegistry,
-          b2aClaimStore: context.storage,
-          b2aOperationClaim,
-          b2aRunId: applyB2aRunId,
-          // R-02 (contract half): same list as the guard above — see the dry-run route.
-          b2aSourceObjects: applyB2aSourceObjects,
-          tenantId: applyTenantId,
-          now: Date.now(),
+        const projectWriteLock = requireStockPreparationProjectWriteLock()
+        const applyWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
+        await projectWriteLock.withProjectWriteLease(applyWriteScope, { purpose: 'small_apply', runId: applyB2aRunId, tenantId: applyTenantId }, async (projectWriteGuard) => {
+          leaseEntered = true
+          // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
+          // so a refusal never burns a single-use dry-run token.
+          const {
+            authorization: applyB2aAuthorization,
+            sourceObjects: applyB2aSourceObjects,
+          } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+            req,
+            tenantScope: applyTenantId,
+            purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+            runId: applyB2aRunId,
+          })
+          // W-5: same stanza, forwarded — see the dry-run route above for why.
+          const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
+          const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+          try {
+            applyResult = await applyStockPreparationAction({
+              action,
+              parameters: body.parameters,
+              dryRunToken: confirm.dryRunToken,
+              acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+              acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
+              permission: applyPermissionForUser(user),
+              sourceAdapter,
+              // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
+              // plan and compares revisions, so the two routes must read the bands from one seam.
+              installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+              // Same probe input the dry-run route threaded, from the same tenant derivation.
+              targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
+              // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
+              // compares its revision against the token. A mapping on one route and not the other would
+              // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+              extFieldMapping: stockPreparationExtFieldMapping,
+              // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
+              // decision confirmed/superseded between dry-run and apply changes the recomputed revision
+              // and fails the token check — fail-closed. Production Apply remains off this line entirely
+              // (sandbox/production gates above are untouched).
+              confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+              recordsApi: getMultitableRecordsApi(),
+              tokenStore: context.storage,
+              policyStore: context.storage,
+              // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+              // Absent (e.g. prod default) → undefined → apply fail-closed.
+              sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+              // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
+              // → sandbox gate (canonical rejected). Request body never supplies it.
+              productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+              // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
+              // nothing in the request; undefined when no overlay was applied.
+              projectSheetGate: projectSheetGateFor(action),
+              // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
+              // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
+              // right — it does not inherit the dry-run's authorization through the token.
+              b2aTrialRegistry,
+              b2aClaimStore: context.storage,
+              b2aOperationClaim,
+              b2aRunId: applyB2aRunId,
+              // R-02 (contract half): same list as the guard above — see the dry-run route.
+              b2aSourceObjects: applyB2aSourceObjects,
+              tenantId: applyTenantId,
+              now: Date.now(),
+              // I1: the guard of the lease held around this call — one holder CAS before every write.
+              projectWriteGuard,
+            })
+          } catch (error) {
+            applyFailure = error
+          }
         })
       } catch (error) {
-        await stampProjectPullOutcome(action, applyTenantId, { outcome: 'refused', code: error && error.code })
-        // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
-        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo)
+        // Refused before the lease was held (review round 1, item 8); B2a / adapter refusals inside the
+        // lease keep their pre-existing (unstamped) behaviour.
+        if (!leaseEntered) await stampWriteLockRefusal(action, applyTenantId, error)
         throw error
+      }
+      if (applyFailure) {
+        // A run the fence STOPPED after some rows landed is a failed pull, not a refusal: rows are on
+        // the sheet. Everything else that threw wrote nothing and keeps its `refused` stamp.
+        const partial = Boolean(applyFailure.details && applyFailure.details.partial === true)
+        await stampProjectPullOutcome(action, applyTenantId, { outcome: partial ? 'failed' : 'refused', code: applyFailure && applyFailure.code })
+        // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, partial ? { recount: true } : undefined)
+        throw applyFailure
       }
       // G1 field defect (R67): `applied` only when no row failed; otherwise `failed` + the dominant row code.
       // Either way the overview row is RECOUNTED, so its 「物料行数」 is what actually landed on the sheet.
@@ -7988,11 +8246,24 @@ function requireStockPreparationAudit() {
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, routeScope.tenantId)
       const parameters = normalizeActionParameters(body.parameters)
+      // PR B (plan §9.4 L01): a pilot project never starts a large-BOM expansion — refused by project number
+      // and by the resolved sheet, before the generation is observed and before any job exists.
+      await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_start')
+      // P1-b (Codex review): the expansion records the target sheet's write generation it starts under
+      // (refused 409 WRITE_LOCKED while a live writer holds the sheet — then no job exists). Plan and
+      // approval require it unchanged. The observation never bumps or binds; the ONE lock write a read-tier
+      // caller can cause here is the clear of an ABANDONED lease (expiry + grace passed; review round 5),
+      // which only takes a dead holder's ability to resume — the same clear any preview or approval performs.
+      // No lock service wired -> an unobserved job, exactly as the approval below creates an unbound one.
+      const expansionWriteScope = stockPreparationProjectWriteLock ? sheetWriteScopeKey(action.target.sheetId) : null
       const job = await createLargeBomBackgroundExpansionJob({
         storage: context.storage,
         ...routeScope,
         action,
         parameters,
+        writeGenerationObserver: expansionWriteScope
+          ? async () => writeObservationFromGeneration(await requireStockPreparationProjectWriteLock().observeGeneration(expansionWriteScope))
+          : undefined,
         // The creator, recorded on both fields. The identity the READ runs under is NOT decided here
         // — it is resolved at run time from the action's bound source (see the run route), so this
         // route loads no external system and the durable-store check stays the first thing that can
@@ -8041,6 +8312,9 @@ function requireStockPreparationAudit() {
       // neither an operation claim nor a credential lookup.
       assertLargeBomJobActor(queuedJob, requestPrincipal(req))
       const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
+      // PR B (L01 / L02): BEFORE the B2a registration and the adapter load — a pilot project's queued
+      // expansion never reads its source (by project number and by the snapshot's sheet).
+      await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: queuedJob.parameters && queuedJob.parameters.projectNo, sheetId: action.target.sheetId }, 'large_expansion_run')
       // B2a — the FOURTH and last call site of `loadTableActionSourceAdapter`, and the only one
       // gated at the route rather than inside a table-action wrapper. It has to be: this path does
       // not go through `dryRunStockPreparationAction`, it drives `runLargeBomBackgroundExpansionJob`
@@ -8137,6 +8411,9 @@ function requireStockPreparationAudit() {
         }),
         'expansion',
       )
+      // PR B (L01): a pilot project is refused here — after the staleness check, before the field probe and
+      // the existing-row read — by project number and by the snapshot's sheet.
+      await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: job.parameters && job.parameters.projectNo, sheetId: action.target.sheetId }, 'large_plan')
       // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
       // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
       await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -8161,6 +8438,9 @@ function requireStockPreparationAudit() {
           policyStore: context.storage,
         }),
       })
+      // P1-b: plan only while the sheet's write generation is still the one the expansion observed, for
+      // exactly this snapshot's sheet (anything else is refused, never read).
+      const planWriteScope = stockPreparationProjectWriteLock ? sheetWriteScopeKey(action.target.sheetId) : null
       const planned = await planLargeBomBackgroundExpansionJob({
         storage: context.storage,
         ...routeScope,
@@ -8168,6 +8448,14 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        writeGenerationReader: planWriteScope
+          ? async (observedScope) => {
+            if (observedScope !== planWriteScope) {
+              throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the expansion observed a different sheet than it plans for; expand again', { reason: 'scope_changed', partial: false })
+            }
+            return requireStockPreparationProjectWriteLock().readGeneration(planWriteScope)
+          }
+          : undefined,
         // The pack-aware ownership band, resolved against the STORED job's action snapshot
         // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
         // never the live binding, which may have been re-pointed since the expansion was sealed).
@@ -8242,6 +8530,9 @@ function requireStockPreparationAudit() {
         }),
         'expansion',
       )
+      // PR B (L01): refused after the staleness check, before the probes, before any checkpoint job exists —
+      // and before the binder's bump, so a pilot project answers the pilot code, never PLAN_SUPERSEDED.
+      await assertLargeLaneAllowedForPilot({ tenantId: routeScope.tenantId, projectNo: expansionJob.parameters && expansionJob.parameters.projectNo, sheetId: snapshotAction.target.sheetId }, 'large_approve')
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -8252,6 +8543,14 @@ function requireStockPreparationAudit() {
         snapshotAction.target,
         expansionJob.parameters && expansionJob.parameters.projectNo,
       )
+      // Batch-refresh phase 0 step 1 — PLAN GENERATION: approving supersedes every earlier plan of this
+      // write scope (the snapshot's target sheet, R-52). The bump expects the row exactly as the expansion
+      // observed it (token AND epoch), so a live writer — whose acquire moved the epoch — is answered 409
+      // PLAN_SUPERSEDED `expansion_stale` first, not WRITE_LOCKED. No lock service wired -> the job is
+      // created UNBOUND, and no chunk runs it.
+      const approvalWriteScope = stockPreparationProjectWriteLock
+        ? sheetWriteScopeKey(snapshotAction.target.sheetId)
+        : null
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -8261,6 +8560,25 @@ function requireStockPreparationAudit() {
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
         installedFieldProperties: await resolveInstalledFieldProperties(req, snapshotAction),
+        // P1-b: the bump is CONDITIONAL on what the expansion observed and the plan re-checked (token AND
+        // fencing epoch, pinned in the CAS): stale -> 409 PLAN_SUPERSEDED `expansion_stale`, no job.
+        writeGenerationBinder: approvalWriteScope
+          ? async (expect) => {
+            if (!expect || expect.writeScope !== approvalWriteScope) {
+              throw new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED, 'the expansion observed a different sheet than it approves for; expand again', { reason: 'scope_changed', partial: false })
+            }
+            return writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(approvalWriteScope, {
+              reason: 'large_approval',
+              tenantId: routeScope.tenantId,
+              // token + epoch, and the expired lease's id + seq when the expansion recorded one (round 4)
+              expect: {
+                generationToken: expect.generationToken,
+                fencingEpoch: expect.fencingEpoch,
+                ...(expect.leaseId ? { leaseId: expect.leaseId, leaseSeq: expect.leaseSeq } : {}),
+              },
+            }))
+          }
+          : undefined,
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
@@ -8323,6 +8641,11 @@ function requireStockPreparationAudit() {
       // own `target` the chunk writer uses — must name the registered sheet, before any IO on them.
       assertLargeBomJobTargetMatchesProjectTarget(runSnapshotAction.target, runProjectAction, 'expansion')
       assertLargeBomJobTargetMatchesProjectTarget(pendingJob.target, runProjectAction, 'apply')
+      // PR B (L02): a pilot project's approved job — approved before OR after the enablement — is refused
+      // here, after the staleness checks and before the probes, the gate and the lease; and AGAIN inside the
+      // lease by the lib (`largeLanePilotCheck` below), before the binding compare and before `running`.
+      const chunkPilotInput = { tenantId: routeScope.tenantId, projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo, sheetId: pendingJob.target && pendingJob.target.sheetId }
+      await assertLargeLaneAllowedForPilot(chunkPilotInput, 'large_apply_chunk')
       await tableActionInternals.assertTargetFieldsExist(
         runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
@@ -8373,13 +8696,21 @@ function requireStockPreparationAudit() {
       // C4 large-BOM apply: same pre-mapped contract as the small route — the apply writer maps payload
       // keys through the operator-configured target.fieldIdMap, so the scoped API must not remap (#4160).
       const scopedRecordsApi = await createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target, { fieldIdTranslation: 'pre_mapped' })
-      const job = await runLargeBomCheckpointApplyJobChunk({
+      // Batch-refresh phase 0 step 1 — the SAME sheet write lease the small lane takes, held per chunk,
+      // after every staleness check, the gate and the bound above (a refusal there costs no lock IO):
+      // one writer per target sheet across lanes and processes; busy -> 409, lock store down -> 503,
+      // no lock service -> 501. The chunk refuses a job whose approval binding is no longer current.
+      const chunkWriteLock = requireStockPreparationProjectWriteLock()
+      const chunkWriteScope = sheetWriteScopeKey(pendingJob.target && pendingJob.target.sheetId)
+      const job = await chunkWriteLock.withProjectWriteLease(chunkWriteScope, { purpose: 'large_apply_chunk', runId: pendingJob.jobId, tenantId: routeScope.tenantId }, (projectWriteGuard) => runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
         ...routeScope,
         actionId,
         applyJobId: pendingJob.jobId,
         recordsApi: scopedRecordsApi,
-      })
+        largeLanePilotCheck: ({ target }) => assertLargeLaneAllowedForPilot({ ...chunkPilotInput, sheetId: target && target.sheetId }, 'large_apply_chunk'),
+        projectWriteGuard,
+      }))
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
     },
 
@@ -9724,32 +10055,73 @@ function requireStockPreparationAudit() {
         targetProjectId,
         target: carryAction.target,
       })
-      // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
-      // `inputFingerprint` arrive as three independent client fields; until they are proven to be
-      // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
-      // carried row written with no approval record — the same defect wearing a different mask.
-      if (decisionId) {
-        await assertCarryConfirmDecisionBinding({
-          recordsApi: getMultitableRecordsApi(),
-          provisioning: getMultitableProvisioning(),
-          targetProjectId,
+      // Batch-refresh phase 2 step 4, PR-0 (plan §5.1 / G5): THE SHEET WRITE LEASE around the carry.
+      // The carry patches HUMAN cells of the canonical sheet — a machine write of the sheet every
+      // other structural writer serialises on — so it holds the same per-sheet lease (R-52) as the
+      // small apply and the large chunk, purpose `carry_confirm`: acquired HERE, after the tenant
+      // wall (provisioning only, zero records IO) and BEFORE the ledger pre-flight, so a busy
+      // refusal (409 STOCK_PREP_PROJECT_WRITE_LOCKED) costs no ledger read; no lock service is 501
+      // and a lock store that cannot be read is 503, both before any records IO. Inside the lease the
+      // executor takes the guard as its write fence (one holder CAS before the patch, the host fence
+      // on the patch), so a lease lost to a takeover writes nothing. Released right after the patch;
+      // the ledger close and the audit below run unleased (they write the ledger sheet, not this one).
+      const projectWriteLock = requireStockPreparationProjectWriteLock()
+      const carryWriteScope = sheetWriteScopeKey(carryAction.target.sheetId)
+      let result
+      await projectWriteLock.withProjectWriteLease(carryWriteScope, { purpose: 'carry_confirm', runId: b2aRunId('stock-preparation-carry-confirm'), tenantId }, async (projectWriteGuard) => {
+        // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
+        // `inputFingerprint` arrive as three independent client fields; until they are proven to be
+        // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
+        // carried row written with no approval record — the same defect wearing a different mask.
+        if (decisionId) {
+          await assertCarryConfirmDecisionBinding({
+            recordsApi: getMultitableRecordsApi(),
+            provisioning: getMultitableProvisioning(),
+            targetProjectId,
+            permission: 'admin',
+            decisionId,
+            inputFingerprint,
+            decision: input.decision,
+          })
+        }
+        // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
+        // own, and the bound target is the only thing that tells it where to write.
+        result = await applyCarryViaConfirm({
           permission: 'admin',
-          decisionId,
-          inputFingerprint,
+          recordsApi: getMultitableRecordsApi(),
+          target: carryAction.target,
           decision: input.decision,
+          // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
+          // and the tenant wall all name one identity rather than three independently-derived ones.
+          confirmedBy: scope.actorId,
+          // I1 / I5: the guard of the lease held around this call — the holder CAS before the patch and
+          // the host fence on it; required, so a carry can never run unfenced from this route.
+          writeFence: projectWriteGuard,
+          writeFenceRequired: true,
         })
-      }
-      // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
-      // own, and the bound target is the only thing that tells it where to write.
-      const result = await applyCarryViaConfirm({
-        permission: 'admin',
-        recordsApi: getMultitableRecordsApi(),
-        target: carryAction.target,
-        decision: input.decision,
-        // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
-        // and the tenant wall all name one identity rather than three independently-derived ones.
-        confirmedBy: scope.actorId,
       })
+      // AFTER RELEASE: the plan generation moves (reason `carry_confirm`), so a dry-run token minted
+      // before the carry is refused PLAN_SUPERSEDED at its apply (the token's `existingRows` revision
+      // refuses it as well; this is the lease-level statement of the same fact, E01). Only a carry
+      // that WROTE bumps: a `skipped_already_carried` replay changed no row, and superseding a
+      // puller's pending token for nothing is a cost without a protection. The bump is best effort
+      // HERE and only here — the carry already landed, so a bump refused by the lock (a writer took the
+      // sheet meanwhile: WRITE_LOCKED; a store fault: STORE_FAILED) is logged values-free and never
+      // masks the carry's own result; the revision chain still refuses the stale token.
+      let generationBumped = false
+      if (result.persisted === true) {
+        try {
+          await projectWriteLock.bumpGeneration(carryWriteScope, { reason: 'carry_confirm', tenantId })
+          generationBumped = true
+        } catch (error) {
+          if (routeLogger) {
+            routeLogger.warn('[plugin-integration-core] stock-prep carry confirm: the generation bump after release was refused; the carry stands', {
+              code: error && error.code,
+              ...(error && error.details && error.details.reason ? { reason: error.details.reason } : {}),
+            })
+          }
+        }
+      }
       // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
       // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
       // travels beside the applied result as a closed code — never silently swallowed, never
@@ -9797,6 +10169,8 @@ function requireStockPreparationAudit() {
           carriedFieldCount: result.carriedFields.length,
           alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
           ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
+          // PR-0: whether the post-release generation bump landed (a written carry only; boolean).
+          ...(result.persisted === true ? { generationBumped } : {}),
         },
       })
       return sendOk(res, { ...result, ...(ledger ? { ledger } : {}) })
@@ -10371,6 +10745,176 @@ function requireStockPreparationAudit() {
       // S3 fix round 1 (R5): the overview row leaves 「已归档」 now. Best-effort.
       await updateProjectOverviewRowBestEffort(tenantId, projectNo)
       return sendOk(res, stockPreparationProjectTargetLifecycleResponse(projectNo, restored))
+    },
+
+    // ── 备料分批拉取第一期 step 3 PR B — THE PILOT MARKER (plan §5.1, §7 G5 / G7, §9.4, §9.5 U05) ───────
+    //
+    // GET: the project's pilot state and its values-free readiness (check ids + booleans), so an admin
+    // sees WHICH condition is still missing before pressing anything. stock-prep:admin (R-53 ②), the
+    // switch (404 DISABLED, zero IO), the query allowlist, the host-vouched scope, the registry, then the
+    // registry read (ABSENT answers 200 absent) and — for an ACTIVE row only — the readiness probes
+    // (reads only: no host write, no lock write, no audit row).
+    async stockPreparationProjectPilotGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = firstString(requestParams(req).projectNo)
+      if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+      }
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectPilot()
+      const pilotRow = await readStockPreparationProjectPilotRow(store, { tenantId, projectNo })
+      if (!pilotRow) {
+        return sendOk(res, { projectNo, status: 'absent', pilot: null, readiness: null, may: { enable: false } })
+      }
+      if (pilotRow.status !== 'active') {
+        return sendOk(res, { projectNo, status: pilotRow.status, pilot: publicStockPreparationPilot(pilotRow), readiness: null, may: { enable: false } })
+      }
+      const { readiness } = await evaluateStockPreparationProjectPilotReadiness({
+        tenantId,
+        workspaceId: firstString(input.workspaceId),
+        projectNo,
+        pilotRow,
+        store,
+      })
+      return sendOk(res, {
+        projectNo,
+        status: pilotRow.status,
+        pilot: publicStockPreparationPilot(pilotRow),
+        readiness,
+        may: { enable: readiness.ready && pilotRow.pilot !== true },
+      })
+    },
+
+    // ENABLE — set-once (NO unset: R-53 ②; a mistaken enable is an owner-approved runbook UPDATE, see
+    // migration 101). THE SEQUENCE, pinned by the pilot route suite:
+    //   1. gate (stock-prep:admin) → switch (404, zero IO) → body (`{ confirmProjectNo }` must repeat the
+    //      path number, pure) → the host-vouched operator scope (never `user.tenantId`);
+    //   2. services: the audit store (501), the registry's pilot surface (501), the write lock (501),
+    //      the 101 audit vocabulary probe (503 until migration 101 has run);
+    //   3. the registry row (ABSENT → 409), then the project's sheet through the overlay (WRITE lookup:
+    //      archived → 409 ARCHIVED) and the tenant wall (C-01 / C-04);
+    //   4. READINESS, in full → 409 STOCK_PREP_PILOT_NOT_READY with the failing check ids (nothing done);
+    //   5. bumpGeneration(reason pilot_enable): every plan made before the pilot — small tokens and
+    //      approved large jobs alike — is superseded; refused 409 WRITE_LOCKED while a writer holds the sheet;
+    //   6. inside withProjectWriteLease(purpose pilot_enable): the open-large-job scan AGAIN (F-3: no chunk ran
+    //      between readiness and the bump — else 409 NOT_READY `no_open_large_job`, nothing done); then the HOST
+    //      STAMP first (closeSheetGridExport — set-once, idempotent; it can only take export away), then the
+    //      REGISTRY MARK (one transaction, the
+    //      tenant lock, the row FOR UPDATE, CAS pilot_enabled_at IS NULL). The stamp comes first so a mark
+    //      that fails leaves a sheet that is closed but not pilot — which the re-POST completes — and never
+    //      a pilot sheet that still exports;
+    //   7. ONE audit row `project_pilot_enable`, written INSIDE the mark's transaction (pre-enable hardening
+    //      F-4(c)), only when the mark lands now: the mark and its row commit or roll back together, so a
+    //      crash between them leaves NEITHER (closed but not pilot, no row) and the re-POST that completes
+    //      the enable writes the one row; a re-POST on an already-pilot row (stamp repair only) writes none.
+    //      An audit store without the in-transaction append is refused 501 in step 2, before any IO.
+    async stockPreparationProjectPilotEnable(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const projectNo = stockPreparationProjectTargetLifecycleRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const audit = requireStockPreparationAudit()
+      if (typeof audit.appendWithin !== 'function') {
+        throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the pilot mark transaction; the pilot is not enabled without its audit row')
+      }
+      const store = requireStockPreparationProjectPilot()
+      const projectWriteLock = requireStockPreparationProjectWriteLock()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION, '101', tenantId)
+      const actor = user.id || user.email
+      const pilotRow = await readStockPreparationProjectPilotRow(store, { tenantId, projectNo })
+      if (!pilotRow) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+      }
+      const { action, projectId, writeScope, readiness } = await evaluateStockPreparationProjectPilotReadiness({
+        tenantId,
+        workspaceId: null,
+        projectNo,
+        pilotRow,
+        store,
+      })
+      if (!readiness.ready) {
+        throw new StockPreparationPilotError(
+          409,
+          STOCK_PREP_PILOT_ERROR_CODES.NOT_READY,
+          'this project is not ready for the batch-refresh pilot; every listed check must pass before it can be enabled',
+          { version: readiness.version, failing: [...readiness.failing], partial: false },
+        )
+      }
+      const provisioning = getMultitableProvisioning()
+      await projectWriteLock.bumpGeneration(writeScope, { reason: 'pilot_enable', tenantId })
+      const outcome = await projectWriteLock.withProjectWriteLease(writeScope, { purpose: 'pilot_enable', runId: `pilot-enable:${crypto.randomUUID()}`, tenantId }, async () => {
+        // F-3, closed under the lease: readiness scanned the job store BEFORE the bump, so a checkpoint chunk
+        // that ran in between (it runs inside this same sheet lease, and persists its status before release)
+        // would be missed. Asked again HERE — no chunk can run while this lease is held, and an approval made
+        // before the bump can no longer run one (its binding is stale). Nothing is stamped or marked on a refusal.
+        const openScan = await countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId })
+        if (openScan.open !== 0 || openScan.unattributed !== 0) {
+          throw new StockPreparationPilotError(
+            409,
+            STOCK_PREP_PILOT_ERROR_CODES.NOT_READY,
+            'this project is not ready for the batch-refresh pilot; every listed check must pass before it can be enabled',
+            { version: readiness.version, failing: ['no_open_large_job'], partial: false },
+          )
+        }
+        const stamp = await provisioning.closeSheetGridExport({ projectId, sheetId: action.target.sheetId, objectId: action.target.objectId, actorId: actor })
+        let audited = false
+        const mark = await store.markPilotEnabled({
+          tenantId,
+          projectNo,
+          actorId: actor,
+          readinessVersion: readiness.version,
+          // F-4(c): the audit row on the mark's own transaction handle — committed with the mark or not at all.
+          onMarked: async (trx) => {
+            await audit.appendWithin(trx, {
+              tenantId,
+              projectId: projectNo,
+              action: STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION,
+              subjectId: action.target.sheetId,
+              mode: 'enabled',
+              actor,
+              detail: {
+                objectId: action.target.objectId,
+                readinessVersion: readiness.version,
+                exportClosureAlreadyClosed: stamp && stamp.alreadyClosed === true,
+                generationBumped: true,
+              },
+            })
+            audited = true
+          },
+        })
+        // A mark that landed without its row means the store skipped the hook — a wiring defect, said loudly.
+        if (mark.enabled === true && audited !== true) {
+          throw new HttpRouteError(500, 'AUDIT_STORE_UNAVAILABLE', 'the pilot mark landed without its in-transaction audit row')
+        }
+        return { stamp, mark }
+      })
+      return sendOk(res, {
+        projectNo,
+        status: outcome.mark.pilot.status,
+        pilot: publicStockPreparationPilot(outcome.mark.pilot),
+        enabled: outcome.mark.enabled === true,
+        alreadyEnabled: outcome.mark.alreadyEnabled === true,
+        exportClosure: { closed: true, alreadyClosed: Boolean(outcome.stamp && outcome.stamp.alreadyClosed === true) },
+        readiness,
+      })
     },
 
     async stockPreparationProjectTargetList(req, res) {

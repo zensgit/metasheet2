@@ -505,7 +505,7 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       await pool().query('DELETE FROM approval_reads WHERE user_id = $1 AND instance_id = $2', [viewerId, ids.fresh])
     })
 
-    it('role-typed CC: counted for the holder the list shows it to; not for a token-only or a user_roles-only holder', async () => {
+    it('role-typed CC: counted for the holder the list shows it to, including a user_roles-only holder; not for a token-only holder', async () => {
       process.env.APPROVAL_CC_UNREAD_BADGE_ENABLED = 'true'
 
       const holder = await token(roleHolderId, ccRole)
@@ -517,10 +517,11 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       expect((await ccTab(claimOnly)).rows).toEqual([])
       expect(await ccUnreadCount(claimOnly)).toBe(0)
 
-      // Holds it only through user_roles: the tab filter (request roles) does not match.
+      // Holds it only through user_roles: the shared approval role set includes stored user_roles
+      // role ids, so the tab filter matches and the row is shown AND counted, like the holder above.
       const userRolesOnly = await token(userRolesOnlyHolderId, inertRole)
-      expect((await ccTab(userRolesOnly)).rows).toEqual([])
-      expect(await ccUnreadCount(userRolesOnly)).toBe(0)
+      expect((await ccTab(userRolesOnly)).rows.map((row) => row.id)).toEqual([ids.role])
+      expect(await ccUnreadCount(userRolesOnly)).toBe(1)
     })
 
     it('role-typed CC: once the holder opens it through the real mark-read endpoint, the count AND the row clear', async () => {

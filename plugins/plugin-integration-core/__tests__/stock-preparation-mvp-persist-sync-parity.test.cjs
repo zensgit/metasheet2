@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // #6475 fix round 2 — 批次存档 (mvp-persist, the project-sync panel's step ④) KEEPS WHAT THE SYNC
 // WROTE, OR NOTHING; AND A BATCH ALREADY KEPT STAYS KEEPABLE WHEN ONLY THE SHEET MOVED.
 //
@@ -285,6 +289,8 @@ function services(source, loads, { extMapping = false } = {}) {
       }
     : null)
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) { return system(input) },
@@ -372,9 +378,9 @@ function mount({ parts = [PART.A1], hourRule = false, extMapping = false } = {})
           routes.set(`${method.toUpperCase()} ${routePath}`, handler)
         },
       },
-      multitable: { provisioning: createProvisioning(), records: records.api },
+      multitable: { provisioning: createProvisioning(), records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records.api) },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig({ hourRule, extMapping })],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [CANONICAL_OBJECT_ID] },

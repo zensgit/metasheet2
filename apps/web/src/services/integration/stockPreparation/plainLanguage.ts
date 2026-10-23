@@ -588,6 +588,68 @@ export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText
  * — nothing here can break by ADDING a field to an object literal.
  */
 export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // Batch-refresh phase 0 step 1 — the project write lock, as any surface that renders a server code
+  // through `stockPrepErrorPlain` sees it (the large-BOM pull panel among them). Short, and never the raw
+  // code as the headline.
+  STOCK_PREP_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '这张备料表正忙(另一次同步正在写入,或系统一时繁忙)。',
+    en: 'This stock-prep sheet is busy (another run is writing it, or the system is momentarily busy).',
+    zhNext: '稍后再试一次。',
+    enNext: 'Try again shortly.',
+  }),
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算或批准,这份计划不再有效。',
+    en: 'A newer preview or approval exists, so this plan is no longer valid.',
+    zhNext: '请重新试算(大BOM请重新展开)后再写入。',
+    enNext: 'Preview again (expand again, for a large BOM) before writing.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LEASE_LOST: Object.freeze({
+    zh: '写入被另一次同步接管,这次已停止。',
+    en: 'Another run took over, so this one stopped.',
+    zhNext: '请重新试算;如果已写进一部分行,它们不会重复写。',
+    enNext: 'Preview again; any rows that already landed will not be written twice.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED: Object.freeze({
+    zh: '写入锁服务暂时不可用,写入没有继续。',
+    en: 'The write-lock service is unavailable, so writing did not continue.',
+    zhNext: '请联系平台管理员检查服务;如果已写进一部分行,它们不会重复写。',
+    enNext: 'Ask the platform admin to check the service; any rows that already landed will not be written twice.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务没有接通,什么都没有写。',
+    en: 'The write-lock service is not set up, so nothing was written.',
+    zhNext: '请联系平台管理员。',
+    enNext: 'Ask the platform admin.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 3 PR B — the pilot marker's own codes (plugin stock-preparation-pilot-gate.cjs). The
+   * large-lane refusal reads 「试点项目不走大 BOM 通道」 on every large route; the over-cap refusal on the dry run;
+   * NOT_READY lists the failing check ids beside the sentence (the board renders them); UNREADABLE fails closed.
+   */
+  STOCK_PREP_PILOT_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这是试点项目,第一期不走后台大 BOM 通道,什么都没有写。',
+    en: 'This is a pilot project: phase 1 never takes the background large-BOM channel, so nothing was written.',
+    zhNext: '试点项目只走小车道;超过上限时请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects take the small lane only; if the cap is exceeded, ask the owner how to proceed.',
+  }),
+  STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED: Object.freeze({
+    zh: '这个试点项目的 BOM 超过了小车道上限,这次拉取被拒绝了;什么都没有改动。',
+    en: 'This pilot project’s BOM exceeds the small-lane cap, so this pull was refused; nothing was changed.',
+    zhNext: '试点项目不走后台大 BOM 通道,也不会截断数据。请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects never take the background large-BOM channel and nothing is truncated. Ask the owner how to proceed.',
+  }),
+  STOCK_PREP_PILOT_STATE_UNREADABLE: Object.freeze({
+    zh: '没能读到这个项目是不是试点项目,这一步没有继续。',
+    en: 'Could not read whether this project is a pilot, so this step did not continue.',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
+  STOCK_PREP_PILOT_NOT_READY: Object.freeze({
+    zh: '这个项目还没有达到试点启用条件,没有启用。',
+    en: 'This project does not meet the pilot readiness conditions yet, so it was not enabled.',
+    zhNext: '下面列出的每一项都通过后才能启用;什么都没有改动。',
+    enNext: 'Every listed check must pass before it can be enabled; nothing was changed.',
+  }),
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',
@@ -980,6 +1042,51 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+/**
+ * The large-BOM pull panel's few lane-specific readings of a server code (PR #6501, Codex review P1-b).
+ * In the large lane a superseded plan can only be fixed by EXPANDING AGAIN: the generation is bound when
+ * the expansion reads its source, so neither re-planning nor re-approving the old expansion is accepted.
+ * Every other code reads exactly as `stockPrepErrorPlain`.
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  STOCK_PREP_PROJECT_PLAN_SUPERSEDED: Object.freeze({
+    zh: 'BOM 已有更新的试算或写入，请重新展开后再规划。',
+    en: 'This BOM has a newer preview or write; expand it again before planning.',
+  }),
+  /**
+   * PR B: in the large lane the pilot refusal is final for this channel — not a retry, not 「重新展开」: the
+   * project is a pilot and phase 1 refuses the background channel on every large route, approved jobs included.
+   */
+  STOCK_PREP_PILOT_LARGE_LANE_REFUSED: Object.freeze({
+    zh: '这是试点项目，第一期不走后台大 BOM 通道；这个作业没有写入任何数据。',
+    en: 'This is a pilot project: phase 1 never takes the background large-BOM channel; this job wrote nothing.',
+  }),
+})
+
+/**
+ * PR #6501 round 6 (N1): the large lane's per-REASON readings of a code, keyed `<code>/<details.reason>`.
+ * `expansion_unbound` / `job_unbound` are not "a newer preview or write exists" — nothing newer happened;
+ * the expansion or job was made before the sheet write lock existed (or without it) and cannot be bound
+ * now. The remedy is the same (expand again), the sentence must not claim a newer write (same rule as the
+ * small lane's WRITE_TOKEN_UNBOUND, review round 2 F6).
+ */
+export const STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/expansion_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+  'STOCK_PREP_PROJECT_PLAN_SUPERSEDED/job_unbound': Object.freeze({
+    zh: '这个作业是旧版本留下的，需要重新展开后再规划。',
+    en: 'This job was left over by an older version; expand again before planning.',
+  }),
+})
+
+export function stockPrepLargeBomErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_LARGE_BOM_ERROR_REASON_PLAIN, `${code}/${reason}`) : undefined)
+    ?? lookup(STOCK_PREP_LARGE_BOM_ERROR_PLAIN, code)
+    ?? stockPrepErrorPlain(code)
 }
 
 /**
@@ -1904,6 +2011,48 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '再点一次即可;什么都没有改动。',
     enNext: 'Press again; nothing was changed.',
   }),
+  /**
+   * Batch-refresh phase 0 step 1 — the project write lock. A trial is refused while another run is
+   * WRITING this project (a new plan would supersede the one being written); the store refusal is a
+   * server matter, so it names who can fix it instead of promising that a retry will.
+   */
+  PLAN_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这张备料表',
+    en: 'Another run is writing this stock-prep sheet right now',
+    zhNext: '等它写完再试算一次;什么都没有改动。',
+    enNext: 'Try again once it finishes; nothing was changed.',
+  }),
+  PLAN_WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务暂时不可用',
+    en: 'The write-lock service is unavailable',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
+  /** Review round 1: lost a race for the write lock while NO run holds it — busy, not "someone is writing". */
+  PLAN_WRITE_LOCK_BUSY: Object.freeze({
+    zh: '系统正忙,这次没有试算成',
+    en: 'The system is busy, so this trial did not run',
+    zhNext: '请稍后重试;什么都没有改动。',
+    enNext: 'Please try again shortly; nothing was changed.',
+  }),
+  /**
+   * 备料分批拉取第一期 step 3 PR B (plan §5.1 「超过小车道上限时明确拒绝,不自动转大车道、不截断数据」). A
+   * FAILURE, not the `large_bom_bounded` SKIP: the background channel is refused for pilot projects, so this
+   * sentence must not promise it, and the next step is a person's decision, not a retry.
+   */
+  PLAN_PILOT_OVER_SMALL_LANE_LIMIT: Object.freeze({
+    zh: '这个试点项目的 BOM 超过了小车道上限,这次拉取被拒绝了',
+    en: 'This pilot project’s BOM exceeds the small-lane cap, so this pull was refused',
+    zhNext: '试点项目不走后台大 BOM 通道,也不会截断数据;什么都没有改动。请联系负责人决定怎么处理。',
+    enNext: 'Pilot projects never take the background large-BOM channel and nothing is truncated; nothing was changed. Ask the owner how to proceed.',
+  }),
+  /** The server could not READ whether this project is a pilot — fail closed; a platform-admin matter. */
+  PLAN_PILOT_STATE_UNREADABLE: Object.freeze({
+    zh: '没能读到这个项目是不是试点项目,这次拉取没有继续',
+    en: 'Could not read whether this project is a pilot, so this pull did not continue',
+    zhNext: '请联系平台管理员检查服务;什么都没有改动。',
+    enNext: 'Ask the platform admin to check the service; nothing was changed.',
+  }),
   PLAN_NOT_APPLYABLE: Object.freeze({
     zh: '这次试算没能得出可以写入的计划',
     en: 'This plan cannot be written',
@@ -2071,6 +2220,66 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     en: 'That did not write; nothing was changed',
     zhNext: '可以再点一次同步;重复同步不会弄乱数据。',
     enNext: 'You can sync again — re-syncing cannot scramble your data.',
+  }),
+  /** Batch-refresh phase 0 step 1 — the write refused or stopped by the project write lock. */
+  WRITE_PROJECT_LOCKED: Object.freeze({
+    zh: '另一次同步正在写入这张备料表,这次没有写',
+    en: 'Another run is writing this stock-prep sheet, so this one did not write',
+    zhNext: '等它写完再同步一次。',
+    enNext: 'Sync again once it finishes.',
+  }),
+  WRITE_PLAN_SUPERSEDED: Object.freeze({
+    zh: '已有更新的试算,这份计划不再有效,没有写入',
+    en: 'A newer preview exists, so this plan was not written',
+    zhNext: '请重新同步(重新试算)后再写入。',
+    enNext: 'Sync again so the newest preview is the one written.',
+  }),
+  WRITE_INTERRUPTED: Object.freeze({
+    zh: '写入中途被另一次同步接管,可能已写进一部分',
+    en: 'Another run took over part-way; some rows may already have landed',
+    zhNext: '请重新同步(重新试算);已写入的行不会重复写。',
+    enNext: 'Sync again; rows that landed will not be written twice.',
+  }),
+  /** Review round 1: taken over before the first write — nothing landed, so it must not say rows may have. */
+  WRITE_TAKEN_OVER: Object.freeze({
+    zh: '这次写入还没开始就被另一次同步接管,没有写入任何行',
+    en: 'Another run took over before this one wrote anything; no rows were written',
+    zhNext: '请重新同步(重新试算)。',
+    enNext: 'Sync again (preview again).',
+  }),
+  WRITE_LOCK_UNAVAILABLE: Object.freeze({
+    zh: '写入锁服务不可用,这次没有写入',
+    en: 'The write-lock service is unavailable, so nothing was written',
+    zhNext: '请联系平台管理员检查服务后再同步。',
+    enNext: 'Ask the platform admin to check the service, then sync again.',
+  }),
+  /** Review round 1: the lock store failed AFTER some rows landed — never "nothing was written". */
+  WRITE_LOCK_FAILED_MIDWAY: Object.freeze({
+    zh: '写入锁服务中途出错,写入已停止,可能已写进一部分',
+    en: 'The write-lock service failed part-way; writing stopped and some rows may already have landed',
+    zhNext: '请联系平台管理员检查服务,恢复后重新同步;已写入的行不会重复写。',
+    enNext: 'Ask the platform admin to check the service, then sync again; rows that landed will not be written twice.',
+  }),
+  /** Review round 2 (F1): the stop did not report whether a host write was attempted — claim neither way. */
+  WRITE_STOPPED_UNCONFIRMED: Object.freeze({
+    zh: '写入被写入锁拦下或中途停止,无法确认是否已写进部分行',
+    en: 'Writing was stopped by the write lock; it is not known whether any rows landed',
+    zhNext: '请重新同步(重新试算);如果已写进一部分行,它们不会重复写。一直这样请联系平台管理员。',
+    enNext: 'Sync again (preview again); any rows that already landed will not be written twice. If it keeps happening, ask the platform admin.',
+  }),
+  /** Review round 2 (F6): the preview's token was unbound — its account cannot write (or it predates the lock). */
+  WRITE_TOKEN_UNBOUND: Object.freeze({
+    zh: '这次试算的账号没有写入权限,这份试算不能用来写入,没有写入',
+    en: 'This trial was run by an account without write rights, so it cannot be written; nothing was written',
+    zhNext: '请由有拉取权限的人重新试算后再写入。',
+    enNext: 'Have someone with pull rights run the trial again, then write.',
+  }),
+  /** Review round 1: lost a race for the write lock while NO run holds it — busy, not "someone is writing". */
+  WRITE_LOCK_BUSY: Object.freeze({
+    zh: '系统正忙,这次没有写入',
+    en: 'The system is busy, so nothing was written',
+    zhNext: '请稍后重试。',
+    enNext: 'Please try again shortly.',
   }),
   // S2 (R-36, Q4): there is no 「撤销新建」 — the new sheet stays, empty, until somebody pulls into it.
   WRITE_NOT_CONFIRMED: Object.freeze({
@@ -2485,6 +2694,8 @@ export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   project_target_grant: Object.freeze({ zh: '给备料角色授了一个项目备料表的写权限', en: "Granted the 备料 roles write access to a project's sheet" }),
   project_fields_update: Object.freeze({ zh: '改了一个项目的项目级信息', en: "Updated a project's project-level fields" }),
   project_overview_refresh: Object.freeze({ zh: '刷新了项目总览表', en: 'Refreshed the project overview sheet' }),
+  // 备料分批拉取第一期 step 3 PR B (migration 101; register R-53 / R-54): the pilot enablement of one project sheet.
+  project_pilot_enable: Object.freeze({ zh: '为一个项目的备料表启用了分批拉取试点', en: "Enabled the batch-refresh pilot on a project's 备料 sheet" }),
 })
 
 // R68 (#6414 / #6454 follow-up): ONE action, two meanings. The options-sync REPAIR leg
@@ -2643,6 +2854,44 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
     en: 'One stock-preparation sheet per project.',
     zhNext: '在下面输入项目号打开;还没建表的项目,由拉取人员拉取时新建。',
     enNext: 'Open a project by its number below; a project without a sheet gets one when a pull operator pulls it.',
+  }),
+  // 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — the pilot line on 项目备料页 (ADMIN only). The
+  // enable is SET-ONCE: no sentence here offers a way back, because there is none in the product (a mistaken
+  // enable is an owner-approved runbook operation).
+  pilot_status_enabled: Object.freeze({
+    zh: '这张备料表已启用分批拉取试点:只走小车道,大 BOM 后台通道会被拒绝,通用网格导出(整表、选中行、CSV、Excel)已关闭。',
+    en: 'This sheet is in the batch-refresh pilot: small lane only, the background large-BOM channel is refused, and generic grid export (whole sheet, selected rows, CSV, Excel) is closed.',
+  }),
+  pilot_status_ready: Object.freeze({
+    zh: '这张备料表还没有启用分批拉取试点;启用条件已全部满足。',
+    en: 'This sheet is not in the batch-refresh pilot yet; every readiness condition is met.',
+  }),
+  pilot_status_not_enabled: Object.freeze({
+    zh: '这张备料表还没有启用分批拉取试点。',
+    en: 'This sheet is not in the batch-refresh pilot yet.',
+  }),
+  pilot_not_ready: Object.freeze({
+    zh: '还没有满足的启用条件:',
+    en: 'Readiness conditions still failing:',
+  }),
+  pilot_enable_action: Object.freeze({ zh: '启用分批拉取试点', en: 'Enable the batch-refresh pilot' }),
+  pilot_confirm_enable: Object.freeze({
+    zh: '启用后不能撤销:这个项目只走小车道,大 BOM 后台作业(包括已批准的)会被拒绝,通用网格导出会关闭。请输入项目号确认。',
+    en: 'Enabling cannot be undone: this project takes the small lane only, background large-BOM jobs (approved ones included) are refused, and generic grid export closes. Type the project number to confirm.',
+  }),
+  pilot_confirm_enable_action: Object.freeze({ zh: '确认启用试点', en: 'Enable the pilot' }),
+  pilot_confirm_enable_cancel: Object.freeze({ zh: '先不启用', en: 'Not now' }),
+  pilot_enabled_done: Object.freeze({
+    zh: '试点已启用;通用网格导出已关闭。',
+    en: 'The pilot is enabled; generic grid export is closed.',
+  }),
+  pilot_already_enabled: Object.freeze({
+    zh: '试点此前已经启用;这次只补齐了导出关闭,没有新的审计记录。',
+    en: 'The pilot was already enabled; this request only re-applied the export closure and wrote no new audit row.',
+  }),
+  pilot_not_permitted: Object.freeze({
+    zh: '只有备料管理员可以启用试点。',
+    en: 'Only a stock-prep administrator can enable the pilot.',
   }),
 })
 

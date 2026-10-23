@@ -821,7 +821,9 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 ]
 
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
-const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields))?$/
+// PR B: `…/target/pilot` (GET state + readiness, POST enable) answers the same switch-off refusal; the board
+// reads it lazily (only for an ADMIN, only after the sheet state said active), so the lanes never reach it.
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields|pilot))?$/
 /** S3 (R-37): the project-level columns — GET and PATCH (fix round 1, R9) on `…/target/project-fields`. */
 const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/

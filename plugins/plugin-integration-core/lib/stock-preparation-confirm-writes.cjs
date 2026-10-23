@@ -56,6 +56,16 @@ const {
   __internals: { assertCarryViaConfirmShape },
 } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+// PR-0 (batch-refresh phase 2 step 4): the carry patch runs under the sheet write lease like every
+// apply write — the SAME host-fence support check and host-write bracket the apply writer uses, and
+// the lock module's own vocabulary for a refused fence. Neither module requires this one back.
+const { assertHostFencedWriteSupported } = require('./stock-preparation-apply-writer.cjs')
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  StockPreparationProjectWriteLockError,
+  isHostWriteFenceError,
+  sheetWriteScopeKey,
+} = require('./stock-preparation-project-write-lock.cjs')
 const {
   generateMaterialMappingCandidates,
   MATCH_STATUSES,
@@ -986,7 +996,7 @@ function createLogicalCarryView(scoped, fieldIdMap) {
     for (const [key, value] of Object.entries(record.data)) data[inverse[key] || key] = value
     return { ...record, data }
   }
-  return {
+  const view = {
     async queryRecords(input = {}) {
       const scopedInput = { ...input }
       if (scopedInput.filters !== undefined) scopedInput.filters = toPhysical(scopedInput.filters, 'filters')
@@ -996,9 +1006,18 @@ function createLogicalCarryView(scoped, fieldIdMap) {
       return Array.isArray(rows) ? rows.map(toLogical) : rows
     },
     async patchRecord(input = {}) {
+      // `expectedVersion` and `writeFence` ride `...input` untouched: the scoped api forwards them to
+      // the host, which pins the version in its UPDATE predicate and checks the fence inside the
+      // same write transaction.
       return toLogical(await scoped.patchRecord({ ...input, changes: toPhysical(input.changes, 'changes') }))
     },
   }
+  // PR-0: the host's fenced-write declaration crosses THIS layer too — copied from the scoped api
+  // underneath (which copied it from the host), never asserted here. This view is a fresh object, so
+  // without the copy a fenced carry would be refused 501 `host_fence_unsupported` on every host,
+  // fenced or not; with it, a host that declares no fence is still refused before any read.
+  if (scoped.supportsWriteFence === true) view.supportsWriteFence = true
+  return view
 }
 
 // Resolve the sheet this carry writes: the BOUND table action's target, never a hardcoded objectId.
@@ -1024,6 +1043,19 @@ async function applyCarryViaConfirm(input = {}) {
   const decision = assertCarryDecision(input.decision)
   const api = ensureRecordsApi(recordsApi)
   const confirmedBy = requiredString(input.confirmedBy, 'confirmedBy')
+  // PR-0 (batch-refresh phase 2 step 4; plan §5.1 / G5): THE SHEET WRITE LEASE GUARD. The route holds
+  // the project write lease around this call and hands its guard in as `writeFence` — the same
+  // object the apply writer takes under that name (apply-writer.cjs fenceBeforeWrite /
+  // hostFenceInput / callFencedRecordsApi), consumed the same way: one holder CAS immediately before
+  // the patch (I1), the host fence on the patch itself (I5), the host-write bracket around it so the
+  // guard's heartbeat never queues behind the carry's own write transaction (N6). The PRODUCTION
+  // caller (the carry route) sets `writeFenceRequired`: a carry without the guard is then refused
+  // 501 before any read, whatever the caller did before. Direct callers (the executor's own unit
+  // suites) that pass neither keep the unfenced behaviour, exactly as the writer's callers do.
+  const writeFence = input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null
+  if (input.writeFenceRequired === true && !writeFence) {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the carry confirm requires the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
+  }
 
   // The BOUND target — supplied by the caller from the deployment's own table action, never
   // resolved here. This executor deliberately takes NO provisioning and NO staging projectId: it
@@ -1031,6 +1063,20 @@ async function applyCarryViaConfirm(input = {}) {
   // structural property rather than a convention. Still zero host IO at this point — an invalid or
   // incompletely-bound target refuses before a single read.
   const target = await resolveScopedCarryTarget(api, input.target, decision.carryFields)
+  // Pre-enable hardening F-1 (step-4 design §23.4): the guard handed in must cover exactly THIS target
+  // sheet — the same rule as the apply lib's `assertProjectWriteGuardScope` (table-actions), restated
+  // over the carry's own normalized target because this executor has no table action to hand it. A
+  // guard of another sheet (or one with no scope key at all) would let the holder CAS and the host fence
+  // vouch for a lease that does not cover the sheet being patched. A programming error in the caller,
+  // never a client error: 500, still before the first read (zero IO).
+  if (writeFence && writeFence.scopeKey !== sheetWriteScopeKey(target.sheetId)) {
+    throw new StockPreparationProjectWriteLockError(500, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, 'the sheet write guard does not cover this carry target sheet')
+  }
+  // A fenced carry is ALSO host-fenced on its patch: the records surface must declare that it honours
+  // a fence (the logical view copies the declaration up from the scoped api and the host), else the
+  // fence would be sent to a host that ignores it and the carry would look protected and not be.
+  // Still before the first read, so the refusal (501) costs no IO.
+  assertHostFencedWriteSupported(target.scoped, writeFence)
 
   // Step 4 — the source row must exist and be INACTIVE (carry-policy's precondition, re-checked at
   // write time so a row that came back to life between plan and confirm refuses).
@@ -1143,9 +1189,25 @@ async function applyCarryViaConfirm(input = {}) {
   // step 6 says can never happen. `expectedVersion` closes the window at the substrate: the records
   // service checks it in code AND pins it in the UPDATE's SQL predicate, so a row that moved since
   // the read fails the write instead of overwriting it.
+  //
+  // PR-0: under the lease, the patch is bracketed exactly as the apply writer brackets its writes.
+  // `beforeWrite` is the holder CAS (I1): a lease lost to a takeover or a plan superseded since the
+  // grant refuses HERE (409 LEASE_LOST / PLAN_SUPERSEDED, `error.fence === true`) before the host is
+  // asked anything. The patch then carries the host fence (I5), checked inside the host's write
+  // transaction together with `expectedVersion`; a host refusal is translated by the guard (which
+  // marks itself lost) and nothing was written. Fence-first: the host checks the fence before the
+  // version predicate, so a refused fence is never reported as a version conflict.
+  if (writeFence) await writeFence.beforeWrite({ operation: 'patchRecord', subject: 'carry' })
   try {
-    await target.scoped.patchRecord({ recordId: targetRecord.id, changes, expectedVersion: targetRecord.version })
+    const patch = () => target.scoped.patchRecord({
+      recordId: targetRecord.id,
+      changes,
+      expectedVersion: targetRecord.version,
+      ...(writeFence ? { writeFence: writeFence.hostWriteFence() } : {}),
+    })
+    await (writeFence ? writeFence.withHostWrite(patch) : patch())
   } catch (error) {
+    if (writeFence && isHostWriteFenceError(error)) throw await writeFence.hostFenceRefused(error)
     if (isRecordVersionConflict(error)) {
       throw new StockPreparationConfirmWriteError(
         409,
