@@ -88,6 +88,11 @@ export default defineConfig({
       // skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-can-decide-current-node.db.test.ts',
+      // Role seats matched through `user_roles` role ids on every can-act surface (pending tab,
+      // pending-count, todo count/items, canDecideCurrentNode, the decision door). Real HTTP + real
+      // DB with the claim-trusting fast path off; wired as a WHOLE FILE into the same
+      // .github/workflows/approval-realdb-can-decide-current-node.yml lane (EXPECT_DB=1).
+      'tests/integration/approval-role-seat-user-roles.db.test.ts',
       // todo-center-design-lock v2.14 §3.0/§5 — the shared "pending" query production-path gate.
       // Runs under its OWN vitest.todo-center-pending-gate.config.ts (RBAC_BYPASS=false,
       // RBAC_TOKEN_TRUST=false, PRODUCT_MODE=plm-workbench — the OPPOSITE of this default config's
