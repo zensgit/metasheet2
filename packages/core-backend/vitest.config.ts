@@ -1008,6 +1008,8 @@ export default defineConfig({
       // DATABASE_URL + jobId. DATABASE_URL-gated; excluded here and run
       // whole-file by the attendance real-DB workflow step.
       'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+      // Real two-connection policy races; whole-file wired in attendance-real-db-integration.
+      'tests/integration/attendance-group-membership-policy.db.test.ts',
       // W4C-3a OD-58 group precondition races and SQL order.
       'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
       // W4C-3a OD-60 group/batch SQL count legs.

@@ -147,6 +147,7 @@ describe('attendance web guard workflow contract', () => {
     const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)
     const targeted = targetedRunCommand(workflow).split(/\s+/)
     for (const spec of [
+      'attendance-group-membership-policy.spec.ts',
       'attendance-server-clock.spec.ts',
       'attendance-server-clock-view.spec.ts',
       'adminPageContentSearch.spec.ts',
@@ -162,6 +163,16 @@ describe('attendance web guard workflow contract', () => {
       expect(required).toContain(spec)
       expect(targeted).toContain(spec)
     }
+  })
+
+  it('mounts the group membership policy panel and classifies its source', () => {
+    const panelPath = 'apps/web/src/views/attendance/AttendanceGroupMembershipPolicyPanel.vue'
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(panelPath)
+    expect(workflow.split(panelPath)).toHaveLength(3)
+    const view = readFileSync(resolve(process.cwd(), 'src/views/AttendanceView.vue'), 'utf8')
+    expect(view).toContain('<AttendanceGroupMembershipPolicyPanel :tr="tr" />')
+    expect(view).toContain("import AttendanceGroupMembershipPolicyPanel from './attendance/AttendanceGroupMembershipPolicyPanel.vue'")
   })
 
   it('parses the required lane as one exec logical line, not one physical line', () => {

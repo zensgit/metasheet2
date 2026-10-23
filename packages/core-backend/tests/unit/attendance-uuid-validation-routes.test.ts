@@ -627,6 +627,8 @@ function fixedScheduleQueryResult(sql: string, config = fixedScheduleConfigRow()
 }
 
 function rbacQueryResult(sql: string, params: unknown[] = [], admin = false) {
+  if (sql.includes('INSERT INTO attendance_management_group_policies')) return [{ allow_multiple_groups: false, version: 0 }]
+  if (sql.includes('group_id::text AS group_id, user_id FROM attendance_group_members')) return []
   if (sql.includes('pg_advisory_xact_lock')) return []
   if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return admin ? [{ ok: 1 }] : []
   if (sql.includes('FROM user_permissions')) return []

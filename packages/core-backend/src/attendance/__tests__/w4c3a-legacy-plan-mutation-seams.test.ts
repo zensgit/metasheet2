@@ -1,3 +1,4 @@
+import { prepareAttendanceManagementGroupAdmission } from '../attendance-group-membership-policy'
 /**
  * Discriminating kill-proofs for the P08 blueprint mutations.
  *
@@ -237,6 +238,7 @@ describe('blueprint mutations — real production surfaces', () => {
         if (sql.includes('FROM pg_locks')) return { rows: [{ held: 1 }] }
         if (sql.includes('to_regclass')) return { rows: [{ present: true }] }
         if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'unit-transaction' }] }
+        if (sql.includes('INSERT INTO attendance_management_group_policies')) return { rows: [{ allow_multiple_groups: false, version: 0 }] }
         if (sql.includes('INSERT INTO attendance_groups')) {
           return { rows: [{ id: GROUP_ID }] }
         }
@@ -278,6 +280,9 @@ describe('blueprint mutations — real production surfaces', () => {
     try {
       await acquireAttendanceImportTimezonePrefixV1(trx as never, ORG)
       await prepareAttendanceImportTimezoneSourceV1(trx as never, ORG)
+      await prepareAttendanceManagementGroupAdmission(trx as never, ORG,
+        withEffects.groupEffects.flatMap(effect => effect.kind === 'ensure_member'
+          ? [{ groupId: effect.groupRef, userId: effect.userId }] : []))
       result = await applyAttendanceLegacyGroupEffectsV1(trx as never, withEffects)
       expect(verifySource).toHaveBeenCalledTimes(1)
     } finally {
@@ -332,6 +337,63 @@ describe('blueprint mutations — real production surfaces', () => {
       registerAttendanceRequestTimezoneSourceGuardV1(null)
     }
   })
+
+  it.each(['missing', 'cross_transaction'] as const)(
+    'production group effect adapter refuses %s admission proof before DML with a valid timezone proof',
+    async mode => {
+      const calls: string[] = []
+      let transactionId = 'admission-proof-first'
+      const trx = {
+        query: async (sql: string) => {
+          calls.push(sql)
+          if (sql.includes('FROM pg_locks')) return { rows: [{ held: 1 }] }
+          if (sql.includes('to_regclass')) return { rows: [{ present: true }] }
+          if (sql.includes('txid_current()')) return { rows: [{ transaction_id: transactionId }] }
+          if (sql.includes('INSERT INTO attendance_management_group_policies')) {
+            return { rows: [{ allow_multiple_groups: false, version: 0 }] }
+          }
+          if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) return { rows: [{ user_id: 'user-a' }] }
+          if (sql.includes('INSERT INTO attendance_groups')) return { rows: [{ id: GROUP_ID }] }
+          if (/INSERT INTO attendance_group_members\s*\(/.test(sql)) return { rows: [{ id: MEMBER_ID }] }
+          return { rows: [] }
+        },
+      }
+      const effects = planWithGroups([
+        { kind: 'ensure_group', groupId: GROUP_ID, normalizedName: 'proof', displayName: 'Proof',
+          code: null, timezone: 'UTC', ruleSetId: null, groupExistedAtPrepare: false },
+        { kind: 'ensure_member', memberId: MEMBER_ID, groupRef: GROUP_ID, userId: 'user-a',
+          membershipExistedAtPrepare: false },
+      ])
+      const members = [{ groupId: GROUP_ID, userId: 'user-a' }]
+      const verifySource = vi.fn(async () => {})
+      registerAttendanceRequestTimezoneSourceGuardV1(async () => verifySource)
+      try {
+        if (mode === 'cross_transaction') {
+          await prepareAttendanceManagementGroupAdmission(trx as never, ORG, members)
+          transactionId = 'admission-proof-second'
+        }
+        // Fresh, matching timezone proof in the actual attempted transaction.
+        await acquireAttendanceImportTimezonePrefixV1(trx as never, ORG)
+        await prepareAttendanceImportTimezoneSourceV1(trx as never, ORG)
+        calls.length = 0
+        await expect(applyAttendanceLegacyGroupEffectsV1(trx as never, effects))
+          .rejects.toMatchObject({ code: 'ATTENDANCE_GROUP_MEMBERSHIP_PRECONDITION_REQUIRED', status: 409 })
+        expect(calls.some(sql => /INSERT INTO attendance_(groups|group_members)\s*\(/.test(sql))).toBe(false)
+        expect(calls.some(sql => sql.includes('FROM user_orgs uo'))).toBe(true)
+        expect(verifySource).not.toHaveBeenCalled()
+
+        // Positive control uses the same production function, subject and timezone proof.
+        await prepareAttendanceManagementGroupAdmission(trx as never, ORG, members)
+        calls.length = 0
+        expect(await applyAttendanceLegacyGroupEffectsV1(trx as never, effects))
+          .toEqual({ groupCreated: 1, groupMembersAdded: 1 })
+        expect(calls.some(sql => /INSERT INTO attendance_groups\s*\(/.test(sql))).toBe(true)
+        expect(calls.some(sql => /INSERT INTO attendance_group_members\s*\(/.test(sql))).toBe(true)
+        expect(verifySource).toHaveBeenCalledTimes(1)
+        expect(calls.some(sql => sql.includes('attendance_management_group_policies'))).toBe(false)
+      } finally { registerAttendanceRequestTimezoneSourceGuardV1(null) }
+    },
+  )
 
   it('rejects an inactive ensure_member before any group or member insert', async () => {
     const calls: string[] = []

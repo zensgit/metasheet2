@@ -17296,6 +17296,195 @@
         }
       }
     },
+    "/api/attendance/group-membership-policy": {
+      "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Read organization management-group membership policy",
+        "description": "Requires attendance administration authority and active membership of the authenticated organization. An orgId selector must match that binding. Missing organization policy defaults to false and version zero. This policy does not change calculation membership history or overlap constraints.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "orgId",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization membership policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "orgId",
+                        "allowMultipleGroups",
+                        "version"
+                      ],
+                      "properties": {
+                        "orgId": {
+                          "type": "string"
+                        },
+                        "allowMultipleGroups": {
+                          "type": "boolean",
+                          "default": false
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Active organization membership and attendance administration required"
+          },
+          "404": {
+            "description": "Organization selector does not match authenticated binding"
+          },
+          "503": {
+            "description": "Policy storage unavailable"
+          }
+        }
+      },
+      "post": {
+        "summary": "Set organization management-group membership policy",
+        "description": "Compare-and-set against expectedVersion. Stale versions return 409 even for an unchanged value. Only an actual boolean transition increments the version. Disabling preserves existing multiple memberships and allows same-group idempotency and removal; new second memberships are rejected. Does not recalculate history or change immutable calculation membership.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "orgId",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "allowMultipleGroups",
+                  "expectedVersion"
+                ],
+                "properties": {
+                  "allowMultipleGroups": {
+                    "type": "boolean"
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Persisted organization policy acknowledgment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "orgId",
+                        "allowMultipleGroups",
+                        "version"
+                      ],
+                      "properties": {
+                        "orgId": {
+                          "type": "string"
+                        },
+                        "allowMultipleGroups": {
+                          "type": "boolean"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Strict boolean and nonnegative safe integer version required; unknown fields rejected"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Active organization membership and attendance administration required"
+          },
+          "404": {
+            "description": "Organization selector does not match authenticated binding"
+          },
+          "409": {
+            "description": "ATTENDANCE_GROUP_MEMBERSHIP_POLICY_VERSION_CONFLICT"
+          },
+          "503": {
+            "description": "Policy storage unavailable"
+          }
+        }
+      }
+    },
     "/api/attendance/effective-calendar": {
       "x-plugin": "plugin-attendance",
       "get": {

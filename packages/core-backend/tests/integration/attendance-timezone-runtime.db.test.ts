@@ -1,3 +1,4 @@
+import { prepareAttendanceManagementGroupAdmission } from '../../src/attendance/attendance-group-membership-policy'
 import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { applyAttendanceLegacyGroupEffectsV1 } from '../../src/attendance/w4c3a-legacy-plan-group-effects'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
@@ -1306,6 +1307,8 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
         manifest:{orgId:fixture.orgId},
         groupEffects:[{kind:'ensure_member',memberId:randomUUID(),groupRef:groupId,userId:actor.userId,membershipExistedAtPrepare:false}],
       } as unknown as VerifiedAttendanceLegacyPlanV1
+      await prepareAttendanceManagementGroupAdmission(trx, fixture.orgId, plan.groupEffects.flatMap(effect =>
+        effect.kind === 'ensure_member' ? [{ groupId: effect.groupRef, userId: effect.userId }] : []))
       await expect(applyAttendanceLegacyGroupEffectsV1(trx,plan)).rejects.toMatchObject({
         code:'ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT',
       })
@@ -1374,6 +1377,7 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       await client.query('BEGIN')
       await acquireAttendanceImportTimezonePrefixV1(trx,fixture.orgId)
       await prepareAttendanceImportTimezoneSourceV1(trx,fixture.orgId)
+      await prepareAttendanceManagementGroupAdmission(trx, fixture.orgId, [{ groupId, userId: actor.userId }])
       expect(await applyAttendanceLegacyGroupEffectsV1(trx,memberPlan)).toEqual({groupCreated:0,groupMembersAdded:1})
       await client.query('COMMIT')
       expect(await read()).toMatchObject({timezone:'UTC',isWorkingDay:false})
@@ -1384,6 +1388,7 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       await client.query('BEGIN')
       await acquireAttendanceImportTimezonePrefixV1(trx,fixture.orgId)
       await prepareAttendanceImportTimezoneSourceV1(trx,fixture.orgId)
+      await prepareAttendanceManagementGroupAdmission(trx, fixture.orgId, [{ groupId, userId: actor.userId }])
       await expect(applyAttendanceLegacyGroupEffectsV1(trx,memberPlan)).rejects.toMatchObject({code:'ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT'})
       await client.query('ROLLBACK')
       expect((await fixture.pool.query('SELECT COUNT(*)::int AS count FROM attendance_group_members WHERE group_id=$1',[groupId])).rows).toEqual([{count:0}])

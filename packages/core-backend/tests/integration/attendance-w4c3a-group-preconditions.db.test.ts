@@ -89,6 +89,10 @@ function groupPlan(input: {
 
 async function createBase(pool: Pool): Promise<void> {
   await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
+  await pool.query(`CREATE TABLE attendance_management_group_policies (
+    org_id text PRIMARY KEY, allow_multiple_groups boolean NOT NULL DEFAULT false,
+    version integer NOT NULL DEFAULT 0 CHECK (version >= 0), updated_at timestamptz NOT NULL DEFAULT now()
+  )`)
   await pool.query(`
     CREATE TABLE attendance_records (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

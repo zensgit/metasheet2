@@ -267,6 +267,10 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     expect(terminalClient).toBe(clients[0])
     expect(afterCommitCount).toBe(1)
     expect(statements[0]?.text).toBe('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+    const policyOrgLockIndex = statements.findIndex(({ text, values }) =>
+      text.includes('pg_advisory_xact_lock(hashtextextended')
+      && values[0] === JSON.stringify(['attendance-timezone-policy-v1', 'default']),
+    )
     const sharedLockIndex = statements.findIndex(({ text }) =>
       text.includes('pg_advisory_xact_lock_shared'),
     )
@@ -275,7 +279,8 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     const terminalIndex = statements.findIndex(({ text }) =>
       text.includes('UPDATE attendance_import_jobs'),
     )
-    expect(sharedLockIndex).toBeGreaterThan(0)
+    expect(policyOrgLockIndex).toBe(2)
+    expect(sharedLockIndex).toBeGreaterThan(policyOrgLockIndex)
     expect(jobLockIndex).toBeGreaterThan(sharedLockIndex)
     expect(sourceIndex).toBeGreaterThan(jobLockIndex)
     expect(terminalIndex).toBeGreaterThan(sourceIndex)
@@ -645,6 +650,8 @@ describe('plugin V1 jobId-only boundary (static)', () => {
     )
     expect(calls.map((call) => call.text)).toEqual([
       "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      "SELECT set_config('lock_timeout', $1, true)",
       'SELECT pg_advisory_xact_lock_shared($1::bigint)',
       "SELECT set_config('lock_timeout', $1, true)",
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
@@ -652,10 +659,31 @@ describe('plugin V1 jobId-only boundary (static)', () => {
       'SELECT pg_advisory_xact_lock($1::bigint)',
       "SELECT set_config('lock_timeout', $1, true)",
     ])
-    expect(calls[1]?.values).toEqual(['1'])
-    expect(calls[3]?.values).toEqual(['default', 'sync-key'])
-    expect(calls[5]?.values).toEqual(['-2'])
-    expect(calls[6]?.values).toEqual(['5000'])
+    expect(calls[1]?.values).toEqual([JSON.stringify(['attendance-timezone-policy-v1', 'default'])])
+    expect(calls[3]?.values).toEqual(['1'])
+    expect(calls[5]?.values).toEqual(['default', 'sync-key'])
+    expect(calls[7]?.values).toEqual(['-2'])
+    expect(calls[8]?.values).toEqual(['5000'])
+  })
+
+  it('charges the org prefix to the original helper deadline and refuses before reservation when exhausted', async () => {
+    let now = 0
+    const statements: string[] = []
+    await expect(syncCompatibility.acquireAttendanceSyncImportReservationLocks({
+      query: async text => {
+        statements.push(text)
+        if (text.includes('pg_advisory_xact_lock(hashtextextended')) now = 5001
+        return []
+      },
+    }, {
+      orgId: 'default', idempotencyKey: 'bounded-org-prefix',
+      witness: { rolloutKey: '1', legacyIdempotencyKey: '2', helperWaitMs: 5000, transactionLockTimeoutMs: 5000 },
+      monotonicNow: () => now,
+    })).rejects.toMatchObject({ status: 409, code: 'ATTENDANCE_OPERATION_IN_PROGRESS' })
+    expect(statements).toEqual([
+      "SELECT set_config('lock_timeout', $1, true)",
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+    ])
   })
 
   it('maps only helper lock timeout to values-free busy postures', async () => {

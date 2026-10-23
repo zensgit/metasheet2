@@ -1,4 +1,11 @@
 const crypto = require('crypto')
+const {
+  AttendanceGroupMembershipPolicyError,
+  assertCanAddMembers: assertManagementGroupAdmission,
+  lockOrg: lockAttendanceManagementGroupOrg,
+  orgLockKey: attendanceManagementGroupOrgLockKey,
+  registerGroupMembershipPolicyRoutes,
+} = require('./lib/attendance-group-membership-policy.cjs')
 const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
   previousCalendarDates, createDailyCalendarScheduler,
@@ -9801,6 +9808,17 @@ async function assertImportGroupMemberAssignmentsActive(client, orgId, assignmen
   )
 }
 
+async function assertAttendanceManagementGroupAdmission(trx, orgId, members) {
+  try {
+    await assertManagementGroupAdmission(trx, orgId, members)
+  } catch (error) {
+    if (error instanceof AttendanceGroupMembershipPolicyError) {
+      throw new HttpError(error.status, error.code, error.code)
+    }
+    throw error
+  }
+}
+
 async function insertAttendanceGroupMembers(db, orgId, members, options) {
   if (!members.length) return 0
   await assertActiveOrgMemberUserIds(
@@ -9809,6 +9827,7 @@ async function insertAttendanceGroupMembers(db, orgId, members, options) {
     members.map((member) => member?.userId),
     options,
   )
+  await assertAttendanceManagementGroupAdmission(db, orgId, members)
   const chunkSize = 200
   let inserted = 0
   for (let i = 0; i < members.length; i += chunkSize) {
@@ -10298,6 +10317,7 @@ function mapImportBatchRow(row) {
 		  if (!clean) return
 		  const normalizedWitness = normalizeAttendanceSyncImportLockWitness(witness)
 		  if (!normalizedWitness) {
+		    await lockAttendanceManagementGroupOrg(client, orgId)
 		    await acquireImportIdempotencyLock(client, orgId, clean)
 		    return
 		  }
@@ -10318,6 +10338,13 @@ function mapImportBatchRow(row) {
 		    if (monotonicNow() > deadline) throw attendanceSyncImportLockBusyError(code)
 		  }
 
+		  // Same org prefix as member API/policy writes, inside the original helper deadline.
+		  // It must precede rollout/reservation locks and revision-triggering DML.
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+		    [attendanceManagementGroupOrgLockKey(orgId)],
+		    'ATTENDANCE_OPERATION_IN_PROGRESS'
+		  )
 		  await takeLock(
 		    'SELECT pg_advisory_xact_lock_shared($1::bigint)',
 		    [normalizedWitness.rolloutKey],
@@ -10372,6 +10399,7 @@ function mapImportBatchRow(row) {
 
 			  const commitResult = await db.transaction(async (trx) => {
 			    await trx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+			    // Acquires the bounded org prefix first, before reservation/business locks.
 			    await acquireAttendanceSyncImportReservationLocks(trx, {
 			      orgId: canonicalOrgId,
 			      idempotencyKey: canonicalLockIdentity,
@@ -29520,6 +29548,9 @@ module.exports = {
 		        : async (handler) => db.transaction(handler)
 		      await runCommitTransaction(async (trx) => {
 	        await applyImportHeavyTransactionTimeout(trx)
+	        // Direct legacy imports also take the org prefix before idempotency
+	        // locks and before ensureAttendanceGroups can lock the revision row.
+	        if (!prepareOnly) await lockAttendanceManagementGroupOrg(trx, orgId)
 		        if (cleanIdempotency && !prepareOnly) {
 	          await acquireImportIdempotencyLock(trx, orgId, cleanIdempotency)
 	          const existing = await loadIdempotentImportBatch(trx, orgId, cleanIdempotency)
@@ -47227,6 +47258,8 @@ module.exports = {
               // All-or-nothing: reject the whole batch before any INSERT when any id is not an
               // active member of this org. A throw rolls the transaction back.
               const acceptedUserIds = await assertActiveOrgMemberUserIds(trx, orgId, userIds)
+              await assertAttendanceManagementGroupAdmission(trx, orgId,
+                acceptedUserIds.map(userId => ({ groupId, userId })))
               for (const userId of acceptedUserIds) {
                 const rows = await trx.query(
                   `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
@@ -52250,6 +52283,14 @@ module.exports = {
         }
         return attendanceTimezoneRuntime.readTargetTimezoneContext(trx,input)
       },
+    })
+
+    registerGroupMembershipPolicyRoutes({
+      addRoute: (...args) => context.api.http.addRoute(...args),
+      withPermission,
+      resolveActor: resolveAttendanceGroupRouteActorContext,
+      db,
+      authorizeManage: authorizeAttendanceTimezoneManage,
     })
 
     registerAttendanceTimezonePolicyRoutes({
