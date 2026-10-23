@@ -9,6 +9,9 @@ on:
       - 'packages/core-backend/src/db/migrations/*plm*.ts'
       - 'packages/core-backend/tests/**/plm-*'
       - 'packages/core-backend/tests/plm-bom-review/**'
+      - 'packages/core-backend/vitest.plm-collaboration-snapshot.config.ts'
+      - 'packages/core-backend/tests/plm-collaboration-snapshot/**'
+      - 'packages/core-backend/vitest.config.ts'
       - '.github/workflows/plm-bom-listener.yml'
   workflow_dispatch:
 permissions:
@@ -58,3 +61,10 @@ jobs:
           tests/unit/plm-change-source-verification.test.ts tests/unit/record-subscription-service.test.ts
           tests/unit/plm-bom-review-service.test.ts tests/unit/plm-bom-review-wire.test.ts
           tests/unit/idempotency-redis.test.ts tests/unit/approval-completion-shutdown-lifecycle.test.ts
+      - name: Real PostgreSQL collaboration snapshot guards
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_listener
+        working-directory: packages/core-backend
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for snapshot DB guards}"
+          node node_modules/vitest/vitest.mjs run --config vitest.plm-collaboration-snapshot.config.ts

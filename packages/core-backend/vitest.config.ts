@@ -34,6 +34,7 @@ export default defineConfig({
       'tests/integration/data-source-permission-catalogue.db.test.ts',
       // Whole file runs with EXPECT_DB=1 in plm-bom-listener.yml.
       'tests/integration/plm-bom-review-realdb.test.ts',
+      'tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts',
       'tests/integration/plm-record-ingress-realdb.test.ts',
       // Whole file runs against disposable PostgreSQL in plm-personal-approval-realdb.yml.
       'tests/integration/plm-personal-approval-realdb.test.ts',
