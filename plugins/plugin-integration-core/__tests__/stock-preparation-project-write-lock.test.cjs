@@ -551,7 +551,7 @@ test('L11b the superseded-reason and host-fence vocabularies are pinned', () => 
   assert.equal(lockModule.isHostWriteFenceError(null), false)
 })
 
-test('L12 observeGeneration / readGeneration are read-only; observe refuses a LIVE writer only', async () => {
+test('L12 observeGeneration writes nothing for a free / absent row and refuses a LIVE writer; readGeneration never refuses', async () => {
   const { lock, scope, db, clock } = setup()
   const absent = await lock.observeGeneration(scope)
   assert.deepEqual({ ...absent }, { scopeKey: scope, present: false, generation: 0, generationToken: null, fencingEpoch: 0, leaseId: null, leaseSeq: null })
@@ -566,9 +566,8 @@ test('L12 observeGeneration / readGeneration are read-only; observe refuses a LI
   const read = await lock.readGeneration(scope)
   assert.equal(read.generationToken, bumped.generationToken, 'L12: readGeneration does not refuse a live lease')
   assert.equal(read.fencingEpoch, grant.fencingEpoch)
-  clock.advance(TTL + GRACE)
-  const abandoned = await lock.observeGeneration(scope)
-  assert.equal(abandoned.fencingEpoch, grant.fencingEpoch, 'L12: an abandoned lease is observed, not refused')
+  // (an ABANDONED lease is cleared by the observation: L16)
+  await lock.createGuard(grant).release()
 })
 
 test('L13 bumpGeneration(expect): bumps only while token AND epoch are what the expansion observed', async () => {
@@ -667,18 +666,24 @@ test('L14 the guard\'s host-fence half: the fence it hands the host, the refusal
   await assert.rejects(() => g5.reassert(), (error) => error.code === PROJECT_WRITE_ERROR_CODES.LEASE_LOST && error.fence === true)
 })
 
-// ── L15 (review round 4): an EXPIRED lease at observation is part of the expectation ─────────────────
-test('L15a an expired, unclaimed lease is observed WITH its lease id + seq; the expectation shape is validated', async () => {
-  const { lock, scope, clock } = setup()
+// ── L15 (review round 4, defence in depth since round 5): an expectation that CARRIES a lease ──────────
+// observeGeneration no longer produces one (L16), but an expectation carrying { leaseId, leaseSeq } is
+// still enforced strictly. Built here from the row itself (readGeneration), the way any other producer would.
+async function leaseCarryingExpectation(lock, scope) {
+  const current = await lock.readGeneration(scope)
+  assert.ok(current.leaseId, 'calibration: a lease is held')
+  return lockModule.writeObservationFromGeneration(current)
+}
+
+test('L15a a lease-carrying expectation keeps the lease id + seq; its shape is validated', async () => {
+  const { lock, scope } = setup()
   await lock.bumpGeneration(scope, { reason: 'small_preview' })
-  const free = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  const free = lockModule.writeObservationFromGeneration(await lock.readGeneration(scope))
   assert.equal('leaseId' in free, false, 'no lease -> no lease keys')
   const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l15a' })
-  clock.advance(TTL + GRACE)
-  const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+  const observed = await leaseCarryingExpectation(lock, scope)
   assert.equal(observed.leaseId, grant.leaseId)
   assert.equal(observed.leaseSeq, grant.leaseSeq)
-  assert.equal(observed.fencingEpoch, grant.fencingEpoch)
   for (const bad of [
     { generationToken: 't', fencingEpoch: 1, leaseId: 'x' },
     { generationToken: 't', fencingEpoch: 1, leaseSeq: 0 },
@@ -690,27 +695,25 @@ test('L15a an expired, unclaimed lease is observed WITH its lease id + seq; the 
   }
 })
 
-test('L15b a recorded lease that RESUMED (seq moved) is stale; one RELEASED since (lease gone, same epoch) is stale too', async () => {
-  // resumed: the holder's next CAS advances lease_seq
+test('L15b a lease-carrying expectation: seq moved -> stale; lease released since (gone, same epoch) -> stale', async () => {
   {
     const { lock, scope, clock, row } = setup()
     await lock.bumpGeneration(scope, { reason: 'small_preview' })
     const guard = lock.createGuard(await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l15b' }))
     clock.advance(TTL + GRACE)
-    const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+    const observed = await leaseCarryingExpectation(lock, scope)
     await guard.beforeWrite({ index: 0, operation: 'createRecord' })
     const g = row().generation
     await assert.rejects(() => lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed }), (error) => error.details.reason === 'expansion_stale')
     assert.equal(row().generation, g, 'nothing bumped')
     assert.equal(lockModule.generationMatchesObservation(await lock.readGeneration(scope), observed), false)
   }
-  // released: release() clears lease_id WITHOUT moving the epoch — so "no lease, same epoch" is not a match
   {
     const { lock, scope, clock, row } = setup()
     await lock.bumpGeneration(scope, { reason: 'small_preview' })
     const guard = lock.createGuard(await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l15b2' }))
     clock.advance(TTL + GRACE)
-    const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
+    const observed = await leaseCarryingExpectation(lock, scope)
     await guard.release()
     assert.equal(row().lease_id, null)
     assert.equal(row().fencing_epoch, observed.fencingEpoch, 'calibration: release leaves the epoch where it was')
@@ -719,20 +722,111 @@ test('L15b a recorded lease that RESUMED (seq moved) is stale; one RELEASED sinc
   }
 })
 
-test('L15c CONTROL: a recorded lease whose holder never came back is cleared BY the approval bump itself; its holder can no longer write', async () => {
+test('L15c a lease-carrying expectation whose lease was abandoned and untouched: the bump clears it and succeeds', async () => {
   const { lock, scope, clock, row } = setup()
   await lock.bumpGeneration(scope, { reason: 'small_preview' })
   const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l15c' })
   const guard = lock.createGuard(grant)
   clock.advance(TTL + GRACE)
-  const observed = lockModule.writeObservationFromGeneration(await lock.observeGeneration(scope))
-  assert.equal(lockModule.generationMatchesObservation(await lock.readGeneration(scope), observed), true, 'the plan-time check admits it')
+  const observed = await leaseCarryingExpectation(lock, scope)
+  assert.equal(lockModule.generationMatchesObservation(await lock.readGeneration(scope), observed), true)
   const bumped = await lock.bumpGeneration(scope, { reason: 'large_approval', expect: observed })
   assert.equal(bumped.generation, row().generation)
-  assert.equal(row().lease_id, null, 'the abandoned lease was cleared by the approval')
+  assert.equal(row().lease_id, null)
   assert.equal(row().fencing_epoch, grant.fencingEpoch + 1)
-  assert.equal(row().last_interrupted_run_id, 'swl-l15c')
   await assert.rejects(() => guard.beforeWrite({ index: 0, operation: 'createRecord' }), (error) => error.code === PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+})
+
+// ── L16 (review round 5): observeGeneration CLEARS an abandoned lease before it records anything ─────
+test('L16a an ABANDONED lease is cleared by the observation (pinned CAS: epoch + 1, last_interrupted_*); the stalled holder can no longer write', async () => {
+  const { lock, scope, clock, row, db } = setup()
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l16a' })
+  const guard = lock.createGuard(grant)
+  await guard.beforeWrite({ index: 0, operation: 'createRecord' }) // the holder passed its pre-write CAS…
+  const seqAtStall = row().lease_seq
+  clock.advance(TTL + GRACE) // …and stalls past TTL + GRACE; nobody takes over
+  const before = row()
+  const observed = await lock.observeGeneration(scope)
+  assert.equal(observed.leaseId, null, 'L16a: an observation never carries a lease')
+  assert.equal(observed.fencingEpoch, grant.fencingEpoch + 1)
+  assert.equal(observed.generationToken, before.generation_token, 'the generation is not bumped')
+  assert.equal(row().lease_id, null)
+  assert.equal(row().fencing_epoch, grant.fencingEpoch + 1)
+  assert.equal(row().last_interrupted_run_id, 'swl-l16a')
+  assert.equal(row().last_interrupted_purpose, 'small_apply')
+  // the clear was ONE CAS pinned to the observed lease / epoch / seq / token
+  const clear = db.log.filter(([method, args]) => method === 'updateRow' && args.set && args.set.lease_id === null && args.set.fencing_epoch === grant.fencingEpoch + 1)
+  assert.equal(clear.length, 1)
+  assert.deepEqual(clear[0][1].where, { scope_key: scope, lease_id: grant.leaseId, fencing_epoch: grant.fencingEpoch, lease_seq: seqAtStall, generation_token: before.generation_token })
+  // the holder resumes: its host write is refused (the fake host checks the same row) and its CAS fails
+  assert.throws(() => kit.assertFakeHostWriteFence(guard.hostWriteFence(), { lockDb: db }), (error) => error.code === 'PLUGIN_WRITE_FENCE_REJECTED')
+  await assert.rejects(() => guard.beforeWrite({ index: 1, operation: 'createRecord' }), (error) => error.code === PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+  // and the observation is what an approval can still match
+  const bumped = await lock.bumpGeneration(scope, { reason: 'large_approval', expect: lockModule.writeObservationFromGeneration(observed) })
+  assert.equal(bumped.generation, row().generation)
+})
+
+test('L16b a lease inside its GRACE window is LIVE to the observation: refused WRITE_LOCKED, nothing cleared', async () => {
+  const { lock, scope, clock, row } = setup()
+  await lock.bumpGeneration(scope, { reason: 'small_preview' })
+  const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l16b' })
+  clock.advance(TTL + GRACE / 2) // expired, but within GRACE
+  const before = row()
+  await assert.rejects(() => lock.observeGeneration(scope), rejectsWith(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409))
+  assert.deepEqual(row(), before, 'nothing cleared')
+  clock.advance(GRACE) // past TTL + GRACE now
+  const observed = await lock.observeGeneration(scope)
+  assert.equal(observed.fencingEpoch, grant.fencingEpoch + 1)
+})
+
+test('L16c a clear that loses its race is re-read once and REFUSED — never an observation over a held lease', async () => {
+  // (1) the holder renews between the observation's read and its clear: the CAS matches nothing; the
+  //     re-read finds a live holder -> WRITE_LOCKED; the lease stays.
+  {
+    const { lock, scope, clock, row, db } = setup()
+    await lock.bumpGeneration(scope, { reason: 'small_preview' })
+    const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l16c' })
+    const guard = lock.createGuard(grant)
+    clock.advance(TTL + GRACE)
+    const gate = kit.deferred()
+    const entered = kit.deferred()
+    let paused = false
+    db.pauses.updateRow = async (args) => {
+      if (!paused && args.set && args.set.lease_id === null && args.set.last_interrupted_run_id === 'swl-l16c') { paused = true; entered.resolve(); await gate.promise }
+    }
+    const observing = lock.observeGeneration(scope)
+    await entered.promise
+    await guard.beforeWrite({ index: 0, operation: 'createRecord' }) // the holder renews (seq + 1, expiry moves)
+    gate.resolve()
+    await assert.rejects(() => observing, rejectsWith(PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 409))
+    assert.equal(row().lease_id, grant.leaseId, 'the renewed lease is untouched')
+    assert.equal(row().fencing_epoch, grant.fencingEpoch)
+  }
+  // (2) another observer clears first: the CAS matches nothing; the re-read finds no live holder ->
+  //     contention (the caller retries; its retry observes the cleared row).
+  {
+    const { lock, scope, clock, row, db } = setup()
+    await lock.bumpGeneration(scope, { reason: 'small_preview' })
+    const grant = await lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-l16c2' })
+    clock.advance(TTL + GRACE)
+    const gate = kit.deferred()
+    const entered = kit.deferred()
+    let paused = false
+    db.pauses.updateRow = async (args) => {
+      if (!paused && args.set && args.set.lease_id === null && args.set.last_interrupted_run_id === 'swl-l16c2') { paused = true; entered.resolve(); await gate.promise }
+    }
+    const first = lock.observeGeneration(scope)
+    await entered.promise
+    delete db.pauses.updateRow
+    const second = await lock.observeGeneration(scope)
+    assert.equal(second.fencingEpoch, grant.fencingEpoch + 1)
+    gate.resolve()
+    await assert.rejects(() => first, (error) => error.code === PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED && error.details.reason === 'contention')
+    assert.equal(row().fencing_epoch, grant.fencingEpoch + 1, 'cleared exactly once')
+    const retry = await lock.observeGeneration(scope)
+    assert.equal(retry.fencingEpoch, grant.fencingEpoch + 1)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-write-lock.test.cjs', tests, { passLine: '✓ stock-preparation-project-write-lock' })

@@ -39,9 +39,14 @@
  *       lease row's xmax (its FOR SHARE), that backend holds its transactionid lock, a takeover queues behind
  *       THAT backend; after it commits, the inserted record's xmin is the SAME xid. Then the takeover lands and
  *       the old fence is refused.
- *   D13 (review round 4) an EXPIRED, unclaimed lease at expansion time, through the real lock, large lib and host:
- *       the holder resumes and writes after the expansion -> approval refused `expansion_stale`, no job; the
- *       control (the holder never resumes) -> the approval's own bump clears the abandoned lease and succeeds.
+ *   D13 (review rounds 4-5) an ABANDONED lease at expansion time, through the real lock, large lib and host: the
+ *       holder passed its pre-write CAS and stalled; the expansion start CLEARS the lease (epoch + 1). The holder
+ *       resumes into its host write: refused (PLUGIN_WRITE_FENCE_REJECTED -> LEASE_LOST), no row; the expansion is
+ *       approvable. Control: the holder never resumes -> approvable as well (no approval refused after a crash).
+ *   D14 (review round 5) a holder stalled INSIDE its host write transaction (FOR SHARE held, INSERT blocked, the D12
+ *       technique) when an expansion observes: the observation's clear WAITS for that transaction
+ *       (pg_blocking_pids), the write commits first, the observation records epoch + 1, and the plan's
+ *       existing-row read afterwards sees the committed row.
  *   D10 a fence for another plugin, or for any table but the allow-listed lease table, is refused by the real
  *       host before any write.
  *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
@@ -839,7 +844,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       }
     }, 60000)
 
-    test('D13 (round 4) an EXPIRED lease at expansion time: the holder resumes and writes -> approval expansion_stale, no job; never resumes -> the approval clears it and succeeds', async () => {
+    test('D13 (rounds 4-5) an ABANDONED lease at expansion time is cleared by the expansion: the resumed holder\'s write is refused (no row, LEASE_LOST) and the expansion is approvable; never-resumed control approvable too', async () => {
       async function stalledFlow(label: string, resume: boolean) {
         const sb = await sandboxSheet(label)
         const projectNo = `SYN-SWL-${label.toUpperCase()}`
@@ -850,7 +855,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
           const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: `swl-${label}-a` })
           const guardA = lockA.createGuard(grantA)
-          // A stalls; on B's clock its lease is past expiry + GRACE and nobody takes it over.
+          await guardA.beforeWrite({ index: 0, operation: 'createRecord' }) // A passed its pre-write CAS, then stalls
           const storage: any = sb.pluginContext.storage
           const jobScope = { tenantId: `tenant_swl_${label}_${TOKEN}`, workspaceId: `ws_swl_${label}_${TOKEN}` }
           const actionId = sb.action.actionId
@@ -861,48 +866,113 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             writeGenerationObserver: async () => writeObservationFromGeneration(await lockB.observeGeneration(sb.key)),
           })
           const stored = await storage.get(largeBomJobs.__internals.backgroundJobKey({ ...jobScope, actionId, jobId }))
-          expect(stored.writeObservation.leaseId, 'the expired lease is recorded').toBe(grantA.leaseId)
-          expect(stored.writeObservation.leaseSeq).toBe(grantA.leaseSeq)
+          const cleared = (await q(`SELECT lease_id, fencing_epoch, last_interrupted_run_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
           await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId, jobId, sourceAdapter: sourceOf(projectNo, '2') })
           await largeBomJobs.planLargeBomBackgroundExpansionJob({
             storage, ...jobScope, actionId, jobId,
             existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
             writeGenerationReader: (observed: string) => lockB.readGeneration(observed),
           })
+          let late: any = null
+          let lateMapped: any = null
+          let lateCas: any = null
+          const rowsBefore = await countRows(sb.sheetId)
           if (resume) {
-            // A comes back: its pre-write CAS renews (lease_seq moves) and it writes through the real host.
-            await guardA.beforeWrite({ index: 0, operation: 'createRecord' })
-            const late = await records.createRecord({ sheetId: sb.sheetId, data: {}, writeFence: guardA.hostWriteFence() })
-            expect(typeof late.id).toBe('string')
+            // A resumes straight into its host write (its CAS was before the stall).
+            late = await settle(records.createRecord({ sheetId: sb.sheetId, data: {}, writeFence: guardA.hostWriteFence() }))
+            if (!late.ok) lateMapped = await guardA.hostFenceRefused(late.error)
+            lateCas = await settle(guardA.beforeWrite({ index: 1, operation: 'createRecord' }))
           }
-          const before = (await q(`SELECT generation, fencing_epoch, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+          const rowsAfterResume = await countRows(sb.sheetId)
           const applyJobId = `swl_${label}_apply_${TOKEN}`
           const approval = await settle(largeBomJobs.createLargeBomCheckpointApplyJob({
             storage, ...jobScope, actionId, jobId, principal: 'swl-d13', permission: 'write', createApplyJobId: () => applyJobId,
             writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lockB.bumpGeneration(sb.key, { reason: 'large_approval', expect })),
           }))
-          const after = (await q(`SELECT generation, fencing_epoch, lease_id, last_interrupted_run_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
           const job = await storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...jobScope, actionId, applyJobId }))
-          return { approval, before, after, job, grantA, guardA }
+          return { stored, cleared, grantA, late, lateMapped, lateCas, rowsBefore, rowsAfterResume, approval, job }
         } finally {
           await dropSheet(sb.sheetId)
         }
       }
-      const resumed = await stalledFlow('d13r', true)
-      expect(resumed.approval.ok).toBe(false)
-      expect((resumed.approval as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
-      expect((resumed.approval as any).error.details.reason).toBe('expansion_stale')
-      expect(resumed.job, 'no job is created').toBeNull()
-      expect(resumed.after.generation, 'nothing bumped').toBe(resumed.before.generation)
-      const crashed = await stalledFlow('d13c', false)
-      expect(crashed.approval.ok, JSON.stringify((crashed.approval as any).error && (crashed.approval as any).error.details)).toBe(true)
-      expect(crashed.job).not.toBeNull()
-      expect(crashed.after.lease_id, 'the approval bump cleared the abandoned lease').toBeNull()
-      expect(crashed.after.fencing_epoch).toBe(crashed.grantA.fencingEpoch + 1)
-      expect(crashed.after.last_interrupted_run_id).toBe('swl-d13c-a')
-      expect(crashed.after.generation).toBe(crashed.before.generation + 1)
-      await expect(crashed.guardA.beforeWrite({ index: 0, operation: 'createRecord' })).rejects.toMatchObject({ code: PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
-    }, 90000)
+      for (const [label, resume] of [['d13r', true], ['d13c', false]] as const) {
+        const r = await stalledFlow(label, resume)
+        expect('leaseId' in r.stored.writeObservation, 'the observation carries no lease').toBe(false)
+        expect(r.stored.writeObservation.fencingEpoch).toBe(r.grantA.fencingEpoch + 1)
+        expect(r.cleared.lease_id, 'the expansion cleared the abandoned lease').toBeNull()
+        expect(r.cleared.fencing_epoch).toBe(r.grantA.fencingEpoch + 1)
+        expect(r.cleared.last_interrupted_run_id).toBe(`swl-${label}-a`)
+        if (resume) {
+          expect(r.late.ok, 'the resumed holder\'s write is refused').toBe(false)
+          expect(r.late.error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
+          expect(r.lateMapped.code).toBe(PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+          expect(r.lateCas.ok).toBe(false)
+          expect(r.lateCas.error.code).toBe(PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+          expect(r.rowsAfterResume, 'no row written').toBe(r.rowsBefore)
+        }
+        expect(r.approval.ok, JSON.stringify(r.approval.ok ? null : r.approval.error.details)).toBe(true)
+        expect(r.job).not.toBeNull()
+      }
+    }, 120000)
+
+    test('D14 (round 5) a holder stalled INSIDE its host write transaction: the observation waits for it (pg_blocking_pids), the write commits first, the observation records epoch + 1, and the plan read sees the row', async () => {
+      const sb = await sandboxSheet('d14')
+      const projectNo = 'SYN-SWL-D14'
+      const projectField: string = (sb.target.fieldIdMap && sb.target.fieldIdMap.projectNo) || 'projectNo'
+      try {
+        const base = Date.now()
+        const lockA = createStockPreparationProjectWriteLock({ db: dbOn(clientA), now: () => new Date(base) })
+        const lockB = createStockPreparationProjectWriteLock({ db: dbOn(clientB), now: () => new Date(base + PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS) })
+        await lockA.bumpGeneration(sb.key, { reason: 'small_preview' })
+        const grantA = await lockA.acquire(sb.key, { purpose: 'small_apply', runId: 'swl-d14-a' })
+        const guardA = lockA.createGuard(grantA)
+        await guardA.beforeWrite({ index: 0, operation: 'createRecord' })
+        const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        const pidB = Number((await clientB.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        // A's host write starts its transaction (fence FOR SHARE taken) and stalls at its INSERT.
+        await clientX.query('BEGIN')
+        await clientX.query('LOCK TABLE meta_records IN SHARE MODE')
+        const write = settle((sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: { [projectField]: projectNo }, writeFence: guardA.hostWriteFence() }))
+        let hostPid = 0
+        await waitUntil('the host write to wait at its meta_records INSERT', async () => {
+          const waiting = await q(`SELECT pid FROM pg_locks WHERE relation = 'meta_records'::regclass AND NOT granted AND pid <> $1`, [pidX])
+          if (waiting.rows.length !== 1) return false
+          hostPid = Number(waiting.rows[0].pid)
+          return true
+        })
+        const hostXid = String((await q('SELECT backend_xid::text AS xid FROM pg_stat_activity WHERE pid = $1', [hostPid])).rows[0].xid)
+        expect((await q(`SELECT xmax::text AS xmax FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0].xmax, 'the stalled write holds the lease row FOR SHARE').toBe(hostXid)
+        // The expansion observes on B's clock: the lease is abandoned, so it clears it — and must wait.
+        let observedAt = 0
+        const observing = settle(lockB.observeGeneration(sb.key).then((value: any) => { observedAt = Date.now(); return value }))
+        await waitUntil('the observation\'s clear to queue behind the stalled host write', () => isBlockedBy(pidB, hostPid))
+        expect(observedAt, 'the observation has not returned while the write is in flight').toBe(0)
+        await clientX.query('COMMIT')
+        const written = await write
+        expect(written.ok, JSON.stringify(written.ok ? null : (written as any).error.code)).toBe(true)
+        const observed = await observing
+        expect(observed.ok).toBe(true)
+        const observation = (observed as any).value
+        expect(observation.fencingEpoch, 'the observation records epoch + 1').toBe(grantA.fencingEpoch + 1)
+        expect(observation.leaseId).toBeNull()
+        const recordId = (written as any).value.id
+        const inserted = (await q('SELECT xmin::text AS xmin FROM meta_records WHERE id = $1', [recordId])).rows[0]
+        expect(inserted.xmin, 'the row committed in the stalled holder\'s own transaction').toBe(hostXid)
+        const cleared = (await q(`SELECT lease_id, fencing_epoch, xmin::text AS xmin FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(cleared.lease_id).toBeNull()
+        expect(cleared.fencing_epoch).toBe(grantA.fencingEpoch + 1)
+        // The plan reads existing rows AFTER the observation: the stalled holder's row is there.
+        const existing = await tableActions.__internals.readExistingStockPreparationRows(sb.multitable.records, sb.target, projectNo)
+        expect(existing.length, 'the plan\'s existing-row read sees the committed write').toBeGreaterThanOrEqual(1)
+        // …and the holder cannot write again.
+        await expect(guardA.beforeWrite({ index: 1, operation: 'createRecord' })).rejects.toMatchObject({ code: PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+        const again = await settle((sb.multitable.records as any).createRecord({ sheetId: sb.sheetId, data: {}, writeFence: guardA.hostWriteFence() }))
+        expect((again as any).error && (again as any).error.code).toBe('PLUGIN_WRITE_FENCE_REJECTED')
+      } finally {
+        try { await clientX.query('ROLLBACK') } catch { /* not in a transaction */ }
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
 
     test('D10 a fence for another plugin, or for any other table, is refused by the real host before any write', async () => {
       const sb = await sandboxSheet('d10')

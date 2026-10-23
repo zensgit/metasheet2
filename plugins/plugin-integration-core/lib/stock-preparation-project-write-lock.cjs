@@ -18,8 +18,10 @@
 //     lease, and re-asserts both in the same single-statement CAS before every write.
 //     LARGE LANE (Codex review P1-b): the generation is bound at EXPANSION time, because that is when
 //     the large lane reads its source. The expansion start records the sheet's generation token and
-//     fencing epoch (observeGeneration — refused while a live writer holds the sheet); the plan is made
-//     only while the token is unchanged (readGeneration) and records what it checked; the approval
+//     fencing epoch (observeGeneration — refused while a live writer holds the sheet, grace included; an
+//     ABANDONED lease is first cleared by the pinned abandoned-lease CAS, which waits for a write still in
+//     flight and fences out one not yet started — review round 5); the plan is made only while token,
+//     epoch (and any recorded lease) are unchanged (readGeneration) and records what it checked; the approval
 //     bumps only while token AND epoch are still exactly that (bumpGeneration `expect`, pinned in the
 //     CAS). A newer preview, approval or ANY lease taken on the sheet since the expansion read its
 //     source makes it stale: 409 PLAN_SUPERSEDED `expansion_stale`; a job carrying no observation
@@ -243,6 +245,10 @@ function writeBindingFromGeneration(generation) {
 // approval (token) or ANY lease taken on the sheet (epoch: every write run acquires) since the expansion
 // read its source makes that expansion stale.
 //
+// DEFENCE IN DEPTH since review round 5: observeGeneration now CLEARS an abandoned lease before it records
+// anything, so the observations it produces never carry a lease. The lease-carrying expectation below is
+// kept so that an observation that DOES carry one (any other producer, or a stored job) is still enforced
+// strictly instead of silently matching on token + epoch alone.
 // AN EXPIRED LEASE AT OBSERVATION (review round 4). observeGeneration refuses only a LIVE lease; a lease
 // that lapsed (expiry + GRACE) but that nobody took over or cleared is observed, and its holder may still
 // resume: its CAS pins lease_id / epoch / seq / token, all unchanged, so it would renew and write under the
@@ -657,14 +663,53 @@ function createStockPreparationProjectWriteLock({
     })
   }
 
-  // P1-b: the generation a large-BOM expansion starts under (read-only; an absent row is observed as
-  // such). Refused 409 WRITE_LOCKED while a live writer holds the sheet — an expansion must not read its
-  // source against a sheet a write is changing.
+  // P1-b: the generation a large-BOM expansion starts under. An absent row is observed as such (nothing
+  // written). A LIVE lease — grace window included, the same rule acquire and bump use — is refused 409
+  // WRITE_LOCKED: an expansion must not read its source against a sheet a write is changing.
+  //
+  // AN ABANDONED LEASE (review round 5) is CLEARED before anything is recorded: the same single-statement
+  // abandoned-lease clear the bump uses (epoch + 1, last_interrupted_*, lease columns NULL), pinned to the
+  // exact lease_id / fencing_epoch / lease_seq / generation_token observed. That closes the two windows a
+  // stalled holder still had after its pre-write CAS:
+  //   * its host write is IN FLIGHT (its transaction holds FOR SHARE on this row): the clear is a non-key
+  //     UPDATE, so it waits for that write to COMMIT — the expansion (and the plan, which reads existing
+  //     rows after this) then sees the row;
+  //   * its host write has NOT STARTED: after the clear its fenced write finds lease_id NULL / epoch + 1
+  //     and is refused (nothing written; LEASE_LOST), and its next CAS fails too.
+  // So every successful observation is of a row with NO lease. A clear that matches nothing (someone
+  // renewed, took over or cleared first) is re-read once and refused with the existing codes — a live
+  // holder is WRITE_LOCKED, anything else contention — never an observation over a held lease.
   async function observeGeneration(scopeKey) {
     const row = await readRow(scopeKey, 'observe')
     const atMs = nowMs()
     if (leaseIsLive(row, atMs)) throw writeLocked(row, atMs)
-    return currentGeneration(scopeKey, row)
+    if (!row || !row.lease_id) return currentGeneration(scopeKey, row)
+    const at = new Date(atMs).toISOString()
+    const epoch = integerOf(row.fencing_epoch) || 0
+    const cleared = await update({
+      lease_id: null,
+      lease_purpose: null,
+      lease_run_id: null,
+      lease_acquired_at: null,
+      lease_expires_at: null,
+      lease_heartbeat_at: null,
+      fencing_epoch: epoch + 1,
+      last_interrupted_run_id: row.lease_run_id || null,
+      last_interrupted_purpose: row.lease_purpose || null,
+      last_interrupted_at: at,
+      updated_at: at,
+    }, {
+      scope_key: scopeKey,
+      lease_id: row.lease_id,
+      fencing_epoch: epoch,
+      lease_seq: integerOf(row.lease_seq) || 0,
+      generation_token: row.generation_token,
+    }, 'observe')
+    if (cleared.length === 1) return currentGeneration(scopeKey, cleared[0])
+    const again = await readRow(scopeKey, 'observe')
+    const againAtMs = nowMs()
+    if (leaseIsLive(again, againAtMs)) throw writeLocked(again, againAtMs)
+    throw contentionRefusal()
   }
 
   // P1-b: the current generation (plan-time check; read-only, no lease refusal).

@@ -2755,10 +2755,10 @@ async function testSwlB8ApprovalRefusesAnExpansionOvertakenByAWrite() {
   await swlExpectStale(swlPlan(harness, storage, x.jobId))
 }
 
-// ── Review round 4: an EXPIRED lease at expansion time (B11–B13) ───────────────────────────────────
-// The holder of the sheet stalled past TTL + GRACE and nobody took over; the expansion observes that
-// lease (id + seq). If the holder comes back, the expansion is stale; if it never does, the approval's own
-// bump clears the abandoned lease and the approval succeeds.
+// ── Review rounds 4–5: an ABANDONED lease at expansion time (B11–B13) ───────────────────────────────
+// The holder of the sheet passed its pre-write CAS, then stalled past TTL + GRACE, and nobody took over.
+// The expansion start CLEARS that lease (round 5) before it records the generation, so whatever the holder
+// does next it can no longer write, and the expansion stays approvable.
 async function swlStalledHolder() {
   const clock = swlKit.createClock()
   const harness = swlKit.createLibWriteLockHarness({ clock })
@@ -2767,6 +2767,7 @@ async function swlStalledHolder() {
   await harness.lock.bumpGeneration(scope, { reason: 'small_preview' })
   const grant = await harness.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-stalled-holder' })
   const guard = harness.lock.createGuard(grant)
+  await guard.beforeWrite({ index: 0, operation: 'createRecord' })
   clock.advance(swlLock.PROJECT_WRITE_LEASE_TTL_MS + swlLock.PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS)
   return { clock, harness, storage, scope, grant, guard }
 }
@@ -2775,51 +2776,60 @@ function swlApplyJobStored(storage, applyJobId) {
   return storage.get(__internals.checkpointApplyJobKey({ ...SWL_SCOPE, actionId: swlKit.goldenAction().actionId, applyJobId }))
 }
 
-async function testSwlB11StalledHolderResumesAndWritesAfterTheExpansion() {
+function swlLockRow(harness, scope) {
+  return harness.db.rows(swlLock.PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === scope)
+}
+
+async function testSwlB11StalledHolderResumingAfterTheExpansionIsRefused() {
   const s = await swlStalledHolder()
   const x = await swlPlannedExpansion(s.harness, { storage: s.storage, jobId: 'swl-b11' })
   const stored = await s.storage.get(__internals.backgroundJobKey({ ...SWL_SCOPE, actionId: x.action.actionId, jobId: x.jobId }))
-  assert.equal(stored.writeObservation.leaseId, s.grant.leaseId, 'B11: the expired lease is recorded')
-  assert.equal(stored.writeObservation.leaseSeq, s.grant.leaseSeq)
+  assert.equal('leaseId' in stored.writeObservation, false, 'B11: the observation carries no lease')
+  assert.equal(stored.writeObservation.fencingEpoch, s.grant.fencingEpoch + 1, 'B11: the expansion cleared the abandoned lease')
+  assert.equal(swlLockRow(s.harness, s.scope).lease_id, null)
   await swlPlan(s.harness, s.storage, x.jobId)
-  // The holder comes back: its pre-write CAS renews (lease_seq moves), and it writes.
-  await s.guard.beforeWrite({ index: 0, operation: 'createRecord' })
+  // The holder comes back between its CAS and its host write: the fenced write is refused, nothing lands.
   const records = swlKit.createRecordsApi()
-  await records.recordsApi.createRecord({ sheetId: x.action.target.sheetId, data: { idempotencyKey: 'swl-b11-late' }, writeFence: s.guard.hostWriteFence() })
-  assert.equal(records.rows.length, 1, 'calibration: the resumed holder wrote')
-  const generation = (await s.harness.lock.readGeneration(s.scope)).generation
-  await swlExpectStale(swlApprove(s.harness, s.storage, x.jobId, 'swl-b11-approval'))
-  assert.equal(await swlApplyJobStored(s.storage, 'swl-b11-approval'), null, 'B11: no job')
-  assert.equal((await s.harness.lock.readGeneration(s.scope)).generation, generation, 'B11: nothing bumped')
-  // …and a resume BEFORE the plan is caught at the plan.
-  const s2 = await swlStalledHolder()
-  const y = await swlPlannedExpansion(s2.harness, { storage: s2.storage, jobId: 'swl-b11-plan' })
-  await s2.guard.beforeWrite({ index: 0, operation: 'createRecord' })
-  await swlExpectStale(swlPlan(s2.harness, s2.storage, y.jobId))
+  await assert.rejects(
+    () => records.recordsApi.createRecord({ sheetId: x.action.target.sheetId, data: { idempotencyKey: 'swl-b11-late' }, writeFence: s.guard.hostWriteFence() }),
+    (error) => error.code === 'PLUGIN_WRITE_FENCE_REJECTED',
+  )
+  assert.equal(records.rows.length, 0, 'B11: the late write did not land')
+  const mapped = await s.guard.hostFenceRefused({ code: 'PLUGIN_WRITE_FENCE_REJECTED' })
+  assert.equal(mapped.code, 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST')
+  await assert.rejects(() => s.guard.beforeWrite({ index: 1, operation: 'createRecord' }), (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST')
+  // …and the expansion is still approvable.
+  const approved = await swlApprove(s.harness, s.storage, x.jobId, 'swl-b11-approval')
+  assert.equal(typeof approved.writeGenerationToken, 'string')
 }
 
-async function testSwlB12StalledHolderNeverReturnsTheApprovalClearsIt() {
+async function testSwlB12StalledHolderNeverReturnsTheExpansionIsApprovable() {
   const s = await swlStalledHolder()
   const x = await swlPlannedExpansion(s.harness, { storage: s.storage, jobId: 'swl-b12' })
   await swlPlan(s.harness, s.storage, x.jobId)
   const approved = await swlApprove(s.harness, s.storage, x.jobId, 'swl-b12-approval')
-  assert.equal(typeof approved.writeGenerationToken, 'string', 'B12: an approval after a crash still succeeds')
-  const row = s.harness.db.rows(swlLock.PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === s.scope)
-  assert.equal(row.lease_id, null, 'B12: the abandoned lease was cleared by the approval bump')
-  assert.equal(row.fencing_epoch, s.grant.fencingEpoch + 1)
+  assert.equal(typeof approved.writeGenerationToken, 'string', 'B12: an approval after a crash succeeds')
+  const row = swlLockRow(s.harness, s.scope)
+  assert.equal(row.lease_id, null)
+  assert.equal(row.fencing_epoch, s.grant.fencingEpoch + 1, 'B12: cleared once, by the expansion')
+  assert.equal(row.last_interrupted_run_id, 'swl-stalled-holder')
   assert.equal(row.generation_token, approved.writeGenerationToken)
-  await assert.rejects(() => s.guard.beforeWrite({ index: 0, operation: 'createRecord' }), (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'B12: the old holder can no longer write')
 }
 
-async function testSwlB13StalledHolderReleasedSinceIsRefusedConservatively() {
-  // release() clears lease_id WITHOUT moving the epoch, so "lease gone, same epoch" cannot be told apart
-  // from "came back, wrote, released" — refused; the operator expands again.
-  const s = await swlStalledHolder()
-  const x = await swlPlannedExpansion(s.harness, { storage: s.storage, jobId: 'swl-b13' })
-  await swlPlan(s.harness, s.storage, x.jobId)
-  await s.guard.release()
-  await swlExpectStale(swlApprove(s.harness, s.storage, x.jobId, 'swl-b13-approval'))
-  assert.equal(await swlApplyJobStored(s.storage, 'swl-b13-approval'), null)
+async function testSwlB13ALeaseInItsGraceWindowRefusesTheExpansion() {
+  const clock = swlKit.createClock()
+  const harness = swlKit.createLibWriteLockHarness({ clock })
+  const storage = swlKit.createConsumableStorage()
+  const scope = swlLock.sheetWriteScopeKey(swlKit.goldenAction().target.sheetId)
+  await harness.lock.bumpGeneration(scope, { reason: 'small_preview' })
+  await harness.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-b13' })
+  clock.advance(swlLock.PROJECT_WRITE_LEASE_TTL_MS + 1000) // expired, inside GRACE
+  await assert.rejects(
+    () => swlPlannedExpansion(harness, { storage, jobId: 'swl-b13' }),
+    (error) => error.code === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && error.status === 409,
+  )
+  assert.equal(await storage.get(__internals.backgroundJobKey({ ...SWL_SCOPE, actionId: swlKit.goldenAction().actionId, jobId: 'swl-b13' })), null)
+  assert.ok(swlLockRow(harness, scope).lease_id, 'the lease is not cleared inside its grace window')
 }
 
 async function testSwlB9UnobservedExpansionsAndBusySheetsAreRefused() {
@@ -2903,9 +2913,9 @@ async function main() {
   await testSwlB8ApprovalRefusesAnExpansionOvertakenByAWrite()
   await testSwlB9UnobservedExpansionsAndBusySheetsAreRefused()
   await testSwlB10ChunkWritesAreHostFenced()
-  await testSwlB11StalledHolderResumesAndWritesAfterTheExpansion()
-  await testSwlB12StalledHolderNeverReturnsTheApprovalClearsIt()
-  await testSwlB13StalledHolderReleasedSinceIsRefusedConservatively()
+  await testSwlB11StalledHolderResumingAfterTheExpansionIsRefused()
+  await testSwlB12StalledHolderNeverReturnsTheExpansionIsApprovable()
+  await testSwlB13ALeaseInItsGraceWindowRefusesTheExpansion()
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()
