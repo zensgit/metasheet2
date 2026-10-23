@@ -81,7 +81,8 @@ import {
 } from '../core/attendance-cancellation-execution-port'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { Logger } from '../core/logger'
-import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { listUserPermissions } from '../rbac/service'
+import { loadApprovalUserRoleIds } from '../services/approval-actor-roles'
 
 const logger = new Logger('ApprovalCancelRoundEntryPort')
 
@@ -166,30 +167,17 @@ async function resolveAffectedUserPermissions(userId: string): Promise<string[]>
 }
 
 /**
- * The role claim of the same touched-but-not-acting user. Their own `GET /api/todo/count` reads the
- * one role the authentication layer puts on `req.user.role` when token claims are not trusted (the
- * production setting): `AuthService.resolveRbacProfile` takes the `users.role` column and upgrades it
- * to `'admin'` when `user_roles` holds `admin` (`isAdmin`, the same lookup). The same two reads here
- * give the push that role, so a pending item seated on that role arm is counted in the push as it is
- * in the read. A failed admin lookup keeps the column value (as `resolveRbacProfile` does); a failed
- * column read gives no role claims (the count the approval side pushes); neither fails the push.
+ * The role set of the same touched-but-not-acting user, as their own `GET /api/todo/count` resolves
+ * it: `resolveApprovalActorRoles` = the request's role claim (in production the `users.role` column,
+ * or `'admin'` when `user_roles` holds `admin`) ∪ the `users.role` column ∪ every `user_roles.role_id`.
+ * Without trusted token claims that union is exactly `loadApprovalUserRoleIds` (the `'admin'` upgrade
+ * comes from a `user_roles` row that set already contains), so a pending item seated on any of those
+ * role ids is counted in the push as it is in the read. A failed read THROWS: the push is skipped and
+ * logged by the caller rather than sent with a narrower count.
  */
 async function resolveAffectedUserRoles(userId: string): Promise<string[]> {
-  let role = ''
-  try {
-    if (!pool) return []
-    const result = await pool.query('SELECT role FROM users WHERE id = $1', [userId])
-    const stored = (result.rows[0] as { role?: unknown } | undefined)?.role
-    role = typeof stored === 'string' ? stored.trim() : ''
-  } catch {
-    return []
-  }
-  try {
-    if (await isRbacAdmin(userId)) role = 'admin'
-  } catch {
-    // keep the column value, as the authentication layer does
-  }
-  return role ? [role] : []
+  if (!pool) return []
+  return loadApprovalUserRoleIds(userId, pool)
 }
 
 /**
@@ -229,7 +217,11 @@ async function publishCancelRoundCounts(
       ...(actorId
         ? [{
             userId: actorId,
-            roles: normalizeActorRoleClaims(actor.roles),
+            // The actor's claims ∪ their stored role ids — the same set their own count read resolves.
+            roles: [...new Set([
+              ...normalizeActorRoleClaims(actor.roles),
+              ...(pool ? await loadApprovalUserRoleIds(actorId, pool) : []),
+            ])],
             permissions: normalizeActorPermissionClaims(actor.permissions),
           }]
         : []),

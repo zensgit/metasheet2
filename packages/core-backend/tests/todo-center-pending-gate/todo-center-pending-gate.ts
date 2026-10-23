@@ -635,19 +635,19 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
   // shared query) (§5 A0 ③).
   const v3 = viewer('c3-admin-no-seat', 'admin')
   // Class ③′ — `users.role='manager'` PLUS an admin `user_roles` row, holding a `('role',
-  // 'manager')` seat of its own ⇒ (a) = 0: `resolveRbacProfile`'s admin upgrade REPLACES `role`
-  // with `'admin'` rather than unioning it, so the manager-role seat no longer matches
-  // `resolveApprovalActorRoles(req)` — a pre-existing, deliberately-unfixed behavior this class
-  // pins as-is (§5 A0 ③′; §3.0 "升格是替换,manager 席位丢失").
+  // 'manager')` seat of its own. `resolveRbacProfile`'s admin upgrade still REPLACES the request's
+  // `role` with `'admin'` (`/me` reads 'admin'), but the shared approval role set now also reads the
+  // `users.role` column and the `user_roles` ids (gate-synchronized widening, the separate ruling the
+  // lock's §7-2′ reserved for it), so the manager-role seat matches again ⇒ 1. Under the former
+  // role source (a) this was 0 (§5 A0 ③′ golden value, superseded by that ruling).
   const v3b = viewer('c3prime-admin-upgrade-drops-role-seat', ROLE_NAME_CLASS_3B)
   // Class ④ — `users.role='employee'`, no seat at all ⇒ 0 (§5 A0 ④).
   const v4 = viewer('c4-employee-no-seat', 'employee')
   // Class ⑤ — `users.role='employee'`, `user_roles` holds a NON-admin `reviewer` role, holding a
-  // `('role', 'reviewer')` seat on its own pending platform instance ⇒ (a) = 0: (a)'s role source
-  // is `users.role` (+ admin upgrade) ONLY, never `user_roles`, so a role held solely via
-  // `user_roles` is invisible to the shared query under (a) — a pre-existing, deliberately-
-  // unfixed, record-only behavior this class pins as-is (§5 A0 ⑤; §3.0 "记录性:(b) 会是 1,这就
-  // 是 (b) 的加宽人口,也是 actionable 与门分叉的人口").
+  // `('role', 'reviewer')` seat on its own pending platform instance ⇒ 1: the shared approval role
+  // set (decision gate and this query alike) includes `user_roles` role ids, so a role held solely
+  // via `user_roles` is visible and decidable. Under the former role source (a) this was 0 — the
+  // population §3.0 recorded as the widening that must move together with the gate (§7-2′).
   const v5 = viewer('c5-reviewer-role-seat', 'employee')
   // Class ⑥ — `users.role='employee'`, `user_roles` holds the migration-seeded, non-admin
   // `attendance_approver` role (granting `attendance:approve` via `role_permissions`, admitted
@@ -1125,21 +1125,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body.unreadCount).toBe(0)
     })
 
-    it('class ③′ — manager role seat, but an admin user_roles row upgrades (a)\'s role and DROPS the manager seat match ⇒ 0', async () => {
+    it('class ③′ — manager role seat plus an admin user_roles row: the request role is upgraded to admin, and the shared role set still holds the users.role column ⇒ 1', async () => {
       const token = await devToken(baseUrl, v3b.id)
       const me = await fetchMe(baseUrl, token)
       expect(me.email).toBe(v3b.email)
       expect(me.username).toBe(v3b.username)
       expect(me.name).toBe(v3b.name)
-      // The admin-upgrade REPLACES `role`, so the resolved identity must read back as 'admin', not
-      // the seeded 'manager' — this is the exact mechanism §5 A0 ③′ pins.
+      // The admin-upgrade still REPLACES the request's `role` ('admin', not the seeded 'manager');
+      // the count below comes from the shared role set's `users.role` column read, not from `/me`.
       expect(me.role).toBe('admin')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
       expect(status).toBe(200)
       expect(body).toHaveProperty('count')
-      expect(body.count).toBe(0)
-      expect(body.unreadCount).toBe(0)
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
     })
 
     it('class ④ — employee, no seat ⇒ 0', async () => {
@@ -1156,21 +1156,21 @@ describe('todo-center pending-query production-path gate (real DB, dedicated pro
       expect(body.unreadCount).toBe(0)
     })
 
-    it('class ⑤ — user_roles-only reviewer role seat is invisible under (a) (role source is users.role only, not user_roles) ⇒ 0', async () => {
+    it('class ⑤ — user_roles-only reviewer role seat is counted (the shared role set includes user_roles role ids) ⇒ 1', async () => {
       const token = await devToken(baseUrl, v5.id)
       const me = await fetchMe(baseUrl, token)
       expect(me.email).toBe(v5.email)
       expect(me.username).toBe(v5.username)
       expect(me.name).toBe(v5.name)
-      // (a) resolves role from `users.role` only — v5 was NOT given an admin `user_roles` row, so
-      // no upgrade fires and `/me` reads back the seeded 'employee', not 'admin' (unlike ③′).
+      // v5 was NOT given an admin `user_roles` row, so no upgrade fires and `/me` reads back the
+      // seeded 'employee' (unlike ③′): the count below comes ONLY from the `user_roles` 'reviewer' id.
       expect(me.role).toBe('employee')
 
       const { status, body } = await fetchPendingCount(baseUrl, token, 'all')
       expect(status).toBe(200)
       expect(body).toHaveProperty('count')
-      expect(body.count).toBe(0)
-      expect(body.unreadCount).toBe(0)
+      expect(body.count).toBe(1)
+      expect(body.unreadCount).toBe(1)
     })
 
     // NOTE (flagged divergence, see `SOURCE_QUEUE_PERMISSION_CODE_CLASS_6`'s docblock above): this
