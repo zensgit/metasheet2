@@ -8565,7 +8565,7 @@ function normalizeRuleOverride(value) {
   const workingDays = Array.isArray(override.workingDays)
     ? override.workingDays.map(day => Number(day)).filter(day => Number.isFinite(day) && day >= 0 && day <= 6)
     : undefined
-  return {
+  const normalized = {
     timezone: typeof override.timezone === 'string' && override.timezone.trim().length > 0
       ? override.timezone.trim()
       : undefined,
@@ -8593,6 +8593,8 @@ function normalizeRuleOverride(value) {
       : undefined,
     workingDays: workingDays && workingDays.length > 0 ? workingDays : undefined,
   }
+  // Missing override fields must preserve the complete base rule.
+  return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined))
 }
 
 function normalizeWorkingDays(value) {
