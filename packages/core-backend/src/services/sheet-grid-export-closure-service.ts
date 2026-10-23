@@ -5,8 +5,10 @@
  * THE LOAD-BEARING PROPERTIES
  *   * ONE UPDATE, SET-ONCE. The only mutating statement in this file sets `grid_export_closure` to the LITERAL
  *     `'stock_prep_pilot'` with `WHERE grid_export_closure IS NULL`. The reason is not a parameter of any function
- *     here, and no statement in the host writes the column back to NULL — there is no reopen / unset verb. The unit
- *     suite pins this file's statement census and scans src/ for any other writer of the column.
+ *     here, and no statement in core-backend/src writes the column back to NULL — there is no reopen / unset verb
+ *     there. KNOWN BYPASS (same posture as `meta_sheets.system_kind`): every plugin's raw `database.query` handle
+ *     could UPDATE the column directly. The unit suite pins this file's statement census and scans core-backend/src
+ *     AND plugins/ for any other writer of the column, so such a plugin write reds before it merges.
  *   * IDEMPOTENT. A second call on a stamped sheet writes nothing and reports `alreadyClosed: true` with the
  *     ORIGINAL time and actor (a re-POST from the plugin repairs a missing stamp; it never moves an existing one).
  *   * ONE TRANSACTION, the same order every other sheet-config writer uses: the canonical writer fence first

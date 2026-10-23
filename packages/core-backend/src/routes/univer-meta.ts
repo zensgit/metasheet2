@@ -16840,8 +16840,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the resolver already turned
       // `canExport` off on a sheet stamped closed for generic grid export (xlsx AND csv — the format branch is far
       // below). A READER of such a sheet is told why (values-free, fixed copy); a non-reader got the plain 403 one
-      // line above and learns nothing. Every other `canExport: false` keeps the plain 403.
-      if (!capabilities.canExport) return gridExportClosed ? res.status(403).json(GRID_EXPORT_CLOSED_REFUSAL) : sendForbidden(res)
+      // line above and learns nothing. Every other `canExport: false` keeps the plain 403, in today's order.
+      // Review round 1: on a CLOSED sheet liveness answers first — a reader of a soft-deleted (or vanished) stamped
+      // sheet gets the same values-free SHEET_DELETED / NOT_FOUND any reader gets, not the closure 403; the closure
+      // refusal is reserved for a live sheet. The caller already passed canRead, so no existence oracle opens.
+      if (!capabilities.canExport) {
+        if (!gridExportClosed) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+        return res.status(403).json(GRID_EXPORT_CLOSED_REFUSAL)
+      }
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
       // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared

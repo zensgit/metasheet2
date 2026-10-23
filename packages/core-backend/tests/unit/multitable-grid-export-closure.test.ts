@@ -48,6 +48,8 @@ import { getObjectSheetId } from '../../src/multitable/provisioning'
 import {
   GRID_EXPORT_CLOSED_REFUSAL,
   GRID_EXPORT_CLOSED_SHEET_IDS_SQL,
+  STOCK_PREPARATION_SHEET_STAMPS_SQL,
+  loadStockPreparationSheetStamps,
   MULTITABLE_GRID_EXPORT_CLOSED_CODE,
   MULTITABLE_GRID_EXPORT_CLOSED_MESSAGE,
   SheetGridExportClosureError,
@@ -78,6 +80,8 @@ const OBJECT_ID = 'plm_stock_preparation_sandbox_p_0123456789abcdef01234567'
 const OTHER_OBJECT_ID = 'plm_stock_preparation_sandbox_p_fedcba9876543210fedcba98'
 const CLOSED = getObjectSheetId(PROJECT_ID, OBJECT_ID)
 const OPEN_DERIVED = getObjectSheetId(PROJECT_ID, OTHER_OBJECT_ID)
+/** A stamped project sheet that has been soft-deleted (review round 1: liveness answers before the closure). */
+const DELETED_CLOSED = getObjectSheetId(PROJECT_ID, 'plm_stock_preparation_sandbox_p_00112233445566778899aabb')
 const PLAIN = 'sht_gec_plain'
 const BASE_ID = 'base_gec'
 const CLOSED_AT = '2026-10-22T06:00:00.000Z'
@@ -104,7 +108,12 @@ function makeAnswer(log: Log, closed: ReadonlySet<string>) {
       const ids = (params[0] as string[]) ?? []
       return { rows: ids.filter((id) => closed.has(id)).map((id) => ({ id })), rowCount: 0 }
     }
+    if (q === collapse(STOCK_PREPARATION_SHEET_STAMPS_SQL)) {
+      const ids = (params[0] as string[]) ?? []
+      return { rows: ids.filter((id) => closed.has(id)).map((id) => ({ id, stock_prep_overview: false, grid_export_closed: true })), rowCount: 0 }
+    }
     if (/^SELECT deleted_at FROM meta_sheets WHERE id = \$1( FOR UPDATE)?$/.test(q)) {
+      if (params[0] === DELETED_CLOSED) return { rows: [{ deleted_at: new Date('2026-10-22T00:00:00Z') }], rowCount: 1 }
       return { rows: known(params[0]) ? [{ deleted_at: null }] : [], rowCount: 0 }
     }
     if (q.includes('FROM meta_sheets s LEFT JOIN meta_bases b ON b.id = s.base_id')) {
@@ -246,6 +255,56 @@ describe('R — the clamp in each of the three resolvers', () => {
   }
 })
 
+describe('Q — query count (review round 1, fix 2): the closure costs NO extra statement', () => {
+  for (const userKey of ['admin', 'reader'] as const) {
+    it(`Q-01 ${userKey}: an UNCLOSED derived-id sheet costs exactly one stamp statement (overview + closure folded) in each resolver; a client-id sheet none`, async () => {
+      const user = USERS[userKey]
+      const access = { userId: user.id, permissions: [...user.perms], isAdminRole: user.roles.includes('admin') }
+      const lanes = {
+        rest: (q: never, s: string) => permissionService.resolveSheetCapabilitiesForAccess(q, s, access),
+        collab: (q: never, s: string) => sheetCapabilities.resolveSheetCapabilitiesForUser(q, s, user.id),
+        onQuery: (q: never, s: string) => txnAuth.resolveSheetCapabilitiesForUserOnQuery(q, s, user.id, undefined, { isAdminRole: access.isAdminRole, permissions: access.permissions }),
+      }
+      for (const [lane, run] of Object.entries(lanes)) {
+        const derivedLog: Log = []
+        await run(makeAnswer(derivedLog, new Set()) as never, OPEN_DERIVED)
+        const plainLog: Log = []
+        await run(makeAnswer(plainLog, new Set()) as never, PLAIN)
+        const stampish = (log: Log) => log.filter((e) => /system_kind|grid_export_closure/.test(e.sql))
+        expect(stampish(derivedLog).map((e) => e.sql), lane).toEqual([collapse(STOCK_PREPARATION_SHEET_STAMPS_SQL)])
+        expect(stampish(plainLog), lane).toEqual([])
+        // The only difference between the two sheets' statement streams is that one folded lookup.
+        expect(derivedLog.length, lane).toBe(plainLog.length + 1)
+      }
+    })
+  }
+
+  it('Q-02 the folded loader reads both stamps from one row set; the alias literal the hoisted overview fakes match is the statement prefix', async () => {
+    const OVERVIEW_ID = getObjectSheetId(PROJECT_ID, 'plm_stock_preparation_project_overview')
+    const query = vi.fn(async () => ({ rows: [
+      { id: OVERVIEW_ID, stock_prep_overview: true, grid_export_closed: false },
+      { id: CLOSED, stock_prep_overview: false, grid_export_closed: true },
+      { id: 7, stock_prep_overview: true, grid_export_closed: true },
+    ] }))
+    const stamps = await loadStockPreparationSheetStamps(query, [PLAIN, OVERVIEW_ID, CLOSED, OPEN_DERIVED])
+    expect(stamps.overviewSheetIds).toEqual(new Set([OVERVIEW_ID]))
+    expect(stamps.gridExportClosedSheetIds).toEqual(new Set([CLOSED]))
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(query.mock.calls[0]).toEqual([STOCK_PREPARATION_SHEET_STAMPS_SQL, [[OVERVIEW_ID, CLOSED, OPEN_DERIVED], 'stock_prep_overview']])
+    expect(STOCK_PREPARATION_SHEET_STAMPS_SQL.startsWith("SELECT id, ((to_jsonb(meta_sheets) ->> 'system_kind') = $2) AS stock_prep_overview,")).toBe(true)
+    // The WHERE admits a row for EITHER stamp (a fake cannot evaluate SQL, so the two arms are pinned as text; the
+    // real-DB cases GX3 / GX4 prove the closure arm on PostgreSQL).
+    expect(STOCK_PREPARATION_SHEET_STAMPS_SQL).toContain(
+      "WHERE id = ANY($1::text[]) AND ((to_jsonb(meta_sheets) ->> 'system_kind') = $2 OR (to_jsonb(meta_sheets) ->> 'grid_export_closure') IS NOT NULL)",
+    )
+    // Both keys are only ever named as to_jsonb KEYS (column-tolerant).
+    expect(STOCK_PREPARATION_SHEET_STAMPS_SQL.replace(/'grid_export_closure'|'system_kind'/g, '')).not.toMatch(/grid_export_closure|system_kind/)
+    const none = vi.fn(async () => ({ rows: [] }))
+    expect(await loadStockPreparationSheetStamps(none, [PLAIN, 'sheet_x'])).toEqual({ overviewSheetIds: new Set(), gridExportClosedSheetIds: new Set() })
+    expect(none).not.toHaveBeenCalled()
+  })
+})
+
 describe('E — the whole-sheet export route (xlsx and csv)', () => {
   const cases: Array<{ label: string; identity: { user: UserKey; token?: boolean } }> = [
     { label: 'ordinary reader', identity: { user: 'reader' } },
@@ -287,6 +346,23 @@ describe('E — the whole-sheet export route (xlsx and csv)', () => {
       }
     }, 60_000)
   }
+
+  it('E-05 (review round 1) a SOFT-DELETED stamped sheet: a reader gets the values-free 404 SHEET_DELETED (liveness first), a non-reader the plain 403', async () => {
+    for (const format of ['xlsx', 'csv'] as const) {
+      const log: Log = []
+      mountApp(log, new Set([CLOSED, DELETED_CLOSED]), { user: 'reader' })
+      const res = await request(pinned.url()).get(`/api/multitable/sheets/${DELETED_CLOSED}/export-xlsx`).query(format === 'csv' ? { format } : {})
+      expect(res.status, format).toBe(404)
+      expect(res.body?.error?.code, format).toBe('SHEET_DELETED')
+      expect(JSON.stringify(res.body)).not.toContain(MULTITABLE_GRID_EXPORT_CLOSED_CODE)
+      expect(JSON.stringify(res.body)).not.toContain(DELETED_CLOSED)
+    }
+    const log: Log = []
+    mountApp(log, new Set([CLOSED, DELETED_CLOSED]), { user: 'outsider' })
+    const outsider = await request(pinned.url()).get(`/api/multitable/sheets/${DELETED_CLOSED}/export-xlsx`)
+    expect(outsider.status).toBe(403)
+    expect(outsider.body?.error?.code).toBe('FORBIDDEN')
+  }, 60_000)
 
   it('E-04 an `mst_` API token cannot reach the export route at all (not on the OAPI allowlist)', () => {
     expect(isOapiAllowlistRequest('GET', `/api/multitable/sheets/${CLOSED}/export-xlsx`, 'Bearer mst_synthetic')).toBe(false)
@@ -563,23 +639,32 @@ describe('S — the close / read service', () => {
     expect(await readSheetGridExportClosure(absent.query, { sheetId: CLOSED })).toMatchObject({ present: false, closure: null })
   })
 
-  it('S-07 ONE WRITER: the service holds the only statement in src/ that writes grid_export_closure, and nothing writes it back to NULL', () => {
+  it('S-07 ONE WRITER: across core-backend/src AND plugins/, the host service holds the only statement that writes grid_export_closure, and nothing writes it back to NULL', () => {
+    // Review round 1, fix 4: plugins get a raw `database.query` handle, so the census also walks plugins/ — a plugin
+    // (PR B included) that wrote the column directly instead of calling the port would red here.
+    const repoRoot = join(__dirname, '../../../..')
     const root = join(__dirname, '../../src')
     const files: string[] = []
     const walk = (dir: string) => {
       for (const name of readdirSync(dir)) {
+        if (name === 'node_modules' || name === 'dist' || name === '.git') continue
         const full = join(dir, name)
         if (statSync(full).isDirectory()) walk(full)
-        else if (/\.(ts|cjs|js|mjs)$/.test(name)) files.push(full)
+        else if (/\.(ts|cjs|js|mjs|sql)$/.test(name)) files.push(full)
       }
     }
     walk(root)
+    const pluginFilesStart = files.length
+    walk(join(repoRoot, 'plugins'))
+    expect(files.length - pluginFilesStart, 'the plugins/ walk found files (it is not a silent no-op)').toBeGreaterThan(100)
     const writers: string[] = []
     for (const file of files) {
       const text = readFileSync(file, 'utf8')
-      if (/grid_export_closure\s*=\s*(NULL|\$\d+|')/i.test(text) || /SET\s+grid_export_closure/i.test(text)) writers.push(relative(root, file).replace(/\\/g, '/'))
+      if (/grid_export_closure\s*=\s*(NULL|\$\d+|'|\?)/i.test(text) || /SET\s+grid_export_closure/i.test(text) || /\bgrid_export_closure\s*:/i.test(text)) {
+        writers.push(relative(repoRoot, file).replace(/\\/g, '/'))
+      }
     }
-    expect(writers).toEqual(['services/sheet-grid-export-closure-service.ts'])
+    expect(writers).toEqual(['packages/core-backend/src/services/sheet-grid-export-closure-service.ts'])
     const service = readFileSync(join(root, 'services/sheet-grid-export-closure-service.ts'), 'utf8')
     expect(service.match(/\bUPDATE\s+meta_sheets\b/g)).toHaveLength(1)
     expect(service).not.toMatch(/grid_export_closure\s*=\s*NULL/i)

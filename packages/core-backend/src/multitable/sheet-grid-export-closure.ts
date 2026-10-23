@@ -17,13 +17,26 @@
  *      can render its export buttons disabled with the reason and re-check before it generates a selected-rows
  *      CSV / XLSX in the browser. Every other sheet's `/context` is byte-identical to before.
  *
- * WHAT IT DOES NOT CLOSE (stated, not hidden): reads (`/view`, record reads, API reads, collaboration), print
- * (`window.print`) and copy-selection. They are not file exports; the delivery note says they are not a formal
- * hand-off basis. The project-material export (plugin side) is untouched.
+ * THE BOUNDARY — WHAT IT DOES NOT CLOSE (stated, not hidden; review round 1 boundary decision, T layer,
+ * Ratified-by-default-2026-10-23, owner may veto within 24h). The closure covers ONLY the pilot sheet's OWN generic
+ * file exports: its whole-sheet and selected-row CSV / Excel. These stay open and are NOT a formal hand-off basis —
+ * the same class as print (`window.print`) and copy-selection:
+ *   - values DERIVED INTO OTHER, ORDINARY sheets through link / lookup / formula. A formula over a lookup into the
+ *     pilot sheet is materialized into the other sheet's records and that sheet's export carries it (confirmed by
+ *     execution); a plain lookup column may hydrate on some export branches. Not closed on purpose: the owner's
+ *     decision reads 「其他普通表不受影响」, and blanking derived values elsewhere would silently break legitimate
+ *     summary / dashboard sheets. There is deliberately NO taint drop for it in maskStoredRecordFieldIds;
+ *   - automation egress from the pilot sheet (send_webhook and the other outbound actions);
+ *   - API JSON reads and the other reads (`/view`, record reads, OAPI token reads, collaboration).
+ * The project-material export (plugin side) is the formal hand-off and is untouched.
  *
- * THE STAMP CAN ONLY TAKE EXPORT AWAY. Nothing reads it to grant anything, and the host has no verb that clears
- * it (no reopen / unset port, service or route). The only writer is services/sheet-grid-export-closure-service.ts,
- * reached through the plugin-only port `provisioning.closeSheetGridExport` (plugin-scope.ts).
+ * THE STAMP CAN ONLY TAKE EXPORT AWAY. Nothing reads it to grant anything, and core-backend/src has no verb that
+ * clears it (no reopen / unset port, service or route). The only writer in core-backend/src is
+ * services/sheet-grid-export-closure-service.ts, reached through the plugin-only port
+ * `provisioning.closeSheetGridExport` (plugin-scope.ts). KNOWN BYPASS, same posture as `system_kind`: every plugin's
+ * raw `database.query` handle could UPDATE the column directly; the one-writer census
+ * (tests/unit/multitable-grid-export-closure.test.ts S-07) scans core-backend/src AND plugins/, so a plugin that
+ * writes the column instead of calling the port reds there.
  *
  * THE LOOKUP ({@link loadGridExportClosedSheetIds}):
  *   - COLUMN-TOLERANT (`to_jsonb(meta_sheets) ->> 'grid_export_closure'`): a database where the migration has not
@@ -32,13 +45,21 @@
  *   - ID-PREFILTERED: a closed sheet is a plugin-provisioned project sheet, whose id is ALWAYS the host-derived
  *     `getObjectSheetId(project, object)` = `sheet_` + 24 lowercase hex; the close service refuses any other id,
  *     and `POST /sheets` / `GET /view?seed=true` refuse to mint that shape. So an id outside the pattern cannot be
- *     closed and the lookup issues NO statement for it: an ordinary (client-id) sheet costs what it cost before.
+ *     closed and the lookup issues NO statement for it. NOT every derived-shape sheet is a project sheet:
+ *     template-installed sheets (template-library stableChildId), plugin sheets, People and the projections share
+ *     the shape. For them the capability resolvers pay NO extra statement either, because they read both host
+ *     stamps (overview kind + closure) in ONE statement (`loadStockPreparationSheetStamps`, review round 1 fix 2):
+ *     derived-id sheets stay at the one statement the overview lookup already cost, client-id sheets at zero.
+ *     The lookup runs before `canRead` is decided, as the overview lookup always has.
  *   - No `deleted_at` filter: a soft-deleted closed sheet stays closed (it can only refuse more).
  *   - Errors other than the tolerated missing column PROPAGATE (fail closed, the overview lookup's posture).
  *
  * No heavy imports: required by the capability resolvers, the export route, copy-sheet and the scope wrapper.
  */
-import { isStockPreparationOverviewSheetIdCandidate } from './stock-preparation-overview-contract'
+import {
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+  isStockPreparationOverviewSheetIdCandidate,
+} from './stock-preparation-overview-contract'
 
 /** The closed set of closure reasons (the migration's CHECK holds the same list). */
 export const GRID_EXPORT_CLOSURE_REASON_STOCK_PREP_PILOT = 'stock_prep_pilot' as const
@@ -104,6 +125,40 @@ export async function loadGridExportClosedSheetIds(
     if (typeof row?.id === 'string') ids.add(row.id)
   }
   return ids
+}
+
+/**
+ * ONE statement for both host stamps a capability resolver needs: the stock-preparation overview kind and the
+ * grid-export closure (review round 1, fix 2). The three resolvers used to ask the overview lookup and then this
+ * module's lookup — two statements for every derived-id sheet (template-installed sheets, plugin sheets, People and
+ * projections all share the `sheet_` + 24 hex shape). Folded, a derived-id sheet costs exactly the one statement it
+ * cost before this feature, and a client-id sheet still costs none. Same table, same derived-id prefilter, same
+ * column tolerance (`to_jsonb`) for both keys; only rows carrying at least one stamp come back.
+ */
+export const STOCK_PREPARATION_SHEET_STAMPS_SQL =
+  `SELECT id, ((to_jsonb(meta_sheets) ->> 'system_kind') = $2) AS stock_prep_overview, ((to_jsonb(meta_sheets) ->> 'grid_export_closure') IS NOT NULL) AS grid_export_closed FROM meta_sheets WHERE id = ANY($1::text[]) AND ((to_jsonb(meta_sheets) ->> 'system_kind') = $2 OR (to_jsonb(meta_sheets) ->> 'grid_export_closure') IS NOT NULL)`
+
+export interface StockPreparationSheetStamps {
+  overviewSheetIds: Set<string>
+  gridExportClosedSheetIds: Set<string>
+}
+
+/** The resolvers' lookup: which of these sheets is the overview, which is closed for grid export. */
+export async function loadStockPreparationSheetStamps(
+  query: GridExportClosureQueryFn,
+  sheetIds: readonly unknown[],
+): Promise<StockPreparationSheetStamps> {
+  const stamps: StockPreparationSheetStamps = { overviewSheetIds: new Set(), gridExportClosedSheetIds: new Set() }
+  if (!Array.isArray(sheetIds) || sheetIds.length === 0) return stamps
+  const candidates = [...new Set(sheetIds.filter(isGridExportClosureSheetIdCandidate))]
+  if (candidates.length === 0) return stamps
+  const result = await query(STOCK_PREPARATION_SHEET_STAMPS_SQL, [candidates, STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND])
+  for (const row of result.rows as Array<{ id?: unknown; stock_prep_overview?: unknown; grid_export_closed?: unknown }>) {
+    if (typeof row?.id !== 'string') continue
+    if (row.stock_prep_overview === true) stamps.overviewSheetIds.add(row.id)
+    if (row.grid_export_closed === true) stamps.gridExportClosedSheetIds.add(row.id)
+  }
+  return stamps
 }
 
 /** Convenience: is this one sheet closed. Same lookup, same tolerance. */

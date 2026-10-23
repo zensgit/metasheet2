@@ -13,8 +13,10 @@ import { sql, type Kysely } from 'kysely'
  * WHO WRITES IT. Only the host service multitable/sheet-grid-export-closure.ts `closeSheetGridExport`, reached
  * only through the `provisioning.closeSheetGridExport` port that the plugin-scope wrapper hands to
  * `plugin-integration-core` alone (same gate shape as `grantSheetRoleWrite`). It sets the stamp once
- * (`WHERE grid_export_closure IS NULL`); there is NO reopen / unset verb anywhere in the host. A mistaken
- * stamp is repaired by an owner-approved runbook DB operation (register row for 2026-10-22).
+ * (`WHERE grid_export_closure IS NULL`); there is NO reopen / unset verb in core-backend/src. The raw plugin
+ * `database.query` handle is the known bypass (same posture as `system_kind`); a one-writer census over
+ * core-backend/src and plugins/ pins that no code writes the column except the host service. A mistaken
+ * stamp is repaired by an owner-approved runbook DB operation (register R-53).
  *
  * WHAT IT CAN DO. The stamp can only TAKE EXPORT AWAY: every capability resolver turns `canExport` off on a
  * stamped sheet and the export route answers 403 MULTITABLE_GRID_EXPORT_CLOSED. Nothing reads it to grant.

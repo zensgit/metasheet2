@@ -59,10 +59,9 @@ import {
 } from './elearning-projection-access'
 import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
 import {
-  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
-import { loadGridExportClosedSheetIds, restrictGridExportCapabilities } from './sheet-grid-export-closure'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -1877,14 +1876,17 @@ export async function resolveSheetCapabilitiesForAccess(
   // projection fence). Readability and listing are untouched: canRead passes through as resolved.
   // Fix round 1 (R12): the lookup issues NO statement for an id that cannot be an overview (the derived-id
   // prefilter in stock-preparation-overview-contract.ts), so an ordinary sheet costs what it cost before.
-  const stockPrepOverview = (await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): the overview kind and the grid-export closure are read in
+  // ONE statement (multitable/sheet-grid-export-closure.ts `loadStockPreparationSheetStamps`), so a derived-id
+  // sheet still costs one statement and a client-id sheet none.
+  const stamps = await loadStockPreparationSheetStamps(query, [sheetId])
+  const stockPrepOverview = stamps.overviewSheetIds.has(sheetId)
   if (stockPrepOverview) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
-  // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): a sheet the host stamped closed for
-  // generic grid export loses `canExport` for EVERY access, administrators included; nothing else changes. The
-  // lookup is column-tolerant and issues no statement for an id that cannot carry the stamp.
-  const gridExportClosed = (await loadGridExportClosedSheetIds(query, [sheetId])).has(sheetId)
+  // 备料分批拉取第一期 step 3: a sheet the host stamped closed for generic grid export loses `canExport` for EVERY
+  // access, administrators included; nothing else changes.
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
   if (gridExportClosed) {
     capabilities = restrictGridExportCapabilities(capabilities, true)
   }
