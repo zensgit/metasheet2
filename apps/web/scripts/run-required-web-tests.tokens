@@ -142,6 +142,7 @@ asyncStateBlock
 attendance-admin-regressions
 attendance-approval-option-hint
 attendance-approval-option-wiring
+attendance-daily-calendar-copy
 attendance-date-only-format
 attendance-experience-entrypoints
 attendance-import-preview-regression.spec.ts

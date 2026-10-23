@@ -803,6 +803,14 @@ jobs:
           fi
           echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
 
+      - name: Run attendance daily calendar units (#5999)
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-daily-calendar.test.ts \
+            tests/unit/attendance-daily-calendar-wiring.test.ts \
+            tests/unit/attendance-daily-calendar-registered.test.ts \
+            --reporter=dot
+
       # Multi-timezone D1: whole-file foundation units; runtime remains unconnected.
       - name: Run attendance timezone policy foundation units
         run: |
@@ -2150,6 +2158,7 @@ jobs:
             tests/integration/attendance-timezone-scheduled.db.test.ts \
             tests/integration/attendance-trip-context-transition-dates.db.test.ts \
             tests/integration/attendance-timezone-policy-store.db.test.ts \
+            tests/integration/attendance-daily-calendar.db.test.ts \
             --reporter=dot
 
       - name: Remove isolated attendance timezone database

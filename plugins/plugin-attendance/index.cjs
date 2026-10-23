@@ -1,6 +1,10 @@
 const crypto = require('crypto')
 const { parseImportAbsoluteDate, normalizeImportCalendarRows, iterateImportCalendarRows } = require('./lib/attendance-import-calendar.cjs')
 const {
+  previousCalendarDates, createDailyCalendarScheduler,
+  loadDailyCalendarDefaultRule, loadDailyCalendarOrgPlans,
+} = require('./lib/attendance-daily-calendar.cjs')
+const {
   isCanonicalImportUserId,
   importUserIdentifierLookupKey,
   adoptCanonicalImportUserId,
@@ -606,11 +610,9 @@ const DEFAULT_SETTINGS = {
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
 let rbacDegraded = false
-let autoAbsenceTimeout = null
-let autoAbsenceInterval = null
+let autoAbsenceSchedule = null
 let lastAutoAbsenceKey = ''
-let autoHolidaySyncTimeout = null
-let autoHolidaySyncInterval = null
+let autoHolidaySyncSchedule = null
 let importUploadCleanupInterval = null
 // Owner-review P2 follow-up on #5064/#5073: periodic metrics logging for the org-resolution
 // shadow recorder (attempted/written/abandoned/dropped/failed — see
@@ -13167,39 +13169,6 @@ function zonedTimeToUtc(parts, timeZone) {
   return utcGuess - offset * 60000
 }
 
-function computeNextRunTime({ now, timeZone, hour, minute }) {
-  const nowDate = now || new Date()
-  const nowParts = getZonedParts(nowDate, timeZone)
-  let targetUtc = zonedTimeToUtc(
-    {
-      year: nowParts.year,
-      month: nowParts.month,
-      day: nowParts.day,
-      hour,
-      minute,
-      second: 0,
-    },
-    timeZone
-  )
-  if (targetUtc <= nowDate.getTime()) {
-    const middayUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 12, 0, 0)
-    const nextDay = new Date(middayUtc + 24 * 60 * 60 * 1000)
-    const nextParts = getZonedParts(nextDay, timeZone)
-    targetUtc = zonedTimeToUtc(
-      {
-        year: nextParts.year,
-        month: nextParts.month,
-        day: nextParts.day,
-        hour,
-        minute,
-        second: 0,
-      },
-      timeZone
-    )
-  }
-  return targetUtc
-}
-
 async function performHolidaySync({ db, logger, orgId, settings, payload, actorId }) {
   const syncConfig = resolveHolidaySyncConfig(settings, payload)
   const years = resolveHolidaySyncYears(settings, payload)
@@ -13967,10 +13936,9 @@ function normalizeSettings(raw) {
   const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
     ? holidaySyncAuto.runAt
     : DEFAULT_SETTINGS.holidaySync.auto.runAt
-  const holidaySyncAutoTimezone = resolveTimeZone(
-    holidaySyncAuto.timezone,
-    DEFAULT_SETTINGS.holidaySync.auto.timezone
-  )
+  const holidaySyncAutoTimezone = parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled)
+    ? holidaySyncAuto.timezone
+    : resolveTimeZone(holidaySyncAuto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
   const holidaySyncLastRunNormalized = holidaySyncLastRun && typeof holidaySyncLastRun === 'object'
     ? {
         ranAt: typeof holidaySyncLastRun.ranAt === 'string' ? holidaySyncLastRun.ranAt : null,
@@ -23819,25 +23787,13 @@ async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
 }
 
 function clearAutoAbsenceSchedule() {
-  if (autoAbsenceTimeout) {
-    clearTimeout(autoAbsenceTimeout)
-    autoAbsenceTimeout = null
-  }
-  if (autoAbsenceInterval) {
-    clearInterval(autoAbsenceInterval)
-    autoAbsenceInterval = null
-  }
+  autoAbsenceSchedule?.stop()
+  autoAbsenceSchedule = null
 }
 
 function clearHolidaySyncSchedule() {
-  if (autoHolidaySyncTimeout) {
-    clearTimeout(autoHolidaySyncTimeout)
-    autoHolidaySyncTimeout = null
-  }
-  if (autoHolidaySyncInterval) {
-    clearInterval(autoHolidaySyncInterval)
-    autoHolidaySyncInterval = null
-  }
+  autoHolidaySyncSchedule?.stop()
+  autoHolidaySyncSchedule = null
 }
 
 // Step 5 (Codex review Blocking #1): extracted from the scheduler's run
@@ -24078,146 +24034,86 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
 }
 
-function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
+function scheduleAutoAbsence({ db, logger, emit, w4Boundary, strictTime }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
   if (!settings.autoAbsence?.enabled) return
-
-  const [hourStr, minuteStr] = settings.autoAbsence.runAt.split(':')
-  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
-  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
-  const now = new Date()
-  const next = new Date(now)
-  next.setHours(hours, minutes, 0, 0)
-  if (next <= now) {
-    next.setDate(next.getDate() + 1)
+  // The cron initiator never bypasses the canonical W4 writer.
+  if (!w4Boundary) {
+    logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+    return
   }
-  const delay = next.getTime() - now.getTime()
-
-  const run = async () => {
-    // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
-    // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
-    if (!w4Boundary) {
-      logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
-      return
-    }
-    // P1-1 fix, item 3 (#4612 verdict second gate round): the org-list query itself is a
-    // single legitimate whole-tick failure (nothing per-org to isolate before org ids exist).
-    // Everything AFTER this point is isolated PER (org, offset) below — a prior revision wrapped
-    // the entire double loop in ONE try, so a single org's `AttendanceW4ScheduledRunIdentityError`
-    // (e.g. the target-set-drift fail-closed remediation, amendment section 1.7 step 3) or the
-    // new `W4C2_SCHEDULED_RUN_TARGET_CONTENDED` retry-exhaustion outcome (P1-2 fix) aborted the
-    // REST of that tick's orgs and lookback days too, repeating every day the stuck workDate
-    // stayed inside the lookback window.
-    let orgIds
-    try {
-      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      orgIds = orgRows.length > 0
-        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
-        : [DEFAULT_ORG_ID]
-    } catch (error) {
-      logger.error('Auto absence job failed (org list)', error)
-      return
-    }
-    const lookbackDays = settings.autoAbsence.lookbackDays || 1
-    for (const orgId of orgIds) {
-      let rule
-      try {
-        rule = await loadDefaultRule(db, orgId)
-      } catch (error) {
-        logger.error('Auto absence job failed for org (rule load)', { orgId, error })
-        continue
-      }
-      for (let offset = 1; offset <= lookbackDays; offset += 1) {
-        const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
-        const workDate = toWorkDate(targetDate, rule.timezone)
+  const warn = code => logger.warn('Attendance daily calendar skipped', { code })
+  autoAbsenceSchedule = createDailyCalendarScheduler({
+    strictTime, warn,
+    loadPlans: () => loadDailyCalendarOrgPlans(db, warn),
+    refreshPlan: async plan => {
+      const rule = await loadDailyCalendarDefaultRule(db, plan.orgId, strictTime, mapRuleRow)
+      return { ...plan, rule, timeZone: rule.timezone, runAt: settings.autoAbsence.runAt }
+    },
+    runPlan: async (plan, isCurrent) => {
+      const lookbackDays = settings.autoAbsence.lookbackDays || 1
+      const workDates = previousCalendarDates(Date.now(), plan.timeZone, lookbackDays)
+      for (const workDate of workDates) {
+        if (!isCurrent()) return
         try {
           await runAutoAbsenceForOrgDate(db, {
-            orgId,
+            orgId: plan.orgId,
             workDate,
-            rule,
+            rule: plan.rule,
             logger,
             emit,
             w4Boundary,
             initiator: 'cron',
           })
-        } catch (error) {
-          // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
-          // module (e.g. "Auto absence generated for ${workDate}" a few lines below), never
-          // the offending business value. One org/date's failure (drift wedge, target-set
-          // contention exhaustion, or any other error) must not skip the remaining orgs/dates
-          // in this tick.
-          logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
+        } catch {
+          // One failed org/date must not skip another date or organization's timer.
+          warn('DAILY_CALENDAR_ORG_DATE_FAILED')
         }
       }
-    }
-  }
-
-  autoAbsenceTimeout = setTimeout(async () => {
-    await run()
-    autoAbsenceInterval = setInterval(run, 24 * 60 * 60 * 1000)
-  }, delay)
+    },
+  })
+  void autoAbsenceSchedule.start()
 }
 
-function scheduleHolidaySync({ db, logger, emit }) {
+function scheduleHolidaySync({ db, logger, emit, strictTime }) {
   clearHolidaySyncSchedule()
   const settings = settingsCache.value
   const auto = settings.holidaySync?.auto
   if (!auto?.enabled) return
-
-  const [hourStr, minuteStr] = String(auto.runAt || '').split(':')
-  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
-  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
-  const timeZone = resolveTimeZone(auto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
-  const now = new Date()
-  const nextTimestamp = computeNextRunTime({
-    now,
-    timeZone,
-    hour: hours,
-    minute: minutes,
-  })
-  const delay = Math.max(0, nextTimestamp - now.getTime())
-
-  const run = async () => {
-    try {
-      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      const orgIds = orgRows.length > 0
-        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
-        : [DEFAULT_ORG_ID]
-      for (const orgId of orgIds) {
-        const result = await performHolidaySync({
-          db,
-          logger,
-          orgId,
-          settings,
-          payload: {},
-        })
-        emit('attendance.holiday.sync', {
-          orgId,
-          years: result.years,
-          totalFetched: result.totalFetched,
-          totalApplied: result.totalApplied,
-          totalSkipped: result.totalSkipped,
-          totalIgnored: result.totalIgnored,
-        })
-        logger.info('Auto holiday sync completed', {
-          orgId,
-          years: result.years,
-          totalFetched: result.totalFetched,
-          totalApplied: result.totalApplied,
-          totalSkipped: result.totalSkipped,
-          totalIgnored: result.totalIgnored,
-        })
+  const warn = code => logger.warn('Attendance daily calendar skipped', { code })
+  autoHolidaySyncSchedule = createDailyCalendarScheduler({
+    strictTime, warn,
+    loadPlans: async () => [{}],
+    refreshPlan: async plan => ({ ...plan, timeZone: auto.timezone, runAt: auto.runAt }),
+    runPlan: async (_plan, isCurrent) => {
+      const orgPlans = await loadDailyCalendarOrgPlans(db, warn)
+      for (const { orgId } of orgPlans) {
+        if (!isCurrent()) return
+        try {
+          // Keep the existing provider calls serial across organizations.
+          const result = await performHolidaySync({ db, logger, orgId, settings, payload: {} })
+          emit('attendance.holiday.sync', {
+            orgId,
+            years: result.years,
+            totalFetched: result.totalFetched,
+            totalApplied: result.totalApplied,
+            totalSkipped: result.totalSkipped,
+            totalIgnored: result.totalIgnored,
+          })
+          logger.info('Auto holiday sync completed', {
+            totalFetched: result.totalFetched,
+            totalApplied: result.totalApplied,
+            totalSkipped: result.totalSkipped,
+            totalIgnored: result.totalIgnored,
+          })
+        } catch {
+          warn('DAILY_CALENDAR_ORG_FAILED')
+        }
       }
-    } catch (error) {
-      logger.error('Auto holiday sync failed', error)
-    }
-  }
-
-  autoHolidaySyncTimeout = setTimeout(async () => {
-    await run()
-    autoHolidaySyncInterval = setInterval(run, 24 * 60 * 60 * 1000)
-  }, delay)
+    },
+  })
+  void autoHolidaySyncSchedule.start()
 }
 
 function createRbacHelpers(db, logger) {
@@ -42509,6 +42405,7 @@ module.exports = {
           })
 
           const mapped = mapRuleRow(rule)
+          void autoAbsenceSchedule?.rearm({ orgId })
           emitEvent('attendance.rule.updated', {
             orgId,
             ruleId: mapped.id,
@@ -52769,8 +52666,8 @@ module.exports = {
         if (!actorAccess) return
         try {
           const saved = await updateAttendanceSettings(db, parsed.data, {orgId:actorAccess.orgId,actorId:actorAccess.userId})
-          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
-          scheduleHolidaySync({ db, logger, emit: emitEvent })
+          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary, strictTime: attendanceW4SegmentCalculationPort })
+          scheduleHolidaySync({ db, logger, emit: emitEvent, strictTime: attendanceW4SegmentCalculationPort })
           emitEvent('attendance.settings.updated', {
             settings: saved,
           })
@@ -52952,8 +52849,8 @@ module.exports = {
 
 	    try {
 	      await getSettings(db)
-	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
-	      scheduleHolidaySync({ db, logger, emit: emitEvent })
+	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary, strictTime: attendanceW4SegmentCalculationPort })
+	      scheduleHolidaySync({ db, logger, emit: emitEvent, strictTime: attendanceW4SegmentCalculationPort })
 	      scheduleImportUploadCleanup()
 	      if (autoShiftAutoWriteSchedulerUnregister) {
 	        autoShiftAutoWriteSchedulerUnregister()

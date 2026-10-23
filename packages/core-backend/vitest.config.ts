@@ -1200,6 +1200,7 @@ export default defineConfig({
       'tests/integration/attendance-timezone-scheduled.db.test.ts',
       'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
       'tests/integration/attendance-timezone-policy-store.db.test.ts',
+      'tests/integration/attendance-daily-calendar.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

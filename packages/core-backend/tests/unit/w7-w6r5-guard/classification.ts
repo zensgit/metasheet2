@@ -81,6 +81,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-calendar-settings-writer.cjs',
   // Import day selection resolves rule/shift context before the frozen import plan.
   'plugins/plugin-attendance/lib/attendance-import-calendar.cjs',
+  'plugins/plugin-attendance/lib/attendance-daily-calendar.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-calendar-day.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs',
