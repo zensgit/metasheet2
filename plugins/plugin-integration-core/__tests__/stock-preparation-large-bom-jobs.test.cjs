@@ -2906,6 +2906,64 @@ async function testSwlB10ChunkWritesAreHostFenced() {
 //
 // The route hands the lib `largeLanePilotCheck`; the lib runs it INSIDE the lease, BEFORE the generation binding
 // compare and BEFORE the job is persisted `running`. Driven through the REAL lock over the kit's fake db.
+// Pre-enable hardening F-3 (step-4 design §23.4): the pilot readiness check `no_open_large_job` asks the job store
+// how many OPEN checkpoint-apply jobs target a sheet. A real approval (queued) is open; finishing it closes it;
+// every non-terminal status is open, every terminal one is not; an unreadable store throws; a value that cannot be
+// attributed counts against readiness; only apply-job keys are read; the answer is three integers.
+async function testPeh3OpenCheckpointApplyJobScan() {
+  const { countOpenLargeBomCheckpointApplyJobsForSheet, LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+  assert.deepEqual(LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES, ['succeeded', 'partial', 'cancelled', 'expired'], 'F-3: the terminal set is pinned')
+  assert.ok(LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES.every((status) => LARGE_BOM_CHECKPOINT_APPLY_STATUSES.includes(status)))
+  assert.equal(__internals.checkpointApplyJobKey({ ...SWL_SCOPE, actionId: 'a', applyJobId: 'j' }).startsWith(__internals.LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX), true, 'F-3: the scan prefix is the key layout\'s own')
+  const harness = swlKit.createLibWriteLockHarness()
+  const flow = await swlApprovedLargeJob(harness)
+  const storage = flow.storage
+  storage.list = async () => Array.from(storage.map.keys()).sort()
+  const sheetId = flow.action.target.sheetId
+  assert.equal(flow.job.status, 'queued', 'calibration: a real approval is queued')
+  assert.deepEqual(await countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId }), { open: 1, unattributed: 0, scanned: 1 }, 'F-3: the approved job is open on its sheet')
+  assert.deepEqual(await countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId: 'sheet_peh_other' }), { open: 0, unattributed: 0, scanned: 1 }, 'F-3: another sheet has none')
+  // Run it to completion through the real lane (lease + fence): the job turns terminal and stops counting.
+  const api = createTargetRecordsApi()
+  const done = await harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi))
+  assert.ok(['succeeded', 'partial'].includes(done.status), `calibration: the job finished (${done.status})`)
+  assert.deepEqual(await countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId }), { open: 0, unattributed: 0, scanned: 1 }, 'F-3: a finished job is not open')
+  // Every status, seeded on this sheet: non-terminal (and unknown) open, terminal not.
+  const seeded = (status, extra = {}) => ({ jobId: `peh-${status}`, ...SWL_SCOPE, status, target: { sheetId, objectId: flow.action.target.objectId }, ...extra })
+  for (const status of [...LARGE_BOM_CHECKPOINT_APPLY_STATUSES, 'some_future_status']) {
+    const store = swlKit.createConsumableStorage()
+    store.durable = true
+    store.list = async () => Array.from(store.map.keys()).sort()
+    await store.set(__internals.checkpointApplyJobKey({ tenantId: 'tenant-peh-other', workspaceId: 'ws-peh', actionId: flow.action.actionId, applyJobId: `peh-${status}` }), seeded(status))
+    const expectedOpen = LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES.includes(status) ? 0 : 1
+    assert.deepEqual(await countOpenLargeBomCheckpointApplyJobsForSheet({ storage: store, sheetId }), { open: expectedOpen, unattributed: 0, scanned: 1 }, `F-3: status ${status} (any tenant / workspace)`)
+  }
+  // Unattributable values count against readiness; terminal ones never do; non-apply keys are never read.
+  const mixed = swlKit.createConsumableStorage()
+  mixed.durable = true
+  mixed.list = async () => Array.from(mixed.map.keys()).sort()
+  const applyKey = (id) => __internals.checkpointApplyJobKey({ ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: id })
+  mixed.map.set(applyKey('peh-garbage'), 'not a job')
+  mixed.map.set(applyKey('peh-no-target'), { status: 'paused' })
+  mixed.map.set(applyKey('peh-terminal-no-target'), { status: 'succeeded' })
+  mixed.map.set(__internals.backgroundJobKey({ ...SWL_SCOPE, actionId: flow.action.actionId, jobId: 'peh-bg' }), seeded('queued'))
+  mixed.map.set('stock-preparation:dry-run-token:peh', seeded('queued'))
+  assert.deepEqual(await countOpenLargeBomCheckpointApplyJobsForSheet({ storage: mixed, sheetId }), { open: 0, unattributed: 2, scanned: 3 })
+  assert.deepEqual(mixed.calls.filter(([op]) => op === 'get').map(([, key]) => key.startsWith(__internals.LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX)), [true, true, true], 'F-3: only apply-job keys are read')
+  // FAIL CLOSED: the store must be the durable one and answer list + get.
+  const expectFailure = async (input, code) => {
+    await assert.rejects(() => countOpenLargeBomCheckpointApplyJobsForSheet(input), (error) => { assert.equal(error.code, code, error.message); return true })
+  }
+  await expectFailure({ storage: { ...mixed, durable: false, get: mixed.get, list: mixed.list }, sheetId }, 'LARGE_BOM_JOB_STORE_UNAVAILABLE')
+  await expectFailure({ storage: { durable: true, get: mixed.get, set: mixed.set }, sheetId }, 'LARGE_BOM_JOB_STORE_UNAVAILABLE')
+  await expectFailure({ storage: { durable: true, get: mixed.get, set: mixed.set, async list() { return 'keys' } }, sheetId }, 'LARGE_BOM_JOB_STORE_UNAVAILABLE')
+  await expectFailure({ storage: null, sheetId }, 'LARGE_BOM_JOB_STORE_UNAVAILABLE')
+  await expectFailure({ storage: mixed, sheetId: '  ' }, 'LARGE_BOM_APPLY_JOB_SCAN_INVALID')
+  const listDown = Object.assign(new Error('plugin durable storage is unavailable'), { code: 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE' })
+  await expectFailure({ storage: { durable: true, get: mixed.get, set: mixed.set, async list() { throw listDown } }, sheetId }, 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE')
+  await expectFailure({ storage: { durable: true, set: mixed.set, list: mixed.list, async get() { throw listDown } }, sheetId }, 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE')
+}
+
 async function testSwlPbInLeasePilotCheckRefusesBeforeBindingAndRunning() {
   const pilotRefusal = () => Object.assign(new Error('pilot project: the large lane is refused'), { status: 409, code: 'STOCK_PREP_PILOT_LARGE_LANE_REFUSED', details: { lane: 'large_apply_chunk', reason: 'pilot_project', partial: false } })
   // (a) a BOUND, current job: the check refuses; nothing persisted, nothing written, the lease released.
@@ -2991,6 +3049,7 @@ async function main() {
   await testSwlB12StalledHolderNeverReturnsTheExpansionIsApprovable()
   await testSwlB13ALeaseInItsGraceWindowRefusesTheExpansion()
   await testSwlPbInLeasePilotCheckRefusesBeforeBindingAndRunning()
+  await testPeh3OpenCheckpointApplyJobScan()
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()

@@ -22,6 +22,14 @@
 //   R-03 a probe that throws is `ok: false`, never a thrown readiness; the answer is values-free
 //   R-04 collectGenericWriterTargets: both registries must answer (else incomplete); object configs and pipeline
 //        erp-feedback options are collected; a throwing registry is incomplete
+//   G-08 (pre-enable hardening F-4a) a read naming NEITHER identity is 500 STATE_UNREADABLE identity_missing — never
+//        not_pilot, registry or not, before any read; each identity alone still reads
+//   R-05 (F-5 / O-6) no_two_copy_component: an ACTIVE root and an ACTIVE nested row of one component refuse; the
+//        continuation core's readings of active (`!== false`) and root (blank parent); the project read is asked once
+//   R-06 (F-5 / O-8) pack_columns_installed: every declared ext_ column listed live by the ledger AND on the host, or
+//        an explicit not-applicable the facts agree with; the reads are strict (a failing ledger fails the check)
+//   S-17 (F-4c) markPilotEnabled `onMarked`: inside the transaction after the CAS; a throw rolls the mark back; never
+//        on alreadyEnabled
 //   S-13 rowToPilotState: no column ⇒ not pilot; the three columns project as handles / clock / integer; the public
 //        target projection is UNCHANGED (no pilot key)
 //   S-14 markPilotEnabled: ONE transaction, the tenant lock, the row FOR UPDATE, ONE compare-and-set update whose
@@ -152,6 +160,34 @@ test('G-03 pilot by project OR by sheet; neither ⇒ not_pilot; a row without th
   assert.equal((await preMigration.readPilotState({ tenantId: TENANT, projectNo: PROJECT, sheetId: SHEET })).state, 'not_pilot')
 })
 
+test('G-08 (F-4a) a read that names NEITHER identity is refused 500 STATE_UNREADABLE identity_missing — never not_pilot, with or without a registry, before any read', async () => {
+  const store = fakeStore([pilotRow()])
+  const gate = createStockPreparationPilotGate({ store })
+  const absent = createStockPreparationPilotGate({ store: null })
+  const noIdentity = [
+    {},
+    undefined,
+    { tenantId: TENANT },
+    { projectNo: PROJECT },
+    { tenantId: '  ', projectNo: PROJECT },
+    { tenantId: TENANT, projectNo: '', sheetId: '   ' },
+    { sheetId: null, projectNo: null, tenantId: null },
+  ]
+  for (const input of noIdentity) {
+    for (const [label, which] of [['registry present', gate], ['registry absent', absent]]) {
+      const caught = await rejects(which.readPilotState(input), { status: 500, code: PILOT_ERROR_CODES.STATE_UNREADABLE })
+      assert.deepEqual(caught.details, { operation: 'pilot_state_read', reason: 'identity_missing', partial: false }, `${label}: ${JSON.stringify(input)}`)
+      for (const lane of PILOT_LARGE_LANES) await rejects(which.assertLargeLaneAllowed(input, lane), { status: 500, code: PILOT_ERROR_CODES.STATE_UNREADABLE })
+      await rejects(which.assertSmallLaneCapNotExceededForPilot(input), { status: 500, code: PILOT_ERROR_CODES.STATE_UNREADABLE })
+    }
+  }
+  assert.deepEqual(store.calls, [], 'no identity costs no read')
+  // Either identity alone still reads (G-03 pins which read runs).
+  assert.equal((await gate.readPilotState({ sheetId: SHEET })).state, 'pilot')
+  assert.equal((await gate.readPilotState({ tenantId: TENANT, projectNo: PROJECT })).state, 'pilot')
+  assert.equal((await absent.readPilotState({ sheetId: SHEET })).registry, 'absent')
+})
+
 test('G-04 a FAILED read is 503 STATE_UNREADABLE (operation + SQLSTATE class only), never not_pilot — on both reads', async () => {
   for (const [label, fail, sqlState] of [
     ['undefined table', Object.assign(new Error('relation does not exist'), { code: '42P01' }), '42P01'],
@@ -261,7 +297,36 @@ function readyDeps(overrides = {}) {
     probeTableReadable: async () => ({ readable: true }),
     specReadPlanSlotDeclaration: null,
     collectGenericWriterTargets: async () => ({ complete: true, sheetIds: new Set(), objectIds: new Set() }),
+    // Pre-enable hardening (version 2): the project's rows (none), the job store's scan (nothing open), the
+    // pack-install ledger (nothing installed) with the explicit "no customer pack" declaration.
+    readExistingStockPreparationRows: async () => [],
+    countOpenLargeJobs: async () => ({ open: 0, unattributed: 0, scanned: 0 }),
+    packInstallStore: { async listInstalledFieldIds() { return { fieldIds: [], packIds: [] } } },
+    customerPackDeclaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE,
     ...overrides,
+  }
+}
+
+// A sheet row as the project-scoped read answers it (logical keys). `parent` null ⇒ a root row.
+const sheetRow = (component, { parent = null, active = true, key } = {}) => ({
+  projectNo: PROJECT, componentSourceId: component, parentSourceId: parent, active,
+  ...(key === undefined ? { idempotencyKey: JSON.stringify([component, parent]) } : (key === null ? {} : { idempotencyKey: key })),
+})
+// A ledger + host pair for the pack check: `ledger` the live field ids the pack-install ledger lists, `host` the
+// field ids the host returns for this sheet.
+function packDeps({ declared, ledger = [], packIds = ledger.length ? ['syn_pack'] : [], host = ledger, declaration = null }) {
+  const calls = []
+  return {
+    calls,
+    deps: {
+      ...(declared === undefined ? {} : { action: { source: { readPlan: { part: { specField: 'Specification' } } }, target: { sheetId: SHEET, objectId: OBJECT }, extensionFieldIds: declared } }),
+      packInstallStore: { async listInstalledFieldIds(input) { calls.push(['ledger', input]); return { fieldIds: [...ledger], packIds: [...packIds] } } },
+      provisioning: {
+        ...readyDeps().provisioning,
+        async readObjectFieldsContent(input) { calls.push(['host', input]); return Object.fromEntries(input.fieldIds.filter((id) => host.includes(id)).map((id) => [id, { property: { stockPreparation: { ownership: 'plm_system' } } }])) },
+      },
+      customerPackDeclaration: declaration,
+    },
   }
 }
 
@@ -272,17 +337,21 @@ async function withContinuationSupport(version, fn) {
 }
 
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
-  assert.equal(readiness.PILOT_READINESS_VERSION, 1)
+  // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 2)
   assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (step 4 PR-3 flips it)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
-    'single_project_on_sheet', 'write_lock_store_readable', 'write_lock_free', 'export_closure_port',
-    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'no_generic_writer_names_sheet', 'continuation_support_version',
+    'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
+    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version',
   ])
+  // The web clamps a failing id to /^[a-z][a-z0-9_]{0,63}$/ (projectTarget.ts): every id survives it.
+  assert.ok(readiness.PILOT_READINESS_CHECK_IDS.every((id) => /^[a-z][a-z0-9_]{0,63}$/.test(id)))
+  assert.equal(readiness.CUSTOMER_PACK_NOT_APPLICABLE, 'not_applicable')
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 1)
+  assert.equal(answer.version, 2)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
@@ -320,6 +389,28 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['no_generic_writer_names_sheet (an object config names the sheet)', () => ({ collectGenericWriterTargets: async () => ({ complete: true, sheetIds: new Set([SHEET]), objectIds: new Set() }) }), ['no_generic_writer_names_sheet']],
     ['no_generic_writer_names_sheet (an option names the objectId)', () => ({ collectGenericWriterTargets: async () => ({ complete: true, sheetIds: new Set(), objectIds: new Set([OBJECT]) }) }), ['no_generic_writer_names_sheet']],
     ['no_generic_writer_names_sheet (a registry did not answer)', () => ({ collectGenericWriterTargets: async () => ({ complete: false, sheetIds: new Set(), objectIds: new Set() }) }), ['no_generic_writer_names_sheet']],
+    // ── version 2 (pre-enable hardening) ──
+    ['no_two_copy_component (one component an active root AND an active nested copy)', () => ({ readExistingStockPreparationRows: async () => [sheetRow('SYN-C1'), sheetRow('SYN-C1', { parent: 'SYN-P1' }), sheetRow('SYN-P1')] }), ['no_two_copy_component']],
+    ['no_two_copy_component (the project read cannot run: not wired)', () => ({ readExistingStockPreparationRows: undefined }), ['no_two_copy_component']],
+    ['no_two_copy_component (the project read refuses: past its bound)', () => ({ readExistingStockPreparationRows: async () => { throw Object.assign(new Error('too large'), { code: 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE' }) } }), ['no_two_copy_component']],
+    ['no_two_copy_component (no project number to read by)', () => ({ projectNo: '' }), ['no_two_copy_component']],
+    ['no_open_large_job (one open job on the sheet)', () => ({ countOpenLargeJobs: async () => ({ open: 1, unattributed: 0, scanned: 3 }) }), ['no_open_large_job']],
+    ['no_open_large_job (an open job whose sheet cannot be read)', () => ({ countOpenLargeJobs: async () => ({ open: 0, unattributed: 1, scanned: 1 }) }), ['no_open_large_job']],
+    ['no_open_large_job (the job store is unreadable)', () => ({ countOpenLargeJobs: async () => { throw Object.assign(new Error('store down'), { code: 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE' }) } }), ['no_open_large_job']],
+    ['no_open_large_job (no scan wired)', () => ({ countOpenLargeJobs: undefined }), ['no_open_large_job']],
+    ['no_open_large_job (a scan that answers nothing usable)', () => ({ countOpenLargeJobs: async () => ({ open: '0', unattributed: 0 }) }), ['no_open_large_job']],
+    ['pack_columns_installed (nothing declared and no not-applicable declaration)', () => ({ customerPackDeclaration: null }), ['pack_columns_installed']],
+    ['pack_columns_installed (a non-literal declaration)', () => ({ customerPackDeclaration: 'n/a' }), ['pack_columns_installed']],
+    ['pack_columns_installed (not applicable, but the ledger lists a live pack column)', () => packDeps({ declared: undefined, ledger: ['ext_synA'], declaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (not applicable, but the action declares a column)', () => packDeps({ declared: ['ext_synA'], ledger: ['ext_synA'], packIds: [], declaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (declared, not in the ledger)', () => packDeps({ declared: ['ext_synA'], ledger: [], host: ['ext_synA'] }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (declared, one of two not in the ledger)', () => packDeps({ declared: ['ext_synA', 'ext_synB'], ledger: ['ext_synA'], host: ['ext_synA', 'ext_synB'] }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (declared, in the ledger, gone from the host)', () => packDeps({ declared: ['ext_synA'], ledger: ['ext_synA'], host: [] }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (a malformed declaration list)', () => packDeps({ declared: ['ext_synA', 7], ledger: ['ext_synA'] }).deps, ['pack_columns_installed']],
+    ['pack_columns_installed (the ledger is unreadable)', () => ({ packInstallStore: { async listInstalledFieldIds() { throw Object.assign(new Error('ledger down'), { code: '42P01' }) } } }), ['pack_columns_installed']],
+    ['pack_columns_installed (no ledger store)', () => ({ packInstallStore: null }), ['pack_columns_installed']],
+    ['pack_columns_installed (the ledger answers no lists)', () => ({ packInstallStore: { async listInstalledFieldIds() { return {} } } }), ['pack_columns_installed']],
+    ['pack_columns_installed (declared, the host cannot read fields)', (d) => { const { deps } = packDeps({ declared: ['ext_synA'], ledger: ['ext_synA'] }); const { readObjectFieldsContent: _r, ...rest } = deps.provisioning; return { ...deps, provisioning: rest } }, ['pack_columns_installed']],
   ]
   for (const [label, mutate, expected] of table) {
     const deps = readyDeps()
@@ -337,15 +428,70 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
   }
 })
 
+test('R-05 (O-6) no_two_copy_component: only an ACTIVE root and an ACTIVE nested row of ONE component refuse; the continuation core\'s readings of active and root', async () => {
+  const { countTwoCopyComponents } = readiness.__internals
+  const cases = [
+    ['nothing', [], 0],
+    ['a root and a nested copy of one component', [sheetRow('C1'), sheetRow('C1', { parent: 'P1' })], 1],
+    ['two components, both doubled', [sheetRow('C1'), sheetRow('C1', { parent: 'P1' }), sheetRow('C2'), sheetRow('C2', { parent: 'P9' })], 2],
+    ['the root is inactive', [sheetRow('C1', { active: false }), sheetRow('C1', { parent: 'P1' })], 0],
+    ['the nested copy is inactive', [sheetRow('C1'), sheetRow('C1', { parent: 'P1', active: false })], 0],
+    ['a root of one component, a nested row of another', [sheetRow('C1'), sheetRow('C2', { parent: 'C1' })], 0],
+    ['one component nested twice under different parents (no root)', [sheetRow('C1', { parent: 'P1' }), sheetRow('C1', { parent: 'P2' })], 0],
+    // The core's "active" is `active !== false` — wider than the fill view's: an unset / null / text cell is active.
+    ['an unset active cell counts as active', [sheetRow('C1', { active: null }), sheetRow('C1', { parent: 'P1', active: undefined })], 1],
+    ['a text "false" active cell counts as active (core reading)', [sheetRow('C1', { active: 'false' }), sheetRow('C1', { parent: 'P1' })], 1],
+    // The core's "root" is a blank parentSourceId: '' and whitespace are roots.
+    ['a blank-string parent is a root', [sheetRow('C1', { parent: '  ' }), sheetRow('C1', { parent: 'P1' })], 1],
+    ['keyless rows count too', [sheetRow('C1', { key: null }), sheetRow('C1', { parent: 'P1', key: null })], 1],
+    ['a blank component is skipped', [sheetRow(''), sheetRow('', { parent: 'P1' }), sheetRow(null), sheetRow(null, { parent: 'P1' })], 0],
+  ]
+  for (const [label, rows, expected] of cases) assert.equal(countTwoCopyComponents(rows), expected, label)
+  // Through the evaluator: the project read is asked with exactly (records, target, projectNo) and its answer decides.
+  const calls = []
+  const deps = readyDeps({ readExistingStockPreparationRows: async (recordsApi, target, projectNo) => { calls.push([recordsApi === deps.recordsApi, target, projectNo]); return [sheetRow('C1'), sheetRow('C1', { parent: 'P1' })] } })
+  const refused = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(deps))
+  assert.deepEqual([...refused.failing], ['no_two_copy_component'])
+  assert.deepEqual(calls, [[true, deps.target, PROJECT]])
+  assert.ok(!JSON.stringify(refused).includes('C1'), 'values-free: no component id in the answer')
+  const clean = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => [sheetRow('C1'), sheetRow('C2', { parent: 'C1' }), sheetRow('C1', { parent: 'P1', active: false })] })))
+  assert.deepEqual([...clean.failing], [])
+})
+
+test('R-06 (O-8) pack_columns_installed: every declared ext_ column installed (ledger AND host), or an explicit not-applicable that the facts agree with — read strictly', async () => {
+  // Positive: two declared columns, both listed live by the ledger and present on the host.
+  const ok = packDeps({ declared: ['ext_synA', 'ext_synB'], ledger: ['ext_synA', 'ext_synB', 'ext_synHuman'] })
+  const passed = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps(ok.deps)))
+  assert.deepEqual([...passed.failing], [])
+  // The ledger is asked for exactly this sheet's (tenant, staging project, objectId); the host for exactly the declared ids.
+  assert.deepEqual(ok.calls, [
+    ['ledger', { tenantId: TENANT, projectId: PROJECT_ID, objectId: OBJECT }],
+    ['host', { projectId: PROJECT_ID, objectId: OBJECT, fieldIds: ['ext_synA', 'ext_synB'] }],
+  ])
+  // Positive: the explicit not-applicable declaration with nothing declared and nothing installed — no host read.
+  const none = packDeps({ declared: undefined, ledger: [], declaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE })
+  assert.deepEqual([...(await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps(none.deps)))).failing], [])
+  assert.deepEqual(none.calls.map(([which]) => which), ['ledger'], 'not applicable still reads the ledger, never the host')
+  // Not applicable WITH a declared column is a contradiction and refuses (R-02). And the read is strict: a failing
+  // ledger is a failing check, never "no pack" (loadPackInstalledFieldProperties would have answered legacy here).
+  const failingLedger = readyDeps({ packInstallStore: { async listInstalledFieldIds() { throw new Error('ledger down') } } })
+  assert.deepEqual([...(await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(failingLedger))).failing], ['pack_columns_installed'])
+  const text = JSON.stringify(passed)
+  assert.ok(!text.includes('ext_syn'), 'values-free: no column id in the answer')
+})
+
 test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator itself never throws', async () => {
   const deps = readyDeps({
     provisioning: { ...readyDeps().provisioning, async findObjectSheet() { throw new Error(`host down ${SHEET}`) } },
     assertTargetSheetHoldsNoForeignActiveRows: async () => { throw new Error('records down') },
     probeTableReadable: async () => { throw new Error('db down') },
     collectGenericWriterTargets: async () => { throw new Error('registry down') },
+    readExistingStockPreparationRows: async () => { throw new Error(`records down ${SHEET}`) },
+    countOpenLargeJobs: async () => { throw new Error('job store down') },
+    packInstallStore: { async listInstalledFieldIds() { throw new Error(`ledger down ${SHEET}`) } },
   })
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(deps))
-  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'continuation_store_readable', 'refresh_state_store_readable', 'no_generic_writer_names_sheet'])
+  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet'])
   assert.ok(!JSON.stringify(answer).includes(SHEET), 'a thrown message never travels into the answer')
   const empty = await readiness.evaluatePilotReadiness({})
   assert.equal(empty.ready, false)
@@ -382,7 +528,9 @@ test('R-04 collectGenericWriterTargets: both registries must answer; object conf
 
 // ── the registry's pilot surface ────────────────────────────────────────────────────────────────────
 
-function makeMemoryDb({ failSelectWith = null } = {}) {
+// `rollback: true` (F-4(c)): a transaction whose callback throws restores every row to what it was when the
+// transaction began — what PostgreSQL does, and what S-17 needs to show the mark and its hook share a fate.
+function makeMemoryDb({ failSelectWith = null, rollback = false } = {}) {
   const rows = []
   const calls = []
   const matches = (candidate, where) => Object.entries(where).every(([column, value]) => (candidate[column] === undefined ? null : candidate[column]) === (value === undefined ? null : value))
@@ -408,7 +556,17 @@ function makeMemoryDb({ failSelectWith = null } = {}) {
     ...tagged(''),
     async transaction(fn) {
       calls.push(['transaction'])
-      return fn({ ...tagged('trx.'), async advisoryXactLock(key) { calls.push(['trx.advisoryXactLock', key]) } })
+      const snapshot = rollback ? rows.map((r) => ({ ...r })) : null
+      try {
+        return await fn({ ...tagged('trx.'), async advisoryXactLock(key) { calls.push(['trx.advisoryXactLock', key]) } })
+      } catch (error) {
+        if (snapshot) {
+          rows.length = 0
+          rows.push(...snapshot)
+          calls.push(['rollback'])
+        }
+        throw error
+      }
     },
   }
 }
@@ -483,6 +641,40 @@ test('S-15 markPilotEnabled refusals: ABSENT / ARCHIVED 409 with no update; a ba
   const caught = await rejects(makeStore(moved).markPilotEnabled({ tenantId: TENANT, projectNo: PROJECT, readinessVersion: 1 }), { status: 409, code: PROJECT_TARGET_PILOT_STATE_MOVED_CODE })
   assert.ok(caught instanceof StockPreparationProjectTargetStoreError)
   assert.equal(moved.rows[0].pilot_enabled_at, null)
+})
+
+test('S-17 (F-4c) markPilotEnabled onMarked: runs INSIDE the transaction right after the CAS, with the trx handle and the new state; a throw rolls the mark back; never on alreadyEnabled; a non-function is 422 before any db call', async () => {
+  const db = makeMemoryDb({ rollback: true })
+  db.rows.push(row())
+  const store = makeStore(db)
+  // A non-function hook is refused before the transaction opens.
+  for (const bad of ['audit', 7, {}]) {
+    await rejects(store.markPilotEnabled({ tenantId: TENANT, projectNo: PROJECT, readinessVersion: 2, onMarked: bad }), { status: 422, code: 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID' })
+  }
+  assert.deepEqual(db.calls, [], 'a bad hook costs no db call')
+  // A hook that throws (the audit insert failing, or the process dying between the two statements): the error
+  // propagates and the mark is rolled back with it — the row is exactly as it was, nothing half-done.
+  const crash = Object.assign(new Error('synthetic crash after the mark'), { code: '08006' })
+  let crashSeen = null
+  const caught = await rejects(store.markPilotEnabled({ tenantId: TENANT, projectNo: PROJECT, actorId: 'u_admin', readinessVersion: 2, onMarked: async (trx, outcome) => { crashSeen = { marked: db.rows[0].pilot_enabled_at, outcome }; throw crash } }), { code: '08006' })
+  assert.equal(caught, crash)
+  assert.equal(crashSeen.marked, AT, 'the hook ran AFTER the compare-and-set had landed in the transaction')
+  assert.equal(crashSeen.outcome.pilot.pilot, true)
+  assert.equal(db.rows[0].pilot_enabled_at, null, 'rolled back: not pilot')
+  assert.equal(db.rows[0].pilot_readiness_version, null)
+  assert.deepEqual(db.calls.slice(-1), [['rollback']])
+  // The hook succeeds: it ran once, on the transaction handle (not the store db), after the update statement.
+  db.calls.length = 0
+  const seen = []
+  const first = await store.markPilotEnabled({ tenantId: TENANT, projectNo: PROJECT, actorId: 'u_admin', readinessVersion: 2, onMarked: async (trx, outcome) => { seen.push({ isTrx: typeof trx.advisoryXactLock === 'function', pilot: outcome.pilot }); db.calls.push(['onMarked']) } })
+  assert.equal(first.enabled, true)
+  assert.deepEqual(seen, [{ isTrx: true, pilot: first.pilot }])
+  assert.deepEqual(db.calls.map(([method]) => method), ['transaction', 'trx.advisoryXactLock', 'trx.selectOneForUpdate', 'trx.updateRow', 'onMarked'])
+  // Already pilot: the hook is NOT called (the one row already exists with the first mark).
+  const again = await store.markPilotEnabled({ tenantId: TENANT, projectNo: PROJECT, actorId: 'u_other', readinessVersion: 2, onMarked: async () => { seen.push('again') } })
+  assert.equal(again.alreadyEnabled, true)
+  assert.equal(seen.length, 1, 'no hook call on alreadyEnabled')
+  // Without a hook (undefined or null) the store behaves as before (S-14).
 })
 
 test('S-16 probeTableReadable: readable / undefined_table (42P01) / read_failed with its SQLSTATE — never a throw', async () => {

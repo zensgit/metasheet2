@@ -68,6 +68,10 @@
  *       mark, one audit row; export-xlsx (xlsx + csv) 403 MULTITABLE_GRID_EXPORT_CLOSED (U09 with #6507); the re-POST.
  *   D21 (PR B, L02) a job approved before the enablement is refused inside the real lease with the pilot code, never
  *       PLAN_SUPERSEDED (the control run without the check proves the order); the job stays queued, zero meta_records writes.
+ *   H-01 (pre-enable hardening F-3) no_open_large_job against a REAL paused checkpoint job in plugin_kv: counted on its
+ *       own sheet only, the readiness check fails; run to its end the job is terminal and the check passes.
+ *   H-02 (pre-enable hardening F-4c) the pilot mark and its audit row in ONE real transaction: a crash before or after
+ *       the audit insert leaves neither; the completing call writes exactly one row; a repeat (already pilot) none.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -1456,6 +1460,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const pilotGateModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pilot-gate.cjs')) as any
     const continuationSupport = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-support.cjs')) as any
     const projectSheetHarness = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
+    // Pre-enable hardening (H-series): the readiness evaluator (version 2) and the pack-install ledger store.
+    const readinessModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pilot-readiness.cjs')) as any
+    const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
 
     function routeResponse() {
       const res: any = { statusCode: 200, body: null, headers: {} }
@@ -1579,7 +1586,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               target: envTarget,
             }],
             stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
-            stockPreparationPilot: { specReadPlanSlot: 'not_applicable' },
+            // Readiness version 2 (pre-enable hardening O-8): this synthetic deployment runs without a customer pack.
+            stockPreparationPilot: { specReadPlanSlot: 'not_applicable', customerPack: 'not_applicable' },
           },
         }
         const base = projectSheetHarness.baseServices(sourceOf(projectNo))
@@ -1590,6 +1598,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           stockPreparationProjectWriteLock: lock,
           stockPreparationProjectTargetStore: store,
           stockPreparationAuditStore: audit,
+          // Readiness version 2 (O-8): the pack-install ledger is read strictly — the real store, an empty ledger for this tenant.
+          stockPreparationPackInstallStore: packInstallStoreModule.createStockPreparationPackInstallStore({ db }),
           tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
@@ -1614,7 +1624,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         const row = (await q('SELECT pilot_enabled_at, pilot_enabled_by, pilot_readiness_version FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])).rows[0]
         expect(row.pilot_enabled_at).not.toBeNull()
         expect(row.pilot_enabled_by).toBe(admin.id)
-        expect(row.pilot_readiness_version).toBe(1)
+        expect(row.pilot_readiness_version).toBe(readinessModule.PILOT_READINESS_VERSION)
         const lockRow = (await q(`SELECT generation, generation_reason, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [key])).rows[0]
         expect(lockRow.generation).toBe(1)
         expect(lockRow.generation_reason).toBe('pilot_enable')
@@ -1624,7 +1634,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect(auditRows[0].subject_id).toBe(sheetId)
         expect(auditRows[0].mode).toBe('enabled')
         expect(auditRows[0].actor).toBe(admin.id)
-        expect(auditRows[0].detail).toEqual({ objectId, readinessVersion: 1, exportClosureAlreadyClosed: false, generationBumped: true })
+        expect(auditRows[0].detail).toEqual({ objectId, readinessVersion: readinessModule.PILOT_READINESS_VERSION, exportClosureAlreadyClosed: false, generationBumped: true })
         // The re-POST: idempotent on the host, set-once in the registry, no second audit row, generation moved again.
         const again = await callRoute(routes, 'POST', PILOT_PATH, { user: admin, params: { projectNo }, body: { confirmProjectNo: projectNo } })
         expect(again.statusCode, JSON.stringify(again.body)).toBe(200)
@@ -1734,6 +1744,127 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await dropSheet(sb.sheetId)
       }
     }, 90000)
+
+    // ── Pre-enable hardening (step-4 design §23.4 F-3 / F-4) — the H series ────────────────────────────────────
+    // H-01 (F-3) no_open_large_job against a REAL job in the REAL durable job store (plugin_kv, jsonb round trip):
+    //      approved through the real lock, one chunk of one decision lands on the real host and the job is
+    //      `paused` — the scan counts it on its own sheet only, the readiness check fails; finishing the job
+    //      through further chunks turns it terminal and the check passes.
+    // H-02 (F-4c) the audit row commits WITH the mark on real PostgreSQL: a crash inside the mark transaction —
+    //      before the audit insert, and AFTER it (the insert landed in the transaction) — rolls back BOTH (row not
+    //      pilot, zero audit rows); the completing call writes exactly one; a repeat call (already pilot) none.
+    test('H-01 (pre-enable F-3) no_open_large_job on a real paused checkpoint job in plugin_kv: counted on its sheet only, readiness fails; finished ⇒ terminal, readiness passes', async () => {
+      const sb = await sandboxSheet('h01')
+      const projectNo = 'SYN-SWL-H01'
+      const tenantId = `tenant_swl_h01_${TOKEN}`
+      const jobScope = { tenantId, workspaceId: `ws_swl_h01_${TOKEN}` }
+      try {
+        const db = createDb({ database: sb.pluginContext.api.database })
+        const lock = createStockPreparationProjectWriteLock({ db })
+        const storage: any = sb.pluginContext.storage
+        expect(storage.durable, 'calibration: the production plugin storage is the durable plugin_kv store').toBe(true)
+        const actionId = sb.action.actionId
+        const jobId = `swl_h01_${TOKEN}`
+        const applyJobId = `swl_h01_apply_${TOKEN}`
+        const records = sb.multitable.records as any
+        const scopedForChunk = () => tableActions.createTargetScopedRecordsApi(records, sb.target, { fieldIdTranslation: 'pre_mapped' })
+        await largeBomJobs.createLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, action: sb.action, parameters: { projectNo }, principal: 'swl-h01', createJobId: () => jobId,
+          writeGenerationObserver: async () => writeObservationFromGeneration(await lock.observeGeneration(sb.key)),
+        })
+        await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId, jobId, sourceAdapter: sourceOf(projectNo, '2') })
+        await largeBomJobs.planLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, actionId, jobId,
+          existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          writeGenerationReader: (observed: string) => lock.readGeneration(observed),
+        })
+        const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
+          storage, ...jobScope, actionId, jobId, principal: 'swl-h01', permission: 'write', createApplyJobId: () => applyJobId,
+          writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'large_approval', expect })),
+        })
+        expect(approved.totalDecisions, 'calibration: at least two decisions, so one chunk of one leaves the job paused').toBeGreaterThanOrEqual(2)
+        const runChunk = () => lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: `swl-h01-chunk-${Date.now()}` }, async (guard: any) =>
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard, maxDecisionsPerChunk: 1 }))
+        const first = await runChunk()
+        expect(first.status).toBe('paused')
+        expect(await countRows(sb.sheetId), 'the chunk really landed on the host').toBeGreaterThan(0)
+        // The job as plugin_kv stores it (jsonb), read back raw: paused, targeting this sheet.
+        const stored = (await q(`SELECT value->>'status' AS status, value->'target'->>'sheetId' AS sheet_id FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key = $1`, [largeBomJobs.__internals.checkpointApplyJobKey({ ...jobScope, actionId, applyJobId })])).rows
+        expect(stored).toEqual([{ status: 'paused', sheet_id: sb.sheetId }])
+        const scan = await largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId: sb.sheetId })
+        expect(scan.open).toBe(1)
+        expect(scan.unattributed).toBe(0)
+        const otherSheet = await largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId: `sheet_swl_h01_other_${TOKEN}` })
+        expect(otherSheet.open, 'another sheet sees none of it').toBe(0)
+        const readinessOf = async () => {
+          const answer = await readinessModule.evaluatePilotReadiness({
+            countOpenLargeJobs: () => largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId: sb.sheetId }),
+          })
+          return answer.checks.find((check: any) => check.id === 'no_open_large_job').ok
+        }
+        expect(await readinessOf(), 'a paused job on the sheet fails no_open_large_job').toBe(false)
+        // 旧作业处置: run it to its end — the job turns terminal and the check passes.
+        let job = first
+        for (let i = 0; i < 20 && job.status === 'paused'; i += 1) job = await runChunk()
+        expect(['succeeded', 'partial']).toContain(job.status)
+        expect((await largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId: sb.sheetId })).open).toBe(0)
+        expect(await readinessOf(), 'a finished job no longer blocks').toBe(true)
+      } finally {
+        await q(`DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE $1`, [`stock-preparation:large-bom:%:${tenantId}:%`]).catch(() => {})
+        await dropSheet(sb.sheetId)
+      }
+    }, 90000)
+
+    test('H-02 (pre-enable F-4c) the mark and its audit row share one real transaction: a crash before or after the audit insert leaves neither; completing writes exactly one; a repeat none', async () => {
+      const tenantId = `tenant_swl_h02_${TOKEN}`
+      const projectNo = 'SYN-SWL-H02'
+      const pluginContext = createProductionPluginContext()
+      const db = createDb({ database: pluginContext.api.database })
+      const store = projectTargetStoreModule.createStockPreparationProjectTargetStore({ db })
+      const audit = auditStoreModule.createStockPreparationAuditStore({ db })
+      const sheetId = `sheet_swl_h02_${TOKEN}`
+      const objectId: string = ownBase.deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
+      const entry = { tenantId, projectId: projectNo, action: 'project_pilot_enable', subjectId: sheetId, mode: 'enabled', actor: 'swl-h02-admin', detail: { objectId, readinessVersion: readinessModule.PILOT_READINESS_VERSION, exportClosureAlreadyClosed: true, generationBumped: true } }
+      const pilotRow = async () => (await q('SELECT pilot_enabled_at, pilot_readiness_version FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])).rows[0]
+      const auditCount = async () => Number((await q(`SELECT COUNT(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_pilot_enable'`, [tenantId])).rows[0].n)
+      const mark = (onMarked: any) => store.markPilotEnabled({ tenantId, projectNo, actorId: 'swl-h02-admin', readinessVersion: readinessModule.PILOT_READINESS_VERSION, onMarked })
+      try {
+        await store.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
+        // (1) a crash inside the transaction BEFORE the audit insert: the compare-and-set rolls back.
+        const crashBefore = await settle(mark(async () => { throw Object.assign(new Error('synthetic crash before the audit insert'), { code: 'SWL_H02' }) }))
+        expect(crashBefore.ok).toBe(false)
+        expect((crashBefore as any).error.code).toBe('SWL_H02')
+        expect((await pilotRow()).pilot_enabled_at).toBeNull()
+        expect(await auditCount()).toBe(0)
+        // (2) a crash AFTER the audit insert landed in the transaction, before COMMIT: BOTH roll back.
+        let insertedInside = false
+        const crashAfter = await settle(mark(async (trx: any) => {
+          await audit.appendWithin(trx, entry)
+          insertedInside = true
+          throw Object.assign(new Error('synthetic crash after the audit insert'), { code: 'SWL_H02' })
+        }))
+        expect(insertedInside, 'calibration: the audit insert ran inside the transaction').toBe(true)
+        expect(crashAfter.ok).toBe(false)
+        expect((await pilotRow()).pilot_enabled_at, 'the mark rolled back').toBeNull()
+        expect((await pilotRow()).pilot_readiness_version).toBeNull()
+        expect(await auditCount(), 'the audit insert rolled back with it').toBe(0)
+        // (3) the completing call (the runbook's re-POST): marked, exactly one row, committed together.
+        const done = await mark(async (trx: any) => { await audit.appendWithin(trx, entry) })
+        expect(done.enabled).toBe(true)
+        expect((await pilotRow()).pilot_enabled_at).not.toBeNull()
+        expect((await pilotRow()).pilot_readiness_version).toBe(readinessModule.PILOT_READINESS_VERSION)
+        expect(await auditCount()).toBe(1)
+        // (4) a repeat (already pilot): the hook never runs, still exactly one row.
+        let hookCalls = 0
+        const again = await mark(async (trx: any) => { hookCalls += 1; await audit.appendWithin(trx, entry) })
+        expect(again.alreadyEnabled).toBe(true)
+        expect(hookCalls).toBe(0)
+        expect(await auditCount()).toBe(1)
+      } finally {
+        await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+      }
+    }, 60000)
 
     // ── Batch-refresh step 4 PR-2: the continuation / refresh-state stores (migrations 102 / 103) and the
     //    governance reader on real PostgreSQL. The hermetic suites drive them against a fake that models the

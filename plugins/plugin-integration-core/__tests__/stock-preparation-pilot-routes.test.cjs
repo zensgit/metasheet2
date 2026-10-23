@@ -27,6 +27,16 @@
 //   P-10 A WRITER THAT ARRIVES BETWEEN READINESS AND THE BUMP: the bump is refused 409 WRITE_LOCKED and nothing is
 //        stamped, marked or audited; a live lease seen by readiness fails `write_lock_free`
 //   P-11 THE AUDIT VOCABULARY PROBE: a database without migration 101 is 503 before readiness, the lock or the host
+//   P-12 (pre-enable hardening F-4b) THE 501 WIRING GUARD, clause by clause — markPilotEnabled included (the harness
+//        store always offers it, so without this case the clause was a mutation survivor): GET and POST 501, zero IO
+//   P-13 (F-4c) THE AUDIT ROW COMMITS WITH THE MARK: a crash at the audit write leaves export-closed-not-pilot and no
+//        row; the re-POST writes exactly one; a third POST none; an audit store without the in-transaction append is
+//        501 before any IO; a store that marks without running the hook is 500, never 200
+//   P-14 (F-3) no_open_large_job through the real routes: a queued approval on the sheet refuses enabling (nothing
+//        done); another sheet's job does not; running the job to its end clears it; an unlistable store fails it; a
+//        job that lands between the readiness scan and the enable's lease is caught by the scan UNDER the lease
+//   P-15 (F-5 / O-6) no_two_copy_component through the real routes: refused with nothing done; the copy inactive enables
+//   P-16 (F-5 / O-8) pack_columns_installed through the real routes: declared ⇒ ledger AND host; nothing declared ⇒ refused
 //   L-01 THE FIVE LARGE ROUTES refuse a PILOT project 409 STOCK_PREP_PILOT_LARGE_LANE_REFUSED naming the lane — no
 //        job created, no source read, no host write; L05: the same five requests on a NON-pilot project are served
 //        exactly as before (202 / 200)
@@ -62,7 +72,7 @@ const { PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS } = requi
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { templateContractOptionFields } = require(path.join(LIB, 'stock-preparation-option-sync.cjs'))
 const { PILOT_ERROR_CODES } = require(path.join(LIB, 'stock-preparation-pilot-gate.cjs'))
-const { PILOT_READINESS_CHECK_IDS, PILOT_READINESS_VERSION, SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } = require(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'))
+const { CUSTOMER_PACK_NOT_APPLICABLE, PILOT_READINESS_CHECK_IDS, PILOT_READINESS_VERSION, SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } = require(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'))
 const continuationSupport = require(path.join(LIB, 'stock-preparation-continuation-support.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
@@ -136,7 +146,8 @@ function mountReady(options = {}) {
   const h = mount({
     fieldReads: true,
     gridExportClosure: true,
-    configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } },
+    // Pre-enable hardening (readiness version 2): the deployment also declares it runs without a customer pack.
+    configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE, customerPack: CUSTOMER_PACK_NOT_APPLICABLE } },
     ...options,
   })
   const originalRestore = h.restore
@@ -305,8 +316,9 @@ test('P-04 GET: absent → 200 absent; active (plain mount) → the readiness li
     assert.equal(data.readiness.ready, false)
     assert.deepEqual(data.readiness.checks.map((check) => check.id), [...PILOT_READINESS_CHECK_IDS])
     // On a plain mount these cannot pass: no field read port (PLM lock / option lists unprovable), no closure port,
-    // no 规格 declaration, inert registries, and the shipped build marker.
-    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'no_generic_writer_names_sheet', 'continuation_support_version'])
+    // no 规格 declaration, no customer-pack declaration (pack_columns_installed, readiness version 2), inert
+    // registries, and the shipped build marker.
+    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version'])
     const text = JSON.stringify(active.body)
     assert.ok(!text.includes(sheetId) && !text.includes(objectId) && !text.includes(TENANT), 'values-free: no sheet id, objectId or tenant in the answer')
     assert.ok(!h.provisioning.calls.some(([verb]) => /^(ensure|patch|grant|close)/.test(verb)), 'GET writes nothing on the host')
@@ -325,7 +337,7 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
     const res = await enablePilot(h, WORKBENCH_ADMIN)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, PILOT_ERROR_CODES.NOT_READY)
-    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'no_generic_writer_names_sheet', 'continuation_support_version'], partial: false })
+    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version'], partial: false })
     assert.deepEqual(await h.projectWriteLock.readState(scope), before, 'the generation did not move and no lease was taken')
     assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
     assert.ok(!h.db.calls.some((call) => /^(updateRow|transaction)/.test(call)), 'no registry write')
@@ -357,9 +369,17 @@ test('P-06 POST ready: bump → lease → host stamp (exact ids) → registry ma
     let stateAtStamp = null
     h.provisioning.closeSheetGridExport = async (input) => { stateAtStamp = await h.projectWriteLock.readState(scope); order.push('stamp'); return closeOriginal(input) }
     const markOriginal = h.projectTargetStore.markPilotEnabled
-    h.projectTargetStore.markPilotEnabled = async (input) => { order.push('mark'); return markOriginal(input) }
+    h.projectTargetStore.markPilotEnabled = async (input) => { order.push('mark'); const marked = await markOriginal(input); order.push('mark-committed'); return marked }
+    // F-4(c): the audit row rides the MARK's transaction — the in-transaction append, never the plain one.
     const appendOriginal = h.services.stockPreparationAuditStore.append
-    h.services.stockPreparationAuditStore.append = async (entry) => { order.push('audit'); return appendOriginal(entry) }
+    h.services.stockPreparationAuditStore.append = async (entry) => { order.push('plain-append'); return appendOriginal(entry) }
+    const appendWithinOriginal = h.services.stockPreparationAuditStore.appendWithin
+    let markedWhenAudited = null
+    h.services.stockPreparationAuditStore.appendWithin = async (trx, entry) => {
+      markedWhenAudited = h.registryRows()[0].pilot_enabled_at instanceof Date
+      order.push('audit')
+      return appendWithinOriginal(trx, entry)
+    }
     const res = await enablePilot(h, WORKBENCH_ADMIN)
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     const data = res.body.data
@@ -372,8 +392,10 @@ test('P-06 POST ready: bump → lease → host stamp (exact ids) → registry ma
     assert.equal(data.pilot.enabledBy, WORKBENCH_ADMIN.id)
     assert.equal(data.pilot.readinessVersion, PILOT_READINESS_VERSION)
     assert.equal(typeof data.pilot.enabledAt, 'string')
-    // Order: the stamp inside the lease, after the bump; then the mark; then the audit row after release.
-    assert.deepEqual(order, ['stamp', 'mark', 'audit'])
+    // Order: the stamp inside the lease, after the bump; then the mark, whose transaction writes the audit row
+    // after the compare-and-set and BEFORE it returns (F-4(c)); the plain append is never used.
+    assert.deepEqual(order, ['stamp', 'mark', 'audit', 'mark-committed'])
+    assert.equal(markedWhenAudited, true, 'the audit row was written after the compare-and-set, in the same transaction')
     assert.equal(stateAtStamp.leaseHeld, true, 'the stamp was requested while the lease was held')
     assert.equal(stateAtStamp.leasePurpose, 'pilot_enable')
     assert.equal(stateAtStamp.generation, 1, 'the bump preceded the stamp')
@@ -520,6 +542,257 @@ test('P-11 the audit vocabulary probe: a database without migration 101 is 503 b
     assert.equal((await h.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h.sheetId))).generation, 0)
     assert.deepEqual(h.auditAppends, [])
   } finally { h.restore() }
+})
+
+// ── pre-enable hardening (step-4 design §23.4 F-3 / F-4 / F-5) ─────────────────────────────────────────
+
+test('P-12 (F-4b) the 501 wiring guard: a registry store missing ANY pilot method — markPilotEnabled included — is 501 on GET and POST with zero registry / host IO, nothing bumped', async () => {
+  for (const method of ['getPilotState', 'getPilotStateBySheetId', 'markPilotEnabled', 'probeTableReadable']) {
+    const h = mountReady()
+    try {
+      const scope = swlLockLib.sheetWriteScopeKey(h.sheetId)
+      h.projectTargetStore[method] = undefined
+      h.db.calls.length = 0
+      h.provisioning.calls.length = 0
+      for (const [label, run] of [['GET', getPilot], ['POST', enablePilot]]) {
+        const res = await run(h, WORKBENCH_ADMIN)
+        assert.equal(res.statusCode, 501, `${method} missing, ${label}: ${JSON.stringify(res.body)}`)
+        assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', `${method} missing, ${label}`)
+      }
+      assert.deepEqual(h.db.calls, [], `${method} missing: no registry statement`)
+      assert.deepEqual(h.provisioning.calls, [], `${method} missing: no host call (no readiness probe, no stamp)`)
+      assert.equal((await h.projectWriteLock.readState(scope)).generation, 0, `${method} missing: nothing bumped`)
+      assert.deepEqual(h.auditAppends, [])
+      assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    } finally { h.restore() }
+  }
+})
+
+test('P-13 (F-4c) the audit row commits WITH the mark: a crash between them leaves export-closed-not-pilot and NO row; the re-POST writes exactly one; a third POST none; an audit store without the in-transaction append, or a store that skips the hook, is refused', async () => {
+  // (a) an audit store that cannot write inside the mark transaction: 501 before ANY IO.
+  {
+    const h = mountReady()
+    try {
+      h.services.stockPreparationAuditStore.appendWithin = undefined
+      h.db.calls.length = 0
+      h.provisioning.calls.length = 0
+      const res = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(res.statusCode, 501, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+      assert.deepEqual(h.db.calls, [], 'no registry statement')
+      assert.deepEqual(h.provisioning.calls, [], 'no readiness probe, no stamp')
+      assert.equal((await h.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h.sheetId))).generation, 0)
+      assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    } finally { h.restore() }
+  }
+  // (b) THE CRASH. The harness memory db applies writes at once; give its transaction PostgreSQL's rollback (the
+  // registry rows AND the audit rows written on that transaction are restored when its callback throws) — the
+  // real-database proof of the same property is H-02 in the real-DB cases module.
+  {
+    const h = mountReady()
+    try {
+      const { sheetId } = h
+      const transactionOriginal = h.db.transaction
+      h.db.transaction = async (fn) => {
+        const registryBefore = h.registryRows().map((r) => ({ ...r }))
+        const auditBefore = h.auditAppends.length
+        try {
+          return await transactionOriginal.call(h.db, fn)
+        } catch (error) {
+          h.registryRows().splice(0, h.registryRows().length, ...registryBefore)
+          h.auditAppends.length = auditBefore
+          throw error
+        }
+      }
+      // One crash at the audit write — whichever seam the route uses (a route that wrote the row AFTER the mark,
+      // outside its transaction, crashes here too and leaves the mark without a row: that is what this pins).
+      let crashes = 1
+      const crash = () => Object.assign(new Error('synthetic crash between the mark and its audit row'), { code: '08006' })
+      const audit = h.services.stockPreparationAuditStore
+      const appendWithinOriginal = audit.appendWithin
+      const appendOriginal = audit.append
+      audit.appendWithin = async (trx, entry) => { if (crashes > 0) { crashes -= 1; throw crash() } return appendWithinOriginal(trx, entry) }
+      audit.append = async (entry) => { if (crashes > 0) { crashes -= 1; throw crash() } return appendOriginal(entry) }
+      const crashed = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(crashed.statusCode, 500, JSON.stringify(crashed.body))
+      assert.equal(crashes, 0, 'calibration: the crash fired')
+      assert.ok(h.provisioning.gridExportClosures.has(sheetId), 'the stamp landed first: the sheet is export-closed')
+      assert.equal(h.registryRows()[0].pilot_enabled_at ?? null, null, 'the mark rolled back with its row: NOT pilot')
+      assert.equal(h.auditAppends.length, 0, 'no audit row')
+      const afterCrash = await h.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(sheetId))
+      assert.equal(afterCrash.leaseHeld, false, 'the lease was released')
+      // The runbook's remedy: enable answered 500 ⇒ POST again. It completes the enable and writes THE row.
+      const again = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+      assert.equal(again.body.data.enabled, true)
+      assert.equal(again.body.data.alreadyEnabled, false)
+      assert.deepEqual(again.body.data.exportClosure, { closed: true, alreadyClosed: true })
+      assert.ok(h.registryRows()[0].pilot_enabled_at instanceof Date)
+      assert.equal(h.auditAppends.length, 1, 'exactly one audit row')
+      assert.equal(h.auditAppends[0].action, 'project_pilot_enable')
+      assert.equal(h.auditAppends[0].detail.exportClosureAlreadyClosed, true, 'the row says the stamp was already there')
+      // A further POST (stamp repair only) writes none.
+      const third = await enablePilot(h, PLATFORM_ADMIN)
+      assert.equal(third.statusCode, 200, JSON.stringify(third.body))
+      assert.equal(third.body.data.alreadyEnabled, true)
+      assert.equal(h.auditAppends.length, 1, 'still exactly one audit row')
+    } finally { h.restore() }
+  }
+  // (c) a registry store that marks WITHOUT running the hook (a wiring defect): the route says so (500), never 200.
+  {
+    const h = mountReady()
+    try {
+      const markOriginal = h.projectTargetStore.markPilotEnabled
+      h.projectTargetStore.markPilotEnabled = async (input) => markOriginal({ ...input, onMarked: undefined })
+      const res = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(res.statusCode, 500, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+      assert.equal(h.auditAppends.length, 0)
+    } finally { h.restore() }
+  }
+})
+
+test('P-14 (F-3) no_open_large_job: a real approved (queued) checkpoint job on the sheet refuses enabling with nothing done; another sheet\'s job does not; finishing the job clears it; a job store that cannot list fails the check', async () => {
+  const h = mountReady()
+  try {
+    const { sheetId, objectId } = h
+    const scope = swlLockLib.sheetWriteScopeKey(sheetId)
+    // Another project's sheet with its own approved job: not this sheet's business.
+    const other = h.seedRegistryRow(OTHER_PROJECT)
+    await seedPlannedExpansionJob(h, { jobId: 'job-peh-other', target: { sheetId: other.sheetId, objectId: other.objectId, fieldIdMap: {} }, projectNo: OTHER_PROJECT })
+    assert.equal((await plan(h, 'job-peh-other')).statusCode, 200)
+    const otherApproved = await applyStart(h, 'job-peh-other')
+    assert.equal(otherApproved.statusCode, 202, JSON.stringify(otherApproved.body))
+    const clean = await getPilot(h, WORKBENCH_ADMIN)
+    assert.deepEqual(clean.body.data.readiness.failing, [], 'another sheet\'s open job does not count')
+    // THIS sheet: approved before the enable, queued, never run.
+    await seedPlannedExpansionJob(h, { jobId: 'job-peh-mine', target: { sheetId, objectId, fieldIdMap: {} } })
+    assert.equal((await plan(h, 'job-peh-mine')).statusCode, 200)
+    const approved = await applyStart(h, 'job-peh-mine')
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const applyJobId = approved.body.data.jobId
+    assert.equal((await h.context.storage.get(checkpointKey(applyJobId))).status, 'queued', 'calibration: an open job')
+    const seen = await getPilot(h, WORKBENCH_ADMIN)
+    assert.deepEqual(seen.body.data.readiness.failing, ['no_open_large_job'])
+    assert.deepEqual(seen.body.data.may, { enable: false })
+    const generationBefore = (await h.projectWriteLock.readState(scope)).generation
+    const refused = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(refused.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+    assert.deepEqual(details(refused).failing, ['no_open_large_job'])
+    assert.equal((await h.projectWriteLock.readState(scope)).generation, generationBefore, 'nothing bumped')
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal(h.registryRows().find((row) => row.project_no === PROJECT).pilot_enabled_at, undefined)
+    assert.ok(!JSON.stringify(refused.body).includes(applyJobId), 'values-free: no job id in the refusal')
+    // 旧作业处置 (runbook): run the old job to its end BEFORE enabling — then the check clears and the enable lands.
+    const ran = await applyRun(h, 'job-peh-mine', applyJobId)
+    assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+    assert.ok(['succeeded', 'partial'].includes((await h.context.storage.get(checkpointKey(applyJobId))).status))
+    const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+  } finally { h.restore() }
+  // FAIL CLOSED: a job store that cannot list its keys cannot prove there is no open job.
+  const h2 = mountReady()
+  try {
+    delete h2.context.storage.list
+    const res = await getPilot(h2, WORKBENCH_ADMIN)
+    assert.deepEqual(res.body.data.readiness.failing, ['no_open_large_job'])
+  } finally { h2.restore() }
+  // THE WINDOW: a job that lands a chunk AFTER readiness scanned and BEFORE the enable's lease (simulated by a
+  // later readiness probe storing a paused job for this sheet). The scan under the lease refuses: 409 NOT_READY
+  // `no_open_large_job`, nothing stamped, marked or audited.
+  const h3 = mountReady()
+  try {
+    const probeOriginal = h3.projectTargetStore.probeTableReadable
+    let landed = false
+    h3.projectTargetStore.probeTableReadable = async (table) => {
+      if (!landed) {
+        landed = true
+        await h3.context.storage.set(checkpointKey('job-peh-window'), { jobId: 'job-peh-window', ...JOB_SCOPE, status: 'paused', target: { sheetId: h3.sheetId, objectId: h3.objectId, fieldIdMap: {} } })
+      }
+      return probeOriginal.call(h3.projectTargetStore, table)
+    }
+    const raced = await enablePilot(h3, WORKBENCH_ADMIN)
+    assert.equal(landed, true, 'calibration: the job landed after the readiness scan')
+    assert.equal(raced.statusCode, 409, JSON.stringify(raced.body))
+    assert.equal(raced.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+    assert.deepEqual(details(raced).failing, ['no_open_large_job'])
+    assert.equal(h3.provisioning.gridExportClosureCalls.length, 0, 'no stamp')
+    assert.equal(h3.registryRows()[0].pilot_enabled_at, undefined, 'not marked')
+    assert.deepEqual(h3.auditAppends, [])
+    assert.equal((await h3.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h3.sheetId))).leaseHeld, false, 'the lease was released')
+  } finally { h3.restore() }
+})
+
+/** Rows on the harness host (physical keys, the project's own number) — what the project-scoped read answers. */
+async function seedSheetRows(h, rows) {
+  const physical = (fieldId) => h.provisioning.getFieldId(h.staging, h.objectId, fieldId)
+  for (const row of rows) {
+    const data = Object.fromEntries(Object.entries({ projectNo: PROJECT, active: true, ...row }).map(([key, value]) => [physical(key), value]))
+    await h.records.createRecord({ sheetId: h.sheetId, data })
+  }
+}
+
+test('P-15 (F-5 / O-6) no_two_copy_component: a sheet holding one component as an active root AND an active nested copy is refused with nothing done; the same sheet with the copy inactive enables', async () => {
+  const doubled = mountReady()
+  try {
+    await seedSheetRows(doubled, [
+      { idempotencyKey: 'syn-k-root-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-root-p1', componentSourceId: 'SYN-PEH-P1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-p1-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: 'SYN-PEH-P1' },
+    ])
+    const seen = await getPilot(doubled, WORKBENCH_ADMIN)
+    assert.deepEqual(seen.body.data.readiness.failing, ['no_two_copy_component'])
+    const refused = await enablePilot(doubled, WORKBENCH_ADMIN)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.deepEqual(details(refused).failing, ['no_two_copy_component'])
+    assert.ok(!JSON.stringify(refused.body).includes('SYN-PEH'), 'values-free: no component id in the refusal')
+    assert.equal(doubled.provisioning.gridExportClosureCalls.length, 0)
+    assert.deepEqual(doubled.auditAppends, [])
+    assert.equal(doubled.registryRows()[0].pilot_enabled_at, undefined)
+  } finally { doubled.restore() }
+  const repaired = mountReady()
+  try {
+    await seedSheetRows(repaired, [
+      { idempotencyKey: 'syn-k-root-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-root-p1', componentSourceId: 'SYN-PEH-P1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-p1-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: 'SYN-PEH-P1', active: false },
+    ])
+    const res = await enablePilot(repaired, WORKBENCH_ADMIN)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.enabled, true)
+  } finally { repaired.restore() }
+})
+
+test('P-16 (F-5 / O-8) pack_columns_installed: an action declaring an ext_ column enables only once that column is listed live by the pack ledger AND present on the project sheet; no declaration at all refuses', async () => {
+  const EXT = 'ext_synPehPack'
+  const h = mountReady({
+    extensionFieldIds: [EXT],
+    configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } },
+  })
+  try {
+    const { objectId } = h
+    const failing = async () => (await getPilot(h, WORKBENCH_ADMIN)).body.data.readiness.failing
+    assert.deepEqual(await failing(), ['pack_columns_installed'], 'declared, nothing installed')
+    // The ledger lists it (a live install on THIS sheet), the host does not have the column (yet / any more).
+    h.db.rowsOf(projectSheet.PACK_INSTALL_TABLE).push({
+      id: 'seed-peh-pack', tenant_id: TENANT, workspace_id: null, project_id: h.staging, object_id: objectId, pack_id: 'syn_peh_pack', pack_version: '1',
+      mode: 'install', status: 'installed', installed_fields_json: [{ fieldId: EXT }], summary_json: {}, warnings_json: [], last_install_at: new Date('2026-10-23T00:00:00Z'),
+    })
+    assert.deepEqual(await failing(), ['pack_columns_installed'], 'in the ledger, not on the sheet')
+    // The column on the project sheet: installed and declared — the check passes and the enable lands.
+    h.provisioning.objects.get(`${h.staging}/${objectId}`).fields.set(EXT, { name: 'syn pack column', type: 'string', property: { stockPreparation: { ownership: 'plm_system' } } })
+    assert.deepEqual(await failing(), [])
+    const res = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  } finally { h.restore() }
+  // Neither a declared column nor the not-applicable declaration: never guessed.
+  const undeclared = mountReady({ configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } } })
+  try {
+    assert.deepEqual((await getPilot(undeclared, WORKBENCH_ADMIN)).body.data.readiness.failing, ['pack_columns_installed'])
+  } finally { undeclared.restore() }
 })
 
 // ── the lane refusals ───────────────────────────────────────────────────────────────────────────────

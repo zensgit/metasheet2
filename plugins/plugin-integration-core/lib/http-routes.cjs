@@ -595,6 +595,7 @@ const {
   createStockPreparationPilotGate,
 } = require('./stock-preparation-pilot-gate.cjs')
 const {
+  CUSTOMER_PACK_NOT_APPLICABLE: STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE,
   SPEC_READ_PLAN_SLOT_NOT_APPLICABLE: STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE,
   collectGenericWriterTargets: collectStockPrepGenericWriterTargets,
   evaluatePilotReadiness: evaluateStockPrepPilotReadiness,
@@ -657,6 +658,7 @@ const {
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
+  countOpenLargeBomCheckpointApplyJobsForSheet,
   createLargeBomBackgroundExpansionJob,
   createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
@@ -4736,6 +4738,11 @@ function requireStockPreparationAudit() {
     const pilotConfig = context && isPlainObject(context.config) && isPlainObject(context.config.stockPreparationPilot) ? context.config.stockPreparationPilot : null
     return pilotConfig && pilotConfig.specReadPlanSlot === STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE ? STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE : null
   }
+  /** Pre-enable hardening O-8: the server-held "no customer pack here" declaration (plugin config, exact literal). */
+  function stockPreparationPilotCustomerPackDeclaration() {
+    const pilotConfig = context && isPlainObject(context.config) && isPlainObject(context.config.stockPreparationPilot) ? context.config.stockPreparationPilot : null
+    return pilotConfig && pilotConfig.customerPack === STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE ? STOCK_PREP_PILOT_CUSTOMER_PACK_NOT_APPLICABLE : null
+  }
   /**
    * The pilot readiness of ONE registered, ACTIVE project (PR B): resolves the project's sheet through the
    * registry overlay (a WRITE lookup — an archived project is the §6 409 here), walls it to the tenant, and
@@ -4765,10 +4772,17 @@ function requireStockPreparationAudit() {
       recordsApi: getMultitableRecordsApi(),
       provisioning,
       assertTargetSheetHoldsNoForeignActiveRows: tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows,
+      // Pre-enable hardening (step-4 design §23.4): O-6 reads the project's rows the planner plans from; F-3
+      // scans the large-BOM job store (the same `context.storage` every large route writes) for this sheet;
+      // O-8 reads the pack-install ledger and the host strictly.
+      readExistingStockPreparationRows: tableActionInternals.readExistingStockPreparationRows,
       lock: stockPreparationProjectWriteLock,
       writeScope,
+      countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
       probeTableReadable: (table) => store.probeTableReadable(table),
       specReadPlanSlotDeclaration: stockPreparationPilotSpecSlotDeclaration(),
+      packInstallStore: stockPreparationPackInstalls,
+      customerPackDeclaration: stockPreparationPilotCustomerPackDeclaration(),
       collectGenericWriterTargets: () => collectStockPrepGenericWriterTargets({
         externalSystemRegistry: externalSystems,
         pipelineRegistry,
@@ -10794,13 +10808,18 @@ function requireStockPreparationAudit() {
     //   4. READINESS, in full → 409 STOCK_PREP_PILOT_NOT_READY with the failing check ids (nothing done);
     //   5. bumpGeneration(reason pilot_enable): every plan made before the pilot — small tokens and
     //      approved large jobs alike — is superseded; refused 409 WRITE_LOCKED while a writer holds the sheet;
-    //   6. inside withProjectWriteLease(purpose pilot_enable): the HOST STAMP first (closeSheetGridExport —
-    //      set-once, idempotent; it can only take export away), then the REGISTRY MARK (one transaction, the
+    //   6. inside withProjectWriteLease(purpose pilot_enable): the open-large-job scan AGAIN (F-3: no chunk ran
+    //      between readiness and the bump — else 409 NOT_READY `no_open_large_job`, nothing done); then the HOST
+    //      STAMP first (closeSheetGridExport — set-once, idempotent; it can only take export away), then the
+    //      REGISTRY MARK (one transaction, the
     //      tenant lock, the row FOR UPDATE, CAS pilot_enabled_at IS NULL). The stamp comes first so a mark
     //      that fails leaves a sheet that is closed but not pilot — which the re-POST completes — and never
     //      a pilot sheet that still exports;
-    //   7. ONE audit row `project_pilot_enable`, only when the mark landed now (a re-POST that repaired the
-    //      stamp of an already-pilot row writes none).
+    //   7. ONE audit row `project_pilot_enable`, written INSIDE the mark's transaction (pre-enable hardening
+    //      F-4(c)), only when the mark lands now: the mark and its row commit or roll back together, so a
+    //      crash between them leaves NEITHER (closed but not pilot, no row) and the re-POST that completes
+    //      the enable writes the one row; a re-POST on an already-pilot row (stamp repair only) writes none.
+    //      An audit store without the in-transaction append is refused 501 in step 2, before any IO.
     async stockPreparationProjectPilotEnable(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireProjectSheetsEnabled()
@@ -10813,6 +10832,9 @@ function requireStockPreparationAudit() {
       })
       const tenantId = scope.tenantId
       const audit = requireStockPreparationAudit()
+      if (typeof audit.appendWithin !== 'function') {
+        throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the pilot mark transaction; the pilot is not enabled without its audit row')
+      }
       const store = requireStockPreparationProjectPilot()
       const projectWriteLock = requireStockPreparationProjectWriteLock()
       await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION, '101', tenantId)
@@ -10839,26 +10861,51 @@ function requireStockPreparationAudit() {
       const provisioning = getMultitableProvisioning()
       await projectWriteLock.bumpGeneration(writeScope, { reason: 'pilot_enable', tenantId })
       const outcome = await projectWriteLock.withProjectWriteLease(writeScope, { purpose: 'pilot_enable', runId: `pilot-enable:${crypto.randomUUID()}`, tenantId }, async () => {
+        // F-3, closed under the lease: readiness scanned the job store BEFORE the bump, so a checkpoint chunk
+        // that ran in between (it runs inside this same sheet lease, and persists its status before release)
+        // would be missed. Asked again HERE — no chunk can run while this lease is held, and an approval made
+        // before the bump can no longer run one (its binding is stale). Nothing is stamped or marked on a refusal.
+        const openScan = await countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId })
+        if (openScan.open !== 0 || openScan.unattributed !== 0) {
+          throw new StockPreparationPilotError(
+            409,
+            STOCK_PREP_PILOT_ERROR_CODES.NOT_READY,
+            'this project is not ready for the batch-refresh pilot; every listed check must pass before it can be enabled',
+            { version: readiness.version, failing: ['no_open_large_job'], partial: false },
+          )
+        }
         const stamp = await provisioning.closeSheetGridExport({ projectId, sheetId: action.target.sheetId, objectId: action.target.objectId, actorId: actor })
-        const mark = await store.markPilotEnabled({ tenantId, projectNo, actorId: actor, readinessVersion: readiness.version })
-        return { stamp, mark }
-      })
-      if (outcome.mark.enabled === true) {
-        await audit.append({
+        let audited = false
+        const mark = await store.markPilotEnabled({
           tenantId,
-          projectId: projectNo,
-          action: STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION,
-          subjectId: action.target.sheetId,
-          mode: 'enabled',
-          actor,
-          detail: {
-            objectId: action.target.objectId,
-            readinessVersion: readiness.version,
-            exportClosureAlreadyClosed: outcome.stamp && outcome.stamp.alreadyClosed === true,
-            generationBumped: true,
+          projectNo,
+          actorId: actor,
+          readinessVersion: readiness.version,
+          // F-4(c): the audit row on the mark's own transaction handle — committed with the mark or not at all.
+          onMarked: async (trx) => {
+            await audit.appendWithin(trx, {
+              tenantId,
+              projectId: projectNo,
+              action: STOCK_PREPARATION_PROJECT_PILOT_ENABLE_AUDIT_ACTION,
+              subjectId: action.target.sheetId,
+              mode: 'enabled',
+              actor,
+              detail: {
+                objectId: action.target.objectId,
+                readinessVersion: readiness.version,
+                exportClosureAlreadyClosed: stamp && stamp.alreadyClosed === true,
+                generationBumped: true,
+              },
+            })
+            audited = true
           },
         })
-      }
+        // A mark that landed without its row means the store skipped the hook — a wiring defect, said loudly.
+        if (mark.enabled === true && audited !== true) {
+          throw new HttpRouteError(500, 'AUDIT_STORE_UNAVAILABLE', 'the pilot mark landed without its in-transaction audit row')
+        }
+        return { stamp, mark }
+      })
       return sendOk(res, {
         projectNo,
         status: outcome.mark.pilot.status,

@@ -16,13 +16,17 @@ function mapConsume(map, key) {
 }
 
 // `Object.assign(new Map(), { durable: true })`, the shape several route-mount suites use as
-// `context.storage`, plus `consume`.
+// `context.storage`, plus `consume` and the host contract's `list` (every key, sorted — what the durable
+// one's `SELECT key ... ORDER BY key` answers; the pilot readiness scans it for open large-BOM jobs).
 function consumableMap({ durable = true } = {}) {
   const map = new Map()
   return Object.assign(map, {
     ...(durable ? { durable: true } : {}),
     async consume(key) {
       return mapConsume(map, key)
+    },
+    async list() {
+      return Array.from(map.keys()).sort()
     },
   })
 }

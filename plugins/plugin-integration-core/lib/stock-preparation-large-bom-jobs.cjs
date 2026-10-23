@@ -61,6 +61,15 @@ const LARGE_BOM_CHECKPOINT_APPLY_STATUSES = Object.freeze([
   'expired',
 ])
 
+// Pre-enable hardening F-3 (step-4 design §23.4): the checkpoint-apply statuses after which a job can
+// never write again. `runLargeBomCheckpointApplyJobChunk` returns `succeeded` / `partial` as they are and
+// refuses `cancelled` / `expired`; every OTHER status — `queued`, `paused`, `failed` (resumable after a
+// fenced stop), `running` (a run that died mid-chunk), and any token this build does not know — is OPEN:
+// the job may still land rows on its sheet.
+const LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES = Object.freeze(['succeeded', 'partial', 'cancelled', 'expired'])
+// Every checkpoint-apply job is stored under this prefix (`checkpointApplyJobKey` below).
+const LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX = 'stock-preparation:large-bom:apply:'
+
 const BACKGROUND_PROGRESS_FIELDS = Object.freeze([
   'rowsExpanded',
   'readCount',
@@ -558,7 +567,60 @@ function checkpointApplyJobKey(input = {}) {
       { actionIdPresent: Boolean(safeActionId), applyJobIdPresent: Boolean(safeApplyJobId) },
     )
   }
-  return `stock-preparation:large-bom:apply:${tenantId}:${workspaceId}:${safeActionId}:${safeApplyJobId}`
+  return `${LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX}${tenantId}:${workspaceId}:${safeActionId}:${safeApplyJobId}`
+}
+
+/**
+ * PRE-ENABLE HARDENING F-3 (step-4 design §23.4): how many OPEN checkpoint-apply jobs target ONE sheet.
+ * Read by the pilot readiness check `no_open_large_job`: a large job half-landed across an enablement can
+ * be neither resumed (the pilot gate refuses every large route) nor closed (there is no apply-job cancel),
+ * so enabling is refused while one exists.
+ *
+ * WHOLE STORE, EVERY TENANT AND WORKSPACE: the write scope is the sheet (R-52) and sheet ids are globally
+ * unique, so a job is this sheet's when its stored target names it, whoever approved it. The answer is two
+ * integers — no job id, tenant or sheet leaves this function.
+ *
+ * FAIL CLOSED: a store that is not the durable one, or lacks `list` / `get`, or whose list / get throws,
+ * THROWS (the readiness check reads a throw as not ok). A stored value that is not an object, or an OPEN
+ * job whose target sheet cannot be read, counts as open (`unattributed`): nothing proves it is another
+ * sheet's. A terminal job is never counted, whatever its target.
+ *
+ * @returns {Promise<{ open: number, unattributed: number, scanned: number }>}
+ */
+async function countOpenLargeBomCheckpointApplyJobsForSheet({ storage, sheetId } = {}) {
+  const sheet = optionalString(sheetId)
+  if (!sheet) {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_APPLY_JOB_SCAN_INVALID', 'the open-job scan needs the sheet it is asked about', { field: 'sheetId' }, 500)
+  }
+  const store = ensureDurableJobStorage(storage)
+  if (typeof store.list !== 'function') {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_JOB_STORE_UNAVAILABLE', 'large-BOM job storage is missing list', { method: 'list' }, 501)
+  }
+  const keys = await store.list()
+  if (!Array.isArray(keys)) {
+    throw new StockPreparationLargeBomJobError('LARGE_BOM_JOB_STORE_UNAVAILABLE', 'large-BOM job storage list did not answer a key list', { method: 'list' }, 501)
+  }
+  let open = 0
+  let unattributed = 0
+  let scanned = 0
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key.startsWith(LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX)) continue
+    scanned += 1
+    const job = await store.get(key)
+    if (job === null || job === undefined) continue // deleted between the list and the read
+    if (!isPlainObject(job)) {
+      unattributed += 1
+      continue
+    }
+    if (LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES.includes(job.status)) continue
+    const jobSheet = isPlainObject(job.target) ? optionalString(job.target.sheetId) : ''
+    if (!jobSheet) {
+      unattributed += 1
+      continue
+    }
+    if (jobSheet === sheet) open += 1
+  }
+  return { open, unattributed, scanned }
 }
 
 function requiredPrincipal(value) {
@@ -1700,8 +1762,10 @@ module.exports = {
   LARGE_BOM_ARTIFACT_CHUNK_COUNT,
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
+  LARGE_BOM_CHECKPOINT_APPLY_TERMINAL_STATUSES,
   StockPreparationLargeBomJobError,
   cancelLargeBomBackgroundExpansionJob,
+  countOpenLargeBomCheckpointApplyJobsForSheet,
   createLargeBomBackgroundExpansionJob,
   createLargeBomCheckpointApplyJob,
   loadLargeBomBackgroundExpansionJob,
@@ -1720,6 +1784,7 @@ module.exports = {
   __internals: {
     backgroundJobKey,
     checkpointApplyJobKey,
+    LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX,
     effectiveExpansionBudgets,
     ensureDurableJobStorage,
     attachReadFailureEvidence,

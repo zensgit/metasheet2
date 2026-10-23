@@ -27,6 +27,12 @@
 //   C10 the executor itself: a records surface that declares no fence is refused 501 before any read; a
 //       fenced run without the guard is refused 501 before any read; the logical view forwards the
 //       declaration.
+//   C11 (pre-enable hardening F-1) the executor refuses a guard scoped to ANOTHER sheet (or carrying no scope
+//       key) 500 GUARD_SCOPE_MISMATCH with ZERO IO: no read, no holder CAS, no fence, no patch; the matching
+//       guard on the same records carries.
+//   C12 (F-1) the carry's patch runs inside the guard's host-write bracket: a heartbeat tick while the patch is
+//       in flight is SKIPPED (no holder CAS, manual timers — the lock suite's L18 pattern, the writer's W10
+//       rule); the next tick after the patch renews. Kills "carry patch without the withHostWrite bracket".
 //
 // Every value here is synthetic.
 
@@ -43,6 +49,7 @@ const { OBJECT_ID: LEDGER_OBJECT_ID } = require(path.join(LIB, 'stock-preparatio
 const { applyCarryViaConfirm } = require(path.join(LIB, 'stock-preparation-confirm-writes.cjs'))
 const {
   PROJECT_WRITE_ERROR_CODES,
+  PROJECT_WRITE_LEASE_HEARTBEAT_MS,
   PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS,
   PROJECT_WRITE_LEASE_TTL_MS,
   PROJECT_WRITE_LOCK_TABLE,
@@ -474,6 +481,104 @@ test('C10 the executor: a records surface without fence support is refused 501 b
     assert.equal(result.mode, 'carried')
     assert.equal(fake.patches()[0][1].expectedVersion, 1)
   }
+})
+
+// The executor-level fixtures C11 / C12 share: an inactive predecessor holding the note and its blank successor,
+// on ONE synthetic sheet, addressed by logical id (an empty fieldIdMap).
+function executorFixture(sheetId) {
+  const target = { sheetId, objectId: 'plm_stock_preparation_main', fieldIdMap: {} }
+  const seeded = () => {
+    const fake = createRecordsFake()
+    fake.rows.push({ id: 'r_old', sheetId, version: 1, data: { projectNo: PROJECT, idempotencyKey: OLD_KEY, componentSourceId: COMPONENT, active: false, notes: NOTE } })
+    fake.rows.push({ id: 'r_new', sheetId, version: 1, data: { projectNo: PROJECT, idempotencyKey: NEW_KEY, componentSourceId: COMPONENT, active: true } })
+    return fake
+  }
+  const base = (recordsApi) => ({ permission: 'admin', recordsApi, target, decision: decisionFixture(), confirmedBy: 'u_scl_admin' })
+  return { target, seeded, base }
+}
+
+// ── C11 ───────────────────────────────────────────────────────────────────────────────────────────
+test('C11 (F-1) the executor refuses a guard of ANOTHER sheet (or with no scope key) 500 GUARD_SCOPE_MISMATCH with zero IO; the matching guard carries', async () => {
+  const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
+  const { target, seeded, base } = executorFixture('sheet_scl_f1_target')
+  const holderCas = () => env.db.log.filter(([method]) => method === 'updateRow').length
+  // Run the executor INSIDE a real lease on `scopeKey`, handing it `makeGuard(guard)`; report the outcome and how
+  // many holder CASes the executor itself issued (the lease's own acquire / release are outside the window).
+  const runInLease = (scopeKey, makeGuard, recordsApi) => env.lock.withProjectWriteLease(scopeKey, { purpose: 'carry_confirm', runId: 'scl-f1' }, async (guard) => {
+    const before = holderCas()
+    try {
+      const result = await applyCarryViaConfirm({ ...base(recordsApi), writeFence: makeGuard(guard), writeFenceRequired: true })
+      return { result, error: null, executorCas: holderCas() - before }
+    } catch (error) {
+      return { result: null, error, executorCas: holderCas() - before }
+    }
+  })
+  const refusals = [
+    ['a guard leased on another sheet', sheetWriteScopeKey('sheet_scl_f1_other'), (guard) => guard],
+    ['the right lease, a guard naming another scope', sheetWriteScopeKey(target.sheetId), (guard) => ({ ...guard, scopeKey: sheetWriteScopeKey('sheet_scl_f1_other') })],
+    ['a guard with no scope key', sheetWriteScopeKey(target.sheetId), (guard) => ({ ...guard, scopeKey: undefined })],
+    ['a guard whose scope key is the raw sheet id', sheetWriteScopeKey(target.sheetId), (guard) => ({ ...guard, scopeKey: target.sheetId })],
+  ]
+  for (const [label, scopeKey, makeGuard] of refusals) {
+    const fake = seeded()
+    const fenced = kit.withFakeHostWriteFence(fake)
+    const outcome = await runInLease(scopeKey, makeGuard, fenced)
+    assert.ok(outcome.error, `${label}: refused (got ${JSON.stringify(outcome.result)})`)
+    assert.equal(outcome.error.status, 500, label)
+    assert.equal(outcome.error.code, PROJECT_WRITE_ERROR_CODES.GUARD_SCOPE_MISMATCH, label)
+    assert.deepEqual(fake.calls, [], `${label}: zero records IO — not even the source read`)
+    assert.equal(fenced.fakeHostFences.length, 0, `${label}: the host was never asked`)
+    assert.equal(outcome.executorCas, 0, `${label}: no holder CAS was issued`)
+    assert.equal(fake.rows.find((row) => row.id === 'r_new').data.notes, undefined, `${label}: nothing carried`)
+    assert.equal(JSON.stringify(outcome.error.details || {}).includes('sheet_scl_f1'), false, `${label}: values-free`)
+  }
+  // The positive leg: the guard of exactly this sheet carries, fenced, with one pre-write CAS.
+  const fake = seeded()
+  const fenced = kit.withFakeHostWriteFence(fake)
+  const ok = await runInLease(sheetWriteScopeKey(target.sheetId), (guard) => guard, fenced)
+  assert.equal(ok.error, null, ok.error && ok.error.message)
+  assert.equal(ok.result.mode, 'carried')
+  assert.equal(ok.executorCas, 1, 'one holder CAS before the patch')
+  assert.equal(fenced.fakeHostFences.length, 1)
+  assert.equal(fenced.fakeHostFences[0][1].scopeKey, sheetWriteScopeKey(target.sheetId))
+  assert.equal(fake.rows.find((row) => row.id === 'r_new').data.notes, NOTE)
+})
+
+// ── C12 ───────────────────────────────────────────────────────────────────────────────────────────
+test('C12 (F-1) the carry patch runs inside the host-write bracket: a heartbeat tick while it is in flight is skipped (manual timers, L18 / W10); the next tick renews', async () => {
+  const clock = kit.createClock()
+  const env = kit.createInMemoryProjectWriteLock({ clock }) // manual timers: the heartbeat fires only when told to
+  const { target, seeded, base } = executorFixture('sheet_scl_f1_bracket')
+  const fake = seeded()
+  const entered = kit.deferred()
+  const gate = kit.deferred()
+  const patchOriginal = fake.patchRecord
+  fake.patchRecord = async (input) => { entered.resolve(); await gate.promise; return patchOriginal(input) }
+  const fenced = kit.withFakeHostWriteFence(fake)
+  const holderCas = () => env.db.log.filter(([method]) => method === 'updateRow').length
+  const outcome = await env.lock.withProjectWriteLease(sheetWriteScopeKey(target.sheetId), { purpose: 'carry_confirm', runId: 'scl-f1-bracket' }, async (guard) => {
+    assert.equal(env.timers.active.size, 1, 'calibration: the lease registered its heartbeat on the manual timers')
+    const carried = applyCarryViaConfirm({ ...base(fenced), writeFence: guard, writeFenceRequired: true })
+    await entered.promise
+    // The patch is IN FLIGHT at the host (past the pre-write CAS, inside the fenced write).
+    const before = holderCas()
+    clock.advance(PROJECT_WRITE_LEASE_HEARTBEAT_MS)
+    await env.timers.fireAll()
+    const duringPatch = holderCas() - before
+    const lostDuringPatch = guard.isLost()
+    gate.resolve()
+    const result = await carried
+    const afterBefore = holderCas()
+    clock.advance(PROJECT_WRITE_LEASE_HEARTBEAT_MS)
+    await env.timers.fireAll()
+    return { result, duringPatch, lostDuringPatch, afterPatch: holderCas() - afterBefore }
+  })
+  assert.equal(outcome.result.mode, 'carried')
+  assert.equal(outcome.duringPatch, 0, 'C12: no heartbeat CAS while the carry patch is in flight (it would queue behind the carry\'s own write transaction)')
+  assert.equal(outcome.lostDuringPatch, false)
+  assert.equal(outcome.afterPatch, 1, 'calibration: outside the bracket the same tick renews the lease')
+  assert.equal(fenced.fakeHostFences.length, 1, 'the patch was fenced')
+  assert.equal(fake.rows.find((row) => row.id === 'r_new').data.notes, NOTE)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-carry-confirm-write-lease.test.cjs', tests, { passLine: '✓ stock-preparation-carry-confirm-write-lease' })
