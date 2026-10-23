@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, large-BOM side: `installedFieldProperties` through the real HTTP routes.
 //
 // `stock-preparation-pack-install-readback.test.cjs` pins the seam (ledger -> live host read ->
@@ -258,6 +262,8 @@ function inertService(methods) {
 
 function baseServices(sourceAdapter, ledger) {
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -340,11 +346,11 @@ function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProd
       },
       multitable: {
         provisioning: createProvisioning(),
-        records: recordsApi.api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(recordsApi.api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [actionConfig(objectId)],
       stockPreparationCustomerPacks: { [PACK_ID]: PACK },

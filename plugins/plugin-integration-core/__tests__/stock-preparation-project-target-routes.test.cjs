@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 一个项目一张备料表 — THE THREE S1 ROUTES and the overlay as the existing routes see it (S1 of ADR
 // adr-stock-prep-project-sheets-20261008 §2 / §4 / §3). The real route stack is mounted; the
 // registry store is the REAL one over an in-memory db; the host provisioning, records, audit gate
@@ -206,6 +210,8 @@ function inertService(methods) {
 
 function baseServices() {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -225,10 +231,10 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      multitable: { provisioning, records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job (R-14..R-16).
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
@@ -263,6 +269,7 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return {
     routes, auditAppends, provisioning, records, db, store, context,
+    projectWriteLock: services.stockPreparationProjectWriteLock || null,
     restore() { for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }
 }
@@ -306,9 +313,17 @@ function registerActive(harness, projectNo = PROJECT, { archived = false, tenant
  * with its snapshot bound to `target`. Rows and decisions are empty: these cases are about WHICH
  * sheet the job addresses, not what it writes.
  */
+const swlLockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const actionId = PLM_STOCK_PREPARATION_ACTION_ID
   const at = '2026-10-09T00:00:00.000Z'
+  // Codex review P1-b: a seeded expansion + plan carries what the routes record — the target sheet's write
+  // generation observed from the mounted lock (none when no lock service is wired).
+  const seedLock = h.projectWriteLock
+  const writeObservation = seedLock && target && typeof target.sheetId === 'string'
+    ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
+    : null
   const job = {
     jobId, ...JOB_SCOPE, actionId,
     status: 'completed', authoritative: true, projectNoPresent: true,
@@ -328,6 +343,7 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
     budgets: {},
     evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
     createdAt: at, updatedAt: at,
+    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
   }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId }), job)
   return job
@@ -842,6 +858,88 @@ test('R-13 board, switch ON: an unregistered project renders with no bound targe
       assert.notEqual(res.body.error.code, 'STOCK_PREPARATION_PROJECT_ABSENT')
     }
   } finally { h.restore() }
+})
+
+// ── R6 (batch-refresh phase 0 step 1): the large lane under the project write lock ────────────────────
+//
+// Approval bumps the plan generation and binds the job; the chunk route takes the SAME project write lease
+// the small lane takes (busy -> 409 before any job write), refuses a job whose binding a newer preview
+// superseded (job untouched), and fails closed 501 with no lock service.
+test('R6 large lane: approval bumps + binds; the chunk route takes the project lease, refuses a superseded job untouched, and 501s without the lock', async () => {
+  const kit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
+  const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_LOCK_TABLE, sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+  const env = kit.createInMemoryProjectWriteLock({ timers: 'real' })
+  const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationProjectWriteLock: env.lock } })
+  try {
+    const { sheetId, objectId } = registerActive(h)
+    const scope = sheetWriteScopeKey(sheetId)
+    const jobId = 'job-swl-r6'
+    await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
+    assert.equal((await plan(h.routes, jobId)).statusCode, 200)
+    const storedJob = async (applyJobId) => h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId }))
+    const approved = await applyStart(h.routes, jobId)
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const applyJobId = approved.body.data.jobId
+    const row = () => env.db.rows(PROJECT_WRITE_LOCK_TABLE).find((r) => r.scope_key === scope)
+    assert.equal(row().generation, 1, 'the approval bumped the generation')
+    const bound = await storedJob(applyJobId)
+    assert.equal(bound.writeScope, scope, 'the job is bound to its project sheet (R-52)')
+    assert.equal(bound.writeGenerationToken, row().generation_token)
+    assert.equal(JSON.stringify(approved.body).includes(bound.writeGenerationToken), false, 'the binding is never answered')
+
+    // Busy: another run holds the project -> 409 before any job write.
+    const holder = await env.lock.acquire(scope, { purpose: 'small_apply', runId: 'swl-r6-small' })
+    const busy = await applyRun(h.routes, jobId, applyJobId)
+    assert.equal(busy.statusCode, 409, JSON.stringify(busy.body))
+    assert.equal(busy.body.error.code, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED)
+    assert.deepEqual(await storedJob(applyJobId), bound, 'job untouched by a busy refusal')
+    await env.lock.createGuard(holder).release()
+
+    // Superseded: a newer preview of the project -> 409 PLAN_SUPERSEDED, job untouched.
+    await env.lock.bumpGeneration(scope, { reason: 'small_preview' })
+    const superseded = await applyRun(h.routes, jobId, applyJobId)
+    assert.equal(superseded.statusCode, 409, JSON.stringify(superseded.body))
+    assert.equal(superseded.body.error.code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+    assert.equal(superseded.body.error.details.reason, 'newer_plan')
+    assert.deepEqual(await storedJob(applyJobId), bound, 'job untouched by a superseded refusal')
+    assert.equal(row().lease_id, null, 'the lease was released')
+
+    // P1-b: re-approving the SAME expansion after the newer preview is refused `expansion_stale` (nothing
+    // bumped, no job); re-planning it too. A FRESH expansion of the project plans, approves and runs.
+    const generationBefore = row().generation
+    const stale = await applyStart(h.routes, jobId)
+    assert.equal(stale.statusCode, 409, JSON.stringify(stale.body))
+    assert.equal(stale.body.error.code, PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+    assert.equal(stale.body.error.details.reason, 'expansion_stale')
+    assert.equal(row().generation, generationBefore, 'a stale approval bumps nothing')
+    const stalePlan = await plan(h.routes, jobId)
+    assert.equal(stalePlan.statusCode, 409, JSON.stringify(stalePlan.body))
+    assert.equal(stalePlan.body.error.details.reason, 'expansion_stale')
+    const freshJobId = 'job-swl-r6-fresh'
+    await seedPlannedExpansionJob(h, { jobId: freshJobId, target: { sheetId, objectId, fieldIdMap: {} } })
+    assert.equal((await plan(h.routes, freshJobId)).statusCode, 200)
+    const again = await applyStart(h.routes, freshJobId)
+    assert.equal(again.statusCode, 202, JSON.stringify(again.body))
+    const ran = await applyRun(h.routes, freshJobId, again.body.data.jobId)
+    assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+    assert.notEqual((await storedJob(again.body.data.jobId)).status, 'queued')
+  } finally { h.restore() }
+
+  const bare = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationProjectWriteLock: null } })
+  try {
+    const { sheetId, objectId } = registerActive(bare)
+    const jobId = 'job-swl-r6-bare'
+    await seedPlannedExpansionJob(bare, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
+    assert.equal((await plan(bare.routes, jobId)).statusCode, 200)
+    const approved = await applyStart(bare.routes, jobId)
+    assert.equal(approved.statusCode, 202, 'approval without the lock service creates an UNBOUND job')
+    const refused = await applyRun(bare.routes, jobId, approved.body.data.jobId)
+    assert.equal(refused.statusCode, 501, JSON.stringify(refused.body))
+    assert.equal(refused.body.error.code, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE)
+    const stored = await bare.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId: approved.body.data.jobId }))
+    assert.equal(stored.status, 'queued', 'nothing ran')
+    assert.equal(Object.prototype.hasOwnProperty.call(stored, 'writeScope'), false)
+  } finally { bare.restore() }
 })
 
 // S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — the same per-test loop

@@ -102,6 +102,14 @@ export type StockPreparationProjectSyncReason =
   // second one), or the server restarted under a running trial (just press again).
   | 'PLAN_DRY_RUN_BUSY'
   | 'PLAN_DRY_RUN_INTERRUPTED'
+  // Batch-refresh phase 0 step 1 — the project write lock. WRITE_LOCKED: another run is writing this
+  // project right now (retry later); LOCK_UNAVAILABLE: the server's write-lock store cannot be reached
+  // (a platform-admin matter — retrying alone does not fix it).
+  | 'PLAN_PROJECT_WRITE_LOCKED'
+  | 'PLAN_WRITE_LOCK_UNAVAILABLE'
+  // Review round 1: lost a race for the lock with no writer holding it ("system busy", never "someone
+  // else is writing").
+  | 'PLAN_WRITE_LOCK_BUSY'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -122,6 +130,26 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_NO_PLAN'
   | 'WRITE_PARTIAL'
   | 'WRITE_FAILED'
+  // Batch-refresh phase 0 step 1 — the write was refused or stopped by the project write lock. Each has
+  // its own next step, and none of them may read 「数据没有变化,再点一次」 when that is not what happened:
+  // LOCKED (someone else is writing: retry later), SUPERSEDED (a newer preview exists: preview again),
+  // INTERRUPTED (this run lost its write turn part-way: some rows may have landed; preview again),
+  // LOCK_UNAVAILABLE (the write-lock store is down: ask the platform admin).
+  | 'WRITE_PROJECT_LOCKED'
+  | 'WRITE_PLAN_SUPERSEDED'
+  | 'WRITE_INTERRUPTED'
+  | 'WRITE_LOCK_UNAVAILABLE'
+  // Review round 1: the write-lock refusals split by what actually happened. BUSY: lost a race for the
+  // lock, no writer. TAKEN_OVER: the run lost its turn before writing anything. LOCK_FAILED_MIDWAY: the
+  // lock store failed after some rows landed (they may be on the sheet; never "nothing changed").
+  | 'WRITE_LOCK_BUSY'
+  | 'WRITE_TAKEN_OVER'
+  | 'WRITE_LOCK_FAILED_MIDWAY'
+  // Review round 2: the stop did not say whether a host write was attempted — neither "nothing was
+  // written" nor "rows landed" can be claimed (F1). And: the token was minted unbound (a preview by a
+  // caller without write rights, or one from before the lock existed) — not "a newer preview exists" (F6).
+  | 'WRITE_STOPPED_UNCONFIRMED'
+  | 'WRITE_TOKEN_UNBOUND'
   // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
   // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
   | 'WRITE_NOT_CONFIRMED'
@@ -598,10 +626,63 @@ export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<stri
   TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
 })
 
+/**
+ * Batch-refresh phase 0 step 1 — the server's project write lock codes
+ * (plugins/plugin-integration-core/lib/stock-preparation-project-write-lock.cjs PROJECT_WRITE_ERROR_CODES).
+ */
+export const STOCK_PREP_PROJECT_WRITE_LOCKED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCKED'
+export const STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE = 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED'
+export const STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE = 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST'
+export const STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED',
+  'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE',
+])
+
+/** The server's `details.reason` on a WRITE_LOCKED that lost a lock race with no writer holding it. */
+export const STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON = 'contention'
+
+/** The server's `details.reason` when a dry-run token was minted UNBOUND (review round 2, F6). */
+export const STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON = 'token_unbound'
+/** The lock-not-wired code: it is refused before any lock IO, so it never follows a write. */
+export const STOCK_PREP_PROJECT_WRITE_LOCK_NOT_WIRED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE'
+
+/**
+ * The apply step's write-lock refusals; `null` for every other failure (it stays WRITE_FAILED).
+ * `partial` is the server's TRI-STATE `details.partial` (`true` a host write was attempted, `false` none
+ * was, `null` not reported), `detailReason` its `details.reason`. "Rows may have landed" only on `true`;
+ * "nothing was written" only on a positive `false` (or a refusal that by construction precedes every
+ * write: a busy sheet, a lock that is not wired); an unreported stop gets the neutral sentence. A lost
+ * race never claims that someone else is writing.
+ */
+export function classifyWriteLockFailure(
+  errorCode: string | null,
+  context: { partial?: boolean | null; detailReason?: string | null } = {},
+): StockPreparationProjectSyncReason | null {
+  const partial = context.partial === true ? true : (context.partial === false ? false : null)
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) {
+    return context.detailReason === STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON ? 'WRITE_LOCK_BUSY' : 'WRITE_PROJECT_LOCKED'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_PLAN_SUPERSEDED_CODE) {
+    if (partial === true) return 'WRITE_INTERRUPTED'
+    if (context.detailReason === STOCK_PREP_PROJECT_TOKEN_UNBOUND_REASON) return 'WRITE_TOKEN_UNBOUND'
+    return partial === false ? 'WRITE_PLAN_SUPERSEDED' : 'WRITE_STOPPED_UNCONFIRMED'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LEASE_LOST_CODE) {
+    if (partial === null) return 'WRITE_STOPPED_UNCONFIRMED'
+    return partial ? 'WRITE_INTERRUPTED' : 'WRITE_TAKEN_OVER'
+  }
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCK_NOT_WIRED_CODE) return 'WRITE_LOCK_UNAVAILABLE'
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) {
+    if (partial === null) return 'WRITE_STOPPED_UNCONFIRMED'
+    return partial ? 'WRITE_LOCK_FAILED_MIDWAY' : 'WRITE_LOCK_UNAVAILABLE'
+  }
+  return null
+}
+
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
-  context: { projectSheet?: boolean } = {},
+  context: { projectSheet?: boolean; detailReason?: string | null } = {},
 ): StockPreparationProjectSyncReason {
   if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
     return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
@@ -611,6 +692,12 @@ export function classifyPlanReadFailureReason(
     return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  // Batch-refresh phase 0 step 1: BY CODE, ahead of the status rules — the 503 store failure must not
+  // read as the transient PLAN_READ_FAILED, and the 409 must not read as an unknown refusal.
+  if (errorCode === STOCK_PREP_PROJECT_WRITE_LOCKED_CODE) {
+    return context.detailReason === STOCK_PREP_PROJECT_WRITE_LOCK_CONTENTION_REASON ? 'PLAN_WRITE_LOCK_BUSY' : 'PLAN_PROJECT_WRITE_LOCKED'
+  }
+  if (errorCode && STOCK_PREP_PROJECT_WRITE_LOCK_UNAVAILABLE_CODES.includes(errorCode)) return 'PLAN_WRITE_LOCK_UNAVAILABLE'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_IN_PROGRESS_CODE) return 'PLAN_DRY_RUN_BUSY'
   if (errorCode === STOCK_PREPARATION_DRY_RUN_JOB_INTERRUPTED_CODE) return 'PLAN_DRY_RUN_INTERRUPTED'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
@@ -631,7 +718,7 @@ export function classifyPlanReadFailureReason(
 export function classifyPlanStep(
   index: number,
   plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
-  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean } = {},
+  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean; detailReason?: string | null } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
@@ -640,7 +727,7 @@ export function classifyPlanStep(
     const status = options.status ?? 0
     const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true })
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true, detailReason: options.detailReason ?? null })
     return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
@@ -866,13 +953,20 @@ export class StockPreparationProjectSyncCallError extends Error {
 
   detailReason: string | null
 
+  /**
+   * The server's `details.partial`, TRI-STATE (review round 2): `true` = a host write was attempted, so
+   * rows may have landed; `false` = the server positively reports that no host write was issued; `null`
+   * = not reported (unknown). Only the literal booleans count; anything else is `null`.
+   */
+  detailPartial: boolean | null
+
   /** True when the transport succeeded and the payload was not this API's envelope. */
   malformed: boolean
 
   constructor(
     status: number,
     route: string,
-    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null } = {},
+    options: { code?: string | null; malformed?: boolean; detailTarget?: string | null; detailReason?: string | null; detailPartial?: unknown } = {},
   ) {
     super(`stock-preparation project sync call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectSyncCallError'
@@ -880,6 +974,7 @@ export class StockPreparationProjectSyncCallError extends Error {
     this.code = options.code ?? null
     this.detailTarget = clampErrorDetailToken(options.detailTarget)
     this.detailReason = clampErrorDetailToken(options.detailReason)
+    this.detailPartial = options.detailPartial === true ? true : (options.detailPartial === false ? false : null)
     this.malformed = options.malformed === true
   }
 }
@@ -1136,6 +1231,7 @@ export async function runStockPreparationProjectSync(
       malformed: isMalformed(error),
       errorCode: codeOf(error),
       projectSheet: hooks.projectSheet === true,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
     }))
   }
   if (planStep.status !== 'ok') return done()
@@ -1248,7 +1344,11 @@ export async function runStockPreparationProjectSync(
     const detail: Record<string, string | number> = { status: statusOf(error) }
     const code = codeOf(error)
     if (code) detail.code = code
-    record(result(3, 'apply', 'fail', 'WRITE_FAILED', detail))
+    const lockReason = classifyWriteLockFailure(code, {
+      partial: error instanceof StockPreparationProjectSyncCallError ? error.detailPartial : null,
+      detailReason: error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null,
+    })
+    record(result(3, 'apply', 'fail', lockReason ?? 'WRITE_FAILED', detail))
   }
 
   // ---- 4. 批次存档 ---------------------------------------------------------
@@ -1335,13 +1435,14 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
       ? (envelope.error as { details?: unknown }).details
       : undefined
     const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
-      ? details as { target?: unknown; reason?: unknown }
+      ? details as { target?: unknown; reason?: unknown; partial?: unknown }
       : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
       // Clamped to lower_snake tokens inside the constructor; anything else is dropped.
       detailTarget: typeof detailRecord.target === 'string' ? detailRecord.target : null,
       detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
+      detailPartial: detailRecord.partial,
     })
   }
   if (!envelope || envelope.ok !== true) {
@@ -1356,7 +1457,7 @@ interface StockPreparationDryRunJobRecord {
   status?: string
   elapsedMs?: number
   result?: unknown
-  error?: { httpStatus?: unknown; code?: unknown }
+  error?: { httpStatus?: unknown; code?: unknown; details?: { reason?: unknown; partial?: unknown } }
 }
 
 function defaultDryRunWait(ms: number): Promise<void> {
@@ -1471,7 +1572,11 @@ export function createStockPreparationProjectSyncApi(
       if (job.status === 'succeeded') return (job.result ?? {}) as StockPreparationProjectSyncPlan
       if (job.status === 'failed') {
         const status = typeof job.error?.httpStatus === 'number' ? job.error.httpStatus : 0
-        throw new StockPreparationProjectSyncCallError(status, jobsRoute, { code: clampErrorCode(job.error?.code) })
+        throw new StockPreparationProjectSyncCallError(status, jobsRoute, {
+          code: clampErrorCode(job.error?.code),
+          detailReason: typeof job.error?.details?.reason === 'string' ? job.error.details.reason : null,
+          detailPartial: job.error?.details?.partial,
+        })
       }
       if (job.status !== 'running') throw new StockPreparationProjectSyncCallError(200, jobsRoute, { malformed: true })
       if (options.onProgress) options.onProgress({ elapsedMs: intOf(job.elapsedMs), attached })

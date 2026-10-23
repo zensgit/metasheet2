@@ -1,5 +1,7 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
@@ -92,6 +94,13 @@ function createMemoryStorage() {
     async delete(key) {
       map.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!map.has(key)) return null
+      const value = map.get(key)
+      map.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
   }
 }
 
@@ -116,6 +125,13 @@ function createSharedDurableStorage(backing = new Map()) {
     async delete(key) {
       backing.delete(key)
     },
+    // Atomic claim, like the host's DELETE ... RETURNING: read and remove in one synchronous step.
+    async consume(key) {
+      if (!backing.has(key)) return null
+      const value = backing.get(key)
+      backing.delete(key)
+      return value === undefined ? null : JSON.parse(JSON.stringify(value))
+    },
     async list() {
       return Array.from(backing.keys()).sort()
     },
@@ -133,6 +149,10 @@ function createFailingDurableStorage(operation = 'set') {
       if (operation === 'set') throw createDurableStorageFailure('set')
     },
     async delete() {},
+    async consume() {
+      if (operation === 'consume') throw createDurableStorageFailure('consume')
+      return null
+    },
     async list() {
       return []
     },
@@ -178,7 +198,7 @@ function createMockContext(options = {}) {
         },
         multitable: {
           provisioning,
-          records,
+          records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records),
         },
         dataSourceWrites: options.dataSourceWrites || {
           async test() { throw new Error('dataSourceWrites.test not configured in test context') },
@@ -263,6 +283,8 @@ function createMockServices(overrides = {}) {
   }
 
   const services = {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       async listExternalSystems(input) {
         calls.push(['listExternalSystems', input])
@@ -5447,6 +5469,16 @@ async function testTableActionRoutes() {
   assert.equal(records.calls[0][1].sheetId, 'sheet_stock_configured', 'existing-row read is scoped to configured target sheet')
   assert.deepEqual(records.calls[0][1].filters, { projectNo: 'P-001' }, 'existing-row read is project-scoped')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'dry-run evidence is values-free')
+  // Batch-refresh phase 0 step 1, review round 1: a READ-tier preview is answered in full but its token is
+  // UNBOUND (it supersedes nothing, and apply refuses it). The apply sequence below plans as the write tier.
+  // PADDED on purpose (review round 2): the token binds the NORMALIZED parameters, so this padded preview
+  // must apply as the trimmed number below — a regression that hashed the raw parameters turns this red.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: ' P-001 ' } },
+  })
+  assertOkResponse(res, 200)
   const dryRunToken = res.body.data.dryRunToken
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
@@ -6532,7 +6564,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('user_admin'), false, 'policy response hides approver identity')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: an applied token must come from a caller who may apply (read-tier tokens are unbound)
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: { parameters: { projectNo: 'P-001' } },
   })
@@ -6556,7 +6588,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.error.code, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups need explicit apply acknowledgement')
 
   res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
-    user: READ_USER,
+    user: WRITE_USER, // review round 1: see above
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
     body: {
       parameters: { projectNo: 'P-001' },

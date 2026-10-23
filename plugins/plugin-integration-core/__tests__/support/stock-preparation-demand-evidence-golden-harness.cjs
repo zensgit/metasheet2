@@ -482,11 +482,16 @@ function routeShapedLargeExpansionOptions(tableActions, normalizedAction) {
 // (a write lease, a generation binder, an atomic-consume token store) is a change to this function.
 function laneCalls(harness) {
   const { tableActions, largeBomJobs } = harness
+  // PR #6501 (sheet write lock): the dry-run through the generation binder, the apply inside the lease
+  // with the guard (a records fake without the host write fence gets the kit's fake host fence), and a
+  // token store with the atomic consume. The large approval stays UNBOUND (no binder), exactly as on main.
+  const writeLockKit = require('./stock-preparation-project-write-lock-kit.cjs')
+  const writeLock = writeLockKit.createLibWriteLockHarness()
   return {
-    dryRun: tableActions.dryRunStockPreparationAction,
-    apply: tableActions.applyStockPreparationAction,
+    dryRun: writeLock.wrapDryRun(tableActions.dryRunStockPreparationAction),
+    apply: writeLock.wrapApply(tableActions.applyStockPreparationAction),
     createLargeApplyJob: largeBomJobs.createLargeBomCheckpointApplyJob,
-    tokenStore: () => createMemoryStorage(),
+    tokenStore: () => writeLockKit.createConsumableStorage(),
   }
 }
 
