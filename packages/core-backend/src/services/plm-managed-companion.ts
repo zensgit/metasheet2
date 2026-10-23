@@ -327,6 +327,23 @@ export async function classifyManagedSource(sourceId: string): Promise<ManagedSo
   }
 }
 
+// Same BINDING_SQL and kind rules as classifyManagedSource, on the caller's query.
+// A transaction callback must use this. The global wrapper above is not same-transaction proof.
+export async function classifyManagedSourceOnQuery(
+  sourceQuery: (sql: string, params?: unknown[]) => Promise<{ rows: readonly (ManagedBindingRow | undefined)[] }>,
+  sourceId: string,
+): Promise<ManagedSourceClass> {
+  try {
+    const result = await sourceQuery(BINDING_SQL, [sourceId])
+    const row = result.rows[0]
+    if (!row) return { kind: 'unbound' }
+    return { kind: 'bound', row }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return { kind: 'schema-missing' }
+    return { kind: 'unavailable' }
+  }
+}
+
 export async function assertLegacySharedTransportAllowed(sourceId: string): Promise<void> {
   const classified = await classifyManagedSource(sourceId)
   if (classified.kind === 'unbound') return

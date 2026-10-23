@@ -1,7 +1,10 @@
 import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
-    include: ['tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts'],
+    include: [
+      'tests/integration/plm-collaboration-snapshot-db-guards.realdb.test.ts',
+      'tests/integration/plm-collaboration-snapshot-service.realdb.test.ts',
+    ],
     environment: 'node',
     pool: 'forks',
     fileParallelism: false,

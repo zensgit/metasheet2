@@ -4,6 +4,7 @@ on:
     paths:
       - 'packages/core-backend/src/multitable/plm-*.ts'
       - 'packages/core-backend/src/routes/plm-bom-reviews.ts'
+      - 'packages/core-backend/src/routes/plm-collaboration-snapshots.ts'
       - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
       - 'packages/core-backend/src/index.ts'
       - 'packages/core-backend/src/db/migrations/*plm*.ts'
@@ -61,6 +62,7 @@ jobs:
           tests/unit/plm-change-source-verification.test.ts tests/unit/record-subscription-service.test.ts
           tests/unit/plm-bom-review-service.test.ts tests/unit/plm-bom-review-wire.test.ts
           tests/unit/idempotency-redis.test.ts tests/unit/approval-completion-shutdown-lifecycle.test.ts
+          tests/unit/plm-collaboration-snapshot-service.test.ts tests/unit/plm-collaboration-snapshot-routes.test.ts
       - name: Real PostgreSQL collaboration snapshot guards
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_listener
