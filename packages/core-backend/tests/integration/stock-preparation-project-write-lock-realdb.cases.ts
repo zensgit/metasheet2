@@ -1424,5 +1424,351 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await dropSheet(sb.sheetId)
       }
     }, 60000)
+
+    // ── Batch-refresh step 4 PR-2: the continuation / refresh-state stores (migrations 102 / 103) and the
+    //    governance reader on real PostgreSQL. The hermetic suites drive them against a fake that models the
+    //    unique indexes and rolls transactions back; a fake is not PostgreSQL, so the claims below are proven
+    //    here: the partial unique claims arbitrate two SESSIONS (A08), the state-row FOR UPDATE serialises the
+    //    decision / reconciliation races, a missing table is 503 (never zero rows), a header-steered tenant is
+    //    refused (never "not governed"), and a project resolved to another sheet is refused (never matched).
+    //    Cases are prefixed S2- (PR-0 / PR B own D17-D21). Every value is synthetic and per-run.
+    describe('S2 continuation / refresh-state stores + governance reader (real Postgres, migrations 102 / 103)', () => {
+      const nodeCrypto = require('node:crypto') as typeof import('node:crypto')
+      const continuationStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
+      const governanceModule = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
+      const refreshKit = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-refresh-store-kit.cjs')) as any
+      const { REFRESH_STORE_TABLES: RT, REFRESH_STORE_ERROR_CODES: RC } = continuationStoreModule
+      const { REFRESH_GOVERNANCE_ERROR_CODES: GC } = governanceModule
+      const S2_TENANT_PREFIX = `tenant_scs_${TOKEN}`
+      const s2Sheets: string[] = []
+      const tenantFor = (label: string) => `${S2_TENANT_PREFIX}_${label}`
+      const sheetFor = (label: string) => {
+        const id = `sheet_scs_${TOKEN}_${label}`
+        s2Sheets.push(id)
+        scopes.push(sheetWriteScopeKey(id))
+        return id
+      }
+      const storeOn = (client: PoolClient) => continuationStoreModule.createStockPreparationContinuationStore({ db: dbOn(client) })
+      const computation = (overrides: Record<string, unknown> = {}) => ({ lane: 'small_preview', suspended: true, generationToken: 'g_s2', sourceContentDigest: 'src_s2', ...overrides })
+      // No registry row for any S2 project: the registry's pilot reads (PR B, #6510) are a test double answering
+      // "absent" — the registry-row legs (pilot governs; registry retarget) are the hermetic suite's and the real
+      // pilot leg waits for #6510's migration 101.
+      const absentRegistry = { getPilotState: async () => null, getPilotStateBySheetId: async () => null }
+      const readerOn = (client: PoolClient) => governanceModule.createStockPreparationRefreshGovernance({
+        continuationStore: storeOn(client),
+        projectTargetStore: absentRegistry,
+        projectWriteLock: createStockPreparationProjectWriteLock({ db: dbOn(client) }),
+      })
+
+      // The test's stand-in for PR-4's `bumpGenerationWithin` (design §8.1): the FREE-ROW branch on the caller's
+      // TRANSACTION handle — insert generation 1 when the lock row is absent, else generation + 1 under
+      // `lease_id IS NULL`; a live lease refuses 409 WRITE_LOCKED. Real statements on the real lock row inside the
+      // store's transaction, so the composition "decision rows + bump, one COMMIT" is what is proven here.
+      async function testBumpWithin(trx: any, scopeKey: string, { reason, tenantId }: { reason: string; tenantId: string }) {
+        const token = `tok_${reason}_${nodeCrypto.randomUUID()}`
+        const row = await trx.selectOneForUpdate(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey })
+        if (!row) {
+          await trx.insertOne(PROJECT_WRITE_LOCK_TABLE, { scope_key: scopeKey, tenant_id: tenantId, generation: 1, generation_token: token, generation_reason: 'small_preview', generation_bumped_at: new Date(), fencing_epoch: 0 })
+          return { generation: 1, generationToken: token, fencingEpoch: 0 }
+        }
+        if (row.lease_id) throw Object.assign(new Error('live lease'), { status: 409, code: PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, details: { reason: 'test_bump' } })
+        const updated = await trx.updateRow(PROJECT_WRITE_LOCK_TABLE, { generation: Number(row.generation) + 1, generation_token: token, generation_bumped_at: new Date() }, { scope_key: scopeKey, lease_id: null, generation_token: row.generation_token })
+        if (!updated || updated.length !== 1) throw Object.assign(new Error('bump lost'), { status: 409, code: PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, details: { reason: 'contention' } })
+        return { generation: Number(row.generation) + 1, generationToken: token, fencingEpoch: Number(row.fencing_epoch) }
+      }
+
+      async function seedOpenHolds(store: any, scope: Record<string, string>, holds: any[], observed = 0) {
+        await store.reconcileHolds({ ...scope, decisionVersionObserved: observed, holds, computation: computation() })
+        const rows = (await q(`SELECT id, fingerprint FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open'`, [scope.sheetId, scope.projectNo])).rows
+        return (hold: any) => {
+          const row = rows.find((entry: any) => entry.fingerprint === hold.fingerprint)
+          if (!row) throw new Error('S2: hold not open')
+          return row.id as string
+        }
+      }
+
+      function confirmInput(scope: Record<string, string>, holdId: string, hold: any, fixture: any, extra: Record<string, unknown> = {}) {
+        return { ...scope, holdId, echo: refreshKit.echoOf(hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: 'u_scs_puller', sourceIdentity: fixture.sourceIdentity, ...extra }
+      }
+
+      async function countWhere(table: string, where: string, params: unknown[]) {
+        return Number((await q(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, params)).rows[0].n)
+      }
+
+      afterAll(async () => {
+        const like = `${S2_TENANT_PREFIX}%`
+        for (const table of [RT.member, RT.continuation, RT.hold, RT.execution, RT.state]) {
+          await q(`DELETE FROM ${table} WHERE tenant_id LIKE $1`, [like]).catch(() => {})
+        }
+      })
+
+      test('S2-01 migrations 102 / 103 applied: the five tables, every unique index (partial where modelled), INTEGER counters, a direct double claim is 23505, the claim mirror and the open-hold unique are DB facts', async () => {
+        for (const table of Object.values(RT) as string[]) {
+          expect((await q('SELECT to_regclass($1) AS oid', [table])).rows[0].oid, table).not.toBeNull()
+        }
+        const indexes = await q(
+          `SELECT c.relname AS name, i.indisunique AS uniq, (i.indpred IS NOT NULL) AS partial,
+                  pg_get_expr(i.indpred, i.indrelid) AS predicate
+             FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+            WHERE i.indrelid = ANY($1::regclass[])`,
+          [[RT.continuation, RT.member, RT.hold, RT.state]],
+        )
+        for (const index of refreshKit.UNIQUE_INDEXES) {
+          const row = indexes.rows.find((entry: any) => entry.name === index.name)
+          expect(row, index.name).toBeTruthy()
+          expect(row.uniq, index.name).toBe(true)
+          expect(row.partial, index.name).toBe(Boolean(index.where))
+        }
+        const cols = await q(
+          `SELECT table_name, column_name, data_type FROM information_schema.columns
+            WHERE table_name = ANY($1::text[]) AND column_name IN ('revision', 'decision_version', 'version', 'generation', 'fencing_epoch', 'position', 'confirmed_generation')`,
+          [Object.values(RT)],
+        )
+        expect(cols.rows.length).toBeGreaterThanOrEqual(7)
+        for (const row of cols.rows) expect(row.data_type, `${row.table_name}.${row.column_name}`).toBe('integer')
+        const tenant = tenantFor('s2_01')
+        const sheet = sheetFor('s2_01')
+        const scopeKey = sheetWriteScopeKey(sheet)
+        const continuationRow = (id: string, overrides: Record<string, unknown> = {}) => q(
+          `INSERT INTO ${RT.continuation} (id, tenant_id, sheet_id, project_no, write_scope_key, status, revision, old_root_record_id, old_root_key,
+             old_root_component_source_id, new_parent_component_source_id, new_root_path_tokens, new_root_key, new_root_key_digest, external_system_id,
+             source_scope_digest, read_plan_digest, pairing_fingerprint, comparison_fingerprint, evidence_fingerprint, evidence_snapshot, demand_basis,
+             confirmed_by, confirmed_at, confirmed_generation, confirmed_generation_token, confirmed_fencing_epoch, claim_active, ended_by, ended_at, ended_outcome)
+           VALUES ($1, $2, $3, 'SYN-S2-01', $4, $5, 1, $6, 'ok', 'c', 'p', '["p","c"]'::jsonb, $7, $8, 'x', 's', 'r', 'pf', 'cf', 'ef', '{}'::jsonb,
+             'puller_confirmed_same_demand', 'u', now(), 1, 't', 0, $9, $10, $11, $12)`,
+          [id, tenant, sheet, scopeKey, overrides.status ?? 'active', overrides.oldRootRecordId ?? 'rec_a', overrides.newRootKey ?? 'nk_a', overrides.newRootKeyDigest ?? 'd_a',
+            overrides.claimActive ?? true, overrides.endedBy ?? null, overrides.endedAt ?? null, overrides.endedOutcome ?? null],
+        )
+        await continuationRow('cont_s2_01_a')
+        // The same old root claimed by a second live relationship: refused by the header's old-root index.
+        const oldRoot = await settle(continuationRow('cont_s2_01_b', { newRootKey: 'nk_b', newRootKeyDigest: 'd_b' }))
+        expect(oldRoot.ok).toBe(false)
+        expect((oldRoot as any).error.code).toBe('23505')
+        expect((oldRoot as any).error.constraint).toBe('uniq_integration_stock_prep_continuation_old_root')
+        // The same new position claimed by a second live relationship: the new-root index.
+        const newRoot = await settle(continuationRow('cont_s2_01_c', { oldRootRecordId: 'rec_c' }))
+        expect((newRoot as any).error.constraint).toBe('uniq_integration_stock_prep_continuation_new_root')
+        // Ending without releasing the claim, or claiming while ended: the mirror CHECK refuses both.
+        const halfEnded = await settle(q(`UPDATE ${RT.continuation} SET status = 'ended', ended_by = 'u', ended_at = now(), ended_outcome = 'escalate_special_repair' WHERE id = $1`, ['cont_s2_01_a']))
+        expect((halfEnded as any).error.code).toBe('23514')
+        expect((halfEnded as any).error.constraint).toBe('integration_stock_prep_continuation_claim_active_check')
+        await q(`UPDATE ${RT.continuation} SET status = 'ended', claim_active = false, ended_by = 'u', ended_at = now(), ended_outcome = 'escalate_special_repair' WHERE id = $1`, ['cont_s2_01_a'])
+        // Once ended, the SAME old root and new position can be claimed again (the partial predicate).
+        await continuationRow('cont_s2_01_d')
+        // The open-hold unique: one open row per (sheet, project, fingerprint); a resolved one does not count.
+        const holdRow = (id: string, status: string) => q(
+          `INSERT INTO ${RT.hold} (id, tenant_id, sheet_id, project_no, write_scope_key, kind, fingerprint, status, confirmable, not_confirmable_reason, subject, detail, resolved_at, resolution)
+           VALUES ($1, $2, $3, 'SYN-S2-01', $4, 'candidate_ambiguous', 'fp_s2_01', $5, false, 'ambiguous_pairing', '{}'::jsonb, '{}'::jsonb, $6, $7)`,
+          [id, tenant, sheet, scopeKey, status, status === 'open' ? null : new Date(), status === 'open' ? null : 'superseded_by_computation'],
+        )
+        await holdRow('hold_s2_01_a', 'open')
+        const dupOpen = await settle(holdRow('hold_s2_01_b', 'open'))
+        expect((dupOpen as any).error.code).toBe('23505')
+        expect((dupOpen as any).error.constraint).toBe('uniq_integration_stock_prep_refresh_hold_open')
+        await holdRow('hold_s2_01_c', 'superseded')
+        // The hold's confirmable shape and the shape-token vocabulary (dropped_other_rule admitted) are CHECKs.
+        const badShape = await settle(q(`UPDATE ${RT.hold} SET confirmable = true WHERE id = $1`, ['hold_s2_01_a']))
+        expect((badShape as any).error.code).toBe('23514')
+        await q(`UPDATE ${RT.hold} SET shape_token = 'dropped_other_rule' WHERE id = $1`, ['hold_s2_01_a'])
+        const badToken = await settle(q(`UPDATE ${RT.hold} SET shape_token = 'made_up' WHERE id = $1`, ['hold_s2_01_a']))
+        expect((badToken as any).error.code).toBe('23514')
+      }, 30000)
+
+      test('S2-02 A08 across two sessions: two holds claiming one old record (and two old sets claiming one new position) -> exactly one confirm commits, the loser is 409 CONFIRM_CONFLICT from the partial unique index and persists nothing', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const storeB = storeOn(clientB)
+        for (const [label, rival] of [['old_record', refreshKit.competingCandidateHold(fixture.hold)], ['new_position', refreshKit.sameNewPositionHold(fixture.hold)]] as const) {
+          const scope = { tenantId: tenantFor(`s2_02_${label}`), sheetId: sheetFor(`s2_02_${label}`), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold, rival])
+          const [a, b] = await Promise.all([
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf(rival), rival, fixture), { bumpWithin: testBumpWithin })),
+          ])
+          const winners = [a, b].filter((outcome) => outcome.ok)
+          const losers = [a, b].filter((outcome) => !outcome.ok) as Array<{ ok: false; error: any }>
+          expect(winners.length, label).toBe(1)
+          expect(losers.length, label).toBe(1)
+          expect(losers[0].error.code, label).toBe(RC.CONFIRM_CONFLICT)
+          expect(losers[0].error.status).toBe(409)
+          expect(losers[0].error.details.sqlState).toBe('23505')
+          expect(String(losers[0].error.details.constraint)).toMatch(/^uniq_integration_stock_prep_continuation/)
+          expect(JSON.stringify(losers[0].error.details)).not.toContain('S-001')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId]), label).toBe(1)
+          expect(await countWhere(RT.member, 'sheet_id = $1 AND claim_active', [scope.sheetId]), label).toBe(4)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'open']), 'the losing hold stays open').toBe(1)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'resolved'])).toBe(1)
+          const state = (await q(`SELECT decision_version, version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0]
+          expect(state.decision_version, 'exactly one decision').toBe(1)
+          // The winner's bump landed in the SAME commit: generation 1 on the sheet's lock row.
+          const lock = (await q(`SELECT generation, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sheetWriteScopeKey(scope.sheetId)])).rows[0]
+          expect(lock.generation).toBe(1)
+          expect(lock.lease_id).toBeNull()
+        }
+      }, 60000)
+
+      test('S2-03 CAS races across two sessions: two confirms of ONE hold, confirm-with-supersedes vs end, reconcile vs confirm, two reconciliations — serialised by the state row, never two decisions, never a stale hold set', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const storeB = storeOn(clientB)
+        // (a) the same hold confirmed twice at once: one commits, the other is STALE (hold_not_open), one decision.
+        {
+          const scope = { tenantId: tenantFor('s2_03a'), sheetId: sheetFor('s2_03a'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const input = confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture)
+          const [a, b] = await Promise.all([
+            settle(storeA.confirmContinuation(input, { bumpWithin: testBumpWithin })),
+            settle(storeB.confirmContinuation(input, { bumpWithin: testBumpWithin })),
+          ])
+          expect([a, b].filter((outcome) => outcome.ok).length).toBe(1)
+          const loser = [a, b].find((outcome) => !outcome.ok) as { ok: false; error: any }
+          expect(loser.error.code).toBe(RC.CONFIRM_STALE)
+          expect(loser.error.details.reason).toBe('hold_not_open')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1', [scope.sheetId])).toBe(1)
+          expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(1)
+        }
+        // (b) confirm (superseding A) vs end (A): exactly one decision lands; A is ended exactly once; at most one live.
+        {
+          const scope = { tenantId: tenantFor('s2_03b'), sheetId: sheetFor('s2_03b'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const first = await storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const idOf2 = await seedOpenHolds(storeA, scope, [rival], 1)
+          const [confirm, end] = await Promise.all([
+            settle(storeB.confirmContinuation(confirmInput(scope, idOf2(rival), rival, fixture, { supersedes: { continuationId: first.continuationId, revision: 1 } }), { bumpWithin: testBumpWithin })),
+            settle(storeA.endContinuation({ ...scope, continuationId: first.continuationId, revision: 1, endedBy: 'u_scs_puller', outcome: 'escalate_special_repair' }, { bumpWithin: testBumpWithin })),
+          ])
+          expect([confirm, end].filter((outcome) => outcome.ok).length, 'exactly one decision').toBe(1)
+          const loser = [confirm, end].find((outcome) => !outcome.ok) as { ok: false; error: any }
+          expect(loser.error.code).toBe(RC.CONFIRM_STALE)
+          const ended = (await q(`SELECT status, ended_outcome, claim_active FROM ${RT.continuation} WHERE id = $1`, [first.continuationId])).rows[0]
+          expect(ended.status).toBe('ended')
+          expect(ended.claim_active).toBe(false)
+          expect(ended.ended_outcome).toBe(confirm.ok ? 'superseded_by_new_confirmation' : 'escalate_special_repair')
+          expect(await countWhere(RT.continuation, 'sheet_id = $1 AND claim_active', [scope.sheetId])).toBe(confirm.ok ? 1 : 0)
+          expect((await q(`SELECT decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0].decision_version).toBe(2)
+        }
+        // (c) reconcile vs confirm: a reconciliation that straddles a decision is STATE_MOVED and persists nothing.
+        {
+          const scope = { tenantId: tenantFor('s2_03c'), sheetId: sheetFor('s2_03c'), projectNo: fixture.projectNo }
+          const idOf = await seedOpenHolds(storeA, scope, [fixture.hold])
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const [confirm, reconcile] = await Promise.all([
+            settle(storeA.confirmContinuation(confirmInput(scope, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })),
+            settle(storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold, rival], computation: computation() })),
+          ])
+          expect(confirm.ok, JSON.stringify((confirm as any).error && (confirm as any).error.details)).toBe(true)
+          const rows = (await q(`SELECT fingerprint, status FROM ${RT.hold} WHERE sheet_id = $1`, [scope.sheetId])).rows
+          expect(rows.filter((row: any) => row.fingerprint === fixture.hold.fingerprint).length, 'the confirmed hold has ONE row').toBe(1)
+          expect(rows.find((row: any) => row.fingerprint === fixture.hold.fingerprint).status).toBe('resolved')
+          if (reconcile.ok) {
+            // The reconciliation ran first (observed 0 still true): the rival hold is open, the confirm followed.
+            expect(rows.some((row: any) => row.fingerprint === rival.fingerprint && row.status === 'open')).toBe(true)
+          } else {
+            expect((reconcile as any).error.code).toBe(RC.STATE_MOVED)
+            expect((reconcile as any).error.details.reason).toBe('decision_version')
+            expect(rows.some((row: any) => row.fingerprint === rival.fingerprint), 'nothing of the moved reconciliation persisted').toBe(false)
+          }
+        }
+        // (d) two reconciliations at once (different sets, same observation): both land in some order; exactly
+        //     one open hold remains, no duplicate rows per fingerprint, version advanced twice, no decision.
+        {
+          const scope = { tenantId: tenantFor('s2_03d'), sheetId: sheetFor('s2_03d'), projectNo: fixture.projectNo }
+          const rival = refreshKit.competingCandidateHold(fixture.hold)
+          const [x, y] = await Promise.all([
+            settle(storeA.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [fixture.hold], computation: computation() })),
+            settle(storeB.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [rival], computation: computation() })),
+          ])
+          expect(x.ok && y.ok, JSON.stringify([(x as any).error && (x as any).error.details, (y as any).error && (y as any).error.details])).toBe(true)
+          expect(await countWhere(RT.state, 'sheet_id = $1', [scope.sheetId]), 'one state row (UPSERT then lock)').toBe(1)
+          const state = (await q(`SELECT version, decision_version FROM ${RT.state} WHERE sheet_id = $1`, [scope.sheetId])).rows[0]
+          expect(state.version).toBe(2)
+          expect(state.decision_version).toBe(0)
+          expect(await countWhere(RT.hold, 'sheet_id = $1 AND status = $2', [scope.sheetId, 'open'])).toBe(1)
+          expect(await countWhere(RT.hold, 'sheet_id = $1', [scope.sheetId])).toBe(2)
+        }
+      }, 60000)
+
+      test('S2-04 table unreadable (migrations absent on the search path): the store answers 503 STORE_FAILED (42P01) — never zero rows; the reader 503 naming the store; the derived state is unreadable', async () => {
+        const client = await poolManager.get().getInternalPool().connect()
+        const schema = `scs_empty_${TOKEN}`
+        try {
+          await client.query(`CREATE SCHEMA ${schema}`)
+          await client.query(`SET search_path TO ${schema}`)
+          const store = storeOn(client)
+          const scope = { tenantId: tenantFor('s2_04'), sheetId: sheetFor('s2_04'), projectNo: 'SYN-S2-04' }
+          const read = await settle(store.readGovernanceRows(scope))
+          expect(read.ok).toBe(false)
+          expect((read as any).error.code).toBe(RC.STORE_FAILED)
+          expect((read as any).error.status).toBe(503)
+          expect((read as any).error.details.sqlState).toBe('42P01')
+          expect((read as any).error.details.operation).toBe('read_continuations')
+          expect((read as any).error.details.partial).toBe(false)
+          const reader = readerOn(client)
+          const consult = await settle(reader.consult(scope))
+          expect(consult.ok).toBe(false)
+          expect((consult as any).error.code).toBe(GC.STORE_FAILED)
+          expect((consult as any).error.details.store).toBe('continuation')
+          const derived = await reader.readRefreshState(scope)
+          expect(derived.state.status).toBe('unreadable')
+          expect(derived.state.unreadable.store).toBe('continuation')
+          expect(derived.state.exportAllowed).toBe(false)
+          // A write is refused the same way: a hold reconciliation never records "clean" on a missing table.
+          const write = await settle(store.reconcileHolds({ ...scope, decisionVersionObserved: 0, holds: [], computation: computation({ suspended: false }) }))
+          expect((write as any).error.code).toBe(RC.STORE_FAILED)
+          expect((write as any).error.details.sqlState).toBe('42P01')
+        } finally {
+          await client.query('RESET search_path').catch(() => {})
+          await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
+          client.release()
+        }
+      }, 30000)
+
+      test('S2-05 tenant assertion: a header-steered tenant that owns nothing is REFUSED by the sheet-keyed read (409 TENANT_MISMATCH), never answered "not governed"', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const owner = { tenantId: tenantFor('s2_05'), sheetId: sheetFor('s2_05'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, owner, [fixture.hold])
+        await storeA.confirmContinuation(confirmInput(owner, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const steered = { ...owner, tenantId: tenantFor('s2_05_steered') }
+        // The store's reads under the steered tenant still surface the owner's rows (the sheet-keyed read) ...
+        const rows = await storeA.readGovernanceRows(steered)
+        expect(rows.continuations.length).toBe(1)
+        expect(rows.continuations[0].tenantId).toBe(owner.tenantId)
+        // ... and the reader refuses on them instead of answering an empty, ungoverned project.
+        const reader = readerOn(clientA)
+        const refused = await settle(reader.consult(steered))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(GC.TENANT_MISMATCH)
+        expect((refused as any).error.status).toBe(409)
+        expect(JSON.stringify((refused as any).error.details)).not.toContain(owner.tenantId)
+        await expect(reader.readRefreshState(steered)).rejects.toMatchObject({ code: GC.TENANT_MISMATCH })
+        // The owner's own consult is governed and derives the confirmed-pending state.
+        const own = await reader.consult(owner)
+        expect(own.governed).toBe(true)
+        expect(own.continuations[0].memberCount).toBe(4)
+        expect((await reader.readRefreshState(owner)).state.status).toBe('confirmed_pending_execution')
+      }, 30000)
+
+      test('S2-06 sheet-keyed read: a project whose protection lives on another sheet is refused 409 RETARGETED when resolved elsewhere — its old rows are never matched to the new target', async () => {
+        const fixture = await refreshKit.candidateHoldFixture()
+        const storeA = storeOn(clientA)
+        const home = { tenantId: tenantFor('s2_06'), sheetId: sheetFor('s2_06_home'), projectNo: fixture.projectNo }
+        const idOf = await seedOpenHolds(storeA, home, [fixture.hold])
+        await storeA.confirmContinuation(confirmInput(home, idOf(fixture.hold), fixture.hold, fixture), { bumpWithin: testBumpWithin })
+        const elsewhere = { ...home, sheetId: sheetFor('s2_06_env') }
+        const reader = readerOn(clientA)
+        const refused = await settle(reader.consult(elsewhere))
+        expect(refused.ok).toBe(false)
+        expect((refused as any).error.code).toBe(GC.TARGET_RETARGETED)
+        expect((refused as any).error.status).toBe(409)
+        expect((refused as any).error.details.reason).toBe('sheet')
+        expect(JSON.stringify((refused as any).error.details)).not.toContain(home.sheetId)
+        await expect(reader.readRefreshState(elsewhere)).rejects.toMatchObject({ code: GC.TARGET_RETARGETED })
+        const own = await reader.consult(home)
+        expect(own.governed).toBe(true)
+        expect(governanceModule.plannerSlice(own).continuations.length).toBe(1)
+      }, 30000)
+    })
   })
 }
