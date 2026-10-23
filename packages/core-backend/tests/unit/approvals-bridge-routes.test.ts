@@ -716,6 +716,19 @@ const routeState = vi.hoisted(() => {
   }
 })
 
+// The shared approval role set also reads the actor's stored role ids from the database. These
+// route tests drive a mocked pool with per-test query sequences, so the stored half is stubbed out
+// here (claims only); it is covered by approval-actor-roles.test.ts and the real-DB suite
+// approval-role-seat-user-roles.db.test.ts.
+vi.mock('../../src/services/approval-actor-roles', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/approval-actor-roles')>()
+  return {
+    ...actual,
+    resolveApprovalActorRoles: async (req: Parameters<typeof actual.resolveApprovalActorRoleClaims>[0]) =>
+      actual.resolveApprovalActorRoleClaims(req),
+  }
+})
+
 vi.mock('../../src/db/pg', () => ({
   pool: routeState.pool,
 }))
