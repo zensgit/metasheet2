@@ -1,6 +1,6 @@
 # 宜搭接入操作手册（备料 → 宜搭，单行手动创建）
 
-> **版本 / 适用范围**：只适用于同时包含 PR #6315 及其 CLI 修复（把登记命令编译进 `dist\scripts`）的发布版本。是否包含，以第 3.2 节第 2 步 `Test-Path` 的结果为准；结果为 `False` 的版本里，第 3.2 节的命令不存在。（编写依据：#6315 头 `e1a9e914c` 与修复提交 `825a6fbe8`；合并后提交号会变化，不要用提交号判断。）
+> **版本 / 适用范围**：只适用于包含 PR #6315 的发布版本（#6315 已包含把登记命令编译进 `dist\scripts` 的修复）。是否包含，以第 3.2 节第 2 步 `Test-Path` 的结果为准；结果为 `False` 的版本里，第 3.2 节的命令不存在。（编写依据：#6315 头 `42ff6d072`；合并后提交号会变化，不要用提交号判断。）
 > **当前状态**：发送开关 `INTEGRATION_YIDA_OWNER_SEND_ENABLED` 处于关闭状态。本手册只说明“怎么做”，**不授权任何一步**。每一步要先取得哪项批准，见第 0 章。
 > **开关前置条件原文**：PR #6315 正文中 “Gates before the send switch may be turned on” 一节。
 > 每条事实对应的代码位置见同目录 `stock-preparation-yida-owner-runbook-20261022-evidence.md`。本手册不含任何主机、IP、真实 ID 或凭据，文中示例值都是假的。尖括号 `<…>` 表示需要现场替换的占位符。
@@ -158,6 +158,7 @@ Remove-Item Env:DATABASE_URL
 - owner 已书面指定：哪一个 MetaSheet 用户、哪一个租户（组织）。
 - 该用户存在、处于启用状态、通过账号激活检查；
 - 该用户在该租户（组织）下有一条**有效**的成员关系；并且建议该用户在**全部组织中恰好只有这一条**有效成员关系，否则登录后会话里没有租户，所有宜搭请求都会被 403 拒绝（第 5.1 节 `YIDA_OWNER_HTTP_DENIED`）；
+- 若 owner 用**钉钉登录**：第一次钉钉登录时系统会自动建号或绑定；客户主机没有配置钉钉 corpId 时会被拒绝（409 `auto_provision_corp_required`），有两个账号都能匹配时也会被拒绝（409 `identity_ambiguous`）。所以登记 owner 之前，先确认这个 owner 账号已经存在并已绑定钉钉，或确认 corpId 已配置。
 - 该用户是“实时集成管理员”，满足以下任一：
   - 拥有 `admin` 角色（角色分配里的 admin，或用户记录上的角色为 admin）；
   - 持有 `role:admin` 权限；
@@ -173,7 +174,7 @@ Remove-Item Env:DATABASE_URL
 - 文件不超过 4096 字节，UTF-8 编码（带不带 BOM、换行是 CRLF 还是 LF 都可以）；用记事本另存为 UTF-8，不要用 Windows PowerShell 5.1 的 `>` 或 `Out-File` 生成（默认 UTF-16，命令会报 `input`）；
 - `ownerId` 是 MetaSheet 用户的 ID；`tenantId` 是该用户有效成员关系所在的租户（组织）ID。取值方法待确认（第 8 章），不要在聊天里传递。
 
-**第 2 步：确认部署包含 CLI 修复**。在部署根目录（其下有 `packages\core-backend\dist`）执行：
+**第 2 步：确认部署包含 CLI 修复**。（出包时的随包校验 `multitable-onprem-package-verify.sh` 已把这个命令文件和它加载的 `dist\src\integration\yida-initialization-bootstrap.js` 列为必需内容，缺任一个都会报 `Required package content missing` 而不出包；这里的 `Test-Path` 是部署现场的二次确认，仍然要做。）在部署根目录（其下有 `packages\core-backend\dist`）执行：
 
 ```powershell
 Test-Path -LiteralPath '.\packages\core-backend\dist\scripts\bootstrap-yida-initialization-owner.js'
@@ -181,7 +182,7 @@ Test-Path -LiteralPath '.\packages\core-backend\dist\scripts\bootstrap-yida-init
 
 结果必须是 `True`。如果是 `False`，说明这个版本不含 `825a6fbe8`：**停止**，联系开发。不要改用 `tsx`、不要拷贝源码脚本过来运行。
 
-**第 3 步：只把 `DATABASE_URL` 读进当前窗口**。命令只从环境变量 `DATABASE_URL` 读取数据库连接串，**不读 app.env**，也**不要**把连接串写在命令行上或手工输入（会留在命令历史里）。这个命令**只用连接串本身**连接数据库，不看 `NODE_ENV`、`DB_SSL*`：若客户数据库要求 TLS，TLS 设置必须已写在 `DATABASE_URL` 里（例如连接串参数 `sslmode`，由运维按客户数据库的要求确认），否则命令会报 `unconfirmed`。请开一个新的 PowerShell 窗口，按部署脚本相同的读法从 app.env 读取（去掉首尾空白、去掉一层引号、同名多行取最后一行），不要把值打印出来：
+**第 3 步：只把 `DATABASE_URL` 读进当前窗口**。命令只从环境变量 `DATABASE_URL` 读取数据库连接串，**不读 app.env**，也**不要**把连接串写在命令行上或手工输入（会留在命令历史里）。这个命令**只用连接串本身**连接数据库，不看 `NODE_ENV`、`DB_SSL*`：若客户数据库要求 TLS，TLS 设置必须已写在 `DATABASE_URL` 里（例如连接串参数 `sslmode`，由运维按客户数据库的要求确认），否则命令会报 `unconfirmed`。另外，命令自己的连接只用连接串，但登记时会加载服务端模块，这些模块还会读取 `SECRET_PROVIDER`、`SECRET_FILE_PATH`、`NODE_ENV`、`DB_SSL*` 等变量：所以**只把 `DATABASE_URL` 读进这个窗口，不要把整份 app.env 读进来**；若窗口继承了 `SECRET_PROVIDER=file` 而那个文件里没有 `DATABASE_URL`，在 `NODE_ENV=production` 下也会报 `unconfirmed`。判定结果时以输出的**最后一行** JSON 为准（前面可能先打印一行不含业务值的警告）。请开一个新的 PowerShell 窗口，按部署脚本相同的读法从 app.env 读取（去掉首尾空白、去掉一层引号、同名多行取最后一行），不要把值打印出来：
 
 ```powershell
 Set-Location '<部署根目录>'
@@ -241,7 +242,7 @@ node .\packages\core-backend\dist\scripts\bootstrap-yida-initialization-owner.js
 | 冒烟时看到 | 说明 | 怎么办 |
 |---|---|---|
 | 「已确认本地空槽…」 | 通过 | 继续第 4.2 节 |
-| `YIDA_OWNER_HTTP_DENIED` | 会话里没有租户：该用户的有效组织成员关系不是恰好一条 | 调整成员关系后重新登录再试 |
+| `YIDA_OWNER_HTTP_DENIED` | 会话里没有租户：该用户的有效组织成员关系不是恰好一条，或登录时带上了该用户不属于的组织 | 把成员关系调整为恰好一条后重新登录；或让该用户登录后选择组织（系统会按所选组织重新签发会话，`POST /api/auth/session-org`）；或清除浏览器里记住的组织后重新登录 |
 | `YIDA_INITIALIZATION_DENIED` | 登录账号不是锚点里的 owner、会话租户与锚点不符，或不是实时集成管理员 | 停止；核对第 3.2 节的清单与账号，联系开发 |
 | `YIDA_INITIALIZATION_UNAVAILABLE` | 锚点未建立，或数据库/权限异常 | 确认第 3.2 节确实打印了 `provisioned`；仍如此联系开发 |
 | 显示「本地配置已初始化…」 | 已经被初始化过（不应发生） | 停止，联系开发 |

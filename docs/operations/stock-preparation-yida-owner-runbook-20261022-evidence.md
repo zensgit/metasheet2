@@ -1,7 +1,7 @@
 # 证据表：《宜搭接入操作手册》（修订版）
 
-基线：PR #6315 头 `e1a9e914c`。除标注 CLIF/PATCH 的行外，所有 `path:line` 都在该提交上成立。
-CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 PR 合入；合并后提交号会变化）。
+基线：编写与两轮核验在 PR #6315 头 `e1a9e914c` 上进行；现已对照新头 `42ff6d072`（= `e1a9e914c` + CLI 修复 `825a6fbe8` + 合入 main `cb22e18e1`）复核：本证据引用的文件中，只有 `StockPreparationProjectBoardView.vue`（BV）因 main 在第 365 行附近插入一行而整体后移 1 行，下表 BV 行号已按 `42ff6d072` 更新；CLI 相关行（CLIF）即 `825a6fbe8` 的内容，在 `42ff6d072` 上不变。其余 `path:line` 在 `42ff6d072` 上成立。
+CLI 修复：提交 `825a6fbe8`，已包含在 #6315（头 `42ff6d072`）里；随包校验 `scripts/ops/multitable-onprem-package-verify.sh:1037-1038` 把编译后的命令与 `dist/src/integration/yida-initialization-bootstrap.js` 列为必需内容（缺失时 `:1175-1177` 报 `Required package content missing`），回归见 `scripts/ops/onprem-package-runtime-closure.test.mjs:12-13`。
 编号对应手册章节。`UNVERIFIED` 表示代码无法证明，手册中已改写为“待 owner 确认”（第 8 章）或标为推断。
 
 ## 路径缩写
@@ -17,7 +17,7 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 | ALA | `packages/core-backend/src/integration/automation-live-authority.ts` |
 | CLI | `packages/core-backend/scripts/bootstrap-yida-initialization-owner.ts`（`e1a9e914c` 版本） |
 | CLIF | 同一文件的 `825a6fbe8` 版本（WSL 副本 cli1） |
-| PATCH | CLI 修复提交 `825a6fbe8` 的补丁（随 #6315 的后续 PR 合入） |
+| PATCH | CLI 修复提交 `825a6fbe8`（已在 #6315 内） |
 | CLIT | `packages/core-backend/tests/unit/yida-initialization-bootstrap-cli.test.ts` |
 | CLIL | `packages/core-backend/tests/unit/yida-initialization-bootstrap-cli-load-graph.test.ts` |
 | HRT | `packages/core-backend/tests/integration/stock-preparation-yida-owner-http-realdb.test.ts` |
@@ -191,12 +191,12 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 
 | # | 陈述 | 证据 |
 |---|---|---|
-| 4.1.1 | 入口在项目备料页、打开项目后的动作区 | WS:107-114（`home`/`project-board` 分支挂 BV）；BV:541-606 |
-| 4.1.2 | 浏览器只对 admin / `role:admin` / `integration:admin` 显示 | WA:70、WA:444-454、WA:547-549；BV:577-603 |
+| 4.1.1 | 入口在项目备料页、打开项目后的动作区 | WS:107-114（`home`/`project-board` 分支挂 BV）；BV:542-607 |
+| 4.1.2 | 浏览器只对 admin / `role:admin` / `integration:admin` 显示 | WA:70、WA:444-454、WA:547-549；BV:578-604 |
 | 4.1.3 | 锚点后非 owner 管理员 GET 得 DENIED；锚点前任何实时集成管理员得 UNAVAILABLE；只在手动 GET/提交时出现 | IRT:181-196（先 actor，后锚点；无锚点 → UNAVAILABLE IRT:192；不符 → DENIED IRT:195）；IP:6（手动按钮）、IP:95-109（无自动请求）；IHT:93-94 |
-| 4.1.4 | 其他人看到「推送宜搭(暂未接入)」 | BV:596-604 |
-| 4.1.5 | 两个按钮文字及行为 | BV:585、BV:592、BV:885-895、BV:606 |
-| 4.1.6 | 切换项目号/租户/工作区关闭面板；离开页签卸载；卸载中止请求 | BV:857-859（watch → `yidaPreviewOpen = false`）；WS:107-108（其他页签 v-if 为假 → BV 卸载）；BV:606（v-if 卸载预演面板）；OP:120（onBeforeUnmount → reset）、OP:99-102；IP:94；CO:222-229（dispose 中止请求）；R:229-233（连接关闭 → 服务端 abort） |
+| 4.1.4 | 其他人看到「推送宜搭(暂未接入)」 | BV:597-605 |
+| 4.1.5 | 两个按钮文字及行为 | BV:586、BV:593、BV:886-896、BV:607 |
+| 4.1.6 | 切换项目号/租户/工作区关闭面板；离开页签卸载；卸载中止请求 | BV:858-860（watch → `yidaPreviewOpen = false`）；WS:107-108（其他页签 v-if 为假 → BV 卸载）；BV:607（v-if 卸载预演面板）；OP:120（onBeforeUnmount → reset）、OP:99-102；IP:94；CO:222-229（dispose 中止请求）；R:229-233（连接关闭 → 服务端 abort） |
 | 4.2.1 | 面板标题与“请勿填写凭据” | PV:3-5 |
 | 4.2.2 | 规则草稿导入 | PV:69-70、PV:244-260（导入后 appType/formUuid/rows 清空 PV:257） |
 | 4.2.3 | 「预演合同」两个选项原文 | PV:7 |
@@ -233,7 +233,7 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 | 4.3.J | 材料不去空格；后果 | 见 2.5；后果见 4.4.4 |
 | 4.3.K | 审核编号/organizationId 格式 | R:174；CI:49-51 |
 | 4.3.L | 样例目标是假的 | SP:522、SP:576；PROBE（refute-probe-v2b：七项身份样例会把槽位绑定到合成目标） |
-| 4.3.M | 失败后 GET 按钮仍可点；成功 GET 解锁；关闭面板也解锁 | IP:6（disabled 只看 busy/invalidated）；IP:99（GET 开始置 `uncertain = true`）、IP:104（成功复位）、IP:106-108（失败不复位）；IP:44-45（locked → emit）；PV:6、PV:94；BV:606（关闭即卸载）。**注**：PRB:49 写“锁到关闭预演为止”，不够精确 |
+| 4.3.M | 失败后 GET 按钮仍可点；成功 GET 解锁；关闭面板也解锁 | IP:6（disabled 只看 busy/invalidated）；IP:99（GET 开始置 `uncertain = true`）、IP:104（成功复位）、IP:106-108（失败不复位）；IP:44-45（locked → emit）；PV:6、PV:94；BV:607（关闭即卸载）。**注**：PRB:49 写“锁到关闭预演为止”，不够精确 |
 | 4.4.1 | 面板标题与说明原文 | IP:3-5 |
 | 4.4.2 | GET 按钮、命令号、空槽提示原文 | IP:6-8 |
 | 4.4.3 | 四个 password 输入；粘贴保留原文 | IP:11-13、IP:36、IP:77-80 |
@@ -340,7 +340,7 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 | 7.9 | UNAVAILABLE 粗粒度 | 见 5.1.6、5.1.11、5.1.13 |
 | 7.10 | 入口比服务器宽 | 见 4.1.3 |
 | 7.11 | 控件与值类型限制、字段 ID 禁用片段 | 见 2.10、2.11 |
-| 7.12 | 手工粘贴 JSON；≤100 行 | BV:606（面板无 props）；PV:54；SP:4 |
+| 7.12 | 手工粘贴 JSON；≤100 行 | BV:607（面板无 props）；PV:54；SP:4 |
 | 7.13 | 开关变更需重启 | 见 3.4.4（推断） |
 | 7.14 | 出网不经代理 | 见 2.12 |
 
@@ -374,8 +374,17 @@ CLI 修复：提交 `825a6fbe8`（在 `e1a9e914c` 之上，随 #6315 的后续 P
 ## 与 PR #6313 设计文档、PR 正文不一致之处
 
 1. **迁移编号**：#6313 文档使用旧编号（`yida-owner-onboarding-decision-20261009.md` §6 称锚点为“094迁移”；`yida-single-row-delivery-design-20260930.md` §4 与 `yida-owner-limited-send-design-20261009.md` §151 称账本/围栏/授权为 088/089/093；`yida-token-lifecycle-design-20260930.md` §7 称材料表为“090”）。代码实际为：090 账本、091 围栏、092 材料、093 草稿、094 目标、095 授权、096 锚点。
-2. **入口可见性**：`yida-static-preview-design-20260930.md` §4 写“不扩权限”；代码只对平台管理员显示宜搭入口（WA:547-549、BV:577-604）。
+2. **入口可见性**：`yida-static-preview-design-20260930.md` §4 写“不扩权限”；代码只对平台管理员显示宜搭入口（WA:547-549、BV:578-605）。
 3. **材料轮换**：`yida-token-lifecycle-design-20260930.md` §7 描述可轮换覆盖、撤销擦除；数据库确实允许（M092:58-65），但初始化只认第 1 代且 `current`（IRT:216、IRT:225），轮换或撤销后本功能永久不可用；也没有 HTTP 路由暴露轮换/撤销（R:242-290）。
 4. **合成试用命令**：`yida-local-synthetic-trial-guide-20261010.md` 指向的 `scripts/ops/run-stock-preparation-yida-synthetic-trial.mjs` 不在 `e1a9e914c` 树中。
 5. **PR 正文 PRB:49**：“locks the preview editor until the preview is closed”——实际成功 GET 一次也会解锁（IP:104），见 4.3.M。
 6. 其余已核对、未发现矛盾：15 分钟上限与一次尝试、未知不重试、不自动释放 not_sent、`ready` 仅在目标与初始化结果均缺失时报告、owner ∩ 集成管理员。
+
+## 对照 `42ff6d072` 新增的依据
+
+| 条目 | 事实 | 依据 |
+|---|---|---|
+| 3.2 第 3 步 | 登记时加载的服务端模块经连接池读取 `DATABASE_URL`，`NODE_ENV=production` 时为必需；`SECRET_PROVIDER=file` 时从文件读取，缺失时抛出 | `packages/core-backend/src/integration/db/connection-pool.ts:255`；`packages/core-backend/src/security/SecretManager.ts:74-79`、`:103` |
+| 3.2 钉钉登录前提 | 首次钉钉登录未配置 corpId 时 409 `auto_provision_corp_required`；多个账号匹配时 409 `identity_ambiguous` | `packages/core-backend/src/auth/dingtalk-oauth.ts:1327`、`:1057` |
+| 3.3 / 5.1 403 处理 | 会话租户只在恰好一条有效成员关系或请求的组织为该用户所属时签发；可按所选组织重新签发会话 | `packages/core-backend/src/auth/AuthService.ts:393`；`packages/core-backend/src/routes/auth.ts:1242` |
+| 3.2 第 2 步 | 随包校验把命令与引导模块列为必需内容 | `scripts/ops/multitable-onprem-package-verify.sh:1037-1038`、`:1175-1177` |
