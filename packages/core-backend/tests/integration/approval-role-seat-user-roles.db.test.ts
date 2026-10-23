@@ -314,7 +314,7 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
   }
 
   /** One requester (claim-trusted, write-granted) and one admin template author per case. */
-  async function fixture(label: string, roleSeatAssignee: string): Promise<{ instanceA: string; instanceB: string }> {
+  async function fixture(label: string, roleSeatAssignee: string): Promise<{ templateId: string; instanceA: string; instanceB: string }> {
     const admin = freshId(`admin-${label}`)
     const requester = freshId(`req-${label}`)
     const next = freshId(`next-${label}`)
@@ -334,15 +334,20 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       // Fixture check: the seat under test is ROLE-typed and names exactly the assignee string.
       expect(seats.rows).toEqual([{ assignment_type: 'role', assignee_id: roleSeatAssignee }])
     }
-    return { instanceA, instanceB }
+    return { templateId, instanceA, instanceB }
   }
 
   /** R held ONLY through a `user_roles` row (`users.role` is something else). */
   async function userRolesOnlyHolder(label: string) {
     const role = await seedRole(label)
-    const { instanceA, instanceB } = await fixture(label, role.id)
+    const { templateId, instanceA, instanceB } = await fixture(label, role.id)
     const holder = await seedViewer(`${label}-holder`, { role: 'user', roleIds: [role.id] })
-    return { instanceA, instanceB, holder }
+    return { role, templateId, instanceA, instanceB, holder }
+  }
+
+  async function rawVersion(instanceId: string): Promise<number> {
+    const result = await pool().query<{ version: number }>('SELECT version FROM approval_instances WHERE id = $1', [instanceId])
+    return result.rows[0].version
   }
 
   it('(a) a non-admin holding R ONLY via user_roles sees the role-seated instances in the pending tab', async () => {
@@ -380,6 +385,48 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       // Both decided: nothing pending for this holder any more.
       expect(await pendingCount(holder.token)).toBe(0)
       expect(await todoCount(holder.token)).toBe(0)
+    })
+  })
+
+  it('(g) the legacy /approve and /reject doors accept the user_roles-only holder and refuse a viewer outside R', async () => {
+    const { instanceA, instanceB, holder } = await userRolesOnlyHolder('row-g')
+    const outsider = await seedViewer('row-g-outsider', { role: 'user' })
+    await withoutTokenClaimTrust(async () => {
+      const refused = await jsonRequest(baseUrl, `/api/approvals/${instanceA}/approve`, outsider.token, {
+        method: 'POST',
+        body: { version: await rawVersion(instanceA), metadata: { nodeKey: 'approval_a' } },
+      })
+      await expectSeatGateRefusal(refused)
+      expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_a' })
+
+      const approved = await jsonRequest(baseUrl, `/api/approvals/${instanceA}/approve`, holder.token, {
+        method: 'POST',
+        body: { version: await rawVersion(instanceA), metadata: { nodeKey: 'approval_a' } },
+      })
+      expect(approved.status, await approved.clone().text()).toBe(200)
+      expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_b' })
+
+      const rejected = await jsonRequest(baseUrl, `/api/approvals/${instanceB}/reject`, holder.token, {
+        method: 'POST',
+        body: { version: await rawVersion(instanceB), reason: 'no', metadata: { nodeKey: 'approval_a' } },
+      })
+      expect(rejected.status, await rejected.clone().text()).toBe(200)
+      expect((await instanceStatus(instanceB)).status).toBe('rejected')
+    })
+  })
+
+  it('(h) side effect: a role-scoped (按角色可见) template becomes visible to a user_roles-only holder of that role', async () => {
+    const { role, templateId, holder } = await userRolesOnlyHolder('row-h')
+    const outsider = await seedViewer('row-h-outsider', { role: 'user' })
+    await pool().query(
+      `UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1`,
+      [templateId, JSON.stringify({ type: 'role', ids: [role.id] })],
+    )
+    await withoutTokenClaimTrust(async () => {
+      const seen = await jsonRequest(baseUrl, `/api/approval-templates/${templateId}`, holder.token)
+      expect(seen.status, await seen.clone().text()).toBe(200)
+      const hidden = await jsonRequest(baseUrl, `/api/approval-templates/${templateId}`, outsider.token)
+      expect(hidden.status, await hidden.clone().text()).toBe(404)
     })
   })
 
@@ -428,13 +475,10 @@ describeIfDatabase('approval role seats match roles granted via user_roles (ids 
       expect(await todoCount(holder.token)).toBe(0)
       expect((await todoItems(holder.token)).map((item) => item.id)).not.toContain(instanceA)
       // The readability predicate (a different, ratified predicate) also matches role NAMES, so the
-      // detail may be readable; when it is, it must not offer the decision.
+      // detail IS readable to this holder — and it must not offer the decision.
       const read = await detail(holder.token, instanceA)
-      if (read.status === 200) {
-        expect(((await read.json()) as { canDecideCurrentNode?: boolean }).canDecideCurrentNode).toBe(false)
-      } else {
-        expect(read.status).toBe(404)
-      }
+      expect(read.status, await read.clone().text()).toBe(200)
+      expect(((await read.json()) as { canDecideCurrentNode?: boolean }).canDecideCurrentNode).toBe(false)
       const refused = await act(holder.token, instanceA, 'approve')
       await expectSeatGateRefusal(refused)
       expect(await instanceStatus(instanceA)).toEqual({ status: 'pending', current_node_key: 'approval_a' })
