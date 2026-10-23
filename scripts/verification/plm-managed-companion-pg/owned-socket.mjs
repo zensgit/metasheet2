@@ -186,6 +186,13 @@ function socketOptions(socket) {
   return `-h '' -k ${socket} -p 5432`
 }
 
+function showServerEncoding(bin, socket) {
+  const selected = runTool(bin, 'psql', [
+    '-h', socket, '-p', '5432', '-U', USER, '-d', DATABASE, '-v', 'ON_ERROR_STOP=1', '-tAc', 'SHOW server_encoding',
+  ])
+  return selected.stdout.trim()
+}
+
 function baseProof(command, owned, running, removed) {
   return {
     ok: true,
@@ -227,12 +234,14 @@ function commandStart() {
     if (!assertReal(root, 'root')?.isDirectory()) fail('owned root was not created', { root, nonce })
     mkdirSync(owned.socket, { mode: 0o700 })
     writeFileSync(path.join(root, MARKER), JSON.stringify({ nonce, kind: KIND }) + '\n', { mode: 0o600, flag: 'wx' })
-    runTool(bin, 'initdb', ['-D', owned.data, '-U', USER, '--auth=trust', '--no-instructions'])
+    runTool(bin, 'initdb', ['-D', owned.data, '-U', USER, '--auth=trust', '--encoding=UTF8', '--locale=C', '--no-instructions'])
     runTool(bin, 'pg_ctl', ['-D', owned.data, '-l', owned.log, '-o', socketOptions(owned.socket), '-w', 'start'])
     if (!postgresRunning(bin, owned.data)) throw new Error('postmaster not running after start')
     runTool(bin, 'createdb', ['-h', owned.socket, '-p', '5432', '-U', USER, DATABASE])
+    const serverEncoding = showServerEncoding(bin, owned.socket)
+    if (serverEncoding !== 'UTF8') throw new Error('server_encoding is ' + serverEncoding)
     const dsn = `postgresql://${USER}@localhost/${DATABASE}?host=${owned.socket}&port=5432`
-    emit({ ...baseProof('start', owned, true, false), dsn, pgBin: bin })
+    emit({ ...baseProof('start', owned, true, false), dsn, pgBin: bin, serverEncoding })
   } catch (error) {
     abandonFresh(bin, owned)
     fail(error instanceof Error ? error.message : String(error), { command: 'start', root, nonce, pgBin: bin })
@@ -263,7 +272,11 @@ function commandOwned(command, options) {
       if (postgresRunning(bin, owned.data)) fail('refusing to boot a postmaster that is already running', { root: owned.root })
       runTool(bin, 'pg_ctl', ['-D', owned.data, '-l', owned.log, '-o', socketOptions(owned.socket), '-w', 'start'])
       if (!postgresRunning(bin, owned.data)) fail('postmaster not running after boot', { root: owned.root, nonce: owned.nonce })
-      emit({ ...baseProof('boot', owned, true, false), pgBin: bin })
+      const serverEncoding = showServerEncoding(bin, owned.socket)
+      if (serverEncoding !== 'UTF8') {
+        fail('server_encoding is ' + serverEncoding, { root: owned.root, nonce: owned.nonce, serverEncoding })
+      }
+      emit({ ...baseProof('boot', owned, true, false), pgBin: bin, serverEncoding })
     }
     if (command === 'cleanup') {
       if (assertReal(owned.data, 'data')) {
@@ -374,23 +387,25 @@ function commandSelfCheck() {
   assertStatusClassifier()
   const started = invoke(['start'])
   if (started.proof?.root && started.proof?.nonce) claimed = { root: started.proof.root, nonce: started.proof.nonce }
-  if (started.status !== 0 || !started.proof?.ok || started.proof.locale !== 'C' || started.proof.postgresRunning !== true) {
+  if (started.status !== 0 || !started.proof?.ok || started.proof.locale !== 'C' || started.proof.postgresRunning !== true || started.proof.serverEncoding !== 'UTF8') {
     die('self-check start failed', { detail: started.proof || started.stderr || String(started.error) })
   }
   const owned = loadOwned({ root: started.proof.root, nonce: started.proof.nonce })
   const selected = runTool(bin, 'psql', ['-h', owned.socket, '-p', '5432', '-U', USER, '-d', DATABASE, '-v', 'ON_ERROR_STOP=1', '-tAc', 'SELECT 1'])
   if (selected.stdout.trim() !== '1') die('self-check select failed', { root: owned.root })
+  if (showServerEncoding(bin, owned.socket) !== 'UTF8') die('self-check start SHOW server_encoding was not UTF8', { root: owned.root })
   const stopped = invoke(['stop', '--root', owned.root, '--nonce', owned.nonce])
   if (stopped.status !== 0 || stopped.proof?.postgresStopped !== true || stopped.proof?.directoryRemoved !== false || stopped.proof?.socket !== owned.socket || stopped.proof?.data !== owned.data) {
     die('self-check stop failed', { detail: stopped.proof, root: owned.root, nonce: owned.nonce })
   }
   if (!assertReal(owned.root, 'root')?.isDirectory()) die('stop removed the owned directory', { root: owned.root })
   const booted = invoke(['boot', '--root', owned.root, '--nonce', owned.nonce])
-  if (booted.status !== 0 || booted.proof?.postgresRunning !== true || booted.proof?.locale !== 'C' || booted.proof?.data !== owned.data || booted.proof?.socket !== owned.socket) {
+  if (booted.status !== 0 || booted.proof?.postgresRunning !== true || booted.proof?.locale !== 'C' || booted.proof?.serverEncoding !== 'UTF8' || booted.proof?.data !== owned.data || booted.proof?.socket !== owned.socket) {
     die('self-check boot failed', { detail: booted.proof, root: owned.root, nonce: owned.nonce })
   }
   const again = runTool(bin, 'psql', ['-h', owned.socket, '-p', '5432', '-U', USER, '-d', DATABASE, '-v', 'ON_ERROR_STOP=1', '-tAc', 'SELECT 1'])
   if (again.stdout.trim() !== '1') die('self-check select after restart failed', { root: owned.root })
+  if (showServerEncoding(bin, owned.socket) !== 'UTF8') die('self-check boot SHOW server_encoding was not UTF8', { root: owned.root })
   let wrongNonce = randomBytes(8).toString('hex')
   if (wrongNonce === owned.nonce) wrongNonce = '0123456789abcdef'
   const refused = invoke(['stop', '--root', owned.root, '--nonce', wrongNonce])

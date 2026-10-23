@@ -279,7 +279,7 @@ async function expectCommitFailure(
   run: (client: PoolClient) => Promise<void>,
   expected: { code: string; constraint?: string; message?: string },
   absentSql: string,
-  absentParams: unknown[] = [],
+  absentParams: unknown[] | (() => unknown[]) = [],
 ): Promise<void> {
   const client = await pool.connect()
   try {
@@ -293,7 +293,8 @@ async function expectCommitFailure(
     }
     if (!failed) throw new Error(`COMMIT succeeded; expected ${expected.code}`)
     assertPg(failed, expected)
-    const left = await client.query(absentSql, absentParams)
+    const params = typeof absentParams === 'function' ? absentParams() : absentParams
+    const left = await client.query(absentSql, params)
     if (Number((left.rows[0] as { n: number }).n) !== 0) {
       throw new Error('failed COMMIT left rows behind')
     }
@@ -924,6 +925,94 @@ const migrationProvider: MigrationProvider = {
   async getMigrations() {
     return { zzzz20261024010000_create_plm_collaboration_snapshots: { up, down } }
   },
+}
+
+const OWNED_OPERATION_FK_SQL = `
+  SELECT constraint_row.conname
+    FROM pg_catalog.pg_constraint constraint_row
+    JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_catalog.pg_class referenced ON referenced.oid = constraint_row.confrelid
+    JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.relnamespace
+   WHERE namespace.nspname = current_schema()
+     AND constraint_row.contype = 'f'
+     AND constraint_row.conname IN ('fk_mrr_operation', 'fk_mrvm_operation')
+     AND constraint_row.condeferrable
+     AND constraint_row.condeferred
+     AND constraint_row.convalidated
+     AND constraint_row.confmatchtype = 's'
+     AND constraint_row.confupdtype = 'a'
+     AND constraint_row.confdeltype = 'a'
+     AND referenced_namespace.nspname = current_schema()
+     AND referenced.relname = 'meta_record_history_operations'
+     AND (
+       SELECT pg_catalog.array_agg(attribute.attname::text ORDER BY key.ordinality)
+       FROM pg_catalog.unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+       JOIN pg_catalog.pg_attribute attribute
+         ON attribute.attrelid = relation.oid AND attribute.attnum = key.attnum
+     ) = ARRAY['sheet_id', 'operation_id']::text[]
+     AND (
+       SELECT pg_catalog.array_agg(attribute.attname::text ORDER BY key.ordinality)
+       FROM pg_catalog.unnest(constraint_row.confkey) WITH ORDINALITY AS key(attnum, ordinality)
+       JOIN pg_catalog.pg_attribute attribute
+         ON attribute.attrelid = referenced.oid AND attribute.attnum = key.attnum
+     ) = ARRAY['sheet_id', 'operation_id']::text[]`
+
+async function foreignOperationConstraintCount(admin: Pool, foreign: string): Promise<number> {
+  const found = await admin.query(
+    `SELECT count(*)::int AS n
+       FROM pg_catalog.pg_constraint constraint_row
+       JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+       JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = $1
+        AND constraint_row.contype = 'f'
+        AND constraint_row.conname IN ('fk_mrr_operation', 'fk_mrvm_operation')
+        AND constraint_row.condeferrable
+        AND constraint_row.condeferred
+        AND constraint_row.convalidated`,
+    [foreign],
+  )
+  return Number((found.rows[0] as { n: number }).n)
+}
+
+async function withForeignOperationConstraintNames(run: (admin: Pool, foreign: string) => Promise<void>): Promise<void> {
+  const foreign = `plm_w23_${randomBytes(8).toString('hex')}`
+  assertSchema(foreign)
+  const admin = new Pool({ connectionString: DATABASE_URL, max: 1, application_name: `${foreign}_foreign` })
+  try {
+    await admin.query(`CREATE SCHEMA ${foreign}`)
+    await admin.query(
+      `CREATE TABLE ${foreign}.meta_record_history_operations (
+         sheet_id text NOT NULL,
+         operation_id uuid NOT NULL,
+         PRIMARY KEY (sheet_id, operation_id)
+       )`,
+    )
+    await admin.query(
+      `CREATE TABLE ${foreign}.meta_record_revisions (
+         sheet_id text NOT NULL,
+         operation_id uuid,
+         CONSTRAINT fk_mrr_operation
+           FOREIGN KEY (sheet_id, operation_id)
+           REFERENCES ${foreign}.meta_record_history_operations (sheet_id, operation_id)
+           DEFERRABLE INITIALLY DEFERRED
+       )`,
+    )
+    await admin.query(
+      `CREATE TABLE ${foreign}.meta_record_version_markers (
+         sheet_id text NOT NULL,
+         operation_id uuid,
+         CONSTRAINT fk_mrvm_operation
+           FOREIGN KEY (sheet_id, operation_id)
+           REFERENCES ${foreign}.meta_record_history_operations (sheet_id, operation_id)
+           DEFERRABLE INITIALLY DEFERRED
+       )`,
+    )
+    await run(admin, foreign)
+  } finally {
+    await admin.query(`DROP SCHEMA IF EXISTS ${foreign} CASCADE`)
+    await admin.end()
+  }
 }
 
 describe('plm collaboration snapshot db guards', () => {
@@ -1638,9 +1727,11 @@ describe('plm collaboration snapshot db guards', () => {
       await expectAbort(pool, (client) => client.query('DELETE FROM meta_sheets WHERE id = $1', [admitted.sheetId]), {
         code: '23514', constraint: 'meta_plm_collaboration_container_guard', message: FAMILY,
       })
+      const movedSheet = `${admitted.sheetId}_viewmove`
+      await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [movedSheet, admitted.baseId, 'view move'])
       await expectAbort(pool, (client) => client.query(
-        'UPDATE meta_views SET deleted_at = now() WHERE id = $1',
-        [admitted.viewId],
+        'UPDATE meta_views SET sheet_id = $2 WHERE id = $1',
+        [admitted.viewId, movedSheet],
       ), { code: '23514', constraint: 'meta_plm_collaboration_container_guard', message: FAMILY })
       await expectAbort(pool, (client) => client.query('DELETE FROM meta_views WHERE id = $1', [admitted.viewId]), {
         code: '23514', constraint: 'meta_plm_collaboration_container_guard', message: FAMILY,
@@ -1657,7 +1748,7 @@ describe('plm collaboration snapshot db guards', () => {
         `INSERT INTO meta_records (id, sheet_id, data, created_by, modified_by) VALUES ($1, $2, '{"open":true}'::jsonb, $3, $3)`,
         [plainRecord, plain, admitted.actorId],
       )
-      await pool.query('UPDATE meta_views SET deleted_at = now() WHERE id = $1', [plainView])
+      await pool.query('UPDATE meta_views SET name = $2 WHERE id = $1', [plainView, 'plain renamed'])
       await pool.query('DELETE FROM meta_records WHERE id = $1', [plainRecord])
       await pool.query('DELETE FROM meta_views WHERE id = $1', [plainView])
       await pool.query('DELETE FROM meta_sheets WHERE id = $1', [plain])
@@ -1925,14 +2016,22 @@ describe('plm collaboration snapshot db guards', () => {
         } finally {
           client.release()
         }
+        let omittedBindingId = ''
         await expectCommitFailure(pool, async (inner) => {
-          await insertAdmission(inner, { omitRecord: true })
+          const omitted = await insertAdmission(inner, { omitRecord: true })
+          omittedBindingId = omitted.bindingId
         }, {
           code: '23503',
           constraint: 'meta_plm_collaboration_rows_record_id_fkey',
-        }, `SELECT count(*)::int AS n FROM meta_plm_collaboration_bindings WHERE id NOT IN (SELECT binding_id FROM meta_plm_collaboration_rows)`)
+        }, `SELECT (
+              SELECT count(*)::int FROM meta_plm_collaboration_bindings WHERE id = $1
+            ) + (
+              SELECT count(*)::int FROM meta_plm_collaboration_rows WHERE binding_id = $1
+            ) AS n`, () => [omittedBindingId])
+        let foreignRecordId = ''
         await expectCommitFailure(pool, async (inner) => {
           const mapped = await insertAdmission(inner, { omitRecord: true })
+          foreignRecordId = mapped.recordId
           const otherSheet = `${mapped.sheetId}_other`
           await inner.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [otherSheet, mapped.baseId, 'other'])
           await inner.query(
@@ -1943,12 +2042,20 @@ describe('plm collaboration snapshot db guards', () => {
           code: '23514',
           constraint: 'meta_plm_collaboration_commit_guard',
           message: FAMILY,
-        }, `SELECT count(*)::int AS n FROM meta_record_revisions WHERE source = 'system_sync' AND record_id NOT IN (SELECT record_id FROM meta_plm_collaboration_rows)`)
+        }, `SELECT (
+              SELECT count(*)::int FROM meta_records WHERE id = $1
+            ) + (
+              SELECT count(*)::int FROM meta_record_revisions WHERE record_id = $1
+            ) AS n`, () => [foreignRecordId])
+        let ownedRecordId = ''
+        let ownedOperationId = ''
         await expectCommitFailure(pool, async (inner) => {
           const admitted = await insertAdmission(inner)
           const query = (text: string, params?: unknown[]) => inner.query(text, params)
           const ledger = await mintOperation(query, admitted.sheetId)
           if (!ledger.operationId) throw new Error('mintOperation returned an inert ledger')
+          ownedRecordId = admitted.recordId
+          ownedOperationId = ledger.operationId
           await recordRecordRevision(query, {
             sheetId: admitted.sheetId,
             recordId: admitted.recordId,
@@ -1965,9 +2072,11 @@ describe('plm collaboration snapshot db guards', () => {
         }, {
           code: '23503',
           constraint: 'fk_mrr_operation',
-        }, `SELECT count(*)::int AS n FROM meta_record_revisions WHERE operation_id IS NOT NULL AND record_id NOT IN (
-              SELECT record_id FROM meta_plm_collaboration_rows
-            )`)
+        }, `SELECT (
+              SELECT count(*)::int FROM meta_record_revisions WHERE record_id = $1 AND operation_id = $2
+            ) + (
+              SELECT count(*)::int FROM meta_record_history_operations WHERE operation_id = $2
+            ) AS n`, () => [ownedRecordId, ownedOperationId])
       })
     } finally {
       if (previousFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
@@ -1975,6 +2084,125 @@ describe('plm collaboration snapshot db guards', () => {
       __resetOperationLedgerColumnProbe()
       __resetRecoveryWriterStateColumnProbe()
     }
+  })
+
+  test('foreign_operation_names_still_require_owned_deferred_fk', async () => {
+    const previousFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    __resetOperationLedgerColumnProbe()
+    __resetRecoveryWriterStateColumnProbe()
+    try {
+      await withForeignOperationConstraintNames(async (admin, foreign) => {
+        await withFixture(async ({ pool }) => {
+          const owned = await pool.query(OWNED_OPERATION_FK_SQL)
+          const names = (owned.rows as Array<{ conname: string }>).map((row) => row.conname).sort()
+          if (names.join(',') !== 'fk_mrr_operation,fk_mrvm_operation') {
+            throw new Error(`owned operation foreign keys are ${names.join(',') || 'missing'}`)
+          }
+          if (await foreignOperationConstraintCount(admin, foreign) !== 2) {
+            throw new Error('foreign operation foreign keys were not left intact')
+          }
+          let ownedRecordId = ''
+          let ownedOperationId = ''
+          await expectCommitFailure(pool, async (inner) => {
+            const admitted = await insertAdmission(inner)
+            const query = (text: string, params?: unknown[]) => inner.query(text, params)
+            const ledger = await mintOperation(query, admitted.sheetId)
+            if (!ledger.operationId) throw new Error('mintOperation returned an inert ledger')
+            ownedRecordId = admitted.recordId
+            ownedOperationId = ledger.operationId
+            await recordRecordRevision(query, {
+              sheetId: admitted.sheetId,
+              recordId: admitted.recordId,
+              version: 1,
+              action: 'create',
+              source: 'system_sync',
+              actorId: admitted.actorId,
+              changedFieldIds: [],
+              patch: {},
+              snapshot: sourcePayload(admitted),
+              createdAt: CAPTURED_AT,
+              ledger,
+            })
+          }, {
+            code: '23503',
+            constraint: 'fk_mrr_operation',
+          }, `SELECT (
+                SELECT count(*)::int FROM meta_record_revisions WHERE record_id = $1 AND operation_id = $2
+              ) + (
+                SELECT count(*)::int FROM meta_record_history_operations WHERE operation_id = $2
+              ) AS n`, () => [ownedRecordId, ownedOperationId])
+          if (await foreignOperationConstraintCount(admin, foreign) !== 2) {
+            throw new Error('unsealed commit check altered the foreign operation foreign keys')
+          }
+        })
+      })
+    } finally {
+      if (previousFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFence
+      __resetOperationLedgerColumnProbe()
+      __resetRecoveryWriterStateColumnProbe()
+    }
+  })
+
+  test('missing_or_malformed_owned_operation_fk_refuses_preflight', async () => {
+    const variants: ReadonlyArray<{ name: string; sql: readonly string[] }> = [
+      {
+        name: 'canonical_missing',
+        sql: [
+          'ALTER TABLE meta_record_revisions DROP CONSTRAINT fk_mrr_operation',
+          'ALTER TABLE meta_record_version_markers DROP CONSTRAINT fk_mrvm_operation',
+        ],
+      },
+      {
+        name: 'match_full',
+        sql: [
+          'ALTER TABLE meta_record_revisions DROP CONSTRAINT fk_mrr_operation',
+          'ALTER TABLE meta_record_revisions ADD CONSTRAINT fk_mrr_operation FOREIGN KEY (sheet_id, operation_id) REFERENCES meta_record_history_operations (sheet_id, operation_id) MATCH FULL DEFERRABLE INITIALLY DEFERRED',
+        ],
+      },
+      {
+        name: 'update_cascade',
+        sql: [
+          'ALTER TABLE meta_record_revisions DROP CONSTRAINT fk_mrr_operation',
+          'ALTER TABLE meta_record_revisions ADD CONSTRAINT fk_mrr_operation FOREIGN KEY (sheet_id, operation_id) REFERENCES meta_record_history_operations (sheet_id, operation_id) ON UPDATE CASCADE DEFERRABLE INITIALLY DEFERRED',
+        ],
+      },
+      {
+        name: 'delete_set_null',
+        sql: [
+          'ALTER TABLE meta_record_revisions DROP CONSTRAINT fk_mrr_operation',
+          'ALTER TABLE meta_record_revisions ADD CONSTRAINT fk_mrr_operation FOREIGN KEY (sheet_id, operation_id) REFERENCES meta_record_history_operations (sheet_id, operation_id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED',
+        ],
+      },
+    ]
+    await withForeignOperationConstraintNames(async (admin, foreign) => {
+      for (const variant of variants) {
+        await withFixture(async ({ pool, admin: fixtureAdmin, db, schema }) => {
+          for (const statement of variant.sql) await pool.query(statement)
+          if (await relationCount(fixtureAdmin, schema, 'meta_plm_collaboration_%') !== 0) {
+            throw new Error(`${variant.name} preflight started with collaboration relations`)
+          }
+          let failed: unknown
+          try {
+            await up(db)
+          } catch (error) {
+            failed = error
+          }
+          assertPg(failed, {
+            code: '23514',
+            constraint: 'meta_plm_collaboration_predecessor_guard',
+            message: 'plm_collaboration_predecessors_absent',
+          })
+          if (await relationCount(fixtureAdmin, schema, 'meta_plm_collaboration_%') !== 0) {
+            throw new Error(`${variant.name} refused preflight created a collaboration relation`)
+          }
+          if (await foreignOperationConstraintCount(admin, foreign) !== 2) {
+            throw new Error(`${variant.name} altered the foreign operation foreign keys`)
+          }
+        }, { migrate: false })
+      }
+    })
   })
 
   test('guard_coexistence_and_runtime_origin', async () => {

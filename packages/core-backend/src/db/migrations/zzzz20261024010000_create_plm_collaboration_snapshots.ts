@@ -29,7 +29,6 @@ const REQUIRED_COLUMNS: ReadonlyArray<readonly [string, string, string]> = [
   ['meta_sheets', 'deleted_at', 'timestamptz'],
   ['meta_views', 'id', 'text'],
   ['meta_views', 'sheet_id', 'text'],
-  ['meta_views', 'deleted_at', 'timestamptz'],
   ['meta_fields', 'id', 'text'],
   ['meta_fields', 'sheet_id', 'text'],
   ['meta_fields', 'type', 'text'],
@@ -128,6 +127,48 @@ BEGIN
         AND type.typname = required.typ
     )
   ) <> ${REQUIRED_COLUMNS.length} THEN
+    RAISE EXCEPTION USING ERRCODE = '23514',
+      MESSAGE = 'plm_collaboration_predecessors_absent',
+      CONSTRAINT = 'meta_plm_collaboration_predecessor_guard';
+  END IF;
+  IF (
+    SELECT count(*)
+    FROM (VALUES ('meta_record_revisions', 'fk_mrr_operation'), ('meta_record_version_markers', 'fk_mrvm_operation'))
+      AS required(rel, conname)
+    WHERE EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_constraint constraint_row
+      JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+      JOIN pg_catalog.pg_class referenced ON referenced.oid = constraint_row.confrelid
+      JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.relnamespace
+      WHERE namespace.nspname = ${quoteLiteral(schema.name)}
+        AND relation.relname = required.rel
+        AND relation.relkind = 'r'
+        AND constraint_row.conname = required.conname
+        AND constraint_row.contype = 'f'
+        AND constraint_row.condeferrable
+        AND constraint_row.condeferred
+        AND constraint_row.convalidated
+        AND constraint_row.confmatchtype = 's'
+        AND constraint_row.confupdtype = 'a'
+        AND constraint_row.confdeltype = 'a'
+        AND referenced_namespace.nspname = ${quoteLiteral(schema.name)}
+        AND referenced.relname = 'meta_record_history_operations'
+        AND (
+          SELECT pg_catalog.array_agg(attribute.attname::text ORDER BY key.ordinality)
+          FROM pg_catalog.unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+          JOIN pg_catalog.pg_attribute attribute
+            ON attribute.attrelid = relation.oid AND attribute.attnum = key.attnum
+        ) = ARRAY['sheet_id', 'operation_id']::text[]
+        AND (
+          SELECT pg_catalog.array_agg(attribute.attname::text ORDER BY key.ordinality)
+          FROM pg_catalog.unnest(constraint_row.confkey) WITH ORDINALITY AS key(attnum, ordinality)
+          JOIN pg_catalog.pg_attribute attribute
+            ON attribute.attrelid = referenced.oid AND attribute.attnum = key.attnum
+        ) = ARRAY['sheet_id', 'operation_id']::text[]
+    )
+  ) <> 2 THEN
     RAISE EXCEPTION USING ERRCODE = '23514',
       MESSAGE = 'plm_collaboration_predecessors_absent',
       CONSTRAINT = 'meta_plm_collaboration_predecessor_guard';
@@ -530,7 +571,7 @@ BEGIN
     PERFORM ${s}.meta_plm_collaboration_refuse('meta_plm_collaboration_binding_guard', 'plm_collaboration_source_protected');
   END IF;
   SELECT * INTO view_row FROM ${s}.meta_views WHERE id = NEW.view_id FOR NO KEY UPDATE;
-  IF NOT FOUND OR view_row.sheet_id IS DISTINCT FROM NEW.sheet_id OR view_row.deleted_at IS NOT NULL THEN
+  IF NOT FOUND OR view_row.sheet_id IS DISTINCT FROM NEW.sheet_id THEN
     PERFORM ${s}.meta_plm_collaboration_refuse('meta_plm_collaboration_binding_guard', 'plm_collaboration_source_protected');
   END IF;
   FOR pair IN
@@ -885,7 +926,7 @@ BEGIN
       RETURN OLD;
     END IF;
     IF EXISTS (SELECT 1 FROM ${s}.meta_plm_collaboration_bindings WHERE view_id IN (OLD.id, NEW.id))
-       AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.sheet_id IS DISTINCT FROM OLD.sheet_id OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at) THEN
+       AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.sheet_id IS DISTINCT FROM OLD.sheet_id) THEN
       PERFORM ${s}.meta_plm_collaboration_refuse('meta_plm_collaboration_container_guard', 'plm_collaboration_source_protected');
     END IF;
     RETURN NEW;
