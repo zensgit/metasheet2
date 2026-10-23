@@ -934,6 +934,30 @@ jobs:
         run: |
           pnpm type-check
 
+      # The YiDa bootstrap CLI runs on the deployed server as a COMPILED program, while the vitest
+      # suites only import its source (which by design never runs it). No other required job builds
+      # core-backend, so this step builds it (tsc, about a minute here) and spawns the compiled file
+      # with no arguments and no database: a silent exit 0 or a file missing from dist is red. The
+      # dist it creates is removed again, so later steps see the same tree as before; a dist that
+      # already exists is refused rather than reused or deleted.
+      - name: Run compiled YiDa bootstrap CLI smoke
+        if: matrix.node-version == '20.x'
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          test ! -e packages/core-backend/dist
+          trap 'rm -rf packages/core-backend/dist' EXIT
+          pnpm --filter @metasheet/core-backend build
+          smoke_out="$(node --test --test-reporter=tap scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs 2>&1)" || { printf '%s\n' "$smoke_out"; echo 'compiled YiDa CLI smoke failed (output above)' >&2; exit 1; }
+          printf '%s\n' "$smoke_out"
+          smoke_tests="$(printf '%s\n' "$smoke_out" | grep -Eo '^# tests [0-9]+$' | tail -n 1 || true)"
+          [ "$smoke_tests" = '# tests 1' ] || { echo "compiled YiDa CLI smoke: expected '# tests 1', got '${smoke_tests:-no summary}'" >&2; exit 1; }
+          # node --test also reports a file that exits 0 before declaring its test as '# tests 1'
+          # ('ok 1 - <file path>'), so require the named test's own TAP line as well.
+          grep -Fxq 'ok 1 - compiled YiDa bootstrap CLI refuses an empty invocation as a program' <<<"$smoke_out" || { echo 'compiled YiDa CLI smoke: the named test did not run' >&2; exit 1; }
+
       - name: Run core-backend tests
         run: |
           pnpm --filter @metasheet/core-backend test
