@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 const repo = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const closures = {
   multitable: [
+    'packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js',
+    'packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js',
     'packages/core-backend/src/db/migrations/20250925_create_view_tables.sql',
     'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',

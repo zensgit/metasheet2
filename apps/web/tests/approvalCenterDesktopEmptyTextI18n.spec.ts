@@ -803,3 +803,6 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
     expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en again)')
   })
 })
+
+// Preload after all eager mock dependencies initialize; keep mount imports unchanged.
+await import('../src/views/approval/ApprovalCenterView.vue')

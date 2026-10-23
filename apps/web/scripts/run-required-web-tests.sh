@@ -1608,7 +1608,11 @@ exec npx vitest run \
   asyncStateBlock \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
+  attendance-daily-calendar-copy \
   attendance-record-timeline \
+  attendance-report-calendar-view.spec.ts \
+  attendance-report-date-range-view.spec.ts \
+  attendance-reports-analytics \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
@@ -1632,6 +1636,7 @@ exec npx vitest run \
   attendanceOverviewRequestReveal \
   attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
+  attendanceReportCalendar.spec.ts \
   attendanceRequestReviewEntitlement \
   attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \

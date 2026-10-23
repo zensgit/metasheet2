@@ -199,6 +199,7 @@ jobs:
         if: matrix.node-version == '20.x'
         run: |
           node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs scripts/ops/dingtalk-oauth-staging-config-env.test.mjs
           node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
           node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
@@ -811,6 +812,14 @@ jobs:
           fi
           echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
 
+      - name: Run attendance daily calendar units (#5999)
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-daily-calendar.test.ts \
+            tests/unit/attendance-daily-calendar-wiring.test.ts \
+            tests/unit/attendance-daily-calendar-registered.test.ts \
+            --reporter=dot
+
       # Multi-timezone D1: whole-file foundation units; runtime remains unconnected.
       - name: Run attendance timezone policy foundation units
         run: |
@@ -1145,12 +1154,42 @@ jobs:
           dropdb -U postgres --if-exists metasheet_test
           createdb -U postgres metasheet_test || true
 
+      # #6032: mandatory real handlers -> token -> SERIALIZABLE core host proof.
+      # Reuses this job's PostgreSQL; the suite creates/drops only its own scratch DB
+      # and applies production attendance migrations. Missing DB is a hard failure.
+      - name: Run attendance import timezone protocol gate
+        id: attendance-import-timezone-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance import timezone protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/6032/protocol-result.json
+
+      # CSV must exercise real upload and the streamed plan builder, not just parser units.
+      - name: Run attendance CSV calendar protocol gate
+        id: attendance-csv-calendar-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for attendance CSV calendar protocol}"
+          pnpm --filter @metasheet/core-backend exec vitest --config tests/attendance-import-timezone-protocol/vitest.csv.config.ts run --watch=false --cache=false --reporter=verbose --reporter=json --outputFile.json=../../artifacts/csv-calendar/csv-result.json
+
       - name: Run private-db backend drain proof
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/timemachine-private-db-backend-drain.db.test.ts \
+            --reporter=verbose
+
+      # Partial rule overrides must preserve base defaults through the real sync host.
+      - name: Run attendance partial rule override protocol
+        id: attendance-rule-override-protocol
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            --config tests/attendance-rule-override-protocol/vitest.config.ts \
             --reporter=verbose
 
       - name: Run isolated manual checkpoint acceptance
@@ -2242,6 +2281,7 @@ jobs:
             tests/integration/attendance-timezone-scheduled.db.test.ts \
             tests/integration/attendance-trip-context-transition-dates.db.test.ts \
             tests/integration/attendance-timezone-policy-store.db.test.ts \
+            tests/integration/attendance-daily-calendar.db.test.ts \
             --reporter=dot
 
       - name: Remove isolated attendance timezone database
