@@ -269,6 +269,84 @@
         <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
         <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
       </p>
+      <!-- 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — THE PILOT MARKER. The projectTarget.pilotRead
+           control (ADMIN): read LAZILY, only once this line knows the sheet exists (active or archived — never on
+           absent) and only for a holder of the capability; it says whether the pilot is on and, while it is off,
+           WHICH readiness checks still fail (closed ids, never values). 「启用分批拉取试点」 is the
+           projectTarget.pilotEnable control (ADMIN): rendered only for its holder AND when the server says the
+           sheet is ready and not yet enabled (`may.enable`). Enabling is SET-ONCE (no disable anywhere — R-53 ②),
+           so the project number must be typed before anything is sent. -->
+      <p
+        v-if="projectPilot"
+        class="sp-board__hint"
+        data-testid="stock-prep-project-pilot-status"
+        :data-pilot-enabled="projectPilot.pilot && projectPilot.pilot.enabled ? 'true' : 'false'"
+        :data-pilot-ready="projectPilot.readiness ? (projectPilot.readiness.ready ? 'true' : 'false') : 'none'"
+      >
+        {{ bi(pilotStatusText.zh, pilotStatusText.en) }}
+        <template v-if="pilotFailingIds.length > 0">
+          <span>{{ bi(targetPlain('pilot_not_ready').zh, targetPlain('pilot_not_ready').en) }}</span>
+          <code v-for="id in pilotFailingIds" :key="id" class="sp-board__token" data-testid="stock-prep-project-pilot-failing">{{ id }}</code>
+        </template>
+      </p>
+      <button
+        v-if="canEnablePilot"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-pilot-enable"
+        :disabled="pilotBusy"
+        @click="openPilotPrompt"
+      >{{ bi(targetPlain('pilot_enable_action').zh, targetPlain('pilot_enable_action').en) }}</button>
+      <div
+        v-if="pilotPrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-pilot-prompt"
+      >
+        <p class="sp-board__hint">{{ bi(targetPlain('pilot_confirm_enable').zh, targetPlain('pilot_confirm_enable').en) }}</p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-pilot-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="pilotTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-pilot-input"
+            :disabled="pilotBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-pilot-confirm"
+          :disabled="pilotBusy || !pilotTypedMatches"
+          @click="confirmPilotEnable"
+        >{{ bi(targetPlain('pilot_confirm_enable_action').zh, targetPlain('pilot_confirm_enable_action').en) }}</button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-pilot-cancel"
+          :disabled="pilotBusy"
+          @click="closePilotPrompt"
+        >{{ bi(targetPlain('pilot_confirm_enable_cancel').zh, targetPlain('pilot_confirm_enable_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="pilotNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-pilot-result"
+        :data-result="pilotNotice.kind"
+      >
+        {{ bi(pilotNoticeText.zh, pilotNoticeText.en) }}
+        <span v-if="pilotNoticeText.zhNext">{{ bi(pilotNoticeText.zhNext, pilotNoticeText.enNext ?? '') }}</span>
+        <code v-if="pilotNotice.kind === 'refused' && pilotNotice.code" class="sp-board__token">{{ pilotNotice.code }}</code>
+        <template v-if="pilotNotice.kind === 'refused' && pilotNotice.failing.length > 0">
+          <code v-for="id in pilotNotice.failing" :key="id" class="sp-board__token" data-testid="stock-prep-project-pilot-refused-failing">{{ id }}</code>
+        </template>
+      </p>
       <!-- S3 (ADR §5 O2(a), register R-37) — 负责人 / 备注 / 计划完成. The projectFields.read control of the
            workbench manifest (OPERATE): read LAZILY, only once this line knows the sheet exists (active or
            archived — never on absent), and only for a holder of the capability. 「保存」 is the
@@ -720,6 +798,7 @@ import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport 
 import {
   changeStockPreparationProjectTargetLifecycle,
   createStockPreparationProjectTargetApi,
+  enableStockPreparationProjectPilot,
   saveStockPreparationProjectFields,
   stockPrepProjectFieldsChangedPatch,
   stockPrepProjectFieldsDraft,
@@ -731,6 +810,8 @@ import {
   type StockPrepProjectFieldsState,
   type StockPrepProjectLifecycleAction,
   type StockPrepProjectLifecycleOutcome,
+  type StockPrepProjectPilotEnableOutcome,
+  type StockPrepProjectPilotState,
   type StockPrepProjectTargetList,
   type StockPrepProjectTargetState,
   type StockPreparationProjectTargetApi,
@@ -1994,7 +2075,7 @@ function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'project
  * S4's archive / restore and S3's project-fields / overview-refresh all go through it.
  */
 function holdsWorkbenchCapability(
-  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh' | 'projectOverview.ensure',
+  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectTarget.pilotRead' | 'projectTarget.pilotEnable' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh' | 'projectOverview.ensure',
 ): boolean {
   return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
 }
@@ -2057,6 +2138,109 @@ const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
   if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
   if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
   if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+// ── 备料分批拉取第一期 step 3 PR B (register R-53 / R-54) — the pilot marker of this project's sheet ──
+//
+// The pilot line renders iff the caller holds projectTarget.pilotRead (ADMIN) and the sheet exists; the
+// enable button iff the caller holds projectTarget.pilotEnable (ADMIN) AND the server's `may.enable` says the
+// sheet is ready and not yet a pilot. Set-once: there is no disable control, by design (R-53 ②).
+
+/** This project's pilot state; null = no line (absent, not loaded, no right, no port, unreadable). */
+const projectPilot = ref<StockPrepProjectPilotState | null>(null)
+let projectPilotGeneration = 0
+
+const canReadPilot = computed<boolean>(() => holdsWorkbenchCapability('projectTarget.pilotRead'))
+
+const canEnablePilot = computed<boolean>(() => {
+  const state = projectPilot.value
+  return Boolean(state && state.status === 'active' && state.may.enable && !(state.pilot && state.pilot.enabled) && holdsWorkbenchCapability('projectTarget.pilotEnable'))
+})
+
+async function loadProjectPilot(projectNo: string): Promise<void> {
+  const mine = ++projectPilotGeneration
+  const api = projectTargetClient()
+  if (!canReadPilot.value || typeof api.getPilot !== 'function') {
+    if (mine === projectPilotGeneration) projectPilot.value = null
+    return
+  }
+  try {
+    const state = await api.getPilot(projectNo)
+    if (mine === projectPilotGeneration && openedProjectNo.value === projectNo) projectPilot.value = state.status === 'absent' ? null : state
+  } catch {
+    if (mine === projectPilotGeneration) projectPilot.value = null
+  }
+}
+
+// Lazy, after the sheet state: the pilot read is asked only of a sheet that exists.
+watch(projectTarget, (state) => {
+  const projectNo = openedProjectNo.value
+  if (state && state.status !== 'absent' && projectNo) void loadProjectPilot(projectNo)
+  else { projectPilotGeneration += 1; projectPilot.value = null }
+})
+
+const pilotStatusText = computed<StockPrepPlainEntry>(() => {
+  const state = projectPilot.value
+  if (!state) return { zh: '', en: '' }
+  if (state.pilot && state.pilot.enabled) return targetPlain('pilot_status_enabled')
+  if (state.readiness && state.readiness.ready) return targetPlain('pilot_status_ready')
+  return targetPlain('pilot_status_not_enabled')
+})
+
+/** The readiness check ids still failing (closed tokens from the server), shown only while the pilot is off. */
+const pilotFailingIds = computed<string[]>(() => {
+  const state = projectPilot.value
+  if (!state || (state.pilot && state.pilot.enabled) || !state.readiness) return []
+  return state.readiness.failing
+})
+
+const pilotPrompt = ref(false)
+const pilotTyped = ref('')
+const pilotBusy = ref(false)
+const pilotNotice = ref<StockPrepProjectPilotEnableOutcome | null>(null)
+const pilotTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, pilotTyped.value))
+
+function openPilotPrompt(): void {
+  pilotPrompt.value = true
+  pilotTyped.value = ''
+  pilotNotice.value = null
+}
+
+function closePilotPrompt(): void {
+  pilotPrompt.value = false
+  pilotTyped.value = ''
+}
+
+async function confirmPilotEnable(): Promise<void> {
+  const projectNo = openedProjectNo.value
+  if (!projectNo || pilotBusy.value) return
+  pilotBusy.value = true
+  try {
+    const outcome = await enableStockPreparationProjectPilot({
+      targetApi: projectTargetClient(),
+      canEnable: holdsWorkbenchCapability('projectTarget.pilotEnable'),
+    }, projectNo, pilotTyped.value)
+    pilotNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closePilotPrompt()
+      if (openedProjectNo.value === projectNo) {
+        projectPilotGeneration += 1
+        if (outcome.state) projectPilot.value = outcome.state
+        else void loadProjectPilot(projectNo)
+      }
+    }
+  } finally {
+    pilotBusy.value = false
+  }
+}
+
+const pilotNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = pilotNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.result.alreadyEnabled ? 'pilot_already_enabled' : 'pilot_enabled_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'not_permitted') return targetPlain('pilot_not_permitted')
   return stockPrepErrorPlain(notice.code ?? '')
 })
 

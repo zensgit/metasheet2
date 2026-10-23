@@ -528,8 +528,9 @@ test('L11 constants and vocabularies are pinned', () => {
   assert.equal(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS, 5000)
   assert.ok(lockModule.PROJECT_WRITE_ROW_LOCK_WAIT_MS < 30000, 'the row-lock wait stays below statement_timeout')
   // PR-0 (batch-refresh phase 2 step 4): `carry_confirm` names the carry-confirm lease and its post-release bump.
-  assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm'])
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm'])
+  // Batch-refresh step 3 PR B: the pilot enable holds the lease (purpose) after bumping the generation (reason).
+  assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',

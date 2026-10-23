@@ -51,7 +51,12 @@ import {
   viewerActiveOrgIds,
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
-import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import {
+  isApprovalTemplateManager,
+  resolveApprovalActorRoleClaims,
+  resolveApprovalActorRoles,
+  resolveApprovalPushRecipientRoles,
+} from '../services/approval-actor-roles'
 import {
   isApprovalCcUnreadBadgeEnabled,
   isApprovalMineOutcomeBadgeEnabled,
@@ -642,10 +647,14 @@ function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string 
 // Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
 // runtime evaluates the SAME request-derived visibility actor this router feeds into
 // applyTemplateVisibilityFilter — one actor derivation, no drift between create and upload.
-export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
+//
+// `roles` (the role-scoped 「按角色可见」 arm) is the shared approval role set, so a role granted via
+// `user_roles` makes a role-scoped template visible. `isTemplateManager` deliberately keeps reading
+// the request's role CLAIMS only: manager status is not a role-seat question and is unchanged here.
+export async function resolveApprovalTemplateVisibilityActor(req: Request): Promise<ApprovalTemplateVisibilityActor | undefined> {
   const userId = resolveApprovalActorId(req)
   if (!userId) return undefined
-  const roles = resolveApprovalActorRoles(req)
+  const roles = await resolveApprovalActorRoles(req)
   const permissions = resolveApprovalActorPermissions(req)
   return {
     userId,
@@ -653,11 +662,7 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
     roles,
     permissions,
     isTemplateManager: req.user?.role === 'admin'
-      || roles.includes('admin')
-      || permissions.includes('*:*')
-      || permissions.includes('approvals:*')
-      || permissions.includes('approvals:admin-templates')
-      || permissions.includes('approval-templates:manage'),
+      || isApprovalTemplateManager(resolveApprovalActorRoleClaims(req), permissions),
   }
 }
 
@@ -1385,17 +1390,37 @@ export async function publishApprovalCountsForUsers(
   users: Array<{ userId: string; roles?: string[]; permissions?: string[] }>,
   reason: string,
 ): Promise<void> {
-  const uniqueUsers = new Map<string, { roles: string[]; permissions?: string[] }>()
+  const uniqueUsers = new Map<string, { roles?: string[]; permissions?: string[] }>()
   for (const user of users) {
     const userId = user.userId.trim()
     if (!userId || uniqueUsers.has(userId)) continue
     uniqueUsers.set(userId, {
-      roles: user.roles ?? [],
+      ...(Array.isArray(user.roles) ? { roles: user.roles } : {}),
       ...(Array.isArray(user.permissions) ? { permissions: user.permissions } : {}),
     })
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, { roles, permissions }]) => Promise.all([
+  // A recipient handed over WITHOUT a role set (every other user an action touches — the next
+  // handlers, the requester, reminded assignees) gets the role set their own count read resolves
+  // (`resolveApprovalPushRecipientRoles`: `users.role` ∪ `user_roles` role ids), so a pending item
+  // seated on any of their roles is counted in the push as it is in GET. If that read fails, THAT
+  // recipient's push is skipped and logged — never sent with a narrower number.
+  const resolved = (await Promise.all([...uniqueUsers.entries()].map(
+    async ([userId, entry]): Promise<[string, { roles: string[]; permissions?: string[] }] | null> => {
+      if (entry.roles) return [userId, { ...entry, roles: entry.roles }]
+      try {
+        return [userId, { ...entry, roles: await resolveApprovalPushRecipientRoles(userId) }]
+      } catch (error) {
+        logger.error(
+          `Approval count push skipped for one recipient (${reason}): role read failed`,
+          error instanceof Error ? error : undefined,
+        )
+        return null
+      }
+    },
+  ))).filter((entry): entry is [string, { roles: string[]; permissions?: string[] }] => entry !== null)
+
+  await Promise.all(resolved.map(([userId, { roles, permissions }]) => Promise.all([
     publishApprovalCountsUpdate({
       injector: options?.injector,
       logger,
@@ -1539,7 +1564,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   r.get('/api/approval-templates', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
-      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const actor = await resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
@@ -1632,7 +1657,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   // Express's matcher does not mistake `categories` for a template id.
   r.get('/api/approval-templates/categories', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
-      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const actor = await resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
@@ -1881,7 +1906,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           tenantId: resolveApprovalTenantId(req),
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
-          roles: resolveApprovalActorRoles(req),
+          roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
         // The sample requester is identified by id only; org relations / directory roles / dept /
@@ -1927,7 +1954,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   r.get('/api/approval-templates/:id', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
-      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const actor = await resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
@@ -2238,7 +2265,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
       // §2 "挂接时按原谓词校验可见" (ratified) — zero rows written if the caller cannot see the
       // template under the ordinary visibility predicate (see isApprovalTemplateVisibleForGroupLink).
-      const visibilityActor = resolveApprovalTemplateVisibilityActor(req)
+      const visibilityActor = await resolveApprovalTemplateVisibilityActor(req)
       if (!(await isApprovalTemplateVisibleForGroupLink(req.params.id, visibilityActor))) {
         return res.status(404).json(approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'))
       }
@@ -2279,7 +2306,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
-      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const actor = await resolveApprovalTemplateVisibilityActor(req)
       const preview = await previewApprovalTemplateGroupBackfill(orgId, actor)
       res.json(preview)
     } catch (error) {
@@ -2304,7 +2331,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       if (!actorId) {
         return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
       }
-      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const actor = await resolveApprovalTemplateVisibilityActor(req)
       const result = await executeApprovalTemplateGroupBackfill(orgId, actor, actorId)
       res.status(result.batchId ? 201 : 200).json(result)
     } catch (error) {
@@ -2748,7 +2775,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               offset: parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER),
             })
       const actorId = resolveApprovalActorId(req)
-      const actorRoles = resolveApprovalActorRoles(req)
+      const actorRoles = await resolveApprovalActorRoles(req)
 
       if (sourceSystem === 'plm' && assignee) {
         return res.status(400).json({
@@ -3027,7 +3054,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           tenantId: resolveApprovalTenantId(req),
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
-          roles: resolveApprovalActorRoles(req),
+          roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
       )
@@ -3080,7 +3109,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           tenantId: resolveApprovalTenantId(req),
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
-          roles: resolveApprovalActorRoles(req),
+          roles: await resolveApprovalActorRoles(req),
+          // Template-manager status stays on the request's role claims (see isApprovalTemplateManager).
+          adminRoleClaims: resolveApprovalActorRoleClaims(req),
           permissions: resolveApprovalActorPermissions(req),
         },
       )
@@ -3387,7 +3418,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         pool,
         {
           actorId: userId,
-          roles: resolveApprovalActorRoles(req),
+          roles: await resolveApprovalActorRoles(req),
           permissions: resolveApprovalActorPermissions(req),
         },
         sourceSystem,
@@ -3449,7 +3480,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         sourceSystem: source.sourceSystem,
         includeExternalTabSources: source.includeExternalTabSources,
         actorId: userId,
-        actorRoles: resolveApprovalActorRoles(req),
+        actorRoles: await resolveApprovalActorRoles(req),
         actorPermissions: resolveApprovalActorPermissions(req),
       })
       res.json({ count })
@@ -3506,7 +3537,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         sourceSystem: source.sourceSystem,
         includeExternalTabSources: source.includeExternalTabSources,
         actorId: userId,
-        actorRoles: resolveApprovalActorRoles(req),
+        actorRoles: await resolveApprovalActorRoles(req),
         actorPermissions: resolveApprovalActorPermissions(req),
       })
       res.json({ count })
@@ -3550,6 +3581,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const { id } = req.params
+      // Resolved before the write so a failed role read answers 500 without a half-reported mark.
+      const actorRoles = await resolveApprovalActorRoles(req)
 
       const markReadResult = await pool.query<{ instance_id: string }>(
         `INSERT INTO approval_reads (user_id, instance_id, read_at)
@@ -3569,7 +3602,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
       await publishApprovalCountsForUsers(
         options,
-        [{ userId, roles: resolveApprovalActorRoles(req) }],
+        [{ userId, roles: actorRoles }],
         'mark-read',
       )
       res.json({ ok: true })
@@ -3619,7 +3652,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
         ? null
         : (rawSourceSystem as 'platform' | 'plm')
-      const actorRoles = resolveApprovalActorRoles(req)
+      const actorRoles = await resolveApprovalActorRoles(req)
       const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
       const actorPermissions = resolveApprovalActorPermissions(req)
       const actorPermissionsParam = actorPermissions.length > 0 ? actorPermissions : ['__none__']
@@ -3660,7 +3693,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
       await publishApprovalCountsForUsers(
         options,
-        [{ userId, roles: resolveApprovalActorRoles(req) }],
+        [{ userId, roles: await resolveApprovalActorRoles(req) }],
         'mark-all-read',
       )
       res.json({ markedCount: result.rows.length })
@@ -3707,6 +3740,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const userName = resolveApprovalActorName(req, userId)
       let remindedDirectAssigneeIds: string[] = []
 
+      // Resolved BEFORE the transaction opens (used by the count push after COMMIT): a failed role read
+      // then answers 500 before anything is written, never after the remind has committed.
+      const actorRoles = await resolveApprovalActorRoles(req)
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
@@ -3740,8 +3776,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           ? ((req.user as { perms: unknown }).perms as unknown[]).filter((p): p is string => typeof p === 'string')
           : []
         const combinedPerms = [...actorPerms, ...actorPermsFromToken]
-        const actorRoles = resolveApprovalActorRoles(req)
-        const isAdminUser = actorRoles.includes('admin') || req.user?.role === 'admin'
+        // Admin status stays on the request's role claims (unchanged by the shared role-set widening).
+        const isAdminUser = resolveApprovalActorRoleClaims(req).includes('admin') || req.user?.role === 'admin'
         const hasActPerm = isAdminUser
           || combinedPerms.includes('*:*')
           || combinedPerms.includes('approvals:*')
@@ -3847,7 +3883,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         await publishApprovalCountsForUsers(
           options,
           [
-            { userId, roles: resolveApprovalActorRoles(req) },
+            { userId, roles: actorRoles },
             ...remindedDirectAssigneeIds.map((assigneeId) => ({ userId: assigneeId })),
           ],
           'remind',
@@ -3915,7 +3951,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
-        roles: resolveApprovalActorRoles(req),
+        roles: await resolveApprovalActorRoles(req),
         permissions: resolveApprovalActorPermissions(req),
         tenantId: resolveApprovalTenantId(req),
         ip: req.ip || null,
@@ -4035,7 +4071,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
-        roles: resolveApprovalActorRoles(req),
+        roles: await resolveApprovalActorRoles(req),
         permissions: resolveApprovalActorPermissions(req),
         tenantId: resolveApprovalTenantId(req),
         ip: req.ip || null,
@@ -4121,7 +4157,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           actor: {
             userId,
             userName: resolveApprovalActorName(req, userId),
-            roles: resolveApprovalActorRoles(req),
+            roles: await resolveApprovalActorRoles(req),
             ip: req.ip || null,
             userAgent: req.get('user-agent') || null,
           },
@@ -4236,7 +4272,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
-        roles: resolveApprovalActorRoles(req),
+        roles: await resolveApprovalActorRoles(req),
         ip: req.ip || null,
         userAgent: req.get('user-agent') || null,
       }
@@ -4373,6 +4409,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
+      // Resolved BEFORE the transaction opens so the role read never runs on a second connection
+      // while this one holds the instance row lock; a failed read lands in the outer catch (500).
+      const actorRoles = await resolveApprovalActorRoles(req)
       const client = await pool.connect()
       // Set by the settlement-parity branch below, which hands the connection back BEFORE the
       // shared settlement path takes its own one. Guards the inner catch and the `finally` against
@@ -4433,7 +4472,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
         // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
         // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
-        const actorRoles = resolveApprovalActorRoles(req)
         const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
         if (!seat.allowed) {
           await client.query('ROLLBACK')
@@ -4612,7 +4650,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         await publishApprovalCountsForUsers(
           options,
           [
-            { userId, roles: resolveApprovalActorRoles(req) },
+            { userId, roles: await resolveApprovalActorRoles(req) },
             ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
           ],
           'legacy-approve',
@@ -4698,6 +4736,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         )
       }
 
+      // Resolved BEFORE the transaction opens so the role read never runs on a second connection
+      // while this one holds the instance row lock; a failed read lands in the outer catch (500).
+      const actorRoles = await resolveApprovalActorRoles(req)
       const client = await pool.connect()
       // Set by the settlement-parity branch below, which hands the connection back BEFORE the
       // shared settlement path takes its own one. Guards the inner catch and the `finally` against
@@ -4758,7 +4799,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
         // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
         // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
-        const actorRoles = resolveApprovalActorRoles(req)
         const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
         if (!seat.allowed) {
           await client.query('ROLLBACK')
@@ -4942,7 +4982,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         await publishApprovalCountsForUsers(
           options,
           [
-            { userId, roles: resolveApprovalActorRoles(req) },
+            { userId, roles: await resolveApprovalActorRoles(req) },
             ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
           ],
           'legacy-reject',
@@ -5020,7 +5060,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const approval = await bridgeService.getApproval(
         req.params.id,
         resolveApprovalActorId(req),
-        resolveApprovalActorRoles(req),
+        await resolveApprovalActorRoles(req),
       )
       if (!approval) {
         return res.status(404).json(

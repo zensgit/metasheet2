@@ -62,6 +62,12 @@
  *   D11 (Codex review P1-b) the large lane through the real lock and host: an expansion planned and approved,
  *       then a small preview + apply writes quantities 5 / 15; re-approving the OLD expansion is refused
  *       `expansion_stale` (nothing bumped, no job) and the old approval's job is refused — quantities stay 5 / 15.
+ *   D19 (PR B) migration 101: the pilot columns, the both-or-neither CHECK, the audit vocabulary with project_pilot_enable.
+ *   D20 (PR B) the enable ROUTE on the real host / lock / registry / audit store: readiness over the real sheet (the step-4
+ *       tables stubbed, the build marker flipped in memory), the bump, the host stamp through the #6507 port, the registry
+ *       mark, one audit row; export-xlsx (xlsx + csv) 403 MULTITABLE_GRID_EXPORT_CLOSED (U09 with #6507); the re-POST.
+ *   D21 (PR B, L02) a job approved before the enablement is refused inside the real lease with the pilot code, never
+ *       PLAN_SUPERSEDED (the control run without the check proves the order); the job stays queued, zero meta_records writes.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -74,7 +80,12 @@ import { promisify } from 'node:util'
 import type { PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
+import express from 'express'
+import request from 'supertest'
+
 import { MetaSheetServer } from '../../src/index'
+import { invalidateUserPerms } from '../../src/rbac/service'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { PLUGIN_WRITE_FENCE_ALLOW_LIST } from '../../src/multitable/plugin-write-fence'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { createPluginDurableStorage } from '../../src/plugins/plugin-durable-storage'
@@ -1424,6 +1435,305 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         await dropSheet(sb.sheetId)
       }
     }, 60000)
+    // ── 备料分批拉取第一期 step 3 PR B: the pilot marker (migration 101), the enable route on the real stack, L02 ──
+    //
+    // D19 migration 101: the three columns, the pilot CHECK (both-or-neither; version >= 1) and the audit vocabulary.
+    // D20 the enable ROUTE over the real host, lock, registry and audit store: readiness passes on a really prepared
+    //     sheet (the step-4 tables are STUBS created here — the later migrations are not in this build — and the
+    //     build marker is flipped in memory, exactly the two things the readiness list exists to wait for), the
+    //     generation is bumped, the host stamp lands in meta_sheets.grid_export_closure through the #6507 port,
+    //     the registry row is marked, ONE audit row; export-xlsx (xlsx + csv) answers 403 MULTITABLE_GRID_EXPORT_CLOSED;
+    //     a re-POST repairs nothing new and writes no second audit row.
+    // D21 (L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the PILOT code
+    //     (the enable's bump would have made it PLAN_SUPERSEDED — the control run without the check proves the
+    //     order), the job stays queued and meta_records is untouched.
+    const PILOT_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pilot'
+    const httpRoutes = require(path.join(PLUGIN_LIB, 'http-routes.cjs')) as any
+    const projectTargetStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
+    const auditStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-audit-store.cjs')) as any
+    const projectTargetsModule = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
+    const ownBase = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
+    const pilotGateModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pilot-gate.cjs')) as any
+    const continuationSupport = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-support.cjs')) as any
+    const projectSheetHarness = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
+
+    function routeResponse() {
+      const res: any = { statusCode: 200, body: null, headers: {} }
+      res.status = (code: number) => { res.statusCode = code; return res }
+      res.json = (payload: unknown) => { res.body = payload; return res }
+      res.setHeader = (name: string, value: unknown) => { res.headers[name] = value; return res }
+      res.send = (payload: unknown) => { res.body = payload; return res }
+      res.end = () => res
+      return res
+    }
+    async function callRoute(routes: Map<string, any>, method: string, routePath: string, req: Record<string, unknown>) {
+      const handler = routes.get(`${method} ${routePath}`)
+      if (!handler) throw new Error(`route ${method} ${routePath} is not registered`)
+      const res = routeResponse()
+      await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+      return res
+    }
+
+    test('D19 (PR B) migration 101: the three pilot columns, the pilot CHECK (both-or-neither, version >= 1), and the audit vocabulary accepts project_pilot_enable', async () => {
+      const cols = await q(
+        `SELECT column_name, data_type, is_nullable FROM information_schema.columns
+          WHERE table_name = 'integration_stock_prep_project_target' AND column_name IN ('pilot_enabled_at', 'pilot_enabled_by', 'pilot_readiness_version')
+          ORDER BY column_name`,
+      )
+      expect(cols.rows.map((row: any) => [row.column_name, row.data_type, row.is_nullable])).toEqual([
+        ['pilot_enabled_at', 'timestamp with time zone', 'YES'],
+        ['pilot_enabled_by', 'text', 'YES'],
+        ['pilot_readiness_version', 'integer', 'YES'],
+      ])
+      const tenant = `tenant_swl_d19_${TOKEN}`
+      const id = `pt_d19_${TOKEN}`
+      const insert = (at: string | null, version: number | null) => q(
+        `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, pilot_enabled_at, pilot_enabled_by, pilot_readiness_version)
+         VALUES ($1, $2, 'SYN-SWL-D19', $3, $4, 'active', $5, $6, $7)`,
+        [id, tenant, `sheet_swl_d19_${TOKEN}`, `plm_stock_preparation_sandbox_p_d19${TOKEN}`, at, at ? 'syn' : null, version],
+      )
+      try {
+        for (const [at, version] of [['2026-10-23T00:00:00Z', null], [null, 1], ['2026-10-23T00:00:00Z', 0]] as const) {
+          const refused = await settle(insert(at, version))
+          expect(refused.ok, `${at} / ${version}`).toBe(false)
+          expect((refused as any).error.code, `${at} / ${version}`).toBe('23514')
+        }
+        await insert(null, null)
+        await q('DELETE FROM integration_stock_prep_project_target WHERE id = $1', [id])
+        await insert('2026-10-23T00:00:00Z', 1)
+        const stored = (await q('SELECT pilot_enabled_at, pilot_enabled_by, pilot_readiness_version FROM integration_stock_prep_project_target WHERE id = $1', [id])).rows[0]
+        expect(stored.pilot_enabled_by).toBe('syn')
+        expect(stored.pilot_readiness_version).toBe(1)
+        // The audit vocabulary (re-listed by 101) accepts the new action and still refuses an unknown one.
+        const auditId = `audit_d19_${TOKEN}`
+        await q(
+          `INSERT INTO integration_stock_prep_audit (id, tenant_id, project_id, action, subject_id, mode, actor, detail)
+           VALUES ($1, $2, 'SYN-SWL-D19', 'project_pilot_enable', $3, 'enabled', 'syn', '{"readinessVersion":1}'::jsonb)`,
+          [auditId, tenant, `sheet_swl_d19_${TOKEN}`],
+        )
+        const unknown = await settle(q(
+          `INSERT INTO integration_stock_prep_audit (id, tenant_id, project_id, action, subject_id, mode, actor, detail)
+           VALUES ($1, $2, 'SYN-SWL-D19', 'project_pilot_disable', $3, 'disabled', 'syn', '{}'::jsonb)`,
+          [`${auditId}_unknown`, tenant, `sheet_swl_d19_${TOKEN}`],
+        ))
+        expect(unknown.ok).toBe(false)
+        expect((unknown as any).error.code).toBe('23514')
+      } finally {
+        await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [tenant]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_project_target WHERE id = $1', [id]).catch(() => {})
+      }
+    })
+
+    test('D20 (PR B) the enable route on the real stack: readiness, bump, the host stamp through the #6507 port, the registry mark, one audit row; export-xlsx 403; a re-POST writes no second audit row', async () => {
+      const tenantId = `tenant_swl_d20_${TOKEN}`
+      const projectNo = 'SYN-SWL-D20'
+      const projectId = `${tenantId}:integration-core`
+      const objectId: string = ownBase.deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
+      const pluginContext = createProductionPluginContext()
+      const multitable = pluginContext.api.multitable
+      if (!multitable) throw new Error('production plugin context is missing multitable APIs')
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      const sheetId: string = ensured.target.sheetId
+      const key = sheetWriteScopeKey(sheetId)
+      scopes.push(key)
+      const db = createDb({ database: pluginContext.api.database })
+      const store = projectTargetStoreModule.createStockPreparationProjectTargetStore({ db })
+      const audit = auditStoreModule.createStockPreparationAuditStore({ db })
+      const lock = createStockPreparationProjectWriteLock({ db })
+      const admin = { id: `u_d20_admin_${TOKEN}`, tenantId, permissions: ['stock-prep:admin'] }
+      const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+      const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
+      const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
+      const createdStubs: string[] = []
+      process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+      try {
+        await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+        const plmLock = await projectTargetsModule.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
+        expect(plmLock.missing).toBe(0)
+        await store.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
+        // STUBS of the step-4 stores (PR-2 creates the real ones): what the readiness probe waits for. Created
+        // ONLY where absent and dropped ONLY when this test created them — the real-DB step shares one database,
+        // and once PR-2's migrations exist these names are real tables that must survive this test.
+        for (const table of STEP4_STUB_TABLES) {
+          const exists = (await q('SELECT to_regclass($1) AS oid', [table])).rows[0].oid !== null
+          if (!exists) {
+            await q(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`)
+            createdStubs.push(table)
+          }
+        }
+        const routes = new Map<string, any>()
+        const envTarget = { sheetId: `sheet_env_d20_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
+        const routeContext = {
+          api: {
+            http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+            multitable,
+            database: pluginContext.api.database,
+          },
+          storage: pluginContext.storage,
+          config: {
+            stockPreparationTableActions: [{
+              actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID,
+              source: { externalSystemId: `swl_source_rdb_d20_${TOKEN}`, kind: 'data-source:sql-readonly' },
+              target: envTarget,
+            }],
+            stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
+            stockPreparationPilot: { specReadPlanSlot: 'not_applicable' },
+          },
+        }
+        const base = projectSheetHarness.baseServices(sourceOf(projectNo))
+        const services = {
+          ...base,
+          externalSystemRegistry: { ...base.externalSystemRegistry, async listExternalSystems() { return [] } },
+          pipelineRegistry: { ...base.pipelineRegistry, async listPipelines() { return [] } },
+          stockPreparationProjectWriteLock: lock,
+          stockPreparationProjectTargetStore: store,
+          stockPreparationAuditStore: audit,
+          tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+        }
+        httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+        // GET: every readiness check passes on the really prepared sheet.
+        const read = await callRoute(routes, 'GET', PILOT_PATH, { user: admin, params: { projectNo }, query: {} })
+        expect(read.statusCode, JSON.stringify(read.body)).toBe(200)
+        expect(read.body.data.readiness.failing, JSON.stringify(read.body.data.readiness)).toEqual([])
+        expect(read.body.data.may).toEqual({ enable: true })
+        expect(read.body.data.pilot.enabled).toBe(false)
+        // Before: the host column is open, no audit row, generation 0.
+        expect((await q('SELECT grid_export_closure FROM meta_sheets WHERE id = $1', [sheetId])).rows[0].grid_export_closure).toBeNull()
+        // POST: the enablement.
+        const enabled = await callRoute(routes, 'POST', PILOT_PATH, { user: admin, params: { projectNo }, body: { confirmProjectNo: projectNo } })
+        expect(enabled.statusCode, JSON.stringify(enabled.body)).toBe(200)
+        expect(enabled.body.data.enabled).toBe(true)
+        expect(enabled.body.data.alreadyEnabled).toBe(false)
+        expect(enabled.body.data.exportClosure).toEqual({ closed: true, alreadyClosed: false })
+        const stamp = (await q('SELECT grid_export_closure, grid_export_closed_by, grid_export_closed_at FROM meta_sheets WHERE id = $1', [sheetId])).rows[0]
+        expect(stamp.grid_export_closure).toBe('stock_prep_pilot')
+        expect(stamp.grid_export_closed_by).toBe(admin.id)
+        expect(stamp.grid_export_closed_at).not.toBeNull()
+        const row = (await q('SELECT pilot_enabled_at, pilot_enabled_by, pilot_readiness_version FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])).rows[0]
+        expect(row.pilot_enabled_at).not.toBeNull()
+        expect(row.pilot_enabled_by).toBe(admin.id)
+        expect(row.pilot_readiness_version).toBe(1)
+        const lockRow = (await q(`SELECT generation, generation_reason, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [key])).rows[0]
+        expect(lockRow.generation).toBe(1)
+        expect(lockRow.generation_reason).toBe('pilot_enable')
+        expect(lockRow.lease_id).toBeNull()
+        const auditRows = (await q(`SELECT subject_id, mode, actor, detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_pilot_enable'`, [tenantId])).rows
+        expect(auditRows).toHaveLength(1)
+        expect(auditRows[0].subject_id).toBe(sheetId)
+        expect(auditRows[0].mode).toBe('enabled')
+        expect(auditRows[0].actor).toBe(admin.id)
+        expect(auditRows[0].detail).toEqual({ objectId, readinessVersion: 1, exportClosureAlreadyClosed: false, generationBumped: true })
+        // The re-POST: idempotent on the host, set-once in the registry, no second audit row, generation moved again.
+        const again = await callRoute(routes, 'POST', PILOT_PATH, { user: admin, params: { projectNo }, body: { confirmProjectNo: projectNo } })
+        expect(again.statusCode, JSON.stringify(again.body)).toBe(200)
+        expect(again.body.data.alreadyEnabled).toBe(true)
+        expect(again.body.data.exportClosure).toEqual({ closed: true, alreadyClosed: true })
+        expect((await q(`SELECT COUNT(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_pilot_enable'`, [tenantId])).rows[0].n).toBe(1)
+        expect((await q('SELECT grid_export_closed_by FROM meta_sheets WHERE id = $1', [sheetId])).rows[0].grid_export_closed_by).toBe(admin.id)
+        // GET after: enabled, nothing more to enable.
+        const after = await callRoute(routes, 'GET', PILOT_PATH, { user: admin, params: { projectNo }, query: {} })
+        expect(after.body.data.pilot.enabled).toBe(true)
+        expect(after.body.data.may).toEqual({ enable: false })
+        // U09 end to end with #6507: the stamped sheet refuses the generic grid export for an admin, xlsx and csv.
+        await q(
+          `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+           VALUES ($1, $2, $1, 'x', 'admin', '[]'::jsonb, TRUE, TRUE)
+           ON CONFLICT (id) DO NOTHING`,
+          [admin.id, `${admin.id}@example.test`],
+        )
+        invalidateUserPerms(admin.id)
+        const app = express()
+        app.use(express.json())
+        app.use((req, _res, next) => { (req as { user?: unknown }).user = { id: admin.id, roles: ['admin'], perms: [] }; next() })
+        app.use('/api/multitable', univerMetaRouter())
+        for (const format of ['xlsx', 'csv']) {
+          const res = await request(app).get(`/api/multitable/sheets/${sheetId}/export-xlsx`).query(format === 'csv' ? { format } : {})
+          expect(res.status, `${format}: ${JSON.stringify(res.body)}`).toBe(403)
+          expect(JSON.stringify(res.body)).toContain('MULTITABLE_GRID_EXPORT_CLOSED')
+        }
+      } finally {
+        if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+        else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
+        continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
+        for (const table of createdStubs) await q(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await q('DELETE FROM user_permissions WHERE user_id = $1', [admin.id]).catch(() => {})
+        await q('DELETE FROM users WHERE id = $1', [admin.id]).catch(() => {})
+        await dropSheet(sheetId)
+      }
+    }, 90000)
+
+    test('D21 (PR B, L02) a job approved BEFORE the enablement: the chunk inside the real lease is refused with the pilot code (not PLAN_SUPERSEDED), the job stays queued, meta_records untouched', async () => {
+      const sb = await sandboxSheet('d21')
+      const projectNo = 'SYN-SWL-D21'
+      const tenantId = `tenant_swl_d21_${TOKEN}`
+      try {
+        const db = createDb({ database: sb.pluginContext.api.database })
+        const lock = createStockPreparationProjectWriteLock({ db })
+        const store = projectTargetStoreModule.createStockPreparationProjectTargetStore({ db })
+        await store.create({ tenantId, projectNo, sheetId: sb.sheetId, objectId: sb.objectId, createdBy: 'syn' })
+        const storage: any = sb.pluginContext.storage
+        const jobScope = { tenantId, workspaceId: `ws_swl_d21_${TOKEN}` }
+        const actionId = sb.action.actionId
+        const jobId = `swl_d21_${TOKEN}`
+        const applyJobId = `swl_d21_apply_${TOKEN}`
+        const records = sb.multitable.records as any
+        const scopedForChunk = () => tableActions.createTargetScopedRecordsApi(records, sb.target, { fieldIdTranslation: 'pre_mapped' })
+        // Approved BEFORE the enablement, the way the routes do it.
+        await largeBomJobs.createLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, action: sb.action, parameters: { projectNo }, principal: 'swl-d19', createJobId: () => jobId,
+          writeGenerationObserver: async () => writeObservationFromGeneration(await lock.observeGeneration(sb.key)),
+        })
+        await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...jobScope, actionId, jobId, sourceAdapter: sourceOf(projectNo, '2') })
+        await largeBomJobs.planLargeBomBackgroundExpansionJob({
+          storage, ...jobScope, actionId, jobId,
+          existingRows: await tableActions.__internals.readExistingStockPreparationRows(records, sb.target, projectNo),
+          writeGenerationReader: (observed: string) => lock.readGeneration(observed),
+        })
+        const approved = await largeBomJobs.createLargeBomCheckpointApplyJob({
+          storage, ...jobScope, actionId, jobId, principal: 'swl-d19', permission: 'write', createApplyJobId: () => applyJobId,
+          writeGenerationBinder: async (expect: any) => writeBindingFromGeneration(await lock.bumpGeneration(sb.key, { reason: 'large_approval', expect })),
+        })
+        expect(approved.status).toBe('queued')
+        expect(approved.totalDecisions).toBeGreaterThan(0)
+        // THE ENABLEMENT on the lock and the registry, as the route performs it.
+        await lock.bumpGeneration(sb.key, { reason: 'pilot_enable', tenantId })
+        const marked = await store.markPilotEnabled({ tenantId, projectNo, actorId: 'swl-d21-admin', readinessVersion: 1 })
+        expect(marked.enabled).toBe(true)
+        const gate = pilotGateModule.createStockPreparationPilotGate({ store })
+        const before = await countRows(sb.sheetId)
+        const chunk = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d21-chunk' }, async (guard: any) =>
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({
+            storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard,
+            largeLanePilotCheck: ({ target }: any) => gate.assertLargeLaneAllowed({ tenantId, projectNo, sheetId: target && target.sheetId }, 'large_apply_chunk'),
+          })))
+        expect(chunk.ok).toBe(false)
+        expect((chunk as any).error.code).toBe('STOCK_PREP_PILOT_LARGE_LANE_REFUSED')
+        expect((chunk as any).error.status).toBe(409)
+        expect((chunk as any).error.details).toMatchObject({ lane: 'large_apply_chunk', reason: 'pilot_project', byProject: true, bySheet: true, partial: false })
+        expect(await countRows(sb.sheetId), 'zero meta_records writes').toBe(before)
+        const job = await largeBomJobs.loadLargeBomCheckpointApplyJob({ storage, ...jobScope, actionId, applyJobId })
+        expect(job.status).toBe('queued')
+        expect(job.checkpoint.nextDecisionIndex).toBe(0)
+        expect((await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0].lease_id).toBeNull()
+        // CONTROL: without the pilot check the same chunk is refused by the generation binding (the enable's bump) —
+        // so the pilot check is what ran FIRST above, and the registry's marker is what refused.
+        const control = await settle(lock.withProjectWriteLease(sb.key, { purpose: 'large_apply_chunk', runId: 'swl-d21-control' }, async (guard: any) =>
+          largeBomJobs.runLargeBomCheckpointApplyJobChunk({ storage, ...jobScope, actionId, applyJobId, recordsApi: await scopedForChunk(), projectWriteGuard: guard })))
+        expect(control.ok).toBe(false)
+        expect((control as any).error.code).toBe(PROJECT_WRITE_ERROR_CODES.PLAN_SUPERSEDED)
+        expect((control as any).error.details.reason).toBe('newer_plan')
+        expect(await countRows(sb.sheetId)).toBe(before)
+        // The marker read by sheet alone (what the chunk's in-lease check reads) says pilot.
+        expect((await store.getPilotStateBySheetId({ sheetId: sb.sheetId })).pilot).toBe(true)
+      } finally {
+        await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+        await dropSheet(sb.sheetId)
+      }
+    }, 90000)
 
     // ── Batch-refresh step 4 PR-2: the continuation / refresh-state stores (migrations 102 / 103) and the
     //    governance reader on real PostgreSQL. The hermetic suites drive them against a fake that models the

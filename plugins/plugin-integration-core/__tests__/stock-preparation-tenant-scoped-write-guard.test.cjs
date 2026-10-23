@@ -372,6 +372,15 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // overview ENSURE (PULL), which creates the overview in that staging project.
   'stockPreparationProjectFieldsGet',
   'stockPreparationProjectFieldsUpdate',
+  // 备料分批拉取第一期 step 3 PR B (register R-53 / R-54). The pilot READ answers a readiness list about the
+  // caller's OWN tenant's registry row and sheet (values-free, but WHOSE row is decided by the scope), and
+  // the ENABLE is a WRITE — it bumps the sheet's generation, asks the host to stamp the sheet closed for
+  // grid export and marks the registry row — keyed by the tenant this scope proves: a header-fillable
+  // tenant here would mark another tenant's project pilot. Both derive their staging project in the shared
+  // readiness helper (`evaluateStockPreparationProjectPilotReadiness`, from the scope's tenant with no
+  // request projectId), not inline, so neither is in the inline-staging set below.
+  'stockPreparationProjectPilotEnable',
+  'stockPreparationProjectPilotGet',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and

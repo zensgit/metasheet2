@@ -2901,6 +2901,80 @@ async function testSwlB10ChunkWritesAreHostFenced() {
   assert.equal(stopped.checkpoint.nextDecisionIndex, 1)
 }
 
+
+// ── Batch-refresh step 3 PR B: the IN-LEASE pilot check of the chunk runner (plan §9.4 L02) ───────────────
+//
+// The route hands the lib `largeLanePilotCheck`; the lib runs it INSIDE the lease, BEFORE the generation binding
+// compare and BEFORE the job is persisted `running`. Driven through the REAL lock over the kit's fake db.
+async function testSwlPbInLeasePilotCheckRefusesBeforeBindingAndRunning() {
+  const pilotRefusal = () => Object.assign(new Error('pilot project: the large lane is refused'), { status: 409, code: 'STOCK_PREP_PILOT_LARGE_LANE_REFUSED', details: { lane: 'large_apply_chunk', reason: 'pilot_project', partial: false } })
+  // (a) a BOUND, current job: the check refuses; nothing persisted, nothing written, the lease released.
+  {
+    const harness = swlKit.createLibWriteLockHarness()
+    const flow = await swlApprovedLargeJob(harness)
+    const key = __internals.checkpointApplyJobKey({ ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })
+    const before = JSON.stringify(await flow.storage.get(key))
+    const api = createTargetRecordsApi()
+    const seen = []
+    await assert.rejects(() => harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi, {
+      largeLanePilotCheck: async (input) => {
+        seen.push({ ...input, leaseHeld: (await harness.lock.readState(flow.scope)).leaseHeld })
+        throw pilotRefusal()
+      },
+    })), (error) => {
+      assert.equal(error.code, 'STOCK_PREP_PILOT_LARGE_LANE_REFUSED')
+      assert.equal(error.status, 409)
+      return true
+    })
+    assert.equal(seen.length, 1, 'PB: the check ran once')
+    assert.equal(seen[0].leaseHeld, true, 'PB: INSIDE the lease')
+    assert.equal(seen[0].applyJobId, flow.applyJobId)
+    assert.deepEqual(seen[0].target, flow.job.target, "PB: the check sees the job's own target (the sheet it would write)")
+    assert.equal(JSON.stringify(await flow.storage.get(key)), before, 'PB: the job is untouched — never persisted running')
+    assert.equal((await flow.storage.get(key)).status, 'queued')
+    assert.equal(api.calls.filter((c) => c[0] === 'createRecord' || c[0] === 'patchRecord').length, 0, 'PB: zero writes')
+    assert.equal((await harness.lock.readState(flow.scope)).leaseHeld, false, 'PB: the lease was released')
+  }
+  // (b) an UNBOUND legacy job: the pilot check runs BEFORE the binding compare — the pilot code, not job_unbound.
+  {
+    const harness = swlKit.createLibWriteLockHarness()
+    const flow = await swlApprovedLargeJob(harness, { binder: null })
+    assert.equal('writeScope' in flow.job, false, 'calibration: approved without the lock service')
+    const api = createTargetRecordsApi()
+    await harness.lock.withProjectWriteLease(flow.scope, { purpose: 'large_apply_chunk' }, async (guard) => {
+      await assert.rejects(() => rawRunLargeBomCheckpointApplyJobChunk(swlChunkInput(flow, api.recordsApi, { projectWriteGuard: guard, largeLanePilotCheck: async () => { throw pilotRefusal() } })), (error) => {
+        assert.equal(error.code, 'STOCK_PREP_PILOT_LARGE_LANE_REFUSED', 'PB: the pilot code wins over job_unbound')
+        return true
+      })
+    })
+    assert.equal((await loadLargeBomCheckpointApplyJob({ storage: flow.storage, ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })).status, 'queued')
+  }
+  // (c) a SUPERSEDED job: still the pilot code (the check precedes the binding compare), the job untouched.
+  {
+    const harness = swlKit.createLibWriteLockHarness()
+    const flow = await swlApprovedLargeJob(harness)
+    await harness.lock.bumpGeneration(flow.scope, { reason: 'pilot_enable' })
+    const api = createTargetRecordsApi()
+    await assert.rejects(() => harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi, { largeLanePilotCheck: async () => { throw pilotRefusal() } })), (error) => {
+      assert.equal(error.code, 'STOCK_PREP_PILOT_LARGE_LANE_REFUSED', 'PB: the pilot code, not PLAN_SUPERSEDED')
+      return true
+    })
+    assert.equal((await loadLargeBomCheckpointApplyJob({ storage: flow.storage, ...SWL_SCOPE, actionId: flow.action.actionId, applyJobId: flow.applyJobId })).status, 'queued')
+    assert.equal(api.calls.filter((c) => c[0] === 'createRecord' || c[0] === 'patchRecord').length, 0)
+  }
+  // (d) a PASSING check changes nothing: the chunk runs to completion exactly as without one.
+  {
+    const harness = swlKit.createLibWriteLockHarness()
+    const flow = await swlApprovedLargeJob(harness)
+    const api = createTargetRecordsApi()
+    let checks = 0
+    const job = await harness.wrapLargeChunk(rawRunLargeBomCheckpointApplyJobChunk)(swlChunkInput(flow, api.recordsApi, { largeLanePilotCheck: async () => { checks += 1 } }))
+    assert.equal(checks, 1)
+    assert.equal(job.status, 'succeeded')
+    assert.equal(api.rows.length, 2, 'PB: the non-pilot chunk wrote its two rows')
+  }
+}
+
 async function main() {
   await testSwlB1ApprovalBindsWithoutMovingAnyRevision()
   await testSwlB2SupersededJobIsRefusedUntouched()
@@ -2916,6 +2990,7 @@ async function main() {
   await testSwlB11StalledHolderResumingAfterTheExpansionIsRefused()
   await testSwlB12StalledHolderNeverReturnsTheExpansionIsApprovable()
   await testSwlB13ALeaseInItsGraceWindowRefusesTheExpansion()
+  await testSwlPbInLeasePilotCheckRefusesBeforeBindingAndRunning()
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
   testBackgroundEvidenceRejectsUnsafeTokens()

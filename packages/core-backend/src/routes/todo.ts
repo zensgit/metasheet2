@@ -27,12 +27,14 @@ import { pendingSourceRegistry, type PendingViewer } from '../services/pending-s
 
 const logger = new Logger('TodoRouter')
 
-function resolveTodoViewer(req: Request): PendingViewer | null {
+// Async because the role set is read from the database (`resolveApprovalActorRoles`); callers await
+// it INSIDE their try so a failed role read answers the route's own 500 rather than a narrower count.
+async function resolveTodoViewer(req: Request): Promise<PendingViewer | null> {
   const actorId = resolveApprovalActorId(req)
   if (!actorId) return null
   return {
     actorId,
-    roles: resolveApprovalActorRoles(req),
+    roles: await resolveApprovalActorRoles(req),
     permissions: resolveApprovalActorPermissions(req),
   }
 }
@@ -48,26 +50,29 @@ export function todoRouter(): Router {
   const r = Router()
 
   r.get('/api/todo/items', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
-    const viewer = resolveTodoViewer(req)
-    if (!viewer) return todoUserRequiredResponse(res)
+    if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
+      const viewer = await resolveTodoViewer(req)
+      if (!viewer) return todoUserRequiredResponse(res)
       const { items, sources } = await pendingSourceRegistry.listPendingForUser(viewer)
       res.json({ items, sources })
     } catch (error) {
       // The registry itself catches every per-source failure (fail-closed, see
-      // pending-source-registry.ts); reaching here means a bug in the aggregation layer, not a
-      // source outage, so this stays a 500 rather than a per-source `unavailable`.
+      // pending-source-registry.ts); reaching here means a bug in the aggregation layer or a failed
+      // read of the viewer's own role set, not a source outage, so this stays a 500 rather than a
+      // per-source `unavailable` (a narrower count would hide the failure).
       logger.error('Failed to list todo items', error instanceof Error ? error : undefined)
       res.status(500).json({ ok: false, error: { code: 'TODO_ITEMS_FAILED', message: 'Failed to list todo items' } })
     }
   })
 
   r.get('/api/todo/count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
-    const viewer = resolveTodoViewer(req)
-    if (!viewer) return todoUserRequiredResponse(res)
+    if (!resolveApprovalActorId(req)) return todoUserRequiredResponse(res)
 
     try {
+      const viewer = await resolveTodoViewer(req)
+      if (!viewer) return todoUserRequiredResponse(res)
       const { count, sources } = await pendingSourceRegistry.countPendingForUser(viewer)
       res.json({ count, sources })
     } catch (error) {
