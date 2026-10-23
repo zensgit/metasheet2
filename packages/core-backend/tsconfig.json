@@ -26,7 +26,8 @@
     "types/**/*",
     "scripts/encrypt-dingtalk-destination-secrets.ts",
     "scripts/encrypt-dingtalk-integration-secrets.ts",
-    "scripts/attendance-timezone-legacy-repair.ts"
+    "scripts/attendance-timezone-legacy-repair.ts",
+    "scripts/bootstrap-yida-initialization-owner.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/__tests__/**"]
 }

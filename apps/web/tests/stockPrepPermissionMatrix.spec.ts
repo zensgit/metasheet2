@@ -32,6 +32,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   F-10 两侧同形,不吃通配: the four principals that used to separate the sides (a bare
 //        `integration:admin`, `stock-prep:*`, `*:*` without an admin role, `stock-prep:write`) are
 //        answered identically by both, value by value
+//   F-11 项目备料页's two 宜搭 entries render for exactly the literal platform admin the core live
+//        gate admits (never for an expanding grant), everyone else keeps main's disabled placeholder,
+//        and the single-row CREATE entry waits for the server's own send-switch bit
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -101,6 +104,7 @@ import {
   canOpenStockPrepMembersPage,
   canOpenStockPrepProjectQuery,
   canOpenStockPrepRailItem,
+  canOpenStockPrepYidaEntries,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
   holdsPlatformAdmin,
@@ -870,5 +874,48 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     // ...and the platform-admin list is the server's, verbatim.
     expect(source).toContain("Object.freeze(['role:admin', INTEGRATION_ADMIN])")
     expect([...PLATFORM_ADMIN_PERMISSIONS]).toEqual([...backendAccess.PLATFORM_ADMIN_PERMISSIONS])
+  })
+
+  // ---------------------------------------------------------------------------
+  // F-11 the 宜搭 entries on 项目备料页
+  // ---------------------------------------------------------------------------
+  //
+  // The entries mirror the plugin's `holdsPlatformAdmin` over the flattened principal: the admin role,
+  // `role:admin`, or the literal `integration:admin` code. Every server action behind them runs the
+  // stricter core live gate (automation-live-authority.ts), which also checks namespace admission, active
+  // tenant membership and the anchored owner. The DOM half, per actor, is StockPreparationProjectBoard.spec.ts B-04.
+
+  it('F-11: the 宜搭 entries open for exactly the literal platform admin, for EVERY actor', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      expect(canOpenStockPrepYidaEntries(principal()), `${actor.name} yida entries`)
+        .toBe(backendAccess.holdsPlatformAdmin(flattened()))
+    }
+    // THE SEAM: the expanding probe says yes to `*:*` and `integration:*`; the server and the board say no.
+    for (const permissions of [['*:*'], ['integration:*']]) {
+      asActor({ name: 'expanding', roles: [], permissions })
+      expect(realHasPermission('integration:admin'), `${permissions[0]}: hasPermission expands`).toBe(true)
+      expect(canOpenStockPrepYidaEntries(principal()), `${permissions[0]} yida entries`).toBe(false)
+    }
+  })
+
+  it('F-11: the board gates both 宜搭 entries on that predicate, keeps main\'s placeholder, and CREATE waits for the server switch (source pin)', () => {
+    const board = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue'),
+      'utf8',
+    )
+    const preview = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationYidaPreviewPanel.vue'),
+      'utf8',
+    )
+    expect(board).toContain('canOpenStockPrepYidaEntries(auth.getAccessSnapshot())')
+    expect(board).toContain('<template v-if="yidaEntriesVisible">')
+    expect(board).toContain('<StockPreparationYidaPreviewPanel v-if="yidaPreviewOpen && yidaEntriesVisible" />')
+    expect(board).toContain("{{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}")
+    expect(board).not.toContain('hasPermission')
+    // The board label promises no single-row send; only the preview's server-switch-gated entry does.
+    expect(board).not.toContain('单行确认')
+    expect(preview).toContain('v-if="ownerSendEnabled && !ownerSendOpen"')
+    expect(preview).toContain('@send-enabled-change="ownerSendEnabled = $event"')
   })
 })

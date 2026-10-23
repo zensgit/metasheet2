@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h as createElement, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as createElement, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
+import { getAuthPrincipalKey, notifyAuthPrincipalChange, readAuthSessionSignature } from '../src/composables/authPrincipal'
 
 // 项目备料页 — THE PAGE, and the four claims it must not get wrong.
 //
@@ -14,7 +15,8 @@ import { createApp, defineComponent, h as createElement, nextTick, ref, type App
 //        filter was not built, and a query param the workbench ignores would be a link that lies.
 //   B-04 NO ROW VALUES, NO RAW CODES. The board's own fields are the only business strings on the
 //        page; a 404 renders #5445's three-way empty state rather than an error code; and 推送宜搭
-//        is a disabled placeholder whose copy says so in words.
+//        stays main's disabled placeholder for everyone the server's live YiDa gate would refuse —
+//        only a literal platform admin gets the two local preparation entries (R-11).
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -71,6 +73,7 @@ import StockPreparationProjectBoardView from '../src/components/integration/stoc
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import {
   canOpenStockPrepProjectBoard,
+  canOpenStockPrepYidaEntries,
   canRunStockPrepProjectSync,
   landsOnStockPrepProjectBoard,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
@@ -1625,12 +1628,296 @@ describe('项目备料页 — the operator project board', () => {
     expect(syncedText.trim().length).toBeGreaterThan(0)
   })
 
-  it('B-04: 推送宜搭 is a disabled placeholder that says so in words', async () => {
+  /** The browser's platform-admin view (holdsPlatformAdmin). The server's live gate is stricter: it also
+   *  checks namespace admission, active tenant membership and the anchored owner (automation-live-authority.ts). */
+  function asYidaAdmin(): void {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull', 'integration:admin']
+    h.roles = []
+  }
+
+  it('B-04: an operate-tier user keeps main\'s disabled 推送宜搭 placeholder and gets no YiDa entry', async () => {
     const root = await mountBoard()
     const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
     expect(yida).not.toBeNull()
     expect(yida.disabled).toBe(true)
-    expect(`${yida.textContent} ${yida.getAttribute('title')}`).toContain('暂未接入')
+    expect(yida.classList.contains('sp-board__button--placeholder')).toBe(true)
+    expect(yida.textContent?.trim()).toBe('推送宜搭(暂未接入)')
+    expect(yida.getAttribute('title')).toBe('宜搭推送暂未接入')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')).toBeNull()
+    expect(root.textContent).not.toContain('宜搭准备')
+    expect(root.textContent).not.toContain('单行确认')
+    const callsBefore = h.apiFetch.mock.calls.length
+    yida.click(); await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+  })
+
+  it('B-04: YiDa entries render exactly for the literal platform admin, never for an expanding grant', async () => {
+    const cases: Array<[string, string[], string[], boolean]> = [
+      ['floor operator', ['stock-prep:read', 'stock-prep:operate'], [], false],
+      ['puller', ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], [], false],
+      ['workbench admin', ['stock-prep:admin'], [], false],
+      ['*:* without the admin role', ['stock-prep:read', 'stock-prep:operate', '*:*'], [], false],
+      ['integration:* wildcard', ['stock-prep:read', 'stock-prep:operate', 'integration:*'], [], false],
+      ['users:write holder', ['stock-prep:read', 'stock-prep:operate', 'users:write'], [], false],
+      ['integration:admin code', ['stock-prep:read', 'stock-prep:operate', 'integration:admin'], [], true],
+      ['role:admin code', ['stock-prep:read', 'stock-prep:operate', 'role:admin'], [], true],
+      ['admin role', [], ['admin'], true],
+    ]
+    for (const [name, permissions, roles, expected] of cases) {
+      h.permissions = permissions
+      h.roles = roles
+      const root = await mountBoard()
+      const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+      const toggle = root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')
+      expect(canOpenStockPrepYidaEntries({ permissions, roles }), `${name} predicate`).toBe(expected)
+      expect(toggle !== null, `${name} toggle`).toBe(expected)
+      expect(yida.disabled, `${name} entry disabled`).toBe(!expected)
+      expect(yida.textContent?.includes('推送宜搭(暂未接入)'), `${name} placeholder`).toBe(!expected)
+      remount()
+    }
+  })
+
+  it('B-04: the admin YiDa preparation entry opens only local preview and promises no single-row send', async () => {
+    asYidaAdmin()
+    const root = await mountBoard()
+    const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+    expect(yida).not.toBeNull()
+    expect(yida.disabled).toBe(false)
+    expect(yida.textContent).toContain('打开宜搭准备（不发送）')
+    expect(yida.getAttribute('title')).toContain('仅打开本地预演和准备界面')
+    expect(root.textContent).not.toContain('单行确认')
+    const callsBefore = h.apiFetch.mock.calls.length
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem')
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem')
+    try {
+      yida.click(); await flush()
+      const panel = root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')
+      expect(panel).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
+      yida.click(); await flush()
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBe(panel)
+      // A protocol preview builds the owner section; with no owner-authorized ON reply its CREATE entry stays absent.
+      const mode = panel!.querySelector('[data-testid="sp-yida-preview-mode"]') as HTMLSelectElement
+      mode.value = 'protocol'
+      mode.dispatchEvent(new Event('change')); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-protocol-example-primary"]') as HTMLButtonElement).click(); await flush()
+      ;(panel!.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click(); await flush()
+      expect(panel!.querySelector('[data-testid="sp-yida-initialization-open"]')).not.toBeNull()
+      expect(panel!.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+      expect(setSpy).not.toHaveBeenCalled()
+      expect(removeSpy).not.toHaveBeenCalled()
+    } finally { fetchSpy.mockRestore(); setSpy.mockRestore(); removeSpy.mockRestore() }
+  })
+
+  it('SA04: static Yida preview remains a separate local-only toggle beside the preparation entry', async () => {
+    asYidaAdmin()
+    const root = await mountBoard()
+    const entry = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+    const toggle = root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement
+    expect(entry.disabled).toBe(false)
+    expect(toggle.disabled).toBe(false)
+    const callsBefore = h.apiFetch.mock.calls.length
+
+    toggle.click()
+    await flush()
+    const panel = root.querySelector('[data-testid="stock-prep-yida-preview-panel"]') as HTMLElement
+    expect(panel).not.toBeNull()
+    ;(panel.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+    await flush()
+    ;(panel.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(panel.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
+    expect(entry.disabled).toBe(false)
+    expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
+  })
+
+  it('SA04: changing tenant, workspace, or project closes local preview state', async () => {
+    asYidaAdmin()
+    const liveScope = reactive({ ...SCOPE })
+    const liveProjectNo = ref(PROJECT_NO)
+    app = createApp(() => createElement(StockPreparationProjectBoardView, {
+      scope: { ...liveScope },
+      projectNo: liveProjectNo.value,
+    }))
+    app.mount(container!)
+    await flush()
+    const root = container!
+    const toggle = () => root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+    ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+    await flush()
+    ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+
+    liveScope.tenantId = 'tenant-b'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+    expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
+    expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+
+    liveScope.workspaceId = 'workspace-other'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+    toggle().click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
+
+    liveProjectNo.value = 'OTHER-PROJECT'
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+  })
+
+  describe('SA04: local Yida preview follows the auth session', () => {
+    const keys = ['auth_token', 'user_permissions', 'user_roles'] as const
+    let previous: Array<string | null>
+
+    beforeEach(() => {
+      previous = keys.map((key) => localStorage.getItem(key))
+      localStorage.setItem('auth_token', 'sa04-actor-a')
+      localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:read', 'stock-prep:operate']))
+      localStorage.setItem('user_roles', '[]')
+      asYidaAdmin()
+    })
+
+    afterEach(() => {
+      keys.forEach((key, index) => {
+        const value = previous[index]
+        if (value === null) localStorage.removeItem(key)
+        else localStorage.setItem(key, value)
+      })
+    })
+
+    async function populate(root: HTMLElement): Promise<string> {
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
+      await flush()
+      ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
+      await flush()
+      const rows = (root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value
+      expect(rows).not.toBe('')
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+      return rows
+    }
+
+    async function expectBlankOnReopen(root: HTMLElement): Promise<void> {
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
+      expect((root.querySelector('[data-testid="sp-yida-app-type"]') as HTMLInputElement).value).toBe('')
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+    }
+
+    it('unmounts the populated panel when account B takes the same project and scope', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'sa04-actor-b')
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('unmounts on a same-subject token rotation', async () => {
+      const token = (issued: number) => `header.${btoa(JSON.stringify({ sub: 'sa04-actor-a', iat: issued }))}.signature`
+      localStorage.setItem('auth_token', token(1))
+      const root = await mountBoard()
+      await populate(root)
+      const principal = getAuthPrincipalKey()
+      const session = readAuthSessionSignature()
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', token(2))
+      expect(getAuthPrincipalKey()).toBe(principal)
+      expect(readAuthSessionSignature()).not.toBe(session)
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('closes before reopening when a token changed without a storage or auth event', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('auth_token', 'sa04-actor-b')
+      ;(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]') as HTMLButtonElement).click()
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('unmounts on a permission snapshot revocation signalled by storage', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('user_permissions', '[]')
+      window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('re-reads YiDa entry visibility when the session snapshot drops to operate tier', async () => {
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      const root = await mountBoard()
+      await populate(root)
+      h.permissions = ['stock-prep:read', 'stock-prep:operate']
+      localStorage.setItem('user_permissions', JSON.stringify(h.permissions))
+      window.dispatchEvent(new StorageEvent('storage', { key: 'user_permissions' }))
+      await flush()
+      expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-board-yida-preview-toggle"]')).toBeNull()
+      const yida = root.querySelector('[data-testid="stock-prep-project-board-yida"]') as HTMLButtonElement
+      expect(yida.disabled).toBe(true)
+      expect(yida.classList.contains('sp-board__button--placeholder')).toBe(true)
+      expect(yida.textContent?.trim()).toBe('推送宜搭(暂未接入)')
+    })
+
+    it('unmounts when focus discovers a changed permission snapshot', async () => {
+      const root = await mountBoard()
+      await populate(root)
+      localStorage.setItem('user_permissions', '[]')
+      window.dispatchEvent(new Event('focus'))
+      await flush()
+      await expectBlankOnReopen(root)
+    })
+
+    it('keeps populated local work on unchanged focus, storage and auth notification', async () => {
+      const root = await mountBoard()
+      const rows = await populate(root)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('storage'))
+      notifyAuthPrincipalChange()
+      await flush()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe(rows)
+      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    })
+
+    it('removes its storage and focus listeners on board unmount', async () => {
+      const added = vi.spyOn(window, 'addEventListener')
+      const removed = vi.spyOn(window, 'removeEventListener')
+      try {
+        await mountBoard()
+        const listeners = added.mock.calls.filter(([type, listener]) =>
+          (type === 'storage' || type === 'focus')
+          && typeof listener === 'function'
+          && listener.name === 'checkYidaPreviewSession')
+        expect(listeners.map(([type]) => type).sort()).toEqual(['focus', 'storage'])
+        remount()
+        for (const [type, listener] of listeners) {
+          expect(removed.mock.calls.some(([removedType, removedListener]) =>
+            removedType === type && removedListener === listener)).toBe(true)
+        }
+      } finally {
+        added.mockRestore()
+        removed.mockRestore()
+      }
+    })
   })
 
   it('B-04: opening a project mirrors the NUMBER into the query, never the internal handle', async () => {
