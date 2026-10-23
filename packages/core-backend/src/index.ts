@@ -414,6 +414,7 @@ import { PluginRuntimeSecurityService } from './security/plugin-runtime-security
 import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
 import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
 import { createPlmBomReviewsRouter } from './routes/plm-bom-reviews'
+import { createPlmCollaborationSnapshotsRouter } from './routes/plm-collaboration-snapshots'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedVisualPreviewRouter from './routes/plm-embed-visual-preview'
@@ -2033,6 +2034,10 @@ export class MetaSheetServer {
     if (plmEnabled) {
       this.app.use('/api/plm/managed-login', plmManagedCompanionRouter)
       this.app.use(plmWorkbenchRouter)
+      this.app.use('/api/plm-collaboration-snapshots', createPlmCollaborationSnapshotsRouter({
+        pool: poolManager.get(),
+        dataSourceManager: getDataSourceManager(),
+      }))
       if (process.env.PLM_BOM_REVIEW_ENABLED === 'true') {
         this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
           pool: poolManager.get(),

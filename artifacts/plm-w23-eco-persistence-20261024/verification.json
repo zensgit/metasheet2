@@ -1,0 +1,140 @@
+{
+  "nonce": "dafb692031094070869804a0b95c0c42",
+  "base": "8e15a92c4f994a5cba3f1df0ffa65eb905159e32",
+  "branch": "codex/plm-w23-eco-persistence-20261024",
+  "contract_sha256": "fb4c20bd2754386dec1878e77a91edcd8f0a1e02c377ac4f7f239a9e622bbe6e",
+  "unit": {
+    "command": "cd packages/core-backend && node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-snapshot-service.test.ts tests/unit/plm-collaboration-snapshot-routes.test.ts",
+    "files": 2,
+    "tests": 23,
+    "passed": 23,
+    "failed": 0,
+    "result": "passed",
+    "free_bytes_before": 14336028672
+  },
+  "tsc": {
+    "command": "cd packages/core-backend && node node_modules/typescript/bin/tsc --noEmit --pretty false",
+    "exit": 0,
+    "result": "passed",
+    "free_bytes_before": 14335299584
+  },
+  "realdb": {
+    "file": "packages/core-backend/tests/integration/plm-collaboration-snapshot-service.realdb.test.ts",
+    "result": "NOT_RUN"
+  },
+  "installed_acceptance": "NOT_CLAIMED",
+  "postgres_proof": "NOT_RUN",
+  "commit": "NOT_MADE",
+  "push": "NOT_MADE",
+  "initial_unit_and_tsc_are_not_current_proof": true,
+  "root_repair": {
+    "nonce": "e20a1351fc4148f19e27c32037666f04",
+    "tsc": {
+      "command": "cd packages/core-backend && node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "exit": 0,
+      "free_bytes_before": 13998010368,
+      "result": "passed"
+    },
+    "unit": {
+      "command": "cd packages/core-backend && node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-snapshot-service.test.ts",
+      "files": 1,
+      "tests": 19,
+      "passed": 19,
+      "failed": 0,
+      "result": "passed",
+      "free_bytes_before": 13996867584,
+      "duration_ms": 544
+    },
+    "routes_rerun": false,
+    "realdb": "NOT_RUN",
+    "provisionManagedLink": "NOT_RUN",
+    "installed_acceptance": "NOT_CLAIMED"
+  },
+  "field_and_lock_repair": {
+    "nonce": "078ebf68a9fe4fa38731890cb8c9ec4d",
+    "tsc": {
+      "command": "cd packages/core-backend && node node_modules/typescript/bin/tsc --noEmit --pretty false",
+      "exit": 0,
+      "free_bytes_before": 13967941632,
+      "result": "passed"
+    },
+    "unit": {
+      "command": "cd packages/core-backend && node node_modules/vitest/vitest.mjs run tests/unit/plm-collaboration-snapshot-service.test.ts",
+      "files": 1,
+      "tests": 21,
+      "passed": 21,
+      "failed": 0,
+      "result": "passed",
+      "free_bytes_before": 13952204800,
+      "duration_ms": 556,
+      "start_local": "06:52:08"
+    },
+    "routes_rerun": false,
+    "realdb": "NOT_RUN",
+    "provisionManagedLink": "NOT_RUN",
+    "installed_acceptance": "NOT_CLAIMED"
+  },
+  "pg_fixture_repair": {
+    "nonce": "87e32164fd6d47b0813636d7a6adccce",
+    "service_sha256": "1293269d83ef7b89478208fa1b96f362f05df648d9394d137a4c0beb957301d1",
+    "root_history": {
+      "privacy": "2 PASS",
+      "two_service_concurrent": "1 PASS; A commit version 2; B 409 VERSION_CONFLICT; no 40P01",
+      "provisionManagedLink": "2 PASS",
+      "target_replay_legitimate_stale": "4 PASS",
+      "realdb_nodes": "6 PASS, 1 fixture FAIL",
+      "fixture_failure": "direct UPDATE meta_records of kept-local raised 23514 plm_collaboration_source_protected",
+      "packet_manifest_sha256": "ad71919ad93dd2a3475eaf7f14fa81492a970dd20d2c71a2eabdf9ae6efea2a3"
+    },
+    "correction": "RecordWriteService.patchRecords writes kept-local while review_note is visible; the existing meta_fields hide runs after that positive read",
+    "worker_postgres": "NOT_RUN",
+    "unit_rerun": false,
+    "tsc_rerun": false,
+    "other_realdb_nodes_rerun": false,
+    "installed_acceptance": "NOT_CLAIMED"
+  },
+  "root_qualification_current": {
+    "at": "2026-10-23T23:18:01.720565+00:00",
+    "service_sha256": "1293269d83ef7b89478208fa1b96f362f05df648d9394d137a4c0beb957301d1",
+    "test_sha256": "585954f4e62824374b65c0f4788e0bc805a2ff771f2f15125eec233177d152fc",
+    "independent_static_review": "No actionable finding in field metadata masking and Source-before-binding lock order; prior controls retained.",
+    "root_actual_pg": {
+      "privacy": {
+        "passed": 2
+      },
+      "actual_two_service_concurrent": {
+        "passed": 1,
+        "observation": "A68965 source held, B68969 advisory waiting, Acommit version2, B409VERSION_CONFLICT and unconsumed loser; no40P01/doublehistory"
+      },
+      "actual_provisionManagedLink": {
+        "passed": 2,
+        "meaning": "Real canonical managed migrations/global and serving backends same own schema; actual producer waits same Source advisory then commits before provider release; ECO rollback. No manual replacement producer SQL."
+      },
+      "target_replay_legitimate_stale": {
+        "passed": 4
+      },
+      "author_current_file_before_fixture_fix": {
+        "passed": 6,
+        "fixture_failed": 1,
+        "failure": "23514 source guard correctly rejects directlocalSQL missing canonicalwrite"
+      },
+      "only_failed_fixture_after_correction": {
+        "passed": 1,
+        "deselected": 6,
+        "exit": 0,
+        "fixture": "ExistingRecordWriteService/currentnonadmincapabilities/versionCAS/actualrestrevision/mintedsealedoperation; populatedlocalcell thenhide retainsauthorizedsourcemetadata"
+      }
+    },
+    "qualification_packet_manifest": "ad71919ad93dd2a3475eaf7f14fa81492a970dd20d2c71a2eabdf9ae6efea2a3",
+    "fixture_green_packet_manifest": "e2e8bf289583f93ec6d0982331b18ba9c2ab598c37fdbe3effd8190c08c08b22",
+    "owned_pg_cleanup_manifest": "f23473933be71ee5bd0f526fe22457c86e03676c213c2707fb6b9fd66beb5a0a",
+    "owned_cleanup": "Both954a/fb83explicitownDBdrop+freshcatalogrestored+status3+PIDabsent+noopenfiles+ownruntimecopyrootlockremoved; originalruntimepinsunchanged.",
+    "overlap": "Named overlapping controls are separate measured groups; no sum implying distinct features or one full7currentfile greenrun. Other6 nodes passed beforefixture-onlychange, productionbodyunchanged, not rerun.",
+    "limits": [
+      "Postcommit subscriber query loggedmissingmeta_record_subscriptions42P01 in fixture; canonicaledit/ledgerpassed, subscriber/notificationintegrationnotqualified.",
+      "ActualNativeHTTP, browser/unifiedworkspace, readiness persistence, sourceimage/installation, currentremoteCI and entiremaster remainopen.",
+      "No merge/deploy/productionenable/realbusinessnotification/issueclose."
+    ]
+  },
+  "historical_not_run_fields_are_worker_measurements": true
+}
