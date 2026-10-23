@@ -23,6 +23,10 @@
 //         rows stay in the consult (they govern) and leave the slice; the answer is frozen.
 //   GR-09 the lock shapes are the real module's: a live lease derives executing, an abandoned one
 //         failed_pending_recovery.
+//   GR-10 PR B's pilot reads REUSED (#6510): the reader over the PRODUCTION registry store (its getPilotState /
+//         getPilotStateBySheetId -> rowToPilotState, on a fake scoped db) — a row without the migration-101
+//         columns is not pilot, a marked row governs, a failed read is 503 naming the registry, a sheet
+//         registered to another project retargets before any store row read. No second pilot reader.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -365,6 +369,61 @@ test('GR-09 the lock shapes are the real module\'s: a live lease derives executi
   assert.equal(abandoned.lock.state.leaseLive, false)
   assert.equal(readProjectRefreshState(abandoned).status, 'failed_pending_recovery')
   await w.lockEnv.lock.createGuard(grant).release().catch(() => {})
+})
+
+// ── GR-10 PR B's pilot reads, REUSED ─────────────────────────────────────────────────────────────
+
+test('GR-10 the reader REUSES PR B\'s registry pilot reads (the production store\'s getPilotState / getPilotStateBySheetId, migration 101): a row without the pilot columns is not pilot, a marked row governs, a failed read is unreadable, a sheet registered to another project retargets before any store row read', async () => {
+  const registryModule = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  assert.equal(typeof registryModule.rowToPilotState, 'function', 'PR B (#6510) is on the tree')
+  // A minimal fake of the scoped db under the REAL registry store (only selectOne is exercised by the pilot reads).
+  function registryDb(rows) {
+    const faults = {}
+    const matches = (row, where) => Object.entries(where).every(([column, value]) => (row[column] === undefined ? null : row[column]) === (value === undefined ? null : value))
+    return {
+      rows,
+      faults,
+      async selectOne(table, where) {
+        assert.equal(table, 'integration_stock_prep_project_target')
+        if (faults.selectOne) throw faults.selectOne
+        return rows.find((row) => matches(row, where)) || null
+      },
+      async select() { return [] },
+      async insertOne() { throw new Error('unused') },
+      async countRows() { return 0 },
+      async updateRow() { return [] },
+      async transaction() { throw new Error('unused') },
+    }
+  }
+  const w = await world()
+  const PRJ = w.scope.projectNo
+  // (a) a database where migration 101 has NOT run: the row carries no pilot column at all -> not pilot (never 501 / unreadable).
+  const registry = registryDb([{ id: 'pt_1', tenant_id: TENANT, project_no: PRJ, sheet_id: SHEET, object_id: 'obj_a', status: 'active' }])
+  const realRegistryStore = registryModule.createStockPreparationProjectTargetStore({ db: registry })
+  const reader = createStockPreparationRefreshGovernance({ continuationStore: w.continuationStore, projectTargetStore: realRegistryStore, projectWriteLock: w.lockEnv.lock })
+  const pre101 = await reader.consult(w.scope)
+  assert.deepEqual(pre101.pilot, { enabled: false, enabledAt: null, enabledBy: null, readinessVersion: null })
+  assert.equal(pre101.governed, false)
+  assert.deepEqual(pre101.registry, { sheetId: SHEET, objectId: 'obj_a', status: 'active' })
+  assert.equal(readProjectRefreshState(pre101).status, 'not_governed')
+  // (b) the marker set (migration 101 applied, the admin enabled the pilot): the marker alone governs.
+  Object.assign(registry.rows[0], { pilot_enabled_at: new Date('2026-10-24T00:00:00.000Z'), pilot_enabled_by: 'u_admin', pilot_readiness_version: 1 })
+  const marked = await reader.consult(w.scope)
+  assert.deepEqual(marked.pilot, { enabled: true, enabledAt: '2026-10-24T00:00:00.000Z', enabledBy: 'u_admin', readinessVersion: 1 })
+  assert.equal(marked.governed, true)
+  assert.equal(readProjectRefreshState(marked).governed, 'pilot')
+  // (c) the registry read fails: 503 naming the registry — never "not pilot".
+  registry.faults.selectOne = refreshKit.sqlError('42703', 'column does not exist')
+  const failed = await expectError(reader.consult(w.scope), { status: 503, code: CODES.STORE_FAILED })
+  assert.equal(failed.details.store, 'registry')
+  assert.equal(failed.details.sqlState, '42703')
+  delete registry.faults.selectOne
+  // (d) through the real by-sheet read: this sheet is registered to ANOTHER project -> RETARGETED before any store row read.
+  const foreign = registryDb([{ id: 'pt_2', tenant_id: TENANT, project_no: 'PRJ-OTHER', sheet_id: SHEET, object_id: 'obj_b', status: 'active' }])
+  const reader2 = createStockPreparationRefreshGovernance({ continuationStore: w.continuationStore, projectTargetStore: registryModule.createStockPreparationProjectTargetStore({ db: foreign }), projectWriteLock: w.lockEnv.lock })
+  w.db.log.length = 0
+  await expectError(reader2.consult(w.scope), { status: 409, code: CODES.TARGET_RETARGETED, reason: 'sheet_registered_to_another_project' })
+  assert.equal(w.db.log.length, 0, 'refused before any store row read')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-refresh-governance.test.cjs', tests)
