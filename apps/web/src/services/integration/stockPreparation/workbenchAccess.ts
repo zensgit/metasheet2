@@ -370,6 +370,24 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/project-overview/ensure',
     control: 'stock-prep-project-overview-ensure',
   }),
+  // 备料分批拉取第一期 step 3 PR B (R-53 / R-54) — byte-equal to the plugin manifest's two PILOT rows. Both
+  // ADMIN. Their controls live on 项目备料页's sheet-state line (the pilot status line and the typed-
+  // confirmation enable button), rendered only once the server's pilot read answered — never on the
+  // confirmation-queue view; StockPreparationProjectArchive.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.pilotRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pilotEnable',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-enable',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

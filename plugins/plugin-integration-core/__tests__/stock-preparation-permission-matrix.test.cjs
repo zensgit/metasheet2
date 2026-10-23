@@ -375,6 +375,11 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // switch-off 404 for the same reason the three above do — not on a 400 about the body.
   'projectTarget.archive': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
   'projectTarget.restore': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // PR B (R-53 / R-54): the pilot read and the typed-confirmation enable — ADMIN; past the gate they land
+  // on the same switch-off 404 (gate first, switch second). Switch on, tier by tier, in
+  // stock-preparation-pilot-routes.test.cjs; the read also joins M-12 below.
+  'projectTarget.pilotRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.pilotEnable': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -433,6 +438,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -459,6 +466,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -485,6 +494,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -511,6 +522,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -537,6 +550,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -563,6 +578,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -589,6 +606,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'pass',
+    'projectTarget.pilotEnable': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -615,6 +634,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'pass',
+    'projectTarget.pilotEnable': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -644,6 +665,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -670,6 +693,8 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectTarget.pilotRead': 'gate',
+    'projectTarget.pilotEnable': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1258,8 +1283,14 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationMembersCustomRoleProjectTargets',
       'stockPreparationMembersCustomRoleUpdate',
       'stockPreparationMembersRead',
+      // PR B (R-53 ② / R-54): the two PILOT handlers — reading a project's pilot state + readiness and
+      // ENABLING the pilot (set-once, no unset). Both manifest members (projectTarget.pilotRead /
+      // .pilotEnable) with controls on 项目备料页; the enable additionally refuses unless every readiness
+      // check passes, bumps the plan generation and holds the sheet write lease around the host stamp.
+      'stockPreparationProjectPilotEnable',
+      'stockPreparationProjectPilotGet',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler and the four members handlers',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers and the two pilot handlers',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1647,6 +1678,10 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // PR B (R-53 / R-54): both pilot routes resolve the host-vouched operator scope (never a header-fillable
+  // tenant), so the door adds nothing to them.
+  'projectTarget.pilotRead',
+  'projectTarget.pilotEnable',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.
@@ -2005,6 +2040,11 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
     // declares the stamp) — 200 over an empty registry; the ensure creates it (PULL), 200.
     'projectOverview.refresh': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/refresh', params: {}, body: {}, stampingHost: true, overviewFirst: true, okStatuses: [200] },
     'projectOverview.ensure': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/ensure', params: {}, body: {}, stampingHost: true, okStatuses: [200] },
+    // PR B (R-53 / R-54): the pilot READ over an empty registry — 200 `status: 'absent'` (ADMIN only). The
+    // ENABLE is deliberately NOT a shape here: on a plain mount its readiness refuses by construction (the
+    // step-4 stores and the continuation marker are later PRs), so its "served" leg is proven in
+    // stock-preparation-pilot-routes.test.cjs over a mount whose every readiness input is satisfied.
+    'projectTarget.pilotRead': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
   }
   let served = 0
   for (const [actorName, expectations] of Object.entries(MATRIX)) {
@@ -2045,9 +2085,10 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       }
     }
   }
-  // Anti-vacuity: puller, workbench admin and platform admin are served all nine; the confirming
-  // operator the two reads plus the three S3 OPERATE routes. 9 + 9 + 9 + 5.
-  assert.equal(served, 32, 'M-12: the served cells are exactly the matrix\'s pass cells for the nine routes')
+  // Anti-vacuity: puller is served the nine S1–S4 routes; workbench admin and platform admin those nine
+  // plus the PR B pilot read; the confirming operator the two reads plus the three S3 OPERATE routes.
+  // 9 + 10 + 10 + 5.
+  assert.equal(served, 34, 'M-12: the served cells are exactly the matrix\'s pass cells for the ten routes')
 }
 
 async function main() {

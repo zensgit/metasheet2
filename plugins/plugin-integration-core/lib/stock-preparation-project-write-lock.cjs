@@ -131,8 +131,12 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 
 // Closed vocabularies. A later increment adds its own tokens WITH its feature (e.g. a content-change
 // review confirm), never ahead of it.
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval'])
+//   * `pilot_enable` (batch-refresh step 3 PR B): the admin enable of a project's pilot BUMPS the
+//     generation (every plan made before the pilot is superseded) and then holds the lease while the host
+//     stamps the sheet closed for grid export and the registry row is marked — so no apply or chunk writes
+//     the sheet in between, and no writer can be mid-write when the marker lands.
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'pilot_enable'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'pilot_enable'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
