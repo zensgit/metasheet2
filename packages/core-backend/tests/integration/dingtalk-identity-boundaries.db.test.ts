@@ -12,7 +12,7 @@ const clientMocks = vi.hoisted(() => ({
 }))
 vi.mock('../../src/integrations/dingtalk/client', () => clientMocks)
 import { query } from '../../src/db/pg'
-import { bindDingTalkIdentityToUser, exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
+import { bindDingTalkIdentityToUser, exchangeCodeForUser, exchangeEnterpriseAuthCodeForUser } from '../../src/auth/dingtalk-oauth'
 
 if (!process.env.DATABASE_URL) throw new Error('DingTalk identity boundary gate requires DATABASE_URL')
 const RUN = `dt-boundary-${randomUUID()}`
@@ -139,6 +139,206 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     expect(step).toContain('exec vitest --config vitest.integration.config.ts run')
     expect(step.split('\n').some(line => line.trim() === `${filename} \\`)).toBe(true)
     expect(readFileSync(path.join(root, 'packages/core-backend/vitest.config.ts'), 'utf8')).toContain(filename)
+  })
+
+  function withoutCorp() {
+    clientMocks.readDingTalkOauthConfig.mockReturnValue({
+      clientId: 'synthetic-client', clientSecret: 'synthetic-secret',
+      redirectUri: 'https://example.test/callback', corpId: null,
+    })
+  }
+
+  async function duplicatePerson(firstId: string, secondId: string) {
+    await q(`UPDATE user_external_identities SET provider_union_id=$2,
+      provider_open_id=$3, external_key=corp_id || ':' || $3, updated_at=NOW() + interval '1 hour'
+      WHERE local_user_id=$1 AND provider='dingtalk'`,
+    [secondId, `${firstId}-union-A`, `${firstId}-open-A`])
+  }
+
+  it.each(['enabled', 'disabled', 'admin'])('rejects cross-corp ambiguity instead of selecting latest %s account', async mode => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: true })
+    const second = await seed({ identity: true, grant: mode !== 'disabled', corp: `${CORP}-other` })
+    if (mode === 'admin') await q("UPDATE users SET role='admin', is_admin=TRUE WHERE id=$1", [second.id])
+    await duplicatePerson(first.id, second.id)
+    const before = [await state(first.id), await state(second.id)]
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+      openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic', email: first.email,
+    })
+    await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 409, code: 'identity_ambiguous' })
+    expect([await state(first.id), await state(second.id)]).toEqual(before)
+  })
+
+  it('configured corp selects only its own account despite a newer other-corp account', async () => {
+    const first = await seed({ identity: true, grant: true })
+    const second = await seed({ identity: true, grant: true, corp: `${CORP}-other` })
+    await duplicatePerson(first.id, second.id)
+    const before = await state(second.id)
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+      openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic', email: first.email,
+    })
+    expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(first.id)
+    expect(await state(second.id)).toEqual(before)
+  })
+
+  it('unscoped self-bind cannot duplicate an identity already owned in a known corp', async () => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: true })
+    const second = await seed()
+    const before = [await state(first.id), await state(second.id)]
+    await expect(bindDingTalkIdentityToUser({ localUserId: second.id, enableGrant: true, dtUser: {
+      openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic',
+    } })).rejects.toMatchObject({ statusCode: 409, code: 'identity_already_bound' })
+    expect([await state(first.id), await state(second.id)]).toEqual(before)
+  })
+
+  it.each([true, false])('rechecks cross-corp ambiguity after the canonical user lock (grant=%s)', async granted => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: granted })
+    const second = await seed({ identity: true, grant: true, corp: `${CORP}-other` })
+    await q("UPDATE user_external_identities SET provider_open_id=NULL WHERE local_user_id=$1", [first.id])
+    const before = await state(first.id)
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+      openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic', email: first.email,
+    })
+    const result = await committedRace(first.id, holder => holder.query(
+      `UPDATE user_external_identities SET provider_union_id=$2, provider_open_id=$3,
+       external_key=corp_id || ':' || $3 WHERE local_user_id=$1 AND provider='dingtalk'`,
+      [second.id, `${first.id}-union-A`, `${first.id}-open-A`]), () => exchangeCodeForUser('synthetic-code'))
+    expect(result.error).toMatchObject({ statusCode: 409, code: 'identity_ambiguous' })
+    expect(await state(first.id)).toEqual(before)
+  })
+
+  it.each(['union-only', 'open-only', 'legacy-null-corp', 'inactive', 'external-key-only'])('fails closed for cross-corp candidate variant %s', async variant => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: true })
+    const second = await seed({ identity: true, grant: true, corp: `${CORP}-other` })
+    await duplicatePerson(first.id, second.id)
+    if (variant === 'union-only') await q(`UPDATE user_external_identities
+      SET provider_open_id=NULL WHERE local_user_id=$1`, [second.id])
+    if (variant === 'open-only') await q(`UPDATE user_external_identities
+      SET provider_union_id=$2 WHERE local_user_id=$1`, [second.id, `${second.id}-different-union`])
+    if (variant === 'legacy-null-corp') await q(`UPDATE user_external_identities
+      SET corp_id=NULL WHERE local_user_id=$1`, [second.id])
+    if (variant === 'inactive') await q('UPDATE users SET is_active=FALSE WHERE id=$1', [second.id])
+    if (variant === 'external-key-only') await q(`UPDATE user_external_identities
+      SET external_key=$2, provider_union_id=$3, provider_open_id=$4 WHERE local_user_id=$1`,
+    [second.id, `${first.id}-union-A`, `${second.id}-unrelated-union`, `${second.id}-unrelated-open`])
+    const before = (await q('SELECT * FROM user_external_identities WHERE local_user_id=ANY($1::text[]) ORDER BY local_user_id', [[first.id, second.id]])).rows
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+      openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic', email: first.email,
+    })
+    await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 409, code: 'identity_ambiguous' })
+    expect((await q('SELECT * FROM user_external_identities WHERE local_user_id=ANY($1::text[]) ORDER BY local_user_id', [[first.id, second.id]])).rows).toEqual(before)
+  })
+
+  it('container login also rejects a cross-corp union identity collision', async () => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: true })
+    const second = await seed({ identity: true, grant: true, corp: `${CORP}-other` })
+    await duplicatePerson(first.id, second.id)
+    const before = [await state(first.id), await state(second.id)]
+    clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('synthetic-app-token')
+    clientMocks.getDingTalkUserInfoByAuthCode.mockResolvedValue({ userId: 'synthetic-employee', unionId: `${first.id}-union-A` })
+    clientMocks.getDingTalkUserDetail.mockResolvedValue({ name: 'Synthetic', unionId: `${first.id}-union-A` })
+    await expect(exchangeEnterpriseAuthCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 409, code: 'identity_ambiguous' })
+    expect([await state(first.id), await state(second.id)]).toEqual(before)
+  })
+
+  it('first email association rejects a newly committed owner in another corp', async () => {
+    withoutCorp()
+    const first = await seed({ grant: true })
+    const second = await seed({ identity: true, grant: true, corp: `${CORP}-other` })
+    const before = await state(first.id)
+    const result = await committedRace(first.id, holder => holder.query(
+      `UPDATE user_external_identities SET provider_union_id=$2, provider_open_id=$3,
+       external_key=corp_id || ':' || $3 WHERE local_user_id=$1 AND provider='dingtalk'`,
+      [second.id, `${first.id}-union-B`, `${first.id}-open-B`]), () => oauth(first.id, first.email))
+    expect(result.error).toMatchObject({ statusCode: 409, code: 'identity_already_bound' })
+    expect(await state(first.id)).toEqual(before)
+  })
+
+  it.each(['login', 'rejected', 'bind'])('serializes a scoped writer arriving AFTER the unscoped %s recheck', async mode => {
+    withoutCorp()
+    const first = await seed({ identity: true, grant: mode !== 'rejected' })
+    const second = await seed()
+    if (mode === 'rejected') await q('UPDATE user_external_identities SET provider_open_id=NULL WHERE local_user_id=$1', [first.id])
+    const holder = new pg.Client({ connectionString: process.env.DATABASE_URL })
+    const writer = new pg.Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    await writer.connect()
+    let login: Promise<{ error: unknown }> | undefined
+    let write: Promise<unknown> | undefined
+    try {
+      await holder.query('BEGIN')
+      // Row-only lock parks OAuth AFTER its candidate recheck, without blocking the table barrier.
+      await holder.query('SELECT id FROM user_external_identities WHERE local_user_id=$1 FOR UPDATE', [first.id])
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const dtUser = { openId: `${first.id}-open-A`, unionId: `${first.id}-union-A`, nick: 'Synthetic' }
+      clientMocks.fetchDingTalkCurrentUser.mockResolvedValue(dtUser)
+      login = (mode === 'bind'
+        ? bindDingTalkIdentityToUser({ localUserId: first.id, enableGrant: true, dtUser })
+        : exchangeCodeForUser('synthetic-code')).then(() => ({ error: null }), error => ({ error }))
+      let oauthPid = 0
+      for (let i = 0; i < 100 && !oauthPid; i++) {
+        await holder.query('SELECT pg_stat_clear_snapshot()')
+        const rows = (await holder.query('SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))', [holderPid])).rows
+        oauthPid = Number(rows[0]?.pid || 0)
+        if (!oauthPid) await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(oauthPid, 'OAuth must reach the identity row after its candidate recheck').toBeGreaterThan(0)
+      const writerPid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      let writerDone = false
+      write = writer.query(`INSERT INTO user_external_identities
+        (provider, local_user_id, corp_id, external_key, provider_union_id, provider_open_id, profile)
+        VALUES ('dingtalk', $1, $2, $3, $4, $5, '{}'::jsonb)`,
+      [second.id, `${CORP}-other`, `${CORP}-other:${first.id}-open-A`, dtUser.unionId, dtUser.openId])
+        .finally(() => { writerDone = true })
+      let blocked = false
+      for (let i = 0; i < 100 && !blocked && !writerDone; i++) {
+        await holder.query('SELECT pg_stat_clear_snapshot()')
+        blocked = (await holder.query('SELECT $1=ANY(pg_blocking_pids($2)) AS blocked', [oauthPid, writerPid])).rows[0].blocked
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(writerDone, 'scoped writer cannot commit in the check/write window').toBe(false)
+      expect(blocked).toBe(true)
+      expect((await holder.query(`SELECT mode FROM pg_locks WHERE pid=$1
+        AND relation='user_external_identities'::regclass AND granted
+        AND mode='ShareRowExclusiveLock'`, [oauthPid])).rows).toEqual([{ mode: 'ShareRowExclusiveLock' }])
+      await holder.query('COMMIT')
+      const result = await login
+      if (mode === 'rejected') expect(result.error).toMatchObject({ code: 'grant_required' })
+      else expect(result.error).toBeNull()
+      await write
+      // Scoped writes remain legitimate after the serialized operation commits. The next
+      // unscoped login must now reject the ambiguity, never pick either account.
+      await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ code: 'identity_ambiguous' })
+    } finally {
+      await holder.query('ROLLBACK')
+      if (login) await login
+      if (write) await write
+      await writer.end()
+      await holder.end()
+    }
+  })
+
+  it('does not provision an unscoped account merely because an enterprise allowlist exists', async () => {
+    withoutCorp()
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '0')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', CORP)
+    const email = `${RUN}-unscoped-jit@example.test`
+    const dtUser = { openId: `${RUN}-jit-open`, unionId: `${RUN}-jit-union`, nick: 'Synthetic JIT', email }
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue(dtUser)
+    try {
+      await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 409, code: 'auto_provision_corp_required' })
+      expect((await q('SELECT id FROM users WHERE email=$1', [email])).rows).toEqual([])
+      expect((await q("SELECT id FROM user_external_identities WHERE provider='dingtalk' AND provider_union_id=$1", [dtUser.unionId])).rows).toEqual([])
+    } finally {
+      // Also clean up the pre-fix red run, which creates a real local user.
+      await q('DELETE FROM users WHERE email=$1', [email])
+    }
   })
 
   it('preserves an explicit disabled grant and all identity state on self-bind', async () => {

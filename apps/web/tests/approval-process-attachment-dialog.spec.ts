@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 
 /**
  * Lock-9 OD-L9-10(a) FE slice — ApprovalDetailView 评论 (comment) action dialog:
@@ -319,7 +320,6 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
   })
 
   async function mountView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     for (const name of ['ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag']) {
