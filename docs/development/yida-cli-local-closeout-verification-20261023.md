@@ -6,7 +6,7 @@ This is local copied-source/package verification on frozen baseline `825a6fbe85c
 
 The original package SHA256 stayed `7dc3bfdf3ff0c5ee823cae3e9a8f2788f9ac2b04c909e3e994d973d10551a17c`. Source archive SHA256 is `4637ae7dc25bee656abe6e4c43ff695bc16c7e73e5bd65c204bfa08a0ef527df`. Supplemental pin archive SHA256 is `7e05248e817bf974d46581fee48820fe3ab4df4c97202603daf43867d98c8e6d`; the exact-baseline closure-workflow reference archive SHA256 is `553314053d4ffcbd0349202ba3bab05e3b8350a39682ec453a8e76b982268098`.
 
-Grok `gbt-9834-1a166512873-2` was actually `grok-4.7 xhigh`, failed/retried at connection, made zero writes and ran zero checks, then was interrupted/closed. Implementation and local runs used `gpt-6.1-sol high`. The independent Codex sibling audit is separate from these implementation results.
+An initial delegated implementation attempt failed/retried at connection, made zero writes and ran zero checks, then was interrupted/closed. Implementation and local runs used a different implementer. The independent Codex sibling audit is separate from these implementation results.
 
 ## Completed package checks
 
@@ -30,10 +30,10 @@ The independent Codex baseline and fixed-checker receipts remain in sibling `yid
 
 ## Permanent regression and mutation
 
-Command in clean WSL environment:
+Command in clean WSL environment, from the repository root:
 
 ```text
-node --test /mnt/e/Projects/metasheet/tmp/yida-cli-closeout-20261023/source/scripts/ops/onprem-package-runtime-closure.test.mjs
+node --test tmp/yida-cli-closeout-20261023/source/scripts/ops/onprem-package-runtime-closure.test.mjs
 ```
 
 Result: exit 0, 13 tests, 13 pass, 0 fail, 0 skip. Both new compiled-path missing-file negatives ran. The test also confirms its existing Node 20 workflow wiring; no CI run was triggered.
@@ -56,7 +56,7 @@ Final receipt: `artifacts/windows-1792719426845/windows-cli-acceptance.json`. Ha
 
 | Platform / tool | Actual result |
 | --- | --- |
-| Native Windows | NT release `10.0.28000`, NTFS extraction outside monorepo |
+| Native Windows | NTFS extraction outside monorepo |
 | Native Node | `v20.20.2`, `process.platform=win32` |
 | Package manager | `pnpm@9.15.9`; pinned toolchain install exit 0 |
 | Package production install | `--prod --frozen-lockfile --ignore-scripts`, exit 0; own public registry cache reused |
@@ -87,12 +87,12 @@ Cleanup is part of the success gate: owned PostgreSQL stop exited 0; status exit
 
 Codex independently reports the complete original CJS provenance suite passing under WSL Node with exit 0 and its success marker. Its native Windows run fails in the suite's Bash-positive fixture at line 669: Windows script/package paths are passed unchanged to Bash, whose actual exit is 127 with the missing-file category. Sibling receipt `yida-cli-codex-audit-20261023/native-provenance-limitation.json` records stderr SHA256 `e27e936c6a490c32b186e2eb30fa2fa6a285cf3c108dab0c9abf02dad6d7035a`. An earlier default-sandbox access denial is a separate host restriction. Neither result is relabeled as a native CLI failure or as an all-native-suite pass; no unrelated suite rewrite was made.
 
-## Reproduction and limits
+## Local-only reproduction (runners in gitignored `tmp/`, not in the repository) and limits
 
-From native Windows PowerShell, run the local harness with the installed Node executable and the task's absolute runner path:
+The acceptance runners live only in the gitignored task directory `tmp/yida-cli-closeout-20261023/` of the developer checkout; they are not part of the repository or this PR. On that checkout, from native Windows PowerShell at the repository root, run the local harness with Node:
 
 ```powershell
-& 'C:\Program Files\nodejs\node.exe' 'E:\Projects\metasheet\tmp\yida-cli-closeout-20261023\source\scripts\ops\yida-cli-windows-acceptance.mjs'
+node tmp/yida-cli-closeout-20261023/source/scripts/ops/yida-cli-windows-acceptance.mjs
 ```
 
 It creates a new receipt directory, runs the full package checks, installs production-only dependencies with a frozen lockfile and lifecycle scripts disabled, performs actual native CLI/grant tests against its own Linux PostgreSQL instance, and cleans exact owned temporary paths. Raw child errors/stacks, credentials, connection strings, SQL parameters and generated principal/anchor values are not printed.
@@ -119,7 +119,7 @@ Owner 随后明确授权：移植到完整、对齐后的 #6315，通过门禁�
 
 完整候选从远端 #6315 `e1a9e914c1899f82e1b5d434e85ba3a741b17786` 的既有本地 CLI 修复 `825a6fbe85c3b4df00aa794807a602f21a22c4d4` 继续，普通 merge 对齐 main `cb22e18e196e36482ab82a7ad0dcf987a3eca064`（远端 #6315 此前落后 main 43 个提交）。无冲突，未重写历史。主检出和其它工作树的未提交文件未被修改。
 
-移植的永久增量为：验包 required 清单两项、已有 runtime-closure 测试两项、一项 verifier pin，以及设计/验证两份 MD。固定临时布局的 Windows/package 验收脚本与原始收据继续留在 `tmp/`；没有将不可移植的本地工具冒充 CI 入口，也不把整个临时源码副本或包上传。
+移植的永久增量为：验包 required 清单两项、已有 runtime-closure 测试两项、一项 verifier pin，以及设计/验证两份 MD。这些增量不是另起的普通追加提交，而是随 merge 提交 `42ff6d072` 本身携带（叠在无冲突合并结果树之上），可用 `git diff 408ae48b0b21c8f3b6a2b4f9e21ab7fa174e9e8b 42ff6d072` 查看。固定临时布局的 Windows/package 验收脚本与原始收据继续留在 `tmp/`；没有将不可移植的本地工具冒充 CI 入口，也不把整个临时源码副本或包上传。
 
 完整候选上重新执行的本地门禁：
 
@@ -141,6 +141,6 @@ Owner 随后明确授权：移植到完整、对齐后的 #6315，通过门禁�
 
 新编译的 CLI SHA256 仍为 `e9244742b3f9476923d449290133ea99e7c4f5aa1506cea451d7180cf763b7a8`；直接 bootstrap 模块 SHA256 为 `07a4ee2615d7517d70d7d10afcdca342cd646a46084f1297957f2fb4a262efdf`。二者与上节原生 Windows 两轮验收实际运行的包中字节一致。main 对齐没有改变这两个 TS 源文件、live-authority、tsconfig 或 lockfile；这不是一次新的 Windows 26 项运行，也不是新发行包的部署验证。
 
-本地门禁收据位于独立 `tmp/yida-cli-alignment-20261023/`，只发布计数、状态、哈希和结论。首次组合调用写错 no-node-modules 文件名，Node 在测试执行前拒绝该命令；改用仓库实际文件名后上述四整文件 97/97 通过，这个调用错误不归因为产品失败。原生 Windows Bash 路径限制、600 秒安装失败、Grok 连接失败及其它历史记录仍全部保留。
+本地门禁收据位于独立 `tmp/yida-cli-alignment-20261023/`，只发布计数、状态、哈希和结论。首次组合调用写错 no-node-modules 文件名，Node 在测试执行前拒绝该命令；改用仓库实际文件名后上述四整文件 97/97 通过，这个调用错误不归因为产品失败。原生 Windows Bash 路径限制、600 秒安装失败、初次委派实施的连接失败及其它历史记录仍全部保留。
 
 所有本地门禁使用清空后重建的环境，无客户数据库地址或真实发送配置；根目录及 backend `.env` 未物化。前端门禁另以现有 `METASHEET_ENV_DIR` 指向新建空目录复跑，避免读取任何环境文件，不改变测试预算或业务安全开关。正式 CI 结果须按推送后的精确 head 单独核实，不能用这些本地通过代替。

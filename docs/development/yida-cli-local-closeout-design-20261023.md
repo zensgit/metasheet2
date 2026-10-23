@@ -2,7 +2,7 @@
 
 ## Publication scope after full-branch alignment
 
-The earlier copied-subset evidence below is retained as history. With the owner's subsequent authorization, the permanent verifier correction, existing CI-wired regression and these two MDs are transplanted onto the complete #6315 checkout, retaining CLI compile fix `825a6fbe85c3b4df00aa794807a602f21a22c4d4` and merging main `cb22e18e196e36482ab82a7ad0dcf987a3eca064` without rewriting existing history. The merge was conflict-free.
+The earlier copied-subset evidence below is retained as history. With the owner's subsequent authorization, the permanent verifier correction, existing CI-wired regression and these two MDs are transplanted onto the complete #6315 checkout, retaining CLI compile fix `825a6fbe85c3b4df00aa794807a602f21a22c4d4` and merging main `cb22e18e196e36482ab82a7ad0dcf987a3eca064` without rewriting existing history. The merge was conflict-free. The transplanted changes are not a separate appended commit: they are carried inside merge commit `42ff6d072` itself, on top of the conflict-free merge result tree, and are visible with `git diff 408ae48b0b21c8f3b6a2b4f9e21ab7fa174e9e8b 42ff6d072`.
 
 The two acceptance helpers remain frozen **local evidence tools under the original task's `tmp/`**, not new general repository commands: their fixed package hash and temporary source layout are intentionally not portable. They are not added to this PR. Only the already-wired runtime-closure regression is the permanent new test coverage. The original CLI fix is three existing local changes: compile inclusion, CommonJS entry detection, and an import-must-not-run regression; no new endpoint, privilege, sender or production flag is introduced. See the verification MD's alignment section for complete-candidate gates and explicit historical limitations.
 
@@ -14,7 +14,7 @@ The copied source subset comes from actual WSL commit `825a6fbe85c3b4df00aa79480
 
 The immutable original `package.tgz` SHA256 is `7dc3bfdf3ff0c5ee823cae3e9a8f2788f9ac2b04c909e3e994d973d10551a17c`. The package acceptance runner asserts this before work. Derivatives have separate names and newly computed `SHA256SUMS` entries.
 
-Grok session `gbt-9834-1a166512873-2` actually used `grok-4.7` with `xhigh`. Its connection failed/retried; it made no implementation writes and ran no checks before interruption and closure. Implementation fell back to `gpt-6.1-sol` with `high`; this is not a Grok success claim. Independent Codex review and its sibling audit artifacts are separate evidence.
+An initial delegated implementation attempt failed/retried at connection; it made no implementation writes and ran no checks before interruption and closure. Implementation fell back to a different implementer; this is not a success claim for the initial attempt. Independent Codex review and its sibling audit artifacts are separate evidence.
 
 ## Package and provenance checks
 
