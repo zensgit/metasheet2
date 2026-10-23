@@ -148,6 +148,7 @@ import {
   canonicalizeApprovalDepartmentFormData,
 } from './approval-department-field'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
+import { isApprovalTemplateManager } from './approval-actor-roles'
 import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
@@ -318,6 +319,14 @@ interface CreateApprovalActor {
   department?: string
   departmentIds?: string[]
   roles?: string[]
+  /**
+   * The role set template-manager status is derived from. HTTP routes pass the request's role CLAIMS
+   * (`resolveApprovalActorRoleClaims`) so the widened `roles` (which also carries stored
+   * `user_roles` ids for role-seat and role-visibility matching) can never change admin semantics —
+   * the same determination `resolveApprovalTemplateVisibilityActor` makes for the list. Callers that
+   * build the actor from the database (automation, record submit) omit it and keep using `roles`.
+   */
+  adminRoleClaims?: string[]
   permissions?: string[]
 }
 
@@ -8073,11 +8082,7 @@ export class ApprovalProductService {
       departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
       roles: actor.roles ?? [],
       permissions: actor.permissions ?? [],
-      isTemplateManager: (actor.permissions ?? []).includes('approval-templates:manage')
-        || (actor.permissions ?? []).includes('approvals:admin-templates')
-        || (actor.permissions ?? []).includes('approvals:*')
-        || (actor.permissions ?? []).includes('*:*')
-        || (actor.roles ?? []).includes('admin'),
+      isTemplateManager: isApprovalTemplateManager(actor.adminRoleClaims ?? actor.roles ?? [], actor.permissions ?? []),
     })
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
