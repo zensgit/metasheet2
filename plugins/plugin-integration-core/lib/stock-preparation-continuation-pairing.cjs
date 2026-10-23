@@ -2,8 +2,8 @@
 
 // Batch-refresh step 4, PR-1 — THE CONTINUATION (沿用关系) PAIRING CORE. Pure and write-free.
 //
-// Design: scratch synthesis `phase2-step4-design/synth/design.md` §6 (planner projection, verification,
-// detection, output), §9.2 (`sheetMachineDigest`), §10.1 (content-trigger fields); requirements: plan
+// Design: the batch-refresh step-4 synthesis (2026-10-23, PR-1 row of its §17) §6 (planner projection,
+// verification, detection, output), §9.2 (`sheetMachineDigest`), §10.1 (content-trigger fields); plan
 // docs/development/takeover-beiliao-20260821/batch-refresh-merge-plan-20261022.md §3.1-3.4, §4, §9.
 //
 // WHAT IT IS. Everything the conflict planner needs to (a) keep a persisted continuation in force on
