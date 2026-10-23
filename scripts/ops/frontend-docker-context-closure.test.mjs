@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url'
 // Dockerfile.frontend builds apps/web from a context of COPY instructions, not the whole repo.
 // #6315 shipped a panel importing plugins/plugin-integration-core/lib modules; the PR lanes build
 // the web app from a full checkout, so only the push-to-main image build saw the missing files.
-// This pins the closure: every file apps/web/src reaches through a relative import, and every
+// This pins the closure: apps/web/src, every file it reaches through a relative import, and every
 // file those reach in turn (plus their declaration siblings), must be copied into the builder
-// stage, at its own path, before the web build runs.
+// stage, at its own path, before the web build runs. Files and directories get one coverage rule,
+// so a directory COPY after the build counts for nothing, and the walk does not stop at a file the
+// context copies: its own imports can still leave the context.
 
 const repo = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.js', '.mjs', '.cjs', '.vue', '.json']
@@ -95,9 +97,9 @@ export function isCopiedAtOwnPath(rel, stage) {
   })
 }
 
-// Files outside the directory COPYs that apps/web/src reaches, transitively, with declaration siblings.
-export function collectUncoveredReach(root, webSrc, stage) {
-  const reached = new Set()
+// Every file the web build needs: apps/web/src plus what it reaches through relative imports,
+// transitively (copied files included), with declaration siblings.
+export function collectReach(root, webSrc) {
   const queue = walk(webSrc)
   const seen = new Set(queue)
   while (queue.length) {
@@ -107,17 +109,19 @@ export function collectUncoveredReach(root, webSrc, stage) {
     for (const specifier of extractRelativeSpecifiers(source)) {
       const target = resolveRelative(file, specifier)
       if (!target) continue
-      const rel = toPosix(path.relative(root, target))
-      const isDirectoryCovered = stage.copies.some(copy => copy.sources.length === 1 && rel.startsWith(norm(copy.sources[0]) + '/') && norm(copy.dest) === norm(copy.sources[0]))
-      if (isDirectoryCovered) continue
-      const additions = [target, ...(DECLARATION_SIBLINGS[path.extname(target)] ?? []).map(ext => target.slice(0, -path.extname(target).length) + ext).filter(sibling => fs.existsSync(sibling))]
-      for (const addition of additions) {
-        reached.add(toPosix(path.relative(root, addition)))
+      const ext = path.extname(target)
+      const siblings = (DECLARATION_SIBLINGS[ext] ?? []).map(sibling => target.slice(0, -ext.length) + sibling).filter(sibling => fs.existsSync(sibling))
+      for (const addition of [target, ...siblings]) {
         if (!seen.has(addition)) { seen.add(addition); queue.push(addition) }
       }
     }
   }
-  return [...reached].sort()
+  return [...seen].map(file => toPosix(path.relative(root, file))).sort()
+}
+
+// The files the web build needs that the builder stage does not copy, at their own path, before it runs.
+export function missingFromBuilderStage(root, webSrc, stage) {
+  return collectReach(root, webSrc).filter(rel => !isCopiedAtOwnPath(rel, stage))
 }
 
 test('relative specifier extraction covers static, side-effect, dynamic and require forms', () => {
@@ -159,28 +163,48 @@ test('builder-stage parsing: directory copies, file-to-directory copies, order a
   assert.equal(isCopiedAtOwnPath('plugins/p/lib/missing.mjs', stage), false)
 })
 
-test('reach collection follows imports out of the context, transitively, with declaration siblings', () => {
+test('missing files: imports leave the context transitively, through copied files, and only pre-build COPYs count', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'frontend-docker-context-'))
   try {
     const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text) }
-    write('apps/web/src/components/Panel.vue', "<script setup lang=\"ts\">\nimport { a } from '../../../../plugins/p/lib/a.mjs'\nimport { u } from '../util'\n</script>\n")
+    write('apps/web/src/components/Panel.vue', "<script setup lang=\"ts\">\nimport { a } from '../../../../plugins/p/lib/a.mjs'\nimport { c } from '../../../../packages/shared/bridge'\nimport { u } from '../util'\n</script>\n")
     write('apps/web/src/util.ts', "export const u = 1\n")
+    write('packages/shared/bridge.ts', "export { c } from '../../plugins/p/lib/c.mjs'\n")
     write('plugins/p/lib/a.mjs', "import { b } from './b.mjs'\nexport const a = b\n")
     write('plugins/p/lib/a.d.mts', "export declare const a: number\n")
     write('plugins/p/lib/b.mjs', "export const b = 1\n")
+    write('plugins/p/lib/c.mjs', "export const c = 1\n")
     write('plugins/p/lib/unrelated.mjs', "export const z = 1\n")
-    const stage = parseBuilderStage('FROM node AS builder\nCOPY apps ./apps\nRUN pnpm --filter @metasheet/web build\n')
-    assert.deepEqual(collectUncoveredReach(root, path.join(root, 'apps/web/src'), stage), ['plugins/p/lib/a.d.mts', 'plugins/p/lib/a.mjs', 'plugins/p/lib/b.mjs'])
+    const webSrc = path.join(root, 'apps/web/src')
+    const reach = collectReach(root, webSrc)
+    assert.deepEqual(reach, ['apps/web/src/components/Panel.vue', 'apps/web/src/util.ts', 'packages/shared/bridge.ts', 'plugins/p/lib/a.d.mts', 'plugins/p/lib/a.mjs', 'plugins/p/lib/b.mjs', 'plugins/p/lib/c.mjs'])
+    const build = 'RUN pnpm --filter @metasheet/web build'
+    const missing = (...instructions) => missingFromBuilderStage(root, webSrc, parseBuilderStage(['FROM node AS builder', ...instructions].join('\n')))
+    // c.mjs is reached only through packages/shared/bridge.ts, which the context does copy.
+    const plugin = ['plugins/p/lib/a.d.mts', 'plugins/p/lib/a.mjs', 'plugins/p/lib/b.mjs', 'plugins/p/lib/c.mjs']
+    assert.deepEqual(missing('COPY apps ./apps', 'COPY packages ./packages', build), plugin)
+    assert.deepEqual(missing('COPY apps ./apps', 'COPY packages ./packages', build, 'COPY plugins ./plugins'), plugin, 'a directory COPY after the web build covers nothing')
+    assert.deepEqual(missing('COPY apps ./apps', 'COPY packages ./packages', 'COPY plugins ./vendor/plugins', build), plugin, 'a directory copied to another path covers nothing')
+    assert.deepEqual(missing(build, 'COPY apps ./apps', 'COPY packages ./packages', 'COPY plugins ./plugins'), reach, 'with every COPY after the web build, nothing is copied')
+    assert.deepEqual(missing('COPY apps ./apps', 'COPY packages ./packages', 'COPY plugins/p/lib ./plugins/p/lib', build), [])
+    assert.deepEqual(missing('COPY apps ./apps', 'COPY packages ./packages', 'COPY plugins ./plugins', build), [])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('Dockerfile.frontend copies everything apps/web/src reaches, at its own path, before the web build', () => {
-  const stage = parseBuilderStage(fs.readFileSync(path.join(repo, 'Dockerfile.frontend'), 'utf8'))
+  const dockerfile = fs.readFileSync(path.join(repo, 'Dockerfile.frontend'), 'utf8')
+  const stage = parseBuilderStage(dockerfile)
   assert.ok(stage.webBuildIndex >= 0, 'the builder stage must run the @metasheet/web build')
   assert.ok(isCopiedAtOwnPath('apps/web/package.json', stage), 'apps/ must be in the build context')
-  const reached = collectUncoveredReach(repo, path.join(repo, 'apps/web/src'), stage)
-  const missing = reached.filter(rel => !isCopiedAtOwnPath(rel, stage))
+  const webSrc = path.join(repo, 'apps/web/src')
+  const missing = missingFromBuilderStage(repo, webSrc, stage)
   assert.deepEqual(missing, [], `Dockerfile.frontend must COPY these into the builder stage before the web build: ${missing.join(', ')}`)
+  // The same path on the real graph: hoist the web build above every COPY and everything must go missing.
+  const lines = dockerfile.replace(/\r/g, '').split('\n')
+  const from = lines.findIndex(line => /^FROM\s/i.test(line.trim()))
+  const run = lines.findIndex(line => WEB_BUILD.test(line))
+  const hoisted = [...lines.slice(0, from + 1), lines[run], ...lines.filter((_, index) => index > from && index !== run)].join('\n')
+  assert.deepEqual(missingFromBuilderStage(repo, webSrc, parseBuilderStage(hoisted)), collectReach(repo, webSrc))
 })
